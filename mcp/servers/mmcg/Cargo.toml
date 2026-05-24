@@ -31,7 +31,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # SQLite with bundled C library — no system libsqlite3 dependency
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 # tree-sitter — fastest mature parser. Each grammar vendors its own C source.
 # No system tree-sitter library required.

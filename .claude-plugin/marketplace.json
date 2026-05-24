@@ -1,0 +1,38 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "mastermind",
+  "description": "Mastermind workflow: planner / critic / executor / auditor with mmcg code-graph as the truth layer. Standards-enforced library of AI agent artifacts.",
+  "owner": {
+    "name": "mastermind",
+    "email": "aglumova@gmail.com"
+  },
+  "metadata": {
+    "pluginRoot": "./plugins"
+  },
+  "plugins": [
+    {
+      "name": "mastermind-workflow",
+      "source": "./plugins/mastermind-workflow",
+      "description": "Planner + critic + executor + auditor + researcher + release subagents. Spec-driven delegation with 7-dimension critic verdict, pre-flight validation, post-flight audit (incl. pre-edit snapshot drift), and parallel incident-response workflow. Engineering canons enforced (no AI slop, YAGNI, non-breaking).",
+      "version": "0.6.0",
+      "category": "development",
+      "keywords": ["workflow", "delegation", "planning", "code-review", "audit", "incident-response", "release"]
+    },
+    {
+      "name": "mmcg",
+      "source": "./plugins/mmcg",
+      "description": "Mastermind Codegraph MCP server. Fast multi-language code indexer (Python, TypeScript/TSX, JavaScript/JSX, Rust) with 12 structural query tools (search, callers/callees with edge_kind filter, impact, imports/imported_by, files, symbols_in_file, outline, recent_changes, unreferenced, api_surface). Local SQLite + tree-sitter, incremental watcher. Truth layer for the mastermind workflow.",
+      "version": "0.6.0",
+      "category": "development",
+      "keywords": ["mcp", "codegraph", "indexer", "rust", "python", "typescript"]
+    },
+    {
+      "name": "mastermind-tools",
+      "source": "./plugins/mastermind-tools",
+      "description": "Standalone skills usable outside the mastermind workflow: pr-review, flaky-finder, doc-stub-sync. Plus two reusable prompt templates (senior-eng-review, api-shape-explorer).",
+      "version": "0.1.0",
+      "category": "development",
+      "keywords": ["code-review", "testing", "documentation"]
+    }
+  ]
+}

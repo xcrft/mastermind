@@ -1,0 +1,59 @@
+# Dependabot config — weekly PRs to bump dependencies.
+# Docs: https://docs.github.com/en/code-security/dependabot/dependabot-version-updates
+
+version: 2
+updates:
+  # mmcg crate dependencies (rusqlite, tree-sitter-*, rayon, notify, serde, clap, walkdir)
+  - package-ecosystem: cargo
+    directory: /mcp/servers/mmcg
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: UTC
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - rust
+    commit-message:
+      prefix: "chore(deps)"
+      include: scope
+    groups:
+      tree-sitter:
+        patterns:
+          - "tree-sitter*"
+      serde:
+        patterns:
+          - "serde*"
+
+  # GitHub Actions used in .github/workflows/*.yml
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: UTC
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: "chore(deps)"
+      include: scope
+
+  # Python deps used by scripts/validate.py and scripts/build-plugins.py
+  - package-ecosystem: pip
+    directory: /scripts
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: UTC
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - python
+    commit-message:
+      prefix: "chore(deps)"
+      include: scope

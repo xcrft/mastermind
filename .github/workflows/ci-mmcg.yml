@@ -1,0 +1,77 @@
+# Per-PR Rust CI for the mmcg crate.
+#
+# Runs on PRs that touch mmcg source / Cargo files OR the canonical templates
+# whose mirrors are embedded into the crate. Skips PRs that only edit unrelated
+# docs/skills so we don't burn CI for content-only changes.
+#
+# Pairs with:
+#   - validate.yml (artifact-level frontmatter / link / template-mirror checks)
+#   - publish-mmcg.yml (release pipeline on `mmcg-v*` tag)
+
+name: CI — mmcg
+
+on:
+  pull_request:
+    paths:
+      - "mcp/servers/mmcg/**"
+      # Canonical templates whose mirrors live in mmcg/templates/.
+      # A change here implies a sync is needed; the validator catches it but
+      # we also re-test mmcg to make sure the embedded content still builds.
+      - "agents/claude-md/mastermind-context.md"
+      - "agents/claude-md/mastermind-workflow.md"
+      - "skills/workflow/mastermind-task-planning/references/spec-template.md"
+      - ".github/workflows/ci-mmcg.yml"
+  push:
+    branches: [main]
+    paths:
+      - "mcp/servers/mmcg/**"
+      - "agents/claude-md/mastermind-context.md"
+      - "agents/claude-md/mastermind-workflow.md"
+      - "skills/workflow/mastermind-task-planning/references/spec-template.md"
+
+concurrency:
+  group: ci-mmcg-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: cargo test + clippy + fmt
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp/servers/mmcg
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain (with clippy + rustfmt)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            mcp/servers/mmcg/target
+          key: ${{ runner.os }}-cargo-ci-${{ hashFiles('mcp/servers/mmcg/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-ci-
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test --lib
+        run: cargo test --lib
+
+      - name: cargo build --release (sanity)
+        run: cargo build --release

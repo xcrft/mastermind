@@ -1,0 +1,8 @@
+{
+  "name": "mastermind-tools",
+  "version": "0.1.0",
+  "description": "Standalone skills usable outside the mastermind workflow: pr-review (staff-engineer-style PR review), flaky-finder (test stability hunter), doc-stub-sync (sync local doc stubs with online sources). Plus two reusable prompt templates.",
+  "author": {
+    "name": "mastermind"
+  }
+}

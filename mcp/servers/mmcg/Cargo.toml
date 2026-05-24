@@ -36,10 +36,10 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # tree-sitter — fastest mature parser. Each grammar vendors its own C source.
 # No system tree-sitter library required.
 tree-sitter = "0.22"
-tree-sitter-python = "0.21"
-tree-sitter-typescript = "0.21"
+tree-sitter-python = "0.23"
+tree-sitter-typescript = "0.23"
 tree-sitter-rust = "0.21"
-tree-sitter-javascript = "0.21"
+tree-sitter-javascript = "0.25"
 
 # Data-parallel iterator — used to parse multiple files concurrently.
 rayon = "1.10"

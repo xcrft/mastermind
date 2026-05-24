@@ -1,0 +1,8 @@
+# GitHub CODEOWNERS — auto-assign reviewer when a PR touches matching paths.
+# Docs: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# Currently single-maintainer; @aglumova is the default reviewer for every PR.
+# As contributors join, add lines above the catch-all so the most specific rule wins.
+
+# Default: everything
+* @aglumova

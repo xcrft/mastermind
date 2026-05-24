@@ -1,0 +1,32 @@
+# IDE / editor
+.idea/
+.vscode/
+*.iml
+
+# macOS
+.DS_Store
+
+# Python — validator deps (scripts/validate.py, build-plugins.py)
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Secrets / local overrides — never commit
+.env
+.env.local
+*.local
+
+# Generic build / scratch
+dist/
+build/
+tmp/
+scratch/
+
+# Mastermind local state — task specs (.mastermind/tasks/) + mmcg SQLite index.
+# Generated per-machine by `mmcg init`. Not for commit.
+.mastermind/
+
+# Claude Code per-machine permissions allowlist with absolute paths.
+.claude/settings.local.json

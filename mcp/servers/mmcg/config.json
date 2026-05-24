@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "mmcg": {
+      "command": "${MMCG_BIN}",
+      "args": ["serve"],
+      "env": {
+        "MMCG_INDEX_PATH": "${MMCG_INDEX_PATH:-.mastermind/mmcg.db}"
+      }
+    }
+  }
+}

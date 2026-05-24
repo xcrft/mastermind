@@ -45,7 +45,7 @@ tree-sitter-javascript = "0.21"
 rayon = "1.10"
 
 # Cross-platform filesystem watcher for `mmcg watch`.
-notify = "6.1"
+notify = "8.2"
 
 # JSON for MCP protocol
 serde = { version = "1", features = ["derive"] }

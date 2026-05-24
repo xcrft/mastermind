@@ -95,7 +95,7 @@ jobs:
         run: cargo package
 
       - name: Stash packaged crate for the publish job
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mmcg-crate
           path: mcp/servers/mmcg/target/package/*.crate

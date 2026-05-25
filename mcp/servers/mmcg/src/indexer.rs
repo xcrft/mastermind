@@ -12,11 +12,13 @@ use std::time::SystemTime;
 use tree_sitter::{Parser, Tree};
 use walkdir::WalkDir;
 
+mod csharp;
 mod javascript;
 mod python;
 mod rust_lang;
 mod typescript;
 
+pub use csharp::CsharpExtractor;
 pub use javascript::JavascriptExtractor;
 pub use python::PythonExtractor;
 pub use rust_lang::RustExtractor;
@@ -42,6 +44,7 @@ pub fn extractor_for_path(path: &Path) -> Option<Box<dyn LanguageExtractor>> {
         "ts" | "tsx" => Some(Box::new(TypescriptExtractor::new(ext == "tsx"))),
         "js" | "jsx" | "mjs" | "cjs" => Some(Box::new(JavascriptExtractor)),
         "rs" => Some(Box::new(RustExtractor)),
+        "cs" => Some(Box::new(CsharpExtractor)),
         _ => None,
     }
 }
@@ -227,6 +230,8 @@ fn guess_language_for(rel_path: &str) -> Option<&'static str> {
         Some("javascript")
     } else if rel_path.ends_with(".rs") {
         Some("rust")
+    } else if rel_path.ends_with(".cs") {
+        Some("csharp")
     } else {
         None
     }

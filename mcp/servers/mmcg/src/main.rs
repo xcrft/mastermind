@@ -97,6 +97,11 @@ enum QueryCmd {
         kind: Option<String>,
         #[arg(long)]
         language: Option<String>,
+        /// Disable collapsing of partial-class declarations into one hit.
+        /// By default mmcg joins C# `partial class Foo` rows across files
+        /// into a single result with a `locations` list.
+        #[arg(long)]
+        no_collapse_partials: bool,
     },
     /// List callers of a symbol (matches name OR type prefix).
     Callers {
@@ -226,11 +231,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     name,
                     kind,
                     language,
+                    no_collapse_partials,
                 } => serde_json::to_value(queries::search(
                     &store,
                     &name,
                     kind.as_deref(),
                     language.as_deref(),
+                    !no_collapse_partials,
                 )?)?,
                 QueryCmd::Callers {
                     name,

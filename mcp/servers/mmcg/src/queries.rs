@@ -12,7 +12,24 @@ pub struct SymbolHit {
     pub kind: String,
     pub file: String,
     pub line: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
+    /// Extra locations when this hit collapses several declarations of the same
+    /// symbol (e.g. C# partial classes split across files). The primary `file`/`line`
+    /// fields still point to the canonical (lex-first) declaration; this list
+    /// includes every declaration including the canonical one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locations: Option<Vec<SymbolLocation>>,
+    /// Decorators / attributes / modifiers captured from source
+    /// (e.g. `",Fact,"`, `",partial,sealed,"`). Skipped from output when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decorators: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SymbolLocation {
+    pub file: String,
+    pub line: u32,
 }
 
 impl From<Symbol> for SymbolHit {
@@ -23,6 +40,8 @@ impl From<Symbol> for SymbolHit {
             file: s.file_path,
             line: s.line_start,
             signature: s.signature,
+            locations: None,
+            decorators: s.decorators,
         }
     }
 }
@@ -87,16 +106,78 @@ pub fn search(
     name: &str,
     kind: Option<&str>,
     language: Option<&str>,
+    collapse_partials: bool,
 ) -> rusqlite::Result<SearchResponse> {
-    let results = store
-        .search_symbols(name, kind, language)?
-        .into_iter()
-        .map(SymbolHit::from)
-        .collect();
+    let raw = store.search_symbols(name, kind, language)?;
+    let results = if collapse_partials {
+        collapse_partial_hits(raw)
+    } else {
+        raw.into_iter().map(SymbolHit::from).collect()
+    };
     Ok(SearchResponse {
         query: name.to_string(),
         results,
     })
+}
+
+/// Collapse multiple Symbol rows for the same partial-class declaration into a
+/// single hit. A row is considered "partial" when its decorators field contains
+/// `,partial,` (set by the C# extractor for `partial class` / `partial record`).
+///
+/// Rows that are NOT partial pass through unchanged — even if multiple rows
+/// share a name. Two non-partial classes with the same name (unusual but
+/// possible across namespaces) deserve to be reported as distinct hits.
+///
+/// The canonical hit is the lex-first by file path; its `locations` field lists
+/// every declaration (including itself).
+fn collapse_partial_hits(symbols: Vec<Symbol>) -> Vec<SymbolHit> {
+    use std::collections::HashMap;
+
+    // Group key: (name, kind). Language not in the key — partials are C#-only
+    // and our SQL filters by language upstream.
+    let mut groups: HashMap<(String, String), Vec<Symbol>> = HashMap::new();
+    let mut order: Vec<(String, String)> = Vec::new();
+    let mut passthrough: Vec<SymbolHit> = Vec::new();
+
+    for sym in symbols {
+        let is_partial = sym
+            .decorators
+            .as_deref()
+            .map(|d| d.contains(",partial,"))
+            .unwrap_or(false);
+        if !is_partial {
+            passthrough.push(SymbolHit::from(sym));
+            continue;
+        }
+        let key = (sym.name.clone(), sym.kind.clone());
+        if !groups.contains_key(&key) {
+            order.push(key.clone());
+        }
+        groups.entry(key).or_default().push(sym);
+    }
+
+    let mut out: Vec<SymbolHit> = Vec::with_capacity(passthrough.len() + order.len());
+    out.extend(passthrough);
+    for key in order {
+        let mut rows = groups.remove(&key).unwrap();
+        rows.sort_by(|a, b| {
+            a.file_path
+                .cmp(&b.file_path)
+                .then(a.line_start.cmp(&b.line_start))
+        });
+        let canonical = rows[0].clone();
+        let locations: Vec<SymbolLocation> = rows
+            .iter()
+            .map(|s| SymbolLocation {
+                file: s.file_path.clone(),
+                line: s.line_start,
+            })
+            .collect();
+        let mut hit = SymbolHit::from(canonical);
+        hit.locations = Some(locations);
+        out.push(hit);
+    }
+    out
 }
 
 pub fn callers(
@@ -550,5 +631,57 @@ mod tests {
         assert!(out.nodes[1].children.is_empty());
 
         std::fs::remove_file(&path).ok();
+    }
+
+    fn mk_sym(name: &str, kind: &str, file: &str, line: u32, decorators: Option<&str>) -> Symbol {
+        Symbol {
+            id: 0,
+            name: name.to_string(),
+            kind: kind.to_string(),
+            file_path: file.to_string(),
+            line_start: line,
+            line_end: line,
+            signature: None,
+            parent_id: None,
+            decorators: decorators.map(String::from),
+        }
+    }
+
+    #[test]
+    fn collapse_partials_groups_only_partial_rows() {
+        let symbols = vec![
+            mk_sym("User", "class", "User.B.cs", 3, Some(",partial,")),
+            mk_sym("User", "class", "User.A.cs", 3, Some(",partial,")),
+            mk_sym("User", "class", "User.C.cs", 3, Some(",partial,")),
+            mk_sym("Service", "class", "Service.cs", 2, None),
+        ];
+        let hits = collapse_partial_hits(symbols);
+        // 1 partial group (User) + 1 passthrough (Service) = 2
+        assert_eq!(hits.len(), 2);
+
+        let user = hits.iter().find(|h| h.name == "User").unwrap();
+        // Canonical = lex-first file
+        assert_eq!(user.file, "User.A.cs");
+        let locs = user.locations.as_ref().expect("partial has locations");
+        assert_eq!(locs.len(), 3);
+        assert_eq!(locs[0].file, "User.A.cs");
+        assert_eq!(locs[1].file, "User.B.cs");
+        assert_eq!(locs[2].file, "User.C.cs");
+
+        let service = hits.iter().find(|h| h.name == "Service").unwrap();
+        assert!(service.locations.is_none());
+    }
+
+    #[test]
+    fn collapse_partials_passes_non_partial_duplicates_unchanged() {
+        // Two distinct non-partial classes named `Foo` in different namespaces —
+        // these are NOT a partial collapse target and must remain separate hits.
+        let symbols = vec![
+            mk_sym("Foo", "class", "A/Foo.cs", 1, None),
+            mk_sym("Foo", "class", "B/Foo.cs", 1, None),
+        ];
+        let hits = collapse_partial_hits(symbols);
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|h| h.locations.is_none()));
     }
 }

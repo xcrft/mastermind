@@ -48,7 +48,7 @@ flowchart TB
 
 The **planner** never implements. The **executor** never improvises. The **critic** (pre-spec) and the **auditor** (post-execution) run as independent Opus instances with no prior conversation context — they catch the planner's bias.
 
-Underneath every role sits **mmcg** — a Rust binary that indexes Python, TypeScript, JavaScript, and Rust into a local SQLite codegraph and exposes 12 structural query tools over MCP (`search`, `callers`, `callees`, `impact`, `imports`, `imported_by`, `files`, `symbols_in_file`, `outline`, `recent_changes`, `unreferenced`, `api_surface`). Every subagent queries mmcg before claiming anything about the code: "does function X exist?", "who calls Y?", "transitive blast radius of changing Z?". This is what makes the workflow's claims resistant to hallucination.
+Underneath every role sits **mmcg** — a Rust binary that indexes Python, TypeScript, JavaScript, Rust, and C# into a local SQLite codegraph and exposes 12 structural query tools over MCP (`search`, `callers`, `callees`, `impact`, `imports`, `imported_by`, `files`, `symbols_in_file`, `outline`, `recent_changes`, `unreferenced`, `api_surface`). Every subagent queries mmcg before claiming anything about the code: "does function X exist?", "who calls Y?", "transitive blast radius of changing Z?". This is what makes the workflow's claims resistant to hallucination.
 
 For the full 14-step flow (pre-flight validation, post-flight audit checks, parallel incident-response workflow, on-demand release packaging) see the [workflow CLAUDE.md template](agents/claude-md/mastermind-workflow.md).
 
@@ -121,7 +121,7 @@ If the full workflow is more than you want, install only what you need.
 
 ### Just the codegraph
 
-`mmcg` is a standalone [crate on crates.io](https://crates.io/crates/mmcg) — 12 structural query tools (search, callers, callees, impact, outline, recent_changes, unreferenced, api_surface, …) for Python / TypeScript / JavaScript / Rust. Zero system deps, sub-millisecond queries.
+`mmcg` is a standalone [crate on crates.io](https://crates.io/crates/mmcg) — 12 structural query tools (search, callers, callees, impact, outline, recent_changes, unreferenced, api_surface, …) for Python / TypeScript / JavaScript / Rust / C#. Zero system deps, sub-millisecond queries.
 
 ```bash
 cargo install mmcg

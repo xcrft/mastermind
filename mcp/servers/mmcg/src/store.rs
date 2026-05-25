@@ -22,7 +22,17 @@ pub struct Symbol {
     pub line_end: u32,
     pub signature: Option<String>,
     pub parent_id: Option<i64>,
+    /// Comma-bookended list of decorators / attributes / modifiers
+    /// (e.g. `",Fact,"`, `",partial,sealed,"`). `None` if no modifiers.
+    /// Used by `mmcg_unreferenced` filtering and by `mmcg_search` partial-class collapse.
+    pub decorators: Option<String>,
 }
+
+/// Column list for every SELECT that hydrates a [`Symbol`] via [`Store::row_to_symbol`].
+/// Adding a column? Update both constants AND `row_to_symbol`.
+const SYMBOL_COLS: &str =
+    "id, name, kind, file_path, line_start, line_end, signature, parent_id, decorators";
+const SYMBOL_COLS_S: &str = "s.id, s.name, s.kind, s.file_path, s.line_start, s.line_end, s.signature, s.parent_id, s.decorators";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Edge {
@@ -373,14 +383,15 @@ impl Store {
         kind: Option<&str>,
         language: Option<&str>,
     ) -> SqlResult<Vec<Symbol>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, name, kind, file_path, line_start, line_end, signature, parent_id
+        let sql = format!(
+            "SELECT {SYMBOL_COLS}
              FROM symbols
              WHERE name = ?1
                AND (?2 IS NULL OR kind = ?2)
                AND (?3 IS NULL OR language = ?3)
-             ORDER BY file_path, line_start",
-        )?;
+             ORDER BY file_path, line_start"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![name, kind, language], Self::row_to_symbol)?;
         rows.collect()
     }
@@ -401,15 +412,16 @@ impl Store {
         language: Option<&str>,
         edge_kind: Option<&str>,
     ) -> SqlResult<Vec<Symbol>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT s.id, s.name, s.kind, s.file_path, s.line_start, s.line_end, s.signature, s.parent_id
+        let sql = format!(
+            "SELECT DISTINCT {SYMBOL_COLS_S}
              FROM symbols s
              JOIN edges e ON e.from_id = s.id
              WHERE e.kind = COALESCE(?3, 'calls')
                AND (e.to_name = ?1 OR e.to_type = ?1)
                AND (?2 IS NULL OR s.language = ?2)
-             ORDER BY s.file_path, s.line_start",
-        )?;
+             ORDER BY s.file_path, s.line_start"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![name, language, edge_kind], Self::row_to_symbol)?;
         rows.collect()
     }
@@ -441,7 +453,10 @@ impl Store {
         max_depth: u32,
         language: Option<&str>,
     ) -> SqlResult<Vec<(Symbol, u32)>> {
-        let mut stmt = self.conn.prepare(
+        // `d` must be appended AFTER the SYMBOL_COLS_S list so its index lines up
+        // with `row_to_symbol`'s column count. Adjust the `r.get(N)` for depth
+        // if you change SYMBOL_COLS.
+        let sql = format!(
             "WITH RECURSIVE impact(sym_id, name, depth) AS (
                  SELECT s.id, s.name, 1
                  FROM symbols s
@@ -458,16 +473,18 @@ impl Store {
                    AND e.kind = 'calls'
                    AND (?3 IS NULL OR s.language = ?3)
              )
-             SELECT s.id, s.name, s.kind, s.file_path, s.line_start, s.line_end, s.signature, s.parent_id,
+             SELECT {SYMBOL_COLS_S},
                     MIN(i.depth) AS d
              FROM impact i
              JOIN symbols s ON s.id = i.sym_id
              GROUP BY s.id
-             ORDER BY d, s.file_path",
-        )?;
+             ORDER BY d, s.file_path"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![name, max_depth, language], |r| {
             let sym = Self::row_to_symbol(r)?;
-            let depth: u32 = r.get(8)?;
+            // Depth is the column AFTER the 9 SYMBOL_COLS_S columns.
+            let depth: u32 = r.get(9)?;
             Ok((sym, depth))
         })?;
         rows.collect()
@@ -492,8 +509,8 @@ impl Store {
         kind: Option<&str>,
         language: Option<&str>,
     ) -> SqlResult<Vec<Symbol>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT s.id, s.name, s.kind, s.file_path, s.line_start, s.line_end, s.signature, s.parent_id
+        let sql = format!(
+            "SELECT {SYMBOL_COLS_S}
              FROM symbols s
              WHERE (?1 IS NULL OR s.kind = ?1)
                AND (?2 IS NULL OR s.language = ?2)
@@ -545,9 +562,36 @@ impl Store {
                    AND s.decorators NOT LIKE '%,tokio::main,%'
                    AND s.decorators NOT LIKE '%,async_std::main,%'
                    AND s.decorators NOT LIKE '%,async_std::test,%'
+                   -- C# test frameworks (xUnit / NUnit / MSTest) — leaf only, Attribute suffix stripped
+                   AND s.decorators NOT LIKE '%,Fact,%'
+                   AND s.decorators NOT LIKE '%,Theory,%'
+                   AND s.decorators NOT LIKE '%,Test,%'
+                   AND s.decorators NOT LIKE '%,TestMethod,%'
+                   AND s.decorators NOT LIKE '%,TestCase,%'
+                   AND s.decorators NOT LIKE '%,TestFixture,%'
+                   AND s.decorators NOT LIKE '%,SetUp,%'
+                   AND s.decorators NOT LIKE '%,TearDown,%'
+                   AND s.decorators NOT LIKE '%,OneTimeSetUp,%'
+                   AND s.decorators NOT LIKE '%,OneTimeTearDown,%'
+                   AND s.decorators NOT LIKE '%,TestInitialize,%'
+                   AND s.decorators NOT LIKE '%,TestCleanup,%'
+                   AND s.decorators NOT LIKE '%,ClassInitialize,%'
+                   AND s.decorators NOT LIKE '%,ClassCleanup,%'
+                   -- ASP.NET routing
+                   AND s.decorators NOT LIKE '%,HttpGet,%'
+                   AND s.decorators NOT LIKE '%,HttpPost,%'
+                   AND s.decorators NOT LIKE '%,HttpPut,%'
+                   AND s.decorators NOT LIKE '%,HttpDelete,%'
+                   AND s.decorators NOT LIKE '%,HttpPatch,%'
+                   AND s.decorators NOT LIKE '%,Route,%'
+                   -- BenchmarkDotNet
+                   AND s.decorators NOT LIKE '%,Benchmark,%'
+                   AND s.decorators NOT LIKE '%,GlobalSetup,%'
+                   AND s.decorators NOT LIKE '%,GlobalCleanup,%'
                ))
-             ORDER BY s.file_path, s.line_start",
-        )?;
+             ORDER BY s.file_path, s.line_start"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![kind, language], Self::row_to_symbol)?;
         rows.collect()
     }
@@ -564,8 +608,8 @@ impl Store {
         } else {
             format!("{path_prefix}%")
         };
-        let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT s.id, s.name, s.kind, s.file_path, s.line_start, s.line_end, s.signature, s.parent_id
+        let sql = format!(
+            "SELECT DISTINCT {SYMBOL_COLS_S}
              FROM symbols s
              WHERE s.file_path LIKE ?1
                AND (?2 IS NULL OR s.language = ?2)
@@ -576,8 +620,9 @@ impl Store {
                    WHERE (e.to_name = s.name OR e.to_type = s.name)
                      AND caller.file_path NOT LIKE ?1
                )
-             ORDER BY s.file_path, s.line_start",
-        )?;
+             ORDER BY s.file_path, s.line_start"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![pattern, language], Self::row_to_symbol)?;
         rows.collect()
     }
@@ -632,10 +677,11 @@ impl Store {
 
     /// All symbols defined in a given file, ordered by line.
     pub fn symbols_in_file(&self, file_path: &str) -> SqlResult<Vec<Symbol>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, name, kind, file_path, line_start, line_end, signature, parent_id
-             FROM symbols WHERE file_path = ?1 ORDER BY line_start",
-        )?;
+        let sql = format!(
+            "SELECT {SYMBOL_COLS}
+             FROM symbols WHERE file_path = ?1 ORDER BY line_start"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![file_path], Self::row_to_symbol)?;
         rows.collect()
     }
@@ -722,6 +768,7 @@ impl Store {
             line_end: r.get(5)?,
             signature: r.get(6)?,
             parent_id: r.get(7)?,
+            decorators: r.get(8)?,
         })
     }
 }

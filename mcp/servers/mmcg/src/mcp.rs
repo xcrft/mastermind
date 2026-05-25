@@ -128,13 +128,14 @@ fn tools_list() -> Value {
         "tools": [
             {
                 "name": "mmcg_search",
-                "description": "Find symbols (functions, classes, methods, structs, traits, etc.) by exact name. Returns location, kind, and signature. Pass `language` to filter by `python`/`typescript`/`tsx`/`javascript`/`rust` — defends against name collisions in monorepos.",
+                "description": "Find symbols (functions, classes, methods, structs, traits, etc.) by exact name. Returns location, kind, signature, and any decorators/attributes. Pass `language` to filter by `python`/`typescript`/`tsx`/`javascript`/`rust`/`csharp` — defends against name collisions in monorepos. C# `partial class` declarations across files are collapsed into a single hit with a `locations` array by default; pass `collapse_partials: false` to see every declaration.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "name": { "type": "string", "description": "Symbol name (exact match)" },
-                        "kind": { "type": "string", "description": "Optional kind filter (function, class, method, struct, enum, trait, etc.)" },
-                        "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "rust"], "description": "Optional language filter" }
+                        "kind": { "type": "string", "description": "Optional kind filter (function, class, method, struct, enum, trait, interface, record, property, etc.)" },
+                        "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "rust", "csharp"], "description": "Optional language filter" },
+                        "collapse_partials": { "type": "boolean", "default": true, "description": "When true (default), C# `partial class Foo` declarations across N files return one hit with a `locations` array of all N declarations. Set false to see each declaration as a separate row." }
                     },
                     "required": ["name"]
                 }
@@ -293,7 +294,11 @@ fn handle_tools_call(store: &mut Store, params: &Value) -> Result<Value, String>
             let name = str_arg(&args, "name")?;
             let kind = opt_str_arg(&args, "kind");
             let language = opt_str_arg(&args, "language");
-            let r = queries::search(store, name, kind, language).map_err(|e| e.to_string())?;
+            // Default true — collapsing partial-class duplicates is the safer default.
+            // Pass `collapse_partials: false` to see every declaration as a separate row.
+            let collapse = opt_bool_arg(&args, "collapse_partials").unwrap_or(true);
+            let r = queries::search(store, name, kind, language, collapse)
+                .map_err(|e| e.to_string())?;
             serde_json::to_value(r).map_err(|e| e.to_string())?
         }
         "mmcg_callers" => {
@@ -388,4 +393,8 @@ fn str_arg<'a>(args: &'a Value, name: &str) -> Result<&'a str, String> {
 
 fn opt_str_arg<'a>(args: &'a Value, name: &str) -> Option<&'a str> {
     args.get(name).and_then(|v| v.as_str())
+}
+
+fn opt_bool_arg(args: &Value, name: &str) -> Option<bool> {
+    args.get(name).and_then(|v| v.as_bool())
 }

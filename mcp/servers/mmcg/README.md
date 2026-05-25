@@ -1,8 +1,8 @@
 ---
 name: mmcg
-description: Mastermind Codegraph — fast multi-language code indexer (Python + TypeScript/TSX + JavaScript/JSX + Rust) exposed over MCP. Indexes symbols, calls, and imports (with fully-qualified paths) into a local SQLite database (`.mastermind/mmcg.db`) and exposes 12 structural query tools for AI agents in the Mastermind workflow. Includes an incremental file watcher.
+description: Mastermind Codegraph — fast multi-language code indexer (Python + TypeScript/TSX + JavaScript/JSX + Rust + C#) exposed over MCP. Indexes symbols, calls, and imports (with fully-qualified paths) into a local SQLite database (`.mastermind/mmcg.db`) and exposes 12 structural query tools for AI agents in the Mastermind workflow. Includes an incremental file watcher.
 metadata:
-  version: 0.7.0
+  version: 0.8.0
   authors:
     - mastermind
   tags:
@@ -12,30 +12,33 @@ metadata:
     - typescript
     - javascript
     - rust
+    - csharp
   transport: stdio
   source: this repository
 ---
 
 # mmcg — Mastermind Codegraph
 
-A small, fast Rust binary that builds a structural index of a codebase (Python, TypeScript/TSX, JavaScript/JSX, Rust) and serves queries over MCP. Pair with the Mastermind workflow so the planner/executor reason from a real graph instead of grep heuristics.
+A small, fast Rust binary that builds a structural index of a codebase (Python, TypeScript/TSX, JavaScript/JSX, Rust, C#) and serves queries over MCP. Pair with the Mastermind workflow so the planner/executor reason from a real graph instead of grep heuristics.
 
-**Status — Phase 6:** Python + TypeScript + JavaScript + Rust. Imports tracked with fully-qualified paths. File watcher. Incremental indexing. **Language filter** on all queries (defends against monorepo name collisions). **Rust type-method awareness** — `mmcg_callers SessionStore` now finds `SessionStore::new()` callers. **`mmcg_symbols_in_file`** — list all symbols in a file in source order. **Phase 6 additions (0.6.0):** `mmcg_outline` (symbol tree per file), `mmcg_recent_changes` (files re-indexed within a time window), `mmcg_unreferenced` (dead-code candidates), `mmcg_api_surface` (symbols referenced from outside a prefix), and an `edge_kind` filter on `mmcg_callers` / `mmcg_callees` (switch between `calls` / `imports` / `inherits`).
+**Status — 0.8.0:** Python + TypeScript + JavaScript + Rust + C#. Imports tracked with fully-qualified paths. File watcher. Incremental indexing. **Language filter** on all queries (defends against monorepo name collisions). **Rust type-method awareness** — `mmcg_callers SessionStore` now finds `SessionStore::new()` callers. **`mmcg_symbols_in_file`** — list all symbols in a file in source order. **Decorator/attribute-aware `mmcg_unreferenced`** — symbols decorated with framework registries (pytest, FastAPI, Triton, Rust `#[test]`, xUnit `[Fact]`, ASP.NET `[HttpGet]`, etc.) are excluded from dead-code candidates.
 
 ## What it indexes
 
 For each supported file, mmcg captures:
 
-| Construct | Python | TS / TSX | JS / JSX | Rust |
-|---|---|---|---|---|
-| Top-level functions | ✓ `def`, `async def` | ✓ `function` | ✓ `function` | ✓ `fn` |
-| Classes | ✓ | ✓ `class`, `interface`, `abstract class` | ✓ `class` | ✓ `struct`, `enum`, `trait` |
-| Methods | ✓ inside classes | ✓ inside classes/interfaces | ✓ inside classes | ✓ inside `impl` / `trait` blocks |
-| Calls | ✓ `foo()`, `obj.foo()` | ✓ `foo()`, `obj.foo()`, `new Foo()` | ✓ same as TS | ✓ `foo()`, `obj.foo()`, `Mod::foo()` |
-| Macro invocations | n/a | n/a | n/a | ✓ `println!`, `vec![]` |
-| Imports | ✓ `import`, `from … import …` | ✓ default, named, namespace | ✓ same as TS | ✓ `use` with paths, lists, aliases, wildcards |
-| Module-level calls | ✓ attributed to `<module>` symbol | ✓ | ✓ | ✓ |
-| **Fully-qualified path** | ✓ `collections.abc.Iterable` | ✓ `'pkg'::default` / `'./mod'::name` | ✓ same as TS | ✓ `foo::bar::Baz` |
+| Construct | Python | TS / TSX | JS / JSX | Rust | C# |
+|---|---|---|---|---|---|
+| Top-level functions | ✓ `def`, `async def` | ✓ `function` | ✓ `function` | ✓ `fn` | ✓ `local_function`, top-level method |
+| Classes | ✓ | ✓ `class`, `interface`, `abstract class` | ✓ `class` | ✓ `struct`, `enum`, `trait` | ✓ `class`, `struct`, `interface`, `record`, `enum` |
+| Methods | ✓ inside classes | ✓ inside classes/interfaces | ✓ inside classes | ✓ inside `impl` / `trait` blocks | ✓ inside classes/structs/records/interfaces |
+| Properties / fields | n/a | n/a | n/a | n/a | ✓ `property` (excluded from dead-code by default) |
+| Calls | ✓ `foo()`, `obj.foo()` | ✓ `foo()`, `obj.foo()`, `new Foo()` | ✓ same as TS | ✓ `foo()`, `obj.foo()`, `Mod::foo()` | ✓ `Foo()`, `obj.Bar()`, `Type.Method()`, `new T()` |
+| Macro invocations | n/a | n/a | n/a | ✓ `println!`, `vec![]` | n/a |
+| Decorators / attributes | ✓ `@pytest.fixture`, `@app.route` | n/a | n/a | ✓ `#[test]`, `#[tokio::main]` | ✓ `[Fact]`, `[HttpGet]` — `Attribute` suffix stripped |
+| Imports | ✓ `import`, `from … import …` | ✓ default, named, namespace | ✓ same as TS | ✓ `use` with paths, lists, aliases, wildcards | ✓ `using`, `using static`, `using <alias> = …` |
+| Module-level calls | ✓ attributed to `<module>` symbol | ✓ | ✓ | ✓ | ✓ |
+| **Fully-qualified path** | ✓ `collections.abc.Iterable` | ✓ `'pkg'::default` / `'./mod'::name` | ✓ same as TS | ✓ `foo::bar::Baz` | ✓ `System.Collections.Generic::*` |
 
 Each file gets a synthetic `<module>` symbol (kind `module`) that owns module-scope imports and top-level statements.
 
@@ -44,6 +47,7 @@ Each file gets a synthetic `<module>` symbol (kind `module`) that owns module-sc
 - **Python:** dotted. `from collections.abc import Iterable as Iter` → name=`Iter`, path=`collections.abc.Iterable`
 - **TS/JS:** module-source + leaf separated by `::`. `import { foo as bar } from './a'` → name=`bar`, path=`./a::foo`. Defaults: `<src>::default`. Namespace: `<src>::*`.
 - **Rust:** Rust-style `::`. `use foo::bar::Baz as Q` → name=`Q`, path=`foo::bar::Baz`. Wildcards: `foo::*`.
+- **C#:** namespace + `::*` wildcard. `using System.Collections.Generic;` → name=`Generic`, path=`System.Collections.Generic::*`. Aliases (`using X = Y.Z`) take the right side.
 - **Calls:** for `obj.foo()`, path is the literal `obj.foo` from source (no type resolution — see Limitations).
 
 **Skipped directories:** `.git`, `.mastermind`, `.venv`, `venv`, `__pycache__`, `node_modules`, `target`, `dist`, `build`, `.tox`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.next`, `.turbo`, `.cache`.
@@ -53,7 +57,7 @@ Each file gets a synthetic `<module>` symbol (kind `module`) that owns module-sc
 The Mastermind workflow needs structural queries every few seconds (planner deciding blast radius, executor checking callers before edits). Grep/Read each costs hundreds of tokens; mmcg returns the same info in dozens. Multiplied across a workflow run, the difference is between affordable and not.
 
 mmcg is intentionally narrow:
-- Four languages (Python, TypeScript/TSX, JavaScript/JSX, Rust) — extend by adding a parser, not by depending on multi-language toolchains
+- Five languages (Python, TypeScript/TSX, JavaScript/JSX, Rust, C#) — extend by adding a parser, not by depending on multi-language toolchains
 - 12 query tools that map directly to the workflow's needs
 - Read-only over MCP (no writes from agents — only `mmcg index` and `mmcg watch` mutate the db)
 
@@ -162,7 +166,7 @@ For best results, run `mmcg watch` in a separate terminal so the index stays cur
 
 | Tool | Args | What it returns |
 |---|---|---|
-| `mmcg_search` | `name`, optional `kind`, `language` | Symbols matching exactly. Pre-flight "does X exist?" check. Returns location, kind, and signature. |
+| `mmcg_search` | `name`, optional `kind`, `language`, `collapse_partials` (default `true`) | Symbols matching exactly. Pre-flight "does X exist?" check. Returns location, kind, signature, and any decorators/attributes. C# `partial class` declarations across N files collapse into one hit with a `locations` array of all N declarations; pass `collapse_partials: false` to see every declaration separately. |
 | `mmcg_callers` | `name`, optional `language`, `edge_kind` (default `calls`) | **Containing functions** that reference `name` by the given edge kind. Count = distinct containing units, not distinct call sites (a function with 3 calls to `name` counts once). Use before editing for blast radius. Pass `edge_kind: imports` to find importers via the same tool. |
 | `mmcg_callees` | `name`, optional `language`, `edge_kind` (default `calls`) | Names the symbol references via the given edge kind. |
 | `mmcg_impact` | `name`, optional `max_depth` (1-10, default 2), `language` | Transitive callers via `calls` edges. Full blast radius. |
@@ -204,16 +208,17 @@ mmcg serve
 
 ## Limitations (honest)
 
-- **Four languages.** Python (`.py`), TS/TSX (`.ts`, `.tsx`), JS/JSX (`.js`, `.jsx`, `.mjs`, `.cjs`), Rust (`.rs`). Other extensions are silently skipped.
+- **Five languages.** Python (`.py`), TS/TSX (`.ts`, `.tsx`), JS/JSX (`.js`, `.jsx`, `.mjs`, `.cjs`), Rust (`.rs`), C# (`.cs`). Other extensions are silently skipped.
 - **Call resolution is name-based, not type-based.** `obj.foo()` records a call to "foo" with literal path "obj.foo" — but `obj` isn't resolved to a type, so cross-file precision is best-effort.
 - **No cross-file symbol resolution.** Edges store `to_name` and `to_path` (strings), not `to_id`. Searching "callers of foo" finds *every* call to "foo" anywhere — even unrelated ones in different modules. The `to_path` column reduces ambiguity for imports specifically (use `mmcg_imported_by` with `match: path`).
 - **Path-based queries reflect literal source text, not semantic FQN.** When you index code with `use foo::bar::Baz` and `mmcg_imported_by --query "foo::bar::Baz" --match path` you'll get that file. But if another file imports the same type via `use crate::Baz` (re-exported), it stores `to_path = "crate::Baz"` and won't match the FQN query. Resolving paths to canonical FQNs would require parsing `Cargo.toml` / `package.json` / `pyproject.toml` and following re-exports — that's compiler-level work and out of scope. **Use `match: name` for "find all consumers"** (catches everything regardless of import phrasing); reserve `match: path` for "find this exact import spelling".
 - **`to_type` for member-call detection uses a capital-letter heuristic in TS/JS/Python.** `Class.method()`, `JSON.parse()`, `Foo.bar.baz()` correctly emit `to_type = "Class"` / `"JSON"` / `"Foo"` (rightmost capitalized receiver). For Rust, `to_type` is unambiguous via the `scoped_identifier` AST node — no heuristic needed. The heuristic misses calls on uppercase-named variables (e.g. `const FOO = new Bar(); FOO.method()` won't emit `to_type=FOO`) but matches the common convention used in idiomatic JS/TS/Python code.
 - **Watcher doesn't index brand-new directories deeply on the first event.** If you `mkdir -p foo/bar/baz` and add files inside, the watcher catches each file event individually. No special handling — just slower for big batch additions.
 - **Schema migration is destructive.** When mmcg's schema version changes (v1→v2, etc.) the existing index is dropped on open. Re-run `mmcg index .` to repopulate. No data is lost — the source code is the source of truth.
-- **`mmcg_unreferenced` filters known framework patterns since 0.7.0.** The query excludes symbols decorated with pytest fixtures / parametrize / mark, web-framework route decorators (`.route` / `.get` / `.post` / `.put` / `.delete` / `.patch` / `.websocket`), JIT decorators (`triton.jit` / `numba.jit` / `nb.njit`), task queues (`celery.task` / `shared_task`), CLI (`click.command` / `click.group`), and Rust attributes (`#[test]`, `#[tokio::main]`, `#[async_std::test]`). Also filters `test_*` functions in `*test*` / `*spec*` paths (pytest convention). Remaining false-positive classes that mmcg can't see: (a) entry points like `main` or framework-registered handlers without a recognized decorator; (b) dynamic dispatch — trait objects, duck-typed calls, JS reflection; (c) cross-language calls (TS subprocess invoking Python); (d) runtime registration via dict / list (`HANDLERS = {"foo": foo}`). Review every hit manually before deleting. The tool is "candidates to investigate", not "safe to delete".
+- **`mmcg_unreferenced` filters known framework patterns since 0.7.0.** The query excludes symbols decorated with pytest fixtures / parametrize / mark, web-framework route decorators (`.route` / `.get` / `.post` / `.put` / `.delete` / `.patch` / `.websocket`), JIT decorators (`triton.jit` / `numba.jit` / `nb.njit`), task queues (`celery.task` / `shared_task`), CLI (`click.command` / `click.group`), Rust attributes (`#[test]`, `#[tokio::main]`, `#[async_std::test]`), and (since 0.8.0) C# test/web/benchmark attributes (xUnit `[Fact]`/`[Theory]`, NUnit `[Test]`/`[SetUp]`, MSTest `[TestMethod]`, ASP.NET `[HttpGet]`/`[HttpPost]`/`[Route]`, BenchmarkDotNet `[Benchmark]`). Also filters `test_*` functions in `*test*` / `*spec*` paths (pytest convention). Remaining false-positive classes that mmcg can't see: (a) entry points like `main` or framework-registered handlers without a recognized decorator; (b) dynamic dispatch — trait objects, duck-typed calls, JS reflection; (c) cross-language calls (TS subprocess invoking Python); (d) runtime registration via dict / list (`HANDLERS = {"foo": foo}`). Review every hit manually before deleting. The tool is "candidates to investigate", not "safe to delete".
 - **`mmcg_api_surface` is empirical, not declared.** It returns symbols that are *currently* called from outside the prefix — independent of language-level visibility (`pub`/`export`/no-underscore). A symbol declared `pub` with no external callers won't appear; a private symbol leaked through a public re-export and called externally will. Useful for "what does the rest of the codebase actually rely on?", not for "what's the public API contract?".
 - **`mmcg_recent_changes` reflects index mtime, not git history.** If you re-index after rewriting history (rebase, amend, force-push) every touched file appears as "recent". Use `git log --since=...` for git truth; use this tool for "what has my watcher seen lately".
+- **C# partial classes** are stored as one symbol per file (each declaration is a real top-level node in its own file). `mmcg_search` collapses them by default into a single hit with a `locations` array of every declaration — set `collapse_partials: false` to opt out. `mmcg_callers` / `mmcg_callees` / `mmcg_impact` / `mmcg_outline` are unaffected: they resolve by name and don't double-count. Non-partial classes with colliding names across namespaces are *not* collapsed (they're genuinely distinct).
 
 ## Files in this artifact
 
@@ -229,11 +234,12 @@ mmcg serve
 | `src/indexer/typescript.rs` | TypeScript / TSX extractor (shared walker also used by JS) |
 | `src/indexer/javascript.rs` | JavaScript / JSX extractor — delegates to TS walker |
 | `src/indexer/rust_lang.rs` | Rust extractor (named to avoid `rust` keyword clash) |
+| `src/indexer/csharp.rs` | C# extractor — classes/structs/records/interfaces, methods, properties, attributes, using directives |
 | `src/queries.rs` | High-level query API with serializable response types |
 | `src/mcp.rs` | JSON-RPC over stdio, MCP `initialize`/`tools/list`/`tools/call` |
 | `src/watcher.rs` | notify-based filesystem watcher with debouncing |
 
-Tests live in `#[cfg(test)]` blocks in each module. Run with `cargo test` — 15 tests covering schema, queries, all three extractors.
+Tests live in `#[cfg(test)]` blocks in each module. Run with `cargo test` — 38 tests covering schema, queries, partial-class collapse, and every extractor.
 
 ## Integration with the Mastermind workflow
 

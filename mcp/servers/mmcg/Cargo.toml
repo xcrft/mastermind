@@ -1,9 +1,9 @@
 [package]
 name = "mmcg"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.75"
-description = "Mastermind Codegraph — fast multi-language code indexer (Python, TypeScript, JavaScript, Rust) with MCP interface. Truth layer for AI coding agents."
+description = "Mastermind Codegraph — fast multi-language code indexer (Python, TypeScript, JavaScript, Rust, C#) with MCP interface. Truth layer for AI coding agents."
 authors = ["mastermind"]
 license = "MIT"
 repository = "https://github.com/xcrft/mastermind"
@@ -40,6 +40,7 @@ tree-sitter-python = "0.23"
 tree-sitter-typescript = "0.23"
 tree-sitter-rust = "0.24"
 tree-sitter-javascript = "0.25"
+tree-sitter-c-sharp = "0.23"
 
 # Data-parallel iterator — used to parse multiple files concurrently.
 rayon = "1.10"

@@ -664,6 +664,62 @@ impl Store {
         rows.collect()
     }
 
+    /// Rank symbols by **in-degree** — how many distinct symbols call them
+    /// (matched by `to_name` or `to_type`, like `callers_of`). The top of the
+    /// list is the codebase's structural attractor surface: utilities everyone
+    /// depends on, core domain types, framework registration points.
+    ///
+    /// Use as a planner pre-flight on an unfamiliar codebase or path prefix:
+    /// "what are the 20 most-referenced symbols in `src/auth/`?" answers
+    /// "what should I read first" cheaply.
+    ///
+    /// - `path_prefix`: limit to symbols whose `file_path` starts with this
+    ///   prefix. `None` = whole index. Trailing `%` accepted, otherwise we append.
+    /// - `language`, `kind`: standard filters.
+    /// - `top`: how many results to return (caller decides — no hard cap).
+    ///
+    /// Excludes synthetic `<module>` symbols (always-zero in-degree under
+    /// name-matched edges) and symbols not referenced anywhere (in-degree 0).
+    pub fn centrality(
+        &self,
+        path_prefix: Option<&str>,
+        language: Option<&str>,
+        kind: Option<&str>,
+        top: u32,
+    ) -> SqlResult<Vec<(Symbol, u32)>> {
+        let pattern = path_prefix.map(|p| {
+            if p.ends_with('%') {
+                p.to_string()
+            } else {
+                format!("{p}%")
+            }
+        });
+        // In-degree = distinct CALLER symbols (not distinct call sites). Mirrors
+        // `mmcg_callers` semantics — a function with 5 calls to `foo` from the
+        // same caller counts once, not five times.
+        let sql = format!(
+            "SELECT {SYMBOL_COLS_S}, COUNT(DISTINCT e.from_id) AS in_degree
+             FROM symbols s
+             JOIN edges e ON e.kind = 'calls'
+                         AND (e.to_name = s.name OR e.to_type = s.name)
+             WHERE s.kind != 'module'
+               AND (?1 IS NULL OR s.file_path LIKE ?1)
+               AND (?2 IS NULL OR s.language = ?2)
+               AND (?3 IS NULL OR s.kind = ?3)
+             GROUP BY s.id
+             ORDER BY in_degree DESC, s.file_path, s.line_start
+             LIMIT ?4"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![pattern, language, kind, top], |r| {
+            let sym = Self::row_to_symbol(r)?;
+            // in_degree is the column after the 9 SYMBOL_COLS_S columns.
+            let in_degree: u32 = r.get(9)?;
+            Ok((sym, in_degree))
+        })?;
+        rows.collect()
+    }
+
     /// Files indexed within the last `window_secs` seconds (based on `indexed_at`).
     /// Used by `mmcg_recent_changes` to answer "what has the watcher touched lately".
     pub fn files_indexed_since(&self, threshold_unix: i64) -> SqlResult<Vec<FileEntry>> {
@@ -1072,6 +1128,102 @@ mod tests {
         let names: Vec<&str> = imp.iter().map(|(s, _)| s.name.as_str()).collect();
         assert!(names.contains(&"b"));
         assert!(names.contains(&"a"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn centrality_ranks_by_in_degree() {
+        let path = tmp_db("centrality_basic");
+        let store = Store::open(&path).unwrap();
+        // popular has 3 distinct callers; medium has 1; lonely has 0.
+        let popular = store
+            .insert_symbol("popular", "function", "x.py", 1, 5, None, None)
+            .unwrap();
+        let medium = store
+            .insert_symbol("medium", "function", "x.py", 10, 15, None, None)
+            .unwrap();
+        let _lonely = store
+            .insert_symbol("lonely", "function", "x.py", 20, 25, None, None)
+            .unwrap();
+        let c1 = store
+            .insert_symbol("c1", "function", "x.py", 30, 35, None, None)
+            .unwrap();
+        let c2 = store
+            .insert_symbol("c2", "function", "x.py", 40, 45, None, None)
+            .unwrap();
+        let c3 = store
+            .insert_symbol("c3", "function", "x.py", 50, 55, None, None)
+            .unwrap();
+        // Same caller calling popular twice → still in_degree=1 (DISTINCT callers).
+        store
+            .insert_edge(c1, Some(popular), "popular", "calls", 31)
+            .unwrap();
+        store
+            .insert_edge(c1, Some(popular), "popular", "calls", 32)
+            .unwrap();
+        store
+            .insert_edge(c2, Some(popular), "popular", "calls", 41)
+            .unwrap();
+        store
+            .insert_edge(c3, Some(popular), "popular", "calls", 51)
+            .unwrap();
+        store
+            .insert_edge(c1, Some(medium), "medium", "calls", 33)
+            .unwrap();
+
+        let ranked = store.centrality(None, None, None, 10).unwrap();
+        let by_name: std::collections::HashMap<&str, u32> = ranked
+            .iter()
+            .map(|(s, deg)| (s.name.as_str(), *deg))
+            .collect();
+        assert_eq!(
+            by_name["popular"], 3,
+            "3 distinct callers, dup call ignored"
+        );
+        assert_eq!(by_name["medium"], 1);
+        // lonely has zero callers — excluded by the JOIN.
+        assert!(!by_name.contains_key("lonely"));
+        // popular ranks above medium.
+        assert_eq!(ranked[0].0.name, "popular");
+
+        // top=1 returns only the top symbol.
+        let top1 = store.centrality(None, None, None, 1).unwrap();
+        assert_eq!(top1.len(), 1);
+        assert_eq!(top1[0].0.name, "popular");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn centrality_filters_prefix_and_kind() {
+        let path = tmp_db("centrality_filters");
+        let store = Store::open(&path).unwrap();
+        let api_fn = store
+            .insert_symbol("api_target", "function", "src/api/x.py", 1, 5, None, None)
+            .unwrap();
+        let core_cls = store
+            .insert_symbol("CoreClass", "class", "src/core/x.py", 1, 5, None, None)
+            .unwrap();
+        let caller = store
+            .insert_symbol("c", "function", "src/api/y.py", 1, 5, None, None)
+            .unwrap();
+        store
+            .insert_edge(caller, Some(api_fn), "api_target", "calls", 2)
+            .unwrap();
+        store
+            .insert_edge(caller, Some(core_cls), "CoreClass", "calls", 3)
+            .unwrap();
+
+        // Prefix filter: src/api/ excludes the class in src/core/.
+        let api_only = store.centrality(Some("src/api/"), None, None, 10).unwrap();
+        let names: Vec<&str> = api_only.iter().map(|(s, _)| s.name.as_str()).collect();
+        assert!(names.contains(&"api_target"));
+        assert!(!names.contains(&"CoreClass"));
+
+        // Kind filter: class only.
+        let classes = store.centrality(None, None, Some("class"), 10).unwrap();
+        let class_names: Vec<&str> = classes.iter().map(|(s, _)| s.name.as_str()).collect();
+        assert!(class_names.contains(&"CoreClass"));
+        assert!(!class_names.contains(&"api_target"));
         std::fs::remove_file(&path).ok();
     }
 }

@@ -260,6 +260,19 @@ fn tools_list() -> Value {
                 }
             },
             {
+                "name": "mmcg_centrality",
+                "description": "Rank symbols by in-degree (distinct callers, matched by name OR type prefix). Pre-flight 'where is the gravity' tool — top hits are the codebase's structural attractors (core utilities, central domain types, framework hooks). Use on unfamiliar code or a `prefix` like 'src/auth/' to learn what to read first. Excludes synthetic `<module>` rows and symbols with zero in-degree.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "prefix": { "type": "string", "description": "Optional path prefix to limit ranking scope (e.g. 'src/auth/'). LIKE-matched." },
+                        "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "rust", "csharp", "go", "java", "php", "cpp"] },
+                        "kind": { "type": "string", "description": "Optional kind filter (function, class, method, struct, etc.)" },
+                        "top": { "type": "integer", "minimum": 1, "maximum": 200, "default": 20, "description": "How many results to return" }
+                    }
+                }
+            },
+            {
                 "name": "mmcg_recent_changes",
                 "description": "Files re-indexed within a recent time window (per the watcher's `indexed_at` mtime). Useful when investigating a recent incident or asking 'what changed in the last hour?'. Pass `since` as a short duration string: 30s / 10m / 2h / 1d.",
                 "inputSchema": {
@@ -364,6 +377,20 @@ fn handle_tools_call(store: &mut Store, params: &Value) -> Result<Value, String>
             let prefix = str_arg(&args, "prefix")?;
             let language = opt_str_arg(&args, "language");
             let r = queries::api_surface(store, prefix, language).map_err(|e| e.to_string())?;
+            serde_json::to_value(r).map_err(|e| e.to_string())?
+        }
+        "mmcg_centrality" => {
+            let prefix = opt_str_arg(&args, "prefix");
+            let language = opt_str_arg(&args, "language");
+            let kind = opt_str_arg(&args, "kind");
+            let top = args
+                .get("top")
+                .and_then(|v| v.as_u64())
+                .and_then(|n| u32::try_from(n).ok())
+                .unwrap_or(20)
+                .clamp(1, 200);
+            let r = queries::centrality(store, prefix, language, kind, top)
+                .map_err(|e| e.to_string())?;
             serde_json::to_value(r).map_err(|e| e.to_string())?
         }
         "mmcg_recent_changes" => {

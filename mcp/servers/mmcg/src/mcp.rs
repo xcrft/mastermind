@@ -260,6 +260,18 @@ fn tools_list() -> Value {
                 }
             },
             {
+                "name": "mmcg_tasks",
+                "description": "Full-text search past task specs in `.mastermind/tasks/`. Use to recall prior designs and surface 'we already tried this' before drafting a new spec. FTS5 MATCH syntax — bare words AND-joined ('rate limit'), phrases double-quoted ('\\\"rate limit\\\"'), OR/NOT supported. Returns paths, titles, and snippet excerpts with «match» highlights ranked by BM25.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "FTS5 MATCH query (e.g. 'rate limit', 'auth OR session', '\\\"token bucket\\\"')" },
+                        "top": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10, "description": "How many results to return" }
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
                 "name": "mmcg_centrality",
                 "description": "Rank symbols by in-degree (distinct callers, matched by name OR type prefix). Pre-flight 'where is the gravity' tool — top hits are the codebase's structural attractors (core utilities, central domain types, framework hooks). Use on unfamiliar code or a `prefix` like 'src/auth/' to learn what to read first. Excludes synthetic `<module>` rows and symbols with zero in-degree.",
                 "inputSchema": {
@@ -377,6 +389,17 @@ fn handle_tools_call(store: &mut Store, params: &Value) -> Result<Value, String>
             let prefix = str_arg(&args, "prefix")?;
             let language = opt_str_arg(&args, "language");
             let r = queries::api_surface(store, prefix, language).map_err(|e| e.to_string())?;
+            serde_json::to_value(r).map_err(|e| e.to_string())?
+        }
+        "mmcg_tasks" => {
+            let query = str_arg(&args, "query")?;
+            let top = args
+                .get("top")
+                .and_then(|v| v.as_u64())
+                .and_then(|n| u32::try_from(n).ok())
+                .unwrap_or(10)
+                .clamp(1, 50);
+            let r = queries::tasks(store, query, top).map_err(|e| e.to_string())?;
             serde_json::to_value(r).map_err(|e| e.to_string())?
         }
         "mmcg_centrality" => {

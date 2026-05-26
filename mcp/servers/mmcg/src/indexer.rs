@@ -103,6 +103,9 @@ pub struct IndexStats {
     pub symbols_total: u32,
     pub edges_total: u32,
     pub by_language: std::collections::BTreeMap<String, u32>,
+    /// Count of `.mastermind/tasks/*.md` specs added to the FTS5 corpus.
+    /// Zero when the directory doesn't exist (project hasn't run `mmcg init`).
+    pub task_specs_indexed: u32,
     pub duration_ms: u128,
 }
 
@@ -214,8 +217,67 @@ impl Indexer {
             }
         }
 
+        // Phase 6: refresh the task-spec FTS5 corpus.
+        // Scan `.mastermind/tasks/*.md` (excluding `_*.md` templates/lessons
+        // which aren't real specs). Whole-corpus replace — task spec sets are
+        // small (<100 files in practice), so atomic replace is cheaper than
+        // delta tracking and avoids stale entries on rename/delete.
+        if let Ok(count) = self.index_task_specs(store) {
+            stats.task_specs_indexed = count;
+        }
+
         stats.duration_ms = start.elapsed().map(|d| d.as_millis()).unwrap_or(0);
         Ok(stats)
+    }
+
+    /// Scan `.mastermind/tasks/*.md` and replace the FTS5 corpus.
+    /// Silent no-op when the directory doesn't exist (project hasn't run `mmcg init`).
+    /// Returns the count of indexed specs.
+    pub fn index_task_specs(&self, store: &mut Store) -> Result<u32, IndexError> {
+        let tasks_dir = self.root.join(".mastermind").join("tasks");
+        if !tasks_dir.is_dir() {
+            // No `.mastermind/tasks/` — also clear any stale entries from a prior run.
+            store
+                .replace_task_specs(&[])
+                .map_err(|e| IndexError::Other(e.to_string()))?;
+            return Ok(0);
+        }
+
+        let mut entries: Vec<crate::store::TaskSpecEntry> = Vec::new();
+        for dirent in std::fs::read_dir(&tasks_dir).map_err(|e| IndexError::Io(e.to_string()))? {
+            let dirent = dirent.map_err(|e| IndexError::Io(e.to_string()))?;
+            let path = dirent.path();
+            if !path.is_file() {
+                continue;
+            }
+            // Only `.md` files. Skip `_spec-template.md`, `_lessons.md` etc —
+            // templates aren't real specs and would pollute search results.
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !name.ends_with(".md") || name.starts_with('_') {
+                continue;
+            }
+            let Ok(body) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let title = extract_spec_title(&body, name);
+            let rel = path
+                .strip_prefix(&self.root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            entries.push(crate::store::TaskSpecEntry {
+                path: rel,
+                title,
+                body,
+            });
+        }
+        let count = entries.len() as u32;
+        store
+            .replace_task_specs(&entries)
+            .map_err(|e| IndexError::Other(e.to_string()))?;
+        Ok(count)
     }
 
     /// Re-index a single file. Used by the watcher.
@@ -231,6 +293,21 @@ impl Indexer {
 
 fn is_skipped_dir(name: &str) -> bool {
     SKIP_DIRS.contains(&name)
+}
+
+/// First `# Heading` line of a markdown spec — falls back to the filename
+/// without extension if no heading exists.
+fn extract_spec_title(body: &str, filename: &str) -> String {
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("# ") {
+            let t = rest.trim();
+            if !t.is_empty() {
+                return t.to_string();
+            }
+        }
+    }
+    filename.trim_end_matches(".md").to_string()
 }
 
 fn guess_language_for(rel_path: &str) -> Option<&'static str> {
@@ -449,6 +526,56 @@ mod incremental_tests {
         let remaining: Vec<String> = store.indexed_paths().unwrap();
         assert!(!remaining.iter().any(|p| p.ends_with("b.py")));
         assert!(remaining.iter().any(|p| p.ends_with("a.py")));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn task_specs_indexed_from_mastermind_dir() {
+        let (dir, db) = setup("task_specs");
+        // No `.mastermind/tasks/` yet — first run should report 0 specs.
+        let indexer = Indexer::new(&dir);
+        let mut store = Store::open(&db).unwrap();
+        let stats1 = indexer.index_all(&mut store, false).unwrap();
+        assert_eq!(stats1.task_specs_indexed, 0);
+
+        // Add two specs + one template (underscore prefix should be excluded).
+        let tasks_dir = dir.join(".mastermind").join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        fs::write(
+            tasks_dir.join("001-rate-limiter.md"),
+            "# Add per-tenant rate limiting\n\nUse token bucket with Redis.\n",
+        )
+        .unwrap();
+        fs::write(
+            tasks_dir.join("002-cache-eviction.md"),
+            "# Cache eviction strategy\n\nLRU with TTL on user records.\n",
+        )
+        .unwrap();
+        fs::write(
+            tasks_dir.join("_spec-template.md"),
+            "# Template — should not appear in search\n\nGeneric scaffold.\n",
+        )
+        .unwrap();
+
+        let stats2 = indexer.index_all(&mut store, false).unwrap();
+        assert_eq!(stats2.task_specs_indexed, 2, "underscore-prefix excluded");
+
+        // FTS5 query proves the body content is searchable.
+        let hits = store.search_task_specs("token bucket", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].path.contains("001-rate-limiter"));
+
+        // Template is excluded — searching for its unique phrase finds nothing.
+        let empty = store.search_task_specs("scaffold", 10).unwrap();
+        assert!(empty.is_empty());
+
+        // Remove one spec — next index pass wipes it from the corpus.
+        fs::remove_file(tasks_dir.join("002-cache-eviction.md")).unwrap();
+        let stats3 = indexer.index_all(&mut store, false).unwrap();
+        assert_eq!(stats3.task_specs_indexed, 1);
+        let gone = store.search_task_specs("LRU TTL", 10).unwrap();
+        assert!(gone.is_empty());
 
         fs::remove_dir_all(&dir).ok();
     }

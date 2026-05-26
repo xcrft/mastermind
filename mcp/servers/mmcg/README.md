@@ -1,8 +1,8 @@
 ---
 name: mmcg
-description: Mastermind Codegraph — fast multi-language code indexer (Python + TypeScript/TSX + JavaScript/JSX + Rust + C# + Go + Java + PHP + C/C++) exposed over MCP. Indexes symbols, calls, and imports (with fully-qualified paths) into a local SQLite database (`.mastermind/mmcg.db`) and exposes 13 structural query tools for AI agents in the Mastermind workflow. Includes an incremental file watcher.
+description: Mastermind Codegraph — fast multi-language code indexer (Python + TypeScript/TSX + JavaScript/JSX + Rust + C# + Go + Java + PHP + C/C++) exposed over MCP. Indexes symbols, calls, and imports (with fully-qualified paths) into a local SQLite database (`.mastermind/mmcg.db`) and exposes 14 structural query tools for AI agents in the Mastermind workflow. Includes FTS5 search over `.mastermind/tasks/` and an incremental file watcher.
 metadata:
-  version: 0.10.0
+  version: 0.11.0
   authors:
     - mastermind
   tags:
@@ -185,6 +185,7 @@ For best results, run `mmcg watch` in a separate terminal so the index stays cur
 | `mmcg_unreferenced` | optional `kind`, `language` | Symbols that no edge references. Dead-code candidates. **Review manually** — see Limitations for false-positive scenarios. |
 | `mmcg_api_surface` | `prefix`, optional `language` | Symbols under `prefix` referenced from at least one file OUTSIDE `prefix`. Empirical "who-uses-this-module" map; doesn't need declared visibility. |
 | `mmcg_centrality` | optional `prefix`, `language`, `kind`, `top` (default 20) | Rank symbols by in-degree (distinct callers). Pre-flight "where is the gravity" — top hits are the structural attractors of the codebase or a subdirectory. Use to learn what to read first on unfamiliar code. Excludes synthetic `<module>` rows and zero-degree symbols. |
+| `mmcg_tasks` | `query`, optional `top` (default 10) | Full-text search past task specs in `.mastermind/tasks/`. FTS5 MATCH syntax (bare words AND-joined, `"phrases"`, `OR`/`NOT`). Returns paths, titles, and snippet excerpts with `«match»` highlights ranked by BM25. Use as planner pre-flight: "have we touched this area before?" surfaces past designs and prior verdicts. Files prefixed with `_` (e.g. `_spec-template.md`, `_lessons.md`) are intentionally excluded. |
 | `mmcg_status` | — | Index health (file count, symbol count, db path). |
 
 All responses are JSON with a `count` field for quick scanning before reading detail.

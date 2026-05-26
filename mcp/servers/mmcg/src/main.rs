@@ -172,6 +172,15 @@ enum QueryCmd {
         #[arg(long, default_value_t = 20)]
         top: u32,
     },
+    /// Full-text search past task specs in `.mastermind/tasks/`.
+    /// FTS5 MATCH syntax — bare words AND-joined, phrases in double quotes,
+    /// OR / NOT supported. Returns paths, titles, and snippet excerpts.
+    Tasks {
+        /// FTS5 MATCH query.
+        query: String,
+        #[arg(long, default_value_t = 10)]
+        top: u32,
+    },
     /// List files whose top-level imports reference the given name or path.
     ImportedBy {
         /// Name or fully-qualified path to look up
@@ -201,7 +210,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let indexer = Indexer::new(&root);
             let stats = indexer.index_all(&mut store, force)?;
             println!(
-                "indexed {} (unchanged {}, purged {}, failed {}) / scanned {} | {} symbols | {} edges | {} ms",
+                "indexed {} (unchanged {}, purged {}, failed {}) / scanned {} | {} symbols | {} edges | {} task specs | {} ms",
                 stats.files_indexed,
                 stats.files_unchanged,
                 stats.files_purged,
@@ -209,6 +218,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 stats.files_scanned,
                 stats.symbols_total,
                 stats.edges_total,
+                stats.task_specs_indexed,
                 stats.duration_ms
             );
             if stats.files_failed > 0 {
@@ -316,6 +326,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     kind.as_deref(),
                     top,
                 )?)?,
+                QueryCmd::Tasks { query, top } => {
+                    serde_json::to_value(queries::tasks(&store, &query, top)?)?
+                }
                 QueryCmd::ImportedBy {
                     query,
                     match_kind,

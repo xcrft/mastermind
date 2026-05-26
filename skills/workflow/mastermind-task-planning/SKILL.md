@@ -2,7 +2,7 @@
 name: mastermind-task-planning
 description: Acts as a CTO/planner that thinks, plans, and creates detailed task specs in `.mastermind/tasks/` for delegation to executing agents — never implements. Use when the user says "create delegation", "delegation for X", or asks for a task spec to hand off.
 metadata:
-  version: 0.9.0
+  version: 0.10.0
   authors:
     - mastermind
   tags:
@@ -97,6 +97,32 @@ Spawn for any design that touches:
 - **Anything with rollback complexity** — deploys you can't easily reverse
 
 For these, the critic is not optional. The cost of a wrong design here vastly exceeds the cost of one Opus spawn.
+
+### Critic panel — three lenses in parallel for sensitive specs
+
+For the **mandatory** category above (auth / billing / migrations / public-API / hard-rollback), one critic isn't enough. A single critic has its own blind spots — a security-leaning reasoner may miss a performance footgun; a performance-leaning one may wave through an authz hole. Spawn **three critics in parallel**, each with a different lens directive prepended to the same brief:
+
+| Lens | Directive prepended to the brief |
+|---|---|
+| **Security** | `Lens: SECURITY-first. Weight Correctness and Non-breaking heavily through the lens of attack surface, authz boundaries, secret handling, input validation, audit trail. Treat "looks fine" on trust boundaries as a fail.` |
+| **Performance** | `Lens: PERFORMANCE-first. Weight Performance & scale and Correctness through 10× load, slow-network, concurrent-execution, memory-pressure lenses. Treat unspecified perf characteristics on hot paths as a fail.` |
+| **Simplicity** | `Lens: SIMPLICITY/YAGNI-first. Weight YAGNI and AI-slop-indicators heavily. Treat any abstraction, future-proofing, or "for flexibility" component without ≥ 2 concrete present use cases as a fail.` |
+
+Same brief, same mmcg snapshot, same alternatives — only the lens directive differs. Spawn all three in one message (the agent harness will run them concurrently, so wall-clock cost is one critic, token cost is three).
+
+**Verdict aggregation rules:**
+
+| Combined result | Aggregate verdict |
+|---|---|
+| All three `ship it` | `ship it` — proceed |
+| All `ship it` or `ship with caveats`, no fails | `ship with caveats` — merge concerns into spec Rules |
+| Any one `revise` (and no `rethink`) | `revise` — address the failing dimension(s); re-spawn THAT lens after fix |
+| Any `rethink` | `rethink` — stop, re-architect; take findings back to user |
+| Two lenses fail on the same dimension | Auto-promote to `rethink` regardless of individual verdicts — a cross-lens consensus failure is a design smell |
+
+Paste **all three** dimension tables in the spec's Notes section so the auditor (and later you) can see which lens caught what. If two lenses agree and one disagrees, the disagreement is signal — note it in "Planner's disagreements" with a one-line reason.
+
+**Cost reality:** 3× Opus spawn on sensitive specs (≈5–10% of work in practice). Outside the mandatory list, stick to one critic.
 
 ### When to spawn the critic — consider
 

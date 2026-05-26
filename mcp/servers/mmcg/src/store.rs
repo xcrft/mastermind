@@ -768,6 +768,62 @@ impl Store {
         tx.commit()
     }
 
+    /// Strongly-connected components of size ≥ `min_size` in the file-level
+    /// import graph. A returned SCC = a circular-import group.
+    ///
+    /// Edges are resolved by **leaf name match** — for each `imports` edge,
+    /// every file containing a same-named symbol becomes a target. This
+    /// over-approximates: two unrelated `Logger` symbols across the codebase
+    /// produce a cross-edge even if the importer didn't mean that one. The
+    /// upside is no extractor-specific import resolution; the downside is
+    /// false-positive cycles to manually verify.
+    ///
+    /// Files cycle-internally never edge to themselves (we exclude
+    /// `from_file = to_file`).
+    ///
+    /// `min_size` defaults to 2 (the smallest possible cycle). Set higher to
+    /// surface only larger architectural problems (e.g. min_size=3 hides
+    /// trivial A→B→A patterns).
+    pub fn dependency_cycles(
+        &self,
+        language: Option<&str>,
+        min_size: usize,
+    ) -> SqlResult<Vec<Vec<String>>> {
+        // Load the file-level adjacency: from_file → set of to_files.
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT
+                s_from.file_path AS from_file,
+                s_to.file_path   AS to_file
+             FROM edges e
+             JOIN symbols s_from ON s_from.id = e.from_id
+             JOIN symbols s_to   ON s_to.name = e.to_name
+             WHERE e.kind = 'imports'
+               AND s_from.file_path != s_to.file_path
+               AND (?1 IS NULL OR s_from.language = ?1)
+               AND (?1 IS NULL OR s_to.language = ?1)
+             ORDER BY from_file, to_file",
+        )?;
+        let rows = stmt.query_map(params![language], |r| {
+            let from: String = r.get(0)?;
+            let to: String = r.get(1)?;
+            Ok((from, to))
+        })?;
+
+        let mut adj: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for row in rows {
+            let (from, to) = row?;
+            adj.entry(from).or_default().push(to);
+        }
+
+        let cycles = tarjan_scc(&adj);
+        let mut out: Vec<Vec<String>> =
+            cycles.into_iter().filter(|c| c.len() >= min_size).collect();
+        // Stable ordering: largest cycles first, lex order inside.
+        out.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        Ok(out)
+    }
+
     /// Full-text search over the task-spec corpus. `query` is an FTS5 MATCH
     /// expression — bare words AND-joined, phrases in double quotes, `NOT`/`OR`
     /// supported. Returns `(path, title, snippet)` ordered by BM25 rank.
@@ -948,6 +1004,111 @@ impl Store {
             decorators: r.get(8)?,
         })
     }
+}
+
+/// Tarjan's strongly-connected-components algorithm — iterative form to avoid
+/// stack overflow on deep import chains. O(V + E).
+///
+/// Returns every SCC including singletons; `dependency_cycles()` filters by
+/// `min_size`. Node order within an SCC is sorted lexicographically for
+/// deterministic output.
+fn tarjan_scc(adj: &std::collections::BTreeMap<String, Vec<String>>) -> Vec<Vec<String>> {
+    use std::collections::HashMap;
+
+    // Intern node names → dense usize ids. Include nodes that only appear as
+    // edge targets (they may have no outgoing edges but still belong to SCCs).
+    let mut all_names: Vec<&str> = adj.keys().map(|s| s.as_str()).collect();
+    for vs in adj.values() {
+        for v in vs {
+            all_names.push(v.as_str());
+        }
+    }
+    all_names.sort();
+    all_names.dedup();
+
+    let mut name_to_id: HashMap<&str, usize> = HashMap::new();
+    let mut id_to_name: Vec<&str> = Vec::with_capacity(all_names.len());
+    for name in &all_names {
+        name_to_id.insert(*name, id_to_name.len());
+        id_to_name.push(*name);
+    }
+    let n = id_to_name.len();
+
+    let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (from, tos) in adj {
+        let f = name_to_id[from.as_str()];
+        for to in tos {
+            succ[f].push(name_to_id[to.as_str()]);
+        }
+    }
+
+    // Iterative Tarjan via explicit work stack.
+    let mut index: Vec<i64> = vec![-1; n];
+    let mut lowlink: Vec<i64> = vec![0; n];
+    let mut on_stack: Vec<bool> = vec![false; n];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut next_index: i64 = 0;
+    let mut sccs: Vec<Vec<String>> = Vec::new();
+
+    // Work stack: (node, iterator-position over its successors).
+    // Using Vec<(usize, usize)> for indexable iteration.
+    enum Action {
+        Enter(usize),
+        Resume(usize, usize),
+    }
+    let mut work: Vec<Action> = Vec::new();
+
+    for start in 0..n {
+        if index[start] >= 0 {
+            continue;
+        }
+        work.push(Action::Enter(start));
+        while let Some(action) = work.pop() {
+            match action {
+                Action::Enter(v) => {
+                    index[v] = next_index;
+                    lowlink[v] = next_index;
+                    next_index += 1;
+                    stack.push(v);
+                    on_stack[v] = true;
+                    work.push(Action::Resume(v, 0));
+                }
+                Action::Resume(v, i) => {
+                    if i < succ[v].len() {
+                        let w = succ[v][i];
+                        // Re-queue resume at i+1 so we come back after w finishes.
+                        work.push(Action::Resume(v, i + 1));
+                        if index[w] < 0 {
+                            work.push(Action::Enter(w));
+                        } else if on_stack[w] {
+                            lowlink[v] = lowlink[v].min(index[w]);
+                        }
+                    } else {
+                        // All successors processed — propagate lowlink to parent
+                        // (peek next Resume on the work stack, if any).
+                        if let Some(Action::Resume(parent, _)) = work.last() {
+                            let p = *parent;
+                            lowlink[p] = lowlink[p].min(lowlink[v]);
+                        }
+                        if lowlink[v] == index[v] {
+                            let mut component: Vec<String> = Vec::new();
+                            loop {
+                                let w = stack.pop().expect("stack non-empty");
+                                on_stack[w] = false;
+                                component.push(id_to_name[w].to_string());
+                                if w == v {
+                                    break;
+                                }
+                            }
+                            component.sort();
+                            sccs.push(component);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    sccs
 }
 
 #[cfg(test)]
@@ -1322,6 +1483,90 @@ mod tests {
         // Replace is wholesale — re-replacing with a smaller set wipes the old.
         store.replace_task_specs(&entries[..1]).unwrap();
         assert_eq!(store.task_specs_count().unwrap(), 1);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn tarjan_finds_simple_cycle() {
+        // A → B → A : one cycle of size 2
+        let mut adj: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        adj.insert("A".into(), vec!["B".into()]);
+        adj.insert("B".into(), vec!["A".into()]);
+        let sccs = super::tarjan_scc(&adj);
+        let cycle: Vec<&Vec<String>> = sccs.iter().filter(|c| c.len() >= 2).collect();
+        assert_eq!(cycle.len(), 1);
+        assert_eq!(cycle[0], &vec!["A".to_string(), "B".to_string()]);
+    }
+
+    #[test]
+    fn tarjan_distinguishes_cycles_from_dag() {
+        // X → Y → Z + B → C → B (only B,C cycle)
+        let mut adj: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        adj.insert("X".into(), vec!["Y".into()]);
+        adj.insert("Y".into(), vec!["Z".into()]);
+        adj.insert("B".into(), vec!["C".into()]);
+        adj.insert("C".into(), vec!["B".into()]);
+        let sccs: Vec<Vec<String>> = super::tarjan_scc(&adj)
+            .into_iter()
+            .filter(|c| c.len() >= 2)
+            .collect();
+        assert_eq!(sccs.len(), 1);
+        assert_eq!(sccs[0], vec!["B".to_string(), "C".to_string()]);
+    }
+
+    #[test]
+    fn tarjan_handles_three_cycle() {
+        // A → B → C → A
+        let mut adj: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        adj.insert("A".into(), vec!["B".into()]);
+        adj.insert("B".into(), vec!["C".into()]);
+        adj.insert("C".into(), vec!["A".into()]);
+        let sccs: Vec<Vec<String>> = super::tarjan_scc(&adj)
+            .into_iter()
+            .filter(|c| c.len() >= 2)
+            .collect();
+        assert_eq!(sccs.len(), 1);
+        assert_eq!(
+            sccs[0],
+            vec!["A".to_string(), "B".to_string(), "C".to_string()]
+        );
+    }
+
+    #[test]
+    fn dependency_cycles_end_to_end() {
+        let path = tmp_db("dep_cycles");
+        let store = Store::open(&path).unwrap();
+        // a.py imports `bar` (lives in b.py); b.py imports `foo` (lives in a.py).
+        // Cycle: a.py ↔ b.py.
+        // c.py is acyclic (only imports `bar`).
+        let a_mod = store
+            .insert_symbol("<module>", "module", "a.py", 1, 100, None, None)
+            .unwrap();
+        let b_mod = store
+            .insert_symbol("<module>", "module", "b.py", 1, 100, None, None)
+            .unwrap();
+        let c_mod = store
+            .insert_symbol("<module>", "module", "c.py", 1, 100, None, None)
+            .unwrap();
+        store
+            .insert_symbol("foo", "function", "a.py", 10, 20, None, None)
+            .unwrap();
+        store
+            .insert_symbol("bar", "function", "b.py", 10, 20, None, None)
+            .unwrap();
+
+        store.insert_edge(a_mod, None, "bar", "imports", 1).unwrap();
+        store.insert_edge(b_mod, None, "foo", "imports", 1).unwrap();
+        store.insert_edge(c_mod, None, "bar", "imports", 1).unwrap();
+
+        let cycles = store.dependency_cycles(None, 2).unwrap();
+        assert_eq!(cycles.len(), 1, "exactly one cycle expected");
+        assert_eq!(cycles[0], vec!["a.py".to_string(), "b.py".to_string()]);
+
+        // min_size=3 hides the 2-node cycle entirely.
+        let bigger = store.dependency_cycles(None, 3).unwrap();
+        assert!(bigger.is_empty());
+
         std::fs::remove_file(&path).ok();
     }
 

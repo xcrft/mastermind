@@ -218,6 +218,27 @@ pub fn tasks(store: &Store, query: &str, top: u32) -> rusqlite::Result<TaskSearc
     })
 }
 
+#[derive(Debug, Serialize)]
+pub struct DependencyCyclesResponse {
+    pub count: u32,
+    pub min_size: u32,
+    /// Each entry is one cycle (SCC) — file paths in lexicographic order.
+    pub cycles: Vec<Vec<String>>,
+}
+
+pub fn dependency_cycles(
+    store: &Store,
+    language: Option<&str>,
+    min_size: u32,
+) -> rusqlite::Result<DependencyCyclesResponse> {
+    let cycles = store.dependency_cycles(language, min_size as usize)?;
+    Ok(DependencyCyclesResponse {
+        count: cycles.len() as u32,
+        min_size,
+        cycles,
+    })
+}
+
 pub fn centrality(
     store: &Store,
     prefix: Option<&str>,

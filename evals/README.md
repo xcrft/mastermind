@@ -26,7 +26,7 @@ Needs `claude` CLI **and** `git` on PATH. Auth uses your Claude Code login (no A
 Each case takes ~30–60s (Opus). Auditor cases are slightly slower because the
 subagent actually runs `git diff`, `git log`, etc. on a real fixture repo.
 
-## Auditor: real-git fixtures
+## Auditor: real-git fixtures + live mmcg
 
 Auditor cases reference a fixture tree under `evals/fixtures/<name>/` rather than
 embedding a synthetic diff string. For each case the runner:
@@ -34,12 +34,19 @@ embedding a synthetic diff string. For each case the runner:
 1. Builds a tmp git repo
 2. Copies `fixtures/<name>/baseline/` → commits → tags `<baseline_ref>`
 3. Replaces the working tree with `fixtures/<name>/changes/<after_ref>/` → commits → tags `<after_ref>`
-4. Passes `--add-dir <tmp>` to `claude -p` so the auditor subagent gets Bash + Read access
-5. The auditor runs **real** `git diff <baseline>..<after>` to verify the executor report
+4. Runs `mmcg index .` against the after-tree, leaving `.mastermind/mmcg.db` in the tmp repo
+5. Passes `--add-dir <tmp>` + `--mcp-config` (mmcg stdio server pointing at the index) to `claude -p`
+6. The auditor runs **real** `git diff <baseline>..<after>` AND calls live `mmcg_callers` / `mmcg_search` MCP tools against the after-tree index to compare against the spec's pre-edit snapshot
 
 This catches failure modes synthetic diffs miss: lazy auditors that trust the
 report, multi-file scope creep visible only in `git diff --name-only`, silent
-file deletions, etc.
+file deletions, snapshot drift where the symbol's caller count changed and the
+spec didn't acknowledge it.
+
+The mmcg binary used is the in-tree `mcp/servers/mmcg/target/release/mmcg`
+when available (matches the SQL schema of the SDK in this checkout), falling
+back to whatever `mmcg` is on `$PATH`. Build it first with
+`cargo build --release --manifest-path mcp/servers/mmcg/Cargo.toml`.
 
 ## Adding a case
 

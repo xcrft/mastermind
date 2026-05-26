@@ -6,41 +6,67 @@ Uses the `claude` CLI in non-interactive mode (`-p`), so authentication runs
 through your existing Claude Code login — no ANTHROPIC_API_KEY needed, costs
 count against your Claude subscription (flat monthly, not per-token).
 
+Auditor cases use **real git fixtures** — each case names a fixture under
+`evals/fixtures/<name>/` plus two refs (`baseline_ref` + `after_ref`). The
+runner builds a real tmp git repo with those two commits/tags and hands the
+path to the auditor via `--add-dir`. The auditor runs `git diff`, `git log`,
+etc. itself against actual hunks. No synthetic paraphrased diff strings.
+
 Usage:
   python evals/runner.py                  # all suites
   python evals/runner.py --suite critic   # one suite
   python evals/runner.py --case c-001     # one case
   python evals/runner.py --model opus     # model alias or full name (default: opus)
+  python evals/runner.py --keep-fixtures  # don't tmp-cleanup (debugging)
 
 Prerequisites:
   - `claude` CLI on PATH (Claude Code installed, logged in)
+  - `git` on PATH
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EVALS_DIR = Path(__file__).resolve().parent
+FIXTURES_DIR = EVALS_DIR / "fixtures"
 
 SUITES = {
     "critic": {
         "subagent": REPO_ROOT / "agents/subagents/mastermind-critic.md",
         "cases": EVALS_DIR / "critic.jsonl",
         "renderer": "render_critic_input",
+        "uses_fixture": False,
     },
     "auditor": {
         "subagent": REPO_ROOT / "agents/subagents/mastermind-auditor.md",
         "cases": EVALS_DIR / "auditor.jsonl",
         "renderer": "render_auditor_input",
+        "uses_fixture": True,
     },
+}
+
+# Deterministic identity for fixture commits — avoids machine-specific git
+# config noise in eval reproducibility.
+GIT_ENV = {
+    "GIT_AUTHOR_NAME": "mmcg-eval",
+    "GIT_AUTHOR_EMAIL": "eval@mastermind.local",
+    "GIT_COMMITTER_NAME": "mmcg-eval",
+    "GIT_COMMITTER_EMAIL": "eval@mastermind.local",
+    # Avoid GPG signing inside fixtures (some dev machines force it globally).
+    "GIT_CONFIG_COUNT": "1",
+    "GIT_CONFIG_KEY_0": "commit.gpgsign",
+    "GIT_CONFIG_VALUE_0": "false",
 }
 
 
@@ -49,8 +75,9 @@ class Result:
     case_id: str
     suite: str
     passed: bool
-    reasons: list[str]
-    duration_ms: int
+    reasons: list[str] = field(default_factory=list)
+    duration_ms: int = 0
+    fixture_path: Path | None = None
 
 
 def strip_frontmatter(text: str) -> str:
@@ -59,6 +86,90 @@ def strip_frontmatter(text: str) -> str:
         if end != -1:
             return text[end + 5 :].lstrip()
     return text
+
+
+# ----- fixture lifecycle ----------------------------------------------------
+
+
+def _run_git(args: list[str], cwd: Path) -> None:
+    """Run git with our scrubbed environment. Raises on non-zero exit."""
+    proc = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        env={**os.environ, **GIT_ENV},
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"git {' '.join(args)} failed in {cwd}:\n"
+            f"  stdout: {proc.stdout.strip()}\n  stderr: {proc.stderr.strip()}"
+        )
+
+
+def setup_fixture(fixture_name: str, baseline_ref: str, after_ref: str) -> Path:
+    """Build a real tmp git repo with baseline → after as two tagged commits.
+
+    Layout expected at `evals/fixtures/<name>/`:
+        baseline/             — files at the baseline tag
+        changes/<after_ref>/  — files at the after tag (full tree, replaces baseline)
+
+    Returns the tmp repo path. Caller is responsible for cleanup via
+    `teardown_fixture`.
+    """
+    src = FIXTURES_DIR / fixture_name
+    if not src.is_dir():
+        raise FileNotFoundError(f"fixture not found: {src}")
+    baseline_src = src / "baseline"
+    after_src = src / "changes" / after_ref
+    if not baseline_src.is_dir():
+        raise FileNotFoundError(f"fixture baseline missing: {baseline_src}")
+    if not after_src.is_dir():
+        raise FileNotFoundError(f"fixture variant missing: {after_src}")
+
+    tmp = Path(tempfile.mkdtemp(prefix=f"mmcg-eval-{fixture_name}-"))
+
+    # Phase 1: baseline tree.
+    _copy_tree_into(baseline_src, tmp)
+    _run_git(["init", "-q", "--initial-branch=main"], tmp)
+    _run_git(["add", "-A"], tmp)
+    _run_git(["commit", "-q", "-m", "baseline"], tmp)
+    _run_git(["tag", baseline_ref], tmp)
+
+    # Phase 2: replace working tree with `after` variant content.
+    # We wipe everything except `.git/` then re-overlay so deletions are
+    # reflected too (e.g. a variant that removes a file present in baseline).
+    for entry in tmp.iterdir():
+        if entry.name == ".git":
+            continue
+        if entry.is_dir():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+    _copy_tree_into(after_src, tmp)
+    _run_git(["add", "-A"], tmp)
+    _run_git(["commit", "-q", "-m", f"executor change ({after_ref})", "--allow-empty"], tmp)
+    _run_git(["tag", after_ref], tmp)
+
+    return tmp
+
+
+def _copy_tree_into(src: Path, dst: Path) -> None:
+    """Recursive copy src/* into dst/, creating dst if needed."""
+    dst.mkdir(parents=True, exist_ok=True)
+    for entry in src.iterdir():
+        target = dst / entry.name
+        if entry.is_dir():
+            shutil.copytree(entry, target, dirs_exist_ok=True)
+        else:
+            shutil.copy2(entry, target)
+
+
+def teardown_fixture(path: Path) -> None:
+    shutil.rmtree(path, ignore_errors=True)
+
+
+# ----- renderers ------------------------------------------------------------
 
 
 def render_critic_input(inp: dict) -> str:
@@ -74,88 +185,150 @@ def render_critic_input(inp: dict) -> str:
     )
 
 
-def render_auditor_input(inp: dict) -> str:
+def render_auditor_input(inp: dict, *, fixture_path: Path, baseline_ref: str, after_ref: str) -> str:
+    """Build the auditor's user message.
+
+    Crucially: NO synthetic git_diff. The auditor is told the working
+    directory and the two tag names and is expected to run `git diff`,
+    `git log`, `git show --stat` etc. itself via Bash.
+    """
     return (
+        f"Audit the executor's work against the spec.\n\n"
+        f"**Working directory:** `{fixture_path}` — a real git repo with two commits.\n"
+        f"**Baseline tag:** `{baseline_ref}` (state before the executor ran)\n"
+        f"**Executor commit tag:** `{after_ref}` (state after the executor ran)\n\n"
+        f"Use real `git diff {baseline_ref}..{after_ref}`, `git log`, "
+        f"`git show --stat` against this repo. Do NOT trust the executor's "
+        f"narrative — verify each claim against the diff.\n\n"
         f"**Spec summary:**\n{inp.get('spec_summary', '')}\n\n"
-        f"**Executor report:**\n```\n{inp.get('executor_report', '')}\n```\n\n"
-        f"**git diff (synthetic):**\n```\n{inp.get('git_diff', '')}\n```"
+        f"**Executor report (what they claim they did):**\n```\n{inp.get('executor_report', '')}\n```"
     )
 
 
-RENDERERS = {
-    "render_critic_input": render_critic_input,
-    "render_auditor_input": render_auditor_input,
-}
+# ----- per-case evaluator ---------------------------------------------------
 
 
-def evaluate_case(model: str, suite_name: str, suite_cfg: dict, case: dict) -> Result:
+def evaluate_case(
+    model: str,
+    suite_name: str,
+    suite_cfg: dict,
+    case: dict,
+    *,
+    keep_fixtures: bool,
+) -> Result:
     case_id = case["id"]
     system_prompt = strip_frontmatter(suite_cfg["subagent"].read_text())
-    user_message = RENDERERS[suite_cfg["renderer"]](case["input"])
 
-    cmd = [
-        "claude",
-        "-p",
-        "--model", model,
-        "--append-system-prompt", system_prompt,
-        "--output-format", "json",
-        "--no-session-persistence",
-        "--permission-mode", "default",
-        user_message,
-    ]
-
+    fixture_path: Path | None = None
+    extra_cmd: list[str] = []
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-    except subprocess.TimeoutExpired:
-        return Result(case_id, suite_name, False, ["timeout after 180s"], 0)
+        if suite_cfg["uses_fixture"]:
+            fixture_name = case["fixture"]
+            baseline_ref = case["baseline_ref"]
+            after_ref = case["after_ref"]
+            fixture_path = setup_fixture(fixture_name, baseline_ref, after_ref)
+            user_message = render_auditor_input(
+                case["input"],
+                fixture_path=fixture_path,
+                baseline_ref=baseline_ref,
+                after_ref=after_ref,
+            )
+            extra_cmd = ["--add-dir", str(fixture_path)]
+        else:
+            user_message = render_critic_input(case["input"])
 
-    if proc.returncode != 0:
-        err = (proc.stderr or proc.stdout or "").strip()[:300]
-        return Result(case_id, suite_name, False, [f"claude exit {proc.returncode}: {err}"], 0)
+        cmd = [
+            "claude",
+            "-p",
+            "--model", model,
+            "--append-system-prompt", system_prompt,
+            "--output-format", "json",
+            "--no-session-persistence",
+            "--permission-mode", "default",
+            *extra_cmd,
+            user_message,
+        ]
 
-    # claude -p --output-format json returns: {"type":"result","result":"...","duration_ms":..., ...}
-    try:
-        payload = json.loads(proc.stdout)
-        output = payload.get("result", "")
-        duration_ms = int(payload.get("duration_ms", 0))
-    except json.JSONDecodeError:
-        output = proc.stdout
-        duration_ms = 0
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        except subprocess.TimeoutExpired:
+            return Result(
+                case_id, suite_name, False, ["timeout after 300s"], 0, fixture_path
+            )
 
-    expect = case.get("expect", {})
-    reasons: list[str] = []
-    passed = True
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or "").strip()[:300]
+            return Result(
+                case_id, suite_name, False,
+                [f"claude exit {proc.returncode}: {err}"], 0, fixture_path,
+            )
 
-    expected_verdict = expect.get("verdict")
-    if expected_verdict:
-        # accept string OR list of acceptable verdicts (any-of)
-        candidates = [expected_verdict] if isinstance(expected_verdict, str) else list(expected_verdict)
-        if not any(re.search(rf"\b{re.escape(v)}\b", output, re.IGNORECASE) for v in candidates):
-            passed = False
-            reasons.append(f"none of expected verdicts {candidates} found")
+        try:
+            payload = json.loads(proc.stdout)
+            output = payload.get("result", "")
+            duration_ms = int(payload.get("duration_ms", 0))
+        except json.JSONDecodeError:
+            output = proc.stdout
+            duration_ms = 0
 
-    for phrase in expect.get("contains", []):
-        if phrase.lower() not in output.lower():
-            passed = False
-            reasons.append(f"missing phrase: {phrase!r}")
+        expect = case.get("expect", {})
+        reasons: list[str] = []
+        passed = True
 
-    for phrase in expect.get("not_contains", []):
-        if phrase.lower() in output.lower():
-            passed = False
-            reasons.append(f"forbidden phrase present: {phrase!r}")
+        expected_verdict = expect.get("verdict")
+        if expected_verdict:
+            candidates = (
+                [expected_verdict]
+                if isinstance(expected_verdict, str)
+                else list(expected_verdict)
+            )
+            if not any(
+                re.search(rf"\b{re.escape(v)}\b", output, re.IGNORECASE)
+                for v in candidates
+            ):
+                passed = False
+                reasons.append(f"none of expected verdicts {candidates} found")
 
-    return Result(case_id, suite_name, passed, reasons, duration_ms)
+        for phrase in expect.get("contains", []):
+            if phrase.lower() not in output.lower():
+                passed = False
+                reasons.append(f"missing phrase: {phrase!r}")
+
+        for phrase in expect.get("not_contains", []):
+            if phrase.lower() in output.lower():
+                passed = False
+                reasons.append(f"forbidden phrase present: {phrase!r}")
+
+        return Result(case_id, suite_name, passed, reasons, duration_ms, fixture_path)
+    finally:
+        if fixture_path is not None and not keep_fixtures:
+            teardown_fixture(fixture_path)
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--suite", choices=list(SUITES.keys()), help="run one suite only")
     parser.add_argument("--case", help="run one case by id")
-    parser.add_argument("--model", default="opus", help="model alias (opus/sonnet/haiku) or full name; default opus")
+    parser.add_argument(
+        "--model", default="opus",
+        help="model alias (opus/sonnet/haiku) or full name; default opus",
+    )
+    parser.add_argument(
+        "--keep-fixtures", action="store_true",
+        help="don't delete fixture tmp dirs after each case (debugging)",
+    )
     args = parser.parse_args()
 
     if not shutil.which("claude"):
-        print("error: `claude` CLI not on PATH. Install Claude Code: https://claude.com/claude-code", file=sys.stderr)
+        print(
+            "error: `claude` CLI not on PATH. Install Claude Code: https://claude.com/claude-code",
+            file=sys.stderr,
+        )
+        return 2
+    if not shutil.which("git"):
+        print("error: `git` not on PATH (required for fixture suites).", file=sys.stderr)
         return 2
 
     suites_to_run = [args.suite] if args.suite else list(SUITES.keys())
@@ -176,10 +349,15 @@ def main() -> int:
                 if args.case and case["id"] != args.case:
                     continue
                 print(f"  [{case['id']}] running ...", end=" ", flush=True)
-                r = evaluate_case(args.model, suite_name, suite_cfg, case)
+                r = evaluate_case(
+                    args.model, suite_name, suite_cfg, case,
+                    keep_fixtures=args.keep_fixtures,
+                )
                 results.append(r)
                 status = "✓ pass" if r.passed else "✗ FAIL"
                 print(f"{status}  ({r.duration_ms}ms)")
+                if args.keep_fixtures and r.fixture_path is not None:
+                    print(f"      fixture: {r.fixture_path}")
                 for reason in r.reasons:
                     print(f"      → {reason}")
 

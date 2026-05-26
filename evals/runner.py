@@ -41,6 +41,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 EVALS_DIR = Path(__file__).resolve().parent
 FIXTURES_DIR = EVALS_DIR / "fixtures"
 
+# Prefer the in-tree build (matches the current SCHEMA_VERSION) over whatever
+# version is installed in ~/.cargo/bin — avoids "schema mismatch — rebuilding"
+# noise during eval and ensures the indexer + server speak the same SQL.
+_LOCAL_MMCG = REPO_ROOT / "mcp" / "servers" / "mmcg" / "target" / "release" / "mmcg"
+MMCG_BIN = str(_LOCAL_MMCG) if _LOCAL_MMCG.is_file() else "mmcg"
+
 SUITES = {
     "critic": {
         "subagent": REPO_ROOT / "agents/subagents/mastermind-critic.md",
@@ -151,7 +157,37 @@ def setup_fixture(fixture_name: str, baseline_ref: str, after_ref: str) -> Path:
     _run_git(["commit", "-q", "-m", f"executor change ({after_ref})", "--allow-empty"], tmp)
     _run_git(["tag", after_ref], tmp)
 
+    # Phase 3: build an mmcg index of the after-tree so the auditor can run
+    # real `mmcg_callers` / `mmcg_search` against the working state and
+    # compare against the spec's pre-edit snapshot. Failure here is non-fatal
+    # — the auditor can still operate on `git diff` alone.
+    try:
+        _build_mmcg_index(tmp)
+    except (RuntimeError, FileNotFoundError) as e:
+        sys.stderr.write(f"  [fixture] mmcg index skipped: {e}\n")
+
     return tmp
+
+
+def _build_mmcg_index(repo: Path) -> None:
+    """Run `mmcg index .` in `repo`, leaving `.mastermind/mmcg.db` behind.
+
+    Uses the in-tree binary when available so the SQL schema matches the MCP
+    server's expectations. Quiet on success — index summary is suppressed.
+    """
+    db_path = repo / ".mastermind" / "mmcg.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.run(
+        [MMCG_BIN, "--index", str(db_path), "index", str(repo)],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"mmcg index failed: {proc.stderr.strip() or proc.stdout.strip()}"
+        )
 
 
 def _copy_tree_into(src: Path, dst: Path) -> None:
@@ -185,13 +221,28 @@ def render_critic_input(inp: dict) -> str:
     )
 
 
-def render_auditor_input(inp: dict, *, fixture_path: Path, baseline_ref: str, after_ref: str) -> str:
+def render_auditor_input(
+    inp: dict,
+    *,
+    fixture_path: Path,
+    baseline_ref: str,
+    after_ref: str,
+    has_mmcg: bool,
+) -> str:
     """Build the auditor's user message.
 
     Crucially: NO synthetic git_diff. The auditor is told the working
     directory and the two tag names and is expected to run `git diff`,
-    `git log`, `git show --stat` etc. itself via Bash.
+    `git log`, `git show --stat` etc. itself via Bash. When `has_mmcg` is
+    true, the auditor also has live `mmcg_callers` / `mmcg_search` MCP
+    tools pointed at an index of the after-tree state.
     """
+    mmcg_note = (
+        "\n\n**mmcg available:** the working dir has a fresh `.mastermind/mmcg.db` "
+        "indexed at the after-commit state. You can call `mmcg_callers`, "
+        "`mmcg_search`, `mmcg_outline` etc. via the MCP tools — use them to "
+        "verify the spec's pre-edit symbol snapshot against the current state.\n"
+    ) if has_mmcg else "\n"
     return (
         f"Audit the executor's work against the spec.\n\n"
         f"**Working directory:** `{fixture_path}` — a real git repo with two commits.\n"
@@ -199,7 +250,8 @@ def render_auditor_input(inp: dict, *, fixture_path: Path, baseline_ref: str, af
         f"**Executor commit tag:** `{after_ref}` (state after the executor ran)\n\n"
         f"Use real `git diff {baseline_ref}..{after_ref}`, `git log`, "
         f"`git show --stat` against this repo. Do NOT trust the executor's "
-        f"narrative — verify each claim against the diff.\n\n"
+        f"narrative — verify each claim against the diff."
+        f"{mmcg_note}\n"
         f"**Spec summary:**\n{inp.get('spec_summary', '')}\n\n"
         f"**Executor report (what they claim they did):**\n```\n{inp.get('executor_report', '')}\n```"
     )
@@ -227,13 +279,30 @@ def evaluate_case(
             baseline_ref = case["baseline_ref"]
             after_ref = case["after_ref"]
             fixture_path = setup_fixture(fixture_name, baseline_ref, after_ref)
+
+            db_path = fixture_path / ".mastermind" / "mmcg.db"
+            has_mmcg = db_path.is_file()
             user_message = render_auditor_input(
                 case["input"],
                 fixture_path=fixture_path,
                 baseline_ref=baseline_ref,
                 after_ref=after_ref,
+                has_mmcg=has_mmcg,
             )
             extra_cmd = ["--add-dir", str(fixture_path)]
+            if has_mmcg:
+                # Spawn an mmcg MCP stdio server pointed at the fixture's index.
+                # This matches the production wiring — auditor calls mmcg_callers
+                # via MCP, not via CLI subprocess.
+                mcp_cfg = json.dumps({
+                    "mcpServers": {
+                        "mmcg": {
+                            "command": MMCG_BIN,
+                            "args": ["--index", str(db_path), "serve"],
+                        }
+                    }
+                })
+                extra_cmd += ["--mcp-config", mcp_cfg]
         else:
             user_message = render_critic_input(case["input"])
 

@@ -2,7 +2,7 @@
 name: mastermind-critic
 description: Independent design-time challenger that stress-tests a proposed approach against 7 explicit engineering dimensions (correctness, performance, observability, non-breaking, YAGNI, AI slop, test/doc coverage) before it becomes a spec. Spawn from the planner during brainstorming — mandatory for sensitive areas. Distinct from `mastermind-auditor` which verifies post-execution.
 metadata:
-  version: 0.3.0
+  version: 0.4.0
   authors:
     - mastermind
   tags:
@@ -72,6 +72,7 @@ The spawner passes:
 - **Alternatives considered** — what was on the table and why others were rejected (the planner must enumerate ≥ 2 alternatives in non-trivial cases — see `mastermind-task-planning`)
 - **Constraints** — hard limits (language, deadline, compatibility, ops)
 - **mmcg snapshot** — the relevant `mmcg_search`/`mmcg_callers`/`mmcg_impact` results the planner gathered. **Your concerns must reference these specifics**, not abstract patterns.
+- **Lens directive (optional)** — `Lens: SECURITY-first`, `Lens: PERFORMANCE-first`, or `Lens: SIMPLICITY/YAGNI-first`. When present, the planner is running a 3-critic panel for a sensitive spec. **You still score all 7 dimensions** — the lens only changes how strictly you weight evidence on its specialty dimensions. Do not skip dimensions outside your lens; another panel member is covering them, but a `pass` from you is still a real signal.
 
 ## Process
 

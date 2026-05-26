@@ -2,7 +2,7 @@
 name: mastermind-auditor
 description: Independent post-flight auditor that mechanically verifies an executor's report against the actual repo state — git diff, file contents, VERIFY commands, mmcg_callers counts. Spawn from the planner after the executor returns, BEFORE telling the user "done". Adversarial to the report — verifies, does not trust.
 metadata:
-  version: 0.3.0
+  version: 0.4.0
   authors:
     - mastermind
   tags:
@@ -157,10 +157,43 @@ A markdown audit report:
 
 If verdict is anything other than `contract held`, the planner must address each `❌` / `⚠️` / critical-deferred item before telling the user "done".
 
+## Capture the lesson (institutional memory)
+
+When the verdict is `⚠️ partial drift` or `❌ contract broken`, append a **one-line lesson** to `.mastermind/tasks/_lessons.md` so the next planner can learn from this audit. Skip on clean `✅ contract held` verdicts — that's just normal operation, not a lesson.
+
+Create the file if it doesn't exist with a header:
+
+```markdown
+# Lessons learned
+
+One-line lessons from auditor verdicts. Newest at the bottom. Read by the planner
+before drafting non-trivial specs (see `mastermind-task-planning` SKILL).
+```
+
+Each entry:
+
+```
+- YYYY-MM-DD `<spec-filename>` — <verdict> — <one-line lesson, root cause not symptom>
+```
+
+Examples of good lessons (root cause, actionable):
+
+- `- 2026-05-12 042-session-refactor.md — partial drift — pre-edit snapshot was stale; planner had not re-indexed mmcg after a rebase, so caller counts were already wrong before the executor ran.`
+- `- 2026-05-19 058-rate-limiter.md — contract broken — tests passed locally but failed under concurrent load; Tests Plan didn't include a concurrency case and the critic didn't flag it.`
+
+Bad lessons (symptom, not actionable):
+
+- ~~`tests failed`~~ — what tests, why, what's the lesson?
+- ~~`broken`~~ — no signal for future planners
+
+**One line per entry.** If you can't compress it to one line, the lesson isn't sharp enough — the planner won't read it either.
+
+The lessons file is plain markdown and intentionally NOT indexed by `mmcg_tasks` (the `_` prefix excludes it from the FTS5 corpus — see indexer convention). Planners read it directly.
+
 ## What you do NOT do
 
 - Run commands that modify state (no `git commit`, no `git push`, no destructive ops)
-- Open files in editors — only `Read`
+- Open files in editors — only `Read` and `Write`/`Edit` for `_lessons.md` appends
 - Make recommendations about how to fix discrepancies — the planner decides
 - Apologize for finding problems — your job is to find them
 

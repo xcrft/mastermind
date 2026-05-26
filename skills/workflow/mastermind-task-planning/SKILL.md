@@ -2,7 +2,7 @@
 name: mastermind-task-planning
 description: Acts as a CTO/planner that thinks, plans, and creates detailed task specs in `.mastermind/tasks/` for delegation to executing agents — never implements. Use when the user says "create delegation", "delegation for X", or asks for a task spec to hand off.
 metadata:
-  version: 0.8.1
+  version: 0.9.0
   authors:
     - mastermind
   tags:
@@ -69,6 +69,19 @@ For any function / method the spec touches, populate the spec's **Pre-edit symbo
 Paste both into the snapshot. This snapshot is the auditor's anchor for detecting silent breakage post-execution — without it, the auditor cannot distinguish legitimate refactor from accidental caller loss.
 
 If the spec touches no code symbols (pure doc / config change), delete the snapshot section. Don't fabricate entries.
+
+### Check institutional memory before designing
+
+For non-trivial specs (anything where the critic would be mandatory), before you start designing:
+
+1. **`mmcg_tasks "<topic keywords>"`** — full-text search past specs in `.mastermind/tasks/`. If a past spec touched this area, **read it before drafting**: copy what worked into your design, list what was rejected in your Alternatives Considered, don't repeat a discarded approach without saying why this time is different.
+2. **Read `.mastermind/tasks/_lessons.md` if it exists** — one-liners from past audit failures. Anything matching your area? Bake that signal into the spec's Rules or Goals.
+
+Cite findings in the spec's Notes section: `Past work: 042-session-refactor (similar problem; their LRU approach worked, kept). Lesson: 2026-05-12 — pre-edit snapshots go stale across rebases; re-running mmcg index before snapshot.`
+
+The lessons file is intentionally NOT searchable via `mmcg_tasks` (underscore prefix excludes it) — read it directly with the `Read` tool.
+
+If neither query returns anything relevant, that's fine — write that explicitly so the auditor knows you checked.
 
 ## Design-time challenge — spawn the critic
 

@@ -180,6 +180,56 @@ fn collapse_partial_hits(symbols: Vec<Symbol>) -> Vec<SymbolHit> {
     out
 }
 
+#[derive(Debug, Serialize)]
+pub struct CentralityHit {
+    pub name: String,
+    pub kind: String,
+    pub file: String,
+    pub line: u32,
+    pub in_degree: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decorators: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CentralityResponse {
+    pub count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    pub top: u32,
+    pub results: Vec<CentralityHit>,
+}
+
+pub fn centrality(
+    store: &Store,
+    prefix: Option<&str>,
+    language: Option<&str>,
+    kind: Option<&str>,
+    top: u32,
+) -> rusqlite::Result<CentralityResponse> {
+    let raw = store.centrality(prefix, language, kind, top)?;
+    let results: Vec<CentralityHit> = raw
+        .into_iter()
+        .map(|(s, in_degree)| CentralityHit {
+            name: s.name,
+            kind: s.kind,
+            file: s.file_path,
+            line: s.line_start,
+            in_degree,
+            signature: s.signature,
+            decorators: s.decorators,
+        })
+        .collect();
+    Ok(CentralityResponse {
+        count: results.len() as u32,
+        prefix: prefix.map(String::from),
+        top,
+        results,
+    })
+}
+
 pub fn callers(
     store: &Store,
     name: &str,

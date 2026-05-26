@@ -19,7 +19,7 @@ Most "AI workflow" templates are a planner prompt and good wishes. This repo shi
 | [`skills/`](skills/) | Markdown skills with frontmatter. The workflow skills (`mastermind-task-planning`, `mastermind-task-executor`, `mastermind-incident-response`, `mastermind-prompt-refiner`) plus standalone ones (`pr-review`, `flaky-finder`, `doc-stub-sync`). |
 | [`prompts/`](prompts/) | Reusable system/user prompt templates (`api-shape-explorer`). |
 | [`agents/`](agents/) | 6 mastermind subagents (`critic`, `auditor`, `researcher`, `task-executor`, `release`, `prompt-refiner`), plus `CLAUDE.md` and `CONTEXT.md` templates. |
-| [`mcp/`](mcp/) | MCP server configs. Headlined by **`mmcg`** — fast Rust codegraph indexer for Python/TS/JS/Rust with 12 structural query tools. |
+| [`mcp/`](mcp/) | MCP server configs. Headlined by **`mmcg`** — fast Rust codegraph indexer for Python/TS/JS/Rust with 13 structural query tools. |
 
 Each top-level folder is grouped by **domain** inside (e.g. `skills/code-review/`, `agents/subagents/`). Every category ships a `_template/` you copy when adding something new.
 
@@ -48,7 +48,7 @@ flowchart TB
 
 The **planner** never implements. The **executor** never improvises. The **critic** (pre-spec) and the **auditor** (post-execution) run as independent Opus instances with no prior conversation context — they catch the planner's bias.
 
-Underneath every role sits **mmcg** — a Rust binary that indexes Python, TypeScript, JavaScript, Rust, C#, Go, Java, PHP, and C/C++ into a local SQLite codegraph and exposes 12 structural query tools over MCP (`search`, `callers`, `callees`, `impact`, `imports`, `imported_by`, `files`, `symbols_in_file`, `outline`, `recent_changes`, `unreferenced`, `api_surface`). Every subagent queries mmcg before claiming anything about the code: "does function X exist?", "who calls Y?", "transitive blast radius of changing Z?". This is what makes the workflow's claims resistant to hallucination.
+Underneath every role sits **mmcg** — a Rust binary that indexes Python, TypeScript, JavaScript, Rust, C#, Go, Java, PHP, and C/C++ into a local SQLite codegraph and exposes 13 structural query tools over MCP (`search`, `callers`, `callees`, `impact`, `imports`, `imported_by`, `files`, `symbols_in_file`, `outline`, `recent_changes`, `unreferenced`, `api_surface`, `centrality`). Every subagent queries mmcg before claiming anything about the code: "does function X exist?", "who calls Y?", "transitive blast radius of changing Z?". This is what makes the workflow's claims resistant to hallucination.
 
 For the full 14-step flow (pre-flight validation, post-flight audit checks, parallel incident-response workflow, on-demand release packaging) see the [workflow CLAUDE.md template](agents/claude-md/mastermind-workflow.md).
 
@@ -121,7 +121,7 @@ If the full workflow is more than you want, install only what you need.
 
 ### Just the codegraph
 
-`mmcg` is a standalone [crate on crates.io](https://crates.io/crates/mmcg) — 12 structural query tools (search, callers, callees, impact, outline, recent_changes, unreferenced, api_surface, …) for Python / TypeScript / JavaScript / Rust / C# / Go / Java / PHP / C/C++. Zero system deps, sub-millisecond queries.
+`mmcg` is a standalone [crate on crates.io](https://crates.io/crates/mmcg) — 13 structural query tools (search, callers, callees, impact, outline, recent_changes, unreferenced, api_surface, centrality, …) for Python / TypeScript / JavaScript / Rust / C# / Go / Java / PHP / C/C++. Zero system deps, sub-millisecond queries.
 
 ```bash
 cargo install mmcg

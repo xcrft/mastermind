@@ -158,6 +158,20 @@ enum QueryCmd {
         #[arg(long)]
         language: Option<String>,
     },
+    /// Rank symbols by in-degree (distinct callers). Pre-flight "where is the
+    /// gravity" — most-referenced functions, classes, methods in a path prefix
+    /// or the whole index.
+    Centrality {
+        #[arg(long)]
+        prefix: Option<String>,
+        #[arg(long)]
+        language: Option<String>,
+        #[arg(long)]
+        kind: Option<String>,
+        /// How many results to return.
+        #[arg(long, default_value_t = 20)]
+        top: u32,
+    },
     /// List files whose top-level imports reference the given name or path.
     ImportedBy {
         /// Name or fully-qualified path to look up
@@ -290,6 +304,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 QueryCmd::ApiSurface { prefix, language } => serde_json::to_value(
                     queries::api_surface(&store, &prefix, language.as_deref())?,
                 )?,
+                QueryCmd::Centrality {
+                    prefix,
+                    language,
+                    kind,
+                    top,
+                } => serde_json::to_value(queries::centrality(
+                    &store,
+                    prefix.as_deref(),
+                    language.as_deref(),
+                    kind.as_deref(),
+                    top,
+                )?)?,
                 QueryCmd::ImportedBy {
                     query,
                     match_kind,

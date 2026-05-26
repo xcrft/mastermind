@@ -1,6 +1,6 @@
 {
   "name": "mmcg",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "description": "Mastermind Codegraph MCP server. Fast multi-language code indexer (Python, TypeScript/TSX, JavaScript/JSX, Rust, C#, Go, Java, PHP, C/C++) with 16 structural query tools: search, callers, callees (with edge_kind filter for calls/imports/inherits), impact, imports, imported_by, files, symbols_in_file, outline, recent_changes, unreferenced, api_surface, centrality, tasks, dependency_cycles, symbols_changed_since. Local SQLite index, tree-sitter parsing, incremental file watcher, FTS5 over `.mastermind/tasks/` task specs, no system dependencies. C/C++ is best-effort syntactic — see README Limitations.",
   "author": {
     "name": "mastermind"

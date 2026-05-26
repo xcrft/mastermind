@@ -547,6 +547,12 @@ impl Store {
              WHERE (?1 IS NULL OR s.kind = ?1)
                AND (?2 IS NULL OR s.language = ?2)
                AND s.kind != 'module'
+               -- Module-level constants are referenced by VALUE-READ (not by
+               -- call/import edges), so they'd dominate the default output as
+               -- false positives. Exclude them unless the caller explicitly
+               -- asked for `kind=constant` (in which case the kind filter
+               -- itself controls the slice).
+               AND (?1 IS NOT NULL OR s.kind != 'constant')
                AND NOT EXISTS (
                    SELECT 1 FROM edges e
                    WHERE e.to_name = s.name OR e.to_type = s.name

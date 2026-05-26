@@ -20,13 +20,111 @@ impl LanguageExtractor for PythonExtractor {
     }
 
     fn extract(&self, tree: &Tree, source: &[u8], pending: &mut PendingFile, module_index: usize) {
-        walk(
-            tree.root_node(),
-            source,
+        let root = tree.root_node();
+        // First pass: capture module-level constants — DIRECT children of
+        // `module` only. This is scope-correct: assignments inside `if` / `for`
+        // / `try` / class bodies / function bodies are not module constants
+        // even when the file's top-level walk happens to reach them. The
+        // recursive `walk` below still processes those subtrees for calls and
+        // imports, but doesn't try to push them as constant symbols.
+        let mut cursor = root.walk();
+        for child in root.children(&mut cursor) {
+            extract_module_constants(&child, source, pending, module_index);
+        }
+        // Then the usual walk for everything else (functions, classes, calls,
+        // imports). Constants are NOT re-pushed because `walk` doesn't handle
+        // the `assignment` case.
+        walk(root, source, pending, Some(module_index), module_index);
+    }
+}
+
+/// Push every binding from a module-level `expression_statement > assignment`
+/// as a `kind="constant"` symbol. No-op for other node kinds, augmented
+/// assignments, or assignments without a right-hand side.
+///
+/// `child` is a direct child of the `module` node — the caller filters scope.
+fn extract_module_constants(
+    child: &Node,
+    source: &[u8],
+    pending: &mut PendingFile,
+    module_index: usize,
+) {
+    // Python tree-sitter wraps top-level assignments in `expression_statement`.
+    let assignment = match child.kind() {
+        "expression_statement" => child.named_child(0),
+        // Defensive: some grammar versions surface bare assignment at module scope.
+        "assignment" => Some(*child),
+        _ => None,
+    };
+    let Some(assignment) = assignment else {
+        return;
+    };
+    if assignment.kind() != "assignment" {
+        return;
+    }
+    // Skip augmented assignments (`+=`, etc.) — they're not declarations.
+    // tree-sitter-python uses a distinct `augmented_assignment` node, so this
+    // is mostly redundant — but defensive against grammar shifts.
+    let Some(left) = assignment.child_by_field_name("left") else {
+        return;
+    };
+    if assignment.child_by_field_name("right").is_none() {
+        // `FOO: int` with no value isn't a binding.
+        return;
+    }
+    let signature = node_text(&assignment, source).map(|s| {
+        // Single-line signature, trimmed; the value preview is useful for
+        // grep-like search but huge dict/list literals would explode storage.
+        let one_line: String = s.split('\n').next().unwrap_or(s).trim().to_string();
+        if one_line.len() > 120 {
+            format!("{}…", &one_line[..120])
+        } else {
+            one_line
+        }
+    });
+
+    for name in collect_assignment_targets(&left, source) {
+        push_def(
             pending,
+            name,
+            "constant",
+            &assignment,
+            signature.clone(),
             Some(module_index),
-            module_index,
         );
+    }
+}
+
+/// Identifiers bound by a single assignment LHS. Handles `FOO`, `FOO: int`,
+/// `A, B`, `(A, B)`, and nested tuple patterns.
+fn collect_assignment_targets(node: &Node, source: &[u8]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    walk_targets(node, source, &mut out);
+    out
+}
+
+fn walk_targets(node: &Node, source: &[u8], out: &mut Vec<String>) {
+    match node.kind() {
+        "identifier" => {
+            if let Some(name) = node_text(node, source) {
+                out.push(name.to_string());
+            }
+        }
+        // `FOO: int = 5` — LHS field is the identifier; type is a sibling.
+        // tree-sitter exposes the identifier directly as the first named child.
+        "pattern_list" | "tuple_pattern" | "list_pattern" => {
+            let mut cursor = node.walk();
+            for c in node.named_children(&mut cursor) {
+                walk_targets(&c, source, out);
+            }
+        }
+        // Annotated form: in some tree-sitter-python versions LHS is wrapped.
+        // Defensive: recurse into the first named child.
+        _ => {
+            if let Some(first) = node.named_child(0) {
+                walk_targets(&first, source, out);
+            }
+        }
     }
 }
 
@@ -488,5 +586,64 @@ mod tests {
         assert!(calls.contains(&("info", Some("logger.info"))));
         assert!(calls.contains(&("helper", Some("pkg.mod.helper"))));
         assert!(calls.contains(&("print", Some("print"))));
+    }
+
+    #[test]
+    fn extracts_module_level_constants() {
+        let path = write_tmp(
+            "constants.py",
+            "MAX_RETRIES = 5\n\
+             TIMEOUT_SECS: float = 30.0\n\
+             HOST, PORT = \"localhost\", 8080\n\
+             __all__ = [\"MAX_RETRIES\", \"TIMEOUT_SECS\"]\n\
+             COUNTER = 0\n\
+             COUNTER += 1\n\
+             def helper():\n    \
+                 local_var = 10\n    \
+                 return local_var\n\
+             class Foo:\n    \
+                 CLASS_ATTR = \"x\"\n\
+             if True:\n    \
+                 CONDITIONAL = 42\n",
+        );
+        let root = path.parent().unwrap();
+        let pending = parse_one(&path, root, &PythonExtractor).unwrap();
+        let constants: Vec<&str> = pending
+            .symbols
+            .iter()
+            .filter(|s| s.kind == "constant")
+            .map(|s| s.name.as_str())
+            .collect();
+
+        // Plain, annotated, and tuple-unpacking module-level assignments captured.
+        assert!(constants.contains(&"MAX_RETRIES"));
+        assert!(constants.contains(&"TIMEOUT_SECS"));
+        assert!(constants.contains(&"HOST"));
+        assert!(constants.contains(&"PORT"));
+        assert!(constants.contains(&"__all__"));
+        assert!(constants.contains(&"COUNTER"));
+
+        // Scoping: locals in function, class attributes, and conditional
+        // assignments are NOT module-level constants.
+        assert!(
+            !constants.contains(&"local_var"),
+            "function-local not a constant"
+        );
+        assert!(
+            !constants.contains(&"CLASS_ATTR"),
+            "class attribute not a module constant"
+        );
+        assert!(
+            !constants.contains(&"CONDITIONAL"),
+            "conditional assignment is not direct module child"
+        );
+
+        // Signature captures the assignment text (cap respected).
+        let max_retries = pending
+            .symbols
+            .iter()
+            .find(|s| s.name == "MAX_RETRIES" && s.kind == "constant")
+            .unwrap();
+        assert_eq!(max_retries.signature.as_deref(), Some("MAX_RETRIES = 5"));
     }
 }

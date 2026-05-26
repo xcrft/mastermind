@@ -183,6 +183,17 @@ enum QueryCmd {
         #[arg(long, default_value_t = 20)]
         top: u32,
     },
+    /// Symbol-level diff between a git ref and the current index.
+    /// Returns added / removed / signature-changed symbols across the files
+    /// in `git diff --name-only <ref>..HEAD`. Uses `git show <ref>:<path>`
+    /// to fetch old blobs and re-parses them with the same extractor.
+    SymbolsChangedSince {
+        /// Git ref to diff against (tag, branch, commit, HEAD~3, etc.)
+        git_ref: String,
+        /// Project root — defaults to cwd. Symbol paths are relative to this.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+    },
     /// Full-text search past task specs in `.mastermind/tasks/`.
     /// FTS5 MATCH syntax — bare words AND-joined, phrases in double quotes,
     /// OR / NOT supported. Returns paths, titles, and snippet excerpts.
@@ -342,6 +353,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 )?)?,
                 QueryCmd::Tasks { query, top } => {
                     serde_json::to_value(queries::tasks(&store, &query, top)?)?
+                }
+                QueryCmd::SymbolsChangedSince { git_ref, root } => {
+                    let root = root
+                        .canonicalize()
+                        .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
+                    let diff = queries::symbols_changed_since(&store, &root, &git_ref)?;
+                    serde_json::to_value(diff)?
                 }
                 QueryCmd::ImportedBy {
                     query,

@@ -370,19 +370,35 @@ pub(crate) fn parse_one(
         .to_string_lossy()
         .replace('\\', "/");
 
+    parse_blob(&rel, &source, mtime, extractor)
+}
+
+/// Parse a file's bytes WITHOUT touching the filesystem. Used by
+/// `mmcg_symbols_changed_since` which needs the symbol set at an old git ref
+/// — the bytes come from `git show <ref>:<path>`, not from disk.
+///
+/// `mtime` is caller-supplied; for git-blob parsing pass `0` (the result is
+/// transient, never stored). `rel_path` is the path relative to the project
+/// root and is also used to pick the language extractor via its extension.
+pub(crate) fn parse_blob(
+    rel_path: &str,
+    source: &[u8],
+    mtime: i64,
+    extractor: &dyn LanguageExtractor,
+) -> Result<PendingFile, IndexError> {
     let mut parser = Parser::new();
     let language = extractor.language();
     parser
         .set_language(&language)
         .map_err(|e| IndexError::Parse(e.to_string()))?;
     let tree = parser
-        .parse(&source, None)
+        .parse(source, None)
         .ok_or_else(|| IndexError::Parse("tree-sitter parse returned None".to_string()))?;
 
     let line_count = source.iter().filter(|&&b| b == b'\n').count() as u32 + 1;
-    let language = guess_language_for(&rel).unwrap_or("").to_string();
+    let language = guess_language_for(rel_path).unwrap_or("").to_string();
     let mut pending = PendingFile {
-        path: rel.clone(),
+        path: rel_path.to_string(),
         mtime,
         language,
         symbols: Vec::new(),
@@ -395,13 +411,13 @@ pub(crate) fn parse_one(
         kind: "module".to_string(),
         line_start: 1,
         line_end: line_count,
-        signature: Some(format!("module {rel}")),
+        signature: Some(format!("module {rel_path}")),
         parent_index: None,
         decorators: None,
     });
     let module_index = pending.symbols.len() - 1;
 
-    extractor.extract(&tree, &source, &mut pending, module_index);
+    extractor.extract(&tree, source, &mut pending, module_index);
     Ok(pending)
 }
 

@@ -260,6 +260,18 @@ fn tools_list() -> Value {
                 }
             },
             {
+                "name": "mmcg_symbols_changed_since",
+                "description": "Symbol-level diff between a git ref and the current index. Returns {added, removed, signature_changed} symbol sets across the files in `git diff --name-only <ref>..HEAD`. Re-parses old blobs from `git show <ref>:<path>` with the same extractor used at index time. Different from `mmcg_recent_changes` (which uses watcher mtime) — this is git-ref-based and answers 'what symbols did THIS PR/branch touch?'. Use cases: PR-review pre-flight, auditor verifying executor's claimed-files vs reality, 'what new public API appeared in v2.3?'.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "git_ref": { "type": "string", "description": "Git ref to diff against (tag, branch, commit, HEAD~3, main, etc.). Must resolve via `git rev-parse`." },
+                        "root": { "type": "string", "description": "Project root — symbol paths are relative to this. Defaults to the index's working directory." }
+                    },
+                    "required": ["git_ref"]
+                }
+            },
+            {
                 "name": "mmcg_dependency_cycles",
                 "description": "Detect circular imports — strongly-connected components in the file-level import graph. Returns each cycle as a list of files. Pre-merge guard: 'does this PR introduce a new cycle?'. Architectural hygiene: 'what cycles already exist?'. Edges are resolved by leaf-name match (over-approximating — two unrelated symbols sharing a name produce a cross-edge; verify before acting). Set `min_size` higher to hide trivial A↔B and surface only larger structural issues.",
                 "inputSchema": {
@@ -412,6 +424,27 @@ fn handle_tools_call(store: &mut Store, params: &Value) -> Result<Value, String>
                 .clamp(1, 50);
             let r = queries::tasks(store, query, top).map_err(|e| e.to_string())?;
             serde_json::to_value(r).map_err(|e| e.to_string())?
+        }
+        "mmcg_symbols_changed_since" => {
+            let git_ref = str_arg(&args, "git_ref")?;
+            let root_arg = opt_str_arg(&args, "root");
+            // Default to the directory containing the index database — that's
+            // where `mmcg index` was run, so paths are relative to it.
+            let root = match root_arg {
+                Some(s) => std::path::PathBuf::from(s),
+                None => store
+                    .db_path()
+                    .parent()
+                    .and_then(|d| d.parent())
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| std::path::PathBuf::from(".")),
+            };
+            let root = root
+                .canonicalize()
+                .map_err(|e| format!("canonicalize root: {e}"))?;
+            let diff =
+                queries::symbols_changed_since(store, &root, git_ref).map_err(|e| e.to_string())?;
+            serde_json::to_value(diff).map_err(|e| e.to_string())?
         }
         "mmcg_dependency_cycles" => {
             let language = opt_str_arg(&args, "language");

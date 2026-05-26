@@ -10,6 +10,7 @@
 //! - `queries` — high-level query API with serializable response types
 //! - `mcp`   — stdio JSON-RPC MCP server exposing 6 tools
 
+pub mod diff;
 pub mod indexer;
 pub mod mcp;
 pub mod queries;

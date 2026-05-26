@@ -226,6 +226,14 @@ pub struct DependencyCyclesResponse {
     pub cycles: Vec<Vec<String>>,
 }
 
+pub fn symbols_changed_since(
+    store: &Store,
+    repo_root: &std::path::Path,
+    git_ref: &str,
+) -> Result<crate::diff::SymbolDiff, crate::diff::DiffError> {
+    crate::diff::symbols_changed_since(store, repo_root, git_ref)
+}
+
 pub fn dependency_cycles(
     store: &Store,
     language: Option<&str>,

@@ -260,6 +260,17 @@ fn tools_list() -> Value {
                 }
             },
             {
+                "name": "mmcg_dependency_cycles",
+                "description": "Detect circular imports — strongly-connected components in the file-level import graph. Returns each cycle as a list of files. Pre-merge guard: 'does this PR introduce a new cycle?'. Architectural hygiene: 'what cycles already exist?'. Edges are resolved by leaf-name match (over-approximating — two unrelated symbols sharing a name produce a cross-edge; verify before acting). Set `min_size` higher to hide trivial A↔B and surface only larger structural issues.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "rust", "csharp", "go", "java", "php", "cpp"], "description": "Optional language filter" },
+                        "min_size": { "type": "integer", "minimum": 2, "maximum": 100, "default": 2, "description": "Smallest SCC to report. 2 = any cycle. 3 hides trivial A↔B pairs." }
+                    }
+                }
+            },
+            {
                 "name": "mmcg_tasks",
                 "description": "Full-text search past task specs in `.mastermind/tasks/`. Use to recall prior designs and surface 'we already tried this' before drafting a new spec. FTS5 MATCH syntax — bare words AND-joined ('rate limit'), phrases double-quoted ('\\\"rate limit\\\"'), OR/NOT supported. Returns paths, titles, and snippet excerpts with «match» highlights ranked by BM25.",
                 "inputSchema": {
@@ -400,6 +411,18 @@ fn handle_tools_call(store: &mut Store, params: &Value) -> Result<Value, String>
                 .unwrap_or(10)
                 .clamp(1, 50);
             let r = queries::tasks(store, query, top).map_err(|e| e.to_string())?;
+            serde_json::to_value(r).map_err(|e| e.to_string())?
+        }
+        "mmcg_dependency_cycles" => {
+            let language = opt_str_arg(&args, "language");
+            let min_size = args
+                .get("min_size")
+                .and_then(|v| v.as_u64())
+                .and_then(|n| u32::try_from(n).ok())
+                .unwrap_or(2)
+                .clamp(2, 100);
+            let r =
+                queries::dependency_cycles(store, language, min_size).map_err(|e| e.to_string())?;
             serde_json::to_value(r).map_err(|e| e.to_string())?
         }
         "mmcg_centrality" => {

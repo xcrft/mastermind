@@ -158,6 +158,17 @@ enum QueryCmd {
         #[arg(long)]
         language: Option<String>,
     },
+    /// Detect circular imports — strongly-connected components of size ≥ min_size
+    /// in the file-level import graph. Resolves edges by leaf-name match
+    /// (over-approximating: may surface cycles between two unrelated symbols
+    /// sharing a name — manually verify before refactoring).
+    DependencyCycles {
+        #[arg(long)]
+        language: Option<String>,
+        /// Smallest SCC to report. Default 2 = any cycle. 3 hides trivial A↔B.
+        #[arg(long, default_value_t = 2)]
+        min_size: u32,
+    },
     /// Rank symbols by in-degree (distinct callers). Pre-flight "where is the
     /// gravity" — most-referenced functions, classes, methods in a path prefix
     /// or the whole index.
@@ -313,6 +324,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 )?,
                 QueryCmd::ApiSurface { prefix, language } => serde_json::to_value(
                     queries::api_surface(&store, &prefix, language.as_deref())?,
+                )?,
+                QueryCmd::DependencyCycles { language, min_size } => serde_json::to_value(
+                    queries::dependency_cycles(&store, language.as_deref(), min_size)?,
                 )?,
                 QueryCmd::Centrality {
                     prefix,

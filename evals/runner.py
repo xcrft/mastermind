@@ -237,6 +237,9 @@ def evaluate_case(
         else:
             user_message = render_critic_input(case["input"])
 
+        # Pass the user message via stdin — passing it as a positional arg
+        # collides with `--add-dir <directories...>` (variadic), which would
+        # swallow the message as another directory.
         cmd = [
             "claude",
             "-p",
@@ -246,14 +249,18 @@ def evaluate_case(
             "--no-session-persistence",
             "--permission-mode", "default",
             *extra_cmd,
-            user_message,
         ]
 
+        # Auditor with real-git fixtures runs many Bash + Read tool calls per
+        # case; observed range is ~120–280s on Sonnet, can blow past 300s. Set
+        # generously at 480s to absorb tail-latency variance.
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            proc = subprocess.run(
+                cmd, input=user_message, capture_output=True, text=True, timeout=480
+            )
         except subprocess.TimeoutExpired:
             return Result(
-                case_id, suite_name, False, ["timeout after 300s"], 0, fixture_path
+                case_id, suite_name, False, ["timeout after 480s"], 0, fixture_path
             )
 
         if proc.returncode != 0:

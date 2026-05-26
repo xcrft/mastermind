@@ -3,7 +3,7 @@
 //! Wraps the raw store methods with name-based lookup, structured response
 //! types, and JSON serialization for the MCP layer.
 
-use crate::store::{FileEntry, Store, Symbol};
+use crate::store::{FileEntry, Store, Symbol, TaskSpecHit};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -200,6 +200,22 @@ pub struct CentralityResponse {
     pub prefix: Option<String>,
     pub top: u32,
     pub results: Vec<CentralityHit>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TaskSearchResponse {
+    pub query: String,
+    pub count: u32,
+    pub results: Vec<TaskSpecHit>,
+}
+
+pub fn tasks(store: &Store, query: &str, top: u32) -> rusqlite::Result<TaskSearchResponse> {
+    let results = store.search_task_specs(query, top)?;
+    Ok(TaskSearchResponse {
+        query: query.to_string(),
+        count: results.len() as u32,
+        results,
+    })
 }
 
 pub fn centrality(

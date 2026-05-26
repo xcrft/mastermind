@@ -10,7 +10,7 @@ use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const SCHEMA_VERSION: &str = "5";
+const SCHEMA_VERSION: &str = "6";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Symbol {
@@ -49,6 +49,25 @@ pub struct FileEntry {
     pub path: String,
     pub indexed_at: i64,
     pub symbol_count: u32,
+}
+
+/// One task-spec file ready to be inserted into the FTS5 corpus.
+#[derive(Debug, Clone)]
+pub struct TaskSpecEntry {
+    pub path: String,
+    pub title: String,
+    pub body: String,
+}
+
+/// One result from `mmcg_tasks` — a matched task-spec with snippet + score.
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskSpecHit {
+    pub path: String,
+    pub title: String,
+    /// Body excerpt around the matched terms with `«match»` highlights.
+    pub excerpt: String,
+    /// FTS5 BM25 score — lower = better match (negative is normal).
+    pub score: f64,
 }
 
 /// Per-file batch ready to be committed in a single transaction.
@@ -164,6 +183,8 @@ impl Store {
                     DROP TABLE IF EXISTS edges;
                     DROP TABLE IF EXISTS symbols;
                     DROP TABLE IF EXISTS files;
+                    DROP TABLE IF EXISTS task_specs;
+                    DROP TABLE IF EXISTS task_specs_fts;
                     DROP TABLE IF EXISTS meta;
                     "#,
                 )?;
@@ -215,6 +236,17 @@ impl Store {
             CREATE TABLE IF NOT EXISTS meta (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+
+            -- Task-spec corpus, populated by the indexer from `.mastermind/tasks/*.md`.
+            -- Used by `mmcg_tasks(query)` so planners can recall past designs and
+            -- learn from prior verdicts. FTS5 gives BM25 ranking + snippet().
+            -- `path` is UNINDEXED — we don't tokenize file paths.
+            CREATE VIRTUAL TABLE IF NOT EXISTS task_specs_fts USING fts5(
+                path UNINDEXED,
+                title,
+                body,
+                tokenize = 'porter unicode61 remove_diacritics 2'
             );
             "#,
         )?;
@@ -720,6 +752,58 @@ impl Store {
         rows.collect()
     }
 
+    /// Replace the entire task-spec corpus with the supplied entries.
+    /// Called by `Indexer::index_task_specs` after scanning `.mastermind/tasks/*.md`.
+    /// Single transaction — atomic from a reader's perspective.
+    pub fn replace_task_specs(&mut self, entries: &[TaskSpecEntry]) -> SqlResult<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM task_specs_fts", [])?;
+        {
+            let mut stmt =
+                tx.prepare("INSERT INTO task_specs_fts(path, title, body) VALUES (?1, ?2, ?3)")?;
+            for entry in entries {
+                stmt.execute(params![entry.path, entry.title, entry.body])?;
+            }
+        }
+        tx.commit()
+    }
+
+    /// Full-text search over the task-spec corpus. `query` is an FTS5 MATCH
+    /// expression — bare words AND-joined, phrases in double quotes, `NOT`/`OR`
+    /// supported. Returns `(path, title, snippet)` ordered by BM25 rank.
+    /// Empty / whitespace-only queries return no results (FTS5 errors otherwise).
+    pub fn search_task_specs(&self, query: &str, top: u32) -> SqlResult<Vec<TaskSpecHit>> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT path,
+                    title,
+                    snippet(task_specs_fts, 2, '«', '»', '…', 16) AS excerpt,
+                    bm25(task_specs_fts) AS score
+             FROM task_specs_fts
+             WHERE task_specs_fts MATCH ?1
+             ORDER BY rank
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![trimmed, top], |r| {
+            Ok(TaskSpecHit {
+                path: r.get(0)?,
+                title: r.get(1)?,
+                excerpt: r.get(2)?,
+                score: r.get(3)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Count of task specs currently indexed — for `mmcg status` diagnostics.
+    pub fn task_specs_count(&self) -> SqlResult<u32> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM task_specs_fts", [], |r| r.get(0))
+    }
+
     /// Files indexed within the last `window_secs` seconds (based on `indexed_at`).
     /// Used by `mmcg_recent_changes` to answer "what has the watcher touched lately".
     pub fn files_indexed_since(&self, threshold_unix: i64) -> SqlResult<Vec<FileEntry>> {
@@ -1190,6 +1274,54 @@ mod tests {
         let top1 = store.centrality(None, None, None, 1).unwrap();
         assert_eq!(top1.len(), 1);
         assert_eq!(top1[0].0.name, "popular");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn task_specs_full_text_search() {
+        let path = tmp_db("task_specs_fts");
+        let mut store = Store::open(&path).unwrap();
+        let entries = vec![
+            TaskSpecEntry {
+                path: ".mastermind/tasks/001-rate-limiter.md".into(),
+                title: "Add rate limiter to API".into(),
+                body: "We need to rate-limit POST /api/orders. \
+                       Token bucket with Redis backing."
+                    .into(),
+            },
+            TaskSpecEntry {
+                path: ".mastermind/tasks/002-cache-invalidation.md".into(),
+                title: "Cache invalidation strategy".into(),
+                body: "On user update, evict cached user records. \
+                       LRU with TTL fallback."
+                    .into(),
+            },
+        ];
+        store.replace_task_specs(&entries).unwrap();
+        assert_eq!(store.task_specs_count().unwrap(), 2);
+
+        // Single-term query matches body content.
+        let hits = store.search_task_specs("rate", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].path.contains("001-rate-limiter"));
+        assert!(hits[0].excerpt.contains("«rate"));
+
+        // Multi-term implicit AND — both rate AND bucket match the first spec only.
+        let combo = store.search_task_specs("rate bucket", 10).unwrap();
+        assert_eq!(combo.len(), 1);
+
+        // Stemming: "invalidate" stems to same root as "invalidation" via porter.
+        let stem = store.search_task_specs("invalidate", 10).unwrap();
+        assert_eq!(stem.len(), 1);
+        assert!(stem[0].path.contains("002-cache-invalidation"));
+
+        // Empty / whitespace query → no results (and no FTS5 syntax error).
+        assert!(store.search_task_specs("", 10).unwrap().is_empty());
+        assert!(store.search_task_specs("   ", 10).unwrap().is_empty());
+
+        // Replace is wholesale — re-replacing with a smaller set wipes the old.
+        store.replace_task_specs(&entries[..1]).unwrap();
+        assert_eq!(store.task_specs_count().unwrap(), 1);
         std::fs::remove_file(&path).ok();
     }
 

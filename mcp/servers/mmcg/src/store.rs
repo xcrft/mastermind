@@ -588,6 +588,43 @@ impl Store {
                    AND s.decorators NOT LIKE '%,Benchmark,%'
                    AND s.decorators NOT LIKE '%,GlobalSetup,%'
                    AND s.decorators NOT LIKE '%,GlobalCleanup,%'
+                   -- Java polymorphic dispatch — `@Override` means a parent's
+                   -- callsites resolve here; not visible to mmcg's call graph.
+                   AND s.decorators NOT LIKE '%,Override,%'
+                   -- Java test frameworks (JUnit 4/5, TestNG)
+                   AND s.decorators NOT LIKE '%,Test,%'
+                   AND s.decorators NOT LIKE '%,ParameterizedTest,%'
+                   AND s.decorators NOT LIKE '%,RepeatedTest,%'
+                   AND s.decorators NOT LIKE '%,TestFactory,%'
+                   AND s.decorators NOT LIKE '%,BeforeEach,%'
+                   AND s.decorators NOT LIKE '%,AfterEach,%'
+                   AND s.decorators NOT LIKE '%,BeforeAll,%'
+                   AND s.decorators NOT LIKE '%,AfterAll,%'
+                   AND s.decorators NOT LIKE '%,Before,%'
+                   AND s.decorators NOT LIKE '%,After,%'
+                   AND s.decorators NOT LIKE '%,BeforeMethod,%'
+                   AND s.decorators NOT LIKE '%,AfterMethod,%'
+                   AND s.decorators NOT LIKE '%,BeforeClass,%'
+                   AND s.decorators NOT LIKE '%,AfterClass,%'
+                   -- Spring routing / DI
+                   AND s.decorators NOT LIKE '%,RequestMapping,%'
+                   AND s.decorators NOT LIKE '%,GetMapping,%'
+                   AND s.decorators NOT LIKE '%,PostMapping,%'
+                   AND s.decorators NOT LIKE '%,PutMapping,%'
+                   AND s.decorators NOT LIKE '%,DeleteMapping,%'
+                   AND s.decorators NOT LIKE '%,PatchMapping,%'
+                   AND s.decorators NOT LIKE '%,Bean,%'
+                   AND s.decorators NOT LIKE '%,Scheduled,%'
+                   AND s.decorators NOT LIKE '%,EventListener,%'
+                   -- PHP test / web (PHP 8 attributes — same leaf-name convention)
+                   AND s.decorators NOT LIKE '%,DataProvider,%'
+                   AND s.decorators NOT LIKE '%,TestDox,%'
+                   AND s.decorators NOT LIKE '%,Group,%'
+                   AND s.decorators NOT LIKE '%,Route,%'
+                   AND s.decorators NOT LIKE '%,AsCommand,%'
+                   AND s.decorators NOT LIKE '%,AsController,%'
+                   AND s.decorators NOT LIKE '%,AsEventListener,%'
+                   AND s.decorators NOT LIKE '%,On,%'
                ))
              ORDER BY s.file_path, s.line_start"
         );

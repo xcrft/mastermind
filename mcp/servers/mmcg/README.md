@@ -1,8 +1,8 @@
 ---
 name: mmcg
-description: Mastermind Codegraph — fast multi-language code indexer (Python + TypeScript/TSX + JavaScript/JSX + Rust + C#) exposed over MCP. Indexes symbols, calls, and imports (with fully-qualified paths) into a local SQLite database (`.mastermind/mmcg.db`) and exposes 12 structural query tools for AI agents in the Mastermind workflow. Includes an incremental file watcher.
+description: Mastermind Codegraph — fast multi-language code indexer (Python + TypeScript/TSX + JavaScript/JSX + Rust + C# + Go + Java + PHP + C/C++) exposed over MCP. Indexes symbols, calls, and imports (with fully-qualified paths) into a local SQLite database (`.mastermind/mmcg.db`) and exposes 12 structural query tools for AI agents in the Mastermind workflow. Includes an incremental file watcher.
 metadata:
-  version: 0.8.0
+  version: 0.9.0
   authors:
     - mastermind
   tags:
@@ -13,32 +13,34 @@ metadata:
     - javascript
     - rust
     - csharp
+    - go
+    - java
+    - php
+    - cpp
   transport: stdio
   source: this repository
 ---
 
 # mmcg — Mastermind Codegraph
 
-A small, fast Rust binary that builds a structural index of a codebase (Python, TypeScript/TSX, JavaScript/JSX, Rust, C#) and serves queries over MCP. Pair with the Mastermind workflow so the planner/executor reason from a real graph instead of grep heuristics.
+A small, fast Rust binary that builds a structural index of a codebase (Python, TypeScript/TSX, JavaScript/JSX, Rust, C#, Go, Java, PHP, C/C++) and serves queries over MCP. Pair with the Mastermind workflow so the planner/executor reason from a real graph instead of grep heuristics.
 
-**Status — 0.8.0:** Python + TypeScript + JavaScript + Rust + C#. Imports tracked with fully-qualified paths. File watcher. Incremental indexing. **Language filter** on all queries (defends against monorepo name collisions). **Rust type-method awareness** — `mmcg_callers SessionStore` now finds `SessionStore::new()` callers. **`mmcg_symbols_in_file`** — list all symbols in a file in source order. **Decorator/attribute-aware `mmcg_unreferenced`** — symbols decorated with framework registries (pytest, FastAPI, Triton, Rust `#[test]`, xUnit `[Fact]`, ASP.NET `[HttpGet]`, etc.) are excluded from dead-code candidates.
+**Status — 0.9.0:** Python + TypeScript + JavaScript + Rust + C# + Go + Java + PHP + C/C++. Imports tracked with fully-qualified paths. File watcher. Incremental indexing. **Language filter** on all queries (defends against monorepo name collisions). **Rust type-method awareness** — `mmcg_callers SessionStore` now finds `SessionStore::new()` callers. **`mmcg_symbols_in_file`** — list all symbols in a file in source order. **Decorator/attribute-aware `mmcg_unreferenced`** — symbols decorated with framework registries (pytest, FastAPI, Triton, Rust `#[test]`, xUnit `[Fact]`, JUnit `@Test`, Spring `@GetMapping`, etc.) are excluded from dead-code candidates. **C/C++ support is best-effort** — see Limitations for precision caveats (macros, templates, headers).
 
 ## What it indexes
 
 For each supported file, mmcg captures:
 
-| Construct | Python | TS / TSX | JS / JSX | Rust | C# |
-|---|---|---|---|---|---|
-| Top-level functions | ✓ `def`, `async def` | ✓ `function` | ✓ `function` | ✓ `fn` | ✓ `local_function`, top-level method |
-| Classes | ✓ | ✓ `class`, `interface`, `abstract class` | ✓ `class` | ✓ `struct`, `enum`, `trait` | ✓ `class`, `struct`, `interface`, `record`, `enum` |
-| Methods | ✓ inside classes | ✓ inside classes/interfaces | ✓ inside classes | ✓ inside `impl` / `trait` blocks | ✓ inside classes/structs/records/interfaces |
-| Properties / fields | n/a | n/a | n/a | n/a | ✓ `property` (excluded from dead-code by default) |
-| Calls | ✓ `foo()`, `obj.foo()` | ✓ `foo()`, `obj.foo()`, `new Foo()` | ✓ same as TS | ✓ `foo()`, `obj.foo()`, `Mod::foo()` | ✓ `Foo()`, `obj.Bar()`, `Type.Method()`, `new T()` |
-| Macro invocations | n/a | n/a | n/a | ✓ `println!`, `vec![]` | n/a |
-| Decorators / attributes | ✓ `@pytest.fixture`, `@app.route` | n/a | n/a | ✓ `#[test]`, `#[tokio::main]` | ✓ `[Fact]`, `[HttpGet]` — `Attribute` suffix stripped |
-| Imports | ✓ `import`, `from … import …` | ✓ default, named, namespace | ✓ same as TS | ✓ `use` with paths, lists, aliases, wildcards | ✓ `using`, `using static`, `using <alias> = …` |
-| Module-level calls | ✓ attributed to `<module>` symbol | ✓ | ✓ | ✓ | ✓ |
-| **Fully-qualified path** | ✓ `collections.abc.Iterable` | ✓ `'pkg'::default` / `'./mod'::name` | ✓ same as TS | ✓ `foo::bar::Baz` | ✓ `System.Collections.Generic::*` |
+| Construct | Python | TS/JS | Rust | C# | Go | Java | PHP | C/C++ |
+|---|---|---|---|---|---|---|---|---|
+| Functions | ✓ `def` | ✓ `function` | ✓ `fn` | ✓ method/local-fn | ✓ `func` | ✓ `method_declaration` | ✓ `function` | ✓ `function_definition` |
+| Methods | ✓ inside classes | ✓ inside classes | ✓ inside `impl`/`trait` | ✓ inside classes/etc | ✓ `func (r T) M()` | ✓ inside classes | ✓ inside classes | ⚠️ inside classes + `T::m()` def |
+| Types | ✓ `class` | ✓ `class`, `interface` | ✓ `struct`, `enum`, `trait` | ✓ `class`, `struct`, `interface`, `record`, `enum` | ✓ `struct`, `interface` | ✓ `class`, `interface`, `enum`, `record` | ✓ `class`, `interface`, `trait`, `enum` | ✓ `class`, `struct`, `union`, `enum` |
+| Calls | ✓ | ✓ | ✓ + `Mod::foo()` | ✓ + `Type.Method()` | ✓ + `pkg.Func()` + `Foo{}` | ✓ + `new Foo()` | ✓ + `Foo::bar()` + `new Foo` | ⚠️ + `new Foo` (no template inst) |
+| Decorators/attributes | ✓ `@pytest.fixture` | n/a | ✓ `#[test]` | ✓ `[Fact]` | n/a | ✓ `@Test`, `@GetMapping` | ✓ `#[Test]` (PHP 8) | n/a |
+| Imports | ✓ `import`/`from` | ✓ ES module forms | ✓ `use` paths | ✓ `using` | ✓ `import` | ✓ `import` | ✓ `use` | ⚠️ `#include` (text-only) |
+| Macros | n/a | n/a | ✓ `println!` | n/a | n/a | n/a | n/a | ❌ invisible — see Limitations |
+| **FQ path** | `collections.abc.Iterable` | `'pkg'::default` | `foo::bar::Baz` | `System.Collections::*` | `net/http::*` | `java.util.List` | `App\Foo` | `vector::*` |
 
 Each file gets a synthetic `<module>` symbol (kind `module`) that owns module-scope imports and top-level statements.
 
@@ -48,6 +50,10 @@ Each file gets a synthetic `<module>` symbol (kind `module`) that owns module-sc
 - **TS/JS:** module-source + leaf separated by `::`. `import { foo as bar } from './a'` → name=`bar`, path=`./a::foo`. Defaults: `<src>::default`. Namespace: `<src>::*`.
 - **Rust:** Rust-style `::`. `use foo::bar::Baz as Q` → name=`Q`, path=`foo::bar::Baz`. Wildcards: `foo::*`.
 - **C#:** namespace + `::*` wildcard. `using System.Collections.Generic;` → name=`Generic`, path=`System.Collections.Generic::*`. Aliases (`using X = Y.Z`) take the right side.
+- **Go:** package path + `::*`. `import f "fmt"` → name=`f`, path=`fmt::*`. `_` / `.` aliases fall back to path leaf.
+- **Java:** dotted. `import java.util.List` → name=`List`, path=`java.util.List`. Wildcards: `java.util::*`. `import static …` keeps the symbol leaf.
+- **PHP:** backslash-namespaced. `use App\Foo as Bar` → name=`Bar`, path=`App\Foo`. Grouped (`use App\{A, B as C}`) expands per-item.
+- **C/C++:** `#include` produces an import edge with the header filename and full path: `#include <vector>` → name=`vector`, path=`vector::*`; `#include "sub/dir/x.h"` → name=`x.h`, path=`sub/dir/x.h::*`. `using std::vector` → name=`vector`, path=`std::vector`. `using namespace ns` → name=`*`, path=`ns::*`.
 - **Calls:** for `obj.foo()`, path is the literal `obj.foo` from source (no type resolution — see Limitations).
 
 **Skipped directories:** `.git`, `.mastermind`, `.venv`, `venv`, `__pycache__`, `node_modules`, `target`, `dist`, `build`, `.tox`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.next`, `.turbo`, `.cache`.
@@ -57,7 +63,7 @@ Each file gets a synthetic `<module>` symbol (kind `module`) that owns module-sc
 The Mastermind workflow needs structural queries every few seconds (planner deciding blast radius, executor checking callers before edits). Grep/Read each costs hundreds of tokens; mmcg returns the same info in dozens. Multiplied across a workflow run, the difference is between affordable and not.
 
 mmcg is intentionally narrow:
-- Five languages (Python, TypeScript/TSX, JavaScript/JSX, Rust, C#) — extend by adding a parser, not by depending on multi-language toolchains
+- Nine languages (Python, TypeScript/TSX, JavaScript/JSX, Rust, C#, Go, Java, PHP, C/C++) — extend by adding a parser, not by depending on multi-language toolchains
 - 12 query tools that map directly to the workflow's needs
 - Read-only over MCP (no writes from agents — only `mmcg index` and `mmcg watch` mutate the db)
 
@@ -208,17 +214,18 @@ mmcg serve
 
 ## Limitations (honest)
 
-- **Five languages.** Python (`.py`), TS/TSX (`.ts`, `.tsx`), JS/JSX (`.js`, `.jsx`, `.mjs`, `.cjs`), Rust (`.rs`), C# (`.cs`). Other extensions are silently skipped.
+- **Nine languages.** Python (`.py`), TS/TSX (`.ts`, `.tsx`), JS/JSX (`.js`, `.jsx`, `.mjs`, `.cjs`), Rust (`.rs`), C# (`.cs`), Go (`.go`), Java (`.java`), PHP (`.php`, `.phtml`), C/C++ (`.c`, `.cc`, `.cpp`, `.cxx`, `.h`, `.hpp`, `.hh`, `.hxx`, `.ipp`, `.tpp`). Other extensions are silently skipped.
 - **Call resolution is name-based, not type-based.** `obj.foo()` records a call to "foo" with literal path "obj.foo" — but `obj` isn't resolved to a type, so cross-file precision is best-effort.
 - **No cross-file symbol resolution.** Edges store `to_name` and `to_path` (strings), not `to_id`. Searching "callers of foo" finds *every* call to "foo" anywhere — even unrelated ones in different modules. The `to_path` column reduces ambiguity for imports specifically (use `mmcg_imported_by` with `match: path`).
 - **Path-based queries reflect literal source text, not semantic FQN.** When you index code with `use foo::bar::Baz` and `mmcg_imported_by --query "foo::bar::Baz" --match path` you'll get that file. But if another file imports the same type via `use crate::Baz` (re-exported), it stores `to_path = "crate::Baz"` and won't match the FQN query. Resolving paths to canonical FQNs would require parsing `Cargo.toml` / `package.json` / `pyproject.toml` and following re-exports — that's compiler-level work and out of scope. **Use `match: name` for "find all consumers"** (catches everything regardless of import phrasing); reserve `match: path` for "find this exact import spelling".
 - **`to_type` for member-call detection uses a capital-letter heuristic in TS/JS/Python.** `Class.method()`, `JSON.parse()`, `Foo.bar.baz()` correctly emit `to_type = "Class"` / `"JSON"` / `"Foo"` (rightmost capitalized receiver). For Rust, `to_type` is unambiguous via the `scoped_identifier` AST node — no heuristic needed. The heuristic misses calls on uppercase-named variables (e.g. `const FOO = new Bar(); FOO.method()` won't emit `to_type=FOO`) but matches the common convention used in idiomatic JS/TS/Python code.
 - **Watcher doesn't index brand-new directories deeply on the first event.** If you `mkdir -p foo/bar/baz` and add files inside, the watcher catches each file event individually. No special handling — just slower for big batch additions.
 - **Schema migration is destructive.** When mmcg's schema version changes (v1→v2, etc.) the existing index is dropped on open. Re-run `mmcg index .` to repopulate. No data is lost — the source code is the source of truth.
-- **`mmcg_unreferenced` filters known framework patterns since 0.7.0.** The query excludes symbols decorated with pytest fixtures / parametrize / mark, web-framework route decorators (`.route` / `.get` / `.post` / `.put` / `.delete` / `.patch` / `.websocket`), JIT decorators (`triton.jit` / `numba.jit` / `nb.njit`), task queues (`celery.task` / `shared_task`), CLI (`click.command` / `click.group`), Rust attributes (`#[test]`, `#[tokio::main]`, `#[async_std::test]`), and (since 0.8.0) C# test/web/benchmark attributes (xUnit `[Fact]`/`[Theory]`, NUnit `[Test]`/`[SetUp]`, MSTest `[TestMethod]`, ASP.NET `[HttpGet]`/`[HttpPost]`/`[Route]`, BenchmarkDotNet `[Benchmark]`). Also filters `test_*` functions in `*test*` / `*spec*` paths (pytest convention). Remaining false-positive classes that mmcg can't see: (a) entry points like `main` or framework-registered handlers without a recognized decorator; (b) dynamic dispatch — trait objects, duck-typed calls, JS reflection; (c) cross-language calls (TS subprocess invoking Python); (d) runtime registration via dict / list (`HANDLERS = {"foo": foo}`). Review every hit manually before deleting. The tool is "candidates to investigate", not "safe to delete".
+- **`mmcg_unreferenced` filters known framework patterns since 0.7.0.** The query excludes symbols decorated with pytest fixtures / parametrize / mark, web-framework route decorators (`.route` / `.get` / `.post` / `.put` / `.delete` / `.patch` / `.websocket`), JIT decorators (`triton.jit` / `numba.jit` / `nb.njit`), task queues (`celery.task` / `shared_task`), CLI (`click.command` / `click.group`), Rust attributes (`#[test]`, `#[tokio::main]`, `#[async_std::test]`), C# test/web/benchmark attributes (xUnit `[Fact]`/`[Theory]`, NUnit `[Test]`/`[SetUp]`, MSTest `[TestMethod]`, ASP.NET `[HttpGet]`/`[HttpPost]`/`[Route]`, BenchmarkDotNet `[Benchmark]`), and (since 0.9.0) Java/PHP frameworks: JUnit `@Test`/`@ParameterizedTest`/`@BeforeEach`, Spring `@GetMapping`/`@PostMapping`/`@Bean`/`@Scheduled`, PHPUnit `#[Test]`/`#[DataProvider]`, Symfony `#[Route]`/`#[AsCommand]`, Livewire `#[On]`. Also filters `test_*` functions in `*test*` / `*spec*` paths (pytest convention). Remaining false-positive classes that mmcg can't see: (a) entry points like `main` or framework-registered handlers without a recognized decorator; (b) dynamic dispatch — trait objects, duck-typed calls, JS reflection; (c) cross-language calls (TS subprocess invoking Python); (d) runtime registration via dict / list (`HANDLERS = {"foo": foo}`); (e) gtest-style C++ macro tests (`TEST(Suite, Name)` — macros invisible to tree-sitter); (f) Go test functions (`TestXxx(*testing.T)` convention — `testing` import is the closest signal, but we don't filter on imports). Review every hit manually before deleting. The tool is "candidates to investigate", not "safe to delete".
 - **`mmcg_api_surface` is empirical, not declared.** It returns symbols that are *currently* called from outside the prefix — independent of language-level visibility (`pub`/`export`/no-underscore). A symbol declared `pub` with no external callers won't appear; a private symbol leaked through a public re-export and called externally will. Useful for "what does the rest of the codebase actually rely on?", not for "what's the public API contract?".
 - **`mmcg_recent_changes` reflects index mtime, not git history.** If you re-index after rewriting history (rebase, amend, force-push) every touched file appears as "recent". Use `git log --since=...` for git truth; use this tool for "what has my watcher seen lately".
 - **C# partial classes** are stored as one symbol per file (each declaration is a real top-level node in its own file). `mmcg_search` collapses them by default into a single hit with a `locations` array of every declaration — set `collapse_partials: false` to opt out. `mmcg_callers` / `mmcg_callees` / `mmcg_impact` / `mmcg_outline` are unaffected: they resolve by name and don't double-count. Non-partial classes with colliding names across namespaces are *not* collapsed (they're genuinely distinct).
+- **C/C++ is best-effort.** The C/C++ extractor uses tree-sitter alone — no preprocessor, no template instantiation, no semantic analysis. Concretely: (a) **macros are invisible** — `TEST(Suite, Name) { ... }` is seen as a call to `TEST`, not as a function definition, so gtest/Catch2 test bodies don't appear in `mmcg_search` and calls inside macro arguments may be lost; (b) **templates** record the template name but not instantiations (`vector<int>` doesn't create a `vector<int>` symbol); (c) **header/source split** produces two symbol rows (`void Foo::bar()` declared in `.h` and defined in `.cpp` = two `bar` hits); (d) **ADL/overload resolution** isn't performed (`swap(a, b)` records `swap` without knowing which namespace it resolves to); (e) **`#include`** records the header as an `imports` edge but doesn't follow its contents. For high-precision C++ structural analysis use `clangd` (semantic, slow, large) or `ctags` (similar tradeoffs to this extractor). mmcg uses one `tree-sitter-cpp` grammar for both `.c` and `.cpp` files — rare C-only code that uses C++ keywords as identifiers (e.g. a variable named `new`) may mis-parse.
 
 ## Files in this artifact
 
@@ -235,11 +242,15 @@ mmcg serve
 | `src/indexer/javascript.rs` | JavaScript / JSX extractor — delegates to TS walker |
 | `src/indexer/rust_lang.rs` | Rust extractor (named to avoid `rust` keyword clash) |
 | `src/indexer/csharp.rs` | C# extractor — classes/structs/records/interfaces, methods, properties, attributes, using directives |
+| `src/indexer/go.rs` | Go extractor — funcs/methods/structs/interfaces, composite-literal construction, imports |
+| `src/indexer/java.rs` | Java extractor — classes/interfaces/records/enums, methods, annotations (decorators), imports |
+| `src/indexer/php.rs` | PHP extractor — classes/traits/interfaces/enums, namespaces, PHP 8 attributes, `use` directives |
+| `src/indexer/cpp.rs` | C/C++ extractor — best-effort syntactic scan, no preprocessor/template instantiation (see Limitations) |
 | `src/queries.rs` | High-level query API with serializable response types |
 | `src/mcp.rs` | JSON-RPC over stdio, MCP `initialize`/`tools/list`/`tools/call` |
 | `src/watcher.rs` | notify-based filesystem watcher with debouncing |
 
-Tests live in `#[cfg(test)]` blocks in each module. Run with `cargo test` — 38 tests covering schema, queries, partial-class collapse, and every extractor.
+Tests live in `#[cfg(test)]` blocks in each module. Run with `cargo test` — 53 tests covering schema, queries, partial-class collapse, and every extractor.
 
 ## Integration with the Mastermind workflow
 

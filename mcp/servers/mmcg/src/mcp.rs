@@ -134,7 +134,7 @@ fn tools_list() -> Value {
                     "properties": {
                         "name": { "type": "string", "description": "Symbol name (exact match)" },
                         "kind": { "type": "string", "description": "Optional kind filter (function, class, method, struct, enum, trait, interface, record, property, etc.)" },
-                        "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "rust", "csharp"], "description": "Optional language filter" },
+                        "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "rust", "csharp", "go", "java", "php", "cpp"], "description": "Optional language filter" },
                         "collapse_partials": { "type": "boolean", "default": true, "description": "When true (default), C# `partial class Foo` declarations across N files return one hit with a `locations` array of all N declarations. Set false to see each declaration as a separate row." }
                     },
                     "required": ["name"]
@@ -147,7 +147,7 @@ fn tools_list() -> Value {
                     "type": "object",
                     "properties": {
                         "name": { "type": "string", "description": "Name or type to look up" },
-                        "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "rust"] },
+                        "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "rust", "csharp", "go", "java", "php", "cpp"] },
                         "edge_kind": { "type": "string", "enum": ["calls", "imports", "inherits"], "default": "calls", "description": "Which kind of incoming edge to consider" }
                     },
                     "required": ["name"]
@@ -160,7 +160,7 @@ fn tools_list() -> Value {
                     "type": "object",
                     "properties": {
                         "name": { "type": "string", "description": "Symbol whose outgoing edges you want to inspect" },
-                        "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "rust"] },
+                        "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "rust", "csharp", "go", "java", "php", "cpp"] },
                         "edge_kind": { "type": "string", "enum": ["calls", "imports", "inherits"], "default": "calls" }
                     },
                     "required": ["name"]
@@ -174,7 +174,7 @@ fn tools_list() -> Value {
                     "properties": {
                         "name": { "type": "string" },
                         "max_depth": { "type": "integer", "minimum": 1, "maximum": 10, "default": 2 },
-                        "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "rust"] }
+                        "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "rust", "csharp", "go", "java", "php", "cpp"] }
                     },
                     "required": ["name"]
                 }
@@ -208,7 +208,7 @@ fn tools_list() -> Value {
                     "type": "object",
                     "properties": {
                         "prefix": { "type": "string", "description": "Optional path prefix" },
-                        "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "rust"], "description": "Optional language filter" }
+                        "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "rust", "csharp", "go", "java", "php", "cpp"], "description": "Optional language filter" }
                     }
                 }
             },
@@ -231,7 +231,7 @@ fn tools_list() -> Value {
                     "properties": {
                         "query": { "type": "string", "description": "Name or path to look up" },
                         "match": { "type": "string", "enum": ["name", "path"], "default": "name", "description": "How to match the query — by leaf binding name or fully-qualified path" },
-                        "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "rust"], "description": "Optional language filter" }
+                        "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "rust", "csharp", "go", "java", "php", "cpp"], "description": "Optional language filter" }
                     },
                     "required": ["query"]
                 }
@@ -243,7 +243,7 @@ fn tools_list() -> Value {
                     "type": "object",
                     "properties": {
                         "kind": { "type": "string", "description": "Filter by symbol kind (function / class / method / struct / etc.)" },
-                        "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "rust"] }
+                        "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "rust", "csharp", "go", "java", "php", "cpp"] }
                     }
                 }
             },
@@ -254,7 +254,7 @@ fn tools_list() -> Value {
                     "type": "object",
                     "properties": {
                         "prefix": { "type": "string", "description": "Path prefix (e.g. 'src/runtime/'). LIKE-matched." },
-                        "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "rust"] }
+                        "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "rust", "csharp", "go", "java", "php", "cpp"] }
                     },
                     "required": ["prefix"]
                 }

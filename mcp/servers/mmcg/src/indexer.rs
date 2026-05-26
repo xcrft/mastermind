@@ -12,14 +12,22 @@ use std::time::SystemTime;
 use tree_sitter::{Parser, Tree};
 use walkdir::WalkDir;
 
+mod cpp;
 mod csharp;
+mod go;
+mod java;
 mod javascript;
+mod php;
 mod python;
 mod rust_lang;
 mod typescript;
 
+pub use cpp::CppExtractor;
 pub use csharp::CsharpExtractor;
+pub use go::GoExtractor;
+pub use java::JavaExtractor;
 pub use javascript::JavascriptExtractor;
+pub use php::PhpExtractor;
 pub use python::PythonExtractor;
 pub use rust_lang::RustExtractor;
 pub use typescript::TypescriptExtractor;
@@ -45,6 +53,15 @@ pub fn extractor_for_path(path: &Path) -> Option<Box<dyn LanguageExtractor>> {
         "js" | "jsx" | "mjs" | "cjs" => Some(Box::new(JavascriptExtractor)),
         "rs" => Some(Box::new(RustExtractor)),
         "cs" => Some(Box::new(CsharpExtractor)),
+        "go" => Some(Box::new(GoExtractor)),
+        "java" => Some(Box::new(JavaExtractor)),
+        "php" | "phtml" => Some(Box::new(PhpExtractor)),
+        // C / C++ share one tree-sitter-cpp grammar. Acceptable since C is mostly
+        // a C++ subset; rare C-only keyword identifiers (e.g. `new` as a var)
+        // may mis-parse — see cpp.rs precision disclaimer.
+        "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh" | "hxx" | "ipp" | "tpp" => {
+            Some(Box::new(CppExtractor))
+        }
         _ => None,
     }
 }
@@ -232,6 +249,24 @@ fn guess_language_for(rel_path: &str) -> Option<&'static str> {
         Some("rust")
     } else if rel_path.ends_with(".cs") {
         Some("csharp")
+    } else if rel_path.ends_with(".go") {
+        Some("go")
+    } else if rel_path.ends_with(".java") {
+        Some("java")
+    } else if rel_path.ends_with(".php") || rel_path.ends_with(".phtml") {
+        Some("php")
+    } else if rel_path.ends_with(".c")
+        || rel_path.ends_with(".cc")
+        || rel_path.ends_with(".cpp")
+        || rel_path.ends_with(".cxx")
+        || rel_path.ends_with(".h")
+        || rel_path.ends_with(".hpp")
+        || rel_path.ends_with(".hh")
+        || rel_path.ends_with(".hxx")
+        || rel_path.ends_with(".ipp")
+        || rel_path.ends_with(".tpp")
+    {
+        Some("cpp")
     } else {
         None
     }

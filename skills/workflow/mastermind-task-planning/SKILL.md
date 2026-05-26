@@ -2,7 +2,7 @@
 name: mastermind-task-planning
 description: Acts as a CTO/planner that thinks, plans, and creates detailed task specs in `.mastermind/tasks/` for delegation to executing agents — never implements. Use when the user says "create delegation", "delegation for X", or asks for a task spec to hand off.
 metadata:
-  version: 0.10.0
+  version: 0.11.0
   authors:
     - mastermind
   tags:
@@ -82,6 +82,14 @@ Cite findings in the spec's Notes section: `Past work: 042-session-refactor (sim
 The lessons file is intentionally NOT searchable via `mmcg_tasks` (underscore prefix excludes it) — read it directly with the `Read` tool.
 
 If neither query returns anything relevant, that's fine — write that explicitly so the auditor knows you checked.
+
+### Ambiguous requirements — verbalize, don't pick silently
+
+If the user request admits ≥ 2 reasonable interpretations, write them out in the spec's Notes section as `Interpretation A / B / picked C because <reason>` — **do not silently choose**. Both the critic and the executor work from the spec; if the spec says "X" but the user meant "Y", the silent fork happens *here*, not later, and the auditor cannot recover it.
+
+If a *single* assumption is load-bearing (e.g. "the user means PostgreSQL, not generic SQL"; "the timeout is per-request, not session-wide"), state it in **Goals** as `Assumes: <X>` so the executor can flag it if they discover otherwise.
+
+The bar is concrete: if you can imagine a reasonable user reading the spec and saying "that's not what I meant", verbalize the fork upfront. The cost of a 2-line "Interpretation" note is negligible; the cost of an executor implementing the wrong interpretation is a full re-spec cycle.
 
 ## Design-time challenge — spawn the critic
 

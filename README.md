@@ -109,9 +109,12 @@ mmcg init --with-claude-md      # also drops in the workflow CLAUDE.md template
 mmcg index .                    # populates the code index
 mmcg watch &                    # (optional) keeps the index fresh as you edit
 echo .mastermind/ >> .gitignore
+mmcg doctor                     # verify the whole setup is wired (exit 1 if not)
 ```
 
 `.mastermind/` holds the project's specs and the mmcg index — local working state, never committed. If you have a pre-0.6.0 `.tasks/` directory at project root, `mmcg init` will print a migration command.
+
+`mmcg doctor` runs eight fail-soft checks (binary, index exists, symbols populated, freshness vs source mtimes, gitignore, CLAUDE.md workflow markers, MCP config registered, live `mmcg serve` handshake). Each check prints its status + a fix hint when not OK. Pipe `--json` for CI/scripting.
 
 ---
 

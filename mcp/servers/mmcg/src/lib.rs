@@ -18,6 +18,7 @@
 //! - `watcher` — notify-based filesystem watcher for incremental re-indexing
 
 pub mod diff;
+pub mod doctor;
 pub mod indexer;
 pub mod mcp;
 pub mod queries;

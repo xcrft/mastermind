@@ -83,6 +83,17 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
+    /// Health-check the environment for adoption — index existence,
+    /// freshness, gitignore, CLAUDE.md workflow markers, MCP config,
+    /// `mmcg serve` handshake. Exit code 0 if no checks fail.
+    Doctor {
+        /// Project root. Defaults to cwd.
+        #[arg(default_value = ".")]
+        root: PathBuf,
+        /// Output JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
     /// One-shot query — handy for CLI debugging without going through MCP.
     #[command(subcommand)]
     Query(QueryCmd),
@@ -269,6 +280,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .canonicalize()
                 .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
             do_init(&root, with_claude_md, force)?;
+        }
+        Cmd::Doctor { root, json } => {
+            let root = root
+                .canonicalize()
+                .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
+            // Use the binary we're already running for the MCP handshake check —
+            // guarantees the version under test matches what's installed.
+            let me = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+            let report = mmcg::doctor::run(&root, &me);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", report.render_text());
+            }
+            // Doctor "failures" are environment problems, not runtime errors.
+            // Exit non-zero so CI / shell scripts can react; bypass the
+            // generic error-printing path in main().
+            if report.has_failures() {
+                std::process::exit(1);
+            }
         }
         Cmd::Query(q) => {
             let store = Store::open(&index_path)?;

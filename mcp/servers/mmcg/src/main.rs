@@ -83,6 +83,37 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
+    /// Pre-execution gate: mechanical checks on a spec file before handing
+    /// off to the executor. Verifies mandatory sections non-empty, claimed
+    /// symbols exist in the index, claimed files exist on disk, pre-edit
+    /// snapshot caller counts match live index, blast radius isn't surprising.
+    /// Exit code 0 if no errors (warnings OK).
+    VerifySpec {
+        /// Path to a `.mastermind/tasks/XXX-*.md` spec.
+        spec: PathBuf,
+        /// Project root the spec's file paths are relative to. Defaults to cwd.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Post-execution gate: mechanical audit comparing spec contract against
+    /// the actual repo state. Diffs against `<git-ref>` (typically `main` or
+    /// merge-base): claimed files vs `git diff --name-only`, pre-edit
+    /// snapshot vs live `mmcg_callers` counts, snapshot symbols still exist.
+    /// Exit code 0 unless verdict is `broken`.
+    AuditSpec {
+        /// Path to the spec.
+        spec: PathBuf,
+        /// Git ref to compare against (e.g. `main`, `HEAD~3`).
+        #[arg(long)]
+        since: String,
+        /// Project root. Defaults to cwd.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     /// Health-check the environment for adoption — index existence,
     /// freshness, gitignore, CLAUDE.md workflow markers, MCP config,
     /// `mmcg serve` handshake. Exit code 0 if no checks fail.
@@ -280,6 +311,47 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .canonicalize()
                 .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
             do_init(&root, with_claude_md, force)?;
+        }
+        Cmd::VerifySpec { spec, root, json } => {
+            let root = root
+                .canonicalize()
+                .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
+            let parsed = mmcg::spec::parse_file(&spec)
+                .map_err(|e| format!("parse {}: {e}", spec.display()))?;
+            // Store is optional — skip live mmcg checks if no index. That
+            // still gives mandatory-sections + missing-files coverage.
+            let store = Store::open(&index_path).ok();
+            let report = mmcg::verify_spec::run(&parsed, store.as_ref(), &root);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", report.render_text());
+            }
+            if report.has_failures() {
+                std::process::exit(1);
+            }
+        }
+        Cmd::AuditSpec {
+            spec,
+            since,
+            root,
+            json,
+        } => {
+            let root = root
+                .canonicalize()
+                .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
+            let parsed = mmcg::spec::parse_file(&spec)
+                .map_err(|e| format!("parse {}: {e}", spec.display()))?;
+            let store = Store::open(&index_path)?;
+            let report = mmcg::audit_spec::run(&parsed, &store, &root, &since)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", report.render_text());
+            }
+            if report.has_failures() {
+                std::process::exit(1);
+            }
         }
         Cmd::Doctor { root, json } => {
             let root = root

@@ -17,10 +17,13 @@
 //!   in `mcp::tools_list()`; READMEs are kept in sync against that.
 //! - `watcher` — notify-based filesystem watcher for incremental re-indexing
 
+pub mod audit_spec;
 pub mod diff;
 pub mod doctor;
 pub mod indexer;
 pub mod mcp;
 pub mod queries;
+pub mod spec;
 pub mod store;
+pub mod verify_spec;
 pub mod watcher;

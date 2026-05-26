@@ -2,7 +2,7 @@
 name: mmcg
 description: Mastermind Codegraph — fast multi-language code indexer (Python + TypeScript/TSX + JavaScript/JSX + Rust + C# + Go + Java + PHP + C/C++) exposed over MCP. Indexes symbols, calls, and imports (with fully-qualified paths) into a local SQLite database (`.mastermind/mmcg.db`) and exposes 17 structural query tools for AI agents in the Mastermind workflow. Includes FTS5 search over `.mastermind/tasks/` and an incremental file watcher.
 metadata:
-  version: 0.15.0
+  version: 0.16.0
   authors:
     - mastermind
   tags:
@@ -110,6 +110,16 @@ mmcg status
 # `mmcg serve` handshake). Exit code 1 if any check fails — wire into CI.
 mmcg doctor                                          # human-readable report
 mmcg doctor --json                                   # machine-parseable
+
+# Pre-execution gate — verify a spec before handing off to the executor.
+# Catches missing symbols, missing files, empty mandatory sections, snapshot
+# drift, blast-radius warnings. Exit 1 on errors.
+mmcg verify-spec .mastermind/tasks/042-feature.md
+
+# Post-execution audit — compare spec contract against actual repo state.
+# Diffs against <git-ref> (typically `main` or merge-base). Flags scope creep,
+# pre-edit snapshot drift, vanished symbols. Exit 1 if verdict is `broken`.
+mmcg audit-spec .mastermind/tasks/042-feature.md --since main
 
 # One-shot queries (for agents, use the MCP server)
 mmcg query search PendingFile

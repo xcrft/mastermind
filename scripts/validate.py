@@ -374,6 +374,111 @@ MMCG_TEMPLATE_MIRRORS: list[tuple[str, str]] = [
 ]
 
 
+# ----- mmcg tool-list drift check ----------------------------------------
+
+# The authoritative list of MCP tools lives in `mcp/servers/mmcg/src/mcp.rs`
+# inside the `tools_list()` JSON. Every doc file that enumerates tools — top
+# READMEs, plugin manifests, marketplace entries — must mention every tool by
+# name, or it drifts and lies about the API. This validator extracts the tool
+# names from the Rust source and asserts they all appear in each docfile.
+
+MMCG_MCP_SRC = "mcp/servers/mmcg/src/mcp.rs"
+
+# Files that must reference every mmcg_* tool name. (Each may have one
+# canonical mention line; we only require *presence* of each tool name in the
+# file's text. False positives possible if a name appears in unrelated prose,
+# but mmcg_xxx names are sufficiently distinctive.)
+MMCG_TOOL_LIST_DOCS: list[str] = [
+    "mcp/servers/mmcg/README.md",
+    "README.md",
+    "plugins/mmcg/.claude-plugin/plugin.json",
+    ".claude-plugin/marketplace.json",
+]
+
+# Files that quote a tool *count* like "16 structural query tools" / "15 tools".
+# We extract counts and assert they all match the count derived from mcp.rs.
+MMCG_TOOL_COUNT_DOCS: list[str] = [
+    "mcp/servers/mmcg/README.md",
+    "README.md",
+    "plugins/mmcg/.claude-plugin/plugin.json",
+    ".claude-plugin/marketplace.json",
+]
+
+
+def extract_mmcg_tools() -> list[str]:
+    """Pull every `"name": "mmcg_xxx"` value from mcp.rs in declaration order.
+
+    The MCP tool definitions in `tools_list()` use JSON literals — a regex over
+    the `"name": "..."` keys is unambiguous because nothing else in mcp.rs uses
+    that exact pattern.
+    """
+    src = (REPO_ROOT / MMCG_MCP_SRC).read_text()
+    # Constrain to the tools_list() body to avoid catching the JSON-RPC
+    # `name` field in initialize_result() (which uses "name": "mmcg" — that
+    # would be a false positive).
+    start = src.find("fn tools_list()")
+    end = src.find("fn handle_tools_call", start) if start != -1 else -1
+    body = src[start:end] if start != -1 and end != -1 else src
+    return re.findall(r'"name":\s*"(mmcg_[a-z_]+)"', body)
+
+
+def validate_mmcg_tool_drift() -> list[Issue]:
+    issues: list[Issue] = []
+    src_path = REPO_ROOT / MMCG_MCP_SRC
+    if not src_path.is_file():
+        return [Issue(src_path, "error", "mcp.rs missing — cannot derive tool list")]
+
+    tools = extract_mmcg_tools()
+    if not tools:
+        issues.append(
+            Issue(src_path, "error", "could not extract any mmcg_* tool names from tools_list()")
+        )
+        return issues
+    canonical_count = len(tools)
+
+    # 1. Presence check — every tool name must appear in each docfile.
+    for rel in MMCG_TOOL_LIST_DOCS:
+        path = REPO_ROOT / rel
+        if not path.is_file():
+            issues.append(Issue(path, "error", f"missing doc file (referenced by tool-drift check)"))
+            continue
+        text = path.read_text()
+        for tool in tools:
+            # READMEs sometimes drop the `mmcg_` prefix (e.g. "search" / "callers"
+            # in inline lists). Accept either spelling.
+            short = tool.removeprefix("mmcg_")
+            if tool not in text and short not in text:
+                issues.append(
+                    Issue(
+                        path,
+                        "error",
+                        f"tool `{tool}` missing — declared in {MMCG_MCP_SRC} "
+                        f"but absent from this file",
+                    )
+                )
+
+    # 2. Count check — every "N structural query tools" / "N query tools" /
+    # "N tool" claim must equal canonical_count.
+    count_re = re.compile(r"(\d+)\s+(?:structural\s+)?(?:query\s+)?tools?\b")
+    for rel in MMCG_TOOL_COUNT_DOCS:
+        path = REPO_ROOT / rel
+        if not path.is_file():
+            continue
+        for m in count_re.finditer(path.read_text()):
+            stated = int(m.group(1))
+            if stated != canonical_count:
+                issues.append(
+                    Issue(
+                        path,
+                        "error",
+                        f"tool count drift — file says `{stated} tools` but "
+                        f"{MMCG_MCP_SRC} declares {canonical_count}",
+                    )
+                )
+
+    return issues
+
+
 def validate_mmcg_template_mirrors() -> list[Issue]:
     issues: list[Issue] = []
     for canonical_rel, mirror_rel in MMCG_TEMPLATE_MIRRORS:
@@ -485,6 +590,7 @@ def main(argv: list[str]) -> int:
     issues.extend(validate_installable_link_escape(rel_links))
 
     issues.extend(validate_mmcg_template_mirrors())
+    issues.extend(validate_mmcg_tool_drift())
 
     issues.sort(key=lambda i: (str(i.path), 0 if i.level == "error" else 1, i.msg))
     for i in issues:

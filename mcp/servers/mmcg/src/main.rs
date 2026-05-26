@@ -34,7 +34,7 @@ const SPEC_TEMPLATE: &str = include_str!("../templates/spec-template.md");
 #[command(
     name = "mmcg",
     version,
-    about = "Mastermind Codegraph — Python code indexer with MCP interface",
+    about = "Mastermind Codegraph — multi-language code indexer (Python, TS/JS, Rust, C#, Go, Java, PHP, C/C++) with MCP interface",
     long_about = None
 )]
 struct Cli {

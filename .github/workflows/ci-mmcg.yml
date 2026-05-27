@@ -55,6 +55,11 @@ on:
       - "agents/claude-md/mastermind-workflow.md"
       - "skills/workflow/mastermind-task-planning/references/spec-template.md"
       - "tests/ci-fixture/**"
+      # Self-watch — a fix to the workflow itself should validate immediately
+      # on merge, not wait for the next mmcg/spec change to piggyback on.
+      - ".github/workflows/ci-mmcg.yml"
+  # Manual trigger from the Actions tab for ad-hoc validation / debugging.
+  workflow_dispatch:
 
 concurrency:
   group: ci-mmcg-${{ github.ref }}

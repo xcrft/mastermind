@@ -64,6 +64,14 @@ pub enum Finding {
     /// Symbol present in pre-edit snapshot has no current entry in mmcg —
     /// renamed, deleted, or moved out of the indexed tree.
     SnapshotSymbolGone { symbol: String },
+    /// A symbol disappeared between baseline and HEAD AND the spec text
+    /// doesn't mention the name anywhere — silent breaking change. Spec
+    /// should acknowledge intentional removals in Goals / Notes.
+    RemovedSymbolNotAcknowledged { symbol: String, file: String },
+    /// The Tests Plan section names a test (`test_foo`, `it('bar')`, etc.)
+    /// that doesn't appear in `symbol_diff.added`. Either the executor
+    /// skipped it or the test name in the plan was wrong.
+    PlannedTestNotAdded { test: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -94,11 +102,13 @@ impl Report {
         ));
         for f in &self.findings {
             let icon = match f {
-                Finding::UnexpectedFile { .. } | Finding::MissingExpectedFile { .. } => "⚠️ ",
-                Finding::SnapshotCallerDrift { .. } | Finding::SnapshotSignatureDrift { .. } => {
-                    "⚠️ "
-                }
-                Finding::SnapshotSymbolGone { .. } => "❌",
+                Finding::UnexpectedFile { .. }
+                | Finding::MissingExpectedFile { .. }
+                | Finding::SnapshotCallerDrift { .. }
+                | Finding::SnapshotSignatureDrift { .. }
+                | Finding::PlannedTestNotAdded { .. } => "⚠️ ",
+                Finding::SnapshotSymbolGone { .. }
+                | Finding::RemovedSymbolNotAcknowledged { .. } => "❌",
             };
             out.push_str(&format!("  {icon} {}\n", render_finding(f)));
         }
@@ -143,6 +153,12 @@ fn render_finding(f: &Finding) -> String {
         }
         Finding::SnapshotSymbolGone { symbol } => {
             format!("snapshot_symbol_gone: `{symbol}` was in pre-edit snapshot, gone from index")
+        }
+        Finding::RemovedSymbolNotAcknowledged { symbol, file } => {
+            format!("removed_symbol_not_acknowledged: `{symbol}` deleted from `{file}` but spec doesn't mention it — potential silent breaking change")
+        }
+        Finding::PlannedTestNotAdded { test } => {
+            format!("planned_test_not_added: Tests Plan named `{test}` but the diff doesn't show a new function with that name")
         }
     }
 }
@@ -194,6 +210,49 @@ pub fn run(
     //    against live callers_of.
     for claim in &spec.pre_edit_snapshot {
         check_snapshot_claim(claim, store, &mut findings);
+    }
+
+    // 3. Removed-symbol-not-acknowledged — for every symbol that disappeared
+    //    in the git diff, check if the spec body mentions its name anywhere.
+    //    Concatenate all section bodies for the search; a removal mentioned
+    //    in Goals or Notes is intentional, otherwise it's a silent breaker.
+    let spec_body_lower = spec
+        .sections
+        .values()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_lowercase();
+    for removed in &symbol_diff.removed {
+        // Module-level synthetic symbols shouldn't trigger this — they're an
+        // artifact of file removal, not a public API delete.
+        if removed.kind == "module" {
+            continue;
+        }
+        let key = removed.name.to_lowercase();
+        if !spec_body_lower.contains(&key) {
+            findings.push(Finding::RemovedSymbolNotAcknowledged {
+                symbol: removed.name.clone(),
+                file: removed.file.clone(),
+            });
+        }
+    }
+
+    // 4. Test plan validation — extract test-function-name-shaped tokens from
+    //    Tests Plan, cross-reference against names added in symbol_diff.
+    if let Some(tests_body) = crate::spec::section_body(spec, "Tests Plan") {
+        let planned = extract_planned_test_names(tests_body);
+        let added_names: HashSet<&str> = symbol_diff
+            .added
+            .iter()
+            .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
+            .map(|s| s.name.as_str())
+            .collect();
+        for test in planned {
+            if !added_names.contains(test.as_str()) {
+                findings.push(Finding::PlannedTestNotAdded { test });
+            }
+        }
     }
 
     let verdict = compute_verdict(&findings);
@@ -248,13 +307,17 @@ fn check_snapshot_claim(claim: &SymbolClaim, store: &Store, findings: &mut Vec<F
 }
 
 fn compute_verdict(findings: &[Finding]) -> Verdict {
-    // SymbolGone is the only "contract broken" finding — a pre-edit symbol
-    // disappearing means the executor likely renamed/deleted it without
-    // saying so. Other findings are scope drift, not broken contracts.
-    if findings
-        .iter()
-        .any(|f| matches!(f, Finding::SnapshotSymbolGone { .. }))
-    {
+    // "Contract broken" = silent deletion of something the spec didn't warn
+    // about. Both SnapshotSymbolGone (pre-tracked symbol vanished) and
+    // RemovedSymbolNotAcknowledged (any symbol removed without spec mention)
+    // qualify — they're the strongest invariant violations we can detect
+    // mechanically.
+    if findings.iter().any(|f| {
+        matches!(
+            f,
+            Finding::SnapshotSymbolGone { .. } | Finding::RemovedSymbolNotAcknowledged { .. }
+        )
+    }) {
         return Verdict::Broken;
     }
     if findings.is_empty() {
@@ -262,6 +325,56 @@ fn compute_verdict(findings: &[Finding]) -> Verdict {
     } else {
         Verdict::Drift
     }
+}
+
+/// Heuristic test-name extractor over the Tests Plan section.
+///
+/// Recognises:
+/// - backticked tokens that look like test names (`test_*`, `*_test`, `it_*`)
+/// - bare-word `test_*` patterns even outside backticks (for plain bullets)
+///
+/// Returns deduplicated names in source order.
+fn extract_planned_test_names(body: &str) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+
+    // Pass 1: backticked tokens.
+    let mut chars = body.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c != '`' {
+            continue;
+        }
+        let rest = &body[i + 1..];
+        let Some(end) = rest.find('`') else { continue };
+        let token = &rest[..end];
+        if is_test_name(token) && seen.insert(token.to_string()) {
+            out.push(token.to_string());
+        }
+        for _ in 0..end + 1 {
+            chars.next();
+        }
+    }
+
+    // Pass 2: bare `test_*` words (often appear in unbacked bullets).
+    for word in body.split(|c: char| !c.is_alphanumeric() && c != '_') {
+        if is_test_name(word) && seen.insert(word.to_string()) {
+            out.push(word.to_string());
+        }
+    }
+    out
+}
+
+fn is_test_name(s: &str) -> bool {
+    if s.len() < 3 || s.len() > 100 {
+        return false;
+    }
+    if !s.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return false;
+    }
+    s.starts_with("test_")
+        || s.ends_with("_test")
+        || s.starts_with("it_")
+        || s.starts_with("should_")
 }
 
 #[cfg(test)]
@@ -429,6 +542,141 @@ Add caller2() in `src/lib.py`
         )));
         // Signature drift alone is a Drift verdict, not Broken.
         assert_eq!(r.verdict, Verdict::Drift);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn flags_removed_symbol_not_acknowledged() {
+        let dir = init_repo("removed_silent");
+        write(
+            &dir,
+            "src/lib.py",
+            "def will_be_removed(): pass\ndef stays(): pass\n",
+        );
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "baseline"]);
+        git(&dir, &["tag", "baseline"]);
+
+        // Executor silently removed `will_be_removed`.
+        write(&dir, "src/lib.py", "def stays(): pass\n");
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "head"]);
+
+        let db = dir.join("idx.db");
+        let mut store = Store::open(&db).unwrap();
+        Indexer::new(&dir).index_all(&mut store, false).unwrap();
+
+        // Spec only mentions `stays` — `will_be_removed` is silent.
+        let spec_body = "\
+## Goals
+- Keep `stays`
+## Alternatives Considered
+- A
+## Tests Plan
+- t
+## Documentation Plan
+- d
+## Observability Plan
+- n/a
+## Performance Considerations
+- O(1)
+";
+        let s = spec::parse_str("spec.md", spec_body);
+        let r = run(&s, &store, &dir, "baseline").unwrap();
+        assert!(r.findings.iter().any(|f| matches!(
+            f,
+            Finding::RemovedSymbolNotAcknowledged { symbol, .. } if symbol == "will_be_removed"
+        )));
+        assert_eq!(r.verdict, Verdict::Broken);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn does_not_flag_removed_symbol_acknowledged_in_spec() {
+        let dir = init_repo("removed_ack");
+        write(&dir, "src/lib.py", "def old_api(): pass\n");
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "baseline"]);
+        git(&dir, &["tag", "baseline"]);
+        write(&dir, "src/lib.py", "# replaced\n");
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "head"]);
+
+        let db = dir.join("idx.db");
+        let mut store = Store::open(&db).unwrap();
+        Indexer::new(&dir).index_all(&mut store, false).unwrap();
+
+        // Spec mentions old_api in Goals — intentional removal.
+        let spec_body = "\
+## Goals
+- Remove deprecated `old_api`
+## Alternatives Considered
+- A
+## Tests Plan
+- t
+## Documentation Plan
+- d
+## Observability Plan
+- n/a
+## Performance Considerations
+- O(1)
+";
+        let s = spec::parse_str("spec.md", spec_body);
+        let r = run(&s, &store, &dir, "baseline").unwrap();
+        assert!(!r.findings.iter().any(|f| matches!(
+            f,
+            Finding::RemovedSymbolNotAcknowledged { symbol, .. } if symbol == "old_api"
+        )));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn flags_planned_test_not_added() {
+        let dir = init_repo("test_not_added");
+        write(&dir, "src/lib.py", "def existing(): pass\n");
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "baseline"]);
+        git(&dir, &["tag", "baseline"]);
+
+        // Executor added `test_foo` but NOT `test_missing`.
+        write(
+            &dir,
+            "src/lib.py",
+            "def existing(): pass\ndef test_foo(): pass\n",
+        );
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "head"]);
+
+        let db = dir.join("idx.db");
+        let mut store = Store::open(&db).unwrap();
+        Indexer::new(&dir).index_all(&mut store, false).unwrap();
+
+        let spec_body = "\
+## Goals
+- Add tests
+## Alternatives Considered
+- A
+## Tests Plan
+- `test_foo` — covers happy path
+- `test_missing` — covers edge case
+## Documentation Plan
+- d
+## Observability Plan
+- n/a
+## Performance Considerations
+- O(1)
+";
+        let s = spec::parse_str("spec.md", spec_body);
+        let r = run(&s, &store, &dir, "baseline").unwrap();
+        assert!(r.findings.iter().any(|f| matches!(
+            f,
+            Finding::PlannedTestNotAdded { test } if test == "test_missing"
+        )));
+        // test_foo WAS added — should not be flagged.
+        assert!(!r.findings.iter().any(|f| matches!(
+            f,
+            Finding::PlannedTestNotAdded { test } if test == "test_foo"
+        )));
         fs::remove_dir_all(&dir).ok();
     }
 

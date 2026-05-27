@@ -36,6 +36,21 @@ pub struct ParsedSpec {
     pub mentioned_files: Vec<String>,
     /// VERIFY commands extracted from phase blocks.
     pub verify_commands: Vec<String>,
+    /// Per-phase FIND/CHANGE-TO/VERIFY triplets — used by verify-spec to
+    /// confirm the FIND text actually exists in the named file.
+    pub find_blocks: Vec<FindBlock>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct FindBlock {
+    /// File path the planner declared above this FIND (`**File:** \`<path>\``).
+    /// None when the spec didn't include a File marker — we still parse the
+    /// FIND text but verify-spec can't validate without a target.
+    pub file: Option<String>,
+    /// Raw FIND payload (whatever was between the triple backticks).
+    pub find_text: String,
+    /// Phase label for diagnostic output (`Phase 1.2`, etc.).
+    pub phase: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -67,6 +82,7 @@ pub fn parse_str(source_path: &str, body: &str) -> ParsedSpec {
         .unwrap_or_default();
     let mentioned_files = extract_mentioned_files(body);
     let verify_commands = extract_verify_commands(body);
+    let find_blocks = extract_find_blocks(body);
 
     ParsedSpec {
         path: source_path.to_string(),
@@ -75,6 +91,7 @@ pub fn parse_str(source_path: &str, body: &str) -> ParsedSpec {
         pre_edit_snapshot,
         mentioned_files,
         verify_commands,
+        find_blocks,
     }
 }
 
@@ -274,6 +291,106 @@ fn extract_verify_commands(body: &str) -> Vec<String> {
     out
 }
 
+/// Parse phase FIND blocks.
+///
+/// Format from `_spec-template.md`:
+/// - `## Phase 1: <name>` opens a phase
+/// - `### 1.2 <action>` opens a sub-step
+/// - `**File:** \`src/path.ext\`` sets the active target file
+/// - `FIND:` opens a fenced code block whose payload is the literal pattern
+///   the executor will replace
+///
+/// We track the most recently seen phase heading + the most recent
+/// `**File:**` line, then on `FIND:` followed by a fenced block emit a
+/// FindBlock with whatever context was active.
+fn extract_find_blocks(body: &str) -> Vec<FindBlock> {
+    let mut out: Vec<FindBlock> = Vec::new();
+    let mut current_file: Option<String> = None;
+    let mut current_phase: Option<String> = None;
+    let mut lines = body.lines().peekable();
+
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim();
+
+        // Track phase headings — both `## Phase N: ...` and `### N.M ...`.
+        if let Some(rest) = trimmed.strip_prefix("## ") {
+            if rest.to_lowercase().starts_with("phase ") {
+                current_phase = Some(rest.trim().to_string());
+                current_file = None; // file marker is scoped to a subsection
+            } else {
+                // Leaving phase territory — clear the trail.
+                current_phase = None;
+                current_file = None;
+            }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("### ") {
+            // Subphase heading inherits the parent phase label.
+            if let Some(parent) = &current_phase {
+                current_phase = Some(format!("{parent} / {}", rest.trim()));
+            } else {
+                current_phase = Some(rest.trim().to_string());
+            }
+            current_file = None;
+            continue;
+        }
+
+        // Track `**File:** \`<path>\`` markers.
+        if let Some(rest) = trimmed.strip_prefix("**File:**") {
+            current_file = parse_backticked(rest.trim());
+            continue;
+        }
+
+        // FIND: marker — next line should open a code fence; consume until
+        // closing fence, payload is everything between.
+        if trimmed == "FIND:" || trimmed == "**FIND:**" || trimmed == "**FIND**:" {
+            let mut payload = String::new();
+            // Skip blank lines, then expect fence opener.
+            let mut opened = false;
+            while let Some(next) = lines.peek() {
+                let nt = next.trim();
+                if nt.is_empty() && !opened {
+                    lines.next();
+                    continue;
+                }
+                if !opened {
+                    if nt.starts_with("```") {
+                        opened = true;
+                        lines.next();
+                        continue;
+                    }
+                    break; // No fence after FIND: — abandon this block.
+                }
+                if nt.starts_with("```") {
+                    lines.next();
+                    break;
+                }
+                payload.push_str(next);
+                payload.push('\n');
+                lines.next();
+            }
+            let payload = payload.trim_end_matches('\n').to_string();
+            if !payload.is_empty() {
+                out.push(FindBlock {
+                    file: current_file.clone(),
+                    find_text: payload,
+                    phase: current_phase.clone(),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// `\`<value>\`` → Some("value"); anything else → None. Used for `**File:**`
+/// markers and similar single-backticked-value patterns.
+fn parse_backticked(s: &str) -> Option<String> {
+    let s = s.trim();
+    s.strip_prefix('`')
+        .and_then(|r| r.strip_suffix('`'))
+        .map(|v| v.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,6 +485,45 @@ pub fn refresh(&self) -> Result<Session> {
             s.verify_commands,
             vec!["cargo test session_count_returns_current_size".to_string()]
         );
+    }
+
+    #[test]
+    fn extracts_find_blocks_with_file_and_phase_context() {
+        let body = "\
+## Phase 1: Add accessor
+
+### 1.1 Add session_count
+
+**File:** `src/session.rs`
+
+FIND:
+```rust
+pub fn refresh(&self) -> Result<Session> {
+```
+
+CHANGE TO:
+```rust
+pub fn session_count(&self) -> usize { ... }
+```
+
+### 1.2 Update tests
+
+**File:** `tests/session_test.rs`
+
+FIND:
+```rust
+fn old_test() {}
+```
+";
+        let s = parse_str("t.md", body);
+        assert_eq!(s.find_blocks.len(), 2);
+        let first = &s.find_blocks[0];
+        assert_eq!(first.file.as_deref(), Some("src/session.rs"));
+        assert!(first.phase.as_deref().unwrap().contains("Phase 1"));
+        assert!(first.find_text.contains("pub fn refresh"));
+        let second = &s.find_blocks[1];
+        assert_eq!(second.file.as_deref(), Some("tests/session_test.rs"));
+        assert!(second.phase.as_deref().unwrap().contains("1.2"));
     }
 
     #[test]

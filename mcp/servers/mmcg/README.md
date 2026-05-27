@@ -2,7 +2,7 @@
 name: mmcg
 description: Mastermind Codegraph — fast multi-language code indexer (Python + TypeScript/TSX + JavaScript/JSX + Rust + C# + Go + Java + PHP + C/C++) exposed over MCP. Indexes symbols, calls, and imports (with fully-qualified paths) into a local SQLite database (`.mastermind/mmcg.db`) and exposes 17 structural query tools for AI agents in the Mastermind workflow. Includes FTS5 search over `.mastermind/tasks/` and an incremental file watcher.
 metadata:
-  version: 0.19.0
+  version: 0.20.0
   authors:
     - mastermind
   tags:
@@ -25,7 +25,7 @@ metadata:
 
 A small, fast Rust binary that builds a structural index of a codebase (Python, TypeScript/TSX, JavaScript/JSX, Rust, C#, Go, Java, PHP, C/C++) and serves queries over MCP. Pair with the Mastermind workflow so the planner/executor reason from a real graph instead of grep heuristics.
 
-**Status — 0.19.0:** Python + TypeScript + JavaScript + Rust + C# + Go + Java + PHP + C/C++. Imports tracked with fully-qualified paths. File watcher. Incremental indexing. **Language filter** on all queries (defends against monorepo name collisions). **Rust type-method awareness** — `mmcg_callers SessionStore` now finds `SessionStore::new()` callers. **`mmcg_symbols_in_file`** — list all symbols in a file in source order. **Decorator/attribute-aware `mmcg_unreferenced`** — symbols decorated with framework registries (pytest, FastAPI, Triton, Rust `#[test]`, xUnit `[Fact]`, JUnit `@Test`, Spring `@GetMapping`, etc.) are excluded from dead-code candidates. **`mmcg verify-spec` / `audit-spec`** — mechanical pre/post gates around a `.mastermind/tasks/` spec. **`mmcg run-task`** (0.19.0) — deterministic two-phase orchestrator: verify → risk report → executor hand-off (or `--exec` to `claude -p`) → audit → release-notes draft, with state persistence between phases. **C/C++ support is best-effort** — see Limitations for precision caveats (macros, templates, headers).
+**Status — 0.20.0:** Python + TypeScript + JavaScript + Rust + C# + Go + Java + PHP + C/C++. Imports tracked with fully-qualified paths. File watcher. Incremental indexing. **Language filter** on all queries (defends against monorepo name collisions). **Rust type-method awareness** — `mmcg_callers SessionStore` now finds `SessionStore::new()` callers. **`mmcg_symbols_in_file`** — list all symbols in a file in source order. **Decorator/attribute-aware `mmcg_unreferenced`** — symbols decorated with framework registries (pytest, FastAPI, Triton, Rust `#[test]`, xUnit `[Fact]`, JUnit `@Test`, Spring `@GetMapping`, etc.) are excluded from dead-code candidates. **`mmcg verify-spec` / `audit-spec`** — mechanical pre/post gates around a `.mastermind/tasks/` spec. **`mmcg run-task`** (0.19.0) — deterministic two-phase orchestrator: verify → risk report → executor hand-off (or `--exec` to `claude -p`) → audit → release-notes draft, with state persistence between phases. **`mmcg setup claude`** (0.20.0) — safe MCP-config writer: diff-first, refuses to clobber, merges into existing `mcpServers`. **`mmcg init --profile`** (0.20.0) — stack-specific CONTEXT.md templates (typescript-api, react-native, python-fastapi, rust-cli) pre-seeded with conventions and canonical gotchas. **C/C++ support is best-effort** — see Limitations for precision caveats (macros, templates, headers).
 
 ## What it indexes
 
@@ -132,6 +132,24 @@ mmcg run-task .mastermind/tasks/042-feature.md --exec      # shell out to `claud
 mmcg run-task .mastermind/tasks/042-feature.md --reset     # drop state, force pre-flight
 mmcg run-task .mastermind/tasks/042-feature.md --pre-only  # never auto-resume into post
 mmcg run-task .mastermind/tasks/042-feature.md --post-only # requires state
+
+# Initialize a project with a stack-specific CONTEXT.md profile.
+# Templates pre-seed conventions, test/lint commands, and canonical gotchas.
+mmcg init --profile typescript-api    # Node.js HTTP/REST/GraphQL API
+mmcg init --profile react-native      # mobile (Expo or bare)
+mmcg init --profile python-fastapi    # async Python API
+mmcg init --profile rust-cli          # command-line tool
+mmcg init                              # default: generic CONTEXT.md
+
+# Register mmcg with Claude Code's MCP layer. Safe by default — prints a diff
+# and exits without writing unless `--write-mcp` is passed. Merges into existing
+# `mcpServers` (preserves other servers). Refuses to overwrite a customized
+# mmcg entry without `--force`.
+mmcg setup claude                                         # diff vs ~/.claude/.mcp.json (dry-run)
+mmcg setup claude --write-mcp                             # apply to ~/.claude/.mcp.json
+mmcg setup claude --project . --write-mcp                 # apply to ./.mcp.json
+mmcg setup claude --project . --write-mcp --with-workflow # also drop CLAUDE.md workflow template
+mmcg setup claude --write-mcp --force                     # overwrite a customized mmcg entry
 
 # One-shot queries (for agents, use the MCP server)
 mmcg query search PendingFile
@@ -288,8 +306,10 @@ mmcg serve
 | `src/audit_spec.rs` | Post-execution gate (scope creep, snapshot drift, removed-symbol-not-acknowledged, planned-test-not-added) |
 | `src/run_task.rs` | Two-phase orchestrator (`mmcg run-task`) — verify → risk report → executor → audit → release notes |
 | `src/doctor.rs` | `mmcg doctor` — environment health check (index, gitignore, CLAUDE.md markers, MCP config, handshake) |
+| `src/setup.rs` | `mmcg setup claude` — safe MCP-config writer (diff-first, atomic write, merge into existing `mcpServers`) |
+| `templates/profiles/*.md` | Stack-specific CONTEXT.md templates (`typescript-api`, `react-native`, `python-fastapi`, `rust-cli`) — picked via `mmcg init --profile <name>` |
 
-Tests live in `#[cfg(test)]` blocks in each module. Run with `cargo test` — 99 tests covering schema, queries, partial-class collapse, every extractor, spec parser, verify/audit gates, and the run-task orchestrator.
+Tests live in `#[cfg(test)]` blocks in each module. Run with `cargo test` — 112 tests covering schema, queries, partial-class collapse, every extractor, spec parser, verify/audit gates, the run-task orchestrator, and the setup/diff/merge helpers.
 
 ## Integration with the Mastermind workflow
 

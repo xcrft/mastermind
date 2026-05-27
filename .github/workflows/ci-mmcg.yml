@@ -8,17 +8,23 @@
 #   - validate.yml       (artifact-level frontmatter / link / template-mirror checks)
 #   - publish-mmcg.yml   (release pipeline on `mmcg-v*` tag)
 #
-# Matrix — 7 targets, all run on every PR:
+# Matrix — 6 targets, all run on every PR:
 #
 #   | Target                          | Runner            | Test runs natively |
 #   |---------------------------------|-------------------|--------------------|
 #   | x86_64-unknown-linux-gnu        | ubuntu-latest     | yes                |
 #   | aarch64-unknown-linux-gnu       | ubuntu-24.04-arm  | yes                |
-#   | x86_64-apple-darwin             | macos-13          | yes                |
 #   | aarch64-apple-darwin            | macos-latest      | yes                |
 #   | x86_64-pc-windows-msvc          | windows-latest    | yes                |
 #   | x86_64-unknown-linux-musl       | ubuntu-latest     | yes (same arch)    |
 #   | aarch64-unknown-linux-musl      | ubuntu-24.04-arm  | yes (same arch)    |
+#
+# macOS Intel (x86_64-apple-darwin / macos-13) is deliberately NOT in the
+# matrix — Apple has shifted the platform to Apple Silicon, GitHub's Intel
+# macOS runners are scarce + slow-to-queue, and our users on Intel Macs are
+# legacy. If a user actually needs an Intel-darwin binary, `cargo install
+# --target=x86_64-apple-darwin` still works locally; we just don't gate
+# every PR on it.
 #
 # Per-target steps: fmt --check, clippy -D warnings, test --all, build --release,
 # then the smoke pipeline (doctor JSON shape + verify-spec + audit-spec on the
@@ -76,9 +82,6 @@ jobs:
             install_musl: false
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
-            install_musl: false
-          - target: x86_64-apple-darwin
-            runner: macos-13
             install_musl: false
           - target: aarch64-apple-darwin
             runner: macos-latest
@@ -147,7 +150,11 @@ jobs:
           EXE=""
           [ "${{ runner.os }}" = "Windows" ] && EXE=".exe"
           BIN="$PWD/target/${{ matrix.target }}/release/mmcg${EXE}"
-          test -x "$BIN" || { echo "binary not found at $BIN"; ls -la "$PWD/target/${{ matrix.target }}/release/" || true; exit 1; }
+          # `test -f` instead of `test -x` — on Windows Git Bash, .exe files
+          # don't reliably have the MSYS x-bit set even though they execute.
+          # Existence is sufficient since cargo build --release wouldn't have
+          # produced a non-runnable file.
+          test -f "$BIN" || { echo "binary not at $BIN"; ls -la "$(dirname "$BIN")" || true; exit 1; }
           PROBE=$(mktemp -d)
           "$BIN" init "$PROBE" >/dev/null
           # doctor exits 1 in a bare scaffold (no MCP config) — that's fine

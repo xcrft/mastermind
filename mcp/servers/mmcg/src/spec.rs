@@ -100,6 +100,16 @@ pub struct Frontmatter {
     pub breaking_changes: BreakingChanges,
 }
 
+impl Frontmatter {
+    /// True when the frontmatter declares any file-scope information (touches
+    /// OR expected_docs). When true, verify-spec / audit-spec use the
+    /// frontmatter list AUTHORITATIVELY for file existence + scope checks
+    /// instead of merging the noisy heuristic backticked-path extraction.
+    pub fn has_file_scope(&self) -> bool {
+        !self.touches.is_empty() || !self.expected_docs.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TouchEntry {
     pub file: String,

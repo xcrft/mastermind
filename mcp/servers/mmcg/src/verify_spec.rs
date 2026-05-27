@@ -228,25 +228,30 @@ pub fn run(spec: &ParsedSpec, store: Option<&Store>, repo_root: &Path) -> Report
     }
 
     // 2. Mentioned files exist on disk.
-    //    When frontmatter is present, the AUTHORITATIVE file list is the union
-    //    of `touches[].file` and `expected_docs[]`. Heuristic mentioned_files
-    //    (backticked path-like tokens) still contributes to catch e.g. paths
-    //    only mentioned in prose — but those false-positive easily (a
-    //    "do not touch X" mention shouldn't flag X as missing). Dedup by path.
-    let mut files_to_check: Vec<String> = spec.mentioned_files.clone();
-    let mut seen: HashSet<String> = files_to_check.iter().cloned().collect();
-    if let Some(fm) = &spec.frontmatter {
-        for touch in &fm.touches {
-            if seen.insert(touch.file.clone()) {
-                files_to_check.push(touch.file.clone());
+    //    Frontmatter-authoritative when present: if frontmatter declares
+    //    `touches[]` or `expected_docs[]`, use ONLY that list. Heuristic
+    //    backticked-path-token extraction is too noisy for gates (it picks
+    //    up prose mentions like ``do not touch `README.md` `` as claims).
+    //    When frontmatter is absent (or has no file-scope fields), fall back
+    //    to the heuristic mentioned_files for backward compat.
+    let files_to_check: Vec<String> = match spec.frontmatter.as_ref() {
+        Some(fm) if fm.has_file_scope() => {
+            let mut seen: HashSet<String> = HashSet::new();
+            let mut out: Vec<String> = Vec::new();
+            for touch in &fm.touches {
+                if seen.insert(touch.file.clone()) {
+                    out.push(touch.file.clone());
+                }
             }
-        }
-        for doc in &fm.expected_docs {
-            if seen.insert(doc.clone()) {
-                files_to_check.push(doc.clone());
+            for doc in &fm.expected_docs {
+                if seen.insert(doc.clone()) {
+                    out.push(doc.clone());
+                }
             }
+            out
         }
-    }
+        _ => spec.mentioned_files.clone(),
+    };
     for rel in &files_to_check {
         let abs = repo_root.join(rel);
         if !abs.exists() {
@@ -816,6 +821,56 @@ verify:
             w,
             Finding::VerifyCommandNotFound { executable, .. } if executable == "typecheck"
         )));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn frontmatter_authoritative_ignores_prose_path_mentions() {
+        // Regression: prose mentions like ``do not touch `README.md` ``
+        // used to flag README.md as a claimed file (heuristic union path).
+        // When frontmatter declares file scope, the heuristic mentioned_files
+        // is ignored — frontmatter is authoritative.
+        let root = tmp();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/x.rs"), "fn x(){}").unwrap();
+        // No README.md on disk — the prose mention would flag MissingFile
+        // under the old union behavior.
+        let body = "---
+id: \"1\"
+touches:
+  - file: src/x.rs
+---
+
+## Goals
+- Edit `src/x.rs`. Do not touch `README.md` or `docs/guide.md`.
+## Alternatives Considered
+- A
+## Tests Plan
+- t
+## Documentation Plan
+- d
+## Observability Plan
+- n/a
+## Performance Considerations
+- O(1)
+";
+        let s = spec::parse_str("t.md", body);
+        let r = run(&s, None, &root);
+        // Heuristic would have flagged README.md and docs/guide.md as missing.
+        // Frontmatter authoritative → only src/x.rs is in scope (and exists).
+        assert!(
+            !r.errors
+                .iter()
+                .any(|e| matches!(e, Finding::MissingFile { file } if file == "README.md")),
+            "prose mention of README.md should not be treated as a claimed file"
+        );
+        assert!(
+            !r.errors
+                .iter()
+                .any(|e| matches!(e, Finding::MissingFile { file } if file == "docs/guide.md")),
+            "prose mention of docs/guide.md should not be treated as a claimed file"
+        );
+        assert_eq!(r.verdict, Verdict::Pass);
         fs::remove_dir_all(&root).ok();
     }
 

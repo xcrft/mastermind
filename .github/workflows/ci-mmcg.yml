@@ -1,12 +1,29 @@
-# Per-PR Rust CI for the mmcg crate.
+# Per-PR cross-platform Rust CI for the mmcg crate.
 #
 # Runs on PRs that touch mmcg source / Cargo files OR the canonical templates
 # whose mirrors are embedded into the crate. Skips PRs that only edit unrelated
 # docs/skills so we don't burn CI for content-only changes.
 #
 # Pairs with:
-#   - validate.yml (artifact-level frontmatter / link / template-mirror checks)
-#   - publish-mmcg.yml (release pipeline on `mmcg-v*` tag)
+#   - validate.yml       (artifact-level frontmatter / link / template-mirror checks)
+#   - publish-mmcg.yml   (release pipeline on `mmcg-v*` tag)
+#
+# Matrix — 7 targets, all run on every PR:
+#
+#   | Target                          | Runner            | Test runs natively |
+#   |---------------------------------|-------------------|--------------------|
+#   | x86_64-unknown-linux-gnu        | ubuntu-latest     | yes                |
+#   | aarch64-unknown-linux-gnu       | ubuntu-24.04-arm  | yes                |
+#   | x86_64-apple-darwin             | macos-13          | yes                |
+#   | aarch64-apple-darwin            | macos-latest      | yes                |
+#   | x86_64-pc-windows-msvc          | windows-latest    | yes                |
+#   | x86_64-unknown-linux-musl       | ubuntu-latest     | yes (same arch)    |
+#   | aarch64-unknown-linux-musl      | ubuntu-24.04-arm  | yes (same arch)    |
+#
+# Per-target steps: fmt --check, clippy -D warnings, test --all, build --release,
+# then the smoke pipeline (doctor JSON shape + verify-spec + audit-spec on the
+# committed tests/ci-fixture/). The matrix is wider than `cargo check` would
+# catch: musl-static linking, Windows path handling, macOS-specific syscalls.
 
 name: CI — mmcg
 
@@ -20,6 +37,9 @@ on:
       - "agents/claude-md/mastermind-context.md"
       - "agents/claude-md/mastermind-workflow.md"
       - "skills/workflow/mastermind-task-planning/references/spec-template.md"
+      # The CI fixture itself — changes here change what `verify-spec` /
+      # `audit-spec` see in every matrix entry.
+      - "tests/ci-fixture/**"
       - ".github/workflows/ci-mmcg.yml"
   push:
     branches: [main]
@@ -28,6 +48,7 @@ on:
       - "agents/claude-md/mastermind-context.md"
       - "agents/claude-md/mastermind-workflow.md"
       - "skills/workflow/mastermind-task-planning/references/spec-template.md"
+      - "tests/ci-fixture/**"
 
 concurrency:
   group: ci-mmcg-${{ github.ref }}
@@ -37,21 +58,56 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: cargo test + clippy + fmt
-    runs-on: ubuntu-latest
+  matrix:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
     defaults:
       run:
+        # bash on every runner (incl. Windows) so the smoke pipeline below is
+        # written once. GitHub-hosted Windows runners ship Git Bash.
+        shell: bash
         working-directory: mcp/servers/mmcg
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            install_musl: false
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            install_musl: false
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            install_musl: false
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            install_musl: false
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            install_musl: false
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            install_musl: true
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            install_musl: true
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install Rust toolchain (with clippy + rustfmt)
+      - name: Install Rust toolchain (with clippy + rustfmt + target)
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+          targets: ${{ matrix.target }}
+
+      # musl targets need musl-tools for the linker. Same Ubuntu runner, just
+      # `apt install` once. arm64-musl on ubuntu-24.04-arm uses the same package.
+      - name: Install musl-tools (musl targets only)
+        if: matrix.install_musl
+        run: sudo apt-get update -qq && sudo apt-get install -yq musl-tools
 
       - name: Cache cargo registry + target
         uses: actions/cache@v5
@@ -60,18 +116,83 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             mcp/servers/mmcg/target
-          key: ${{ runner.os }}-cargo-ci-${{ hashFiles('mcp/servers/mmcg/Cargo.lock') }}
+          # Per-target key so musl builds don't clobber gnu builds in the same
+          # OS's cache.
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('mcp/servers/mmcg/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-ci-
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
 
       - name: cargo fmt --check
+        # fmt is target-agnostic — run once is enough, but cheap to re-run here
+        # so a target-specific config change can't sneak through formatted code.
         run: cargo fmt --check
 
-      - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --target ${{ matrix.target }} -- -D warnings
 
-      - name: cargo test --lib
-        run: cargo test --lib
+      - name: cargo test --all
+        run: cargo test --all --target ${{ matrix.target }}
 
-      - name: cargo build --release (sanity)
-        run: cargo build --release
+      - name: cargo build --release
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # Smoke pipeline — the binary actually runs through its full surface on
+      # this target: indexer, SQLite, tree-sitter, git shellouts, frontmatter
+      # parser, verify/audit gates. A pure cargo test misses platform regressions
+      # in subprocess invocation, path handling, and SQLite C bindings.
+      - name: smoke — mmcg doctor produces valid JSON
+        run: |
+          set -e
+          # Windows targets get `.exe` suffixed by cargo.
+          EXE=""
+          [ "${{ runner.os }}" = "Windows" ] && EXE=".exe"
+          BIN="$PWD/target/${{ matrix.target }}/release/mmcg${EXE}"
+          test -x "$BIN" || { echo "binary not found at $BIN"; ls -la "$PWD/target/${{ matrix.target }}/release/" || true; exit 1; }
+          PROBE=$(mktemp -d)
+          "$BIN" init "$PROBE" >/dev/null
+          # doctor exits 1 in a bare scaffold (no MCP config) — that's fine
+          # for the smoke. Validate the JSON is well-formed regardless of
+          # exit code (proves the binary runs and produces parseable output).
+          "$BIN" doctor --json --index "$PROBE/.mastermind/mmcg.db" "$PROBE" > "$PROBE/doctor.json" || true
+          # python3 on Linux/macOS, python on Windows (Git Bash uses the
+          # `python` launcher).
+          if command -v python3 >/dev/null 2>&1; then
+            PY=python3
+          else
+            PY=python
+          fi
+          "$PY" -c "import json; d = json.load(open(r'$PROBE/doctor.json')); assert 'checks' in d, d"
+          rm -rf "$PROBE"
+
+      - name: smoke — verify-spec + audit-spec on tests/ci-fixture
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -e
+          EXE=""
+          [ "${{ runner.os }}" = "Windows" ] && EXE=".exe"
+          BIN="$PWD/mcp/servers/mmcg/target/${{ matrix.target }}/release/mmcg${EXE}"
+          SMOKE=$(mktemp -d)
+          cp -R tests/ci-fixture/* "$SMOKE/"
+          cd "$SMOKE"
+          git init -q -b main
+          git config user.email "ci@mmcg"
+          git config user.name "ci"
+          git config commit.gpgsign false
+          mkdir -p .mastermind
+          printf '*\n!.gitignore\n' > .mastermind/.gitignore
+          git add -A
+          git -c commit.gpgsign=false commit -q -m baseline
+          git tag baseline
+          "$BIN" index .
+          # verify-spec must Pass (exit 0).
+          "$BIN" verify-spec spec.md
+          # Introduce a benign change so audit has something to compare against.
+          printf '\ndef new_helper() -> None:\n    pass\n' >> src/lib.py
+          git add -A
+          git -c commit.gpgsign=false commit -q -m "executor step"
+          "$BIN" index .
+          # audit-spec exits 0 on Held or Drift, 1 on Broken. For this fixture
+          # the verdict is Drift (the heuristic planned-test detector flags
+          # `test_smoke_passes`, documented as warning-only) — exit 0 expected.
+          "$BIN" audit-spec spec.md --since baseline
+          rm -rf "$SMOKE"

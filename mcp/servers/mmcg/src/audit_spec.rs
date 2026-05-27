@@ -176,15 +176,33 @@ pub fn run(
     let symbol_diff = diff::symbols_changed_since(store, repo_root, git_ref)?;
     let mut findings: Vec<Finding> = Vec::new();
 
-    // 1. File scope check — symmetric difference of spec.mentioned_files vs
-    //    git diff --name-only. Mentioned files that are doc-only (README.md
-    //    etc.) are still counted; the LLM auditor decides if scope makes sense.
+    // 1. File scope check — symmetric difference of declared files vs
+    //    git diff --name-only.
     //
-    //    Filter out `.mastermind/` from the diff side — that directory is
-    //    local working state (the index DB, the specs themselves) and is
-    //    universally gitignored in real projects. When a fixture eval commits
-    //    it for test reasons, we'd otherwise drown the report in noise.
-    let spec_files: HashSet<&str> = spec.mentioned_files.iter().map(String::as_str).collect();
+    //    Frontmatter-authoritative when present: `touches[].file` +
+    //    `expected_docs[]` are the declared set. Heuristic mentioned_files
+    //    (backticked path tokens) is too noisy — picks up prose mentions
+    //    like ``do not touch `README.md` `` and flags scope creep on files
+    //    the planner never claimed.
+    //
+    //    Filter `.mastermind/` from the diff side — that directory is local
+    //    working state (index DB, specs themselves), universally gitignored
+    //    in real projects; CI fixtures commit it for test reasons.
+    let spec_files_owned: Vec<String> = match spec.frontmatter.as_ref() {
+        Some(fm) if fm.has_file_scope() => {
+            let mut out: Vec<String> =
+                Vec::with_capacity(fm.touches.len() + fm.expected_docs.len());
+            for t in &fm.touches {
+                out.push(t.file.clone());
+            }
+            for d in &fm.expected_docs {
+                out.push(d.clone());
+            }
+            out
+        }
+        _ => spec.mentioned_files.clone(),
+    };
+    let spec_files: HashSet<&str> = spec_files_owned.iter().map(String::as_str).collect();
     let diff_files: HashSet<&str> = symbol_diff
         .files_in_diff
         .iter()

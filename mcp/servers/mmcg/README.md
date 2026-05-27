@@ -2,7 +2,7 @@
 name: mmcg
 description: Mastermind Codegraph — fast multi-language code indexer (Python + TypeScript/TSX + JavaScript/JSX + Rust + C# + Go + Java + PHP + C/C++) exposed over MCP. Indexes symbols, calls, and imports (with fully-qualified paths) into a local SQLite database (`.mastermind/mmcg.db`) and exposes 17 structural query tools for AI agents in the Mastermind workflow. Includes FTS5 search over `.mastermind/tasks/` and an incremental file watcher.
 metadata:
-  version: 0.21.0
+  version: 0.21.1
   authors:
     - mastermind
   tags:
@@ -313,7 +313,9 @@ mmcg serve
 | `src/setup.rs` | `mmcg setup claude` — safe MCP-config writer (diff-first, atomic write, merge into existing `mcpServers`) |
 | `templates/profiles/*.md` | Stack-specific CONTEXT.md templates (`typescript-api`, `react-native`, `python-fastapi`, `rust-cli`) — picked via `mmcg init --profile <name>` |
 
-Tests live in `#[cfg(test)]` blocks in each module. Run with `cargo test` — 124 tests covering schema, queries, partial-class collapse, every extractor, spec parser (incl. YAML frontmatter), verify/audit gates (incl. frontmatter-scoped symbol checks and breaking-change ack), the run-task orchestrator (incl. the index-required gate), and the setup/diff/merge helpers.
+Tests live in `#[cfg(test)]` blocks in each module. Run with `cargo test` — 125 tests covering schema, queries, partial-class collapse, every extractor, spec parser (incl. YAML frontmatter), verify/audit gates (incl. frontmatter-authoritative file scope, file+language-scoped symbol checks, breaking-change ack), the run-task orchestrator (incl. the index-required gate), and the setup/diff/merge helpers.
+
+CI (`.github/workflows/ci-mmcg.yml`) runs the full suite plus an end-to-end smoke (`mmcg doctor --json` + `mmcg verify-spec` + `mmcg audit-spec` against `tests/ci-fixture/`) on a 7-target matrix every PR: x86_64/aarch64 Linux gnu + musl, x86_64/aarch64 macOS, x86_64 Windows.
 
 ## Integration with the Mastermind workflow
 

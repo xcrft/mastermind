@@ -77,7 +77,15 @@ fn extract_module_constants(
         // grep-like search but huge dict/list literals would explode storage.
         let one_line: String = s.split('\n').next().unwrap_or(s).trim().to_string();
         if one_line.len() > 120 {
-            format!("{}…", &one_line[..120])
+            // Walk back to a UTF-8 char boundary — a fixed byte slice at 120
+            // panics when it lands inside a multi-byte char (e.g. CJK constants
+            // like `WYNTXT_JA = "はい、…"`). `is_char_boundary` is O(1) and
+            // walks back at most 3 bytes (max UTF-8 code-point length is 4).
+            let mut end = 120;
+            while end > 0 && !one_line.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}…", &one_line[..end])
         } else {
             one_line
         }
@@ -645,5 +653,30 @@ mod tests {
             .find(|s| s.name == "MAX_RETRIES" && s.kind == "constant")
             .unwrap();
         assert_eq!(max_retries.signature.as_deref(), Some("MAX_RETRIES = 5"));
+    }
+
+    /// Regression test for the UTF-8 char-boundary panic that crashed indexing
+    /// of any Python file containing a long CJK / emoji / multi-byte constant.
+    /// Before the fix, `&one_line[..120]` panicked when byte 120 landed inside
+    /// a multi-byte character (e.g. Japanese 'す' = 3 bytes).
+    #[test]
+    fn long_multibyte_constant_does_not_panic_on_signature_truncation() {
+        // Japanese sentence ~360 bytes (120+ chars × 3 bytes each).
+        let body = "WYNTXT_JA = \"はい、ウィンダムリワードに登録して無料宿泊ポイントを獲得したいと思います。[ウィンダムホテルグループLLC](https://example.com)、[追加開示事項](https://example.com)、および[利用規約](https://example.com)を読み、同意します。\"\n";
+        let path = write_tmp("multibyte.py", body);
+        let root = path.parent().unwrap();
+        // Must NOT panic. Before fix: thread panicked at python.rs:80 with
+        // "end byte index 120 is not a char boundary; it is inside 'す'".
+        let pending = parse_one(&path, root, &PythonExtractor).unwrap();
+        let sym = pending
+            .symbols
+            .iter()
+            .find(|s| s.name == "WYNTXT_JA")
+            .expect("constant extracted");
+        let sig = sym.signature.as_deref().expect("signature present");
+        // Truncated form must still be valid UTF-8 (we built it from a String)
+        // and end with the ellipsis we appended.
+        assert!(sig.ends_with('…'), "signature should be ellipsis-truncated: {sig}");
+        assert!(sig.len() <= 124, "truncated signature stays within ~120 bytes + 3-byte ellipsis: got {}", sig.len());
     }
 }

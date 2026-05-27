@@ -23,6 +23,7 @@ pub mod doctor;
 pub mod indexer;
 pub mod mcp;
 pub mod queries;
+pub mod run_task;
 pub mod spec;
 pub mod store;
 pub mod verify_spec;

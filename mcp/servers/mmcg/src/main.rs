@@ -125,6 +125,34 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Two-phase orchestrator that wraps the mastermind workflow in mechanical
+    /// gates. Auto-resumes via `.mastermind/run-state/<basename>.json`.
+    ///
+    ///   Pre-flight  — `verify-spec` + risk report + state write + hand-off.
+    ///   Post-flight — `audit-spec` vs the recorded baseline ref; on Held,
+    ///                 emits release notes to stdout + `.mastermind/releases/`.
+    ///
+    /// Defaults to hand-off semantics — print "now invoke the executor and
+    /// re-run". Pass `--exec` to shell out to `claude -p` between phases.
+    RunTask {
+        /// Path to the spec file (typically under `.mastermind/tasks/`).
+        spec: PathBuf,
+        /// Project root the spec's file paths resolve against. Defaults to cwd.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Drop existing state and force pre-flight even if state exists.
+        #[arg(long)]
+        reset: bool,
+        /// Run only pre-flight (verify + risk report + state write); never auto-resume.
+        #[arg(long)]
+        pre_only: bool,
+        /// Run only post-flight (errors if no state file).
+        #[arg(long)]
+        post_only: bool,
+        /// Shell out to `claude -p` synchronously between phases. Default: hand-off only.
+        #[arg(long)]
+        exec: bool,
+    },
     /// One-shot query — handy for CLI debugging without going through MCP.
     #[command(subcommand)]
     Query(QueryCmd),
@@ -370,6 +398,36 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             // Exit non-zero so CI / shell scripts can react; bypass the
             // generic error-printing path in main().
             if report.has_failures() {
+                std::process::exit(1);
+            }
+        }
+        Cmd::RunTask {
+            spec,
+            root,
+            reset,
+            pre_only,
+            post_only,
+            exec,
+        } => {
+            let root = root
+                .canonicalize()
+                .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
+            let opts = mmcg::run_task::RunOpts {
+                reset,
+                pre_only,
+                post_only,
+                exec,
+            };
+            let outcome = mmcg::run_task::run(&spec, &root, &index_path, opts);
+            // Map outcomes to exit codes: gate failures / contract breaks /
+            // executor failures all surface as non-zero so CI / shell pipelines
+            // can react. PostDrift is deliberately exit 0 — warnings, not blocks.
+            if matches!(
+                outcome,
+                mmcg::run_task::Outcome::PreFailed
+                    | mmcg::run_task::Outcome::PostBroken
+                    | mmcg::run_task::Outcome::ExecFailed
+            ) {
                 std::process::exit(1);
             }
         }

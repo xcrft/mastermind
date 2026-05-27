@@ -2,7 +2,7 @@
 name: mmcg
 description: Mastermind Codegraph — fast multi-language code indexer (Python + TypeScript/TSX + JavaScript/JSX + Rust + C# + Go + Java + PHP + C/C++) exposed over MCP. Indexes symbols, calls, and imports (with fully-qualified paths) into a local SQLite database (`.mastermind/mmcg.db`) and exposes 17 structural query tools for AI agents in the Mastermind workflow. Includes FTS5 search over `.mastermind/tasks/` and an incremental file watcher.
 metadata:
-  version: 0.18.0
+  version: 0.19.0
   authors:
     - mastermind
   tags:
@@ -25,7 +25,7 @@ metadata:
 
 A small, fast Rust binary that builds a structural index of a codebase (Python, TypeScript/TSX, JavaScript/JSX, Rust, C#, Go, Java, PHP, C/C++) and serves queries over MCP. Pair with the Mastermind workflow so the planner/executor reason from a real graph instead of grep heuristics.
 
-**Status — 0.14.0:** Python + TypeScript + JavaScript + Rust + C# + Go + Java + PHP + C/C++. Imports tracked with fully-qualified paths. File watcher. Incremental indexing. **Language filter** on all queries (defends against monorepo name collisions). **Rust type-method awareness** — `mmcg_callers SessionStore` now finds `SessionStore::new()` callers. **`mmcg_symbols_in_file`** — list all symbols in a file in source order. **Decorator/attribute-aware `mmcg_unreferenced`** — symbols decorated with framework registries (pytest, FastAPI, Triton, Rust `#[test]`, xUnit `[Fact]`, JUnit `@Test`, Spring `@GetMapping`, etc.) are excluded from dead-code candidates. **C/C++ support is best-effort** — see Limitations for precision caveats (macros, templates, headers).
+**Status — 0.19.0:** Python + TypeScript + JavaScript + Rust + C# + Go + Java + PHP + C/C++. Imports tracked with fully-qualified paths. File watcher. Incremental indexing. **Language filter** on all queries (defends against monorepo name collisions). **Rust type-method awareness** — `mmcg_callers SessionStore` now finds `SessionStore::new()` callers. **`mmcg_symbols_in_file`** — list all symbols in a file in source order. **Decorator/attribute-aware `mmcg_unreferenced`** — symbols decorated with framework registries (pytest, FastAPI, Triton, Rust `#[test]`, xUnit `[Fact]`, JUnit `@Test`, Spring `@GetMapping`, etc.) are excluded from dead-code candidates. **`mmcg verify-spec` / `audit-spec`** — mechanical pre/post gates around a `.mastermind/tasks/` spec. **`mmcg run-task`** (0.19.0) — deterministic two-phase orchestrator: verify → risk report → executor hand-off (or `--exec` to `claude -p`) → audit → release-notes draft, with state persistence between phases. **C/C++ support is best-effort** — see Limitations for precision caveats (macros, templates, headers).
 
 ## What it indexes
 
@@ -121,6 +121,18 @@ mmcg verify-spec .mastermind/tasks/042-feature.md
 # pre-edit snapshot drift, vanished symbols. Exit 1 if verdict is `broken`.
 mmcg audit-spec .mastermind/tasks/042-feature.md --since main
 
+# Two-phase orchestrator: deterministic shell around the executor.
+#   1st invocation → verify-spec + risk report + write state
+#                    (.mastermind/run-state/<spec>.json), captures git HEAD as baseline
+#   2nd invocation (after executor) → audit-spec vs baseline; on Held verdict, emit
+#                    release-notes draft to stdout AND .mastermind/releases/<spec>.md;
+#                    clear state. Drift/Broken keeps state for retry after fixes.
+mmcg run-task .mastermind/tasks/042-feature.md             # hand-off semantics
+mmcg run-task .mastermind/tasks/042-feature.md --exec      # shell out to `claude -p` between phases
+mmcg run-task .mastermind/tasks/042-feature.md --reset     # drop state, force pre-flight
+mmcg run-task .mastermind/tasks/042-feature.md --pre-only  # never auto-resume into post
+mmcg run-task .mastermind/tasks/042-feature.md --post-only # requires state
+
 # One-shot queries (for agents, use the MCP server)
 mmcg query search PendingFile
 mmcg query callers commit_file
@@ -184,7 +196,7 @@ Add to your MCP client config (e.g. `~/.claude/mcp.json` or `claude_desktop_conf
 
 For best results, run `mmcg watch` in a separate terminal so the index stays current while you work.
 
-## MCP tools exposed (12)
+## MCP tools exposed (17)
 
 | Tool | Args | What it returns |
 |---|---|---|
@@ -270,8 +282,14 @@ mmcg serve
 | `src/queries.rs` | High-level query API with serializable response types |
 | `src/mcp.rs` | JSON-RPC over stdio, MCP `initialize`/`tools/list`/`tools/call` |
 | `src/watcher.rs` | notify-based filesystem watcher with debouncing |
+| `src/diff.rs` | Git-ref-based symbol diff — powers `mmcg_symbols_changed_since` and the audit's `--since` |
+| `src/spec.rs` | Lenient parser for `.mastermind/tasks/XXX-*.md` — sections, pre-edit snapshot, FIND blocks, VERIFY commands |
+| `src/verify_spec.rs` | Pre-execution gate (mandatory sections, missing symbols/files, snapshot drift, FIND staleness, VERIFY PATH) |
+| `src/audit_spec.rs` | Post-execution gate (scope creep, snapshot drift, removed-symbol-not-acknowledged, planned-test-not-added) |
+| `src/run_task.rs` | Two-phase orchestrator (`mmcg run-task`) — verify → risk report → executor → audit → release notes |
+| `src/doctor.rs` | `mmcg doctor` — environment health check (index, gitignore, CLAUDE.md markers, MCP config, handshake) |
 
-Tests live in `#[cfg(test)]` blocks in each module. Run with `cargo test` — 53 tests covering schema, queries, partial-class collapse, and every extractor.
+Tests live in `#[cfg(test)]` blocks in each module. Run with `cargo test` — 99 tests covering schema, queries, partial-class collapse, every extractor, spec parser, verify/audit gates, and the run-task orchestrator.
 
 ## Integration with the Mastermind workflow
 

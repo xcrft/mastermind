@@ -21,8 +21,8 @@
     {
       "name": "mmcg",
       "source": "./plugins/mmcg",
-      "description": "Mastermind Codegraph MCP server. Fast multi-language code indexer (Python, TypeScript/TSX, JavaScript/JSX, Rust, C#, Go, Java, PHP, C/C++) with 17 tools (search, callers/callees with edge_kind filter, impact, imports/imported_by, files, symbols_in_file, outline, recent_changes, unreferenced, api_surface, centrality, tasks, dependency_cycles, symbols_changed_since, status). Local SQLite + tree-sitter, incremental watcher, FTS5 over `.mastermind/tasks/`. Truth layer for the mastermind workflow. C/C++ best-effort (see README Limitations).",
-      "version": "0.18.0",
+      "description": "Mastermind Codegraph MCP server. Fast multi-language code indexer (Python, TypeScript/TSX, JavaScript/JSX, Rust, C#, Go, Java, PHP, C/C++) with 17 tools (search, callers/callees with edge_kind filter, impact, imports/imported_by, files, symbols_in_file, outline, recent_changes, unreferenced, api_surface, centrality, tasks, dependency_cycles, symbols_changed_since, status). Plus the `mmcg run-task` CLI orchestrator wrapping verify-spec → risk report → executor → audit-spec → release-notes draft. Local SQLite + tree-sitter, incremental watcher, FTS5 over `.mastermind/tasks/`. Truth layer for the mastermind workflow. C/C++ best-effort (see README Limitations).",
+      "version": "0.19.0",
       "category": "development",
       "keywords": ["mcp", "codegraph", "indexer", "rust", "python", "typescript", "csharp", "go", "java", "php", "cpp"]
     },

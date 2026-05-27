@@ -53,6 +53,14 @@ pub enum Finding {
         spec_says: u32,
         index_says: u32,
     },
+    /// Pre-edit snapshot signature != current signature of the same symbol.
+    /// Could be intentional (executor changed param shape) or a side-effect.
+    /// LLM auditor decides; we just flag the mechanical fact.
+    SnapshotSignatureDrift {
+        symbol: String,
+        spec_says: String,
+        index_says: Option<String>,
+    },
     /// Symbol present in pre-edit snapshot has no current entry in mmcg —
     /// renamed, deleted, or moved out of the indexed tree.
     SnapshotSymbolGone { symbol: String },
@@ -87,7 +95,9 @@ impl Report {
         for f in &self.findings {
             let icon = match f {
                 Finding::UnexpectedFile { .. } | Finding::MissingExpectedFile { .. } => "⚠️ ",
-                Finding::SnapshotCallerDrift { .. } => "⚠️ ",
+                Finding::SnapshotCallerDrift { .. } | Finding::SnapshotSignatureDrift { .. } => {
+                    "⚠️ "
+                }
                 Finding::SnapshotSymbolGone { .. } => "❌",
             };
             out.push_str(&format!("  {icon} {}\n", render_finding(f)));
@@ -122,6 +132,14 @@ fn render_finding(f: &Finding) -> String {
             index_says,
         } => {
             format!("snapshot_caller_drift: `{symbol}` pre-edit said {spec_says} callers, post-edit {index_says}")
+        }
+        Finding::SnapshotSignatureDrift {
+            symbol,
+            spec_says,
+            index_says,
+        } => {
+            let live = index_says.as_deref().unwrap_or("<no signature stored>");
+            format!("snapshot_signature_drift: `{symbol}` pre-edit signature was `{spec_says}`, post-edit `{live}` — confirm change was intentional")
         }
         Finding::SnapshotSymbolGone { symbol } => {
             format!("snapshot_symbol_gone: `{symbol}` was in pre-edit snapshot, gone from index")
@@ -209,6 +227,21 @@ fn check_snapshot_claim(claim: &SymbolClaim, store: &Store, findings: &mut Vec<F
                 symbol: claim.name.clone(),
                 spec_says: spec_count,
                 index_says: live,
+            });
+        }
+    }
+    // Signature comparison — same any-match rule as verify_spec (multiple
+    // matches accepted if at least one signature still matches the claim).
+    if let Some(spec_sig) = &claim.signature {
+        let live_sigs: Vec<Option<String>> = hits.iter().map(|s| s.signature.clone()).collect();
+        let any_match = live_sigs
+            .iter()
+            .any(|s| s.as_deref() == Some(spec_sig.as_str()));
+        if !any_match {
+            findings.push(Finding::SnapshotSignatureDrift {
+                symbol: claim.name.clone(),
+                spec_says: spec_sig.clone(),
+                index_says: live_sigs.into_iter().flatten().next(),
             });
         }
     }
@@ -345,6 +378,57 @@ Add caller2() in `src/lib.py`
         assert!(r.findings.iter().any(|f| matches!(f, Finding::SnapshotCallerDrift { symbol, spec_says, index_says } if symbol == "helper" && *spec_says == 1 && *index_says == 2)));
         assert_eq!(r.verdict, Verdict::Drift);
 
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn flags_signature_drift() {
+        let dir = init_repo("sig_drift");
+        // Baseline: refresh() takes no params.
+        write(&dir, "src/lib.py", "def refresh():\n    return 1\n");
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "baseline"]);
+        git(&dir, &["tag", "baseline"]);
+
+        // Executor changed signature: added a `force` param.
+        write(
+            &dir,
+            "src/lib.py",
+            "def refresh(force=False):\n    return 1\n",
+        );
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "head"]);
+
+        let db = dir.join("idx.db");
+        let mut store = Store::open(&db).unwrap();
+        Indexer::new(&dir).index_all(&mut store, false).unwrap();
+
+        // Spec recorded the OLD signature in the snapshot.
+        let spec_body = "\
+## Goals
+- Refactor `refresh`
+## Alternatives Considered
+- A
+## Pre-edit symbol snapshot
+- `refresh` — 0 callers, signature `def refresh()`
+## Tests Plan
+- t
+## Documentation Plan
+- d
+## Observability Plan
+- n/a
+## Performance Considerations
+- O(1)
+";
+        let s = spec::parse_str("spec.md", spec_body);
+        let r = run(&s, &store, &dir, "baseline").unwrap();
+        assert!(r.findings.iter().any(|f| matches!(
+            f,
+            Finding::SnapshotSignatureDrift { symbol, spec_says, .. }
+                if symbol == "refresh" && spec_says == "def refresh()"
+        )));
+        // Signature drift alone is a Drift verdict, not Broken.
+        assert_eq!(r.verdict, Verdict::Drift);
         fs::remove_dir_all(&dir).ok();
     }
 

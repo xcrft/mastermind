@@ -74,6 +74,14 @@ pub enum Finding {
         spec_says: u32,
         index_says: u32,
     },
+    /// Pre-edit snapshot signature doesn't match the live index. Same staleness
+    /// signal — somebody (or another commit) changed the signature between
+    /// when the planner ran `mmcg_search` and now.
+    SnapshotSignatureDrift {
+        symbol: String,
+        spec_says: String,
+        index_says: Option<String>,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -139,6 +147,14 @@ fn render_finding(f: &Finding) -> String {
             index_says,
         } => {
             format!("snapshot_drift: spec says `{symbol}` has {spec_says} callers, index says {index_says} — re-run `mmcg_callers {symbol}`")
+        }
+        Finding::SnapshotSignatureDrift {
+            symbol,
+            spec_says,
+            index_says,
+        } => {
+            let live = index_says.as_deref().unwrap_or("<no signature stored>");
+            format!("snapshot_signature_drift: spec says `{symbol}` signature is `{spec_says}`, index says `{live}` — re-run `mmcg_search {symbol}`")
         }
     }
 }
@@ -216,23 +232,40 @@ fn check_symbol_claim(
         return;
     }
     // Caller-count check — compare spec's stated count against the live index.
-    let live = match store.callers_of(&claim.name, None, None) {
+    let live_callers = match store.callers_of(&claim.name, None, None) {
         Ok(callers) => callers.len() as u32,
         Err(_) => return,
     };
     if let Some(spec_count) = claim.callers {
-        if spec_count != live {
+        if spec_count != live_callers {
             errors.push(Finding::SnapshotCallerCountDrift {
                 symbol: claim.name.clone(),
                 spec_says: spec_count,
-                index_says: live,
+                index_says: live_callers,
             });
         }
     }
-    if live >= BLAST_RADIUS_WARN {
+    // Signature check — if the bullet recorded a signature, the live signature
+    // of any matching symbol must equal it. Multiple matches (e.g. C# partial
+    // class collisions, monorepo same-name in two languages) → pass if ANY
+    // matches; the planner has the language filter to disambiguate elsewhere.
+    if let Some(spec_sig) = &claim.signature {
+        let live_sigs: Vec<Option<String>> = hits.iter().map(|s| s.signature.clone()).collect();
+        let any_match = live_sigs
+            .iter()
+            .any(|s| s.as_deref() == Some(spec_sig.as_str()));
+        if !any_match {
+            errors.push(Finding::SnapshotSignatureDrift {
+                symbol: claim.name.clone(),
+                spec_says: spec_sig.clone(),
+                index_says: live_sigs.into_iter().flatten().next(),
+            });
+        }
+    }
+    if live_callers >= BLAST_RADIUS_WARN {
         warnings.push(Finding::LargeBlastRadius {
             symbol: claim.name.clone(),
-            callers: live,
+            callers: live_callers,
             threshold: BLAST_RADIUS_WARN,
         });
     }

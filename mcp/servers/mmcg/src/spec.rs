@@ -44,6 +44,10 @@ pub struct SymbolClaim {
     /// Caller count the planner recorded at snapshot time. None if the
     /// bullet line didn't say (e.g., just `- \`foo\` — added in this spec`).
     pub callers: Option<u32>,
+    /// Signature the planner recorded via `mmcg_search <name>`. Extracted from
+    /// `signature \`<sig>\`` after the caller count in a snapshot bullet.
+    /// None if absent — that's allowed (signature claim is opt-in evidence).
+    pub signature: Option<String>,
     /// Raw bullet text for hint in error messages.
     pub raw: String,
 }
@@ -156,13 +160,36 @@ fn extract_snapshot(body: &str) -> Vec<SymbolClaim> {
             .to_string();
         // Parse caller count from "N callers" pattern.
         let callers = extract_caller_count(after_dash);
+        let signature = extract_signature(after_dash);
         out.push(SymbolClaim {
             name: leaf,
             callers,
+            signature,
             raw: trimmed.to_string(),
         });
     }
     out
+}
+
+/// Extract the bullet's `signature \`<sig>\`` claim. Returns None when the
+/// bullet doesn't include one. Tolerates the literal word "signature" being
+/// followed by either a backticked code span (preferred) or bare text up to a
+/// trailing parenthetical / comma.
+fn extract_signature(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    let key = lower.find("signature")?;
+    // Position in the original string is the same offset (single-byte word).
+    let after = text[key + "signature".len()..].trim_start_matches(['*', ' ', ':', '=']);
+    // Preferred: backticked.
+    if let Some(stripped) = after.strip_prefix('`') {
+        if let Some(end) = stripped.find('`') {
+            let sig = stripped[..end].trim();
+            if !sig.is_empty() {
+                return Some(sig.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn extract_caller_count(text: &str) -> Option<u32> {
@@ -341,6 +368,27 @@ pub fn refresh(&self) -> Result<Session> {
             s.verify_commands,
             vec!["cargo test session_count_returns_current_size".to_string()]
         );
+    }
+
+    #[test]
+    fn extracts_signature_from_snapshot_bullets() {
+        let s = parse_str("test.md", SAMPLE);
+        let by_name: std::collections::HashMap<&str, &SymbolClaim> = s
+            .pre_edit_snapshot
+            .iter()
+            .map(|c| (c.name.as_str(), c))
+            .collect();
+        // SAMPLE has signatures on the first two bullets.
+        assert_eq!(
+            by_name["SessionStore"].signature.as_deref(),
+            Some("pub struct SessionStore")
+        );
+        assert_eq!(
+            by_name["refresh"].signature.as_deref(),
+            Some("pub fn refresh(&self) -> Result<Session>")
+        );
+        // `new_helper` bullet has no signature clause.
+        assert_eq!(by_name["new_helper"].signature, None);
     }
 
     #[test]

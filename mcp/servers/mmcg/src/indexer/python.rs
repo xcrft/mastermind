@@ -676,7 +676,14 @@ mod tests {
         let sig = sym.signature.as_deref().expect("signature present");
         // Truncated form must still be valid UTF-8 (we built it from a String)
         // and end with the ellipsis we appended.
-        assert!(sig.ends_with('…'), "signature should be ellipsis-truncated: {sig}");
-        assert!(sig.len() <= 124, "truncated signature stays within ~120 bytes + 3-byte ellipsis: got {}", sig.len());
+        assert!(
+            sig.ends_with('…'),
+            "signature should be ellipsis-truncated: {sig}"
+        );
+        assert!(
+            sig.len() <= 124,
+            "truncated signature stays within ~120 bytes + 3-byte ellipsis: got {}",
+            sig.len()
+        );
     }
 }

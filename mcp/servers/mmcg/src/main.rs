@@ -206,6 +206,12 @@ enum Cmd {
         /// Shell out to `claude -p` synchronously between phases. Default: hand-off only.
         #[arg(long)]
         exec: bool,
+        /// Skip the "index must exist and be non-empty" pre-check. Use for
+        /// docs-only / spec-only specs that don't touch indexed source.
+        /// Default = hard-fail when no index, because mmcg gates are only as
+        /// strong as the codegraph they reason from.
+        #[arg(long)]
+        allow_no_index: bool,
     },
     /// One-shot query — handy for CLI debugging without going through MCP.
     #[command(subcommand)]
@@ -528,6 +534,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             pre_only,
             post_only,
             exec,
+            allow_no_index,
         } => {
             let root = root
                 .canonicalize()
@@ -537,6 +544,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 pre_only,
                 post_only,
                 exec,
+                allow_no_index,
             };
             let outcome = mmcg::run_task::run(&spec, &root, &index_path, opts);
             // Map outcomes to exit codes: gate failures / contract breaks /

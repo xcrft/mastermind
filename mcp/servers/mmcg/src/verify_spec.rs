@@ -15,9 +15,10 @@
 //! Exit code maps: 0 / 0 / 1. Warnings do NOT fail the gate by design — a
 //! 38-caller blast radius is a flag for the planner to read, not a block.
 
-use crate::spec::{self, ParsedSpec, SymbolClaim};
+use crate::spec::{self, ParsedSpec, SymbolClaim, TouchEntry};
 use crate::store::Store;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::path::Path;
 
 /// Threshold above which `blast_radius` becomes a warning. 30 is empirical —
@@ -93,6 +94,16 @@ pub enum Finding {
     /// when `cargo` isn't installed, `pnpm` when project uses `npm`, etc.
     /// Warning only — could be a project-local script the executor knows about.
     VerifyCommandNotFound { command: String, executable: String },
+    /// A symbol named in `frontmatter.touches[].symbols` was not found at the
+    /// declared file path. Distinct from `MissingSymbol`: this one is
+    /// file-scoped, so it catches monorepo leaf-name collisions that the
+    /// heuristic check would miss (`handleWebhook` exists in many controllers
+    /// — but not at `src/billing/billing.controller.ts`).
+    MissingSymbolAtFile {
+        symbol: String,
+        file: String,
+        language: Option<String>,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -181,6 +192,14 @@ fn render_finding(f: &Finding) -> String {
         } => {
             format!("verify_command_not_found: `{command}` — executable `{executable}` not on PATH")
         }
+        Finding::MissingSymbolAtFile {
+            symbol,
+            file,
+            language,
+        } => {
+            let lang = language.as_deref().unwrap_or("<any>");
+            format!("missing_symbol_at_file: `{symbol}` not found at `{file}` (language={lang}) — file/language scoping from frontmatter.touches catches collisions the heuristic would miss")
+        }
     }
 }
 
@@ -209,7 +228,26 @@ pub fn run(spec: &ParsedSpec, store: Option<&Store>, repo_root: &Path) -> Report
     }
 
     // 2. Mentioned files exist on disk.
-    for rel in &spec.mentioned_files {
+    //    When frontmatter is present, the AUTHORITATIVE file list is the union
+    //    of `touches[].file` and `expected_docs[]`. Heuristic mentioned_files
+    //    (backticked path-like tokens) still contributes to catch e.g. paths
+    //    only mentioned in prose — but those false-positive easily (a
+    //    "do not touch X" mention shouldn't flag X as missing). Dedup by path.
+    let mut files_to_check: Vec<String> = spec.mentioned_files.clone();
+    let mut seen: HashSet<String> = files_to_check.iter().cloned().collect();
+    if let Some(fm) = &spec.frontmatter {
+        for touch in &fm.touches {
+            if seen.insert(touch.file.clone()) {
+                files_to_check.push(touch.file.clone());
+            }
+        }
+        for doc in &fm.expected_docs {
+            if seen.insert(doc.clone()) {
+                files_to_check.push(doc.clone());
+            }
+        }
+    }
+    for rel in &files_to_check {
         let abs = repo_root.join(rel);
         if !abs.exists() {
             errors.push(Finding::MissingFile { file: rel.clone() });
@@ -217,9 +255,18 @@ pub fn run(spec: &ParsedSpec, store: Option<&Store>, repo_root: &Path) -> Report
     }
 
     // 3. Pre-edit snapshot symbols: existence, caller-count drift, blast radius.
+    //    Two sources, both contribute findings:
+    //    a) heuristic `## Pre-edit symbol snapshot` bullets (name-only search)
+    //    b) frontmatter `touches[].symbols` with file+language scoping —
+    //       catches monorepo collisions the heuristic misses.
     if let Some(store) = store {
         for claim in &spec.pre_edit_snapshot {
             check_symbol_claim(claim, store, &mut errors, &mut warnings);
+        }
+        if let Some(fm) = &spec.frontmatter {
+            for touch in &fm.touches {
+                check_frontmatter_touch(touch, store, &mut errors, &mut warnings);
+            }
         }
     }
 
@@ -232,9 +279,23 @@ pub fn run(spec: &ParsedSpec, store: Option<&Store>, repo_root: &Path) -> Report
 
     // 5. VERIFY commands — first token resolvable on `$PATH`. Soft warn:
     //    might be a project-local script (`./scripts/check.sh`) which would
-    //    look like an unresolved binary but is fine.
-    for cmd in &spec.verify_commands {
-        check_verify_command(cmd, &mut warnings);
+    //    look like an unresolved binary but is fine. Includes both heuristic
+    //    phase-block `**VERIFY**: ...` lines AND frontmatter `verify[]` entries
+    //    with `cmd:` form (label-only entries are informational, skipped).
+    let mut all_commands: Vec<String> = spec.verify_commands.clone();
+    if let Some(fm) = &spec.frontmatter {
+        for entry in &fm.verify {
+            if let Some(cmd) = entry.command() {
+                all_commands.push(cmd.to_string());
+            }
+        }
+    }
+    // De-dup while preserving order.
+    let mut seen_cmds: HashSet<String> = HashSet::new();
+    for cmd in &all_commands {
+        if seen_cmds.insert(cmd.clone()) {
+            check_verify_command(cmd, &mut warnings);
+        }
     }
 
     let verdict = if !errors.is_empty() {
@@ -307,6 +368,77 @@ fn check_symbol_claim(
             callers: live_callers,
             threshold: BLAST_RADIUS_WARN,
         });
+    }
+}
+
+/// Validate one `frontmatter.touches[]` entry — the symbols listed must exist
+/// at the declared file path (and language, if given). Catches the leaf-name
+/// collision class of false positive that the heuristic `pre_edit_snapshot`
+/// path can't see: `handleWebhook` exists in many controllers, but the spec
+/// says THIS one is at `src/billing/billing.controller.ts`.
+fn check_frontmatter_touch(
+    touch: &TouchEntry,
+    store: &Store,
+    errors: &mut Vec<Finding>,
+    warnings: &mut Vec<Finding>,
+) {
+    for sym in &touch.symbols {
+        let name = sym.name();
+        // Inherit file/language from the touch entry unless the Detailed
+        // variant overrides them.
+        let file = sym.file().unwrap_or(touch.file.as_str());
+        let language = sym.language().or(touch.language.as_deref());
+
+        let hits = match store.search_symbols(name, None, language) {
+            Ok(rows) => rows,
+            Err(_) => continue, // store error — verify_spec already surfaces store failures elsewhere
+        };
+        let scoped: Vec<_> = hits.into_iter().filter(|s| s.file_path == file).collect();
+        if scoped.is_empty() {
+            errors.push(Finding::MissingSymbolAtFile {
+                symbol: name.to_string(),
+                file: file.to_string(),
+                language: language.map(str::to_string),
+            });
+            continue;
+        }
+        // Caller-count drift, same any-file scoping rule as the heuristic
+        // path. (Caller counts are inherently cross-file; we filter the symbol
+        // hit by file for existence, but don't try to attribute callers to a
+        // specific definition.)
+        if let Some(declared) = sym.callers() {
+            let live = match store.callers_of(name, language, None) {
+                Ok(callers) => callers.len() as u32,
+                Err(_) => continue,
+            };
+            if declared != live {
+                errors.push(Finding::SnapshotCallerCountDrift {
+                    symbol: name.to_string(),
+                    spec_says: declared,
+                    index_says: live,
+                });
+            }
+            if live >= BLAST_RADIUS_WARN {
+                warnings.push(Finding::LargeBlastRadius {
+                    symbol: name.to_string(),
+                    callers: live,
+                    threshold: BLAST_RADIUS_WARN,
+                });
+            }
+        }
+        // Signature drift — must match at least one scoped hit.
+        if let Some(declared_sig) = sym.signature() {
+            let live_sigs: Vec<Option<String>> =
+                scoped.iter().map(|s| s.signature.clone()).collect();
+            let any_match = live_sigs.iter().any(|s| s.as_deref() == Some(declared_sig));
+            if !any_match {
+                errors.push(Finding::SnapshotSignatureDrift {
+                    symbol: name.to_string(),
+                    spec_says: declared_sig.to_string(),
+                    index_says: live_sigs.into_iter().flatten().next(),
+                });
+            }
+        }
     }
 }
 
@@ -577,6 +709,153 @@ VERIFY: `definitely-not-on-path-12345`
             w,
             Finding::VerifyCommandNotFound { executable, .. } if executable == "definitely-not-on-path-12345"
         )));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn frontmatter_touch_catches_file_scoped_missing_symbol() {
+        use crate::indexer::Indexer;
+        let root = tmp();
+        // Two files with the SAME leaf name `handleWebhook` — monorepo collision.
+        fs::create_dir_all(root.join("src/billing")).unwrap();
+        fs::create_dir_all(root.join("src/legacy")).unwrap();
+        // The "right" file does NOT contain handleWebhook (yet) — spec is wrong
+        // about where it lives. Legacy does. Heuristic check would pass
+        // (handleWebhook exists somewhere); scoped check should fail.
+        fs::write(
+            root.join("src/billing/billing.ts"),
+            "export function unrelated() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/legacy/legacy.ts"),
+            "export function handleWebhook(req, res) {}\n",
+        )
+        .unwrap();
+
+        let db = root.join("idx.db");
+        let mut store = Store::open(&db).unwrap();
+        Indexer::new(&root).index_all(&mut store, false).unwrap();
+        drop(store);
+
+        // Frontmatter declares handleWebhook lives in billing.ts.
+        // Mandatory sections all present so we isolate the frontmatter check.
+        let body = "---
+id: \"1\"
+touches:
+  - file: src/billing/billing.ts
+    language: typescript
+    symbols:
+      - name: handleWebhook
+---
+
+## Goals
+- Add `handleWebhook` to `src/billing/billing.ts`
+## Alternatives Considered
+- a — rejected
+## Tests Plan
+- t
+## Documentation Plan
+- d
+## Observability Plan
+- n/a
+## Performance Considerations
+- O(1)
+";
+        let s = spec::parse_str("t.md", body);
+        let store = Store::open(&db).unwrap();
+        let r = run(&s, Some(&store), &root);
+        // Heuristic would PASS (handleWebhook exists somewhere). Frontmatter
+        // scoped check must fail.
+        assert!(
+            r.errors.iter().any(|e| matches!(
+                e,
+                Finding::MissingSymbolAtFile { symbol, file, .. }
+                    if symbol == "handleWebhook" && file == "src/billing/billing.ts"
+            )),
+            "expected MissingSymbolAtFile finding; got {:?}",
+            r.errors
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn frontmatter_verify_cmd_is_path_checked() {
+        let root = tmp();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/x.rs"), "fn x(){}").unwrap();
+        let body = "---
+id: \"1\"
+verify:
+  - typecheck
+  - cmd: \"definitely-not-on-path-87654\"
+---
+
+## Goals
+- Edit `src/x.rs`
+## Alternatives Considered
+- A
+## Tests Plan
+- t
+## Documentation Plan
+- d
+## Observability Plan
+- n/a
+## Performance Considerations
+- O(1)
+";
+        let s = spec::parse_str("t.md", body);
+        let r = run(&s, None, &root);
+        // Label-only `typecheck` should NOT warn (no cmd). The `cmd:` entry
+        // for the bogus binary SHOULD warn.
+        assert!(r.warnings.iter().any(|w| matches!(
+            w,
+            Finding::VerifyCommandNotFound { executable, .. } if executable == "definitely-not-on-path-87654"
+        )));
+        assert!(!r.warnings.iter().any(|w| matches!(
+            w,
+            Finding::VerifyCommandNotFound { executable, .. } if executable == "typecheck"
+        )));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn frontmatter_expected_docs_are_existence_checked() {
+        let root = tmp();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/x.rs"), "fn x(){}").unwrap();
+        // README.md exists, docs/missing.md doesn't.
+        fs::write(root.join("README.md"), "# x").unwrap();
+        let body = "---
+id: \"1\"
+expected_docs:
+  - README.md
+  - docs/missing.md
+---
+
+## Goals
+- Edit `src/x.rs`
+## Alternatives Considered
+- A
+## Tests Plan
+- t
+## Documentation Plan
+- d
+## Observability Plan
+- n/a
+## Performance Considerations
+- O(1)
+";
+        let s = spec::parse_str("t.md", body);
+        let r = run(&s, None, &root);
+        assert!(r
+            .errors
+            .iter()
+            .any(|e| matches!(e, Finding::MissingFile { file } if file == "docs/missing.md")));
+        assert!(!r
+            .errors
+            .iter()
+            .any(|e| matches!(e, Finding::MissingFile { file } if file == "README.md")));
         fs::remove_dir_all(&root).ok();
     }
 

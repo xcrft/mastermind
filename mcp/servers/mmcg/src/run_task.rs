@@ -111,6 +111,13 @@ pub struct RunOpts {
     pub post_only: bool,
     /// Shell out to `claude -p` between phases. Default false — hand-off only.
     pub exec: bool,
+    /// Skip the "index must exist and be non-empty" pre-check. Use for
+    /// docs-only / spec-only specs that don't touch indexed source. Default
+    /// false: missing-or-empty index hard-fails pre-flight, because mmcg's
+    /// core claim is "grounded in the codegraph" — running gates without that
+    /// grounding silently degrades them to mandatory-section + file-existence
+    /// checks only.
+    pub allow_no_index: bool,
 }
 
 /// State file path — `<repo_root>/.mastermind/run-state/<spec-basename>.json`.
@@ -418,9 +425,41 @@ fn run_pre(
 
     println!("=== Pre-flight: {} ===", spec_path.display());
 
+    // Index existence + non-empty check — hard fail by default. mmcg's gates
+    // are only as strong as the codegraph they reason from; running them
+    // against an absent or empty index would silently degrade verify-spec to
+    // file-existence checks and turn audit-spec into git-diff-only. The
+    // escape hatch `--allow-no-index` exists for docs-only specs.
+    let store = Store::open(index_path).ok();
+    if !opts.allow_no_index {
+        match store.as_ref() {
+            None => {
+                eprintln!(
+                    "❌ No index at `{}`. Run `mmcg index .` first, or pass --allow-no-index for docs-only specs.",
+                    index_path.display()
+                );
+                return Outcome::PreFailed;
+            }
+            Some(s) => match s.symbol_count() {
+                Ok(0) => {
+                    eprintln!(
+                        "❌ Index at `{}` is empty (0 symbols). Run `mmcg index .` to populate, or pass --allow-no-index for docs-only specs.",
+                        index_path.display()
+                    );
+                    return Outcome::PreFailed;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("warning: querying index symbol count: {e}");
+                    // Tolerate transient SQL errors here — verify-spec below
+                    // will fail more loudly if the store is actually broken.
+                }
+            },
+        }
+    }
+
     // 1. verify-spec (store optional — without index, only mandatory-section +
     //    missing-file checks contribute).
-    let store = Store::open(index_path).ok();
     let verify = verify_spec::run(&parsed, store.as_ref(), repo_root);
     print!("{}", verify.render_text());
     if verify.has_failures() {
@@ -795,7 +834,8 @@ mod tests {
         let index_path = dir.join("idx.db");
         let _ = Store::open(&index_path).unwrap();
         let opts = RunOpts {
-            pre_only: true, // don't even try to resume / exec
+            pre_only: true,       // don't even try to resume / exec
+            allow_no_index: true, // fixture has no source — skip index requirement
             ..Default::default()
         };
         let outcome = run(&spec_path, &dir, &index_path, opts);
@@ -834,6 +874,7 @@ mod tests {
             &index_path,
             RunOpts {
                 pre_only: true,
+                allow_no_index: true, // isolate failure to verify-spec, not index
                 ..Default::default()
             },
         );
@@ -842,6 +883,78 @@ mod tests {
         assert!(
             load_state(&state_path).unwrap().is_none(),
             "no state file should have been written on failed pre-flight"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pre_flight_fails_without_index_by_default() {
+        let dir = tmp("no_index_default_fails");
+        init_repo(&dir);
+        fs::write(dir.join("x.txt"), "x\n").unwrap();
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "baseline"]);
+
+        let spec_dir = dir.join(".mastermind/tasks");
+        fs::create_dir_all(&spec_dir).unwrap();
+        let spec_path = spec_dir.join("080-thing.md");
+        // Valid spec body — failure should be index-only, not verify-spec.
+        fs::write(
+            &spec_path,
+            "\
+# T
+
+## Goals
+- Edit `x.txt`
+## Alternatives Considered
+- a — rejected
+## Tests Plan
+- t
+## Documentation Plan
+- d
+## Observability Plan
+- n/a
+## Performance Considerations
+- O(1)
+",
+        )
+        .unwrap();
+        let index_path = dir.join("idx.db");
+        // Open the store to materialize the file but leave it empty.
+        let _ = Store::open(&index_path).unwrap();
+
+        // Default opts → hard-fail because index has 0 symbols.
+        let outcome = run(
+            &spec_path,
+            &dir,
+            &index_path,
+            RunOpts {
+                pre_only: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(outcome, Outcome::PreFailed);
+        let state_path = state_file_path(&dir, &spec_path);
+        assert!(
+            load_state(&state_path).unwrap().is_none(),
+            "no state file should have been written on index-empty failure"
+        );
+
+        // Same setup + --allow-no-index → succeeds.
+        let outcome = run(
+            &spec_path,
+            &dir,
+            &index_path,
+            RunOpts {
+                pre_only: true,
+                allow_no_index: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(outcome, Outcome::PreReady);
+        assert!(
+            load_state(&state_path).unwrap().is_some(),
+            "state should be written when allow_no_index permits"
         );
         fs::remove_dir_all(&dir).ok();
     }

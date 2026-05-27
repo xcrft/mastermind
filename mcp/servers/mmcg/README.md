@@ -2,7 +2,7 @@
 name: mmcg
 description: Mastermind Codegraph — fast multi-language code indexer (Python + TypeScript/TSX + JavaScript/JSX + Rust + C# + Go + Java + PHP + C/C++) exposed over MCP. Indexes symbols, calls, and imports (with fully-qualified paths) into a local SQLite database (`.mastermind/mmcg.db`) and exposes 17 structural query tools for AI agents in the Mastermind workflow. Includes FTS5 search over `.mastermind/tasks/` and an incremental file watcher.
 metadata:
-  version: 0.20.1
+  version: 0.21.0
   authors:
     - mastermind
   tags:
@@ -25,7 +25,7 @@ metadata:
 
 A small, fast Rust binary that builds a structural index of a codebase (Python, TypeScript/TSX, JavaScript/JSX, Rust, C#, Go, Java, PHP, C/C++) and serves queries over MCP. Pair with the Mastermind workflow so the planner/executor reason from a real graph instead of grep heuristics.
 
-**Status — 0.20.0:** Python + TypeScript + JavaScript + Rust + C# + Go + Java + PHP + C/C++. Imports tracked with fully-qualified paths. File watcher. Incremental indexing. **Language filter** on all queries (defends against monorepo name collisions). **Rust type-method awareness** — `mmcg_callers SessionStore` now finds `SessionStore::new()` callers. **`mmcg_symbols_in_file`** — list all symbols in a file in source order. **Decorator/attribute-aware `mmcg_unreferenced`** — symbols decorated with framework registries (pytest, FastAPI, Triton, Rust `#[test]`, xUnit `[Fact]`, JUnit `@Test`, Spring `@GetMapping`, etc.) are excluded from dead-code candidates. **`mmcg verify-spec` / `audit-spec`** — mechanical pre/post gates around a `.mastermind/tasks/` spec. **`mmcg run-task`** (0.19.0) — deterministic two-phase orchestrator: verify → risk report → executor hand-off (or `--exec` to `claude -p`) → audit → release-notes draft, with state persistence between phases. **`mmcg setup claude`** (0.20.0) — safe MCP-config writer: diff-first, refuses to clobber, merges into existing `mcpServers`. **`mmcg init --profile`** (0.20.0) — stack-specific CONTEXT.md templates (typescript-api, react-native, python-fastapi, rust-cli) pre-seeded with conventions and canonical gotchas. **C/C++ support is best-effort** — see Limitations for precision caveats (macros, templates, headers).
+**Status — 0.21.0:** Python + TypeScript + JavaScript + Rust + C# + Go + Java + PHP + C/C++. Imports tracked with fully-qualified paths. File watcher. Incremental indexing. **Language filter** on all queries (defends against monorepo name collisions). **Rust type-method awareness** — `mmcg_callers SessionStore` now finds `SessionStore::new()` callers. **`mmcg_symbols_in_file`** — list all symbols in a file in source order. **Decorator/attribute-aware `mmcg_unreferenced`** — symbols decorated with framework registries (pytest, FastAPI, Triton, Rust `#[test]`, xUnit `[Fact]`, JUnit `@Test`, Spring `@GetMapping`, etc.) are excluded from dead-code candidates. **`mmcg verify-spec` / `audit-spec`** — mechanical pre/post gates around a `.mastermind/tasks/` spec. **`mmcg run-task`** — deterministic two-phase orchestrator: verify → risk report → executor hand-off (or `--exec` to `claude -p`) → audit → release-notes draft, with state persistence between phases. As of 0.21.0, **the index is required by default** (`--allow-no-index` escape hatch for docs-only specs) because gates are only as strong as the codegraph they reason from. **`mmcg setup claude`** — safe MCP-config writer: diff-first, refuses to clobber, merges into existing `mcpServers`. `install.sh` no longer writes MCP config directly (it drifted from the canonical path) — single code path through `setup claude`. **`mmcg init --profile`** — stack-specific CONTEXT.md templates (typescript-api, react-native, python-fastapi, rust-cli). **YAML frontmatter on specs** (0.21.0) — additive structured contract (`touches[]` with file+language-scoped symbol gates, `verify[].cmd` for PATH check, `expected_docs[]` for separate doc-audit, `breaking_changes.removed_symbols[]` for explicit removal ack). Heuristic Markdown parsing remains as fallback when frontmatter is absent. **C/C++ support is best-effort** — see Limitations for precision caveats (macros, templates, headers).
 
 ## What it indexes
 
@@ -132,6 +132,10 @@ mmcg run-task .mastermind/tasks/042-feature.md --exec      # shell out to `claud
 mmcg run-task .mastermind/tasks/042-feature.md --reset     # drop state, force pre-flight
 mmcg run-task .mastermind/tasks/042-feature.md --pre-only  # never auto-resume into post
 mmcg run-task .mastermind/tasks/042-feature.md --post-only # requires state
+mmcg run-task .mastermind/tasks/042-feature.md --allow-no-index  # docs-only / spec-only specs
+# NOTE: without --allow-no-index, pre-flight hard-fails when the index is missing
+# or empty. Gates without a codegraph degrade to file-existence + section checks
+# only — mmcg's value comes from the structural truth layer, not the heuristics.
 
 # Initialize a project with a stack-specific CONTEXT.md profile.
 # Templates pre-seed conventions, test/lint commands, and canonical gotchas.
@@ -309,7 +313,7 @@ mmcg serve
 | `src/setup.rs` | `mmcg setup claude` — safe MCP-config writer (diff-first, atomic write, merge into existing `mcpServers`) |
 | `templates/profiles/*.md` | Stack-specific CONTEXT.md templates (`typescript-api`, `react-native`, `python-fastapi`, `rust-cli`) — picked via `mmcg init --profile <name>` |
 
-Tests live in `#[cfg(test)]` blocks in each module. Run with `cargo test` — 112 tests covering schema, queries, partial-class collapse, every extractor, spec parser, verify/audit gates, the run-task orchestrator, and the setup/diff/merge helpers.
+Tests live in `#[cfg(test)]` blocks in each module. Run with `cargo test` — 124 tests covering schema, queries, partial-class collapse, every extractor, spec parser (incl. YAML frontmatter), verify/audit gates (incl. frontmatter-scoped symbol checks and breaking-change ack), the run-task orchestrator (incl. the index-required gate), and the setup/diff/merge helpers.
 
 ## Integration with the Mastermind workflow
 

@@ -10,8 +10,13 @@
 # What it does:
 #   1. Builds and installs the `mmcg` binary into ~/.cargo/bin (needs Rust ≥ 1.75)
 #   2. Copies all subagents, skills, prompts, and CLAUDE.md templates into ~/.claude/
-#   3. Prints an mmcg MCP-server snippet for you to paste into ~/.claude/mcp.json
-#      (does NOT touch your mcp.json — too risky to merge JSON blindly)
+#   3. Points you at `mmcg setup claude --write-mcp` for the MCP registration step
+#      (single source of truth — see `mmcg setup claude --help`).
+#
+# NOTE: Earlier versions of this script wrote `~/.claude/mcp.json` directly. That
+# path drifted from what `mmcg doctor` and `mmcg setup claude` look for
+# (`~/.claude/.mcp.json` with a dot prefix). The MCP write step is now delegated
+# to `mmcg setup claude` so there is exactly one code path for config writing.
 #
 # Override CLAUDE_HOME to install somewhere else: CLAUDE_HOME=/tmp/test ./install.sh
 # Override REPO_URL if you fork: REPO_URL=https://github.com/you/mastermind ./install.sh
@@ -90,31 +95,18 @@ for f in "$SRC"/agents/claude-md/*.md; do
 done
 printf '  ✓ %d CLAUDE.md templates → %s/templates/\n' "$n_templates" "$CLAUDE_DIR"
 
-# 3. MCP server snippet
+# 3. MCP registration — delegated to `mmcg setup claude` so there's exactly
+#    one code path for config writing (this script used to write its own,
+#    drifted from what `mmcg doctor` and `mmcg setup claude` look for, and
+#    quietly broke).
 printf '\n→ MCP server config\n'
-MCP_FILE="$CLAUDE_DIR/mcp.json"
-SNIPPET='{
-  "mcpServers": {
-    "mmcg": {
-      "command": "mmcg",
-      "args": ["serve"],
-      "env": { "MMCG_INDEX_PATH": ".mastermind/mmcg.db" }
-    }
-  }
-}'
-
-if [ -f "$MCP_FILE" ]; then
-    printf '  ⚠ %s already exists — not touching it.\n' "$MCP_FILE"
-    if grep -q '"mmcg"' "$MCP_FILE" 2>/dev/null; then
-        printf '    Looks like mmcg is already registered. Done.\n'
-    else
-        printf '    Add this block to its "mcpServers":\n\n'
-        printf '%s\n\n' "$SNIPPET"
-    fi
-else
-    printf '%s\n' "$SNIPPET" > "$MCP_FILE"
-    printf '  ✓ wrote %s\n' "$MCP_FILE"
-fi
+printf '  ℹ This installer no longer writes MCP config directly.\n'
+printf '    Run one of:\n'
+printf '      mmcg setup claude --write-mcp                        # global ~/.claude/.mcp.json\n'
+printf '      mmcg setup claude --project . --write-mcp            # project-local ./.mcp.json\n'
+printf '      mmcg setup claude                                    # dry-run: print diff and exit\n\n'
+printf '    See `mmcg setup claude --help` for `--with-workflow` (drop CLAUDE.md template)\n'
+printf '    and `--force` (overwrite a customized entry).\n'
 
 # Cleanup temp clone if we made one
 if [ "$CLEANUP_SRC" = 1 ]; then

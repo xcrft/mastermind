@@ -1,0 +1,256 @@
+# Build prebuilt mmcg binaries for every supported target, assemble npm
+# platform packages from them, smoke the wrapper end-to-end, then publish
+# all 7 packages (root + 6 platforms) with the same version.
+#
+# Tag-driven: pushing `npm-v<semver>` (e.g. `npm-v0.22.0`) triggers verify
+# + publish. `workflow_dispatch` runs verify-only (dry-run by default) so
+# the assembly + smoke path can be tested before tagging.
+#
+# Setup (one-time before first publish):
+#   Settings → Environments → `npm-prod` → Secrets → NPM_TOKEN
+#     Generate at https://www.npmjs.com/settings/<your-user>/tokens
+#     Token type: Automation (bypasses 2FA on publish — required for CI)
+#   Settings → Environments → `npm-prod` → Required reviewers (recommended)
+#     Adds a human approval gate between matrix-build and publish.
+#
+# Release procedure:
+#   1. Bump version in mcp/servers/mmcg/Cargo.toml AND all 7 npm package.jsons
+#      (root @xcrft/mastermind + 6 @xcrft/mmcg-* platform packages).
+#      The build helper hard-fails on Cargo↔platform version mismatch.
+#   2. Validate: `python scripts/validate.py && cargo test --lib`
+#   3. Commit on main: `git commit -am "mastermind 0.22.0"`
+#   4. Tag: `git tag npm-v0.22.0 && git push origin main npm-v0.22.0`
+#   5. This workflow: matrix-build → assemble → smoke → (approval) → publish
+#
+# Tag-version-match guard prevents shipping a mismatched release.
+
+name: Publish @xcrft/mastermind to npm
+
+on:
+  push:
+    tags:
+      - "npm-v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run — verify + smoke only, no publish (default: true)"
+        type: boolean
+        default: true
+
+concurrency:
+  group: publish-npm-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-binaries:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: mcp/servers/mmcg
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            artifact: mmcg
+            install_musl: false
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            artifact: mmcg
+            install_musl: false
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            artifact: mmcg
+            install_musl: false
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            artifact: mmcg.exe
+            install_musl: false
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            artifact: mmcg
+            install_musl: true
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            artifact: mmcg
+            install_musl: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl-tools
+        if: matrix.install_musl
+        run: sudo apt-get update -qq && sudo apt-get install -yq musl-tools
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            mcp/servers/mmcg/target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-release-${{ hashFiles('mcp/servers/mmcg/Cargo.lock') }}
+
+      - name: cargo build --release --locked
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: mmcg-${{ matrix.target }}
+          path: mcp/servers/mmcg/target/${{ matrix.target }}/release/${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 7
+
+  assemble-and-smoke:
+    name: Assemble platform packages + smoke
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v6
+        with:
+          path: build-artifacts
+
+      - name: Assemble all 6 platform packages
+        run: |
+          set -e
+          # Maps each artifact directory back to its Rust target triple.
+          declare -A TARGETS=(
+            [mmcg-x86_64-unknown-linux-gnu]=x86_64-unknown-linux-gnu
+            [mmcg-aarch64-unknown-linux-gnu]=aarch64-unknown-linux-gnu
+            [mmcg-aarch64-apple-darwin]=aarch64-apple-darwin
+            [mmcg-x86_64-pc-windows-msvc]=x86_64-pc-windows-msvc
+            [mmcg-x86_64-unknown-linux-musl]=x86_64-unknown-linux-musl
+            [mmcg-aarch64-unknown-linux-musl]=aarch64-unknown-linux-musl
+          )
+          for art_dir in "${!TARGETS[@]}"; do
+            target="${TARGETS[$art_dir]}"
+            # Windows artifact is `mmcg.exe`; everyone else `mmcg`.
+            if [[ "$target" == *windows* ]]; then
+              bin_path="build-artifacts/$art_dir/mmcg.exe"
+            else
+              bin_path="build-artifacts/$art_dir/mmcg"
+            fi
+            ./scripts/build-npm-packages.sh "$target" "$bin_path"
+          done
+
+      - name: npm pack all 7 packages (root + 6 platforms)
+        run: |
+          set -e
+          mkdir -p packed
+          for pkg_dir in npm/mastermind npm/platforms/*/; do
+            (cd "$pkg_dir" && npm pack --pack-destination "$GITHUB_WORKSPACE/packed")
+          done
+          ls -la packed/
+
+      - name: Smoke — install root + native platform from tarballs and run
+        run: |
+          set -e
+          # Host is ubuntu-latest x64-gnu — install the matching platform.
+          SMOKE_DIR=$(mktemp -d)
+          cd "$SMOKE_DIR"
+          npm init -y > /dev/null
+          # Install both tarballs at once so npm resolves the optional dep
+          # locally instead of fetching @xcrft/mmcg-linux-x64-gnu from the
+          # registry (it isn't published yet at this point — first publish
+          # would fail this smoke without --no-save+local file: spec).
+          npm install --no-save \
+            "$GITHUB_WORKSPACE/packed/xcrft-mastermind-0.22.0.tgz" \
+            "$GITHUB_WORKSPACE/packed/xcrft-mmcg-linux-x64-gnu-0.22.0.tgz"
+          echo "--- mastermind --version"
+          ./node_modules/.bin/mastermind --version
+          echo "--- mastermind doctor --json (shape check)"
+          ./node_modules/.bin/mastermind doctor --json > doctor.json || true
+          python3 -c "import json; d = json.load(open('doctor.json')); assert 'checks' in d, d"
+          echo "--- mastermind setup claude (dry-run, project mode)"
+          # Project-local install — install-mode detection should write
+          # `./node_modules/.bin/mastermind` as the MCP command.
+          ./node_modules/.bin/mastermind setup claude --project . 2>&1 | tail -15
+
+      - name: Upload assembled tarballs for the publish job
+        uses: actions/upload-artifact@v7
+        with:
+          name: npm-tarballs
+          path: packed/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Verify tag matches version (push event only)
+        if: github.event_name == 'push'
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          TAG_VERSION="${TAG#npm-v}"
+          ROOT_VERSION=$(node -e "console.log(require('./npm/mastermind/package.json').version)")
+          echo "tag=$TAG_VERSION  root pkg=$ROOT_VERSION"
+          if [ "$TAG_VERSION" != "$ROOT_VERSION" ]; then
+            echo "::error::tag version ($TAG_VERSION) does not match @xcrft/mastermind package.json ($ROOT_VERSION). Bump or retag."
+            exit 1
+          fi
+
+  publish:
+    name: Publish to npm
+    needs: assemble-and-smoke
+    # Two skip conditions:
+    #   - workflow_dispatch dry-run (default true)
+    #   - running on a fork (no NPM_TOKEN in env)
+    if: |
+      github.repository == 'xcrft/mastermind' &&
+      (github.event_name == 'push' || github.event.inputs.dry_run == 'false')
+    runs-on: ubuntu-latest
+    # `npm-prod` environment scopes the NPM_TOKEN secret and (if configured)
+    # triggers required-reviewer / wait-timer protection rules.
+    environment: npm-prod
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Download assembled tarballs
+        uses: actions/download-artifact@v6
+        with:
+          name: npm-tarballs
+          path: packed
+
+      - name: Publish all 7 packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -e
+          # Publish platform packages FIRST so the root's optionalDependencies
+          # can resolve to real registry entries (otherwise root install would
+          # silently skip them on first install). Order within platforms
+          # doesn't matter — they're independent.
+          for tgz in packed/xcrft-mmcg-*.tgz; do
+            echo "→ npm publish $tgz"
+            npm publish --access public "$tgz"
+          done
+          # Root last.
+          echo "→ npm publish packed/xcrft-mastermind-*.tgz"
+          npm publish --access public packed/xcrft-mastermind-*.tgz
+
+  dry-run-notice:
+    name: Dry-run notice
+    needs: assemble-and-smoke
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run != 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Dry run complete — build + assemble + smoke passed. No publish performed."

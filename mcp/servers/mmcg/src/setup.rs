@@ -175,11 +175,76 @@ pub fn run_claude(
     outcome
 }
 
+/// Decide what `command` + `args` to write into the MCP config based on how
+/// this binary was invoked. Three sources of truth, checked in order:
+///
+/// 1. `MASTERMIND_INSTALL_MODE` env var set by the npm JS wrapper. Values:
+///    - `npx` → user is one-shotting via `npx -y @xcrft/mastermind`. Pin the
+///      command to `npx -y @xcrft/mastermind@<version> serve` so the MCP
+///      client launches the same version every time.
+///    - `global` → `npm install -g`. Use the wrapper name (`mastermind`),
+///      which is on PATH.
+///    - `project` → `npm install -D`. Use the project-local bin path so the
+///      project version pin is honored.
+///    - `unknown` → wrapper couldn't classify; treat as `global` (safest
+///      default — `mastermind` on PATH).
+/// 2. No env var → assume cargo-installed `mmcg` (the original path). Use
+///    the absolute path of the running binary, same as before npm support.
+///
+/// The two-mode design keeps `cargo install mmcg` working with zero changes
+/// while letting npm users get a config that travels with their install
+/// method.
 fn mmcg_entry(mmcg_binary: &Path) -> Value {
-    json!({
-        "command": mmcg_binary.display().to_string(),
-        "args": ["serve"],
-    })
+    let install_mode = std::env::var("MASTERMIND_INSTALL_MODE").ok();
+    let version = std::env::var("MASTERMIND_VERSION").ok();
+    let package = std::env::var("MASTERMIND_PACKAGE")
+        .ok()
+        .unwrap_or_else(|| "@xcrft/mastermind".to_string());
+
+    match install_mode.as_deref() {
+        Some("npx") => {
+            // Pin the version so the MCP client gets reproducible behavior;
+            // unpinned `npx @xcrft/mastermind` would silently upgrade and
+            // could break the integration on a future release.
+            let pinned = match version {
+                Some(v) => format!("{package}@{v}"),
+                None => package,
+            };
+            json!({
+                "command": "npx",
+                "args": ["-y", pinned, "serve"],
+            })
+        }
+        Some("project") => {
+            // Project-local install. Path is relative to the project root
+            // (where `.mcp.json` lives), so it survives `cd` into subdirs.
+            let bin = if cfg!(windows) {
+                "./node_modules/.bin/mastermind.cmd"
+            } else {
+                "./node_modules/.bin/mastermind"
+            };
+            json!({
+                "command": bin,
+                "args": ["serve"],
+            })
+        }
+        Some("global") | Some("unknown") => {
+            // `mastermind` is on PATH via npm's global bin directory.
+            json!({
+                "command": "mastermind",
+                "args": ["serve"],
+            })
+        }
+        _ => {
+            // No env var → invoked directly (cargo install, manual build, etc.).
+            // Use the absolute path of the running binary — guarantees the
+            // exact binary the user just ran is what the MCP client launches.
+            json!({
+                "command": mmcg_binary.display().to_string(),
+                "args": ["serve"],
+            })
+        }
+    }
 }
 
 /// Deep-merge `mmcg` into `existing.mcpServers`, preserving other servers.
@@ -549,6 +614,137 @@ mod tests {
         );
         assert_eq!(fs::read_to_string(&claude_md).unwrap(), "ORIGINAL");
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn mmcg_entry_cargo_mode_uses_absolute_binary_path() {
+        // No MASTERMIND_INSTALL_MODE → cargo-install / direct-invocation
+        // behavior. Must use the absolute binary path so the MCP client
+        // launches the exact binary the user just configured.
+        // Use a unique env-var prefix to avoid cross-test contamination.
+        let _guard = EnvGuard::clear(&[
+            "MASTERMIND_INSTALL_MODE",
+            "MASTERMIND_VERSION",
+            "MASTERMIND_PACKAGE",
+        ]);
+        let entry = mmcg_entry(Path::new("/opt/cargo/bin/mmcg"));
+        assert_eq!(
+            entry.get("command").and_then(|v| v.as_str()),
+            Some("/opt/cargo/bin/mmcg")
+        );
+        assert_eq!(entry.get("args"), Some(&serde_json::json!(["serve"])));
+    }
+
+    #[test]
+    fn mmcg_entry_global_mode_uses_mastermind_on_path() {
+        let _guard = EnvGuard::set(&[
+            ("MASTERMIND_INSTALL_MODE", "global"),
+            ("MASTERMIND_VERSION", "0.22.0"),
+            ("MASTERMIND_PACKAGE", "@xcrft/mastermind"),
+        ]);
+        let entry = mmcg_entry(Path::new("/ignored/path/mmcg"));
+        assert_eq!(
+            entry.get("command").and_then(|v| v.as_str()),
+            Some("mastermind"),
+            "global install should write the PATH name, not the npm cache path"
+        );
+    }
+
+    #[test]
+    fn mmcg_entry_project_mode_writes_node_modules_bin() {
+        let _guard = EnvGuard::set(&[("MASTERMIND_INSTALL_MODE", "project")]);
+        let entry = mmcg_entry(Path::new("/ignored"));
+        let cmd = entry.get("command").and_then(|v| v.as_str()).unwrap();
+        // Unix path on non-Windows; .cmd suffix on Windows.
+        if cfg!(windows) {
+            assert!(
+                cmd.ends_with("node_modules/.bin/mastermind.cmd")
+                    || cmd.ends_with(r"node_modules\.bin\mastermind.cmd")
+            );
+        } else {
+            assert_eq!(cmd, "./node_modules/.bin/mastermind");
+        }
+    }
+
+    #[test]
+    fn mmcg_entry_npx_mode_pins_version() {
+        let _guard = EnvGuard::set(&[
+            ("MASTERMIND_INSTALL_MODE", "npx"),
+            ("MASTERMIND_VERSION", "0.22.0"),
+            ("MASTERMIND_PACKAGE", "@xcrft/mastermind"),
+        ]);
+        let entry = mmcg_entry(Path::new("/ignored"));
+        assert_eq!(entry.get("command").and_then(|v| v.as_str()), Some("npx"));
+        let args = entry.get("args").and_then(|v| v.as_array()).unwrap();
+        // Version is pinned in the package spec arg.
+        assert!(
+            args.iter()
+                .any(|a| a.as_str() == Some("@xcrft/mastermind@0.22.0")),
+            "expected version-pinned npx package arg; got {:?}",
+            args
+        );
+    }
+
+    #[test]
+    fn mmcg_entry_npx_mode_falls_back_when_version_absent() {
+        // No MASTERMIND_VERSION → unpinned npx command (with a warning the
+        // wrapper should emit). Still valid MCP config — just not pinned.
+        let _guard = EnvGuard::set(&[("MASTERMIND_INSTALL_MODE", "npx")]);
+        std::env::remove_var("MASTERMIND_VERSION");
+        let entry = mmcg_entry(Path::new("/ignored"));
+        let args = entry.get("args").and_then(|v| v.as_array()).unwrap();
+        assert!(
+            args.iter().any(|a| a.as_str() == Some("@xcrft/mastermind")),
+            "expected unpinned package arg when MASTERMIND_VERSION absent"
+        );
+    }
+
+    /// RAII helper to set/unset env vars for a test scope and restore prior
+    /// values on drop. Avoids cross-test contamination when env-var-driven
+    /// code paths are under test.
+    ///
+    /// **Tests using EnvGuard MUST run single-threaded** — cargo by default
+    /// runs tests in parallel, and env vars are process-global. The five
+    /// `mmcg_entry_*_mode_*` tests below all touch MASTERMIND_INSTALL_MODE
+    /// and would race. Run with `cargo test -- --test-threads=1` or mark
+    /// these specifically (cargo doesn't have a per-test serial annotation
+    /// in stable; documented as a known constraint).
+    struct EnvGuard {
+        prior: Vec<(String, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn set(pairs: &[(&str, &str)]) -> Self {
+            let prior = pairs
+                .iter()
+                .map(|(k, _)| (k.to_string(), std::env::var(k).ok()))
+                .collect();
+            for (k, v) in pairs {
+                std::env::set_var(k, v);
+            }
+            Self { prior }
+        }
+        fn clear(keys: &[&str]) -> Self {
+            let prior = keys
+                .iter()
+                .map(|k| (k.to_string(), std::env::var(k).ok()))
+                .collect();
+            for k in keys {
+                std::env::remove_var(k);
+            }
+            Self { prior }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in &self.prior {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
     }
 
     #[test]

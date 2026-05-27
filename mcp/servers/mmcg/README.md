@@ -315,7 +315,7 @@ mmcg serve
 
 Tests live in `#[cfg(test)]` blocks in each module. Run with `cargo test` — 125 tests covering schema, queries, partial-class collapse, every extractor, spec parser (incl. YAML frontmatter), verify/audit gates (incl. frontmatter-authoritative file scope, file+language-scoped symbol checks, breaking-change ack), the run-task orchestrator (incl. the index-required gate), and the setup/diff/merge helpers.
 
-CI (`.github/workflows/ci-mmcg.yml`) runs the full suite plus an end-to-end smoke (`mmcg doctor --json` + `mmcg verify-spec` + `mmcg audit-spec` against `tests/ci-fixture/`) on a 7-target matrix every PR: x86_64/aarch64 Linux gnu + musl, x86_64/aarch64 macOS, x86_64 Windows.
+CI (`.github/workflows/ci-mmcg.yml`) runs the full suite plus an end-to-end smoke (`mmcg doctor --json` + `mmcg verify-spec` + `mmcg audit-spec` against `tests/ci-fixture/`) on a 6-target matrix every PR: x86_64/aarch64 Linux gnu + musl, aarch64 macOS (Apple Silicon), x86_64 Windows. macOS Intel (`x86_64-apple-darwin`) is intentionally out of scope — still buildable locally via `cargo install --target=x86_64-apple-darwin`, just not gated per-PR.
 
 ## Integration with the Mastermind workflow
 

@@ -1,6 +1,6 @@
 {
   "name": "mmcg",
-  "version": "0.21.1",
+  "version": "0.22.0",
   "description": "Mastermind Codegraph MCP server. Fast multi-language code indexer (Python, TypeScript/TSX, JavaScript/JSX, Rust, C#, Go, Java, PHP, C/C++) with 17 tools: search, callers, callees (with edge_kind filter for calls/imports/inherits), impact, imports, imported_by, files, symbols_in_file, outline, recent_changes, unreferenced, api_surface, centrality, tasks, dependency_cycles, symbols_changed_since, status. CLI orchestrators: `mmcg run-task` (verify-spec → risk report → optional `--exec` to `claude -p` → audit-spec → release-notes draft; index required by default, --allow-no-index escape), `mmcg setup claude` (safe MCP config writer — diff-first, merges into existing `mcpServers`), `mmcg init --profile` (CONTEXT.md templates for typescript-api / react-native / python-fastapi / rust-cli). Spec files support YAML frontmatter (`touches[]`, `verify[]`, `expected_docs[]`, `breaking_changes.removed_symbols[]`) for high-precision file+language-scoped gates; heuristic Markdown parsing falls back when absent. Local SQLite index, tree-sitter parsing, incremental file watcher, FTS5 over `.mastermind/tasks/` task specs, no system dependencies. C/C++ is best-effort syntactic — see README Limitations.",
   "author": {
     "name": "mastermind"

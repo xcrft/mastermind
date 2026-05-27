@@ -1,0 +1,14 @@
+{
+  "name": "@xcrft/mmcg-linux-arm64-gnu",
+  "version": "0.22.0",
+  "description": "Prebuilt mmcg binary for Linux arm64 glibc. Internal — installed automatically as an optional dependency of @xcrft/mastermind.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xcrft/mastermind.git"
+  },
+  "os": ["linux"],
+  "cpu": ["arm64"],
+  "libc": ["glibc"],
+  "files": ["bin/"]
+}

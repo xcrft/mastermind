@@ -1,0 +1,13 @@
+{
+  "name": "@xcrft/mmcg-darwin-arm64",
+  "version": "0.22.0",
+  "description": "Prebuilt mmcg binary for macOS arm64 (Apple Silicon). Internal — installed automatically as an optional dependency of @xcrft/mastermind.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xcrft/mastermind.git"
+  },
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "files": ["bin/"]
+}

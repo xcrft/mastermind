@@ -66,17 +66,38 @@ See [`docs/conventions.md`](docs/conventions.md) for the full standard.
 
 ## Install
 
-Mastermind is a **complete workflow grounded in a codegraph** — not just an MCP server. The default install brings everything: the `mmcg` binary, all subagents, skills, prompts, CLAUDE.md templates, MCP config.
+Mastermind ships as a **prebuilt native binary via npm**. No Rust toolchain required for the normal path.
 
-### One-liner (recommended)
-
-Installs the `mmcg` binary into `~/.cargo/bin/` and copies subagents / skills / prompts / templates into `~/.claude/`. Needs Rust 1.75+ ([rustup](https://rustup.rs/) if missing).
+### One-shot (no install)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/xcrft/mastermind/main/install.sh | sh
+npx -y @xcrft/mastermind doctor
+npx -y @xcrft/mastermind init --profile typescript-api
+npx -y @xcrft/mastermind run-task .mastermind/tasks/042-feature.md
 ```
 
-Override the install location with `CLAUDE_HOME=/path/to/dir`. Re-run anytime to refresh — overwrites our artifacts but leaves your `mcp.json` alone (prints a snippet if it already exists). If `curl | sh` makes you nervous (fair), [read the script first](install.sh) — ~110 lines, no obfuscation.
+### Global (recommended)
+
+```bash
+npm install -g @xcrft/mastermind
+mastermind setup claude --write-mcp       # register mmcg with Claude Code's MCP layer
+mastermind doctor                          # verify the environment
+```
+
+`setup claude` writes `~/.claude/.mcp.json` with `command: "mastermind"` so Claude Code launches the wrapper from PATH. Re-run anytime — merges into existing `mcpServers`, refuses to clobber a customized entry.
+
+### Project-local (reproducible, version-pinned)
+
+```bash
+npm install -D @xcrft/mastermind
+npx mastermind setup claude --project . --write-mcp
+```
+
+Writes `./.mcp.json` with `command: "./node_modules/.bin/mastermind"` so the project always uses the version pinned in `package.json`.
+
+### Supported platforms
+
+Prebuilt binaries: macOS (arm64 + x86_64), Linux glibc (x86_64 + arm64), Linux musl/Alpine (x86_64 + arm64), Windows (x86_64). Other targets fall back to `cargo install mmcg`.
 
 ### Or via Claude Code plugin marketplace
 
@@ -88,7 +109,18 @@ Override the install location with `CLAUDE_HOME=/path/to/dir`. Re-run anytime to
 /plugin install mastermind-tools@mastermind      # standalone skills (pr-review, flaky-finder, doc-stub-sync)
 ```
 
-Plugins land in `~/.claude/plugins/`. The `mmcg` plugin registers the MCP server config; the binary is still a separate install — `cargo install --git https://github.com/xcrft/mastermind --path mcp/servers/mmcg`.
+Plugins land in `~/.claude/plugins/`. The `mmcg` plugin registers the MCP server config; install the binary via `npm install -g @xcrft/mastermind` (or `cargo install mmcg` if you build from source).
+
+### Build from source (contributors / unsupported platforms)
+
+```bash
+cargo install mmcg                                    # crates.io
+# or
+git clone https://github.com/xcrft/mastermind && cd mastermind
+cargo install --path mcp/servers/mmcg
+```
+
+Requires Rust 1.75+ ([rustup](https://rustup.rs/) if missing). The cargo-installed binary is `mmcg`, not `mastermind` — same code, same subcommands, only the wrapper name differs.
 
 <details>
 <summary>How the plugin tree is built</summary>

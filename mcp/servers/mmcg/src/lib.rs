@@ -24,6 +24,7 @@ pub mod indexer;
 pub mod mcp;
 pub mod queries;
 pub mod run_task;
+pub mod setup;
 pub mod spec;
 pub mod store;
 pub mod verify_spec;

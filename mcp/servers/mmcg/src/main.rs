@@ -6,7 +6,7 @@
 //!   mmcg status         — print index health
 //!   mmcg query <kind>   — one-shot query from the CLI (handy for debugging)
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use mmcg::indexer::Indexer;
 use mmcg::queries;
 use mmcg::store::Store;
@@ -29,6 +29,50 @@ use std::process::ExitCode;
 const CONTEXT_TEMPLATE: &str = include_str!("../templates/context.md");
 const WORKFLOW_TEMPLATE: &str = include_str!("../templates/workflow.md");
 const SPEC_TEMPLATE: &str = include_str!("../templates/spec-template.md");
+
+// Per-stack CONTEXT.md profiles (`mmcg init --profile <name>`). Each one is a
+// pre-seeded version of context.md with stack-specific layout conventions, test
+// commands, and gotchas baked in. Adding a new profile = add a file under
+// `templates/profiles/` + a const here + a `Profile` enum variant.
+const PROFILE_TYPESCRIPT_API: &str = include_str!("../templates/profiles/typescript-api.md");
+const PROFILE_REACT_NATIVE: &str = include_str!("../templates/profiles/react-native.md");
+const PROFILE_PYTHON_FASTAPI: &str = include_str!("../templates/profiles/python-fastapi.md");
+const PROFILE_RUST_CLI: &str = include_str!("../templates/profiles/rust-cli.md");
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+enum Profile {
+    /// Generic CONTEXT.md (current default — no stack-specific seeding).
+    Generic,
+    /// TypeScript HTTP/REST/GraphQL API service.
+    TypescriptApi,
+    /// React Native mobile app (Expo or bare).
+    ReactNative,
+    /// Python FastAPI async API service.
+    PythonFastapi,
+    /// Rust command-line tool.
+    RustCli,
+}
+
+fn profile_template(p: Profile) -> &'static str {
+    match p {
+        Profile::Generic => CONTEXT_TEMPLATE,
+        Profile::TypescriptApi => PROFILE_TYPESCRIPT_API,
+        Profile::ReactNative => PROFILE_REACT_NATIVE,
+        Profile::PythonFastapi => PROFILE_PYTHON_FASTAPI,
+        Profile::RustCli => PROFILE_RUST_CLI,
+    }
+}
+
+fn profile_label(p: Profile) -> &'static str {
+    match p {
+        Profile::Generic => "generic",
+        Profile::TypescriptApi => "typescript-api",
+        Profile::ReactNative => "react-native",
+        Profile::PythonFastapi => "python-fastapi",
+        Profile::RustCli => "rust-cli",
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -82,7 +126,17 @@ enum Cmd {
         /// Overwrite existing files (CONTEXT.md, CLAUDE.md). Off by default.
         #[arg(long)]
         force: bool,
+        /// CONTEXT.md template variant. `generic` (default) is stack-agnostic.
+        /// Stack-specific profiles pre-seed the file with conventions, test
+        /// commands, and canonical gotchas — prune what doesn't apply.
+        #[arg(long, value_enum, default_value = "generic")]
+        profile: Profile,
     },
+    /// Interactive configuration for an external tool — currently only Claude
+    /// Code. Safe by default: prints a diff and exits without writing unless
+    /// `--write-mcp` is passed.
+    #[command(subcommand)]
+    Setup(SetupCmd),
     /// Pre-execution gate: mechanical checks on a spec file before handing
     /// off to the executor. Verifies mandatory sections non-empty, claimed
     /// symbols exist in the index, claimed files exist on disk, pre-edit
@@ -285,6 +339,32 @@ enum QueryCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum SetupCmd {
+    /// Register mmcg with Claude Code's MCP layer. Merges into existing
+    /// `mcpServers` rather than clobbering. Default = print diff + exit
+    /// without writing. Pass `--write-mcp` to apply.
+    Claude {
+        /// Project-local target: writes `<path>/.mcp.json` instead of the
+        /// global `~/.claude/.mcp.json`.
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Actually write the config file. Without this, prints diff only.
+        #[arg(long)]
+        write_mcp: bool,
+        /// Alias for the default (no-write) mode — useful for scripting clarity.
+        #[arg(long)]
+        dry_run: bool,
+        /// Also drop the workflow CLAUDE.md template into the project root.
+        /// Refuses to overwrite existing CLAUDE.md unless `--force`.
+        #[arg(long)]
+        with_workflow: bool,
+        /// Overwrite a customized `mmcg` entry or existing CLAUDE.md.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
 fn default_index_path() -> PathBuf {
     PathBuf::from(".mastermind/mmcg.db")
 }
@@ -334,11 +414,51 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             root,
             with_claude_md,
             force,
+            profile,
         } => {
             let root = root
                 .canonicalize()
                 .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
-            do_init(&root, with_claude_md, force)?;
+            do_init(&root, with_claude_md, force, profile)?;
+        }
+        Cmd::Setup(SetupCmd::Claude {
+            project,
+            write_mcp,
+            dry_run: _,
+            with_workflow,
+            force,
+        }) => {
+            // `--dry-run` is documented as an alias for the default (no-write)
+            // mode — it's already the default, so passing it doesn't change
+            // behavior. We accept it for scripting clarity (lets a wrapper say
+            // "always set --dry-run explicitly").
+            let target = if let Some(p) = project {
+                let root = p
+                    .canonicalize()
+                    .map_err(|e| format!("canonicalize {}: {e}", p.display()))?;
+                mmcg::setup::Target::project(&root)
+            } else {
+                mmcg::setup::Target::global()?
+            };
+            let project_root = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
+            let me = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+            let outcome = mmcg::setup::run_claude(
+                &target,
+                &me,
+                &project_root,
+                &strip_template_comment(WORKFLOW_TEMPLATE),
+                mmcg::setup::Opts {
+                    write: write_mcp,
+                    force,
+                    with_workflow,
+                },
+            );
+            if matches!(
+                outcome,
+                mmcg::setup::Outcome::Error | mmcg::setup::Outcome::RefusedOverwrite
+            ) {
+                std::process::exit(1);
+            }
         }
         Cmd::VerifySpec { spec, root, json } => {
             let root = root
@@ -576,6 +696,7 @@ fn do_init(
     root: &Path,
     with_claude_md: bool,
     force: bool,
+    profile: Profile,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut created: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
@@ -623,11 +744,18 @@ fn do_init(
         );
     }
 
-    // 3. CONTEXT.md from the template (strip the HTML-comment instructions block)
+    // 3. CONTEXT.md from the picked profile template (strip the HTML-comment
+    //    instructions block). `--profile generic` keeps the original
+    //    stack-agnostic template; stack-specific profiles pre-seed the file
+    //    with conventions / commands / gotchas — see `templates/profiles/`.
     let context_path = root.join("CONTEXT.md");
-    let context_body = strip_template_comment(CONTEXT_TEMPLATE);
+    let context_body = strip_template_comment(profile_template(profile));
     if write_if_absent(&context_path, &context_body, force)? {
-        created.push("CONTEXT.md".into());
+        let label = match profile {
+            Profile::Generic => "CONTEXT.md".to_string(),
+            _ => format!("CONTEXT.md (profile: {})", profile_label(profile)),
+        };
+        created.push(label);
     } else {
         skipped.push("CONTEXT.md (already exists — pass --force to overwrite)".into());
     }

@@ -168,7 +168,12 @@ jobs:
           else
             PY=python
           fi
-          "$PY" -c "import json; d = json.load(open(r'$PROBE/doctor.json')); assert 'checks' in d, d"
+          # Pipe via stdin instead of `open(path)` — on Windows, Git Bash
+          # auto-translates command-line args between MSYS and Windows paths,
+          # but NOT string literals inside the Python source. Reading stdin
+          # sidesteps the issue: bash handles the file open in its native
+          # path semantics.
+          "$PY" -c "import json, sys; d = json.load(sys.stdin); assert 'checks' in d, d" < "$PROBE/doctor.json"
           rm -rf "$PROBE"
 
       - name: smoke — verify-spec + audit-spec on tests/ci-fixture

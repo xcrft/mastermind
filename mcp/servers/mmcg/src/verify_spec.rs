@@ -82,6 +82,17 @@ pub enum Finding {
         spec_says: String,
         index_says: Option<String>,
     },
+    /// FIND block payload not present in the target file — spec is stale or
+    /// the executor would fail at phase 1. Whitespace-sensitive substring match.
+    FindBlockMismatch {
+        file: String,
+        phase: Option<String>,
+        find_text_preview: String,
+    },
+    /// VERIFY command's first token isn't a binary on `$PATH` — `cargo test`
+    /// when `cargo` isn't installed, `pnpm` when project uses `npm`, etc.
+    /// Warning only — could be a project-local script the executor knows about.
+    VerifyCommandNotFound { command: String, executable: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -156,6 +167,20 @@ fn render_finding(f: &Finding) -> String {
             let live = index_says.as_deref().unwrap_or("<no signature stored>");
             format!("snapshot_signature_drift: spec says `{symbol}` signature is `{spec_says}`, index says `{live}` — re-run `mmcg_search {symbol}`")
         }
+        Finding::FindBlockMismatch {
+            file,
+            phase,
+            find_text_preview,
+        } => {
+            let phase_label = phase.as_deref().unwrap_or("(no phase label)");
+            format!("find_block_mismatch: {phase_label} → `{file}` doesn't contain the FIND text (preview: `{find_text_preview}`) — spec is stale or the file changed")
+        }
+        Finding::VerifyCommandNotFound {
+            command,
+            executable,
+        } => {
+            format!("verify_command_not_found: `{command}` — executable `{executable}` not on PATH")
+        }
     }
 }
 
@@ -196,6 +221,20 @@ pub fn run(spec: &ParsedSpec, store: Option<&Store>, repo_root: &Path) -> Report
         for claim in &spec.pre_edit_snapshot {
             check_symbol_claim(claim, store, &mut errors, &mut warnings);
         }
+    }
+
+    // 4. FIND blocks — for every block with a target file, the FIND text must
+    //    be a literal substring of the current file contents. Stale FIND ⇒
+    //    executor fails at phase 1, so this is `error`, not warning.
+    for block in &spec.find_blocks {
+        check_find_block(block, repo_root, &mut errors);
+    }
+
+    // 5. VERIFY commands — first token resolvable on `$PATH`. Soft warn:
+    //    might be a project-local script (`./scripts/check.sh`) which would
+    //    look like an unresolved binary but is fine.
+    for cmd in &spec.verify_commands {
+        check_verify_command(cmd, &mut warnings);
     }
 
     let verdict = if !errors.is_empty() {
@@ -269,6 +308,85 @@ fn check_symbol_claim(
             threshold: BLAST_RADIUS_WARN,
         });
     }
+}
+
+/// FIND-block validation: the planner's `FIND:` payload must appear as a
+/// substring of the target file. Whitespace-sensitive — matching the executor's
+/// reality (it does literal replace).
+fn check_find_block(block: &crate::spec::FindBlock, repo_root: &Path, errors: &mut Vec<Finding>) {
+    let Some(file) = &block.file else {
+        // No `**File:**` marker — can't validate. Silent skip; verify-spec's
+        // mandatory-file-mentions check (#2) catches the typical case.
+        return;
+    };
+    let abs = repo_root.join(file);
+    let Ok(body) = std::fs::read_to_string(&abs) else {
+        // Missing file is already flagged by check #2; don't double-report.
+        return;
+    };
+    if !body.contains(&block.find_text) {
+        let preview: String = block
+            .find_text
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(80)
+            .collect();
+        errors.push(Finding::FindBlockMismatch {
+            file: file.clone(),
+            phase: block.phase.clone(),
+            find_text_preview: preview,
+        });
+    }
+}
+
+/// Check that the first token of a VERIFY command resolves on `$PATH`. Skips
+/// shell-syntactic intros (`cd …`, `pushd …`) and project-local paths starting
+/// with `./` or `/` — both are common and not actually missing.
+fn check_verify_command(command: &str, warnings: &mut Vec<Finding>) {
+    let first = match command.split_whitespace().next() {
+        Some(t) => t,
+        None => return,
+    };
+    // Skip project-local paths (`./scripts/foo.sh`) — they're files, not
+    // PATH-resolved binaries. Existence is the executor's problem, not ours.
+    if first.starts_with("./") || first.starts_with('/') {
+        return;
+    }
+    // Skip shell builtins that wrap a real command.
+    if matches!(first, "cd" | "pushd" | "popd" | "exec" | "env" | "time") {
+        return;
+    }
+    if which_on_path(first).is_some() {
+        return;
+    }
+    warnings.push(Finding::VerifyCommandNotFound {
+        command: command.to_string(),
+        executable: first.to_string(),
+    });
+}
+
+/// Bare-bones `which(1)` — walks `$PATH`, checks each entry for the binary.
+/// Returns the resolved absolute path or None.
+fn which_on_path(binary: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(binary);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        // Windows: try common executable extensions if no extension present.
+        if cfg!(windows) && !binary.contains('.') {
+            for ext in ["exe", "cmd", "bat"] {
+                let c = dir.join(format!("{binary}.{ext}"));
+                if c.is_file() {
+                    return Some(c);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Section body is effectively empty when it's whitespace, just the template
@@ -379,6 +497,86 @@ Edit `src/missing.rs`
             .errors
             .iter()
             .any(|e| matches!(e, Finding::EmptyMandatorySection { section } if section == "Alternatives Considered")));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn flags_stale_find_block_against_file() {
+        let root = tmp();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/foo.rs"), "fn renamed() {}\n").unwrap();
+        let body = "\
+## Goals
+1. Touch `src/foo.rs`
+## Alternatives Considered
+- A
+## Tests Plan
+- t
+## Documentation Plan
+- d
+## Observability Plan
+- n/a
+## Performance Considerations
+- O(1)
+## Phase 1: change
+### 1.1 edit
+**File:** `src/foo.rs`
+FIND:
+```rust
+fn old_name() {}
+```
+";
+        let s = spec::parse_str("t.md", body);
+        let r = run(&s, None, &root);
+        assert!(r.errors.iter().any(|e| matches!(
+            e,
+            Finding::FindBlockMismatch { file, .. } if file == "src/foo.rs"
+        )));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn verify_command_check_handles_local_paths_and_missing_bins() {
+        let root = tmp();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/foo.rs"), "// stub").unwrap();
+        let body = "\
+## Goals
+1. Edit `src/foo.rs`
+## Alternatives Considered
+- A
+## Tests Plan
+- t
+## Documentation Plan
+- d
+## Observability Plan
+- n/a
+## Performance Considerations
+- O(1)
+## Phase 1: x
+**File:** `src/foo.rs`
+FIND:
+```
+// stub
+```
+VERIFY: `./scripts/local-script.sh`
+VERIFY: `definitely-not-on-path-12345`
+";
+        let s = spec::parse_str("t.md", body);
+        let r = run(&s, None, &root);
+        // ./scripts/... is project-local — no warning expected
+        let local_warned = r.warnings.iter().any(|w| {
+            matches!(
+                w,
+                Finding::VerifyCommandNotFound { executable, .. } if executable.starts_with("./")
+            )
+        });
+        assert!(!local_warned, "./scripts/ paths should not be PATH-checked");
+        // The missing-binary one should warn
+        assert!(r.warnings.iter().any(|w| matches!(
+            w,
+            Finding::VerifyCommandNotFound { executable, .. } if executable == "definitely-not-on-path-12345"
+        )));
         fs::remove_dir_all(&root).ok();
     }
 

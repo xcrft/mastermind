@@ -18,7 +18,7 @@
 //!   against `git diff --name-only`.
 //! - VERIFY commands — `**VERIFY**: `cmd`` lines under phase bodies.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -39,6 +39,164 @@ pub struct ParsedSpec {
     /// Per-phase FIND/CHANGE-TO/VERIFY triplets — used by verify-spec to
     /// confirm the FIND text actually exists in the named file.
     pub find_blocks: Vec<FindBlock>,
+    /// YAML frontmatter (between `---` delimiters at file start). When
+    /// present, takes precedence over heuristic extraction in verify/audit
+    /// gates. When absent, gates fall back to the heuristic fields above
+    /// with an advisory "consider migrating to frontmatter" warning.
+    pub frontmatter: Option<Frontmatter>,
+}
+
+/// Structured spec metadata parsed from a YAML frontmatter block. All fields
+/// are optional — partial frontmatter is fine, gates use what's present and
+/// fall back to heuristics for what's missing.
+///
+/// Schema (all optional):
+/// ```yaml
+/// id: 042
+/// title: Add billing webhook
+/// risk: high
+/// touches:
+///   - file: src/billing/billing.controller.ts
+///     language: typescript
+///     symbols:
+///       - name: handleWebhook
+///         signature: "async handleWebhook(req, res)"
+///         callers: 4
+/// verify:
+///   - typecheck                       # label-only (informational)
+///   - cmd: "npm test -- billing"      # executable (PATH-checked)
+/// expected_docs:
+///   - README.md
+///   - docs/billing.md
+/// breaking_changes:
+///   removed_symbols:
+///     - old_api                       # bare string OR
+///     - name: legacy_handler          # detailed object
+///       file: src/api/legacy.ts
+///       reason: "deprecated since 2025-01"
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Frontmatter {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    /// "low" / "medium" / "high" — informational, surfaced in the risk report.
+    #[serde(default)]
+    pub risk: Option<String>,
+    /// Files this spec authorizes the executor to modify, with optional
+    /// symbol-level snapshots scoped by file + language.
+    #[serde(default)]
+    pub touches: Vec<TouchEntry>,
+    /// Verification steps. Strings are labels (informational); objects with
+    /// `cmd:` are real commands fed into verify-spec's PATH check.
+    #[serde(default)]
+    pub verify: Vec<VerifyEntry>,
+    /// Doc files expected to be modified — separated from code-touches so the
+    /// audit can flag "you said you'd update the README but didn't".
+    #[serde(default)]
+    pub expected_docs: Vec<String>,
+    #[serde(default)]
+    pub breaking_changes: BreakingChanges,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TouchEntry {
+    pub file: String,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub symbols: Vec<SymbolSpec>,
+}
+
+/// Polymorphic symbol — accept either a bare name string (`- foo`) or a
+/// detailed object (`- {name: foo, signature: "...", callers: 4}`). Untagged
+/// enum so YAML parses both forms transparently.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SymbolSpec {
+    Name(String),
+    Detailed {
+        name: String,
+        #[serde(default)]
+        signature: Option<String>,
+        #[serde(default)]
+        callers: Option<u32>,
+        #[serde(default)]
+        file: Option<String>,
+        #[serde(default)]
+        language: Option<String>,
+        #[serde(default)]
+        reason: Option<String>,
+    },
+}
+
+impl SymbolSpec {
+    pub fn name(&self) -> &str {
+        match self {
+            SymbolSpec::Name(s) => s,
+            SymbolSpec::Detailed { name, .. } => name,
+        }
+    }
+    pub fn signature(&self) -> Option<&str> {
+        match self {
+            SymbolSpec::Name(_) => None,
+            SymbolSpec::Detailed { signature, .. } => signature.as_deref(),
+        }
+    }
+    pub fn callers(&self) -> Option<u32> {
+        match self {
+            SymbolSpec::Name(_) => None,
+            SymbolSpec::Detailed { callers, .. } => *callers,
+        }
+    }
+    pub fn file(&self) -> Option<&str> {
+        match self {
+            SymbolSpec::Name(_) => None,
+            SymbolSpec::Detailed { file, .. } => file.as_deref(),
+        }
+    }
+    pub fn language(&self) -> Option<&str> {
+        match self {
+            SymbolSpec::Name(_) => None,
+            SymbolSpec::Detailed { language, .. } => language.as_deref(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum VerifyEntry {
+    Label(String),
+    Command { cmd: String },
+}
+
+impl VerifyEntry {
+    /// Returns the runnable command (`cmd:` form) or None for label-only entries.
+    pub fn command(&self) -> Option<&str> {
+        match self {
+            VerifyEntry::Command { cmd } => Some(cmd),
+            VerifyEntry::Label(_) => None,
+        }
+    }
+    /// Returns the human-readable label (the string for Label, the cmd for Command).
+    pub fn label(&self) -> &str {
+        match self {
+            VerifyEntry::Label(s) => s,
+            VerifyEntry::Command { cmd } => cmd,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BreakingChanges {
+    /// Symbols intentionally removed in this spec. The audit cross-references
+    /// against the git diff: any symbol removed but NOT in this list is
+    /// flagged as `RemovedSymbolNotAcknowledged` (Broken verdict). This
+    /// replaces the older lowercase-substring heuristic which was fooled by
+    /// incidental mentions like ``Do not remove `old_api` ``.
+    #[serde(default)]
+    pub removed_symbols: Vec<SymbolSpec>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -74,15 +232,19 @@ pub fn parse_file(path: &Path) -> std::io::Result<ParsedSpec> {
 }
 
 pub fn parse_str(source_path: &str, body: &str) -> ParsedSpec {
-    let (sections, order) = split_sections(body);
+    // Frontmatter is non-fatal — a malformed `---...---` block returns None
+    // and gates fall back to heuristics with an advisory warning. We do NOT
+    // want bad YAML to block a spec from running through verify-spec.
+    let (frontmatter, body_after_fm) = extract_frontmatter(body);
+    let (sections, order) = split_sections(body_after_fm);
     let pre_edit_snapshot = sections
         .iter()
         .find(|(k, _)| section_key(k) == "pre-edit symbol snapshot")
         .map(|(_, body)| extract_snapshot(body))
         .unwrap_or_default();
-    let mentioned_files = extract_mentioned_files(body);
-    let verify_commands = extract_verify_commands(body);
-    let find_blocks = extract_find_blocks(body);
+    let mentioned_files = extract_mentioned_files(body_after_fm);
+    let verify_commands = extract_verify_commands(body_after_fm);
+    let find_blocks = extract_find_blocks(body_after_fm);
 
     ParsedSpec {
         path: source_path.to_string(),
@@ -92,6 +254,51 @@ pub fn parse_str(source_path: &str, body: &str) -> ParsedSpec {
         mentioned_files,
         verify_commands,
         find_blocks,
+        frontmatter,
+    }
+}
+
+/// Split a `---\n...\n---\n` block off the top of the body. Returns the parsed
+/// frontmatter (None if absent or unparseable) and the body remainder.
+///
+/// The leading `---` MUST be the very first line (no blank lines before it),
+/// matching Jekyll / MkDocs / Hugo conventions. A trailing `---` closes the
+/// block. If the YAML between fails to deserialize, we warn to stderr and
+/// return None — the spec body is still usable through the heuristic path.
+fn extract_frontmatter(body: &str) -> (Option<Frontmatter>, &str) {
+    if !body.starts_with("---\n") && !body.starts_with("---\r\n") {
+        return (None, body);
+    }
+    // Skip the opening fence.
+    let after_open = body
+        .strip_prefix("---\n")
+        .or_else(|| body.strip_prefix("---\r\n"))
+        .unwrap_or(body);
+    // Find the closing `---` on its own line.
+    let mut yaml_end = None;
+    let mut rest_start = 0;
+    let mut offset = 0;
+    for line in after_open.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed == "---" {
+            yaml_end = Some(offset);
+            rest_start = offset + line.len();
+            break;
+        }
+        offset += line.len();
+    }
+    let Some(yaml_end) = yaml_end else {
+        // No closing fence — treat the file as having no frontmatter.
+        return (None, body);
+    };
+    let yaml_src = &after_open[..yaml_end];
+    let rest = &after_open[rest_start..];
+    match serde_yml::from_str::<Frontmatter>(yaml_src) {
+        Ok(fm) => (Some(fm), rest),
+        Err(e) => {
+            eprintln!("warning: YAML frontmatter failed to parse, falling back to heuristics: {e}");
+            (None, rest)
+        }
     }
 }
 
@@ -545,6 +752,137 @@ fn old_test() {}
         );
         // `new_helper` bullet has no signature clause.
         assert_eq!(by_name["new_helper"].signature, None);
+    }
+
+    #[test]
+    fn frontmatter_absent_when_no_yaml_block() {
+        let s = parse_str("t.md", "# Title\n## Goals\n- x\n");
+        assert!(s.frontmatter.is_none());
+        // Body still parses through the heuristic path.
+        assert!(s.section_order.iter().any(|n| n.starts_with("Goals")));
+    }
+
+    #[test]
+    fn frontmatter_parses_full_schema() {
+        let body = "---
+id: \"42\"
+title: Add billing webhook
+risk: high
+touches:
+  - file: src/billing/billing.controller.ts
+    language: typescript
+    symbols:
+      - name: handleWebhook
+        signature: \"async handleWebhook(req, res)\"
+        callers: 4
+verify:
+  - typecheck
+  - cmd: \"npm test -- billing\"
+expected_docs:
+  - README.md
+  - docs/billing.md
+breaking_changes:
+  removed_symbols:
+    - old_api
+    - name: legacy_handler
+      file: src/api/legacy.ts
+      reason: \"deprecated since 2025-01\"
+---
+
+# Add billing webhook
+
+## Goals
+- Wire the new endpoint
+";
+        let s = parse_str("t.md", body);
+        let fm = s.frontmatter.expect("frontmatter parsed");
+        assert_eq!(fm.id.as_deref(), Some("42"));
+        assert_eq!(fm.title.as_deref(), Some("Add billing webhook"));
+        assert_eq!(fm.risk.as_deref(), Some("high"));
+        assert_eq!(fm.touches.len(), 1);
+        let t = &fm.touches[0];
+        assert_eq!(t.file, "src/billing/billing.controller.ts");
+        assert_eq!(t.language.as_deref(), Some("typescript"));
+        assert_eq!(t.symbols.len(), 1);
+        assert_eq!(t.symbols[0].name(), "handleWebhook");
+        assert_eq!(t.symbols[0].callers(), Some(4));
+        // Verify list is mixed: label + cmd object.
+        assert_eq!(fm.verify.len(), 2);
+        assert_eq!(fm.verify[0].label(), "typecheck");
+        assert!(fm.verify[0].command().is_none());
+        assert_eq!(fm.verify[1].command(), Some("npm test -- billing"));
+        // Expected docs.
+        assert_eq!(fm.expected_docs, vec!["README.md", "docs/billing.md"]);
+        // Removed symbols — mixed string + object.
+        assert_eq!(fm.breaking_changes.removed_symbols.len(), 2);
+        assert_eq!(fm.breaking_changes.removed_symbols[0].name(), "old_api");
+        assert_eq!(
+            fm.breaking_changes.removed_symbols[1].name(),
+            "legacy_handler"
+        );
+        assert_eq!(
+            fm.breaking_changes.removed_symbols[1].file(),
+            Some("src/api/legacy.ts")
+        );
+        // Body after frontmatter still parses.
+        assert!(s.section_order.iter().any(|n| n.starts_with("Goals")));
+    }
+
+    #[test]
+    fn frontmatter_with_partial_fields_uses_defaults() {
+        let body = "---
+id: \"7\"
+touches:
+  - file: src/x.rs
+---
+
+## Goals
+- x
+";
+        let s = parse_str("t.md", body);
+        let fm = s.frontmatter.expect("present");
+        assert_eq!(fm.id.as_deref(), Some("7"));
+        assert!(fm.title.is_none());
+        assert!(fm.risk.is_none());
+        assert!(fm.verify.is_empty());
+        assert!(fm.expected_docs.is_empty());
+        assert!(fm.breaking_changes.removed_symbols.is_empty());
+        assert_eq!(fm.touches.len(), 1);
+        assert!(fm.touches[0].symbols.is_empty());
+    }
+
+    #[test]
+    fn malformed_frontmatter_falls_back_to_heuristic() {
+        // Missing closing `---` → no frontmatter, body parses as-is.
+        let body = "---\nid: 42\ntitle: \"Unterminated\n\n## Goals\n- x\n";
+        let s = parse_str("t.md", body);
+        assert!(s.frontmatter.is_none());
+        // The body after the missing close fence is the entire input — so we
+        // SHOULD still find Goals if the parser falls back correctly. (The
+        // current implementation returns the original body when no close
+        // fence is found, preserving everything for heuristic parsing.)
+        assert!(
+            s.section_order.iter().any(|n| n.starts_with("Goals")),
+            "heuristic path should still find sections on malformed frontmatter"
+        );
+    }
+
+    #[test]
+    fn frontmatter_does_not_swallow_body_sections() {
+        let body = "---
+id: \"1\"
+---
+
+## Goals
+- a real goal
+
+## Tests Plan
+- t
+";
+        let s = parse_str("t.md", body);
+        assert!(s.frontmatter.is_some());
+        assert!(s.section_order.iter().any(|n| n.starts_with("Goals")));
+        assert!(s.section_order.iter().any(|n| n.starts_with("Tests Plan")));
     }
 
     #[test]

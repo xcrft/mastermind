@@ -213,9 +213,28 @@ pub fn run(
     }
 
     // 3. Removed-symbol-not-acknowledged — for every symbol that disappeared
-    //    in the git diff, check if the spec body mentions its name anywhere.
-    //    Concatenate all section bodies for the search; a removal mentioned
-    //    in Goals or Notes is intentional, otherwise it's a silent breaker.
+    //    in the git diff, decide if it's a deliberate removal or a silent
+    //    breaking change.
+    //
+    //    Resolution order:
+    //    a) Frontmatter present + `breaking_changes.removed_symbols` non-empty
+    //       → AUTHORITATIVE. Exact-name match against that list. Anything not
+    //         in the list is flagged. No lowercase-substring fuzz, no false
+    //         positives from incidental mentions like `Do not remove old_api`.
+    //    b) Frontmatter present but no `removed_symbols` → strict mode. ANY
+    //         removed non-module symbol is flagged (frontmatter forces the
+    //         planner to explicitly ack removals).
+    //    c) No frontmatter → fall back to the legacy lowercase-substring
+    //         heuristic. Documented as imprecise; planners are encouraged to
+    //         migrate to frontmatter.
+    let frontmatter_acks: Option<std::collections::HashSet<String>> =
+        spec.frontmatter.as_ref().map(|fm| {
+            fm.breaking_changes
+                .removed_symbols
+                .iter()
+                .map(|s| s.name().to_string())
+                .collect()
+        });
     let spec_body_lower = spec
         .sections
         .values()
@@ -229,8 +248,15 @@ pub fn run(
         if removed.kind == "module" {
             continue;
         }
-        let key = removed.name.to_lowercase();
-        if !spec_body_lower.contains(&key) {
+        let acknowledged = match &frontmatter_acks {
+            // Frontmatter present → exact match against breaking_changes list.
+            // The empty-list case still goes through here and flags everything
+            // (strict mode, intended).
+            Some(acks) => acks.contains(&removed.name),
+            // No frontmatter → legacy lowercase-substring fallback.
+            None => spec_body_lower.contains(&removed.name.to_lowercase()),
+        };
+        if !acknowledged {
             findings.push(Finding::RemovedSymbolNotAcknowledged {
                 symbol: removed.name.clone(),
                 file: removed.file.clone(),
@@ -329,9 +355,25 @@ fn compute_verdict(findings: &[Finding]) -> Verdict {
 
 /// Heuristic test-name extractor over the Tests Plan section.
 ///
+/// **This is a best-effort signal, not a gate.** `PlannedTestNotAdded` lives
+/// in the Drift bucket (warning, not Broken) for exactly this reason — the
+/// detector below covers a slice of test-naming conventions and misses several
+/// common ones. Don't rely on it for "did the executor write the tests" — use
+/// frontmatter `verify[].cmd` to run the actual test suite for that.
+///
 /// Recognises:
-/// - backticked tokens that look like test names (`test_*`, `*_test`, `it_*`)
+/// - backticked tokens shaped like `test_*`, `*_test`, `it_*`, `should_*`
 /// - bare-word `test_*` patterns even outside backticks (for plain bullets)
+///
+/// Does NOT recognise (planner: document these explicitly, don't rely on the
+/// heuristic for them):
+/// - Jest / Vitest `it("does x", ...)` / `describe(...)` — the test name is
+///   a string literal in the test file, not a function symbol
+/// - Playwright `test("logs in", ...)` — same shape, not a function symbol
+/// - Table-driven test cases (single Rust `#[test] fn cases() { for case in ... }`)
+/// - Golden / snapshot tests where the test "name" is a fixture filename
+/// - Modifications to EXISTING tests — only new function symbols appear in
+///   `symbol_diff.added`
 ///
 /// Returns deduplicated names in source order.
 fn extract_planned_test_names(body: &str) -> Vec<String> {
@@ -677,6 +719,114 @@ Add caller2() in `src/lib.py`
             f,
             Finding::PlannedTestNotAdded { test } if test == "test_foo"
         )));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn frontmatter_breaking_changes_replaces_lowercase_substring_match() {
+        // The legacy heuristic was fooled by `Do not remove `old_api`` (mention
+        // ≠ acknowledgement). With frontmatter, the audit ONLY trusts
+        // `breaking_changes.removed_symbols` — a prose mention is no longer
+        // sufficient ack.
+        let dir = init_repo("frontmatter_breaking_strict");
+        write(
+            &dir,
+            "src/lib.py",
+            "def old_api(): pass\ndef stays(): pass\n",
+        );
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "baseline"]);
+        git(&dir, &["tag", "baseline"]);
+        // Executor silently removed old_api.
+        write(&dir, "src/lib.py", "def stays(): pass\n");
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "head"]);
+
+        let db = dir.join("idx.db");
+        let mut store = Store::open(&db).unwrap();
+        Indexer::new(&dir).index_all(&mut store, false).unwrap();
+
+        // Spec MENTIONS old_api in prose (`Do not remove`) but doesn't list it
+        // in breaking_changes. Under legacy heuristic, this passed silently.
+        // Under frontmatter strict mode, it's a Broken verdict.
+        let spec_body = "---
+id: \"1\"
+breaking_changes:
+  removed_symbols: []
+---
+
+## Goals
+- Keep `stays`. Do not remove `old_api`.
+## Alternatives Considered
+- a
+## Tests Plan
+- t
+## Documentation Plan
+- d
+## Observability Plan
+- n/a
+## Performance Considerations
+- O(1)
+";
+        let s = spec::parse_str("spec.md", spec_body);
+        let r = run(&s, &store, &dir, "baseline").unwrap();
+        assert!(
+            r.findings.iter().any(|f| matches!(
+                f,
+                Finding::RemovedSymbolNotAcknowledged { symbol, .. } if symbol == "old_api"
+            )),
+            "expected `old_api` flagged despite the `Do not remove` prose mention; \
+             frontmatter strict mode requires structured ack"
+        );
+        assert_eq!(r.verdict, Verdict::Broken);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn frontmatter_breaking_changes_accepts_explicit_acknowledgement() {
+        let dir = init_repo("frontmatter_breaking_acked");
+        write(&dir, "src/lib.py", "def old_api(): pass\n");
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "baseline"]);
+        git(&dir, &["tag", "baseline"]);
+        write(&dir, "src/lib.py", "# replaced\n");
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "head"]);
+
+        let db = dir.join("idx.db");
+        let mut store = Store::open(&db).unwrap();
+        Indexer::new(&dir).index_all(&mut store, false).unwrap();
+
+        // Frontmatter lists old_api in removed_symbols → audit accepts.
+        let spec_body = "---
+id: \"2\"
+breaking_changes:
+  removed_symbols:
+    - old_api
+---
+
+## Goals
+- Drop deprecated API
+## Alternatives Considered
+- A
+## Tests Plan
+- t
+## Documentation Plan
+- d
+## Observability Plan
+- n/a
+## Performance Considerations
+- O(1)
+";
+        let s = spec::parse_str("spec.md", spec_body);
+        let r = run(&s, &store, &dir, "baseline").unwrap();
+        assert!(
+            !r.findings.iter().any(|f| matches!(
+                f,
+                Finding::RemovedSymbolNotAcknowledged { symbol, .. } if symbol == "old_api"
+            )),
+            "old_api explicitly acked in frontmatter — should not flag"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 

@@ -11,6 +11,19 @@
   Everything below this comment block. Keep the language imperative, the FIND blocks
   exact, the VERIFY commands runnable. Specs are contracts.
 
+  YAML FRONTMATTER (RECOMMENDED, ADDITIVE)
+  The block between the `---` fences below is the machine-readable contract that
+  `mmcg verify-spec` and `mmcg audit-spec` use for high-precision gates:
+    - `touches[].file` + `touches[].symbols` — scoped symbol search (no monorepo
+      leaf-name collisions like the heuristic path has)
+    - `expected_docs` — separate from code touches, audit flags missed doc updates
+    - `verify[].cmd` — fed into the VERIFY PATH check + run-task verify gate
+    - `breaking_changes.removed_symbols` — STRUCTURED ack list. Replaces the
+      old lowercase-substring fallback that misread `Do not remove X` as an ack.
+  When frontmatter is ABSENT, the gates fall back to heuristic extraction from
+  the Markdown body — fine for trivial / docs-only specs, but the precision
+  gain on real code changes is what makes the workflow trustworthy. Migrate.
+
   CANON COMPLIANCE
   The mandatory sections below (Alternatives Considered, Tests Plan, Documentation
   Plan, Observability Plan, Performance Considerations) exist to enforce engineering
@@ -18,6 +31,38 @@
   Removing these sections defeats the canon — the auditor will fail post-flight if
   the spec claimed Tests Plan but no tests were actually added.
 -->
+
+---
+# Machine-readable spec contract — consumed by `mmcg verify-spec` / `audit-spec` /
+# `run-task`. All fields are optional; partial frontmatter is fine. Delete this
+# block if you want the heuristic path only (advisory: precision drops).
+id: "<NNN>"                         # spec number, string (YAML quirk: bare 042 → 34 octal)
+title: <Feature Name>
+risk: <low|medium|high>             # informational, surfaced in run-task risk report
+
+touches:                            # files this spec authorizes the executor to modify
+  - file: <src/area/file.ext>
+    language: <python|typescript|rust|csharp|go|java|php|cpp|...>
+    symbols:                        # mix of bare names + detailed objects allowed
+      - <symbol_name>               # bare-name form
+      - name: <other_symbol>
+        signature: "<exact signature>"     # `mmcg_search <name>` to capture
+        callers: <N>                       # `mmcg_callers <name>` count at snapshot time
+
+verify:                             # PATH-checked at verify-spec; run by `run-task --exec`
+  - <label>                         # informational only (e.g. "typecheck")
+  - cmd: "<runnable command>"       # the actual command, e.g. `npm test -- billing`
+
+expected_docs:                      # doc files the spec promises to update — separate
+  - <README.md or path/to/doc.md>   # from code touches so audit can flag misses
+
+breaking_changes:                   # ack list for intentional removals
+  removed_symbols:
+    - <symbol_name>                 # bare-name form OR
+    - name: <other_symbol>          # detailed object with file/reason
+      file: <path>
+      reason: "<one-line explanation>"
+---
 
 # Task <NNN>: <Feature Name>
 

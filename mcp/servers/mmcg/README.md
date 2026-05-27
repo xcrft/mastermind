@@ -2,7 +2,7 @@
 name: mmcg
 description: Mastermind Codegraph — fast multi-language code indexer (Python + TypeScript/TSX + JavaScript/JSX + Rust + C# + Go + Java + PHP + C/C++) exposed over MCP. Indexes symbols, calls, and imports (with fully-qualified paths) into a local SQLite database (`.mastermind/mmcg.db`) and exposes 17 structural query tools for AI agents in the Mastermind workflow. Includes FTS5 search over `.mastermind/tasks/` and an incremental file watcher.
 metadata:
-  version: 0.20.0
+  version: 0.20.1
   authors:
     - mastermind
   tags:

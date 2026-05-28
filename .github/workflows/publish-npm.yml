@@ -285,6 +285,12 @@ jobs:
     # `npm-prod` environment scopes the NPM_TOKEN secret and (if configured)
     # triggers required-reviewer / wait-timer protection rules.
     environment: npm-prod
+    # `id-token: write` mints the OIDC token npm uses to attach a build
+    # provenance attestation (`npm publish --provenance`); `contents: read` for
+    # checkout. Job-level block overrides the workflow default.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v6
 
@@ -320,11 +326,11 @@ jobs:
           # doesn't matter — they're independent.
           for tgz in "$GITHUB_WORKSPACE"/packed/xcraftmind-mmcg-*.tgz; do
             echo "→ npm publish $tgz"
-            npm publish --access public "$tgz"
+            npm publish --provenance --access public "$tgz"
           done
           # Root last.
           echo "→ npm publish $GITHUB_WORKSPACE/packed/xcraftmind-mastermind-*.tgz"
-          npm publish --access public "$GITHUB_WORKSPACE"/packed/xcraftmind-mastermind-*.tgz
+          npm publish --provenance --access public "$GITHUB_WORKSPACE"/packed/xcraftmind-mastermind-*.tgz
 
   dry-run-notice:
     name: Dry-run notice

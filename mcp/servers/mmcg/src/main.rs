@@ -136,13 +136,14 @@ enum Cmd {
     /// Scaffold a project for the Mastermind workflow: create .mastermind/tasks/,
     /// CONTEXT.md (only if missing) and the index, then build the index and
     /// (unless --no-claude) populate CONTEXT.md from the codebase via `claude -p`.
-    /// Does NOT touch an existing CLAUDE.md (pass --with-claude-md to drop the template).
+    /// Does NOT touch an existing CLAUDE.md (pass --with-claude-md to drop + fill the template).
     Init {
         /// Project root. Defaults to cwd.
         #[arg(default_value = ".")]
         root: PathBuf,
-        /// Also drop a copy of the Mastermind workflow CLAUDE.md template into the project root.
-        /// Refuses to overwrite an existing CLAUDE.md unless --force is passed.
+        /// Also drop the Mastermind workflow CLAUDE.md template and fill its <PLACEHOLDER> sections
+        /// from the codebase via `claude -p` (unless --no-claude). Refuses to overwrite an existing
+        /// CLAUDE.md unless --force is passed.
         #[arg(long)]
         with_claude_md: bool,
         /// Overwrite existing files (CONTEXT.md, CLAUDE.md). Off by default.
@@ -837,11 +838,13 @@ fn do_init(
     }
 
     // 4. CLAUDE.md (optional)
+    let mut claude_md_created = false;
     if with_claude_md {
         let claude_path = root.join("CLAUDE.md");
         let claude_body = strip_template_comment(WORKFLOW_TEMPLATE);
         if write_if_absent(&claude_path, &claude_body, force)? {
             created.push("CLAUDE.md".into());
+            claude_md_created = true;
         } else {
             skipped.push("CLAUDE.md (already exists — pass --force to overwrite)".into());
         }
@@ -882,16 +885,31 @@ fn do_init(
         skipped.push("index build (--no-index) — run `mastermind index .` when ready".into());
     }
 
-    // 8. Populate CONTEXT.md from the codebase via `claude -p`. Only when we just
-    //    created the bare template (never clobber a user-edited file) and
-    //    `--no-claude` wasn't passed. Best-effort: a missing Claude CLI or a
-    //    non-zero exit must NOT fail init — fall back to printing the prompt.
-    if claude && context_created {
-        match fill_context_with_claude(root, &context_path) {
-            Ok(()) => created.push("CONTEXT.md populated via `claude -p`".into()),
+    // 8. Draft the scaffold's project-specific content from the codebase via
+    //    `claude -p` — CONTEXT.md (when freshly created) and, with --with-claude-md,
+    //    the CLAUDE.md <PLACEHOLDER> sections. One claude run fills both. Only
+    //    targets files we just created (never clobbers user-edited ones). Best-effort:
+    //    a missing CLI or non-zero exit never fails init (we fall back to the prompt).
+    let fill_context = claude && context_created;
+    let fill_claude_md = claude && claude_md_created;
+    if fill_context || fill_claude_md {
+        let claude_md_path = root.join("CLAUDE.md");
+        let prompt = draft_prompt(
+            fill_context.then_some(context_path.as_path()),
+            fill_claude_md.then_some(claude_md_path.as_path()),
+        );
+        match run_claude_draft(root, &prompt) {
+            Ok(()) => {
+                if fill_context {
+                    created.push("CONTEXT.md populated via `claude -p`".into());
+                }
+                if fill_claude_md {
+                    created.push("CLAUDE.md placeholders filled via `claude -p`".into());
+                }
+            }
             Err(e) => {
-                warnings.push(format!("CONTEXT.md auto-fill skipped: {e}"));
-                context_fill_prompt = Some(context_prompt(&context_path));
+                warnings.push(format!("claude -p auto-fill skipped: {e}"));
+                context_fill_prompt = Some(prompt);
             }
         }
     }
@@ -924,45 +942,61 @@ fn do_init(
     println!("  3. (Optional) Keep the index fresh in another terminal:  mastermind watch");
     if !with_claude_md {
         println!("  4. Adopt the workflow CLAUDE.md:  re-run `mastermind init --with-claude-md`");
+    } else if claude {
+        println!(
+            "  4. Review the drafted CLAUDE.md — placeholders were filled from your codebase."
+        );
     } else {
-        println!("  4. Review the dropped CLAUDE.md — it has <PLACEHOLDER> sections to fill in.");
+        println!("  4. Fill CLAUDE.md's <PLACEHOLDER> sections (--no-claude skipped auto-fill).");
     }
     if let Some(prompt) = context_fill_prompt {
         println!(
-            "\nCONTEXT.md was left as a template. To fill it, paste this into Claude Code:\n\n  {prompt}"
+            "\nScaffold files were left as templates. To fill them, paste this into Claude Code:\n\n  {prompt}"
         );
     }
 
     Ok(())
 }
 
-/// Prompt handed to `claude -p` (or printed as a fallback) to fill CONTEXT.md
-/// from the codebase. Scopes Claude to the two human-authored sections and
-/// tells it to leave the accumulating sections as empty templates.
-fn context_prompt(context_path: &Path) -> String {
-    format!(
-        "Populate the CONTEXT.md at `{}` for this project. It is currently a blank template. \
-         Read the codebase (use the mmcg MCP tools and file access) and fill ONLY the Identity \
-         (what it is / what it is not / primary users) and Active goals sections with project \
-         specifics. Leave the Decision log, Known gotchas, Domain glossary, External dependencies, \
-         and Don't-touch list sections as the empty templates — those accumulate over time. State \
-         only things that are true about the project and not trivially derivable; do not invent goals.",
-        context_path.display()
-    )
+/// Build the `claude -p` prompt that fills the freshly-scaffolded files from the
+/// codebase. Each file gets scoped instructions so Claude fills only what should
+/// be project-specific and leaves accumulating sections as templates. Also used
+/// as the printed fallback when the Claude CLI is unavailable.
+fn draft_prompt(context: Option<&Path>, claude_md: Option<&Path>) -> String {
+    let mut s = String::from(
+        "Fill in the following freshly-scaffolded Mastermind files for THIS project by reading the \
+         codebase (use the mmcg MCP tools and file access). State only things that are true about the \
+         project and not trivially derivable; do not invent.",
+    );
+    if let Some(p) = context {
+        s.push_str(&format!(
+            "\n- `{}`: fill ONLY the Identity (what it is / what it is not / primary users) and Active \
+             goals sections. Leave Decision log, Known gotchas, Domain glossary, External dependencies, \
+             and Don't-touch list as the empty templates — those accumulate over time.",
+            p.display()
+        ));
+    }
+    if let Some(p) = claude_md {
+        s.push_str(&format!(
+            "\n- `{}`: replace the <PLACEHOLDER> tokens (project name, and the run / test / typecheck / \
+             lint commands) with the project's real values, inferred from package manifests, scripts, and \
+             config. Leave the workflow instructions intact — only fill the placeholders.",
+            p.display()
+        ));
+    }
+    s
 }
 
-/// Best-effort: shell out to `claude -p` to populate CONTEXT.md from the
-/// codebase. Runs in `root` so Claude operates inside the project. Returns Err
-/// on spawn failure (no CLI) or non-zero exit so the caller can fall back to
-/// printing the prompt — auto-fill never fails the overall `init`.
-fn fill_context_with_claude(root: &Path, context_path: &Path) -> Result<(), String> {
-    println!("\nPopulating CONTEXT.md via `claude -p` (pass --no-claude to skip)...\n");
+/// Best-effort: shell out to `claude -p` to draft the scaffold files from the
+/// codebase. Runs in `root` with `--permission-mode acceptEdits` so the file
+/// writes apply without a prompt (it still prompts for Bash/other tools). Returns
+/// Err on spawn failure or non-zero exit so the caller can fall back to printing
+/// the prompt — auto-fill never fails the overall `init`.
+fn run_claude_draft(root: &Path, prompt: &str) -> Result<(), String> {
+    println!("\nDrafting scaffold files via `claude -p` (pass --no-claude to skip)...\n");
     let status = std::process::Command::new("claude")
         .arg("-p")
-        .arg(context_prompt(context_path))
-        // Auto-apply the CONTEXT.md write so `init` stays hands-off (no mid-run
-        // approval prompt). acceptEdits still prompts for Bash/other tools, and
-        // the prompt scopes the work to CONTEXT.md only.
+        .arg(prompt)
         .arg("--permission-mode")
         .arg("acceptEdits")
         .current_dir(root)

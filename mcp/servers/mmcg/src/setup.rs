@@ -407,6 +407,18 @@ mod tests {
     use super::*;
     use std::fs;
 
+    // Process-global MASTERMIND_* env vars are read by `mmcg_entry`. Cargo runs
+    // tests in parallel within one process, so an env mutation in one test can
+    // leak into another. Every test that sets OR depends on the default value of
+    // these vars holds this lock for its duration, making them mutually
+    // exclusive. Poison-tolerant — one panicking test must not cascade-fail the
+    // rest.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+
     fn tmp(name: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!(
             "mmcg-setup-{}-{name}-{}",
@@ -441,6 +453,7 @@ mod tests {
 
     #[test]
     fn merge_preserves_other_servers() {
+        let _env = env_lock();
         let existing = json!({
             "mcpServers": {
                 "other-server": {"command": "other", "args": ["run"]}
@@ -499,6 +512,7 @@ mod tests {
 
     #[test]
     fn run_claude_write_creates_file_with_merged_entry() {
+        let _env = env_lock();
         let dir = tmp("write_creates");
         let target = Target {
             path: dir.join(".mcp.json"),
@@ -527,6 +541,7 @@ mod tests {
 
     #[test]
     fn run_claude_no_change_when_entry_matches() {
+        let _env = env_lock();
         let dir = tmp("no_change_match");
         let target = Target {
             path: dir.join(".mcp.json"),
@@ -593,6 +608,7 @@ mod tests {
 
     #[test]
     fn run_claude_force_overwrites_customized_entry() {
+        let _env = env_lock();
         let dir = tmp("force_overwrites");
         let target = Target {
             path: dir.join(".mcp.json"),
@@ -755,21 +771,21 @@ mod tests {
     }
 
     /// RAII helper to set/unset env vars for a test scope and restore prior
-    /// values on drop. Avoids cross-test contamination when env-var-driven
-    /// code paths are under test.
-    ///
-    /// **Tests using EnvGuard MUST run single-threaded** — cargo by default
-    /// runs tests in parallel, and env vars are process-global. The five
-    /// `mmcg_entry_*_mode_*` tests below all touch MASTERMIND_INSTALL_MODE
-    /// and would race. Run with `cargo test -- --test-threads=1` or mark
-    /// these specifically (cargo doesn't have a per-test serial annotation
-    /// in stable; documented as a known constraint).
+    /// values on drop. Holds `ENV_LOCK` for its lifetime so env-driven tests are
+    /// mutually exclusive even under cargo's default parallel runner — reader
+    /// tests that depend on the default environment take the same lock via
+    /// `env_lock()`. No `--test-threads=1` required.
     struct EnvGuard {
         prior: Vec<(String, Option<String>)>,
+        // Held until drop so env mutation + restore happen while no other
+        // env-touching test runs. Declared after `prior` so it releases only
+        // after the Drop impl below has restored the prior values.
+        _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl EnvGuard {
         fn set(pairs: &[(&str, &str)]) -> Self {
+            let _lock = env_lock();
             let prior = pairs
                 .iter()
                 .map(|(k, _)| (k.to_string(), std::env::var(k).ok()))
@@ -777,9 +793,10 @@ mod tests {
             for (k, v) in pairs {
                 std::env::set_var(k, v);
             }
-            Self { prior }
+            Self { prior, _lock }
         }
         fn clear(keys: &[&str]) -> Self {
+            let _lock = env_lock();
             let prior = keys
                 .iter()
                 .map(|k| (k.to_string(), std::env::var(k).ok()))
@@ -787,7 +804,7 @@ mod tests {
             for k in keys {
                 std::env::remove_var(k);
             }
-            Self { prior }
+            Self { prior, _lock }
         }
     }
 

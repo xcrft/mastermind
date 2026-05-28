@@ -54,6 +54,8 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
+        # 7 targets = the 7 platform packages in npm/platforms/. The consistency
+        # check in `assemble-and-smoke` asserts this stays in lockstep.
         include:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
@@ -64,6 +66,15 @@ jobs:
             artifact: mmcg
             install_musl: false
           - target: aarch64-apple-darwin
+            runner: macos-latest
+            artifact: mmcg
+            install_musl: false
+          # Intel macOS — cross-compiled from the arm64 runner (`rustup target
+          # add x86_64-apple-darwin`). No scarce/slow Intel runner needed; the
+          # macOS SDK ships both arch slices so the bundled SQLite + tree-sitter
+          # C sources compile fine. Build-only (the arm64 host can't run x64
+          # tests without Rosetta, and we don't need to for a release build).
+          - target: x86_64-apple-darwin
             runner: macos-latest
             artifact: mmcg
             install_musl: false
@@ -127,14 +138,17 @@ jobs:
         with:
           path: build-artifacts
 
-      - name: Assemble all 6 platform packages
+      - name: Assemble all 7 platform packages
         run: |
           set -e
           # Maps each artifact directory back to its Rust target triple.
+          # MUST stay in lockstep with the build matrix + npm/platforms/ dirs —
+          # the consistency check below enforces it.
           declare -A TARGETS=(
             [mmcg-x86_64-unknown-linux-gnu]=x86_64-unknown-linux-gnu
             [mmcg-aarch64-unknown-linux-gnu]=aarch64-unknown-linux-gnu
             [mmcg-aarch64-apple-darwin]=aarch64-apple-darwin
+            [mmcg-x86_64-apple-darwin]=x86_64-apple-darwin
             [mmcg-x86_64-pc-windows-msvc]=x86_64-pc-windows-msvc
             [mmcg-x86_64-unknown-linux-musl]=x86_64-unknown-linux-musl
             [mmcg-aarch64-unknown-linux-musl]=aarch64-unknown-linux-musl
@@ -150,7 +164,20 @@ jobs:
             ./scripts/build-npm-packages.sh "$target" "$bin_path"
           done
 
-      - name: npm pack all 7 packages (root + 6 platforms)
+      - name: Consistency check — package count == platform dirs == matrix == binaries
+        run: |
+          set -e
+          OPT_DEPS=$(node -p "Object.keys(require('./npm/mastermind/package.json').optionalDependencies).length")
+          PLATFORM_DIRS=$(find npm/platforms -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+          ASSEMBLED=$(find npm/platforms -type f \( -name mmcg -o -name mmcg.exe \) -path '*/bin/*' | wc -l | tr -d ' ')
+          echo "optionalDependencies=$OPT_DEPS  platform_dirs=$PLATFORM_DIRS  assembled_binaries=$ASSEMBLED"
+          if [ "$OPT_DEPS" != "$PLATFORM_DIRS" ] || [ "$PLATFORM_DIRS" != "$ASSEMBLED" ]; then
+            echo "::error::platform count mismatch — every optionalDependency needs a platform dir AND an assembled binary. A package without a binary publishes empty and breaks at runtime."
+            echo "  (a darwin-x64 with no build target is exactly the bug this guard catches)"
+            exit 1
+          fi
+
+      - name: npm pack all 7 packages (root + 7 platforms)
         run: |
           set -e
           mkdir -p packed
@@ -159,20 +186,37 @@ jobs:
           done
           ls -la packed/
 
+      - name: Verify every platform tarball contains its binary
+        run: |
+          set -e
+          for tgz in packed/xcrft-mmcg-*.tgz; do
+            # tarball member layout is `package/bin/mmcg[.exe]`
+            if tar tzf "$tgz" | grep -qE 'package/bin/mmcg(\.exe)?$'; then
+              echo "✓ $(basename "$tgz") contains a binary"
+            else
+              echo "::error::$(basename "$tgz") has NO bin/mmcg — assembly skipped this platform"
+              tar tzf "$tgz"
+              exit 1
+            fi
+          done
+
       - name: Smoke — install root + native platform from tarballs and run
         run: |
           set -e
-          # Host is ubuntu-latest x64-gnu — install the matching platform.
+          # Derive version dynamically — no hardcoded tarball names (they'd
+          # rot on every release).
+          VERSION=$(node -p "require('./npm/mastermind/package.json').version")
+          ROOT_TGZ="$GITHUB_WORKSPACE/packed/xcrft-mastermind-${VERSION}.tgz"
+          PLAT_TGZ="$GITHUB_WORKSPACE/packed/xcrft-mmcg-linux-x64-gnu-${VERSION}.tgz"
+          test -f "$ROOT_TGZ" || { echo "::error::root tarball not found: $ROOT_TGZ"; ls packed/; exit 1; }
+          test -f "$PLAT_TGZ" || { echo "::error::platform tarball not found: $PLAT_TGZ"; ls packed/; exit 1; }
           SMOKE_DIR=$(mktemp -d)
           cd "$SMOKE_DIR"
           npm init -y > /dev/null
           # Install both tarballs at once so npm resolves the optional dep
           # locally instead of fetching @xcrft/mmcg-linux-x64-gnu from the
-          # registry (it isn't published yet at this point — first publish
-          # would fail this smoke without --no-save+local file: spec).
-          npm install --no-save \
-            "$GITHUB_WORKSPACE/packed/xcrft-mastermind-0.22.0.tgz" \
-            "$GITHUB_WORKSPACE/packed/xcrft-mmcg-linux-x64-gnu-0.22.0.tgz"
+          # registry (it isn't published yet at this point).
+          npm install --no-save "$ROOT_TGZ" "$PLAT_TGZ"
           echo "--- mastermind --version"
           ./node_modules/.bin/mastermind --version
           echo "--- mastermind doctor --json (shape check)"
@@ -181,7 +225,13 @@ jobs:
           echo "--- mastermind setup claude (dry-run, project mode)"
           # Project-local install — install-mode detection should write
           # `./node_modules/.bin/mastermind` as the MCP command.
-          ./node_modules/.bin/mastermind setup claude --project . 2>&1 | tail -15
+          ./node_modules/.bin/mastermind setup claude --project . > mcp-diff.txt 2>&1 || true
+          grep -q "node_modules/.bin/mastermind" mcp-diff.txt || {
+            echo "::error::project-mode setup claude did not propose ./node_modules/.bin/mastermind"
+            cat mcp-diff.txt
+            exit 1
+          }
+          echo "✓ project-mode MCP command form verified"
 
       - name: Upload assembled tarballs for the publish job
         uses: actions/upload-artifact@v7

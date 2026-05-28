@@ -76,6 +76,8 @@ npx -y @xcrft/mastermind init --profile typescript-api
 npx -y @xcrft/mastermind run-task .mastermind/tasks/042-feature.md
 ```
 
+`npx` is fine for one-shot commands. For the **MCP server registration** (`setup claude`), prefer global or project-local install instead — an `npx ... serve` MCP config re-resolves through the npm cache on every Claude Code launch (slower, less deterministic).
+
 ### Global (recommended)
 
 ```bash

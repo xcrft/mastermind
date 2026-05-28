@@ -153,9 +153,9 @@ mmcg init --profile rust-cli          # command-line tool
 # and exits without writing unless `--write-mcp` is passed. Merges into existing
 # `mcpServers` (preserves other servers). Refuses to overwrite a customized
 # mmcg entry without `--force`.
-mmcg setup claude                                         # diff vs ~/.claude/.mcp.json (dry-run)
-mmcg setup claude --write-mcp                             # apply to ~/.claude/.mcp.json
-mmcg setup claude --project . --write-mcp                 # apply to ./.mcp.json
+mmcg setup claude                                         # dry-run: show the `claude mcp add` it would run
+mmcg setup claude --write-mcp                             # register at user scope (~/.claude.json) via `claude mcp add`
+mmcg setup claude --project . --write-mcp                 # write ./.mcp.json (project scope)
 mmcg setup claude --project . --write-mcp --with-workflow # also drop CLAUDE.md workflow template
 mmcg setup claude --write-mcp --force                     # overwrite a customized mmcg entry
 

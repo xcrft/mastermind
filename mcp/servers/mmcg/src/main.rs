@@ -513,31 +513,37 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             with_workflow,
             force,
         }) => {
-            // `--dry-run` is documented as an alias for the default (no-write)
-            // mode — it's already the default, so passing it doesn't change
-            // behavior. We accept it for scripting clarity (lets a wrapper say
-            // "always set --dry-run explicitly").
-            let target = if let Some(p) = project {
+            // `--dry-run` is the default (no-write); accepted for scripting clarity.
+            let project_root = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
+            let me = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+            let opts = mmcg::setup::Opts {
+                write: write_mcp,
+                force,
+                with_workflow,
+            };
+            let outcome = if let Some(p) = project {
+                // Project scope → write `<root>/.mcp.json` (Claude Code reads this).
                 let root = p
                     .canonicalize()
                     .map_err(|e| format!("canonicalize {}: {e}", p.display()))?;
-                mmcg::setup::Target::project(&root)
+                mmcg::setup::run_claude(
+                    &mmcg::setup::Target::project(&root),
+                    &me,
+                    &project_root,
+                    &strip_template_comment(WORKFLOW_TEMPLATE),
+                    opts,
+                )
             } else {
-                mmcg::setup::Target::global()?
+                // User (global) scope → `claude mcp add --scope user`, which writes
+                // ~/.claude.json. (The old path, ~/.claude/.mcp.json, is ignored by
+                // Claude Code, so global registration never actually took effect.)
+                mmcg::setup::add_claude_user(
+                    &me,
+                    &project_root,
+                    &strip_template_comment(WORKFLOW_TEMPLATE),
+                    opts,
+                )
             };
-            let project_root = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
-            let me = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
-            let outcome = mmcg::setup::run_claude(
-                &target,
-                &me,
-                &project_root,
-                &strip_template_comment(WORKFLOW_TEMPLATE),
-                mmcg::setup::Opts {
-                    write: write_mcp,
-                    force,
-                    with_workflow,
-                },
-            );
             if matches!(
                 outcome,
                 mmcg::setup::Outcome::Error | mmcg::setup::Outcome::RefusedOverwrite
@@ -1175,7 +1181,7 @@ fn do_uninstall(
     }
 
     if do_global {
-        mmcg::setup::remove_claude(&mmcg::setup::Target::global()?, force);
+        mmcg::setup::remove_claude_user(force);
     }
 
     if !force {

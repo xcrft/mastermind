@@ -274,6 +274,60 @@ fn merge_mmcg_entry(existing: &Value, mmcg_entry: &Value) -> Result<Value, Strin
 /// edits (which `setup claude` never produces because the merge is always
 /// additive on one key) this would produce a wider-than-necessary block. If we
 /// ever need finer diffs, pull in the `similar` crate.
+/// Reverse of `run_claude`: remove the `mmcg` entry from an MCP config.
+/// Safe by default — prints a diff and exits unless `write` is true. Leaves
+/// every other server intact, and leaves an empty `mcpServers` object behind
+/// rather than deleting the file (another tool may own it).
+pub fn remove_claude(target: &Target, write: bool) -> Outcome {
+    println!("=== mmcg uninstall claude ({}) ===", target.label);
+
+    let existing_text = match std::fs::read_to_string(&target.path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            println!("No MCP config at `{}` — nothing to remove.", target.label);
+            return Outcome::NoChange;
+        }
+        Err(e) => {
+            eprintln!("error: reading `{}`: {e}", target.label);
+            return Outcome::Error;
+        }
+    };
+
+    let mut config: Value = match serde_json::from_str(&existing_text) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: `{}` is not valid JSON: {e}", target.label);
+            return Outcome::Error;
+        }
+    };
+
+    if config.pointer("/mcpServers/mmcg").is_none() {
+        println!("No `mmcg` entry in `{}` — nothing to remove.", target.label);
+        return Outcome::NoChange;
+    }
+
+    if let Some(servers) = config.get_mut("mcpServers").and_then(|v| v.as_object_mut()) {
+        servers.remove("mmcg");
+    }
+
+    let after = format!("{}\n", serde_json::to_string_pretty(&config).unwrap());
+    println!("\n--- {} (current)", target.label);
+    println!("+++ {} (proposed)\n", target.label);
+    print!("{}", render_line_diff(&existing_text, &after));
+
+    if !write {
+        println!("\n(dry-run — pass --force to apply)");
+        return Outcome::DryRun;
+    }
+
+    if let Err(e) = write_atomic(&target.path, &after) {
+        eprintln!("error: writing `{}`: {e}", target.label);
+        return Outcome::Error;
+    }
+    println!("\nRemoved `mmcg` from {}.", target.label);
+    Outcome::Wrote
+}
+
 fn render_line_diff(before: &str, after: &str) -> String {
     if before == after {
         return "(no changes)\n".to_string();

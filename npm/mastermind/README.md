@@ -1,10 +1,16 @@
 # @xcraftmind/mastermind
 
+[![npm version](https://img.shields.io/npm/v/@xcraftmind/mastermind.svg)](https://www.npmjs.com/package/@xcraftmind/mastermind)
+[![CI](https://github.com/xcrft/mastermind/actions/workflows/ci-mmcg.yml/badge.svg)](https://github.com/xcrft/mastermind/actions/workflows/ci-mmcg.yml)
+[![license: MIT](https://img.shields.io/npm/l/@xcraftmind/mastermind.svg)](./LICENSE)
+
 Mastermind workflow CLI + mmcg codegraph for AI coding agents — verify-spec / audit-spec gates, MCP server, multi-language tree-sitter indexer (Python, TypeScript, JavaScript, Rust, C#, Go, Java, PHP, C/C++).
 
 Prebuilt native binaries via optional platform packages — **no Rust toolchain required**.
 
 ## Install
+
+Requires **Node.js 18+**. The CLI is a thin JS wrapper around a prebuilt native binary — no Rust toolchain needed (except the build-from-source path below).
 
 ### One-shot (no install)
 
@@ -101,5 +107,10 @@ No `postinstall` script. No network calls beyond the npm registry itself.
 ## Links
 
 - Source: [github.com/xcrft/mastermind](https://github.com/xcrft/mastermind)
+- Changelog: [CHANGELOG.md](https://github.com/xcrft/mastermind/blob/main/CHANGELOG.md)
 - mmcg Rust crate: [crates.io/crates/mmcg](https://crates.io/crates/mmcg)
 - MCP protocol: [modelcontextprotocol.io](https://modelcontextprotocol.io)
+
+## License
+
+MIT — see [LICENSE](./LICENSE).

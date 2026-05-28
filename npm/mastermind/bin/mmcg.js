@@ -34,14 +34,14 @@ function packageName() {
   const platform = process.platform;
   const arch = process.arch;
 
-  if (platform === "darwin" && arch === "arm64") return "@xcrft/mmcg-darwin-arm64";
-  if (platform === "darwin" && arch === "x64") return "@xcrft/mmcg-darwin-x64";
-  if (platform === "win32" && arch === "x64") return "@xcrft/mmcg-win32-x64-msvc";
+  if (platform === "darwin" && arch === "arm64") return "@xcraftmind/mmcg-darwin-arm64";
+  if (platform === "darwin" && arch === "x64") return "@xcraftmind/mmcg-darwin-x64";
+  if (platform === "win32" && arch === "x64") return "@xcraftmind/mmcg-win32-x64-msvc";
 
   if (platform === "linux") {
     const libc = detectLibc();
-    if (arch === "x64") return `@xcrft/mmcg-linux-x64-${libc}`;
-    if (arch === "arm64") return `@xcrft/mmcg-linux-arm64-${libc}`;
+    if (arch === "x64") return `@xcraftmind/mmcg-linux-x64-${libc}`;
+    if (arch === "arm64") return `@xcraftmind/mmcg-linux-arm64-${libc}`;
   }
 
   throw new Error(`unsupported platform: ${platform}-${arch}`);
@@ -61,7 +61,7 @@ function resolveBinary() {
       "  - your platform is not in the supported set (see README)",
       "",
       "Fixes:",
-      "  - npm install --include=optional @xcrft/mastermind     # force optional install",
+      "  - npm install --include=optional @xcraftmind/mastermind     # force optional install",
       "  - cargo install mmcg                                   # build from source (needs Rust)",
       "",
       `(underlying error: ${String(err?.message ?? err)})`,

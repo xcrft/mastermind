@@ -15,7 +15,7 @@
 #
 # Release procedure:
 #   1. Bump version in mcp/servers/mmcg/Cargo.toml AND all 7 npm package.jsons
-#      (root @xcrft/mastermind + 6 @xcrft/mmcg-* platform packages).
+#      (root @xcraftmind/mastermind + 6 @xcraftmind/mmcg-* platform packages).
 #      The build helper hard-fails on Cargo↔platform version mismatch.
 #   2. Validate: `python scripts/validate.py && cargo test --lib`
 #   3. Commit on main: `git commit -am "mastermind 0.22.0"`
@@ -24,7 +24,7 @@
 #
 # Tag-version-match guard prevents shipping a mismatched release.
 
-name: Publish @xcrft/mastermind to npm
+name: Publish @xcraftmind/mastermind to npm
 
 on:
   push:
@@ -214,7 +214,7 @@ jobs:
           cd "$SMOKE_DIR"
           npm init -y > /dev/null
           # Install both tarballs at once so npm resolves the optional dep
-          # locally instead of fetching @xcrft/mmcg-linux-x64-gnu from the
+          # locally instead of fetching @xcraftmind/mmcg-linux-x64-gnu from the
           # registry (it isn't published yet at this point).
           npm install --no-save "$ROOT_TGZ" "$PLAT_TGZ"
           echo "--- mastermind --version"
@@ -249,7 +249,7 @@ jobs:
           ROOT_VERSION=$(node -e "console.log(require('./npm/mastermind/package.json').version)")
           echo "tag=$TAG_VERSION  root pkg=$ROOT_VERSION"
           if [ "$TAG_VERSION" != "$ROOT_VERSION" ]; then
-            echo "::error::tag version ($TAG_VERSION) does not match @xcrft/mastermind package.json ($ROOT_VERSION). Bump or retag."
+            echo "::error::tag version ($TAG_VERSION) does not match @xcraftmind/mastermind package.json ($ROOT_VERSION). Bump or retag."
             exit 1
           fi
 

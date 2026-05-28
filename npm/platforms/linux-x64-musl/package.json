@@ -1,7 +1,7 @@
 {
-  "name": "@xcrft/mmcg-linux-x64-musl",
+  "name": "@xcraftmind/mmcg-linux-x64-musl",
   "version": "0.22.0",
-  "description": "Prebuilt mmcg binary for Linux x86_64 musl (Alpine, distroless). Internal — installed automatically as an optional dependency of @xcrft/mastermind.",
+  "description": "Prebuilt mmcg binary for Linux x86_64 musl (Alpine, distroless). Internal — installed automatically as an optional dependency of @xcraftmind/mastermind.",
   "license": "MIT",
   "repository": {
     "type": "git",

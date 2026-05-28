@@ -179,8 +179,8 @@ pub fn run_claude(
 /// this binary was invoked. Three sources of truth, checked in order:
 ///
 /// 1. `MASTERMIND_INSTALL_MODE` env var set by the npm JS wrapper. Values:
-///    - `npx` → user is one-shotting via `npx -y @xcrft/mastermind`. Pin the
-///      command to `npx -y @xcrft/mastermind@<version> serve` so the MCP
+///    - `npx` → user is one-shotting via `npx -y @xcraftmind/mastermind`. Pin the
+///      command to `npx -y @xcraftmind/mastermind@<version> serve` so the MCP
 ///      client launches the same version every time.
 ///    - `global` → `npm install -g`. Use the wrapper name (`mastermind`),
 ///      which is on PATH.
@@ -199,12 +199,12 @@ fn mmcg_entry(mmcg_binary: &Path) -> Value {
     let version = std::env::var("MASTERMIND_VERSION").ok();
     let package = std::env::var("MASTERMIND_PACKAGE")
         .ok()
-        .unwrap_or_else(|| "@xcrft/mastermind".to_string());
+        .unwrap_or_else(|| "@xcraftmind/mastermind".to_string());
 
     match install_mode.as_deref() {
         Some("npx") => {
             // Pin the version so the MCP client gets reproducible behavior;
-            // unpinned `npx @xcrft/mastermind` would silently upgrade and
+            // unpinned `npx @xcraftmind/mastermind` would silently upgrade and
             // could break the integration on a future release.
             let pinned = match version {
                 Some(v) => format!("{package}@{v}"),
@@ -640,7 +640,7 @@ mod tests {
         let _guard = EnvGuard::set(&[
             ("MASTERMIND_INSTALL_MODE", "global"),
             ("MASTERMIND_VERSION", "0.22.0"),
-            ("MASTERMIND_PACKAGE", "@xcrft/mastermind"),
+            ("MASTERMIND_PACKAGE", "@xcraftmind/mastermind"),
         ]);
         let entry = mmcg_entry(Path::new("/ignored/path/mmcg"));
         assert_eq!(
@@ -671,7 +671,7 @@ mod tests {
         let _guard = EnvGuard::set(&[
             ("MASTERMIND_INSTALL_MODE", "npx"),
             ("MASTERMIND_VERSION", "0.22.0"),
-            ("MASTERMIND_PACKAGE", "@xcrft/mastermind"),
+            ("MASTERMIND_PACKAGE", "@xcraftmind/mastermind"),
         ]);
         let entry = mmcg_entry(Path::new("/ignored"));
         assert_eq!(entry.get("command").and_then(|v| v.as_str()), Some("npx"));
@@ -679,7 +679,7 @@ mod tests {
         // Version is pinned in the package spec arg.
         assert!(
             args.iter()
-                .any(|a| a.as_str() == Some("@xcrft/mastermind@0.22.0")),
+                .any(|a| a.as_str() == Some("@xcraftmind/mastermind@0.22.0")),
             "expected version-pinned npx package arg; got {:?}",
             args
         );
@@ -694,7 +694,7 @@ mod tests {
         let entry = mmcg_entry(Path::new("/ignored"));
         let args = entry.get("args").and_then(|v| v.as_array()).unwrap();
         assert!(
-            args.iter().any(|a| a.as_str() == Some("@xcrft/mastermind")),
+            args.iter().any(|a| a.as_str() == Some("@xcraftmind/mastermind")),
             "expected unpinned package arg when MASTERMIND_VERSION absent"
         );
     }

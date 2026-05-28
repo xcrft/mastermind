@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-05-28
+
+### Added
+- `mastermind init` now installs the workflow subagents + skills into `~/.claude/{agents,skills}/` — the full planner / critic / executor / auditor pipeline (plus workflow skills) from a single npm install, not just the codegraph. The npm package bundles them under `share/`; `init` overwrites Mastermind's own files there to keep them current. `--no-global` skips it; a cargo install ships no bundle and falls back to the plugin marketplace.
+
 ## [0.24.0] - 2026-05-28
 
 ### Added
@@ -42,7 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Seven prebuilt platform packages (`@xcraftmind/mmcg-*`) covering macOS (arm64, x64), Linux glibc and musl (x64, arm64), and Windows (x64). npm installs only the package matching the host's `os` / `cpu` / `libc`.
 - Install-mode-aware `setup claude` that writes the correct MCP `command` form for npx, global, project-local, and cargo installs.
 
-[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v0.24.0...HEAD
+[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v0.25.0...HEAD
+[0.25.0]: https://github.com/xcrft/mastermind/compare/npm-v0.24.0...npm-v0.25.0
 [0.24.0]: https://github.com/xcrft/mastermind/compare/npm-v0.23.1...npm-v0.24.0
 [0.23.1]: https://github.com/xcrft/mastermind/compare/npm-v0.23.0...npm-v0.23.1
 [0.23.0]: https://github.com/xcrft/mastermind/compare/npm-v0.22.1...npm-v0.23.0

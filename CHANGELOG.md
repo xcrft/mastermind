@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.1] - 2026-05-28
+
+### Changed
+- `mastermind init` runs `claude -p` with `--permission-mode acceptEdits` so it drafts CONTEXT.md hands-off — no mid-run approval prompt for the CONTEXT.md write.
+
 ## [0.23.0] - 2026-05-28
 
 ### Added
@@ -32,7 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Seven prebuilt platform packages (`@xcraftmind/mmcg-*`) covering macOS (arm64, x64), Linux glibc and musl (x64, arm64), and Windows (x64). npm installs only the package matching the host's `os` / `cpu` / `libc`.
 - Install-mode-aware `setup claude` that writes the correct MCP `command` form for npx, global, project-local, and cargo installs.
 
-[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v0.23.0...HEAD
+[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v0.23.1...HEAD
+[0.23.1]: https://github.com/xcrft/mastermind/compare/npm-v0.23.0...npm-v0.23.1
 [0.23.0]: https://github.com/xcrft/mastermind/compare/npm-v0.22.1...npm-v0.23.0
 [0.22.1]: https://github.com/xcrft/mastermind/compare/npm-v0.22.0...npm-v0.22.1
 [0.22.0]: https://github.com/xcrft/mastermind/releases/tag/npm-v0.22.0

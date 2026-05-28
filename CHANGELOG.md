@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `mastermind setup claude` (global/user scope) now registers mmcg via `claude mcp add --scope user` (writes `~/.claude.json`) instead of `~/.claude/.mcp.json`, which Claude Code **ignores** — so global registration silently never loaded the mmcg tools. `--project .` still writes the project `.mcp.json` (already correct). `uninstall --scope global` now uses `claude mcp remove`, and `doctor`'s MCP-config check reads `~/.claude.json` so it can no longer report a false "registered".
+
 ## [0.26.0] - 2026-05-28
 
 ### Added

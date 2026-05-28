@@ -15,7 +15,7 @@
 //! | 4 | `index freshness`      | no source file newer than the index                    |
 //! | 5 | `gitignore`            | `.mastermind/` is excluded from VCS                    |
 //! | 6 | `CLAUDE.md`            | exists and references the workflow                     |
-//! | 7 | `MCP config`           | mmcg registered in `~/.claude/.mcp.json` or `./.mcp.json` |
+//! | 7 | `MCP config`           | mmcg registered in `~/.claude.json` (user) or `./.mcp.json` (project) |
 //! | 8 | `MCP serve handshake`  | spawning `mastermind serve` responds to `initialize` + `tools/list` |
 //!
 //! Output is human-readable by default. `--json` switches to a machine-
@@ -377,11 +377,14 @@ fn check_claude_md(root: &Path) -> Check {
 /// Look for `mmcg` registered in known MCP config locations. We don't try
 /// every editor — just the two locations Claude Code uses today.
 fn check_mcp_config(root: &Path) -> Check {
+    // The two locations Claude Code actually reads: the project `.mcp.json`
+    // (project scope) and `~/.claude.json` top-level `mcpServers` (user scope,
+    // written by `claude mcp add --scope user`). NOT `~/.claude/.mcp.json`, which
+    // Claude Code ignores.
     let candidates: Vec<(PathBuf, &'static str)> =
-        std::iter::once((root.join(".mcp.json"), "project-local .mcp.json"))
+        std::iter::once((root.join(".mcp.json"), "project .mcp.json"))
             .chain(
-                dirs::home_dir()
-                    .map(|h| (h.join(".claude").join(".mcp.json"), "~/.claude/.mcp.json")),
+                dirs::home_dir().map(|h| (h.join(".claude.json"), "~/.claude.json (user scope)")),
             )
             .collect();
 
@@ -411,10 +414,8 @@ fn check_mcp_config(root: &Path) -> Check {
     Check {
         name: "MCP config",
         status: Status::Warn,
-        message: "mmcg not found in `.mcp.json` (project) or `~/.claude/.mcp.json`".into(),
-        hint: Some(
-            "register the server — see `mcp/servers/mmcg/README.md#mcp-server-usage`".into(),
-        ),
+        message: "mmcg not registered (project `.mcp.json` or `~/.claude.json` user scope)".into(),
+        hint: Some("run `mastermind setup claude --write-mcp`".into()),
     }
 }
 

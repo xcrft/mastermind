@@ -1,11 +1,13 @@
-//! `mastermind setup claude` — interactive MCP-config writer.
+//! `mastermind setup claude` — MCP-config registrar.
 //!
-//! Registers mmcg with Claude Code's MCP layer by editing either
-//! `~/.claude/.mcp.json` (global) or `<root>/.mcp.json` (project). Safe by
-//! default: prints a diff and exits without writing unless `--write-mcp` is
-//! passed. Merges into an existing `mcpServers` object rather than clobbering —
-//! other servers stay intact. Refuses to overwrite a user-customized `mmcg`
-//! entry without `--force`.
+//! Registers mmcg with Claude Code. Two scopes:
+//!   - user (global, default): via `claude mcp add --scope user` → `~/.claude.json`,
+//!     the location Claude Code actually reads for global servers. (Earlier versions
+//!     wrote `~/.claude/.mcp.json`, which Claude Code ignores — see `add_claude_user`.)
+//!   - project (`--project .`): writes `<root>/.mcp.json`, merging into an existing
+//!     `mcpServers` object without clobbering other servers (see `run_claude`).
+//!
+//! Safe by default: prints what it will do and exits unless `--write-mcp` is passed.
 //!
 //! Why hand-rolled diff (vs `similar` crate): the change is always additive +
 //! contiguous (one entry into one object), and `serde_json::to_string_pretty`
@@ -326,6 +328,139 @@ pub fn remove_claude(target: &Target, write: bool) -> Outcome {
     }
     println!("\nRemoved `mmcg` from {}.", target.label);
     Outcome::Wrote
+}
+
+/// Register mmcg at Claude Code's **user scope** via the official `claude mcp add`
+/// CLI, which writes `~/.claude.json` — the location Claude Code actually reads
+/// for global servers. (The previous approach wrote `~/.claude/.mcp.json`, which
+/// Claude Code ignores, so global registration silently never took effect.)
+/// Safe by default: prints the command and exits unless `opts.write`.
+pub fn add_claude_user(
+    mmcg_binary: &Path,
+    project_root: &Path,
+    workflow_template: &str,
+    opts: Opts,
+) -> Outcome {
+    println!("=== mmcg setup claude (user scope → ~/.claude.json via `claude mcp add`) ===");
+
+    let entry = mmcg_entry(mmcg_binary);
+    let command = entry
+        .get("command")
+        .and_then(|v| v.as_str())
+        .unwrap_or("mastermind")
+        .to_string();
+    let args: Vec<String> = entry
+        .get("args")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let preview = format!(
+        "claude mcp add --scope user mmcg -- {command} {}",
+        args.join(" ")
+    );
+
+    let already = claude_mcp_has("mmcg");
+
+    if already && !opts.force {
+        println!(
+            "mmcg is already registered with Claude Code. Re-run with --force to re-register.\n  would run: {preview}"
+        );
+        if opts.with_workflow {
+            handle_workflow_drop(project_root, workflow_template, opts);
+        }
+        return Outcome::NoChange;
+    }
+
+    println!("Will run:\n  {preview}");
+    if !opts.write {
+        println!("\n(dry-run) Pass --write-mcp to apply.");
+        if opts.with_workflow {
+            handle_workflow_drop(project_root, workflow_template, opts);
+        }
+        return Outcome::DryRun;
+    }
+
+    // Re-register cleanly: drop any existing entry first (best-effort), then add.
+    if already {
+        let _ = std::process::Command::new("claude")
+            .args(["mcp", "remove", "mmcg", "-s", "user"])
+            .stdin(std::process::Stdio::null())
+            .status();
+    }
+    let status = std::process::Command::new("claude")
+        .args(["mcp", "add", "--scope", "user", "mmcg", "--"])
+        .arg(&command)
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .status();
+    let outcome = match status {
+        Ok(s) if s.success() => {
+            println!("\n✓ Registered mmcg with Claude Code (user scope, ~/.claude.json). Restart Claude Code to load the tools.");
+            Outcome::Wrote
+        }
+        Ok(s) => {
+            eprintln!("error: `claude mcp add` exited with {s}");
+            Outcome::Error
+        }
+        Err(e) => {
+            eprintln!(
+                "error: could not run `claude mcp add`: {e} — is the Claude Code CLI installed and on PATH?"
+            );
+            Outcome::Error
+        }
+    };
+    if opts.with_workflow {
+        handle_workflow_drop(project_root, workflow_template, opts);
+    }
+    outcome
+}
+
+/// Remove mmcg from Claude Code's user scope via `claude mcp remove`. Safe by
+/// default: prints the command and exits unless `write`.
+pub fn remove_claude_user(write: bool) -> Outcome {
+    println!("=== mmcg uninstall claude (user scope via `claude mcp remove`) ===");
+    if !claude_mcp_has("mmcg") {
+        println!("mmcg is not registered with Claude Code — nothing to remove.");
+        return Outcome::NoChange;
+    }
+    println!("Will run:\n  claude mcp remove mmcg -s user");
+    if !write {
+        println!("\n(dry-run — pass --force to apply)");
+        return Outcome::DryRun;
+    }
+    match std::process::Command::new("claude")
+        .args(["mcp", "remove", "mmcg", "-s", "user"])
+        .stdin(std::process::Stdio::null())
+        .status()
+    {
+        Ok(s) if s.success() => {
+            println!("\nRemoved mmcg from Claude Code (user scope).");
+            Outcome::Wrote
+        }
+        Ok(s) => {
+            eprintln!("error: `claude mcp remove` exited with {s}");
+            Outcome::Error
+        }
+        Err(e) => {
+            eprintln!("error: could not run `claude mcp remove`: {e}");
+            Outcome::Error
+        }
+    }
+}
+
+/// True if `claude mcp get <name>` reports the server as registered (any scope).
+/// Best-effort: false if the Claude CLI is missing or errors.
+fn claude_mcp_has(name: &str) -> bool {
+    std::process::Command::new("claude")
+        .args(["mcp", "get", name])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn render_line_diff(before: &str, after: &str) -> String {

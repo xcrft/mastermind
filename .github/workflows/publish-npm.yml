@@ -289,13 +289,13 @@ jobs:
           # can resolve to real registry entries (otherwise root install would
           # silently skip them on first install). Order within platforms
           # doesn't matter — they're independent.
-          for tgz in packed/xcraftmind-mmcg-*.tgz; do
+          for tgz in "$GITHUB_WORKSPACE"/packed/xcraftmind-mmcg-*.tgz; do
             echo "→ npm publish $tgz"
             npm publish --access public "$tgz"
           done
           # Root last.
-          echo "→ npm publish packed/xcraftmind-mastermind-*.tgz"
-          npm publish --access public packed/xcraftmind-mastermind-*.tgz
+          echo "→ npm publish $GITHUB_WORKSPACE/packed/xcraftmind-mastermind-*.tgz"
+          npm publish --access public "$GITHUB_WORKSPACE"/packed/xcraftmind-mastermind-*.tgz
 
   dry-run-notice:
     name: Dry-run notice

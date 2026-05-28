@@ -4,28 +4,47 @@
   <img src="docs/assets/banner.webp" alt="mastermind — circuit-board logo, xcrft/mastermind" width="720">
 </p>
 
-A curated standard library of **skills**, **prompts**, **agent configs**, and **MCP integrations** for AI coding agents (primarily [Claude Code](https://claude.com/claude-code), portable to other tools).
+<p align="center">
+  <a href="https://www.npmjs.com/package/@xcraftmind/mastermind"><img src="https://img.shields.io/npm/v/@xcraftmind/mastermind.svg" alt="npm version"></a>
+  <a href="https://github.com/xcrft/mastermind/actions/workflows/ci-mmcg.yml"><img src="https://github.com/xcrft/mastermind/actions/workflows/ci-mmcg.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+</p>
 
-The goal is to give teams and individuals a place to find — and contribute — AI artifacts with a consistent shape, so adopting a new skill or prompt feels the same as the last one.
+A curated standard library of **skills**, **prompts**, **agent configs**, and **MCP integrations** for AI coding agents — primarily [Claude Code](https://claude.com/claude-code), portable to any MCP client.
+
+Headlined by a **spec-driven planner / critic / executor / auditor pipeline** grounded in a real codegraph (**mmcg**): every claim a subagent makes about your code is verified against an AST, not hallucinated.
+
+## Quick start
+
+```bash
+npm install -g @xcraftmind/mastermind     # prebuilt native binary — no Rust toolchain
+
+cd your-project
+mastermind init                            # scaffold .mastermind/, build the index, draft CONTEXT.md
+mastermind setup claude --write-mcp        # register the codegraph with Claude Code (run once)
+mastermind doctor                          # verify — should be all green
+```
+
+Restart Claude Code and the codegraph tools (search, callers, impact, …) are available in every project you've indexed. Requires Node.js 18+. [Other install methods ↓](#install)
 
 ## Why mastermind
 
-Most "AI workflow" templates are a planner prompt and good wishes. This repo ships a **spec-driven planner / critic / executor / auditor pipeline** grounded in a real codegraph (**mmcg**) — every claim a subagent makes about your code is verified against an AST, not hallucinated. Engineering canons (YAGNI, non-breaking, no AI slop, mandatory Tests / Docs / Observability / Performance sections in every spec) are checked by an independent Opus reviewer before a spec leaves the planner, and again by an independent Opus auditor after the executor reports.
+Most "AI workflow" templates are a planner prompt and good wishes. Here, engineering canons — YAGNI, non-breaking, no AI slop, mandatory Tests / Docs / Observability / Performance sections in every spec — are enforced by an independent Opus **critic** before a spec leaves the planner, and again by an independent Opus **auditor** after the executor reports. Every structural claim is checked against the **mmcg** codegraph, not the model's memory.
 
 ## What's inside
 
 | Folder | What it holds |
 |---|---|
-| [`skills/`](skills/) | Markdown skills with frontmatter. The workflow skills (`mastermind-task-planning`, `mastermind-task-executor`, `mastermind-incident-response`, `mastermind-prompt-refiner`) plus standalone ones (`pr-review`, `flaky-finder`, `doc-stub-sync`). |
+| [`skills/`](skills/) | Markdown skills with frontmatter — workflow skills (`mastermind-task-planning`, `mastermind-task-executor`, `mastermind-incident-response`, `mastermind-prompt-refiner`) and standalone ones (`pr-review`, `flaky-finder`, `doc-stub-sync`). |
 | [`prompts/`](prompts/) | Reusable system/user prompt templates (`api-shape-explorer`). |
-| [`agents/`](agents/) | 6 mastermind subagents (`critic`, `auditor`, `researcher`, `task-executor`, `release`, `prompt-refiner`), plus `CLAUDE.md` and `CONTEXT.md` templates. |
-| [`mcp/`](mcp/) | MCP server configs. Headlined by **`mmcg`** — fast Rust codegraph indexer for Python, TS/JS, Rust, C#, Go, Java, PHP, C/C++ with 17 tools (16 structural queries + 1 `status` diagnostic). |
+| [`agents/`](agents/) | Six mastermind subagents (`critic`, `auditor`, `researcher`, `task-executor`, `release`, `prompt-refiner`) plus `CLAUDE.md` / `CONTEXT.md` templates. |
+| [`mcp/`](mcp/) | MCP server configs, headlined by **`mmcg`** — a fast Rust codegraph indexer (Python, TS/JS, Rust, C#, Go, Java, PHP, C/C++) with 17 tools. |
 
-Each top-level folder is grouped by **domain** inside (e.g. `skills/code-review/`, `agents/subagents/`). Every category ships a `_template/` you copy when adding something new.
+Each folder is grouped by **domain** inside (e.g. `skills/code-review/`); every category ships a `_template/` to copy when adding something new. The standard itself lives in [`docs/conventions.md`](docs/conventions.md).
 
 ## How it works
 
-A task flows from the user through 4-7 specialized subagents — each at its own model tier — with **mmcg** (the codegraph MCP) as the shared truth source.
+A task flows from the user through 4–7 specialized subagents — each at its own model tier — with **mmcg** as the shared truth source.
 
 ```mermaid
 flowchart TB
@@ -48,147 +67,113 @@ flowchart TB
 
 The **planner** never implements. The **executor** never improvises. The **critic** (pre-spec) and the **auditor** (post-execution) run as independent Opus instances with no prior conversation context — they catch the planner's bias.
 
-Underneath every role sits **mmcg** — a Rust binary that indexes Python, TypeScript, JavaScript, Rust, C#, Go, Java, PHP, and C/C++ into a local SQLite codegraph and exposes 17 tools over MCP (`search`, `callers`, `callees`, `impact`, `imports`, `imported_by`, `files`, `symbols_in_file`, `outline`, `recent_changes`, `unreferenced`, `api_surface`, `centrality`, `tasks`, `dependency_cycles`, `symbols_changed_since`, plus a `status` diagnostic). Every subagent queries mmcg before claiming anything about the code: "does function X exist?", "who calls Y?", "transitive blast radius of changing Z?", "what past specs touched this area?", "any new import cycles?", "what symbols did this branch add since main?". This is what makes the workflow's claims resistant to hallucination.
-
-For the full 14-step flow (pre-flight validation, post-flight audit checks, parallel incident-response workflow, on-demand release packaging) see the [workflow CLAUDE.md template](agents/claude-md/mastermind-workflow.md).
+Underneath every role sits **mmcg**: a Rust binary that indexes nine languages into a local SQLite codegraph and answers structural questions over MCP — *"does function X exist?"*, *"who calls Y?"*, *"transitive blast radius of changing Z?"*, *"what symbols did this branch add since main?"*. That grounding is what makes the workflow's claims resistant to hallucination. Full 14-step flow: the [workflow CLAUDE.md template](agents/claude-md/mastermind-workflow.md).
 
 ## Engineering canons
 
 Enforced by the critic (pre-spec) and the auditor (post-execution):
 
-- **No AI slop** — every claim grounded in code via mmcg, not memory. Hallucinated symbols, fabricated SLAs, padded "best practices" sections, decorative output structures are flagged.
-- **YAGNI** — no speculative features, no premature abstractions, no future-proofing for unstated requirements.
-- **Non-breaking** — public-API changes require an explicit Non-breaking justification + deprecation path in the spec.
-- **Mandatory spec sections** — every spec ships with Tests Plan, Documentation Plan, Observability Plan, Performance Considerations. Empty sections fail pre-flight.
-- **Pre-edit symbol snapshot** — planner records current `mmcg_callers` count + signatures before editing; auditor compares post-execution to surface silent breakage.
-
-See [`docs/conventions.md`](docs/conventions.md) for the full standard.
+- **No AI slop** — every claim grounded in code via mmcg, not memory. Hallucinated symbols, fabricated SLAs, and padded "best practices" are flagged.
+- **YAGNI** — no speculative features, premature abstractions, or future-proofing for unstated requirements.
+- **Non-breaking** — public-API changes require an explicit justification + deprecation path in the spec.
+- **Mandatory spec sections** — Tests / Documentation / Observability / Performance. Empty sections fail pre-flight.
+- **Pre-edit symbol snapshot** — the planner records `mmcg_callers` counts + signatures before editing; the auditor diffs post-execution to surface silent breakage.
 
 ## Install
 
-Mastermind ships as a **prebuilt native binary via npm**. No Rust toolchain required for the normal path.
+Mastermind ships as a **prebuilt native binary via npm** — no Rust toolchain on the normal path. `mastermind` is the command; `mmcg` is the same binary under its cargo name.
 
-### One-shot (no install)
-
-```bash
-npx -y @xcraftmind/mastermind doctor
-npx -y @xcraftmind/mastermind init --profile typescript-api
-npx -y @xcraftmind/mastermind run-task .mastermind/tasks/042-feature.md
-```
-
-`npx` is fine for one-shot commands. For the **MCP server registration** (`setup claude`), prefer global or project-local install instead — an `npx ... serve` MCP config re-resolves through the npm cache on every Claude Code launch (slower, less deterministic).
-
-### Global (recommended)
+**Global** (recommended)
 
 ```bash
 npm install -g @xcraftmind/mastermind
-mastermind setup claude --write-mcp       # register mmcg with Claude Code's MCP layer
-mastermind doctor                          # verify the environment
+mastermind setup claude --write-mcp
 ```
 
-`setup claude` writes `~/.claude/.mcp.json` with `command: "mastermind"` so Claude Code launches the wrapper from PATH. Re-run anytime — merges into existing `mcpServers`, refuses to clobber a customized entry.
+Writes `~/.claude/.mcp.json` with `command: "mastermind"`. Merges into an existing `mcpServers` and refuses to clobber a customized entry.
 
-### Project-local (reproducible, version-pinned)
+**Project-local** (reproducible, version-pinned)
 
 ```bash
 npm install -D @xcraftmind/mastermind
 npx mastermind setup claude --project . --write-mcp
 ```
 
-Writes `./.mcp.json` with `command: "./node_modules/.bin/mastermind"` so the project always uses the version pinned in `package.json`.
+Writes `./.mcp.json` with `command: "./node_modules/.bin/mastermind"`.
 
-### Supported platforms
+**One-shot** — `npx -y @xcraftmind/mastermind doctor`. Fine for one-offs; avoid it for the MCP server (it re-resolves through the npm cache on every Claude Code launch).
 
-Prebuilt binaries: macOS (arm64 + x86_64), Linux glibc (x86_64 + arm64), Linux musl/Alpine (x86_64 + arm64), Windows (x86_64). Other targets fall back to `cargo install mmcg`.
+**Supported platforms** — macOS (arm64 + x86_64), Linux glibc & musl/Alpine (x86_64 + arm64), Windows (x86_64). Other targets fall back to `cargo install mmcg`.
 
-### Or via Claude Code plugin marketplace
+<details>
+<summary>Claude Code plugin marketplace</summary>
 
 ```bash
-# In Claude Code:
 /plugin marketplace add xcrft/mastermind
 /plugin install mastermind-workflow@mastermind   # workflow subagents
 /plugin install mmcg@mastermind                  # codegraph MCP config
-/plugin install mastermind-tools@mastermind      # standalone skills (pr-review, flaky-finder, doc-stub-sync)
+/plugin install mastermind-tools@mastermind      # standalone skills
 ```
 
-Plugins land in `~/.claude/plugins/`. The `mmcg` plugin registers the MCP server config; install the binary via `npm install -g @xcraftmind/mastermind` (or `cargo install mmcg` if you build from source).
+The `mmcg` plugin registers the MCP config; install the binary via `npm install -g @xcraftmind/mastermind`. The `plugins/` tree is regenerated from canonical artifacts by [`scripts/build-plugins.py`](scripts/build-plugins.py).
+</details>
 
-### Build from source (contributors / unsupported platforms)
+<details>
+<summary>Build from source</summary>
 
 ```bash
-cargo install mmcg                                    # crates.io
-# or
-git clone https://github.com/xcrft/mastermind && cd mastermind
+cargo install mmcg                       # crates.io
+# or from a clone:
 cargo install --path mcp/servers/mmcg
 ```
 
-Requires Rust 1.75+ ([rustup](https://rustup.rs/) if missing). The cargo-installed binary is `mmcg`, not `mastermind` — same code, same subcommands, only the wrapper name differs.
-
-<details>
-<summary>How the plugin tree is built</summary>
-
-The `plugins/` tree is regenerated from canonical artifacts by [`scripts/build-plugins.py`](scripts/build-plugins.py). The `.claude-plugin/` manifests are the marketplace entry points.
-
+Requires Rust 1.75+ ([rustup](https://rustup.rs/)). The binary is `mmcg` — same code, same subcommands.
 </details>
 
----
+## Use it in a project
 
-## Bootstrap a project
-
-Once mastermind is installed, in any project's working directory:
+From any project's working directory:
 
 ```bash
-mmcg init                       # scaffolds .mastermind/{tasks/, .gitignore, mmcg.db}, CONTEXT.md
-mmcg init --with-claude-md      # also drops in the workflow CLAUDE.md template
-mmcg index .                    # populates the code index
-mmcg watch &                    # (optional) keeps the index fresh as you edit
-echo .mastermind/ >> .gitignore
-mmcg doctor                     # verify the whole setup is wired (exit 1 if not)
+mastermind init                  # scaffold .mastermind/, build the index, draft CONTEXT.md via claude -p
+echo .mastermind/ >> .gitignore  # local working state — never committed
+mastermind doctor                # 8 fail-soft checks: binary, index, freshness, MCP config, serve handshake, …
 ```
 
-`.mastermind/` holds the project's specs and the mmcg index — local working state, never committed. If you have a pre-0.6.0 `.tasks/` directory at project root, `mmcg init` will print a migration command.
+`init` indexes the codebase and drafts `CONTEXT.md` automatically — pass `--no-index` / `--no-claude` to skip, or `--with-claude-md` to also drop the workflow CLAUDE.md template. Keep the index live with `mastermind watch`, and tear a setup down with `mastermind uninstall` (`--scope project|global|all`; dry-run unless `--force`).
 
-`mmcg doctor` runs eight fail-soft checks (binary, index exists, symbols populated, freshness vs source mtimes, gitignore, CLAUDE.md workflow markers, MCP config registered, live `mmcg serve` handshake). Each check prints its status + a fix hint when not OK. Pipe `--json` for CI/scripting.
-
----
+`.mastermind/` holds the project's specs and the mmcg index. `mastermind doctor --json` is CI-friendly (exit 1 if anything's unwired).
 
 ## Subsets (advanced)
 
-If the full workflow is more than you want, install only what you need.
-
-### Just the codegraph
-
-`mmcg` is a standalone [crate on crates.io](https://crates.io/crates/mmcg) — 17 tools (search, callers, callees, impact, outline, recent_changes, unreferenced, api_surface, centrality, tasks, dependency_cycles, symbols_changed_since, status, …) for Python / TypeScript / JavaScript / Rust / C# / Go / Java / PHP / C/C++. Zero system deps, sub-millisecond queries.
+**Just the codegraph** — `mmcg` is a standalone [crate](https://crates.io/crates/mmcg): 17 tools (`search`, `callers`, `callees`, `impact`, `imports`, `imported_by`, `files`, `outline`, `symbols_in_file`, `recent_changes`, `unreferenced`, `api_surface`, `centrality`, `tasks`, `dependency_cycles`, `symbols_changed_since`, + a `status` diagnostic) across nine languages. Sub-millisecond queries, zero system deps.
 
 ```bash
 cargo install mmcg
 ```
 
-Register it in your MCP client's config — snippet in [`mcp/servers/mmcg/README.md`](mcp/servers/mmcg/README.md#mcp-server-usage).
+Register it in your MCP client — snippet in [`mcp/servers/mmcg/README.md`](mcp/servers/mmcg/README.md).
 
-### Just specific subagents or skills
+**Just specific subagents or skills** — copy the markdown into `~/.claude/`:
 
 ```bash
-git clone https://github.com/xcrft/mastermind ~/mastermind
-cp ~/mastermind/agents/subagents/mastermind-critic.md ~/.claude/agents/
-cp -r ~/mastermind/skills/code-review/pr-review ~/.claude/skills/
+cp agents/subagents/mastermind-critic.md ~/.claude/agents/
+cp -r skills/code-review/pr-review ~/.claude/skills/
 ```
 
-Read each artifact's frontmatter (`name`, `description`, `metadata.requires`) to know what it expects. Note: pulling subagents in isolation skips the workflow contracts they normally operate under — the critic without the planner is still useful as a code reviewer, but the spec-driven pipeline guarantees only hold when the full set is in place.
-
----
+The pipeline's guarantees hold only with the full set — a lone critic is still a fine code reviewer, but the spec-driven contracts need the planner + auditor too.
 
 ## Not using Claude Code?
 
-`mmcg` is tool-agnostic — works with any MCP stdio client (Cursor, Continue, custom). The subagent markdown files use Claude Code's frontmatter format, but the underlying patterns (planner/critic/executor/auditor pipeline, spec template, engineering canons) are portable — adopt them in whatever your tooling supports.
+`mmcg` is tool-agnostic — it works with any MCP stdio client (Cursor, Continue, custom). The subagent files use Claude Code's frontmatter format, but the underlying patterns (the pipeline, the spec template, the engineering canons) are portable.
 
 ## Contributing
 
 The repo lives or dies by consistency. Before adding anything, read:
 
-- [`docs/conventions.md`](docs/conventions.md) — naming, frontmatter, file layout rules. **This is the standard.**
-- The `anatomy.md` for your artifact type (e.g. [`docs/skill-anatomy.md`](docs/skill-anatomy.md)).
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — PR process.
+- [`docs/conventions.md`](docs/conventions.md) — naming, frontmatter, file layout. **This is the standard.**
+- The `*-anatomy.md` for your artifact type (e.g. [`docs/skill-anatomy.md`](docs/skill-anatomy.md)).
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — the PR process.
 
 To add a new artifact: copy the matching `_template/`, fill it in, open a PR.
 

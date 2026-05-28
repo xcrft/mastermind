@@ -18,8 +18,8 @@
 #      (root @xcraftmind/mastermind + 7 @xcraftmind/mmcg-* platform packages).
 #      The build helper hard-fails on Cargo↔platform version mismatch.
 #   2. Validate: `python scripts/validate.py && cargo test --lib`
-#   3. Commit on main: `git commit -am "mastermind 0.22.0"`
-#   4. Tag: `git tag npm-v0.22.0 && git push origin main npm-v0.22.0`
+#   3. Commit on main: `git commit -am "mastermind <version>"`
+#   4. Tag: `git tag npm-v<version> && git push origin main npm-v<version>`
 #   5. This workflow: matrix-build → assemble → smoke → (approval) → publish
 #
 # Tag-version-match guard prevents shipping a mismatched release.

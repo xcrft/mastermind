@@ -71,9 +71,9 @@ Mastermind ships as a **prebuilt native binary via npm**. No Rust toolchain requ
 ### One-shot (no install)
 
 ```bash
-npx -y @xcrft/mastermind doctor
-npx -y @xcrft/mastermind init --profile typescript-api
-npx -y @xcrft/mastermind run-task .mastermind/tasks/042-feature.md
+npx -y @xcraftmind/mastermind doctor
+npx -y @xcraftmind/mastermind init --profile typescript-api
+npx -y @xcraftmind/mastermind run-task .mastermind/tasks/042-feature.md
 ```
 
 `npx` is fine for one-shot commands. For the **MCP server registration** (`setup claude`), prefer global or project-local install instead — an `npx ... serve` MCP config re-resolves through the npm cache on every Claude Code launch (slower, less deterministic).
@@ -81,7 +81,7 @@ npx -y @xcrft/mastermind run-task .mastermind/tasks/042-feature.md
 ### Global (recommended)
 
 ```bash
-npm install -g @xcrft/mastermind
+npm install -g @xcraftmind/mastermind
 mastermind setup claude --write-mcp       # register mmcg with Claude Code's MCP layer
 mastermind doctor                          # verify the environment
 ```
@@ -91,7 +91,7 @@ mastermind doctor                          # verify the environment
 ### Project-local (reproducible, version-pinned)
 
 ```bash
-npm install -D @xcrft/mastermind
+npm install -D @xcraftmind/mastermind
 npx mastermind setup claude --project . --write-mcp
 ```
 
@@ -111,7 +111,7 @@ Prebuilt binaries: macOS (arm64 + x86_64), Linux glibc (x86_64 + arm64), Linux m
 /plugin install mastermind-tools@mastermind      # standalone skills (pr-review, flaky-finder, doc-stub-sync)
 ```
 
-Plugins land in `~/.claude/plugins/`. The `mmcg` plugin registers the MCP server config; install the binary via `npm install -g @xcrft/mastermind` (or `cargo install mmcg` if you build from source).
+Plugins land in `~/.claude/plugins/`. The `mmcg` plugin registers the MCP server config; install the binary via `npm install -g @xcraftmind/mastermind` (or `cargo install mmcg` if you build from source).
 
 ### Build from source (contributors / unsupported platforms)
 

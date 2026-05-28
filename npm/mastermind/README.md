@@ -1,4 +1,4 @@
-# @xcrft/mastermind
+# @xcraftmind/mastermind
 
 Mastermind workflow CLI + mmcg codegraph for AI coding agents — verify-spec / audit-spec gates, MCP server, multi-language tree-sitter indexer (Python, TypeScript, JavaScript, Rust, C#, Go, Java, PHP, C/C++).
 
@@ -9,17 +9,17 @@ Prebuilt native binaries via optional platform packages — **no Rust toolchain 
 ### One-shot (no install)
 
 ```sh
-npx -y @xcrft/mastermind doctor
-npx -y @xcrft/mastermind init --profile typescript-api
-npx -y @xcrft/mastermind run-task .mastermind/tasks/042-feature.md
+npx -y @xcraftmind/mastermind doctor
+npx -y @xcraftmind/mastermind init --profile typescript-api
+npx -y @xcraftmind/mastermind run-task .mastermind/tasks/042-feature.md
 ```
 
-`npx` is great for these one-shot commands. **Avoid it for the MCP server**, though: an MCP config that runs `npx ... serve` pays an npm-cache/network resolution cost on every Claude Code launch and is less deterministic than a real install. For `setup claude`, prefer **global** or **project-local** (below). If you do register via npx, `setup claude` pins the version (`npx -y @xcrft/mastermind@<ver> serve`) so at least the version is stable — but it's an escape hatch, not the recommended path.
+`npx` is great for these one-shot commands. **Avoid it for the MCP server**, though: an MCP config that runs `npx ... serve` pays an npm-cache/network resolution cost on every Claude Code launch and is less deterministic than a real install. For `setup claude`, prefer **global** or **project-local** (below). If you do register via npx, `setup claude` pins the version (`npx -y @xcraftmind/mastermind@<ver> serve`) so at least the version is stable — but it's an escape hatch, not the recommended path.
 
 ### Global (recommended for most users)
 
 ```sh
-npm install -g @xcrft/mastermind
+npm install -g @xcraftmind/mastermind
 mastermind setup claude --write-mcp       # register mmcg as an MCP server
 mastermind doctor                          # verify the environment
 ```
@@ -29,7 +29,7 @@ mastermind doctor                          # verify the environment
 ### Project-local
 
 ```sh
-npm install -D @xcrft/mastermind
+npm install -D @xcraftmind/mastermind
 npx mastermind setup claude --project . --write-mcp
 ```
 
@@ -83,17 +83,17 @@ See `mastermind <subcommand> --help` for full options.
 
 ## Architecture
 
-The npm package uses the prebuilt-platform-package pattern (same as `esbuild`, `swc`, `lefthook`, `turbo`). The root `@xcrft/mastermind` package contains only JavaScript wrappers and lists all seven platform packages as `optionalDependencies`. npm installs only the package matching the host's `os` + `cpu` (+ `libc` for Linux); the others are skipped.
+The npm package uses the prebuilt-platform-package pattern (same as `esbuild`, `swc`, `lefthook`, `turbo`). The root `@xcraftmind/mastermind` package contains only JavaScript wrappers and lists all seven platform packages as `optionalDependencies`. npm installs only the package matching the host's `os` + `cpu` (+ `libc` for Linux); the others are skipped.
 
 ```
-@xcrft/mastermind                    # JS wrappers + optionalDependencies
-├── @xcrft/mmcg-darwin-arm64         # one of these installs, the rest skip
-├── @xcrft/mmcg-darwin-x64
-├── @xcrft/mmcg-linux-x64-gnu
-├── @xcrft/mmcg-linux-arm64-gnu
-├── @xcrft/mmcg-linux-x64-musl
-├── @xcrft/mmcg-linux-arm64-musl
-└── @xcrft/mmcg-win32-x64-msvc
+@xcraftmind/mastermind                    # JS wrappers + optionalDependencies
+├── @xcraftmind/mmcg-darwin-arm64         # one of these installs, the rest skip
+├── @xcraftmind/mmcg-darwin-x64
+├── @xcraftmind/mmcg-linux-x64-gnu
+├── @xcraftmind/mmcg-linux-arm64-gnu
+├── @xcraftmind/mmcg-linux-x64-musl
+├── @xcraftmind/mmcg-linux-arm64-musl
+└── @xcraftmind/mmcg-win32-x64-msvc
 ```
 
 No `postinstall` script. No network calls beyond the npm registry itself.

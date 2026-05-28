@@ -1,5 +1,5 @@
 {
-  "name": "@xcrft/mastermind",
+  "name": "@xcraftmind/mastermind",
   "version": "0.22.0",
   "description": "Mastermind workflow CLI + mmcg codegraph for AI coding agents — verify-spec / audit-spec gates, MCP server, multi-language tree-sitter indexer (Python, TypeScript, JavaScript, Rust, C#, Go, Java, PHP, C/C++). Prebuilt native binaries via optional platform packages — no Rust toolchain required.",
   "license": "MIT",
@@ -36,12 +36,12 @@
     "mastermind"
   ],
   "optionalDependencies": {
-    "@xcrft/mmcg-darwin-arm64": "0.22.0",
-    "@xcrft/mmcg-darwin-x64": "0.22.0",
-    "@xcrft/mmcg-linux-x64-gnu": "0.22.0",
-    "@xcrft/mmcg-linux-arm64-gnu": "0.22.0",
-    "@xcrft/mmcg-linux-x64-musl": "0.22.0",
-    "@xcrft/mmcg-linux-arm64-musl": "0.22.0",
-    "@xcrft/mmcg-win32-x64-msvc": "0.22.0"
+    "@xcraftmind/mmcg-darwin-arm64": "0.22.0",
+    "@xcraftmind/mmcg-darwin-x64": "0.22.0",
+    "@xcraftmind/mmcg-linux-x64-gnu": "0.22.0",
+    "@xcraftmind/mmcg-linux-arm64-gnu": "0.22.0",
+    "@xcraftmind/mmcg-linux-x64-musl": "0.22.0",
+    "@xcraftmind/mmcg-linux-arm64-musl": "0.22.0",
+    "@xcraftmind/mmcg-win32-x64-msvc": "0.22.0"
   }
 }

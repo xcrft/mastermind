@@ -1,4 +1,4 @@
-//! `mmcg doctor` — environment health-check for setup adoption.
+//! `mastermind doctor` — environment health-check for setup adoption.
 //!
 //! Runs a fixed set of fail-soft checks against the project at `root` (CWD by
 //! default) and prints a structured report. Each check is independent; one
@@ -16,7 +16,7 @@
 //! | 5 | `gitignore`            | `.mastermind/` is excluded from VCS                    |
 //! | 6 | `CLAUDE.md`            | exists and references the workflow                     |
 //! | 7 | `MCP config`           | mmcg registered in `~/.claude/.mcp.json` or `./.mcp.json` |
-//! | 8 | `MCP serve handshake`  | spawning `mmcg serve` responds to `initialize` + `tools/list` |
+//! | 8 | `MCP serve handshake`  | spawning `mastermind serve` responds to `initialize` + `tools/list` |
 //!
 //! Output is human-readable by default. `--json` switches to a machine-
 //! parseable format for piping into other tools.
@@ -75,7 +75,7 @@ impl Report {
     pub fn render_text(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!(
-            "mmcg doctor — checking environment at {}\n\n",
+            "mastermind doctor — checking environment at {}\n\n",
             self.root
         ));
         let name_width = self
@@ -162,7 +162,7 @@ fn check_index_db(root: &Path) -> Check {
             name: "index database",
             status: Status::Fail,
             message: ".mastermind/mmcg.db not found".into(),
-            hint: Some("run `mmcg init` then `mmcg index .`".into()),
+            hint: Some("run `mastermind init` then `mastermind index .`".into()),
         }
     }
 }
@@ -184,7 +184,7 @@ fn check_symbols_indexed(root: &Path) -> Check {
                 name: "symbols indexed",
                 status: Status::Fail,
                 message: format!("can't open db: {e}"),
-                hint: Some("delete `.mastermind/mmcg.db` and re-run `mmcg index .`".into()),
+                hint: Some("delete `.mastermind/mmcg.db` and re-run `mastermind index .`".into()),
             };
         }
     };
@@ -196,7 +196,7 @@ fn check_symbols_indexed(root: &Path) -> Check {
             name: "symbols indexed",
             status: Status::Fail,
             message: format!("{file_count} files, {symbol_count} symbols"),
-            hint: Some("index is empty — run `mmcg index .` from the project root".into()),
+            hint: Some("index is empty — run `mastermind index .` from the project root".into()),
         }
     } else {
         Check {
@@ -283,7 +283,9 @@ fn check_index_freshness(root: &Path) -> Check {
             name: "index freshness",
             status: Status::Warn,
             message: format!("{count_label} (e.g. {preview})"),
-            hint: Some("run `mmcg index .` or start `mmcg watch` for live updates".into()),
+            hint: Some(
+                "run `mastermind index .` or start `mastermind watch` for live updates".into(),
+            ),
         }
     }
 }
@@ -451,7 +453,7 @@ fn check_mcp_handshake(root: &Path, binary: &Path) -> Check {
     };
 
     let result = perform_handshake(&mut child);
-    // Always kill — `mmcg serve` reads stdin forever otherwise.
+    // Always kill — `mastermind serve` reads stdin forever otherwise.
     let _ = child.kill();
     let _ = child.wait();
 
@@ -460,7 +462,7 @@ fn check_mcp_handshake(root: &Path, binary: &Path) -> Check {
             name: "MCP handshake",
             status: Status::Ok,
             message: format!(
-                "`mmcg serve` responded to initialize + tools/list ({tool_count} tools)"
+                "`mastermind serve` responded to initialize + tools/list ({tool_count} tools)"
             ),
             hint: None,
         },
@@ -468,7 +470,9 @@ fn check_mcp_handshake(root: &Path, binary: &Path) -> Check {
             name: "MCP handshake",
             status: Status::Fail,
             message: format!("handshake failed: {e}"),
-            hint: Some("re-run `mmcg index .` and try again; report bug if it persists".into()),
+            hint: Some(
+                "re-run `mastermind index .` and try again; report bug if it persists".into(),
+            ),
         },
     }
 }
@@ -604,7 +608,7 @@ mod tests {
         let root = tmp();
         let c = check_index_db(&root);
         assert_eq!(c.status, Status::Fail);
-        assert!(c.hint.as_deref().unwrap().contains("mmcg init"));
+        assert!(c.hint.as_deref().unwrap().contains("mastermind init"));
         fs::remove_dir_all(&root).ok();
     }
 
@@ -687,7 +691,7 @@ mod tests {
             }],
         );
         let txt = report.render_text();
-        assert!(txt.contains("mmcg doctor"));
+        assert!(txt.contains("mastermind doctor"));
         assert!(txt.contains("v0.14.0"));
         assert!(txt.contains("1 ok, 0 warn, 0 fail"));
         assert!(!report.has_failures());

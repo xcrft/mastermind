@@ -104,7 +104,7 @@ pub struct IndexStats {
     pub edges_total: u32,
     pub by_language: std::collections::BTreeMap<String, u32>,
     /// Count of `.mastermind/tasks/*.md` specs added to the FTS5 corpus.
-    /// Zero when the directory doesn't exist (project hasn't run `mmcg init`).
+    /// Zero when the directory doesn't exist (project hasn't run `mastermind init`).
     pub task_specs_indexed: u32,
     pub duration_ms: u128,
 }
@@ -231,7 +231,7 @@ impl Indexer {
     }
 
     /// Scan `.mastermind/tasks/*.md` and replace the FTS5 corpus.
-    /// Silent no-op when the directory doesn't exist (project hasn't run `mmcg init`).
+    /// Silent no-op when the directory doesn't exist (project hasn't run `mastermind init`).
     /// Returns the count of indexed specs.
     pub fn index_task_specs(&self, store: &mut Store) -> Result<u32, IndexError> {
         let tasks_dir = self.root.join(".mastermind").join("tasks");

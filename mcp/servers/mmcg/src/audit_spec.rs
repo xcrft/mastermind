@@ -1,4 +1,4 @@
-//! `mmcg audit-spec` — post-execution mechanical audit.
+//! `mastermind audit-spec` — post-execution mechanical audit.
 //!
 //! Complements the LLM auditor by handling the **deterministic** part of the
 //! audit contract: file-set comparison, pre-edit snapshot drift, symbol-level

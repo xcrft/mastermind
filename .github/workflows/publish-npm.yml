@@ -304,6 +304,16 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -e
+          # Irreversible step — assert tarball counts before publishing. Expected
+          # platform count is derived from optionalDependencies (drift-proof).
+          EXPECT=$(node -p "Object.keys(require('$GITHUB_WORKSPACE/npm/mastermind/package.json').optionalDependencies).length")
+          PLAT=$(ls "$GITHUB_WORKSPACE"/packed/xcraftmind-mmcg-*.tgz 2>/dev/null | wc -l | tr -d ' ')
+          ROOT=$(ls "$GITHUB_WORKSPACE"/packed/xcraftmind-mastermind-*.tgz 2>/dev/null | wc -l | tr -d ' ')
+          if [ "$PLAT" != "$EXPECT" ] || [ "$ROOT" != "1" ]; then
+            echo "::error::expected $EXPECT platform + 1 root tarball, found $PLAT + $ROOT — aborting before irreversible publish"
+            ls "$GITHUB_WORKSPACE"/packed/
+            exit 1
+          fi
           # Publish platform packages FIRST so the root's optionalDependencies
           # can resolve to real registry entries (otherwise root install would
           # silently skip them on first install). Order within platforms

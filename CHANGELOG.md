@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-05-28
+
+### Added
+- `mastermind init` now also installs prompt-based **slash commands** into `~/.claude/commands/` (alongside the subagents + skills) — the bundled `prompts/` become `/`-commands in Claude Code. `--no-global` skips the whole global install.
+
 ## [0.25.0] - 2026-05-28
 
 ### Added
@@ -47,7 +52,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Seven prebuilt platform packages (`@xcraftmind/mmcg-*`) covering macOS (arm64, x64), Linux glibc and musl (x64, arm64), and Windows (x64). npm installs only the package matching the host's `os` / `cpu` / `libc`.
 - Install-mode-aware `setup claude` that writes the correct MCP `command` form for npx, global, project-local, and cargo installs.
 
-[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v0.25.0...HEAD
+[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v0.26.0...HEAD
+[0.26.0]: https://github.com/xcrft/mastermind/compare/npm-v0.25.0...npm-v0.26.0
 [0.25.0]: https://github.com/xcrft/mastermind/compare/npm-v0.24.0...npm-v0.25.0
 [0.24.0]: https://github.com/xcrft/mastermind/compare/npm-v0.23.1...npm-v0.24.0
 [0.23.1]: https://github.com/xcrft/mastermind/compare/npm-v0.23.0...npm-v0.23.1

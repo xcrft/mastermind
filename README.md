@@ -140,7 +140,7 @@ echo .mastermind/ >> .gitignore  # local working state — never committed
 mastermind doctor                # 8 fail-soft checks: binary, index, freshness, MCP config, serve handshake, …
 ```
 
-`init` indexes the codebase and drafts `CONTEXT.md` automatically — pass `--no-index` / `--no-claude` to skip, or `--with-claude-md` to also drop the workflow CLAUDE.md template and fill its placeholders from your code. It also installs the workflow subagents + skills into `~/.claude/` so the full planner/critic/executor/auditor pipeline is available, not just the codegraph (`--no-global` to skip). Keep the index live with `mastermind watch`, and tear a setup down with `mastermind uninstall` (`--scope project|global|all`; dry-run unless `--force`).
+`init` indexes the codebase and drafts `CONTEXT.md` automatically — pass `--no-index` / `--no-claude` to skip, or `--with-claude-md` to also drop the workflow CLAUDE.md template and fill its placeholders from your code. It also installs the workflow subagents, skills, and slash commands into `~/.claude/` so the full planner/critic/executor/auditor pipeline is available, not just the codegraph (`--no-global` to skip). Keep the index live with `mastermind watch`, and tear a setup down with `mastermind uninstall` (`--scope project|global|all`; dry-run unless `--force`).
 
 `.mastermind/` holds the project's specs and the mmcg index. `mastermind doctor --json` is CI-friendly (exit 1 if anything's unwired).
 

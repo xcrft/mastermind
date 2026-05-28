@@ -3,7 +3,7 @@
 # binary, set the executable bit, and bump the package.json version to match
 # the Rust crate. Used by both:
 #   - local smoke (one platform — your host's triple)
-#   - the GitHub Actions publish workflow (all 6 platforms, one job per target)
+#   - the GitHub Actions publish workflow (all 7 platforms, one job per target)
 #
 # Usage:
 #   scripts/build-npm-packages.sh <rust-target-triple> <path-to-built-binary>

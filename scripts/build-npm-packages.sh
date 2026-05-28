@@ -67,6 +67,15 @@ mkdir -p "$PLATFORM_BIN"
 cp "$BIN_SRC" "$PLATFORM_BIN/$EXE"
 chmod +x "$PLATFORM_BIN/$EXE" 2>/dev/null || true   # no-op on Windows .exe
 
+# Post-copy guard: the binary MUST exist and be non-empty after assembly.
+# A platform package that packs without a real binary publishes empty and
+# breaks the wrapper at runtime — exactly the failure class this script
+# exists to prevent.
+if [ ! -s "$PLATFORM_BIN/$EXE" ]; then
+    echo "error: assembly produced no binary at $PLATFORM_BIN/$EXE (empty or missing)" >&2
+    exit 1
+fi
+
 # Verify the version in the platform package.json matches the Rust crate.
 # Mismatch = release pipeline drift; better to fail loud than ship inconsistent.
 CRATE_VERSION=$(awk -F'"' '/^version *= *"/ {print $2; exit}' \

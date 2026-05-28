@@ -1,0 +1,142 @@
+# Per-PR validation for the npm distribution layer.
+#
+# `ci-mmcg.yml` covers the Rust crate (6-target build + test matrix). This
+# workflow covers the JS wrappers + the npm packaging integration — so a
+# broken wrapper or a packaging mistake surfaces at PR time, not at release.
+#
+# Single Linux job (npm wrapper logic is platform-agnostic; the cross-platform
+# binary resolution is covered by the release workflow's per-target builds):
+#   1. `node --check` both wrappers (fast syntax gate)
+#   2. build mmcg for the host (linux-x64-gnu, native)
+#   3. assemble the linux-x64-gnu platform package via the shared helper
+#   4. `npm pack` root + platform
+#   5. install both from local tarballs and run the binary through the wrapper
+#   6. assert install-mode detection writes the right MCP `command` per mode
+#
+# This is the "did the whole chain survive this change" smoke that the audit
+# (correctly) flagged as missing from PR CI.
+
+name: CI — npm
+
+on:
+  pull_request:
+    paths:
+      - "npm/**"
+      - "mcp/servers/mmcg/**"
+      - "scripts/build-npm-packages.sh"
+      - ".github/workflows/ci-npm.yml"
+  push:
+    branches: [main]
+    paths:
+      - "npm/**"
+      - "mcp/servers/mmcg/**"
+      - "scripts/build-npm-packages.sh"
+      - ".github/workflows/ci-npm.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-npm-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  npm-smoke:
+    name: wrapper check + linux-x64 install smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+
+      - name: node --check both wrappers (syntax gate)
+        run: |
+          set -e
+          node --check npm/mastermind/bin/mastermind.js
+          node --check npm/mastermind/bin/mmcg.js
+          echo "✓ wrapper syntax OK"
+
+      - name: Validate root package.json shape
+        run: |
+          set -e
+          node -e '
+            const p = require("./npm/mastermind/package.json");
+            const bins = Object.keys(p.bin || {});
+            if (!bins.includes("mastermind") || !bins.includes("mmcg")) {
+              throw new Error("root package must expose `mastermind` and `mmcg` bins");
+            }
+            const opt = Object.keys(p.optionalDependencies || {});
+            if (opt.length !== 7) {
+              throw new Error(`expected 7 optionalDependencies, found ${opt.length}`);
+            }
+            // every optional dep version must equal the root version (lockstep release)
+            for (const [name, ver] of Object.entries(p.optionalDependencies)) {
+              if (ver !== p.version) {
+                throw new Error(`${name} pinned to ${ver}, root is ${p.version} — versions must match`);
+              }
+            }
+            console.log("✓ root package.json shape OK (7 platform deps, versions in lockstep)");
+          '
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            mcp/servers/mmcg/target
+          key: ${{ runner.os }}-npm-smoke-cargo-${{ hashFiles('mcp/servers/mmcg/Cargo.lock') }}
+
+      - name: Build mmcg (host = linux-x64-gnu)
+        working-directory: mcp/servers/mmcg
+        run: cargo build --release --locked
+
+      - name: Assemble linux-x64-gnu platform package
+        run: ./scripts/build-npm-packages.sh x86_64-unknown-linux-gnu mcp/servers/mmcg/target/release/mmcg
+
+      - name: npm pack root + platform
+        run: |
+          set -e
+          mkdir -p packed
+          (cd npm/mastermind && npm pack --pack-destination "$GITHUB_WORKSPACE/packed")
+          (cd npm/platforms/linux-x64-gnu && npm pack --pack-destination "$GITHUB_WORKSPACE/packed")
+          ls -la packed/
+
+      - name: Install from tarballs + smoke the wrapper
+        run: |
+          set -e
+          VERSION=$(node -p "require('./npm/mastermind/package.json').version")
+          SMOKE=$(mktemp -d)
+          cd "$SMOKE"
+          npm init -y > /dev/null
+          npm install --no-save \
+            "$GITHUB_WORKSPACE/packed/xcrft-mastermind-${VERSION}.tgz" \
+            "$GITHUB_WORKSPACE/packed/xcrft-mmcg-linux-x64-gnu-${VERSION}.tgz"
+
+          echo "--- mastermind --version"
+          OUT=$(./node_modules/.bin/mastermind --version)
+          echo "$OUT"
+          echo "$OUT" | grep -q "$VERSION" || { echo "::error::--version ($OUT) != package version ($VERSION)"; exit 1; }
+
+          echo "--- mastermind doctor --json (shape)"
+          ./node_modules/.bin/mastermind doctor --json > doctor.json || true
+          python3 -c "import json; d = json.load(open('doctor.json')); assert 'checks' in d, d"
+
+          echo "--- install-mode: project (this is a project-local install)"
+          ./node_modules/.bin/mastermind setup claude --project . > diff.txt 2>&1 || true
+          grep -q "node_modules/.bin/mastermind" diff.txt || {
+            echo "::error::project-mode should propose ./node_modules/.bin/mastermind"; cat diff.txt; exit 1;
+          }
+          echo "✓ project-mode command form correct"
+
+          echo "--- install-mode: cargo (mmcg compat wrapper → absolute path)"
+          ./node_modules/.bin/mmcg setup claude --project . > diff2.txt 2>&1 || true
+          grep -q "/bin/mmcg" diff2.txt || {
+            echo "::error::mmcg wrapper should propose an absolute binary path"; cat diff2.txt; exit 1;
+          }
+          echo "✓ mmcg compat command form correct"

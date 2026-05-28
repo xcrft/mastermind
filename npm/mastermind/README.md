@@ -111,7 +111,7 @@ mastermind verify-spec <path>               # pre-execution mechanical gate on a
 mastermind audit-spec <path> --since main   # post-execution audit vs a git baseline
 mastermind run-task <path>                  # two-phase orchestrator: verify → executor → audit
 mastermind query callers <symbol>           # one-shot CLI query (agents use the MCP tools instead)
-mastermind uninstall [--mcp]                # remove .mastermind/ (and, with --mcp, de-register from the MCP config)
+mastermind uninstall [--scope <s>]          # remove project setup (.mastermind/ + project .mcp.json); --scope global|all for the global MCP entry
 ```
 
 `mmcg` is a legacy alias for the same binary (cargo installs expose it under that name) — prefer `mastermind`. See `mastermind <subcommand> --help` for full options.

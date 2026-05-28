@@ -56,6 +56,18 @@ enum Profile {
     RustCli,
 }
 
+/// Which parts of a Mastermind setup `uninstall` should remove.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+enum UninstallScope {
+    /// This project only: remove `.mastermind/` and the project `.mcp.json` mmcg entry.
+    Project,
+    /// Global only: de-register mmcg from `~/.claude/.mcp.json` (leaves `.mastermind/` alone).
+    Global,
+    /// Both project and global.
+    All,
+}
+
 fn profile_template(p: Profile) -> &'static str {
     match p {
         Profile::Generic => CONTEXT_TEMPLATE,
@@ -149,20 +161,20 @@ enum Cmd {
         #[arg(long)]
         no_claude: bool,
     },
-    /// Remove Mastermind workflow state from a project: deletes `.mastermind/`
-    /// (index, tasks, run-state). With `--mcp`, also de-registers the `mmcg` entry
-    /// from the MCP config. Never touches CONTEXT.md / CLAUDE.md. Safe by default:
-    /// prints what it would remove and exits unless `--force` is passed.
+    /// Remove a Mastermind setup. By default (`--scope project`) deletes
+    /// `.mastermind/` (index, tasks, run-state) and de-registers the `mmcg`
+    /// entry from the project `.mcp.json`. `--scope global` removes only the
+    /// `~/.claude/.mcp.json` entry; `--scope all` does both. Never touches
+    /// CONTEXT.md / CLAUDE.md. Safe by default: prints the plan and exits unless
+    /// `--force` is passed.
     Uninstall {
-        /// Project root. Defaults to cwd.
+        /// Project root. Defaults to cwd. (Ignored for `--scope global`.)
         #[arg(default_value = ".")]
         root: PathBuf,
-        /// Also remove the `mmcg` entry from the project `.mcp.json`.
-        #[arg(long)]
-        mcp: bool,
-        /// De-register from the global `~/.claude/.mcp.json` instead of the project file. Implies --mcp.
-        #[arg(long)]
-        global: bool,
+        /// What to remove: `project` (.mastermind/ + project .mcp.json),
+        /// `global` (the ~/.claude/.mcp.json mmcg entry), or `all`.
+        #[arg(long, value_enum, default_value = "project")]
+        scope: UninstallScope,
         /// Actually delete. Without this, prints what would be removed and exits.
         #[arg(long)]
         force: bool,
@@ -473,16 +485,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
             do_init(&root, with_claude_md, force, profile, !no_index, !no_claude)?;
         }
-        Cmd::Uninstall {
-            root,
-            mcp,
-            global,
-            force,
-        } => {
+        Cmd::Uninstall { root, scope, force } => {
             let root = root
                 .canonicalize()
                 .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
-            do_uninstall(&root, mcp || global, global, force)?;
+            do_uninstall(&root, scope, force)?;
         }
         Cmd::Setup(SetupCmd::Claude {
             project,
@@ -965,49 +972,63 @@ fn fill_context_with_claude(root: &Path, context_path: &Path) -> Result<(), Stri
     Ok(())
 }
 
-/// Reverse of `do_init`: remove `.mastermind/` (and, with `mcp`, the `mmcg`
-/// entry from the MCP config). Safe by default — prints the plan and exits
-/// unless `force`. Never touches CONTEXT.md / CLAUDE.md (user-edited).
+/// Reverse of `do_init`. `Project` scope removes `.mastermind/` + the project
+/// `.mcp.json` mmcg entry; `Global` removes the `~/.claude/.mcp.json` entry;
+/// `All` does both. Safe by default — prints the plan and exits unless `force`.
+/// Never touches CONTEXT.md / CLAUDE.md (user-edited).
 fn do_uninstall(
     root: &Path,
-    mcp: bool,
-    global: bool,
+    scope: UninstallScope,
     force: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== mastermind uninstall ({}) ===", root.display());
+    let do_project = matches!(scope, UninstallScope::Project | UninstallScope::All);
+    let do_global = matches!(scope, UninstallScope::Global | UninstallScope::All);
+    println!(
+        "=== mastermind uninstall — scope: {} ===",
+        scope_label(scope)
+    );
 
-    let mastermind_dir = root.join(".mastermind");
-    if mastermind_dir.exists() {
-        if force {
-            fs::remove_dir_all(&mastermind_dir)?;
-            println!(
-                "Removed {} (index, tasks, run-state).",
-                mastermind_dir.display()
-            );
+    if do_project {
+        let mastermind_dir = root.join(".mastermind");
+        if mastermind_dir.exists() {
+            if force {
+                fs::remove_dir_all(&mastermind_dir)?;
+                println!(
+                    "Removed {} (index, tasks, run-state).",
+                    mastermind_dir.display()
+                );
+            } else {
+                println!(
+                    "Would remove {} (index, tasks, run-state).",
+                    mastermind_dir.display()
+                );
+            }
         } else {
             println!(
-                "Would remove {} (index, tasks, run-state).",
-                mastermind_dir.display()
+                "No `.mastermind/` at {} — nothing to remove there.",
+                root.display()
             );
         }
-    } else {
-        println!("No `.mastermind/` at this root — nothing to remove there.");
+        // Prints its own diff + dry-run / written notice.
+        mmcg::setup::remove_claude(&mmcg::setup::Target::project(root), force);
     }
 
-    if mcp {
-        let target = if global {
-            mmcg::setup::Target::global()?
-        } else {
-            mmcg::setup::Target::project(root)
-        };
-        // Prints its own diff + dry-run / written notice.
-        mmcg::setup::remove_claude(&target, force);
+    if do_global {
+        mmcg::setup::remove_claude(&mmcg::setup::Target::global()?, force);
     }
 
     if !force {
         println!("\n(dry-run — pass --force to apply. CONTEXT.md / CLAUDE.md are never touched.)");
     }
     Ok(())
+}
+
+fn scope_label(s: UninstallScope) -> &'static str {
+    match s {
+        UninstallScope::Project => "project (.mastermind/ + project .mcp.json)",
+        UninstallScope::Global => "global (~/.claude/.mcp.json)",
+        UninstallScope::All => "all (project + global)",
+    }
 }
 
 fn main() -> ExitCode {

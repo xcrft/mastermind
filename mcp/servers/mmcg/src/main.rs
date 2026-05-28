@@ -112,9 +112,10 @@ enum Cmd {
     },
     /// Print one-shot status (file count, symbol count, db path).
     Status,
-    /// Scaffold a project for the Mastermind workflow: create .mastermind/tasks/, .mastermind/,
-    /// CONTEXT.md (only if missing), and an initial empty index. Does NOT touch
-    /// existing CLAUDE.md — adopt the workflow template from agents/claude-md/ manually.
+    /// Scaffold a project for the Mastermind workflow: create .mastermind/tasks/,
+    /// CONTEXT.md (only if missing) and the index, then build the index and
+    /// (unless --no-claude) populate CONTEXT.md from the codebase via `claude -p`.
+    /// Does NOT touch an existing CLAUDE.md (pass --with-claude-md to drop the template).
     Init {
         /// Project root. Defaults to cwd.
         #[arg(default_value = ".")]
@@ -131,6 +132,31 @@ enum Cmd {
         /// commands, and canonical gotchas — prune what doesn't apply.
         #[arg(long, value_enum, default_value = "generic")]
         profile: Profile,
+        /// Skip the automatic index build (otherwise `init` runs `index .` for you).
+        #[arg(long)]
+        no_index: bool,
+        /// Skip auto-populating CONTEXT.md via `claude -p` (e.g. offline, in CI, or
+        /// when the Claude Code CLI isn't installed). The bare template is left in place.
+        #[arg(long)]
+        no_claude: bool,
+    },
+    /// Remove Mastermind workflow state from a project: deletes `.mastermind/`
+    /// (index, tasks, run-state). With `--mcp`, also de-registers the `mmcg` entry
+    /// from the MCP config. Never touches CONTEXT.md / CLAUDE.md. Safe by default:
+    /// prints what it would remove and exits unless `--force` is passed.
+    Uninstall {
+        /// Project root. Defaults to cwd.
+        #[arg(default_value = ".")]
+        root: PathBuf,
+        /// Also remove the `mmcg` entry from the project `.mcp.json`.
+        #[arg(long)]
+        mcp: bool,
+        /// De-register from the global `~/.claude/.mcp.json` instead of the project file. Implies --mcp.
+        #[arg(long)]
+        global: bool,
+        /// Actually delete. Without this, prints what would be removed and exits.
+        #[arg(long)]
+        force: bool,
     },
     /// Interactive configuration for an external tool — currently only Claude
     /// Code. Safe by default: prints a diff and exits without writing unless
@@ -421,11 +447,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             with_claude_md,
             force,
             profile,
+            no_index,
+            no_claude,
         } => {
             let root = root
                 .canonicalize()
                 .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
-            do_init(&root, with_claude_md, force, profile)?;
+            do_init(&root, with_claude_md, force, profile, !no_index, !no_claude)?;
+        }
+        Cmd::Uninstall {
+            root,
+            mcp,
+            global,
+            force,
+        } => {
+            let root = root
+                .canonicalize()
+                .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
+            do_uninstall(&root, mcp || global, global, force)?;
         }
         Cmd::Setup(SetupCmd::Claude {
             project,
@@ -705,10 +744,13 @@ fn do_init(
     with_claude_md: bool,
     force: bool,
     profile: Profile,
+    index: bool,
+    claude: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut created: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
+    let mut context_fill_prompt: Option<String> = None;
 
     // 1. .mastermind/ — single working-state folder, fully gitignored.
     //    Contains tasks/, the mmcg index, and anything else session-scratch.
@@ -758,7 +800,8 @@ fn do_init(
     //    with conventions / commands / gotchas — see `templates/profiles/`.
     let context_path = root.join("CONTEXT.md");
     let context_body = strip_template_comment(profile_template(profile));
-    if write_if_absent(&context_path, &context_body, force)? {
+    let context_created = write_if_absent(&context_path, &context_body, force)?;
+    if context_created {
         let label = match profile {
             Profile::Generic => "CONTEXT.md".to_string(),
             _ => format!("CONTEXT.md (profile: {})", profile_label(profile)),
@@ -787,13 +830,45 @@ fn do_init(
         skipped.push(".mastermind/tasks/_spec-template.md (already exists)".into());
     }
 
-    // 6. Initial empty index
+    // 6. Index database
     let db_path = mastermind_dir.join("mmcg.db");
     if !db_path.exists() {
         let _ = Store::open(&db_path)?; // creates schema
-        created.push(".mastermind/mmcg.db (empty index — run `mmcg index .` to populate)".into());
+        created.push(".mastermind/mmcg.db".into());
     } else {
         skipped.push(".mastermind/mmcg.db (already exists)".into());
+    }
+
+    // 7. Build the index now so the project is queryable immediately — `init`
+    //    should leave you ready to use, not half-configured. `--no-index` opts out.
+    if index {
+        let mut store = Store::open(&db_path)?;
+        let indexer = Indexer::new(root);
+        match indexer.index_all(&mut store, false) {
+            Ok(stats) => created.push(format!(
+                "indexed {} files, {} symbols, {} edges ({} ms)",
+                stats.files_indexed, stats.symbols_total, stats.edges_total, stats.duration_ms
+            )),
+            Err(e) => warnings.push(format!(
+                "index build failed: {e} — run `mmcg index .` manually"
+            )),
+        }
+    } else {
+        skipped.push("index build (--no-index) — run `mmcg index .` when ready".into());
+    }
+
+    // 8. Populate CONTEXT.md from the codebase via `claude -p`. Only when we just
+    //    created the bare template (never clobber a user-edited file) and
+    //    `--no-claude` wasn't passed. Best-effort: a missing Claude CLI or a
+    //    non-zero exit must NOT fail init — fall back to printing the prompt.
+    if claude && context_created {
+        match fill_context_with_claude(root, &context_path) {
+            Ok(()) => created.push("CONTEXT.md populated via `claude -p`".into()),
+            Err(e) => {
+                warnings.push(format!("CONTEXT.md auto-fill skipped: {e}"));
+                context_fill_prompt = Some(context_prompt(&context_path));
+            }
+        }
     }
 
     // Report
@@ -818,19 +893,102 @@ fn do_init(
     }
 
     println!("\nNext steps:");
-    println!("  1. Run `mmcg index .` to populate the index");
-    println!("  2. (Optional) Run `mmcg watch` in another terminal to keep the index fresh");
-    println!("  3. Register mmcg with your MCP client (see mcp/servers/mmcg/README.md for config)");
-    println!("  4. Add `.mastermind/` to your project's root `.gitignore` (everything under it is local working state)");
+    println!("  1. Register with Claude Code:  mmcg setup claude --write-mcp");
+    println!("     (run once — the global server serves whichever project you open)");
+    println!("  2. Add `.mastermind/` to your project's root `.gitignore` (local working state)");
+    println!("  3. (Optional) Keep the index fresh in another terminal:  mmcg watch");
     if !with_claude_md {
-        println!("  5. Adopt the workflow CLAUDE.md: copy from agents/claude-md/mastermind-workflow.md\n     or re-run `mmcg init --with-claude-md` to drop it in automatically");
+        println!("  4. Adopt the workflow CLAUDE.md:  re-run `mmcg init --with-claude-md`");
     } else {
-        println!("  5. Review the dropped CLAUDE.md — it has <PLACEHOLDER> sections to fill in for your project");
+        println!("  4. Review the dropped CLAUDE.md — it has <PLACEHOLDER> sections to fill in.");
     }
-    println!(
-        "  Note: task specs now live under `.mastermind/tasks/` (was `.tasks/` in pre-0.6.0)."
-    );
+    if let Some(prompt) = context_fill_prompt {
+        println!(
+            "\nCONTEXT.md was left as a template. To fill it, paste this into Claude Code:\n\n  {prompt}"
+        );
+    }
 
+    Ok(())
+}
+
+/// Prompt handed to `claude -p` (or printed as a fallback) to fill CONTEXT.md
+/// from the codebase. Scopes Claude to the two human-authored sections and
+/// tells it to leave the accumulating sections as empty templates.
+fn context_prompt(context_path: &Path) -> String {
+    format!(
+        "Populate the CONTEXT.md at `{}` for this project. It is currently a blank template. \
+         Read the codebase (use the mmcg MCP tools and file access) and fill ONLY the Identity \
+         (what it is / what it is not / primary users) and Active goals sections with project \
+         specifics. Leave the Decision log, Known gotchas, Domain glossary, External dependencies, \
+         and Don't-touch list sections as the empty templates — those accumulate over time. State \
+         only things that are true about the project and not trivially derivable; do not invent goals.",
+        context_path.display()
+    )
+}
+
+/// Best-effort: shell out to `claude -p` to populate CONTEXT.md from the
+/// codebase. Runs in `root` so Claude operates inside the project. Returns Err
+/// on spawn failure (no CLI) or non-zero exit so the caller can fall back to
+/// printing the prompt — auto-fill never fails the overall `init`.
+fn fill_context_with_claude(root: &Path, context_path: &Path) -> Result<(), String> {
+    println!("\nPopulating CONTEXT.md via `claude -p` (pass --no-claude to skip)...\n");
+    let status = std::process::Command::new("claude")
+        .arg("-p")
+        .arg(context_prompt(context_path))
+        .current_dir(root)
+        .stdin(std::process::Stdio::null())
+        .status()
+        .map_err(|e| {
+            format!("spawn claude: {e} — is the Claude Code CLI installed and on PATH?")
+        })?;
+    if !status.success() {
+        return Err(format!("claude exited with {status}"));
+    }
+    Ok(())
+}
+
+/// Reverse of `do_init`: remove `.mastermind/` (and, with `mcp`, the `mmcg`
+/// entry from the MCP config). Safe by default — prints the plan and exits
+/// unless `force`. Never touches CONTEXT.md / CLAUDE.md (user-edited).
+fn do_uninstall(
+    root: &Path,
+    mcp: bool,
+    global: bool,
+    force: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("=== mmcg uninstall ({}) ===", root.display());
+
+    let mastermind_dir = root.join(".mastermind");
+    if mastermind_dir.exists() {
+        if force {
+            fs::remove_dir_all(&mastermind_dir)?;
+            println!(
+                "Removed {} (index, tasks, run-state).",
+                mastermind_dir.display()
+            );
+        } else {
+            println!(
+                "Would remove {} (index, tasks, run-state).",
+                mastermind_dir.display()
+            );
+        }
+    } else {
+        println!("No `.mastermind/` at this root — nothing to remove there.");
+    }
+
+    if mcp {
+        let target = if global {
+            mmcg::setup::Target::global()?
+        } else {
+            mmcg::setup::Target::project(root)
+        };
+        // Prints its own diff + dry-run / written notice.
+        mmcg::setup::remove_claude(&target, force);
+    }
+
+    if !force {
+        println!("\n(dry-run — pass --force to apply. CONTEXT.md / CLAUDE.md are never touched.)");
+    }
     Ok(())
 }
 

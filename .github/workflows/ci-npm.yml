@@ -115,8 +115,8 @@ jobs:
           cd "$SMOKE"
           npm init -y > /dev/null
           npm install --no-save \
-            "$GITHUB_WORKSPACE/packed/xcrft-mastermind-${VERSION}.tgz" \
-            "$GITHUB_WORKSPACE/packed/xcrft-mmcg-linux-x64-gnu-${VERSION}.tgz"
+            "$GITHUB_WORKSPACE/packed/xcraftmind-mastermind-${VERSION}.tgz" \
+            "$GITHUB_WORKSPACE/packed/xcraftmind-mmcg-linux-x64-gnu-${VERSION}.tgz"
 
           echo "--- mastermind --version"
           OUT=$(./node_modules/.bin/mastermind --version)

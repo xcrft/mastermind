@@ -694,7 +694,8 @@ mod tests {
         let entry = mmcg_entry(Path::new("/ignored"));
         let args = entry.get("args").and_then(|v| v.as_array()).unwrap();
         assert!(
-            args.iter().any(|a| a.as_str() == Some("@xcraftmind/mastermind")),
+            args.iter()
+                .any(|a| a.as_str() == Some("@xcraftmind/mastermind")),
             "expected unpinned package arg when MASTERMIND_VERSION absent"
         );
     }

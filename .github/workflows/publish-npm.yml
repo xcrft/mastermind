@@ -189,7 +189,7 @@ jobs:
       - name: Verify every platform tarball contains its binary
         run: |
           set -e
-          for tgz in packed/xcrft-mmcg-*.tgz; do
+          for tgz in packed/xcraftmind-mmcg-*.tgz; do
             # tarball member layout is `package/bin/mmcg[.exe]`
             if tar tzf "$tgz" | grep -qE 'package/bin/mmcg(\.exe)?$'; then
               echo "✓ $(basename "$tgz") contains a binary"
@@ -206,8 +206,8 @@ jobs:
           # Derive version dynamically — no hardcoded tarball names (they'd
           # rot on every release).
           VERSION=$(node -p "require('./npm/mastermind/package.json').version")
-          ROOT_TGZ="$GITHUB_WORKSPACE/packed/xcrft-mastermind-${VERSION}.tgz"
-          PLAT_TGZ="$GITHUB_WORKSPACE/packed/xcrft-mmcg-linux-x64-gnu-${VERSION}.tgz"
+          ROOT_TGZ="$GITHUB_WORKSPACE/packed/xcraftmind-mastermind-${VERSION}.tgz"
+          PLAT_TGZ="$GITHUB_WORKSPACE/packed/xcraftmind-mmcg-linux-x64-gnu-${VERSION}.tgz"
           test -f "$ROOT_TGZ" || { echo "::error::root tarball not found: $ROOT_TGZ"; ls packed/; exit 1; }
           test -f "$PLAT_TGZ" || { echo "::error::platform tarball not found: $PLAT_TGZ"; ls packed/; exit 1; }
           SMOKE_DIR=$(mktemp -d)
@@ -289,13 +289,13 @@ jobs:
           # can resolve to real registry entries (otherwise root install would
           # silently skip them on first install). Order within platforms
           # doesn't matter — they're independent.
-          for tgz in packed/xcrft-mmcg-*.tgz; do
+          for tgz in packed/xcraftmind-mmcg-*.tgz; do
             echo "→ npm publish $tgz"
             npm publish --access public "$tgz"
           done
           # Root last.
-          echo "→ npm publish packed/xcrft-mastermind-*.tgz"
-          npm publish --access public packed/xcrft-mastermind-*.tgz
+          echo "→ npm publish packed/xcraftmind-mastermind-*.tgz"
+          npm publish --access public packed/xcraftmind-mastermind-*.tgz
 
   dry-run-notice:
     name: Dry-run notice

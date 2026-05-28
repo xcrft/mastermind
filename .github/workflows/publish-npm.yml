@@ -1,6 +1,6 @@
 # Build prebuilt mmcg binaries for every supported target, assemble npm
 # platform packages from them, smoke the wrapper end-to-end, then publish
-# all 7 packages (root + 6 platforms) with the same version.
+# all 8 packages (root + 7 platforms) with the same version.
 #
 # Tag-driven: pushing `npm-v<semver>` (e.g. `npm-v0.22.0`) triggers verify
 # + publish. `workflow_dispatch` runs verify-only (dry-run by default) so
@@ -14,8 +14,8 @@
 #     Adds a human approval gate between matrix-build and publish.
 #
 # Release procedure:
-#   1. Bump version in mcp/servers/mmcg/Cargo.toml AND all 7 npm package.jsons
-#      (root @xcraftmind/mastermind + 6 @xcraftmind/mmcg-* platform packages).
+#   1. Bump version in mcp/servers/mmcg/Cargo.toml AND all 8 npm package.jsons
+#      (root @xcraftmind/mastermind + 7 @xcraftmind/mmcg-* platform packages).
 #      The build helper hard-fails on Cargo↔platform version mismatch.
 #   2. Validate: `python scripts/validate.py && cargo test --lib`
 #   3. Commit on main: `git commit -am "mastermind 0.22.0"`
@@ -177,7 +177,7 @@ jobs:
             exit 1
           fi
 
-      - name: npm pack all 7 packages (root + 7 platforms)
+      - name: npm pack all 8 packages (root + 7 platforms)
         run: |
           set -e
           mkdir -p packed
@@ -280,7 +280,7 @@ jobs:
           name: npm-tarballs
           path: packed
 
-      - name: Publish all 7 packages
+      - name: Publish all 8 packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |

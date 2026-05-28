@@ -8,29 +8,67 @@ Mastermind workflow CLI + mmcg codegraph for AI coding agents — verify-spec / 
 
 Prebuilt native binaries via optional platform packages — **no Rust toolchain required**.
 
-## Install
+## What it does
 
-Requires **Node.js 18+**. The CLI is a thin JS wrapper around a prebuilt native binary — no Rust toolchain needed (except the build-from-source path below).
+`mastermind` parses your codebase into a queryable graph (definitions, callers/callees, imports, blast radius) with tree-sitter, and serves it to Claude Code over MCP — so the agent asks structural questions instead of grepping. It also ships the Mastermind workflow gates: `verify-spec` (pre-flight) and `audit-spec` (post-flight) for running coding tasks against mechanical checks.
 
-### One-shot (no install)
+## Quick start
 
-```sh
-npx -y @xcraftmind/mastermind doctor
-npx -y @xcraftmind/mastermind init --profile typescript-api
-npx -y @xcraftmind/mastermind run-task .mastermind/tasks/042-feature.md
-```
+Requires **Node.js 18+**. The CLI is a thin JS wrapper over a prebuilt native binary — no Rust toolchain needed.
 
-`npx` is great for these one-shot commands. **Avoid it for the MCP server**, though: an MCP config that runs `npx ... serve` pays an npm-cache/network resolution cost on every Claude Code launch and is less deterministic than a real install. For `setup claude`, prefer **global** or **project-local** (below). If you do register via npx, `setup claude` pins the version (`npx -y @xcraftmind/mastermind@<ver> serve`) so at least the version is stable — but it's an escape hatch, not the recommended path.
-
-### Global (recommended for most users)
+**1. Install**
 
 ```sh
 npm install -g @xcraftmind/mastermind
-mastermind setup claude --write-mcp       # register mmcg as an MCP server
-mastermind doctor                          # verify the environment
 ```
 
-`setup claude` writes `~/.claude/.mcp.json` with `command: "mastermind"` so Claude Code launches the wrapper from PATH.
+**2. Index your project** — run inside each repo you want Claude to understand:
+
+```sh
+cd your-project
+mastermind init                      # scaffold .mastermind/ (CONTEXT.md + empty index)
+mastermind index .                   # parse the codebase into the graph
+echo ".mastermind/" >> .gitignore    # the index + local specs are local state
+```
+
+**3. Register with Claude Code** — once, globally:
+
+```sh
+mastermind setup claude --write-mcp
+```
+
+**4. Verify**
+
+```sh
+mastermind doctor                    # should now be all green
+```
+
+Restart Claude Code — the `mmcg` tools (search, callers, callees, impact, …) are now available in any project you've indexed.
+
+## What gets set up where
+
+Two separate things — and the split is the part that trips people up:
+
+| | Scope | Lives in | How often |
+|---|---|---|---|
+| **Index** — `init` + `index` | **per project** | `.mastermind/mmcg.db` in each repo | once per repo, refresh with `index` / `watch` |
+| **MCP registration** — `setup claude` | once | `~/.claude/.mcp.json` (global) | once for all projects |
+
+- **The index is always per-project.** Run `mastermind init && mastermind index .` in *every* repo you want indexed. `doctor` reporting `index database not found` just means you haven't done this in the current directory yet (the exact situation if you run `doctor` from `/tmp` or a fresh shell).
+- **The MCP registration is usually once, globally.** The global entry launches `mastermind serve` from whichever project you open in Claude Code, so it picks up *that* project's `.mastermind/mmcg.db` automatically. You do **not** re-run `setup claude` per repo.
+- Use **per-project registration** only if you want the MCP config committed with the repo and version-pinned: `mastermind setup claude --project . --write-mcp` writes `./.mcp.json` with `command: "./node_modules/.bin/mastermind"` (pair it with a project-local install — see below).
+
+> `setup claude` is safe by default: without `--write-mcp` it prints the diff and exits without touching anything.
+
+## Install options
+
+### Global (recommended)
+
+```sh
+npm install -g @xcraftmind/mastermind
+```
+
+Puts `mastermind` on your PATH. `setup claude --write-mcp` registers `command: "mastermind"` in `~/.claude/.mcp.json`.
 
 ### Project-local
 
@@ -39,15 +77,42 @@ npm install -D @xcraftmind/mastermind
 npx mastermind setup claude --project . --write-mcp
 ```
 
-`setup claude --project .` writes `./.mcp.json` with `command: "./node_modules/.bin/mastermind"` so the project gets a reproducible, version-pinned MCP server.
+Writes `./.mcp.json` with `command: "./node_modules/.bin/mastermind"` — reproducible and version-pinned with the repo. Commit `./.mcp.json`; keep ignoring `.mastermind/`.
+
+### One-shot with npx (no install)
+
+```sh
+npx -y @xcraftmind/mastermind doctor
+npx -y @xcraftmind/mastermind init --profile typescript-api
+```
+
+Fine for one-off commands. **Avoid npx for the MCP server** — running `npx … serve` on every Claude Code launch pays an npm-resolution cost and is less deterministic than a real install. For `serve` / `setup claude`, prefer global or project-local.
 
 ### Build from source (contributors / unsupported platforms)
 
 ```sh
-cargo install mmcg
+cargo install mmcg     # requires Rust 1.75+
 ```
 
-Requires Rust 1.75+. The cargo-installed binary is `mmcg`, not `mastermind` — same code, same subcommands, only the wrapper name differs.
+The cargo-installed binary is `mmcg`, not `mastermind` — same code, same subcommands, only the wrapper name differs.
+
+## Commands
+
+```sh
+mastermind init [--profile <p>]             # scaffold .mastermind/ (+ empty index). Profiles: generic, typescript-api, react-native, python-fastapi, rust-cli
+mastermind index .                          # build/refresh the codegraph (incremental; --force to re-parse all)
+mastermind watch                            # long-running watcher — re-indexes on file changes
+mastermind status                           # file count, symbol count, db path
+mastermind doctor                           # environment health check
+mastermind serve                            # MCP stdio server (this is what Claude Code launches)
+mastermind setup claude --write-mcp         # register with Claude Code's MCP layer
+mastermind verify-spec <path>               # pre-execution mechanical gate on a task spec
+mastermind audit-spec <path> --since main   # post-execution audit vs a git baseline
+mastermind run-task <path>                  # two-phase orchestrator: verify → executor → audit
+mastermind query callers <symbol>           # one-shot CLI query (agents use the MCP tools instead)
+```
+
+`mastermind` and `mmcg` are the same binary — use whichever your team has documented. See `mastermind <subcommand> --help` for full options.
 
 ## Supported platforms
 
@@ -62,30 +127,6 @@ Prebuilt binaries ship for:
 | Windows | x86_64 |
 
 Other targets fall back to `cargo install mmcg`.
-
-## What's in the box
-
-- `mastermind` — public CLI command (alias for `mmcg` with install-mode hints)
-- `mmcg` — compatibility command (same binary, same subcommands as cargo-installed `mmcg`)
-
-Both commands resolve to the same native binary. Use whichever your team has documented.
-
-### Top-level subcommands
-
-```sh
-mastermind init --profile typescript-api    # scaffold .mastermind/ with stack-specific CONTEXT.md
-mastermind index .                          # build/refresh the codegraph index
-mastermind watch                            # long-running watcher (re-indexes on file changes)
-mastermind doctor                           # environment health check
-mastermind serve                            # MCP stdio server
-mastermind setup claude --write-mcp         # register with Claude Code's MCP layer
-mastermind verify-spec <path>               # pre-execution mechanical gate on a task spec
-mastermind audit-spec <path> --since main   # post-execution audit vs git baseline
-mastermind run-task <path>                  # two-phase orchestrator: verify → executor → audit
-mastermind query callers <symbol>           # one-shot CLI query (use MCP for agents)
-```
-
-See `mastermind <subcommand> --help` for full options.
 
 ## Architecture
 

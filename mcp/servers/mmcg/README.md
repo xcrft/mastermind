@@ -117,6 +117,8 @@ mmcg doctor --json                                   # machine-parseable
 # Catches missing symbols, missing files, empty mandatory sections, snapshot
 # drift, blast-radius warnings. Exit 1 on errors.
 mmcg verify-spec .mastermind/tasks/042-feature.md
+mmcg verify-spec .mastermind/tasks/042-feature.md --strict         # contract mode: require frontmatter scoping + a verify cmd + index
+mmcg verify-spec .mastermind/tasks/042-feature.md --require-index  # fail (don't skip live checks) when no index
 
 # Post-execution audit — compare spec contract against actual repo state.
 # Diffs against <git-ref> (typically `main` or merge-base). Flags scope creep,
@@ -135,6 +137,7 @@ mmcg run-task .mastermind/tasks/042-feature.md --reset     # drop state, force p
 mmcg run-task .mastermind/tasks/042-feature.md --pre-only  # never auto-resume into post
 mmcg run-task .mastermind/tasks/042-feature.md --post-only # requires state
 mmcg run-task .mastermind/tasks/042-feature.md --allow-no-index  # docs-only / spec-only specs
+mmcg run-task .mastermind/tasks/042-feature.md --strict          # fold strict spec checks into pre-flight
 # NOTE: without --allow-no-index, pre-flight hard-fails when the index is missing
 # or empty. Gates without a codegraph degrade to file-existence + section checks
 # only — mmcg's value comes from the structural truth layer, not the heuristics.

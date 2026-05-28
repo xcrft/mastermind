@@ -203,6 +203,13 @@ enum Cmd {
         root: PathBuf,
         #[arg(long)]
         json: bool,
+        /// Fail if no index is present, instead of skipping the live symbol checks.
+        #[arg(long)]
+        require_index: bool,
+        /// Contract-driven mode: also require YAML frontmatter scoping the change
+        /// (`touches` with files) and at least one `verify[].cmd`. Implies --require-index.
+        #[arg(long)]
+        strict: bool,
     },
     /// Post-execution gate: mechanical audit comparing spec contract against
     /// the actual repo state. Diffs against `<git-ref>` (typically `main` or
@@ -265,6 +272,10 @@ enum Cmd {
         /// strong as the codegraph they reason from.
         #[arg(long)]
         allow_no_index: bool,
+        /// Contract-driven mode: fold strict spec checks into pre-flight
+        /// (frontmatter scoping, file-scoped touches, a runnable verify command).
+        #[arg(long)]
+        strict: bool,
     },
     /// One-shot query — handy for CLI debugging without going through MCP.
     #[command(subcommand)]
@@ -551,7 +562,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         }
-        Cmd::VerifySpec { spec, root, json } => {
+        Cmd::VerifySpec {
+            spec,
+            root,
+            json,
+            require_index,
+            strict,
+        } => {
             let root = root
                 .canonicalize()
                 .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
@@ -560,7 +577,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             // Store is optional — skip live mmcg checks if no index. That
             // still gives mandatory-sections + missing-files coverage.
             let store = Store::open(&index_path).ok();
-            let report = mmcg::verify_spec::run(&parsed, store.as_ref(), &root);
+            let mut report = mmcg::verify_spec::run(&parsed, store.as_ref(), &root);
+            // --strict implies --require-index; both hard-fail when no index.
+            if (strict || require_index) && store.is_none() {
+                report.push_error(mmcg::verify_spec::Finding::StrictViolation {
+                    reason:
+                        "no index — run `mastermind index .` (required by --strict / --require-index)"
+                            .into(),
+                });
+            }
+            if strict {
+                for f in mmcg::verify_spec::strict_check(&parsed) {
+                    report.push_error(f);
+                }
+            }
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
@@ -620,6 +650,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             post_only,
             exec,
             allow_no_index,
+            strict,
         } => {
             let root = root
                 .canonicalize()
@@ -630,6 +661,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 post_only,
                 exec,
                 allow_no_index,
+                strict,
             };
             let outcome = mmcg::run_task::run(&spec, &root, &index_path, opts);
             // Map outcomes to exit codes: gate failures / contract breaks /

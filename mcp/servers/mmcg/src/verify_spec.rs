@@ -104,6 +104,9 @@ pub enum Finding {
         file: String,
         language: Option<String>,
     },
+    /// A `--strict` requirement was not met (missing frontmatter, unscoped
+    /// touch, no verify command, index required…). Only emitted in strict mode.
+    StrictViolation { reason: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -140,6 +143,13 @@ impl Report {
 
     pub fn has_failures(&self) -> bool {
         !self.errors.is_empty()
+    }
+
+    /// Fold a hard error in and force the verdict to Fail. Used to layer
+    /// `--strict` / `--require-index` findings onto a report after `run`.
+    pub fn push_error(&mut self, finding: Finding) {
+        self.errors.push(finding);
+        self.verdict = Verdict::Fail;
     }
 }
 
@@ -200,7 +210,48 @@ fn render_finding(f: &Finding) -> String {
             let lang = language.as_deref().unwrap_or("<any>");
             format!("missing_symbol_at_file: `{symbol}` not found at `{file}` (language={lang}) — file/language scoping from frontmatter.touches catches collisions the heuristic would miss")
         }
+        Finding::StrictViolation { reason } => format!("strict: {reason}"),
     }
+}
+
+/// Extra requirements enforced only under `--strict`: a code-touching spec must
+/// carry YAML frontmatter that scopes what it changes (`touches`/`expected_docs`),
+/// scope each touch to a file, and declare at least one runnable verify command.
+/// Returns the violations as `StrictViolation` findings for the caller to fold in.
+pub fn strict_check(spec: &ParsedSpec) -> Vec<Finding> {
+    let mut out = Vec::new();
+    match &spec.frontmatter {
+        None => out.push(Finding::StrictViolation {
+            reason: "no YAML frontmatter — a strict spec needs a `---` block with touches / verify / breaking_changes".into(),
+        }),
+        Some(fm) => {
+            if !fm.has_file_scope() {
+                out.push(Finding::StrictViolation {
+                    reason: "frontmatter declares no `touches` or `expected_docs` — scope what the spec changes".into(),
+                });
+            }
+            for t in &fm.touches {
+                if t.file.trim().is_empty() {
+                    out.push(Finding::StrictViolation {
+                        reason: "a `touches` entry has an empty `file`".into(),
+                    });
+                } else if t.symbols.is_empty() {
+                    out.push(Finding::StrictViolation {
+                        reason: format!(
+                            "touch `{}` names no `symbols` — list the symbols it changes",
+                            t.file
+                        ),
+                    });
+                }
+            }
+            if fm.verify.is_empty() && spec.verify_commands.is_empty() {
+                out.push(Finding::StrictViolation {
+                    reason: "no verify command — declare at least one `verify[].cmd` the executor must run".into(),
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Run all Phase A checks against a parsed spec, using `store` as the live
@@ -938,5 +989,41 @@ expected_docs:
         let r = run(&s, None, &root);
         assert_eq!(r.verdict, Verdict::Pass);
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn strict_check_flags_spec_without_frontmatter() {
+        let s = spec::parse_str("t.md", "## Goals\n- x\n## Tests Plan\n- t\n");
+        let findings = strict_check(&s);
+        assert!(
+            findings.iter().any(|f| matches!(
+                f,
+                Finding::StrictViolation { reason } if reason.contains("frontmatter")
+            )),
+            "expected a frontmatter strict violation, got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn strict_check_passes_a_well_scoped_frontmatter_spec() {
+        let body = "\
+---
+touches:
+  - file: src/foo.rs
+    language: rust
+    symbols:
+      - name: foo
+verify:
+  - cmd: cargo test
+---
+## Goals
+- x
+";
+        let s = spec::parse_str("t.md", body);
+        assert!(
+            strict_check(&s).is_empty(),
+            "well-scoped frontmatter spec should pass strict, got {:?}",
+            strict_check(&s)
+        );
     }
 }

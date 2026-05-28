@@ -960,6 +960,11 @@ fn fill_context_with_claude(root: &Path, context_path: &Path) -> Result<(), Stri
     let status = std::process::Command::new("claude")
         .arg("-p")
         .arg(context_prompt(context_path))
+        // Auto-apply the CONTEXT.md write so `init` stays hands-off (no mid-run
+        // approval prompt). acceptEdits still prompts for Bash/other tools, and
+        // the prompt scopes the work to CONTEXT.md only.
+        .arg("--permission-mode")
+        .arg("acceptEdits")
         .current_dir(root)
         .stdin(std::process::Stdio::null())
         .status()

@@ -1,6 +1,6 @@
 {
   "name": "@xcraftmind/mmcg-darwin-arm64",
-  "version": "0.23.0",
+  "version": "0.23.1",
   "description": "Prebuilt mmcg binary for macOS arm64 (Apple Silicon). Internal — installed automatically as an optional dependency of @xcraftmind/mastermind.",
   "license": "MIT",
   "author": "xcraftmind",

@@ -161,6 +161,11 @@ enum Cmd {
         /// when the Claude Code CLI isn't installed). The bare template is left in place.
         #[arg(long)]
         no_claude: bool,
+        /// Skip installing the workflow subagents + skills into ~/.claude/. npm
+        /// installs do this by default so the full workflow (not just the codegraph)
+        /// is available; it overwrites Mastermind's own files there.
+        #[arg(long)]
+        no_global: bool,
     },
     /// Remove a Mastermind setup. By default (`--scope project`) deletes
     /// `.mastermind/` (index, tasks, run-state) and de-registers the `mmcg`
@@ -480,11 +485,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             profile,
             no_index,
             no_claude,
+            no_global,
         } => {
             let root = root
                 .canonicalize()
                 .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
-            do_init(&root, with_claude_md, force, profile, !no_index, !no_claude)?;
+            do_init(
+                &root,
+                with_claude_md,
+                force,
+                profile,
+                !no_index,
+                !no_claude,
+                !no_global,
+            )?;
         }
         Cmd::Uninstall { root, scope, force } => {
             let root = root
@@ -772,6 +786,7 @@ fn do_init(
     profile: Profile,
     index: bool,
     claude: bool,
+    global: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut created: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
@@ -914,6 +929,18 @@ fn do_init(
         }
     }
 
+    // 9. Install the workflow subagents + skills into ~/.claude/ — the part the
+    //    npm binary alone doesn't give you. Overwrites Mastermind's own files so
+    //    they stay current; leaves other files in those dirs alone. `--no-global`
+    //    opts out. A cargo install ships no bundle, so it's skipped with a pointer
+    //    to the plugin marketplace.
+    if global {
+        match install_workflow_global() {
+            Ok(msg) => created.push(msg),
+            Err(e) => warnings.push(format!("global workflow install skipped — {e}")),
+        }
+    }
+
     // Report
     println!("Mastermind workflow initialized at {}", root.display());
     if !created.is_empty() {
@@ -1007,6 +1034,85 @@ fn run_claude_draft(root: &Path, prompt: &str) -> Result<(), String> {
         })?;
     if !status.success() {
         return Err(format!("claude exited with {status}"));
+    }
+    Ok(())
+}
+
+/// Install the bundled workflow subagents + skills into `~/.claude/` so the full
+/// Mastermind workflow — not just the codegraph — is available to Claude Code.
+/// Reads the bundle from `$MASTERMIND_SHARE_DIR` (set by the npm wrapper); a
+/// cargo install ships no bundle, so it's skipped with a marketplace pointer.
+/// Only runs when `~/.claude/` already exists (Claude Code is set up). Overwrites
+/// the files Mastermind ships; leaves any other files in those dirs untouched.
+fn install_workflow_global() -> Result<String, String> {
+    let share = std::env::var("MASTERMIND_SHARE_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            "no bundle (cargo install?) — add the workflow via the Claude Code plugin \
+             marketplace: `/plugin marketplace add xcrft/mastermind`"
+                .to_string()
+        })?;
+    let share = Path::new(&share);
+    let home = dirs::home_dir().ok_or_else(|| "no $HOME — cannot locate ~/.claude".to_string())?;
+    let claude = home.join(".claude");
+    if !claude.exists() {
+        return Err(format!(
+            "{} not found (is Claude Code installed?)",
+            claude.display()
+        ));
+    }
+
+    // Subagents → ~/.claude/agents/ (flat `.md` files).
+    let mut agents = 0usize;
+    let src_agents = share.join("agents");
+    if src_agents.is_dir() {
+        let dst = claude.join("agents");
+        fs::create_dir_all(&dst).map_err(|e| format!("create {}: {e}", dst.display()))?;
+        for entry in fs::read_dir(&src_agents).map_err(|e| e.to_string())? {
+            let p = entry.map_err(|e| e.to_string())?.path();
+            if p.extension().and_then(|x| x.to_str()) == Some("md") {
+                let name = p.file_name().expect("dir entry has a name");
+                fs::copy(&p, dst.join(name)).map_err(|e| format!("copy {}: {e}", p.display()))?;
+                agents += 1;
+            }
+        }
+    }
+
+    // Skills → ~/.claude/skills/<name>/ (directories, copied recursively).
+    let mut skills = 0usize;
+    let src_skills = share.join("skills");
+    if src_skills.is_dir() {
+        let dst_root = claude.join("skills");
+        for entry in fs::read_dir(&src_skills).map_err(|e| e.to_string())? {
+            let p = entry.map_err(|e| e.to_string())?.path();
+            if p.is_dir() {
+                let name = p.file_name().expect("dir entry has a name");
+                copy_dir_all(&p, &dst_root.join(name))
+                    .map_err(|e| format!("copy skill {}: {e}", p.display()))?;
+                skills += 1;
+            }
+        }
+    }
+
+    Ok(format!(
+        "installed {agents} subagents + {skills} skills into {}",
+        claude.display()
+    ))
+}
+
+/// Recursively copy `src` into `dst` (created if missing), overwriting files.
+fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)?;
+        }
     }
     Ok(())
 }

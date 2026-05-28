@@ -102,6 +102,7 @@ jobs:
       - name: npm pack root + platform
         run: |
           set -e
+          bash scripts/stage-npm-share.sh   # stage subagents + skills into npm/mastermind/share/
           mkdir -p packed
           (cd npm/mastermind && npm pack --pack-destination "$GITHUB_WORKSPACE/packed")
           (cd npm/platforms/linux-x64-gnu && npm pack --pack-destination "$GITHUB_WORKSPACE/packed")

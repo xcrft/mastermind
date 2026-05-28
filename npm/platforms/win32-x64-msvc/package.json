@@ -1,6 +1,6 @@
 {
   "name": "@xcraftmind/mmcg-win32-x64-msvc",
-  "version": "0.24.0",
+  "version": "0.25.0",
   "description": "Prebuilt mmcg binary for Windows x86_64 (MSVC). Internal — installed automatically as an optional dependency of @xcraftmind/mastermind.",
   "license": "MIT",
   "author": "xcraftmind",

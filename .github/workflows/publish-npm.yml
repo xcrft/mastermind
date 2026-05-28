@@ -180,6 +180,9 @@ jobs:
       - name: npm pack all 8 packages (root + 7 platforms)
         run: |
           set -e
+          # Stage the workflow subagents + skills into npm/mastermind/share/ (gitignored)
+          # so they ship in the root tarball — `mastermind init` installs them to ~/.claude/.
+          bash scripts/stage-npm-share.sh
           mkdir -p packed
           for pkg_dir in npm/mastermind npm/platforms/*/; do
             (cd "$pkg_dir" && npm pack --pack-destination "$GITHUB_WORKSPACE/packed")
@@ -232,6 +235,19 @@ jobs:
             exit 1
           }
           echo "✓ project-mode MCP command form verified"
+          echo "--- workflow bundle ships + init installs it globally"
+          test -d node_modules/@xcraftmind/mastermind/share/agents || {
+            echo "::error::root tarball missing share/agents — did stage-npm-share.sh run?"; exit 1;
+          }
+          FAKE_HOME=$(mktemp -d); mkdir -p "$FAKE_HOME/.claude"
+          HOME="$FAKE_HOME" ./node_modules/.bin/mastermind init --no-claude --no-index > init.txt 2>&1 || { cat init.txt; exit 1; }
+          test -f "$FAKE_HOME/.claude/agents/mastermind-critic.md" || {
+            echo "::error::init did not install subagents to ~/.claude/agents"; cat init.txt; exit 1;
+          }
+          test -f "$FAKE_HOME/.claude/skills/mastermind-task-planning/SKILL.md" || {
+            echo "::error::init did not install skills to ~/.claude/skills"; cat init.txt; exit 1;
+          }
+          echo "✓ workflow bundle ships + init installs it to ~/.claude/"
 
       - name: Upload assembled tarballs for the publish job
         uses: actions/upload-artifact@v7

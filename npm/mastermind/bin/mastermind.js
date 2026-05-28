@@ -11,6 +11,9 @@ import process from "node:process";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json");
+// Package root (…/npm/mastermind). Its bundled `share/` tree holds the workflow
+// subagents + skills that `init` installs into ~/.claude/.
+const pkgRoot = path.dirname(require.resolve("../package.json"));
 
 function detectLibc() {
   if (process.platform !== "linux") return null;
@@ -97,6 +100,7 @@ const env = {
   MASTERMIND_INSTALL_MODE: installMode,
   MASTERMIND_VERSION: pkg.version,
   MASTERMIND_PACKAGE: pkg.name,
+  MASTERMIND_SHARE_DIR: path.join(pkgRoot, "share"),
 };
 
 const child = spawn(bin, process.argv.slice(2), {

@@ -11,7 +11,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SHARE="$REPO_ROOT/npm/mastermind/share"
 
 rm -rf "$SHARE"
-mkdir -p "$SHARE/agents" "$SHARE/skills"
+mkdir -p "$SHARE/agents" "$SHARE/skills" "$SHARE/commands"
 
 # Subagents — flat `.md` files.
 cp "$REPO_ROOT"/agents/subagents/*.md "$SHARE/agents/"
@@ -24,6 +24,11 @@ while IFS= read -r skill_md; do
     cp -R "$dir" "$SHARE/skills/$name"
 done < <(find "$REPO_ROOT/skills" -name SKILL.md)
 
+# Prompts → slash commands — flat `.md` files. Skip _template/ and READMEs.
+find "$REPO_ROOT/prompts" -name '*.md' ! -name 'README.md' ! -path '*/_template/*' \
+    -exec cp {} "$SHARE/commands/" \;
+
 agents_n=$(find "$SHARE/agents" -name '*.md' | wc -l | tr -d ' ')
 skills_n=$(find "$SHARE/skills" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
-echo "staged $agents_n subagents + $skills_n skills → npm/mastermind/share/"
+commands_n=$(find "$SHARE/commands" -name '*.md' | wc -l | tr -d ' ')
+echo "staged $agents_n subagents + $skills_n skills + $commands_n commands → npm/mastermind/share/"

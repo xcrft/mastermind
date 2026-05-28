@@ -161,7 +161,7 @@ enum Cmd {
         /// when the Claude Code CLI isn't installed). The bare template is left in place.
         #[arg(long)]
         no_claude: bool,
-        /// Skip installing the workflow subagents + skills into ~/.claude/. npm
+        /// Skip installing the workflow subagents, skills, and slash commands into ~/.claude/. npm
         /// installs do this by default so the full workflow (not just the codegraph)
         /// is available; it overwrites Mastermind's own files there.
         #[arg(long)]
@@ -929,7 +929,7 @@ fn do_init(
         }
     }
 
-    // 9. Install the workflow subagents + skills into ~/.claude/ — the part the
+    // 9. Install the workflow subagents, skills, and commands into ~/.claude/ — the part the
     //    npm binary alone doesn't give you. Overwrites Mastermind's own files so
     //    they stay current; leaves other files in those dirs alone. `--no-global`
     //    opts out. A cargo install ships no bundle, so it's skipped with a pointer
@@ -1038,7 +1038,7 @@ fn run_claude_draft(root: &Path, prompt: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Install the bundled workflow subagents + skills into `~/.claude/` so the full
+/// Install the bundled workflow subagents, skills, and slash commands into `~/.claude/` so the full
 /// Mastermind workflow — not just the codegraph — is available to Claude Code.
 /// Reads the bundle from `$MASTERMIND_SHARE_DIR` (set by the npm wrapper); a
 /// cargo install ships no bundle, so it's skipped with a marketplace pointer.
@@ -1095,8 +1095,24 @@ fn install_workflow_global() -> Result<String, String> {
         }
     }
 
+    // Prompts → ~/.claude/commands/ (flat `.md` slash-command files).
+    let mut commands = 0usize;
+    let src_commands = share.join("commands");
+    if src_commands.is_dir() {
+        let dst = claude.join("commands");
+        fs::create_dir_all(&dst).map_err(|e| format!("create {}: {e}", dst.display()))?;
+        for entry in fs::read_dir(&src_commands).map_err(|e| e.to_string())? {
+            let p = entry.map_err(|e| e.to_string())?.path();
+            if p.extension().and_then(|x| x.to_str()) == Some("md") {
+                let name = p.file_name().expect("dir entry has a name");
+                fs::copy(&p, dst.join(name)).map_err(|e| format!("copy {}: {e}", p.display()))?;
+                commands += 1;
+            }
+        }
+    }
+
     Ok(format!(
-        "installed {agents} subagents + {skills} skills into {}",
+        "installed {agents} subagents + {skills} skills + {commands} commands into {}",
         claude.display()
     ))
 }

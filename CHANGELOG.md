@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Strict, contract-driven gates. `mastermind verify-spec --strict` and `run-task --strict` require YAML frontmatter that scopes the change (`touches` with files + symbols) plus at least one `verify[].cmd`, and require an index. `verify-spec --require-index` fails (instead of silently skipping the live symbol checks) when no index is present.
 
+### Changed
+- Release: npm packages are now published with `npm publish --provenance`, attaching a signed [build provenance attestation](https://docs.npmjs.com/generating-provenance-statements) minted via GitHub Actions OIDC. Each package on npm links back to the exact workflow run and commit that built it.
+
 ### Fixed
 - `mastermind setup claude` (global/user scope) now registers mmcg via `claude mcp add --scope user` (writes `~/.claude.json`) instead of `~/.claude/.mcp.json`, which Claude Code **ignores** — so global registration silently never loaded the mmcg tools. `--project .` still writes the project `.mcp.json` (already correct). `uninstall --scope global` now uses `claude mcp remove`, and `doctor`'s MCP-config check reads `~/.claude.json` so it can no longer report a false "registered".
 

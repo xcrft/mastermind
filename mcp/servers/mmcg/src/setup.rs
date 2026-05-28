@@ -1,4 +1,4 @@
-//! `mmcg setup claude` — interactive MCP-config writer.
+//! `mastermind setup claude` — interactive MCP-config writer.
 //!
 //! Registers mmcg with Claude Code's MCP layer by editing either
 //! `~/.claude/.mcp.json` (global) or `<root>/.mcp.json` (project). Safe by
@@ -77,7 +77,7 @@ pub fn run_claude(
     workflow_template: &str,
     opts: Opts,
 ) -> Outcome {
-    println!("=== mmcg setup claude ({}) ===", target.label);
+    println!("=== mastermind setup claude ({}) ===", target.label);
 
     let existing_text = match std::fs::read_to_string(&target.path) {
         Ok(s) => s,
@@ -279,7 +279,7 @@ fn merge_mmcg_entry(existing: &Value, mmcg_entry: &Value) -> Result<Value, Strin
 /// every other server intact, and leaves an empty `mcpServers` object behind
 /// rather than deleting the file (another tool may own it).
 pub fn remove_claude(target: &Target, write: bool) -> Outcome {
-    println!("=== mmcg uninstall claude ({}) ===", target.label);
+    println!("=== mastermind uninstall claude ({}) ===", target.label);
 
     let existing_text = match std::fs::read_to_string(&target.path) {
         Ok(s) => s,

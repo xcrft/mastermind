@@ -22,14 +22,15 @@ Requires **Node.js 18+**. The CLI is a thin JS wrapper over a prebuilt native bi
 npm install -g @xcraftmind/mastermind
 ```
 
-**2. Index your project** — run inside each repo you want Claude to understand:
+**2. Set up your project** — run inside each repo you want Claude to understand:
 
 ```sh
 cd your-project
-mastermind init                      # scaffold .mastermind/ (CONTEXT.md + empty index)
-mastermind index .                   # parse the codebase into the graph
-echo ".mastermind/" >> .gitignore    # the index + local specs are local state
+mastermind init                      # scaffold .mastermind/, build the index, draft CONTEXT.md
+echo ".mastermind/" >> .gitignore    # index + local specs are local state
 ```
+
+`init` builds the index and drafts `CONTEXT.md` from your code via `claude -p` (pass `--no-claude` or `--no-index` to skip). Re-run `mastermind index .` to refresh, or `mastermind watch` to keep it live.
 
 **3. Register with Claude Code** — once, globally:
 
@@ -43,7 +44,7 @@ mastermind setup claude --write-mcp
 mastermind doctor                    # should now be all green
 ```
 
-Restart Claude Code — the `mmcg` tools (search, callers, callees, impact, …) are now available in any project you've indexed.
+Restart Claude Code — the codegraph tools (search, callers, callees, impact, …) are now available in any project you've indexed.
 
 ## What gets set up where
 
@@ -99,7 +100,7 @@ The cargo-installed binary is `mmcg`, not `mastermind` — same code, same subco
 ## Commands
 
 ```sh
-mastermind init [--profile <p>]             # scaffold .mastermind/ (+ empty index). Profiles: generic, typescript-api, react-native, python-fastapi, rust-cli
+mastermind init [--profile <p>]             # scaffold .mastermind/, build index, draft CONTEXT.md (--no-index / --no-claude to skip)
 mastermind index .                          # build/refresh the codegraph (incremental; --force to re-parse all)
 mastermind watch                            # long-running watcher — re-indexes on file changes
 mastermind status                           # file count, symbol count, db path
@@ -110,9 +111,10 @@ mastermind verify-spec <path>               # pre-execution mechanical gate on a
 mastermind audit-spec <path> --since main   # post-execution audit vs a git baseline
 mastermind run-task <path>                  # two-phase orchestrator: verify → executor → audit
 mastermind query callers <symbol>           # one-shot CLI query (agents use the MCP tools instead)
+mastermind uninstall [--mcp]                # remove .mastermind/ (and, with --mcp, de-register from the MCP config)
 ```
 
-`mastermind` and `mmcg` are the same binary — use whichever your team has documented. See `mastermind <subcommand> --help` for full options.
+`mmcg` is a legacy alias for the same binary (cargo installs expose it under that name) — prefer `mastermind`. See `mastermind <subcommand> --help` for full options.
 
 ## Supported platforms
 

@@ -1,4 +1,4 @@
-//! `mmcg run-task` — deterministic shell around the probabilistic agents.
+//! `mastermind run-task` — deterministic shell around the probabilistic agents.
 //!
 //! Two-phase orchestrator that wraps the mastermind workflow in mechanical gates:
 //!
@@ -435,7 +435,7 @@ fn run_pre(
         match store.as_ref() {
             None => {
                 eprintln!(
-                    "❌ No index at `{}`. Run `mmcg index .` first, or pass --allow-no-index for docs-only specs.",
+                    "❌ No index at `{}`. Run `mastermind index .` first, or pass --allow-no-index for docs-only specs.",
                     index_path.display()
                 );
                 return Outcome::PreFailed;
@@ -443,7 +443,7 @@ fn run_pre(
             Some(s) => match s.symbol_count() {
                 Ok(0) => {
                     eprintln!(
-                        "❌ Index at `{}` is empty (0 symbols). Run `mmcg index .` to populate, or pass --allow-no-index for docs-only specs.",
+                        "❌ Index at `{}` is empty (0 symbols). Run `mastermind index .` to populate, or pass --allow-no-index for docs-only specs.",
                         index_path.display()
                     );
                     return Outcome::PreFailed;
@@ -464,7 +464,7 @@ fn run_pre(
     print!("{}", verify.render_text());
     if verify.has_failures() {
         eprintln!(
-            "❌ verify-spec failed — no state written. Fix errors above and re-run `mmcg run-task`."
+            "❌ verify-spec failed — no state written. Fix errors above and re-run `mastermind run-task`."
         );
         return Outcome::PreFailed;
     }
@@ -474,7 +474,7 @@ fn run_pre(
     match &store {
         Some(s) => print!("{}", render_risk_report(&compute_risk_report(&parsed, s))),
         None => println!(
-            "\nRisk Report\n  (no index at `{}` — run `mmcg index .` for blast-radius numbers)",
+            "\nRisk Report\n  (no index at `{}` — run `mastermind index .` for blast-radius numbers)",
             index_path.display()
         ),
     }
@@ -515,7 +515,7 @@ fn run_pre(
             Err(e) => {
                 eprintln!("\n❌ Executor failed: {e}");
                 eprintln!(
-                    "State kept at `{}`. After fixing, re-run `mmcg run-task {}`.",
+                    "State kept at `{}`. After fixing, re-run `mastermind run-task {}`.",
                     state_path.display(),
                     spec_path.display()
                 );
@@ -526,7 +526,7 @@ fn run_pre(
 
     println!(
         "\nNext: invoke the executor on this spec (e.g. via the mastermind-task-executor \
-         subagent, or `claude -p` directly), then re-run:\n  mmcg run-task {}\nto audit + draft release notes.",
+         subagent, or `claude -p` directly), then re-run:\n  mastermind run-task {}\nto audit + draft release notes.",
         spec_path.display()
     );
     Outcome::PreReady

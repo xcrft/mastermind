@@ -1,4 +1,4 @@
-//! `mmcg verify-spec` — pre-execution gate.
+//! `mastermind verify-spec` — pre-execution gate.
 //!
 //! Replaces the prompt-discipline checks the planner is supposed to do before
 //! handing off to the executor with **deterministic, mechanical** checks. The

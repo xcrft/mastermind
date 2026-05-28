@@ -8,11 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `mmcg uninstall` — removes `.mastermind/` (index, tasks, run-state) and, with `--mcp` / `--global`, de-registers the `mmcg` entry from the MCP config. Safe dry-run by default; `--force` to apply. Never touches CONTEXT.md / CLAUDE.md.
+- `mastermind uninstall` — removes `.mastermind/` (index, tasks, run-state) and, with `--mcp` / `--global`, de-registers the `mmcg` entry from the MCP config. Safe dry-run by default; `--force` to apply. Never touches CONTEXT.md / CLAUDE.md.
 
 ### Changed
-- `mmcg init` now builds the index automatically (`--no-index` to skip) and populates CONTEXT.md from the codebase via `claude -p` (`--no-claude` to skip; falls back to printing the prompt if the Claude CLI is unavailable).
-- Fixed `mmcg init` "Next steps" to reference real commands (`mmcg setup claude --write-mcp`) instead of repo-internal paths that don't exist for npm installs.
+- `mastermind init` now builds the index automatically (`--no-index` to skip) and populates CONTEXT.md from the codebase via `claude -p` (`--no-claude` to skip; falls back to printing the prompt if the Claude CLI is unavailable).
+- `mastermind` is now the primary command in all help text and CLI output; `--help` usage, the long description (with an onboarding walkthrough), and every printed command example say `mastermind`. `mmcg` remains a working alias (the cargo-installed binary name).
+- Fixed `mastermind init` "Next steps" to reference real commands (`mastermind setup claude --write-mcp`) instead of repo-internal paths that don't exist for npm installs.
 - Rewrote the npm README with a step-by-step quick start and a "what gets set up where" guide (per-project index vs. global MCP registration).
 
 ## [0.22.1] - 2026-05-28

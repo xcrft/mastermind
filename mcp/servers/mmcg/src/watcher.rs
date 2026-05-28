@@ -27,10 +27,10 @@ pub fn run(root: PathBuf, mut store: Store) -> Result<(), Box<dyn std::error::Er
     // Incremental: only re-parses files whose mtime is newer than the stored index.
     let stats = indexer.index_all(&mut store, false)?;
     eprintln!(
-        "[mmcg watch] initial: indexed {} (unchanged {}, purged {}) in {} ms",
+        "[mastermind watch] initial: indexed {} (unchanged {}, purged {}) in {} ms",
         stats.files_indexed, stats.files_unchanged, stats.files_purged, stats.duration_ms
     );
-    eprintln!("[mmcg watch] watching {}", root.display());
+    eprintln!("[mastermind watch] watching {}", root.display());
 
     let (tx, rx) = mpsc::channel::<notify::Result<notify::Event>>();
     let mut watcher: RecommendedWatcher = notify::recommended_watcher(tx)?;
@@ -42,10 +42,10 @@ pub fn run(root: PathBuf, mut store: Store) -> Result<(), Box<dyn std::error::Er
         // Drain incoming events with a short timeout so we can also flush pending changes
         match rx.recv_timeout(RX_TIMEOUT) {
             Ok(Ok(event)) => handle_event(event, &root, &mut pending_changes, &mut store),
-            Ok(Err(e)) => eprintln!("[mmcg watch] notify error: {e}"),
+            Ok(Err(e)) => eprintln!("[mastermind watch] notify error: {e}"),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                eprintln!("[mmcg watch] watcher channel closed");
+                eprintln!("[mastermind watch] watcher channel closed");
                 break;
             }
         }
@@ -77,9 +77,9 @@ fn handle_event(
                     // Drop from pending (race: a quick rm + write would otherwise re-add)
                     pending.remove(&path);
                     if let Err(e) = store.purge_file(&rel) {
-                        eprintln!("[mmcg watch] purge failed {rel}: {e}");
+                        eprintln!("[mastermind watch] purge failed {rel}: {e}");
                     } else {
-                        eprintln!("[mmcg watch] purged {rel}");
+                        eprintln!("[mastermind watch] purged {rel}");
                     }
                 }
             }
@@ -102,8 +102,8 @@ fn flush_settled(indexer: &Indexer, store: &mut Store, pending: &mut HashMap<Pat
             continue;
         }
         match indexer.index_one(store, &path) {
-            Ok(()) => eprintln!("[mmcg watch] reindexed {}", path.display()),
-            Err(e) => eprintln!("[mmcg watch] failed {}: {e}", path.display()),
+            Ok(()) => eprintln!("[mastermind watch] reindexed {}", path.display()),
+            Err(e) => eprintln!("[mastermind watch] failed {}: {e}", path.display()),
         }
     }
 }

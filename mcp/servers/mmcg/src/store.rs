@@ -175,7 +175,7 @@ impl Store {
                 .optional()?;
             if stored.as_deref() != Some(SCHEMA_VERSION) {
                 eprintln!(
-                    "[mmcg] schema version mismatch (have {:?}, need {}). Rebuilding — re-run `mmcg index <root>` to repopulate.",
+                    "[mmcg] schema version mismatch (have {:?}, need {}). Rebuilding — re-run `mastermind index <root>` to repopulate.",
                     stored, SCHEMA_VERSION
                 );
                 self.conn.execute_batch(
@@ -860,7 +860,7 @@ impl Store {
         rows.collect()
     }
 
-    /// Count of task specs currently indexed — for `mmcg status` diagnostics.
+    /// Count of task specs currently indexed — for `mastermind status` diagnostics.
     pub fn task_specs_count(&self) -> SqlResult<u32> {
         self.conn
             .query_row("SELECT COUNT(*) FROM task_specs_fts", [], |r| r.get(0))

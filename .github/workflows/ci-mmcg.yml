@@ -136,13 +136,13 @@ jobs:
         run: cargo fmt --check
 
       - name: cargo clippy --all-targets -- -D warnings
-        run: cargo clippy --all-targets --target ${{ matrix.target }} -- -D warnings
+        run: cargo clippy --all-targets --locked --target ${{ matrix.target }} -- -D warnings
 
       - name: cargo test --all
-        run: cargo test --all --target ${{ matrix.target }}
+        run: cargo test --all --locked --target ${{ matrix.target }}
 
       - name: cargo build --release
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       # Smoke pipeline — the binary actually runs through its full surface on
       # this target: indexer, SQLite, tree-sitter, git shellouts, frontmatter

@@ -24,6 +24,10 @@ on:
       - "npm/**"
       - "mcp/servers/mmcg/**"
       - "scripts/build-npm-packages.sh"
+      - "scripts/stage-npm-share.sh"
+      - "agents/subagents/**"
+      - "skills/**"
+      - "prompts/**"
       - ".github/workflows/ci-npm.yml"
   push:
     branches: [main]
@@ -31,6 +35,10 @@ on:
       - "npm/**"
       - "mcp/servers/mmcg/**"
       - "scripts/build-npm-packages.sh"
+      - "scripts/stage-npm-share.sh"
+      - "agents/subagents/**"
+      - "skills/**"
+      - "prompts/**"
       - ".github/workflows/ci-npm.yml"
   workflow_dispatch:
 

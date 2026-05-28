@@ -118,6 +118,9 @@ pub struct RunOpts {
     /// grounding silently degrades them to mandatory-section + file-existence
     /// checks only.
     pub allow_no_index: bool,
+    /// Contract-driven mode: fold `verify_spec::strict_check` into pre-flight —
+    /// require frontmatter scoping, file-scoped touches, and a runnable verify.
+    pub strict: bool,
 }
 
 /// State file path — `<repo_root>/.mastermind/run-state/<spec-basename>.json`.
@@ -460,7 +463,12 @@ fn run_pre(
 
     // 1. verify-spec (store optional — without index, only mandatory-section +
     //    missing-file checks contribute).
-    let verify = verify_spec::run(&parsed, store.as_ref(), repo_root);
+    let mut verify = verify_spec::run(&parsed, store.as_ref(), repo_root);
+    if opts.strict {
+        for f in verify_spec::strict_check(&parsed) {
+            verify.push_error(f);
+        }
+    }
     print!("{}", verify.render_text());
     if verify.has_failures() {
         eprintln!(

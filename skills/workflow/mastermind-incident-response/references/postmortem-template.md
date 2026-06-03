@@ -138,7 +138,7 @@ Each action item gets owned, dated, and either (a) becomes a `.mastermind/tasks/
 
 | # | Action | Type | Owner | Due | Spec / CONTEXT entry |
 |---|---|---|---|---|---|
-| 1 | <Specific change — code, config, process, doc> | <code-fix \| context-md \| workflow-improvement \| process> | <person> | <YYYY-MM-DD> | <`.mastermind/tasks/NNN-…md` or "CONTEXT.md → Known gotchas">|
+| 1 | <Specific change — code, config, process, doc> | <code-fix \| context-md \| workflow-improvement \| process> | <person> | <YYYY-MM-DD> | <`.mastermind/tasks/NNN-name/spec.md` or "CONTEXT.md → Known gotchas">|
 | 2 | <…> | <…> | <…> | <…> | <…> |
 
 **Avoid action items like:**
@@ -147,8 +147,8 @@ Each action item gets owned, dated, and either (a) becomes a `.mastermind/tasks/
 - ❌ "Train the team on X" — training without process change rarely sticks
 
 **Prefer action items like:**
-- ✓ "Add P99 latency alert on /api/messages at 200ms threshold via Datadog monitor — `.mastermind/tasks/NNN-add-messages-latency-alert.md`"
-- ✓ "Add 'capacity test' as mandatory line in Performance Considerations section of spec-template — `.mastermind/tasks/NNN-spec-template-capacity.md`"
+- ✓ "Add P99 latency alert on /api/messages at 200ms threshold via Datadog monitor — `.mastermind/tasks/NNN-add-messages-latency-alert/spec.md`"
+- ✓ "Add 'capacity test' as mandatory line in Performance Considerations section of spec-template — `.mastermind/tasks/NNN-spec-template-capacity/spec.md`"
 - ✓ "Add CONTEXT.md known-gotcha: 'Redis cluster mode silently drops MULTI on key migrations during rebalance'"
 
 ---

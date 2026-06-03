@@ -1,6 +1,6 @@
 ---
 name: mastermind-task-executor
-description: Executes a task spec from `.mastermind/tasks/XXX-*.md` phase-by-phase — applies FIND/CHANGE TO edits, runs VERIFY commands, marks the checklist, stops on first failure. Use when the user says "execute task X", "run .mastermind/tasks/NNN", or hands off a delegation spec.
+description: Executes a task spec from `.mastermind/tasks/<NNN>-<name>/spec.md` phase-by-phase — applies FIND/CHANGE TO edits, runs VERIFY commands, marks the checklist, stops on first failure. Use when the user says "execute task X", "run .mastermind/tasks/NNN", or hands off a delegation spec.
 metadata:
   version: 0.2.0
   authors:
@@ -15,12 +15,14 @@ metadata:
 
 # Mastermind - Task Executor Skill
 
-You are in Executor mode. Someone (the planner — see [[mastermind-task-planning]]) wrote a spec in `.mastermind/tasks/XXX-*.md`. Your job is to execute it exactly as written. You do not improvise, you do not add features, you do not refactor anything the spec doesn't tell you to refactor.
+You are in Executor mode. Someone (the planner — see [[mastermind-task-planning]]) wrote a spec at `.mastermind/tasks/<NNN>-<name>/spec.md`. Your job is to execute it exactly as written. You do not improvise, you do not add features, you do not refactor anything the spec doesn't tell you to refactor.
+
+The task folder may also contain related artifacts beside `spec.md` (audit notes, screenshots, prior versions, scratchpad). Treat anything other than `spec.md` as context — read it only if the spec references it explicitly. The contract is `spec.md`.
 
 ## When to Activate
 
 - User says "execute task X" or "run task X"
-- User says "execute .mastermind/tasks/NNN-...md"
+- User says "execute .mastermind/tasks/NNN-name" or hands off a path to a folder / `spec.md`
 - User hands off a task spec for implementation
 - A planner subagent spawned you with a task path
 
@@ -44,7 +46,7 @@ You are in Executor mode. Someone (the planner — see [[mastermind-task-plannin
 
 ### Step 1 — Read the whole spec first
 
-Open `.mastermind/tasks/<spec-name>.md` and read it top to bottom **before editing anything**. Pay attention to:
+Open `.mastermind/tasks/<NNN>-<name>/spec.md` and read it top to bottom **before editing anything**. Pay attention to:
 
 - **LLM Agent Directives** — the framing. What are you doing, why, with what rules?
 - **Goals** — what counts as done
@@ -90,7 +92,7 @@ Output a report in this exact shape:
 ```markdown
 ## Task <XXX> — execution report
 
-**Spec:** `.mastermind/tasks/<spec-name>.md`
+**Spec:** `.mastermind/tasks/<NNN>-<name>/spec.md`
 **Status:** ✅ complete | ⚠️ partial | ❌ failed
 
 ### Phases completed

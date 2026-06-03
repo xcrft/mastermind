@@ -7,10 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-06-03
+
 ### Added
 - Strict, contract-driven gates. `mastermind verify-spec --strict` and `run-task --strict` require YAML frontmatter that scopes the change (`touches` with files + symbols) plus at least one `verify[].cmd`, and require an index. `verify-spec --require-index` fails (instead of silently skipping the live symbol checks) when no index is present.
+- Deterministic `_lessons.md` writer. `mmcg audit-spec` and `mmcg run-task`'s post-phase now append a `[auto]`-prefixed one-line lesson to `.mastermind/tasks/_lessons.md` on every `Drift` / `Broken` verdict — no LLM in the loop, so the file accumulates real signal even when the planner skips spawning the `mastermind-auditor` subagent. The auditor subagent still writes a richer root-cause line alongside; the `[auto]` entry is the mechanical finding summary (counts of scope creep / caller drift / etc.).
 
 ### Changed
+- **BREAKING — task specs now live in per-task folders.** New layout is `.mastermind/tasks/<NNN>-<name>/spec.md` (was `.mastermind/tasks/<NNN>-<name>.md`). The folder holds the spec plus any related artifacts (audit notes, screenshots, scratchpad). The only shared asset that may stay flat at the top of `tasks/` is `_lessons.md` (auditor-appended). Bare `.md` files at the top of `tasks/` are no longer indexed by `mmcg_tasks`. `mastermind init` surfaces them with a per-file migration command (`mkdir -p .mastermind/tasks/NNN-name && mv .mastermind/tasks/NNN-name.md .mastermind/tasks/NNN-name/spec.md`). All bundled templates, skills, and subagents updated to the new path shape.
+- `mastermind init` no longer drops `_spec-template.md` into `.mastermind/tasks/`. The planner skill reads from its own bundled template (`skills/workflow/mastermind-task-planning/references/spec-template.md`), so the project-level copy was unused — and worse, `.mastermind/*` is gitignored, so any local customization vanished on fresh clone. Existing copies are detected by `init` and surfaced with a `rm` hint.
 - Release: npm packages are now published with `npm publish --provenance`, attaching a signed [build provenance attestation](https://docs.npmjs.com/generating-provenance-statements) minted via GitHub Actions OIDC. Each package on npm links back to the exact workflow run and commit that built it.
 
 ### Fixed

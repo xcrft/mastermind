@@ -590,6 +590,15 @@ fn run_post(
     };
     print!("{}", audit.render_text());
 
+    // Deterministic lesson log on Drift/Broken — no-op on Held. Pairs with the
+    // same call in `mmcg audit-spec` so `_lessons.md` accumulates whether the
+    // user runs the two-phase orchestrator or audit-spec directly.
+    match crate::lessons::append_if_drift_or_broken(repo_root, spec_path, &audit) {
+        Ok(true) => println!("  appended lesson → .mastermind/tasks/_lessons.md"),
+        Err(e) => eprintln!("  warning: lessons append failed: {e}"),
+        _ => {}
+    }
+
     let verdict_label = match audit.verdict {
         audit_spec::Verdict::Held => "✅ Held",
         audit_spec::Verdict::Drift => "⚠️ Drift",

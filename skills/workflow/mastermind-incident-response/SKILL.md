@@ -65,7 +65,7 @@ While asking, parallel-research with `mastermind-researcher` subagent:
 ```
 git log --since='2 hours ago' --oneline    → what changed recently
 git log -10 --oneline                       → most recent commits
-ls -lt .mastermind/tasks/ | head -10                  → most recent specs
+ls -lt .mastermind/tasks/*/spec.md 2>/dev/null | head -10  → most recent specs (folder-per-task)
 mmcg_status                                → index health
 ```
 
@@ -100,7 +100,7 @@ With pressure off, find **root cause** — not just the symptom. Five-whys disci
 - **Did observability fire?** If yes, why didn't it page sooner? If no, why wasn't it instrumented?
 - **Is this a recurrence?** Grep `CONTEXT.md` for the symptom — known gotcha?
 
-If a fix is needed, **don't write it inline in this incident flow** — open a `.mastermind/tasks/<NNN>-<short-name>.md` spec via the main workflow. The fix goes through the normal critic/auditor gates. Incident response identifies the need; planner designs the response.
+If a fix is needed, **don't write it inline in this incident flow** — open a `.mastermind/tasks/<NNN>-<short-name>/spec.md` via the main workflow. The fix goes through the normal critic/auditor gates. Incident response identifies the need; planner designs the response.
 
 ### Phase 4 — Postmortem (within 24h of resolution)
 

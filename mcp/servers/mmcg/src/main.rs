@@ -17,8 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 /// Templates embedded at build time. These live inside the crate as a mirror of
-/// canonical sources (`agents/claude-md/mastermind-{context,workflow}.md` and
-/// `skills/workflow/mastermind-task-planning/references/spec-template.md`) so the
+/// canonical sources (`agents/claude-md/mastermind-{context,workflow}.md`) so the
 /// published crate is self-contained — `cargo publish` cannot reach files outside
 /// the crate root, and reaching `../../../..` only works in a checked-out repo.
 ///
@@ -26,11 +25,8 @@ use std::process::ExitCode;
 /// (run after any edit to either side). To sync manually:
 ///   cp agents/claude-md/mastermind-context.md mcp/servers/mmcg/templates/context.md
 ///   cp agents/claude-md/mastermind-workflow.md mcp/servers/mmcg/templates/workflow.md
-///   cp skills/workflow/mastermind-task-planning/references/spec-template.md \
-///      mcp/servers/mmcg/templates/spec-template.md
 const CONTEXT_TEMPLATE: &str = include_str!("../templates/context.md");
 const WORKFLOW_TEMPLATE: &str = include_str!("../templates/workflow.md");
-const SPEC_TEMPLATE: &str = include_str!("../templates/spec-template.md");
 
 // Per-stack CONTEXT.md profiles (`mastermind init --profile <name>`). Each one is a
 // pre-seeded version of context.md with stack-specific layout conventions, test
@@ -196,7 +192,7 @@ enum Cmd {
     /// snapshot caller counts match live index, blast radius isn't surprising.
     /// Exit code 0 if no errors (warnings OK).
     VerifySpec {
-        /// Path to a `.mastermind/tasks/XXX-*.md` spec.
+        /// Path to a `.mastermind/tasks/<NNN>-<name>/spec.md` file.
         spec: PathBuf,
         /// Project root the spec's file paths are relative to. Defaults to cwd.
         #[arg(long, default_value = ".")]
@@ -618,6 +614,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 print!("{}", report.render_text());
             }
+            // Deterministic lesson log — bypasses the LLM-auditor path so
+            // `_lessons.md` accumulates even when the subagent isn't spawned.
+            // Best-effort: write failure prints a warning but never aborts.
+            match mmcg::lessons::append_if_drift_or_broken(&root, &spec, &report) {
+                Ok(true) if !json => {
+                    eprintln!("  appended lesson → .mastermind/tasks/_lessons.md")
+                }
+                Err(e) if !json => eprintln!("  warning: lessons append failed: {e}"),
+                _ => {}
+            }
             if report.has_failures() {
                 std::process::exit(1);
             }
@@ -817,6 +823,31 @@ fn write_if_absent(
     Ok(true)
 }
 
+/// Bare `<name>.md` files at the top of `.mastermind/tasks/` — the 0.6.x flat layout.
+/// `_`-prefixed names (shared assets like `_lessons.md`) and
+/// `.`-prefixed names (`.gitignore` etc) are not migration candidates.
+fn collect_flat_specs(tasks_dir: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(tasks_dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for dirent in entries.flatten() {
+        let path = dirent.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(".md") || name.starts_with('_') || name.starts_with('.') {
+            continue;
+        }
+        out.push(name.to_string());
+    }
+    out.sort();
+    out
+}
+
 fn do_init(
     root: &Path,
     with_claude_md: bool,
@@ -853,7 +884,11 @@ fn do_init(
         skipped.push(".mastermind/ (already exists)".into());
     }
 
-    // 2. .mastermind/tasks/ — spec files live here (was `.tasks/` at root pre-0.6.0)
+    // 2. .mastermind/tasks/ — per-task folders live here. Each task gets its own
+    //    folder (`<NNN>-<kebab-name>/spec.md` + any related artifacts). Shared
+    //    files (`_lessons.md`) stay at the top level.
+    //    Layout history: pre-0.6.0 root `.tasks/`, 0.6.x flat `.mastermind/tasks/*.md`,
+    //    0.7.0+ per-task folders.
     if !tasks_dir.exists() {
         fs::create_dir_all(&tasks_dir)?;
         created.push(".mastermind/tasks/".into());
@@ -871,6 +906,22 @@ fn do_init(
              — specs now live under `.mastermind/tasks/`."
                 .to_string(),
         );
+    }
+
+    // Surface flat-spec files (`.mastermind/tasks/NNN-name.md`, 0.6.x layout) so
+    // the user knows to migrate to per-task folders. Don't auto-move — the user
+    // may have related artifacts named with the same prefix.
+    let flat_specs = collect_flat_specs(&tasks_dir);
+    if !flat_specs.is_empty() {
+        let example = flat_specs.first().cloned().unwrap_or_default();
+        let stem = example.strip_suffix(".md").unwrap_or(&example);
+        warnings.push(format!(
+            "found {n} flat spec file(s) under `.mastermind/tasks/` (0.6.x layout, e.g. `{example}`). \
+             Migrate each `NNN-name.md` to `NNN-name/spec.md`. Example: \
+             `mkdir -p .mastermind/tasks/{stem} && mv .mastermind/tasks/{example} .mastermind/tasks/{stem}/spec.md` \
+             — flat specs are no longer indexed.",
+            n = flat_specs.len(),
+        ));
     }
 
     // 3. CONTEXT.md from the picked profile template (strip the HTML-comment
@@ -903,15 +954,20 @@ fn do_init(
         }
     }
 
-    // 5. .mastermind/tasks/_spec-template.md — drop the spec template
-    let spec_template_path = tasks_dir.join("_spec-template.md");
-    if write_if_absent(&spec_template_path, SPEC_TEMPLATE, force)? {
-        created.push(".mastermind/tasks/_spec-template.md".into());
-    } else {
-        skipped.push(".mastermind/tasks/_spec-template.md (already exists)".into());
+    // Surface obsolete `_spec-template.md` (pre-0.7.0 init dropped it here, but
+    // the planner skill never read it — it copies from its own bundled
+    // `references/spec-template.md`). Safe to remove on sight.
+    let obsolete_template = tasks_dir.join("_spec-template.md");
+    if obsolete_template.exists() {
+        warnings.push(
+            "found `.mastermind/tasks/_spec-template.md` — obsolete (the planner skill \
+             uses its own bundled template, this copy is unused). \
+             Safe to remove: `rm .mastermind/tasks/_spec-template.md`."
+                .to_string(),
+        );
     }
 
-    // 6. Index database
+    // 5. Index database
     let db_path = mastermind_dir.join("mmcg.db");
     if !db_path.exists() {
         let _ = Store::open(&db_path)?; // creates schema
@@ -920,7 +976,7 @@ fn do_init(
         skipped.push(".mastermind/mmcg.db (already exists)".into());
     }
 
-    // 7. Build the index now so the project is queryable immediately — `init`
+    // 6. Build the index now so the project is queryable immediately — `init`
     //    should leave you ready to use, not half-configured. `--no-index` opts out.
     if index {
         let mut store = Store::open(&db_path)?;
@@ -938,7 +994,7 @@ fn do_init(
         skipped.push("index build (--no-index) — run `mastermind index .` when ready".into());
     }
 
-    // 8. Draft the scaffold's project-specific content from the codebase via
+    // 7. Draft the scaffold's project-specific content from the codebase via
     //    `claude -p` — CONTEXT.md (when freshly created) and, with --with-claude-md,
     //    the CLAUDE.md <PLACEHOLDER> sections. One claude run fills both. Only
     //    targets files we just created (never clobbers user-edited ones). Best-effort:

@@ -24,8 +24,8 @@ See [`../docs/skill-anatomy.md`](../docs/skill-anatomy.md) for the format. Addin
 ### workflow/
 | Skill | Description |
 |---|---|
-| [`mastermind-task-planning`](workflow/mastermind-task-planning/SKILL.md) | CTO/planner mode — brainstorms with user and writes detailed `.mastermind/tasks/XXX-*.md` specs for delegation. Never implements. |
-| [`mastermind-task-executor`](workflow/mastermind-task-executor/SKILL.md) | Executes a `.mastermind/tasks/XXX-*.md` spec phase-by-phase, runs VERIFY, marks the checklist, stops on first failure. |
+| [`mastermind-task-planning`](workflow/mastermind-task-planning/SKILL.md) | CTO/planner mode — brainstorms with user and writes detailed `.mastermind/tasks/<NNN>-<name>/spec.md` files (folder per task) for delegation. Never implements. |
+| [`mastermind-task-executor`](workflow/mastermind-task-executor/SKILL.md) | Executes a `.mastermind/tasks/<NNN>-<name>/spec.md` file phase-by-phase, runs VERIFY, marks the checklist, stops on first failure. |
 | [`mastermind-incident-response`](workflow/mastermind-incident-response/SKILL.md) | **Parallel workflow** for production incidents — triage, stop bleed, investigate root cause via mmcg + git + .mastermind/tasks/ history, blameless postmortem, feed lessons forward. Activates on "incident" / "outage" / "rollback" / "что-то сломалось в проде". |
 
 ### prompt-engineering/

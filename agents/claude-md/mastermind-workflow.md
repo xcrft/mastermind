@@ -136,7 +136,7 @@ If `mmcg_status` returns nothing, the index isn't ready — run `mmcg index .` i
    - **Considered** for: multi-file changes, designs with multiple plausible approaches
    - **Skipped** for: one-line fixes, docs, throwaway exploration
    - Verdict `rethink` (Correctness fails or 2+ dimensions fail) → return to brainstorming. Verdict `revise` (one fail) → fix the failing dimension and re-spawn critic. Verdicts `ship it` (all 7 pass) / `ship with caveats` (some concerns) → proceed to spec; bake every `concern` and `fail`-fix into spec Rules / Do-NOT items. Paste the 7-row dimension table into the spec's Notes.
-5. **Planner drafts the spec** in `.mastermind/tasks/XXX-feature-name.md` from `spec-template.md` (next sequential number). Mandatory sections (enforced by the auditor post-flight):
+5. **Planner drafts the spec** in `.mastermind/tasks/XXX-feature-name/spec.md` (folder per task, the spec itself is always `spec.md`) from `spec-template.md` (next sequential number). Mandatory sections (enforced by the auditor post-flight):
    - **Alternatives Considered** — ≥ 2 entries for non-trivial work
    - **Pre-edit symbol snapshot** — for every function/method the spec edits, planner auto-fills `mmcg_callers` count + `mmcg_search` signature; auditor uses to detect silent breakage. Delete section if no code symbols touched.
    - **Tests Plan** — explicit list of tests to add per phase
@@ -234,7 +234,7 @@ The subagent is **read-only**. It produces a draft; the planner runs `git add` /
 
 ### Spec naming
 
-`.mastermind/tasks/XXX-kebab-case-name.md` where `XXX` is the next sequential number (`001`, `002`, …).
+`.mastermind/tasks/XXX-kebab-case-name/spec.md` where `XXX` is the next sequential number (`001`, `002`, …). The folder holds the spec plus any related artifacts (audit notes, screenshots, scratchpad).
 
 ### When to use this workflow vs. just doing it
 
@@ -262,7 +262,7 @@ Different priorities:
 - Blameless analysis (systems, not people)
 - Output: blameless postmortem + action items that become regular planning specs
 
-The two workflows connect via action items: postmortems generate `.mastermind/tasks/<NNN>-*.md` specs that flow through this planning workflow normally. Lessons feed into CONTEXT.md (Known gotchas / Don't-touch list / Decision log).
+The two workflows connect via action items: postmortems generate `.mastermind/tasks/<NNN>-<name>/spec.md` specs that flow through this planning workflow normally. Lessons feed into CONTEXT.md (Known gotchas / Don't-touch list / Decision log).
 
 If the incident traces to a workflow gate that should have caught it (critic missed an Observability concern, spec template lacked a section, auditor passed when it shouldn't have), the postmortem proposes workflow improvements as their own specs.
 

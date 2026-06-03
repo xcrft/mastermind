@@ -74,7 +74,7 @@ metadata:
 - **Alternatives rejected:**
   - <option A>: <why rejected>
   - <option B>: <why rejected>
-- **Source:** <`.mastermind/tasks/NNN-...md` or a discussion link>
+- **Source:** <`.mastermind/tasks/NNN-name/spec.md` or a discussion link>
 - **Critic verdict** (if applicable): <`ship it` / `ship with caveats` / etc.>
 
 ### <YYYY-MM-DD> — <Earlier decision>
@@ -87,7 +87,7 @@ metadata:
 
 *Surprises discovered during work — one line each. Keeps the next workflow run from re-discovering. Append-only.*
 
-- **<gotcha 1>** — <concrete bite scenario, e.g., "Redis cluster mode silently drops MULTI on key migrations during rebalance">. Discovered in `.mastermind/tasks/<NNN>`.
+- **<gotcha 1>** — <concrete bite scenario, e.g., "Redis cluster mode silently drops MULTI on key migrations during rebalance">. Discovered in `.mastermind/tasks/<NNN>-<name>/`.
 - **<gotcha 2>** — <bite scenario>.
 
 ---

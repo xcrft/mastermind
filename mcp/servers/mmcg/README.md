@@ -116,14 +116,14 @@ mmcg doctor --json                                   # machine-parseable
 # Pre-execution gate — verify a spec before handing off to the executor.
 # Catches missing symbols, missing files, empty mandatory sections, snapshot
 # drift, blast-radius warnings. Exit 1 on errors.
-mmcg verify-spec .mastermind/tasks/042-feature.md
-mmcg verify-spec .mastermind/tasks/042-feature.md --strict         # contract mode: require frontmatter scoping + a verify cmd + index
-mmcg verify-spec .mastermind/tasks/042-feature.md --require-index  # fail (don't skip live checks) when no index
+mmcg verify-spec .mastermind/tasks/042-feature/spec.md
+mmcg verify-spec .mastermind/tasks/042-feature/spec.md --strict         # contract mode: require frontmatter scoping + a verify cmd + index
+mmcg verify-spec .mastermind/tasks/042-feature/spec.md --require-index  # fail (don't skip live checks) when no index
 
 # Post-execution audit — compare spec contract against actual repo state.
 # Diffs against <git-ref> (typically `main` or merge-base). Flags scope creep,
 # pre-edit snapshot drift, vanished symbols. Exit 1 if verdict is `broken`.
-mmcg audit-spec .mastermind/tasks/042-feature.md --since main
+mmcg audit-spec .mastermind/tasks/042-feature/spec.md --since main
 
 # Two-phase orchestrator: deterministic shell around the executor.
 #   1st invocation → verify-spec + risk report + write state
@@ -131,13 +131,13 @@ mmcg audit-spec .mastermind/tasks/042-feature.md --since main
 #   2nd invocation (after executor) → audit-spec vs baseline; on Held verdict, emit
 #                    release-notes draft to stdout AND .mastermind/releases/<spec>.md;
 #                    clear state. Drift/Broken keeps state for retry after fixes.
-mmcg run-task .mastermind/tasks/042-feature.md             # hand-off semantics
-mmcg run-task .mastermind/tasks/042-feature.md --exec      # shell out to `claude -p` between phases
-mmcg run-task .mastermind/tasks/042-feature.md --reset     # drop state, force pre-flight
-mmcg run-task .mastermind/tasks/042-feature.md --pre-only  # never auto-resume into post
-mmcg run-task .mastermind/tasks/042-feature.md --post-only # requires state
-mmcg run-task .mastermind/tasks/042-feature.md --allow-no-index  # docs-only / spec-only specs
-mmcg run-task .mastermind/tasks/042-feature.md --strict          # fold strict spec checks into pre-flight
+mmcg run-task .mastermind/tasks/042-feature/spec.md             # hand-off semantics
+mmcg run-task .mastermind/tasks/042-feature/spec.md --exec      # shell out to `claude -p` between phases
+mmcg run-task .mastermind/tasks/042-feature/spec.md --reset     # drop state, force pre-flight
+mmcg run-task .mastermind/tasks/042-feature/spec.md --pre-only  # never auto-resume into post
+mmcg run-task .mastermind/tasks/042-feature/spec.md --post-only # requires state
+mmcg run-task .mastermind/tasks/042-feature/spec.md --allow-no-index  # docs-only / spec-only specs
+mmcg run-task .mastermind/tasks/042-feature/spec.md --strict          # fold strict spec checks into pre-flight
 # NOTE: without --allow-no-index, pre-flight hard-fails when the index is missing
 # or empty. Gates without a codegraph degrade to file-existence + section checks
 # only — mmcg's value comes from the structural truth layer, not the heuristics.
@@ -249,7 +249,7 @@ For best results, run `mmcg watch` in a separate terminal so the index stays cur
 | `mmcg_unreferenced` | optional `kind`, `language` | Symbols that no edge references. Dead-code candidates. **Review manually** — see Limitations for false-positive scenarios. |
 | `mmcg_api_surface` | `prefix`, optional `language` | Symbols under `prefix` referenced from at least one file OUTSIDE `prefix`. Empirical "who-uses-this-module" map; doesn't need declared visibility. |
 | `mmcg_centrality` | optional `prefix`, `language`, `kind`, `top` (default 20) | Rank symbols by in-degree (distinct callers). Pre-flight "where is the gravity" — top hits are the structural attractors of the codebase or a subdirectory. Use to learn what to read first on unfamiliar code. Excludes synthetic `<module>` rows and zero-degree symbols. |
-| `mmcg_tasks` | `query`, optional `top` (default 10) | Full-text search past task specs in `.mastermind/tasks/`. FTS5 MATCH syntax (bare words AND-joined, `"phrases"`, `OR`/`NOT`). Returns paths, titles, and snippet excerpts with `«match»` highlights ranked by BM25. Use as planner pre-flight: "have we touched this area before?" surfaces past designs and prior verdicts. Files prefixed with `_` (e.g. `_spec-template.md`, `_lessons.md`) are intentionally excluded. |
+| `mmcg_tasks` | `query`, optional `top` (default 10) | Full-text search past task specs (`.mastermind/tasks/<NNN>-<name>/spec.md`). FTS5 MATCH syntax (bare words AND-joined, `"phrases"`, `OR`/`NOT`). Returns paths, titles, and snippet excerpts with `«match»` highlights ranked by BM25. Use as planner pre-flight: "have we touched this area before?" surfaces past designs and prior verdicts. Top-level files prefixed with `_` (e.g. `_lessons.md`) and bare `.md` files at the top of `tasks/` (legacy 0.6.x layout) are intentionally excluded. |
 | `mmcg_dependency_cycles` | optional `language`, `min_size` (default 2) | Detect circular imports — strongly-connected components in the file-level import graph (Tarjan's algorithm). Each result is a cycle = a list of files. Pre-merge guard ("does this PR introduce a new cycle?") and architectural-hygiene survey. Resolves edges by leaf-name match — over-approximates (two unrelated `Logger` symbols cross-link) so verify before refactoring. Bump `min_size` to hide trivial A↔B and surface only larger structural problems. |
 | `mmcg_symbols_changed_since` | `git_ref`, optional `root` | Symbol-level diff between a git ref and the current index. Returns `{added, removed, signature_changed}` symbol sets for files in `git diff --name-only <ref>..HEAD`. Re-parses old blobs from `git show <ref>:<path>` using the same extractor. Different from `mmcg_recent_changes` (watcher mtime) — this is git-ref-based, answering "what symbols did THIS PR/branch touch?". PR-review pre-flight, auditor verification, "what new public API appeared in v2.3?". |
 | `mmcg_status` | — | Index health (file count, symbol count, db path). |
@@ -319,7 +319,7 @@ mmcg serve
 | `src/mcp.rs` | JSON-RPC over stdio, MCP `initialize`/`tools/list`/`tools/call` |
 | `src/watcher.rs` | notify-based filesystem watcher with debouncing |
 | `src/diff.rs` | Git-ref-based symbol diff — powers `mmcg_symbols_changed_since` and the audit's `--since` |
-| `src/spec.rs` | Lenient parser for `.mastermind/tasks/XXX-*.md` — sections, pre-edit snapshot, FIND blocks, VERIFY commands |
+| `src/spec.rs` | Lenient parser for `.mastermind/tasks/<NNN>-<name>/spec.md` — sections, pre-edit snapshot, FIND blocks, VERIFY commands |
 | `src/verify_spec.rs` | Pre-execution gate (mandatory sections, missing symbols/files, snapshot drift, FIND staleness, VERIFY PATH) |
 | `src/audit_spec.rs` | Post-execution gate (scope creep, snapshot drift, removed-symbol-not-acknowledged, planned-test-not-added) |
 | `src/run_task.rs` | Two-phase orchestrator (`mmcg run-task`) — verify → risk report → executor → audit → release notes |

@@ -21,6 +21,7 @@ pub mod audit_spec;
 pub mod diff;
 pub mod doctor;
 pub mod indexer;
+pub mod lessons;
 pub mod mcp;
 pub mod queries;
 pub mod run_task;

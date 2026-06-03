@@ -1,6 +1,6 @@
 [package]
 name = "mmcg"
-version = "0.27.0"
+version = "0.27.1"
 edition = "2021"
 rust-version = "1.75"
 description = "Mastermind Codegraph — fast multi-language code indexer (Python, TypeScript, JavaScript, Rust, C#, Go, Java, PHP, C/C++) with MCP interface. Truth layer for AI coding agents."
@@ -56,9 +56,12 @@ notify = "8.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# YAML frontmatter in spec files. `serde_yml` is the maintained fork of
-# `serde_yaml` (archived upstream Sept 2024). Pure-rust, no system deps.
-serde_yml = "0.0.12"
+# YAML frontmatter in spec files. `serde_norway` is the maintained fork of
+# `serde_yaml` (archived upstream Sept 2024) — switched to it from `serde_yml`
+# in 0.27.1 because `serde_yml` itself was archived as unsound (RUSTSEC-2025-0068
+# + libyml RUSTSEC-2025-0067). `serde_norway` uses `unsafe-libyaml-norway`, the
+# maintained libyaml fork. Same API surface as serde_yaml.
+serde_norway = "0.9.42"
 
 # CLI argument parsing
 clap = { version = "4.5", features = ["derive", "env"] }

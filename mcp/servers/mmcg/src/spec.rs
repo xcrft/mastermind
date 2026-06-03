@@ -303,7 +303,7 @@ fn extract_frontmatter(body: &str) -> (Option<Frontmatter>, &str) {
     };
     let yaml_src = &after_open[..yaml_end];
     let rest = &after_open[rest_start..];
-    match serde_yml::from_str::<Frontmatter>(yaml_src) {
+    match serde_norway::from_str::<Frontmatter>(yaml_src) {
         Ok(fm) => (Some(fm), rest),
         Err(e) => {
             eprintln!("warning: YAML frontmatter failed to parse, falling back to heuristics: {e}");

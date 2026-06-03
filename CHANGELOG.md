@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.1] - 2026-06-03
+
+### Security
+- Drop `serde_yml` (and its `libyml` transitive) — both archived as unsound: [RUSTSEC-2025-0068](https://rustsec.org/advisories/RUSTSEC-2025-0068.html) (`serde_yml`) and [RUSTSEC-2025-0067](https://rustsec.org/advisories/RUSTSEC-2025-0067.html) (`libyml`, `yaml_string_extend` UB). Swapped to `serde_norway 0.9.42` — maintained fork of `serde_yaml`, backed by `unsafe-libyaml-norway` (maintained libyaml fork). API-compatible drop-in; no behavior change on spec parsing. Closes the two Dependabot alerts (1 high + 1 medium).
+
 ## [0.27.0] - 2026-06-03
 
 ### Added

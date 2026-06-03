@@ -70,7 +70,7 @@ clap = { version = "4.5", features = ["derive", "env"] }
 walkdir = "2.5"
 
 # Cross-platform home dir lookup for `mmcg doctor`'s MCP-config check.
-dirs = "5"
+dirs = "6"
 
 [profile.release]
 opt-level = 3

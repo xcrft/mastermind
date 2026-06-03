@@ -19,7 +19,7 @@ metadata:
 
 # Critic — design-time challenger
 
-Independent subagent that stress-tests a proposed design **before** it becomes a `.mastermind/tasks/*.md` spec. Spawned with no prior conversation context so the critique isn't anchored on the spawner's reasoning.
+Independent subagent that stress-tests a proposed design **before** it becomes a `.mastermind/tasks/<NNN>-<name>/spec.md` file. Spawned with no prior conversation context so the critique isn't anchored on the spawner's reasoning.
 
 **Output is structured by 7 engineering dimensions** — not a free-form list of weaknesses. Each dimension gets a verdict + concrete evidence. The planner can disagree but the disagreement must be logged in the spec's Notes section.
 

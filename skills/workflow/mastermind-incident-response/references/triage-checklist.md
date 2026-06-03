@@ -48,8 +48,9 @@ git log --since='2 hours ago' --oneline
 git tag --sort=-creatordate | head -5
 git log -10 --oneline
 
-# What specs were finished recently
+# What specs were finished recently (each task is a folder containing spec.md)
 ls -lt .mastermind/tasks/ | head -10
+ls -lt .mastermind/tasks/*/spec.md 2>/dev/null | head -10
 
 # Are there in-progress specs that might be related?
 git status -s

@@ -46,7 +46,7 @@ You do NOT:
 ## Inputs
 
 The spawner passes:
-- **Spec path** — `.mastermind/tasks/XXX-*.md` that was supposed to be implemented
+- **Spec path** — `.mastermind/tasks/<NNN>-<name>/spec.md` that was supposed to be implemented
 - **Execution report** — the markdown the executor produced
 - **Optional: baseline ref** — a git ref representing state BEFORE the executor ran. Defaults to the most recent commit on the current branch's parent (or `HEAD` minus the executor's commits, if discoverable).
 
@@ -120,7 +120,7 @@ A markdown audit report:
 ```markdown
 ## Audit verdict: ✅ contract held | ⚠️ partial drift | ❌ contract broken
 
-**Spec:** `.mastermind/tasks/XXX-*.md`
+**Spec:** `.mastermind/tasks/<NNN>-<name>/spec.md`
 **Report audited:** <one-line identifier>
 **Baseline ref:** <git ref or "HEAD~N">
 
@@ -159,7 +159,11 @@ If verdict is anything other than `contract held`, the planner must address each
 
 ## Capture the lesson (institutional memory)
 
-When the verdict is `⚠️ partial drift` or `❌ contract broken`, append a **one-line lesson** to `.mastermind/tasks/_lessons.md` so the next planner can learn from this audit. Skip on clean `✅ contract held` verdicts — that's just normal operation, not a lesson.
+When the verdict is `⚠️ partial drift` or `❌ contract broken`, append a **one-line lesson** to `.mastermind/tasks/_lessons.md` (shared file at the top of `tasks/`, not inside any task folder) so the next planner can learn from this audit. Skip on clean `✅ contract held` verdicts — that's just normal operation, not a lesson.
+
+**Note on the `[auto]` entries already in the file.** As of mmcg 0.7.0, `mmcg audit-spec` and `mmcg run-task`'s post-phase deterministically append a `[auto]`-prefixed line summarizing the mechanical findings (counts of scope creep / caller drift / etc.) whenever they encounter a drift or broken verdict. Your job is to add a richer, root-cause-level lesson on top — what *caused* the drift, not just what the finding type was. Do not skip writing because an `[auto]` line already exists; the auto line is signal, your line is judgment.
+
+You may also drop the full audit report itself as `audit.md` inside the task folder (alongside `spec.md`) when it's worth preserving for later reference. The lesson is the one-line takeaway across all tasks; the audit report is the per-task record.
 
 Create the file if it doesn't exist with a header:
 
@@ -178,8 +182,8 @@ Each entry:
 
 Examples of good lessons (root cause, actionable):
 
-- `- 2026-05-12 042-session-refactor.md — partial drift — pre-edit snapshot was stale; planner had not re-indexed mmcg after a rebase, so caller counts were already wrong before the executor ran.`
-- `- 2026-05-19 058-rate-limiter.md — contract broken — tests passed locally but failed under concurrent load; Tests Plan didn't include a concurrency case and the critic didn't flag it.`
+- `- 2026-05-12 042-session-refactor — partial drift — pre-edit snapshot was stale; planner had not re-indexed mmcg after a rebase, so caller counts were already wrong before the executor ran.`
+- `- 2026-05-19 058-rate-limiter — contract broken — tests passed locally but failed under concurrent load; Tests Plan didn't include a concurrency case and the critic didn't flag it.`
 
 Bad lessons (symptom, not actionable):
 
@@ -193,7 +197,7 @@ The lessons file is plain markdown and intentionally NOT indexed by `mmcg_tasks`
 ## What you do NOT do
 
 - Run commands that modify state (no `git commit`, no `git push`, no destructive ops)
-- Open files in editors — only `Read` and `Write`/`Edit` for `_lessons.md` appends
+- Open files in editors — only `Read` and `Write`/`Edit` for `_lessons.md` appends (and optionally the task folder's `audit.md`)
 - Make recommendations about how to fix discrepancies — the planner decides
 - Apologize for finding problems — your job is to find them
 

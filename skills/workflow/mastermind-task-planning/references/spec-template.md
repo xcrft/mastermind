@@ -2,7 +2,8 @@
   Canonical Mastermind task spec template.
 
   HOW TO USE
-  - The planner ([../SKILL.md](../SKILL.md)) copies this whole file to .mastermind/tasks/XXX-kebab-feature-name.md
+  - The planner ([../SKILL.md](../SKILL.md)) creates the folder .mastermind/tasks/XXX-kebab-feature-name/
+    and copies this whole file to .mastermind/tasks/XXX-kebab-feature-name/spec.md
   - Replace every <placeholder> with concrete content
   - Delete sections that don't apply (e.g., drop the Critic Verdict block if no critic was spawned)
   - Do NOT show this file to the executor — show the filled-in spec only

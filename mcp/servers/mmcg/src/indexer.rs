@@ -103,7 +103,7 @@ pub struct IndexStats {
     pub symbols_total: u32,
     pub edges_total: u32,
     pub by_language: std::collections::BTreeMap<String, u32>,
-    /// Count of `.mastermind/tasks/*.md` specs added to the FTS5 corpus.
+    /// Count of `.mastermind/tasks/<NNN>-<name>/spec.md` files added to the FTS5 corpus.
     /// Zero when the directory doesn't exist (project hasn't run `mastermind init`).
     pub task_specs_indexed: u32,
     pub duration_ms: u128,
@@ -218,10 +218,12 @@ impl Indexer {
         }
 
         // Phase 6: refresh the task-spec FTS5 corpus.
-        // Scan `.mastermind/tasks/*.md` (excluding `_*.md` templates/lessons
-        // which aren't real specs). Whole-corpus replace — task spec sets are
-        // small (<100 files in practice), so atomic replace is cheaper than
-        // delta tracking and avoids stale entries on rename/delete.
+        // Scan `.mastermind/tasks/<NNN>-<name>/spec.md` (each task is its own
+        // folder; top-level `_*.md` and bare `*.md` files are excluded — the
+        // former are shared assets, the latter is legacy 0.6.x layout). Whole-
+        // corpus replace — task spec sets are small (<100 files in practice),
+        // so atomic replace is cheaper than delta tracking and avoids stale
+        // entries on rename/delete.
         if let Ok(count) = self.index_task_specs(store) {
             stats.task_specs_indexed = count;
         }
@@ -230,9 +232,14 @@ impl Indexer {
         Ok(stats)
     }
 
-    /// Scan `.mastermind/tasks/*.md` and replace the FTS5 corpus.
+    /// Scan `.mastermind/tasks/<NNN>-<name>/spec.md` and replace the FTS5 corpus.
     /// Silent no-op when the directory doesn't exist (project hasn't run `mastermind init`).
     /// Returns the count of indexed specs.
+    ///
+    /// Layout (since 0.7.0): each task is a folder containing `spec.md` and any
+    /// related artifacts (audit notes, screenshots, prior versions). Top-level
+    /// `_`-prefixed files (e.g. `_lessons.md`) are shared assets and
+    /// intentionally excluded from search.
     pub fn index_task_specs(&self, store: &mut Store) -> Result<u32, IndexError> {
         let tasks_dir = self.root.join(".mastermind").join("tasks");
         if !tasks_dir.is_dir() {
@@ -247,24 +254,23 @@ impl Indexer {
         for dirent in std::fs::read_dir(&tasks_dir).map_err(|e| IndexError::Io(e.to_string()))? {
             let dirent = dirent.map_err(|e| IndexError::Io(e.to_string()))?;
             let path = dirent.path();
-            if !path.is_file() {
-                continue;
-            }
-            // Only `.md` files. Skip `_spec-template.md`, `_lessons.md` etc —
-            // templates aren't real specs and would pollute search results.
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            if !name.ends_with(".md") || name.starts_with('_') {
+            // Per-task folders only. Bare `.md` files at top level (legacy 0.6.x
+            // layout) and `_`-prefixed names (shared assets, private scratch) are
+            // excluded.
+            if !path.is_dir() || name.starts_with('_') || name.starts_with('.') {
                 continue;
             }
-            let Ok(body) = std::fs::read_to_string(&path) else {
+            let spec_path = path.join("spec.md");
+            let Ok(body) = std::fs::read_to_string(&spec_path) else {
                 continue;
             };
             let title = extract_spec_title(&body, name);
-            let rel = path
+            let rel = spec_path
                 .strip_prefix(&self.root)
-                .unwrap_or(&path)
+                .unwrap_or(&spec_path)
                 .to_string_lossy()
                 .replace('\\', "/");
             entries.push(crate::store::TaskSpecEntry {
@@ -555,39 +561,56 @@ mod incremental_tests {
         let stats1 = indexer.index_all(&mut store, false).unwrap();
         assert_eq!(stats1.task_specs_indexed, 0);
 
-        // Add two specs + one template (underscore prefix should be excluded).
+        // Add two task folders + one shared template (underscore prefix excluded).
+        // Layout: .mastermind/tasks/<NNN>-<name>/spec.md
         let tasks_dir = dir.join(".mastermind").join("tasks");
-        fs::create_dir_all(&tasks_dir).unwrap();
+        let spec_a = tasks_dir.join("001-rate-limiter");
+        let spec_b = tasks_dir.join("002-cache-eviction");
+        fs::create_dir_all(&spec_a).unwrap();
+        fs::create_dir_all(&spec_b).unwrap();
         fs::write(
-            tasks_dir.join("001-rate-limiter.md"),
+            spec_a.join("spec.md"),
             "# Add per-tenant rate limiting\n\nUse token bucket with Redis.\n",
         )
         .unwrap();
         fs::write(
-            tasks_dir.join("002-cache-eviction.md"),
+            spec_b.join("spec.md"),
             "# Cache eviction strategy\n\nLRU with TTL on user records.\n",
         )
         .unwrap();
         fs::write(
-            tasks_dir.join("_spec-template.md"),
-            "# Template — should not appear in search\n\nGeneric scaffold.\n",
+            tasks_dir.join("_lessons.md"),
+            "# Lessons — should not appear in search\n\nGeneric scaffold.\n",
+        )
+        .unwrap();
+        // A bare `.md` at top level (legacy 0.6.x layout) must be ignored.
+        fs::write(
+            tasks_dir.join("099-legacy-flat.md"),
+            "# Legacy flat spec\n\nShould be skipped — needs migration.\n",
         )
         .unwrap();
 
         let stats2 = indexer.index_all(&mut store, false).unwrap();
-        assert_eq!(stats2.task_specs_indexed, 2, "underscore-prefix excluded");
+        assert_eq!(
+            stats2.task_specs_indexed, 2,
+            "underscore + legacy flat excluded"
+        );
 
         // FTS5 query proves the body content is searchable.
         let hits = store.search_task_specs("token bucket", 10).unwrap();
         assert_eq!(hits.len(), 1);
-        assert!(hits[0].path.contains("001-rate-limiter"));
+        assert!(hits[0].path.contains("001-rate-limiter/spec.md"));
 
-        // Template is excluded — searching for its unique phrase finds nothing.
+        // Lessons file is excluded — searching for its unique phrase finds nothing.
         let empty = store.search_task_specs("scaffold", 10).unwrap();
         assert!(empty.is_empty());
 
-        // Remove one spec — next index pass wipes it from the corpus.
-        fs::remove_file(tasks_dir.join("002-cache-eviction.md")).unwrap();
+        // Legacy flat file is also excluded.
+        let legacy = store.search_task_specs("legacy flat", 10).unwrap();
+        assert!(legacy.is_empty());
+
+        // Remove one spec folder — next index pass wipes it from the corpus.
+        fs::remove_dir_all(&spec_b).unwrap();
         let stats3 = indexer.index_all(&mut store, false).unwrap();
         assert_eq!(stats3.task_specs_indexed, 1);
         let gone = store.search_task_specs("LRU TTL", 10).unwrap();

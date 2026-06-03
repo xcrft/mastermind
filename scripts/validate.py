@@ -358,19 +358,19 @@ def validate_relative_links(links: dict[Path, set[str]]) -> list[Issue]:
 
 # ----- mmcg template-mirror sync ---------------------------------------
 
-# The mmcg crate embeds three templates at build time via `include_str!`. They
-# live at `mcp/servers/mmcg/templates/` so `cargo publish` can ship them (the
-# canonical originals are outside the crate root and would be unreachable from
-# the published tarball). When the canonical files change, the mirror must be
-# refreshed — otherwise `mmcg init` from `cargo install`ed binaries scaffolds
-# stale templates. This check enforces parity.
+# The mmcg crate embeds two templates at build time via `include_str!` (CONTEXT.md
+# and CLAUDE.md/workflow). They live at `mcp/servers/mmcg/templates/` so
+# `cargo publish` can ship them (the canonical originals are outside the crate
+# root and would be unreachable from the published tarball). When the canonical
+# files change, the mirror must be refreshed — otherwise `mmcg init` from
+# `cargo install`ed binaries scaffolds stale templates. This check enforces parity.
+#
+# The spec template is no longer mirrored / embedded — `mmcg init` does not drop
+# it into projects anymore (the planner skill carries its own copy and uses that
+# directly, so the project-level copy was dead weight).
 MMCG_TEMPLATE_MIRRORS: list[tuple[str, str]] = [
     ("agents/claude-md/mastermind-context.md", "mcp/servers/mmcg/templates/context.md"),
     ("agents/claude-md/mastermind-workflow.md", "mcp/servers/mmcg/templates/workflow.md"),
-    (
-        "skills/workflow/mastermind-task-planning/references/spec-template.md",
-        "mcp/servers/mmcg/templates/spec-template.md",
-    ),
 ]
 
 

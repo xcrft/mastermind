@@ -200,7 +200,8 @@ You do not have to agree with the critic on every dimension. But if you disagree
 **Do not write the spec from scratch.** Copy the canonical template:
 
 ```bash
-cp <path-to-skill>/references/spec-template.md .mastermind/tasks/<NNN>-<kebab-feature>.md
+mkdir -p .mastermind/tasks/<NNN>-<kebab-feature>
+cp <path-to-skill>/references/spec-template.md .mastermind/tasks/<NNN>-<kebab-feature>/spec.md
 ```
 
 Then fill in every `<placeholder>` and delete sections that don't apply. See [`references/spec-template.md`](references/spec-template.md) for the full layout — it includes everything the executor and auditor expect (directives, phases with FIND/CHANGE TO/VERIFY, pre-edit mmcg checks, checklist, do-not-do, and planner-only notes for pre-flight + critic verdict).
@@ -298,7 +299,7 @@ Append to `CONTEXT.md` ONLY when the discovery is worth preserving across sessio
 | Discovery from this task | CONTEXT.md section to update |
 |---|---|
 | Non-trivial design decision the critic agreed with | **Decision log** — date, decision, why, alternatives rejected |
-| Workflow surprised by something — "almost broke X because Y" | **Known gotchas** — one-line summary + `.mastermind/tasks/NNN` reference |
+| Workflow surprised by something — "almost broke X because Y" | **Known gotchas** — one-line summary + `.mastermind/tasks/NNN-name/` reference |
 | New term that took explaining during brainstorming | **Domain glossary** — term + local meaning |
 | New external dependency added (service, API, vendor) | **External dependencies** — what for + auth mechanism |
 | Code area found to have hidden constraints | **Don't-touch list** — path + constraint |
@@ -322,15 +323,31 @@ If both audit and semantic review pass, report to the user with:
 
 The user sees what was mechanically verified, your judgment on the work, and what was added to the project's institutional memory.
 
-## Task Numbering
+## Task Layout
 
-- Check existing tasks in `.mastermind/tasks/` folder
-- Use next sequential number: 001, 002, 003...
-- Format: `XXX-kebab-case-name.md`
+Each task lives in its own folder under `.mastermind/tasks/`:
+
+```
+.mastermind/tasks/
+├── _lessons.md              # shared audit lessons (underscore-prefixed, not indexed; auditor appends to it)
+├── 001-rate-limiter/
+│   └── spec.md              # the spec itself
+├── 002-cache-eviction/
+│   ├── spec.md
+│   ├── audit.md             # auditor's verdict, kept beside the spec
+│   ├── notes.md             # ad-hoc planning notes
+│   └── screenshots/         # any related artifacts
+└── 003-…/
+```
+
+- Check existing task folders for the next sequential number: 001, 002, 003…
+- Folder name: `<NNN>-<kebab-case-name>` (e.g. `042-add-rate-limiter`)
+- Spec file inside: always `spec.md`
+- Anything else related to the task (audit notes, screenshots, critic verdicts, scratchpad) goes into the same folder
 
 ## First Time Setup
 
-If `.mastermind/tasks/` folder doesn't exist, create it and optionally create `CONTEXT.md` with project info.
+If `.mastermind/tasks/` doesn't exist, create it and optionally create `CONTEXT.md` with project info. `mmcg init` does this for you.
 
 ## Pair Skill
 

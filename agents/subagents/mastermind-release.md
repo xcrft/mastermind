@@ -60,7 +60,7 @@ You translate completed work into a clean release artifact. You do not embellish
 ## Inputs
 
 The spawner passes:
-- **Spec path(s)** — `.mastermind/tasks/XXX-*.md` for the work being shipped (one or more if bundled).
+- **Spec path(s)** — `.mastermind/tasks/<NNN>-<name>/spec.md` for the work being shipped (one or more if bundled).
 - **Auditor report** — the markdown verdict from `mastermind-auditor`. You will quote the verdict and propagate any `concern` items as caveats in the PR body.
 - **Critic verdict (optional)** — if any dimension was `ship with caveats`, propagate the caveat into a "Known caveats" section in the PR.
 - **Base branch** — typically `main`; defaults from `git symbolic-ref refs/remotes/origin/HEAD` if unset.
@@ -113,13 +113,13 @@ If a Tests Plan / Docs Plan item from the spec is NOT in the diff, surface it as
   - Paragraph 1: **why** — the user-visible motivation or problem.
   - Paragraph 2: **what** — at a high level (one line per real change).
   - Paragraph 3: **how to verify** — the specific commands or checks a reviewer can run.
-  - Optional final line: spec reference `Spec: .mastermind/tasks/XXX-name.md`.
+  - Optional final line: spec reference `Spec: .mastermind/tasks/<NNN>-name/spec.md`.
 
 ### 6. Draft the PR description
 Structured sections (see the example in "Output" below for the shape):
 - **Why** — motivation, 1-3 sentences.
 - **What changed** — bullets, one per coherent change. Cite file paths.
-- **Spec** — link to `.mastermind/tasks/XXX-*.md`.
+- **Spec** — link to `.mastermind/tasks/<NNN>-<name>/spec.md`.
 - **Tests** — what tests are new / changed, cross-referenced against diff.
 - **Documentation** — what docs touched.
 - **Observability** — logs / metrics / probes added (or "n/a" with reason).
@@ -136,7 +136,7 @@ Structured sections (see the example in "Output" below for the shape):
 ```markdown
 ## Release draft
 
-**Spec(s):** `.mastermind/tasks/XXX-*.md`
+**Spec(s):** `.mastermind/tasks/<NNN>-<name>/spec.md`
 **Branch:** `<branch-name>` → `<base>`
 **Auditor verdict:** contract held
 **Style match:** Conventional Commits / plain imperative / <whatever was detected> — sample subjects from last 10 commits:
@@ -157,7 +157,7 @@ Structured sections (see the example in "Output" below for the shape):
 
 <body paragraph 3 — how to verify>
 
-Spec: .mastermind/tasks/XXX-name.md
+Spec: .mastermind/tasks/<NNN>-name/spec.md
 ```
 
 ---
@@ -176,7 +176,7 @@ Spec: .mastermind/tasks/XXX-name.md
 - `<file>` — <one line>
 
 ## Spec
-- `.mastermind/tasks/XXX-name.md`
+- `.mastermind/tasks/<NNN>-name/spec.md`
 
 ## Tests
 - <test name> — <what it covers>
@@ -226,7 +226,7 @@ git commit -m "$(cat <<'EOF'
 
 <commit body>
 
-Spec: .mastermind/tasks/XXX-name.md
+Spec: .mastermind/tasks/<NNN>-name/spec.md
 EOF
 )"
 
@@ -278,7 +278,7 @@ If any check fails, fix the draft before returning it.
 ### Clean release — Conventional Commits style
 
 **Spawner sends:**
-- Spec: `.mastermind/tasks/042-session-count-getter.md` (add `session_count()` accessor)
+- Spec: `.mastermind/tasks/042-session-count-getter/spec.md` (add `session_count()` accessor)
 - Auditor: `contract held`. 1 file changed, 1 test added.
 - Critic prior verdict: `ship with caveats` (concern: lock contention if called in hot path; mitigation noted in spec).
 
@@ -286,7 +286,7 @@ If any check fails, fix the draft before returning it.
 ```markdown
 ## Release draft
 
-**Spec(s):** `.mastermind/tasks/042-session-count-getter.md`
+**Spec(s):** `.mastermind/tasks/042-session-count-getter/spec.md`
 **Branch:** `feat/session-count` → `main`
 **Auditor verdict:** contract held
 **Style match:** Conventional Commits — sample subjects:
@@ -309,7 +309,7 @@ matching test for empty / populated / post-removal cases.
 
 Verify: cargo test session_count_returns_current_size
 
-Spec: .mastermind/tasks/042-session-count-getter.md
+Spec: .mastermind/tasks/042-session-count-getter/spec.md
 ```
 
 ---
@@ -329,7 +329,7 @@ the map. Mirrors the existing `turn_count` pattern.
 - `sdk/edge-ai-core/src/runtime/session.rs` — unit test `session_count_returns_current_size`
 
 ## Spec
-- `.mastermind/tasks/042-session-count-getter.md`
+- `.mastermind/tasks/042-session-count-getter/spec.md`
 
 ## Tests
 - `session_count_returns_current_size` — covers empty, after-insert, after-delete
@@ -382,7 +382,7 @@ matching test for empty / populated / post-removal cases.
 
 Verify: cargo test session_count_returns_current_size
 
-Spec: .mastermind/tasks/042-session-count-getter.md
+Spec: .mastermind/tasks/042-session-count-getter/spec.md
 EOF
 )"
 git push -u origin feat/session-count

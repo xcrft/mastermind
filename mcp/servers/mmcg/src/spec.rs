@@ -1,4 +1,4 @@
-//! Parser for `.mastermind/tasks/XXX-*.md` spec files.
+//! Parser for `.mastermind/tasks/<NNN>-<name>/spec.md` files.
 //!
 //! The canonical structure is at
 //! `skills/workflow/mastermind-task-planning/references/spec-template.md`,
@@ -510,7 +510,7 @@ fn extract_verify_commands(body: &str) -> Vec<String> {
 
 /// Parse phase FIND blocks.
 ///
-/// Format from `_spec-template.md`:
+/// Format from the planner skill's bundled `spec-template.md`:
 /// - `## Phase 1: <name>` opens a phase
 /// - `### 1.2 <action>` opens a sub-step
 /// - `**File:** \`src/path.ext\`` sets the active target file

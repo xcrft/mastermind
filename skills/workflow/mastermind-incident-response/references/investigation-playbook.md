@@ -61,17 +61,18 @@ If the blast radius DOES include the symptom's component → strong candidate. R
 Spec for any recent change should have had Tests Plan + Observability Plan + Performance Considerations sections (per spec template).
 
 ```bash
-# Find the spec for this work (look in .mastermind/tasks/ for matching name or timestamp)
-ls -lt .mastermind/tasks/
+# Find the spec for this work (look in .mastermind/tasks/ for matching folder or timestamp)
+ls -lt .mastermind/tasks/                                  # task folders, newest first
+ls -lt .mastermind/tasks/*/spec.md 2>/dev/null             # direct list of spec files by mtime
 
 # Read its Tests Plan
-grep -A 20 "Tests Plan" .mastermind/tasks/<NNN>-<name>.md
+grep -A 20 "Tests Plan" .mastermind/tasks/<NNN>-<name>/spec.md
 
 # Read its Observability Plan
-grep -A 10 "Observability Plan" .mastermind/tasks/<NNN>-<name>.md
+grep -A 10 "Observability Plan" .mastermind/tasks/<NNN>-<name>/spec.md
 
 # Read its Performance Considerations
-grep -A 10 "Performance Considerations" .mastermind/tasks/<NNN>-<name>.md
+grep -A 10 "Performance Considerations" .mastermind/tasks/<NNN>-<name>/spec.md
 ```
 
 Then ask:

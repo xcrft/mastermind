@@ -238,7 +238,7 @@ impl Store {
                 value TEXT NOT NULL
             );
 
-            -- Task-spec corpus, populated by the indexer from `.mastermind/tasks/*.md`.
+            -- Task-spec corpus, populated by the indexer from `.mastermind/tasks/<NNN>-<name>/spec.md`.
             -- Used by `mmcg_tasks(query)` so planners can recall past designs and
             -- learn from prior verdicts. FTS5 gives BM25 ranking + snippet().
             -- `path` is UNINDEXED — we don't tokenize file paths.
@@ -759,7 +759,7 @@ impl Store {
     }
 
     /// Replace the entire task-spec corpus with the supplied entries.
-    /// Called by `Indexer::index_task_specs` after scanning `.mastermind/tasks/*.md`.
+    /// Called by `Indexer::index_task_specs` after scanning `.mastermind/tasks/<NNN>-<name>/spec.md`.
     /// Single transaction — atomic from a reader's perspective.
     pub fn replace_task_specs(&mut self, entries: &[TaskSpecEntry]) -> SqlResult<()> {
         let tx = self.conn.unchecked_transaction()?;
@@ -1450,14 +1450,14 @@ mod tests {
         let mut store = Store::open(&path).unwrap();
         let entries = vec![
             TaskSpecEntry {
-                path: ".mastermind/tasks/001-rate-limiter.md".into(),
+                path: ".mastermind/tasks/001-rate-limiter/spec.md".into(),
                 title: "Add rate limiter to API".into(),
                 body: "We need to rate-limit POST /api/orders. \
                        Token bucket with Redis backing."
                     .into(),
             },
             TaskSpecEntry {
-                path: ".mastermind/tasks/002-cache-invalidation.md".into(),
+                path: ".mastermind/tasks/002-cache-invalidation/spec.md".into(),
                 title: "Cache invalidation strategy".into(),
                 body: "On user update, evict cached user records. \
                        LRU with TTL fallback."

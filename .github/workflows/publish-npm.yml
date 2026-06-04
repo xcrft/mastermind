@@ -134,7 +134,7 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       - name: Download all build artifacts
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           path: build-artifacts
 
@@ -300,7 +300,7 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       - name: Download assembled tarballs
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: npm-tarballs
           path: packed

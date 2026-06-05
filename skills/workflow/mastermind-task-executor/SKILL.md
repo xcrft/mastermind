@@ -120,6 +120,20 @@ Output a report in this exact shape:
 <Anything you noticed but didn't fix because it was out of scope. Hand back to the planner — they decide whether to add a follow-up task.>
 ```
 
+### Structured tail (REQUIRED)
+
+After the prose sections above, emit a fenced-YAML structured tail wrapped in
+`<!-- mastermind:report-begin -->` / `<!-- mastermind:report-end -->` sentinels.
+The planner reads this block to mechanically route on defect `kind:` — see
+[`structured-report-schema.md`](../mastermind-task-planning/references/structured-report-schema.md)
+for the full schema and
+[`defect-taxonomy.md`](../mastermind-task-planning/references/defect-taxonomy.md)
+for the closed `kind:` set.
+
+Even on a clean run (all phases done, every VERIFY passed) the tail is REQUIRED
+— with `status: complete` and `defects: []`. Planners rely on the sentinel block
+existing; absence is treated as a malformed reply.
+
 ## Failure modes — and how to handle them
 
 | Situation | What to do |

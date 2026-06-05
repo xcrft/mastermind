@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-06-05
+
 ### Fixed
 - Flaky test temp-dir collision. `doctor.rs::tmp()` and `verify_spec.rs::tmp()` — the only two test helpers that keyed their temp-dir name purely on `process::id()` + a nanosecond timestamp — could resolve to the SAME directory when two of cargo's parallel test threads entered them in the same nanosecond bucket, letting one test's `remove_dir_all` wipe another's working dir mid-run (observed as an intermittent `check_gitignore_warns_when_missing_or_unset` panic, ~1 in 6 runs). Both helpers now mix in a process-global `AtomicU64` counter, guaranteeing a distinct directory per call. Test-harness only — no production code touched.
 
@@ -81,7 +83,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Seven prebuilt platform packages (`@xcraftmind/mmcg-*`) covering macOS (arm64, x64), Linux glibc and musl (x64, arm64), and Windows (x64). npm installs only the package matching the host's `os` / `cpu` / `libc`.
 - Install-mode-aware `setup claude` that writes the correct MCP `command` form for npx, global, project-local, and cargo installs.
 
-[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v0.26.0...HEAD
+[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v0.28.0...HEAD
+[0.28.0]: https://github.com/xcrft/mastermind/compare/npm-v0.27.1...npm-v0.28.0
+[0.27.1]: https://github.com/xcrft/mastermind/compare/npm-v0.27.0...npm-v0.27.1
+[0.27.0]: https://github.com/xcrft/mastermind/compare/npm-v0.26.0...npm-v0.27.0
 [0.26.0]: https://github.com/xcrft/mastermind/compare/npm-v0.25.0...npm-v0.26.0
 [0.25.0]: https://github.com/xcrft/mastermind/compare/npm-v0.24.0...npm-v0.25.0
 [0.24.0]: https://github.com/xcrft/mastermind/compare/npm-v0.23.1...npm-v0.24.0

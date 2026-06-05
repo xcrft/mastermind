@@ -588,9 +588,19 @@ mod tests {
     use std::path::PathBuf;
 
     fn tmp() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        // Process-global monotonic counter. `process::id()` is identical across
+        // cargo's parallel test threads and the nanosecond clock can collide
+        // when two threads enter here in the same bucket — that collision is
+        // the root cause of the historical `check_gitignore` flake, where one
+        // test's `remove_dir_all` wiped another's working dir mid-run. The
+        // atomic `fetch_add` guarantees every call gets a distinct value, so no
+        // two `tmp()` invocations can ever resolve to the same directory.
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let p = std::env::temp_dir().join(format!(
-            "mmcg-doctor-{}-{}",
+            "mmcg-doctor-{}-{}-{}",
             std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed),
             rand_suffix()
         ));
         fs::create_dir_all(&p).unwrap();

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Cross-agent scratchpad MCP tools — `mmcg_scratchpad_append { agent, kind, body }` and `mmcg_scratchpad_read { since?, agent?, kind?, limit? }`. Live in-session channel between Mastermind subagents (planner → executor → auditor), persisted in `.mastermind/mmcg.db` (additive table — no schema-version bump, no re-index needed). Body capped at 8 KiB. Cross-session counterpart remains `.mastermind/tasks/_lessons.md` (auditor-written).
+
 ## [0.27.1] - 2026-06-03
 
 ### Security

@@ -59,6 +59,15 @@ pub struct TaskSpecEntry {
     pub body: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ScratchpadEntry {
+    pub id: i64,
+    pub ts: i64,
+    pub agent: String,
+    pub kind: String,
+    pub body: String,
+}
+
 /// One result from `mmcg_tasks` — a matched task-spec with snippet + score.
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskSpecHit {
@@ -248,6 +257,21 @@ impl Store {
                 body,
                 tokenize = 'porter unicode61 remove_diacritics 2'
             );
+
+            -- Cross-agent scratchpad. Live in-session channel between Mastermind
+            -- subagents (planner → executor → auditor). Counterpart to
+            -- `.mastermind/tasks/_lessons.md` which is cross-session.
+            -- Additive table — no SCHEMA_VERSION bump required; the IF NOT EXISTS
+            -- form lets existing DBs adopt it without a rebuild.
+            CREATE TABLE IF NOT EXISTS scratchpad (
+                id    INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts    INTEGER NOT NULL,
+                agent TEXT NOT NULL,
+                kind  TEXT NOT NULL,
+                body  TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_scratchpad_ts ON scratchpad(ts);
+            CREATE INDEX IF NOT EXISTS idx_scratchpad_agent ON scratchpad(agent);
             "#,
         )?;
 
@@ -1010,6 +1034,68 @@ impl Store {
             decorators: r.get(8)?,
         })
     }
+
+    /// Append a single scratchpad entry. Returns the inserted row's id + unix
+    /// timestamp. `kind` is freeform but conventionally one of `intent`,
+    /// `note`, `handoff`, `risk`. `body` must be ≤ 8 KiB; the caller (MCP
+    /// layer) enforces the bound — Store accepts whatever the caller passes.
+    pub fn scratchpad_append(
+        &mut self,
+        agent: &str,
+        kind: &str,
+        body: &str,
+    ) -> SqlResult<(i64, i64)> {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.conn.execute(
+            "INSERT INTO scratchpad(ts, agent, kind, body) VALUES (?1, ?2, ?3, ?4)",
+            params![ts, agent, kind, body],
+        )?;
+        Ok((self.conn.last_insert_rowid(), ts))
+    }
+
+    /// Read scratchpad entries, newest first. All filters optional.
+    pub fn scratchpad_read(
+        &self,
+        since_ts: Option<i64>,
+        agent: Option<&str>,
+        kind: Option<&str>,
+        limit: u32,
+    ) -> SqlResult<Vec<ScratchpadEntry>> {
+        let mut sql = String::from("SELECT id, ts, agent, kind, body FROM scratchpad WHERE 1=1");
+        let mut params_dyn: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(ts) = since_ts {
+            sql.push_str(" AND ts >= ?");
+            params_dyn.push(Box::new(ts));
+        }
+        if let Some(a) = agent {
+            sql.push_str(" AND agent = ?");
+            params_dyn.push(Box::new(a.to_string()));
+        }
+        if let Some(k) = kind {
+            sql.push_str(" AND kind = ?");
+            params_dyn.push(Box::new(k.to_string()));
+        }
+        sql.push_str(" ORDER BY ts DESC, id DESC LIMIT ?");
+        params_dyn.push(Box::new(limit as i64));
+
+        let bound: Vec<&dyn rusqlite::ToSql> = params_dyn.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(bound), |r| {
+                Ok(ScratchpadEntry {
+                    id: r.get(0)?,
+                    ts: r.get(1)?,
+                    agent: r.get(2)?,
+                    kind: r.get(3)?,
+                    body: r.get(4)?,
+                })
+            })?
+            .collect::<SqlResult<Vec<_>>>()?;
+        Ok(rows)
+    }
 }
 
 /// Tarjan's strongly-connected-components algorithm — iterative form to avoid
@@ -1608,5 +1694,63 @@ mod tests {
         assert!(class_names.contains(&"CoreClass"));
         assert!(!class_names.contains(&"api_target"));
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn scratchpad_append_and_read_newest_first() {
+        let path = tmp_db("scratchpad_basic");
+        let mut store = Store::open(&path).unwrap();
+        let (id1, ts1) = store
+            .scratchpad_append("planner", "intent", "drafting spec 042")
+            .unwrap();
+        // Force a 1-second separation so the ORDER BY ts DESC is deterministic.
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let (id2, ts2) = store
+            .scratchpad_append("executor", "handoff", "phase 1 done, ready for audit")
+            .unwrap();
+        assert!(id2 > id1);
+        assert!(ts2 >= ts1);
+
+        // No filters → newest first.
+        let all = store.scratchpad_read(None, None, None, 10).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].agent, "executor");
+        assert_eq!(all[1].agent, "planner");
+
+        // Filter by agent.
+        let only_planner = store
+            .scratchpad_read(None, Some("planner"), None, 10)
+            .unwrap();
+        assert_eq!(only_planner.len(), 1);
+        assert_eq!(only_planner[0].body, "drafting spec 042");
+
+        // Filter by kind.
+        let only_handoff = store
+            .scratchpad_read(None, None, Some("handoff"), 10)
+            .unwrap();
+        assert_eq!(only_handoff.len(), 1);
+
+        // Filter by since_ts — exclude the first entry.
+        let since_second = store.scratchpad_read(Some(ts2), None, None, 10).unwrap();
+        assert_eq!(since_second.len(), 1);
+        assert_eq!(since_second[0].agent, "executor");
+
+        // Limit.
+        let only_one = store.scratchpad_read(None, None, None, 1).unwrap();
+        assert_eq!(only_one.len(), 1);
+        assert_eq!(only_one[0].agent, "executor");
+    }
+
+    #[test]
+    fn scratchpad_table_idempotent_across_opens() {
+        // Re-opening an existing DB must not error out (CREATE TABLE IF NOT EXISTS).
+        let path = tmp_db("scratchpad_idempotent");
+        {
+            let mut store = Store::open(&path).unwrap();
+            store.scratchpad_append("a", "n", "hi").unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let rows = store.scratchpad_read(None, None, None, 10).unwrap();
+        assert_eq!(rows.len(), 1);
     }
 }

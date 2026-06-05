@@ -322,6 +322,32 @@ fn tools_list() -> Value {
                 "name": "mmcg_status",
                 "description": "Show index health — file count, symbol count, db path.",
                 "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "mmcg_scratchpad_append",
+                "description": "Append a one-line intent / note / handoff to the cross-agent scratchpad. Live in-session channel between Mastermind subagents (planner → executor → auditor). Use to hand off context the next agent needs without polluting the chat or the spec. Persists in `.mastermind/mmcg.db` (additive table, gitignored). The cross-session counterpart is `_lessons.md` (auditor-written). Body capped at 8 KiB — scratchpad is for one-liners, not blob dumps.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "agent": { "type": "string", "description": "Agent identifier — conventionally `planner` / `executor` / `auditor` / `critic`, but freeform." },
+                        "kind": { "type": "string", "description": "Entry kind — conventionally `intent` / `note` / `handoff` / `risk`, but freeform." },
+                        "body": { "type": "string", "description": "The one-line content. ≤ 8 KiB." }
+                    },
+                    "required": ["agent", "kind", "body"]
+                }
+            },
+            {
+                "name": "mmcg_scratchpad_read",
+                "description": "Read recent scratchpad entries, newest first. All filters optional — call with no args to get the last 20 entries. Use `since` (unix seconds) to grab everything since you last checked.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "since": { "type": "integer", "description": "Unix timestamp (seconds). Only entries with `ts >= since` are returned." },
+                        "agent": { "type": "string", "description": "Filter by agent identifier." },
+                        "kind": { "type": "string", "description": "Filter by entry kind." },
+                        "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 20, "description": "Max entries returned." }
+                    }
+                }
             }
         ]
     })
@@ -481,6 +507,37 @@ fn handle_tools_call(store: &mut Store, params: &Value) -> Result<Value, String>
             let r = queries::status(store).map_err(|e| e.to_string())?;
             serde_json::to_value(r).map_err(|e| e.to_string())?
         }
+        "mmcg_scratchpad_append" => {
+            let agent = str_arg(&args, "agent")?;
+            let kind = str_arg(&args, "kind")?;
+            let body = str_arg(&args, "body")?;
+            const BODY_MAX: usize = 8 * 1024;
+            if body.len() > BODY_MAX {
+                return Err(format!(
+                    "scratchpad body too large: {} bytes (max {})",
+                    body.len(),
+                    BODY_MAX
+                ));
+            }
+            let (id, ts) = store
+                .scratchpad_append(agent, kind, body)
+                .map_err(|e| e.to_string())?;
+            json!({ "id": id, "ts": ts })
+        }
+        "mmcg_scratchpad_read" => {
+            let since = args.get("since").and_then(|v| v.as_i64());
+            let agent = opt_str_arg(&args, "agent");
+            let kind = opt_str_arg(&args, "kind");
+            let limit = args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(20)
+                .min(200) as u32;
+            let r = store
+                .scratchpad_read(since, agent, kind, limit)
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(r).map_err(|e| e.to_string())?
+        }
         other => return Err(format!("unknown tool: {other}")),
     };
 
@@ -503,4 +560,69 @@ fn opt_str_arg<'a>(args: &'a Value, name: &str) -> Option<&'a str> {
 
 fn opt_bool_arg(args: &Value, name: &str) -> Option<bool> {
     args.get(name).and_then(|v| v.as_bool())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: handle_tools_call wraps every successful payload in the MCP
+    /// content envelope (`{ "content": [{ "type": "text", "text": <serialized> }] }`).
+    /// This unwraps it back to the raw payload for assertion convenience.
+    fn unwrap_content(v: &serde_json::Value) -> serde_json::Value {
+        let text = v["content"][0]["text"].as_str().expect("content[0].text");
+        serde_json::from_str(text).expect("content[0].text was not valid JSON")
+    }
+
+    #[test]
+    fn scratchpad_round_trip_via_tools_call() {
+        let path = std::env::temp_dir().join("mmcg_mcp_scratchpad.db");
+        let _ = std::fs::remove_file(&path);
+        let mut store = crate::store::Store::open(&path).unwrap();
+
+        let append_env = handle_tools_call(
+            &mut store,
+            &serde_json::json!({
+                "name": "mmcg_scratchpad_append",
+                "arguments": {
+                    "agent": "planner",
+                    "kind": "intent",
+                    "body": "spec 001 ready for executor"
+                }
+            }),
+        )
+        .unwrap();
+        let append = unwrap_content(&append_env);
+        assert!(append.get("id").and_then(|v| v.as_i64()).is_some());
+        assert!(append.get("ts").and_then(|v| v.as_i64()).is_some());
+
+        let read_env = handle_tools_call(
+            &mut store,
+            &serde_json::json!({
+                "name": "mmcg_scratchpad_read",
+                "arguments": { "limit": 10 }
+            }),
+        )
+        .unwrap();
+        let read = unwrap_content(&read_env);
+        let arr = read.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["agent"], "planner");
+        assert_eq!(arr[0]["kind"], "intent");
+        assert_eq!(arr[0]["body"], "spec 001 ready for executor");
+
+        // Body-size guard — error path returns an Err(String), NOT a wrapped payload.
+        let too_big = "x".repeat(8 * 1024 + 1);
+        let err = handle_tools_call(
+            &mut store,
+            &serde_json::json!({
+                "name": "mmcg_scratchpad_append",
+                "arguments": { "agent": "a", "kind": "n", "body": too_big }
+            }),
+        )
+        .unwrap_err();
+        assert!(err.contains("too large"));
+
+        let _ = std::fs::remove_file(&path);
+    }
 }

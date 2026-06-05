@@ -55,6 +55,29 @@ file as [`structured-report-schema.md`](structured-report-schema.md).
   path contains the substring.
 - **First observed**: Task 001 Phase 1.3.
 
+### `verify_grep_false_positive`
+
+- **What**: A VERIFY command pipes test output into `grep -q "test result: ok"`
+  (or similar benign-line match) to gate pass/fail. But that line can co-exist
+  with a failure: a module with both unit tests AND doctests prints one
+  `test result: ok` per harness, so a `grep -q "ok"` can match the passing
+  doctest summary while a unit-test `FAILED` line sits elsewhere in the output.
+  The gate reports pass even though a test failed. Most dangerous in stress
+  loops (`for i in seq …; grep -q ok`) where one masked failure per iteration
+  is invisible.
+- **Surfaced as**: An auditor independently re-running the loop with an explicit
+  `grep "FAILED"` / non-zero-exit check finds failures the spec's own loop
+  missed; or a flaky test "passes" the loop but fails in CI.
+- **Fix template**: Gate on the ABSENCE of failure, not the presence of a
+  benign line. Prefer `cargo test … && echo ok || fails=$((fails+1))` (uses
+  cargo's own exit code — non-zero on any failure), or grep for the failure
+  marker: `cargo test … 2>&1 | grep -q "FAILED" && fails=$((fails+1))`. Never
+  gate a loop solely on a positive `grep -q "ok"`.
+- **First observed**: Task 006 Phase 3 (planner's stress loop used
+  `grep -q "test result: ok"`; auditor caught the maskability and re-verified
+  with an explicit FAILED-marker hunt — fix held, but the VERIFY pattern was
+  latently unsound).
+
 ### `stale_pre_edit_snapshot`
 
 - **What**: Spec's Pre-edit symbol snapshot or a Phase's FIND block claims a

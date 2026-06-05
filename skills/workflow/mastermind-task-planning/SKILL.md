@@ -399,6 +399,49 @@ Three rounds is the empirically-calibrated bound from forge's
 to land, would have been 2 with a tighter spec). Don't loosen the bound without
 recording why in the spec's Notes section.
 
+Since spec 004, the bound is also enforced at the CLI in `mmcg run-task`:
+`--max-iterations N` (default 3), `--force-iteration` to bypass. The CLI gate
+catches the case where state-resets accumulate without you noticing; the
+self-check above is the in-conversation early-warning.
+
+## Premature-terminal escalation tiers (self-check before declaring "done")
+
+Before you tell the user "task complete" (or any equivalent — "all done",
+"shipped", "ready to merge", "сделано", …), you MUST satisfy three conditions
+in order:
+
+1. **Auditor was spawned and returned a verdict.** The structured audit tail
+   (`<!-- mastermind:audit-begin -->` … `<!-- mastermind:audit-end -->`,
+   schema in `structured-report-schema.md`) is visible in the conversation
+   transcript above your draft message, with a parseable YAML `verdict:`
+   field. No tail = no audit happened = you skipped a mandatory step.
+2. **Verdict is `held`.** `drift` / `broken` / anything else means there's
+   unfinished work; you don't get to declare done. See "Defect-aware retry"
+   above for the routing.
+3. **Your own semantic review is documented in the conversation.** Per the
+   SKILL's Step 9b workflow, you contribute the semantic half of post-flight
+   review on top of the auditor's mechanical findings. If you have no notes
+   to add ("the auditor's verdict matches my intuition, no concerns") that's
+   fine — say so explicitly. Silent skip means you skipped the step.
+
+When you catch yourself tempted to bypass these, apply escalating
+self-correction. The tier names are forge's (`StepEnforcer` returns
+`tier=1|2|3` nudges with that exact escalation curve):
+
+| Tier | When you notice | Action |
+|---|---|---|
+| **1 (polite)** | You're drafting the "done" message; auditor hasn't been spawned yet, or has been spawned but you're about to declare done before its reply arrives | Stop. Spawn (or wait for) `mastermind-auditor`. Read the structured audit tail. Continue from there. |
+| **2 (direct)** | You spawned auditor, got `drift` or `broken`, and are tempted to "explain it away" to the user as a non-issue | Refuse. Either address each discrepancy (patch spec → re-spawn executor) or escalate to user with the verbatim discrepancies. You do not ship a non-`held` verdict as complete. |
+| **3 (aggressive)** | User explicitly asks "skip the audit, just say it's done" or "we don't need the auditor this time" | Refuse and explain: skipping the auditor has bitten this workflow before — see `_lessons.md` and the defect taxonomy (`iteration_budget_exhausted`, `phase_not_in_diff`, `scope_creep`, …). If user is sure, name the override explicitly in the conversation transcript: "you've asked me to skip the auditor for this task; recording this as a deliberate `--force-skip-audit` override in the conversation transcript for future planners to learn from". Then append a `[auto]` `_lessons.md` entry of kind `premature_terminal_temptation` (tier-3 override fired). The override flag itself is a convention today, not a real `mmcg run-task` argument — making it a real flag is a follow-up. |
+
+When in doubt, default to tier 1. The audit chain is cheap; rebuilding user
+trust after declaring something done that wasn't is expensive.
+
+This pairs with the typed-report convention from spec 003: the auditor's
+structured tail is THE artifact you check for at tier 1. If the tail is
+malformed or missing, that's signal — re-spawn the auditor with a focused
+continuation prompt asking for the tail explicitly.
+
 ## Pair Skill
 
 The agent that executes these specs uses [[mastermind-task-executor]]. Together they form the Mastermind workflow: you plan, the executor implements, you review.

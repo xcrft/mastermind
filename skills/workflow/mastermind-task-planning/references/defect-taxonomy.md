@@ -202,6 +202,50 @@ file as [`structured-report-schema.md`](structured-report-schema.md).
   by execution time there were already 2 prior bullets pushing the new one to
   line 6).
 
+### `verify_count_vs_change_to_mismatch`
+
+- **What**: Spec's VERIFY command expects N occurrences of a phrase
+  (e.g. `grep -c "foo" file ≥ 2`), justified by a comment like "one in the
+  heading, one in the body". But the spec's prescribed CHANGE TO body
+  actually contains the phrase fewer times — the body refers to it
+  pronoun-style (`this kind:`, `it`, `the same`) instead of respelling. After
+  verbatim application, grep returns < N and VERIFY fails on a self-consistency
+  bug.
+- **Surfaced as**: `grep -c` count is less than spec's claimed minimum;
+  CHANGE TO body was applied byte-for-byte; planner-side prose self-mismatch.
+- **Fix template**: Prefer (a) — edit the CHANGE TO body to spell the phrase
+  explicitly where the VERIFY count assumed it would appear (e.g. swap
+  `with this \`kind:\`` for `of kind \`foo\``). That's also more useful for
+  taxonomy / doc consumers grepping for the literal term. Alternative (b) —
+  relax the VERIFY count to match the actual prescribed body. Default to (a)
+  for taxonomy / reference docs where literal grep-ability is valuable.
+- **First observed**: Task 005 Phase 2.1 (planner wrote "this `kind:`" in
+  Fix template body but VERIFY expected 2 occurrences of the kind name).
+
+### `premature_terminal_temptation`
+
+- **What**: Planner is drafting a "task done" / "shipped" / "сделано"
+  message to the user without first ensuring (a) `mastermind-auditor` was
+  spawned, (b) verdict tail is in conversation with `verdict: held`, and
+  (c) planner's semantic review is documented. Often paired with the
+  rationalization "the executor's report looks clean, the audit will
+  surely pass".
+- **Surfaced as**:
+  - Planner catches themselves mid-draft (tier 1)
+  - Planner has Drift/Broken verdict and is tempted to "explain it away"
+    as a non-issue to user (tier 2)
+  - User explicitly asks the planner to skip the auditor and just declare
+    done (tier 3 — refusal + explicit override recording)
+- **Fix template**: Apply the SKILL's `Premature-terminal escalation tiers`
+  section. Tier 1 → just spawn the auditor and wait. Tier 2 → refuse, fix
+  the discrepancies, re-audit. Tier 3 → refuse, explain `_lessons.md`
+  precedent, name the override explicitly in the conversation transcript,
+  and append a `[auto]` `_lessons.md` entry of kind `premature_terminal_temptation`.
+- **First observed**: Workflow convention — pre-emptively named in task 005
+  ahead of real instances, so planners have a routing key on the day they
+  catch themselves. If you (future planner) ARE the first real instance,
+  update `First observed` here to your task number.
+
 ### `unclassified`
 
 - **What**: A defect that doesn't match any kind above.

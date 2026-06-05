@@ -237,9 +237,10 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_edges_kind ON edges(kind);
 
             CREATE TABLE IF NOT EXISTS files (
-                path          TEXT PRIMARY KEY,
-                indexed_at    INTEGER NOT NULL,
-                symbol_count  INTEGER NOT NULL
+                path                    TEXT PRIMARY KEY,
+                indexed_at              INTEGER NOT NULL,
+                symbol_count            INTEGER NOT NULL,
+                structural_fingerprint  TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS meta (
@@ -274,6 +275,15 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_scratchpad_agent ON scratchpad(agent);
             "#,
         )?;
+
+        // Idempotent column add for upgrades from pre-0.28 DBs (the CREATE TABLE
+        // IF NOT EXISTS above is a no-op when the table already exists).
+        // SQLite raises a `duplicate column name` error if the column is already
+        // there — that's the steady-state case and we discard the result.
+        let _ = self.conn.execute(
+            "ALTER TABLE files ADD COLUMN structural_fingerprint TEXT NOT NULL DEFAULT ''",
+            [],
+        );
 
         // Stamp schema version on first init
         self.conn.execute(
@@ -352,9 +362,16 @@ impl Store {
         }
 
         // Stamp the file
+        let fingerprint = crate::fingerprint::compute_structural_fingerprint(&pending);
         tx.execute(
-            "INSERT INTO files(path, indexed_at, symbol_count) VALUES (?1, ?2, ?3)",
-            params![&pending.path, pending.mtime, pending.symbols.len() as u32],
+            "INSERT INTO files(path, indexed_at, symbol_count, structural_fingerprint) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                &pending.path,
+                pending.mtime,
+                pending.symbols.len() as u32,
+                &fingerprint
+            ],
         )?;
 
         tx.commit()?;
@@ -422,6 +439,20 @@ impl Store {
             .prepare("SELECT indexed_at FROM files WHERE path = ?1")?;
         let mut rows = stmt.query(params![path])?;
         rows.next()?.map(|r| r.get(0)).transpose()
+    }
+
+    /// Return the stored structural fingerprint for a file path, or `None` if
+    /// the file was never indexed. An empty string is returned for files indexed
+    /// before 0.28 (the column existed but was backfilled with `''`); callers
+    /// should treat `Some("")` as `first-seen`.
+    pub fn file_fingerprint(&self, path: &str) -> SqlResult<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT structural_fingerprint FROM files WHERE path = ?1",
+                params![path],
+                |r| r.get(0),
+            )
+            .optional()
     }
 
     /// All paths currently in the index. Used by the indexer to detect deletions —

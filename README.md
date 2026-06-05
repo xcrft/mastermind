@@ -38,7 +38,7 @@ Most "AI workflow" templates are a planner prompt and good wishes. Here, enginee
 | [`skills/`](skills/) | Markdown skills with frontmatter — workflow skills (`mastermind-task-planning`, `mastermind-task-executor`, `mastermind-incident-response`, `mastermind-prompt-refiner`) and standalone ones (`pr-review`, `flaky-finder`, `doc-stub-sync`). |
 | [`prompts/`](prompts/) | Reusable system/user prompt templates (`api-shape-explorer`). |
 | [`agents/`](agents/) | Six mastermind subagents (`critic`, `auditor`, `researcher`, `task-executor`, `release`, `prompt-refiner`) plus `CLAUDE.md` / `CONTEXT.md` templates. |
-| [`mcp/`](mcp/) | MCP server configs, headlined by **`mmcg`** — a fast Rust codegraph indexer (Python, TS/JS, Rust, C#, Go, Java, PHP, C/C++) with 19 tools. |
+| [`mcp/`](mcp/) | MCP server configs, headlined by **`mmcg`** — a fast Rust codegraph indexer (Python, TS/JS, Rust, C#, Go, Java, PHP, C/C++) with 20 tools. |
 
 Each folder is grouped by **domain** inside (e.g. `skills/code-review/`); every category ships a `_template/` to copy when adding something new. The standard itself lives in [`docs/conventions.md`](docs/conventions.md).
 
@@ -146,7 +146,7 @@ mastermind doctor                # 8 fail-soft checks: binary, index, freshness,
 
 ## Subsets (advanced)
 
-**Just the codegraph** — `mmcg` is a standalone [crate](https://crates.io/crates/mmcg): 19 tools (`search`, `callers`, `callees`, `impact`, `imports`, `imported_by`, `files`, `outline`, `symbols_in_file`, `recent_changes`, `unreferenced`, `api_surface`, `centrality`, `tasks`, `dependency_cycles`, `symbols_changed_since`, `scratchpad_append`, `scratchpad_read`, + a `status` diagnostic) across nine languages. Sub-millisecond queries, zero system deps.
+**Just the codegraph** — `mmcg` is a standalone [crate](https://crates.io/crates/mmcg): 20 tools (`search`, `callers`, `callees`, `impact`, `imports`, `imported_by`, `files`, `outline`, `symbols_in_file`, `recent_changes`, `unreferenced`, `api_surface`, `centrality`, `tasks`, `dependency_cycles`, `symbols_changed_since`, `scratchpad_append`, `scratchpad_read`, `change_class`, + a `status` diagnostic) across nine languages. Sub-millisecond queries, zero system deps.
 
 ```bash
 cargo install mmcg

@@ -348,6 +348,17 @@ fn tools_list() -> Value {
                         "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 20, "description": "Max entries returned." }
                     }
                 }
+            },
+            {
+                "name": "mmcg_change_class",
+                "description": "Classify a file's last change as `structural` (signatures, edges, or imports changed), `cosmetic` (only line numbers / whitespace / comments differ), or `first-seen` (file never indexed). Pre-edit signal for planner and auditor: a diff of 20 files where 17 are cosmetic-only has a much smaller blast radius than its raw line count suggests. Backed by a deterministic FNV-1a 64-bit hash of the file's parsed structural shape — same source on any machine yields the same fingerprint.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "file": { "type": "string", "description": "Path relative to the project root (e.g. `src/auth/login.ts`)." }
+                    },
+                    "required": ["file"]
+                }
             }
         ]
     })
@@ -538,6 +549,12 @@ fn handle_tools_call(store: &mut Store, params: &Value) -> Result<Value, String>
                 .map_err(|e| e.to_string())?;
             serde_json::to_value(r).map_err(|e| e.to_string())?
         }
+        "mmcg_change_class" => {
+            let file = str_arg(&args, "file")?;
+            let root = std::env::current_dir().map_err(|e| e.to_string())?;
+            let r = queries::classify_change(store, &root, file)?;
+            serde_json::to_value(r).map_err(|e| e.to_string())?
+        }
         other => return Err(format!("unknown tool: {other}")),
     };
 
@@ -624,5 +641,97 @@ mod tests {
         assert!(err.contains("too large"));
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn change_class_round_trip_via_tools_call() {
+        // Layout: tmp/.mastermind/mmcg.db + tmp/src/foo.rs
+        let tmp = std::env::temp_dir().join("mmcg_change_class_rt");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("src")).unwrap();
+        let db_path = tmp.join("mmcg.db");
+        let mut store = crate::store::Store::open(&db_path).unwrap();
+
+        let foo_path = tmp.join("src/foo.rs");
+        let rel = "src/foo.rs";
+        std::fs::write(&foo_path, "// header\nfn foo() {}\nfn bar() { foo(); }\n").unwrap();
+
+        // Switch into tmp so `crate::indexer::parse_one` (which the dispatch
+        // arm invokes via std::env::current_dir) resolves paths relative to it.
+        let _ = std::env::set_current_dir(&tmp);
+
+        // Stage 1: file never indexed → first-seen.
+        let first_env = handle_tools_call(
+            &mut store,
+            &serde_json::json!({
+                "name": "mmcg_change_class",
+                "arguments": { "file": rel }
+            }),
+        )
+        .unwrap();
+        let first = unwrap_content(&first_env);
+        assert_eq!(first["class"], "first-seen");
+        assert!(first["current_fingerprint"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .all(|c| c.is_ascii_hexdigit()));
+
+        // Stage 2: index the file using the same parser path the classifier
+        // will use later. This guarantees the stored fingerprint and the
+        // current fingerprint use identical extractor output (kind strings,
+        // signatures), so a cosmetic edit really does hash to the same value.
+        let extractor =
+            crate::indexer::extractor_for_path(&foo_path).expect("rust extractor available");
+        let pending =
+            crate::indexer::parse_one(&foo_path, &tmp, extractor.as_ref()).expect("parse foo.rs");
+        let stored_fp = crate::fingerprint::compute_structural_fingerprint(&pending);
+        store.commit_file(pending).unwrap();
+        assert_eq!(
+            store.file_fingerprint(rel).unwrap().as_deref(),
+            Some(stored_fp.as_str())
+        );
+
+        // Stage 3: cosmetic edit — only comments + line positions change.
+        // Same (kind, name, signature) tuples, same call edge → same hash.
+        std::fs::write(
+            &foo_path,
+            "// header v2 (longer)\n// extra comment\nfn foo() {}\nfn bar() { foo(); }\n",
+        )
+        .unwrap();
+        let cosmetic_env = handle_tools_call(
+            &mut store,
+            &serde_json::json!({
+                "name": "mmcg_change_class",
+                "arguments": { "file": rel }
+            }),
+        )
+        .unwrap();
+        let cosmetic = unwrap_content(&cosmetic_env);
+        assert_eq!(cosmetic["class"], "cosmetic");
+        assert_eq!(
+            cosmetic["stored_fingerprint"].as_str(),
+            Some(stored_fp.as_str())
+        );
+
+        // Stage 4: structural edit — add a new function. New symbol tuple →
+        // hash diverges → classifier returns "structural".
+        std::fs::write(
+            &foo_path,
+            "fn foo() {}\nfn bar() { foo(); }\nfn baz() { bar(); }\n",
+        )
+        .unwrap();
+        let structural_env = handle_tools_call(
+            &mut store,
+            &serde_json::json!({
+                "name": "mmcg_change_class",
+                "arguments": { "file": rel }
+            }),
+        )
+        .unwrap();
+        let structural = unwrap_content(&structural_env);
+        assert_eq!(structural["class"], "structural");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

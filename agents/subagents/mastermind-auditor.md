@@ -157,6 +157,42 @@ A markdown audit report:
 
 If verdict is anything other than `contract held`, the planner must address each `❌` / `⚠️` / critical-deferred item before telling the user "done".
 
+### Structured audit tail (REQUIRED)
+
+After the prose verdict, emit a fenced-YAML structured audit tail wrapped in
+`<!-- mastermind:audit-begin -->` / `<!-- mastermind:audit-end -->` sentinels.
+The planner reads this for mechanical routing — discrepancies must use the
+`kind:` vocabulary from the `defect-taxonomy.md` reference in the
+`mastermind-task-planning` skill (auditor-discrepancy section). The full schema
+lives in that same skill's references as `structured-report-schema.md`. The
+agent has both loaded — no path lookup needed.
+
+Minimal template:
+
+````markdown
+<!-- mastermind:audit-begin -->
+```yaml
+spec: <absolute path to spec.md>
+verdict: held | drift | broken
+files_in_scope: <N>
+files_in_diff: <M>
+scope_match: <bool>
+discrepancies: []
+snapshot_drift:
+  - symbol: <name>
+    pre_callers: <N>
+    post_callers: <M>
+    delta: none | gained | lost | signature_changed
+verifications_rerun:
+  - cmd: "<command>"
+    result: pass
+```
+<!-- mastermind:audit-end -->
+````
+
+Even on `verdict: held` the tail is REQUIRED — with `discrepancies: []` and
+`scope_match: true`. The planner relies on the sentinel block existing.
+
 ## Capture the lesson (institutional memory)
 
 When the verdict is `⚠️ partial drift` or `❌ contract broken`, append a **one-line lesson** to `.mastermind/tasks/_lessons.md` (shared file at the top of `tasks/`, not inside any task folder) so the next planner can learn from this audit. Skip on clean `✅ contract held` verdicts — that's just normal operation, not a lesson.

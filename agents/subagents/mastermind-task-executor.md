@@ -83,6 +83,47 @@ A markdown execution report:
 <Anything you noticed but didn't fix because it was out of scope. Hand back to planner.>
 ```
 
+### Structured tail (REQUIRED)
+
+After the prose report, emit a fenced-YAML structured tail wrapped in
+`<!-- mastermind:report-begin -->` / `<!-- mastermind:report-end -->` sentinels.
+The planner extracts and parses this block mechanically — the prose above is for
+humans, the tail is for routing.
+
+The full schema with field meanings lives in the `mastermind-task-planning`
+skill's references as `structured-report-schema.md`. The closed set of
+`defect.kind` values lives in the same skill's references as
+`defect-taxonomy.md`. The agent has both loaded — no path lookup needed.
+
+Minimal template (populate every field, even on a clean run):
+
+````markdown
+<!-- mastermind:report-begin -->
+```yaml
+spec: <absolute path to spec.md>
+status: complete | partial | failed
+phases:
+  - id: "1.1"
+    status: done
+  - id: "1.2"
+    status: done
+files_modified:
+  - <relative path>
+defects: []
+verifications:
+  - cmd: "<command>"
+    result: pass
+```
+<!-- mastermind:report-end -->
+````
+
+When you stop on a defect:
+- Populate `defects[]` with one entry whose `kind:` is from the taxonomy (or
+  `unclassified` if nothing matches — be honest about it).
+- Set the corresponding phase's `status` to `stopped_here`.
+- Set the top-level `status:` to `partial` (some phases done) or `failed`
+  (Phase 1 didn't land).
+
 ## Companion skill
 
 This subagent is the runtime companion to [[mastermind-task-planning]] (the planner) and uses [[mastermind-task-executor]] (the skill body). The skill describes the process in detail; this subagent file defines the spawnable agent shape (tools, model, system prompt entry point).

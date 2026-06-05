@@ -349,6 +349,56 @@ Each task lives in its own folder under `.mastermind/tasks/`:
 
 If `.mastermind/tasks/` doesn't exist, create it and optionally create `CONTEXT.md` with project info. `mmcg init` does this for you.
 
+## Defect-aware retry (mechanical routing on subagent reports)
+
+The executor and auditor subagents emit a fenced-YAML "structured tail" at the
+end of every report — full schema at
+[`references/structured-report-schema.md`](references/structured-report-schema.md),
+defect-kind vocabulary at
+[`references/defect-taxonomy.md`](references/defect-taxonomy.md).
+
+When you (planner) receive a subagent report that isn't `status: complete` /
+`verdict: held`, your routing flow is:
+
+1. Locate the sentinel block (`<!-- mastermind:report-begin -->` or
+   `<!-- mastermind:audit-begin -->`) at the end of the reply.
+2. Parse the YAML block. For each `defects[]` / `discrepancies[]` entry, read
+   `kind:`.
+3. Look up that `kind:` in the taxonomy doc. Apply the named fix template to
+   the spec (patch the offending phase, add a missing `expected_docs[]` entry,
+   add an authorization Rule, etc.).
+4. Re-spawn the executor with the patched spec, with a focused continuation
+   prompt that names which phases are already done and which need re-execution.
+
+When the structured tail's `kind:` is `unclassified`, you're in unknown
+territory:
+- Read the verbatim `details:` field
+- Design the fix manually
+- After the task lands, promote the new defect into a named entry in
+  `defect-taxonomy.md` (no separate spec needed for taxonomy edits — direct
+  doc commit is fine)
+
+The whole point of this routing is to **avoid re-reading prose reports**.
+Before this convention landed (tasks 001 + 002), the planner read 4 executor
+reports across two tasks and manually classified 6 defects. With the taxonomy +
+structured tail, the planner can route the same defects in a single YAML lookup.
+
+## Iteration budget (escalate, don't loop forever)
+
+If you've re-spawned the executor 3 times on the same spec and it keeps
+returning `status: partial` / `failed`, STOP. Don't issue a 4th respawn.
+Instead:
+- Surface the situation to the user with the cumulative defect list (all 3
+  rounds' `defects[]` entries flattened)
+- Suggest spec redesign rather than another patch
+- Append a one-line `[auto]` entry to `_lessons.md` of kind
+  `iteration_budget_exhausted` so future planners see this signal
+
+Three rounds is the empirically-calibrated bound from forge's
+`ErrorTracker.max_retries=3` default and from our task-002 experience (4 rounds
+to land, would have been 2 with a tighter spec). Don't loosen the bound without
+recording why in the spec's Notes section.
+
 ## Pair Skill
 
 The agent that executes these specs uses [[mastermind-task-executor]]. Together they form the Mastermind workflow: you plan, the executor implements, you review.

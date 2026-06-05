@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Cross-agent scratchpad MCP tools — `mmcg_scratchpad_append { agent, kind, body }` and `mmcg_scratchpad_read { since?, agent?, kind?, limit? }`. Live in-session channel between Mastermind subagents (planner → executor → auditor), persisted in `.mastermind/mmcg.db` (additive table — no schema-version bump, no re-index needed). Body capped at 8 KiB. Cross-session counterpart remains `.mastermind/tasks/_lessons.md` (auditor-written).
+- Structural fingerprints on every indexed file plus a new `mmcg_change_class { file }` MCP tool that returns `structural` / `cosmetic` / `first-seen` for a given path. The fingerprint is a deterministic FNV-1a 64-bit hash of the file's parsed shape (sorted symbol `(kind, name, signature)` tuples + sorted edge `(kind, from, to_name, to_path)` tuples — line numbers and whitespace excluded by design). Stored in a new `files.structural_fingerprint` column added idempotently via `ALTER TABLE` — no `SCHEMA_VERSION` bump, no forced re-index. Existing files report `first-seen` until naturally re-indexed.
 
 ## [0.27.1] - 2026-06-03
 

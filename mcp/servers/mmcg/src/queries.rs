@@ -624,6 +624,61 @@ pub fn imported_by(
     })
 }
 
+/// Outcome of comparing a file's current structural shape against the
+/// fingerprint stored in the index.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ChangeClass {
+    /// File has no stored fingerprint — never indexed (or indexed pre-0.28
+    /// before the column existed and not yet re-indexed).
+    FirstSeen,
+    /// Fingerprint matches — only line numbers / whitespace / comments differ.
+    Cosmetic,
+    /// Fingerprint differs — signatures, edges, or imports changed.
+    Structural,
+}
+
+/// Structured response for `mmcg_change_class`. Both fingerprints are surfaced
+/// so consumers can sanity-check against `sqlite3` or persist across sessions.
+#[derive(Debug, serde::Serialize)]
+pub struct ChangeClassReport {
+    pub file: String,
+    pub class: ChangeClass,
+    pub stored_fingerprint: Option<String>,
+    pub current_fingerprint: String,
+}
+
+/// Classify a single file's current state against its last-indexed fingerprint.
+/// `rel_path` is relative to `root`. Errors if the file can't be parsed or the
+/// extension isn't supported by any extractor.
+pub fn classify_change(
+    store: &crate::store::Store,
+    root: &std::path::Path,
+    rel_path: &str,
+) -> Result<ChangeClassReport, String> {
+    let full_path = root.join(rel_path);
+    let extractor = crate::indexer::extractor_for_path(&full_path)
+        .ok_or_else(|| format!("no extractor for {rel_path}"))?;
+    let pending = crate::indexer::parse_one(&full_path, root, extractor.as_ref())
+        .map_err(|e| format!("parse {rel_path}: {e:?}"))?;
+    let current = crate::fingerprint::compute_structural_fingerprint(&pending);
+    let stored = store
+        .file_fingerprint(rel_path)
+        .map_err(|e| format!("read fingerprint for {rel_path}: {e}"))?;
+    let class = match stored.as_deref() {
+        None => ChangeClass::FirstSeen,
+        Some("") => ChangeClass::FirstSeen,
+        Some(s) if s == current => ChangeClass::Cosmetic,
+        Some(_) => ChangeClass::Structural,
+    };
+    Ok(ChangeClassReport {
+        file: rel_path.to_string(),
+        class,
+        stored_fingerprint: stored,
+        current_fingerprint: current,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

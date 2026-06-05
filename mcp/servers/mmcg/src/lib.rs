@@ -20,6 +20,7 @@
 pub mod audit_spec;
 pub mod diff;
 pub mod doctor;
+pub mod fingerprint;
 pub mod indexer;
 pub mod lessons;
 pub mod mcp;

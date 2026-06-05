@@ -133,11 +133,13 @@ mmcg audit-spec .mastermind/tasks/042-feature/spec.md --since main
 #                    clear state. Drift/Broken keeps state for retry after fixes.
 mmcg run-task .mastermind/tasks/042-feature/spec.md             # hand-off semantics
 mmcg run-task .mastermind/tasks/042-feature/spec.md --exec      # shell out to `claude -p` between phases
-mmcg run-task .mastermind/tasks/042-feature/spec.md --reset     # drop state, force pre-flight
+mmcg run-task .mastermind/tasks/042-feature/spec.md --reset     # drop state, force pre-flight (counter survives)
 mmcg run-task .mastermind/tasks/042-feature/spec.md --pre-only  # never auto-resume into post
 mmcg run-task .mastermind/tasks/042-feature/spec.md --post-only # requires state
 mmcg run-task .mastermind/tasks/042-feature/spec.md --allow-no-index  # docs-only / spec-only specs
 mmcg run-task .mastermind/tasks/042-feature/spec.md --strict          # fold strict spec checks into pre-flight
+mmcg run-task .mastermind/tasks/042-feature/spec.md --max-iterations 5 # raise the default budget (default 3)
+mmcg run-task .mastermind/tasks/042-feature/spec.md --force-iteration  # bypass budget for this attempt; auto-lesson still fires
 # NOTE: without --allow-no-index, pre-flight hard-fails when the index is missing
 # or empty. Gates without a codegraph degrade to file-existence + section checks
 # only — mmcg's value comes from the structural truth layer, not the heuristics.

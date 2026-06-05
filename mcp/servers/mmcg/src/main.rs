@@ -272,6 +272,17 @@ enum Cmd {
         /// (frontmatter scoping, file-scoped touches, a runnable verify command).
         #[arg(long)]
         strict: bool,
+        /// Maximum number of pre-flight iterations on the same spec before
+        /// the dispatcher refuses to continue. Default 3. Set to 0 to disable
+        /// (not recommended). The counter survives `--reset` so the budget
+        /// can't be trivially bypassed.
+        #[arg(long, default_value_t = 3)]
+        max_iterations: u32,
+        /// Bypass the iteration-budget check for this one invocation. Still
+        /// appends a `kind: iteration_budget_exhausted` lesson so the override
+        /// is visible to future planners.
+        #[arg(long)]
+        force_iteration: bool,
     },
     /// One-shot query — handy for CLI debugging without going through MCP.
     #[command(subcommand)]
@@ -657,6 +668,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             exec,
             allow_no_index,
             strict,
+            max_iterations,
+            force_iteration,
         } => {
             let root = root
                 .canonicalize()
@@ -668,6 +681,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 exec,
                 allow_no_index,
                 strict,
+                max_iterations,
+                force_iteration,
             };
             let outcome = mmcg::run_task::run(&spec, &root, &index_path, opts);
             // Map outcomes to exit codes: gate failures / contract breaks /

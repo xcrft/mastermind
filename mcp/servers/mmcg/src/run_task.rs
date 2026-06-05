@@ -42,6 +42,13 @@ pub struct RunState {
     pub baseline_ref: String,
     /// Unix epoch seconds at pre-flight.
     pub started_at: u64,
+    /// Iteration count for this spec — incremented on every pre-flight entry.
+    /// First fresh run is `1`. Survives `--reset` (the dispatcher reads the
+    /// old value before deleting the state file and carries it forward). Old
+    /// state files written before this field existed deserialize with the
+    /// serde default of `0`; they're treated as "iteration not yet counted".
+    #[serde(default)]
+    pub iteration: u32,
 }
 
 /// What happened end-to-end. Mapped to exit codes by `main.rs`: any of the
@@ -101,7 +108,7 @@ pub struct ReleaseNotes {
 
 /// Flags from `main.rs`. Kept as a single struct so the dispatcher signature
 /// stays stable as we add options (next likely: `--json`).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct RunOpts {
     /// Delete any existing state file before deciding which phase to run.
     pub reset: bool,
@@ -121,6 +128,32 @@ pub struct RunOpts {
     /// Contract-driven mode: fold `verify_spec::strict_check` into pre-flight —
     /// require frontmatter scoping, file-scoped touches, and a runnable verify.
     pub strict: bool,
+    /// Maximum number of pre-flight iterations on the same spec before the
+    /// dispatcher refuses to continue. Default 3 — matches the
+    /// `mastermind-task-planning` SKILL's "Iteration budget" convention and
+    /// forge's `ErrorTracker.max_retries=3` empirical anchor. Set to 0 to
+    /// disable the budget entirely (not recommended).
+    pub max_iterations: u32,
+    /// Bypass the iteration-budget check. Use only when the planner has
+    /// explicitly decided the extra cycle is worth it (e.g. one specific
+    /// defect kind to mop up). Auto-lesson append still fires so the override
+    /// is visible to future planners.
+    pub force_iteration: bool,
+}
+
+impl Default for RunOpts {
+    fn default() -> Self {
+        Self {
+            reset: false,
+            pre_only: false,
+            post_only: false,
+            exec: false,
+            allow_no_index: false,
+            strict: false,
+            max_iterations: 3,
+            force_iteration: false,
+        }
+    }
 }
 
 /// State file path — `<repo_root>/.mastermind/run-state/<spec-basename>.json`.
@@ -363,19 +396,68 @@ pub fn render_release_notes(r: &ReleaseNotes) -> String {
     )
 }
 
+/// Append a one-line `iteration_budget_exhausted` lesson to
+/// `.mastermind/tasks/_lessons.md`. Best-effort: silently swallows IO errors
+/// because the caller has already eprintln'd the user-facing reason.
+fn append_iteration_budget_lesson(
+    repo_root: &Path,
+    spec_path: &Path,
+    iteration: u32,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let lessons_path = repo_root
+        .join(".mastermind")
+        .join("tasks")
+        .join("_lessons.md");
+    if let Some(parent) = lessons_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let needs_header = !lessons_path.exists();
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&lessons_path)?;
+    if needs_header {
+        f.write_all(
+            b"# Lessons learned\n\nOne-line lessons. See `defect-taxonomy.md` for `kind:` vocabulary.\n\n",
+        )?;
+    }
+    let task_id = spec_path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("<unknown>");
+    writeln!(
+        f,
+        "- `{task_id}` — kind: iteration_budget_exhausted — pre-flight #{iteration} refused; consider re-designing the spec instead of re-running."
+    )?;
+    Ok(())
+}
+
 /// Top-level dispatcher — picks pre or post based on flags + state presence,
 /// then calls the corresponding phase function. Pure I/O orchestration; the
 /// computational pieces above are independently testable.
 pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts) -> Outcome {
     let state_path = state_file_path(repo_root, spec_path);
-    if opts.reset {
+    // Iteration carry-forward: if --reset is dropping a prior state, snapshot
+    // its iteration FIRST so the next pre-flight can resume the count.
+    // Without this the budget is trivially bypassed by repeated --reset.
+    let preserved_iter: u32 = if opts.reset {
+        let prior_iter = load_state(&state_path)
+            .ok()
+            .flatten()
+            .map(|s| s.iteration)
+            .unwrap_or(0);
         if let Err(e) = delete_state(&state_path) {
             eprintln!(
                 "warning: --reset failed to delete `{}`: {e}",
                 state_path.display()
             );
         }
-    }
+        prior_iter
+    } else {
+        0
+    };
 
     let existing = match load_state(&state_path) {
         Ok(s) => s,
@@ -402,7 +484,14 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts)
     }
 
     if opts.pre_only || existing.is_none() {
-        return run_pre(spec_path, repo_root, index_path, &state_path, opts);
+        return run_pre(
+            spec_path,
+            repo_root,
+            index_path,
+            &state_path,
+            opts,
+            preserved_iter,
+        );
     }
 
     // Default mode + state present → resume into post.
@@ -416,7 +505,27 @@ fn run_pre(
     index_path: &Path,
     state_path: &Path,
     opts: RunOpts,
+    preserved_iter: u32,
 ) -> Outcome {
+    // Iteration budget — refuse to enter pre-flight when the spec has already
+    // been through `max_iterations` cycles without landing Held. The dispatcher
+    // passes `preserved_iter` carrying forward any iteration count from a
+    // state file that --reset just dropped; we add 1 for THIS attempt.
+    let iteration = preserved_iter.saturating_add(1);
+    if opts.max_iterations > 0 && iteration > opts.max_iterations && !opts.force_iteration {
+        eprintln!(
+            "❌ iteration budget exhausted: this spec has been through {} pre-flight cycle(s) without landing `contract held` (limit: {}).",
+            iteration - 1,
+            opts.max_iterations
+        );
+        eprintln!("   Stop and re-design the spec, or re-run with --force-iteration to override.");
+        eprintln!(
+            "   See `defect-taxonomy.md` in the mastermind-task-planning skill, kind `iteration_budget_exhausted`."
+        );
+        let _ = append_iteration_budget_lesson(repo_root, spec_path, iteration);
+        return Outcome::PreFailed;
+    }
+
     let spec_body = match std::fs::read_to_string(spec_path) {
         Ok(b) => b,
         Err(e) => {
@@ -500,6 +609,7 @@ fn run_pre(
         spec_hash: hash_text(&spec_body),
         baseline_ref: head.clone(),
         started_at: timestamp_now(),
+        iteration,
     };
     if let Err(e) = save_state(state_path, &state) {
         eprintln!("error: writing state `{}`: {e}", state_path.display());
@@ -739,6 +849,7 @@ mod tests {
             spec_hash: "deadbeefcafef00d".into(),
             baseline_ref: "abc1234".into(),
             started_at: 123456,
+            iteration: 0,
         };
         save_state(&path, &state).unwrap();
         let loaded = load_state(&path).unwrap().expect("present");
@@ -1137,6 +1248,241 @@ mod tests {
         // Mapped to PreFailed because the dispatcher uses that variant to
         // signal "couldn't get to post" — main.rs exits non-zero for it.
         assert_eq!(outcome, Outcome::PreFailed);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn iteration_starts_at_one_on_fresh_preflight() {
+        let dir = tmp("iter_fresh");
+        init_repo(&dir);
+        fs::write(dir.join("src.txt"), "x\n").unwrap();
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "baseline"]);
+
+        let spec_dir = dir.join(".mastermind/tasks/050-iter");
+        fs::create_dir_all(&spec_dir).unwrap();
+        let spec_path = spec_dir.join("spec.md");
+        fs::write(
+            &spec_path,
+            "# Iter 050\n\n## Goals\n- Edit `src.txt`\n## Alternatives Considered\n- a — rejected: r\n## Tests Plan\n- t\n## Documentation Plan\n- d\n## Observability Plan\n- n/a\n## Performance Considerations\n- O(1)\n",
+        )
+        .unwrap();
+
+        let index_path = dir.join("idx.db");
+        let _ = Store::open(&index_path).unwrap();
+        let opts = RunOpts {
+            pre_only: true,
+            allow_no_index: true,
+            ..Default::default()
+        };
+        let outcome = run(&spec_path, &dir, &index_path, opts);
+        assert_eq!(outcome, Outcome::PreReady);
+
+        let state_path = state_file_path(&dir, &spec_path);
+        let state = load_state(&state_path).unwrap().expect("state written");
+        assert_eq!(state.iteration, 1, "first pre-flight should be iteration 1");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reset_preserves_and_increments_iteration() {
+        let dir = tmp("iter_reset");
+        init_repo(&dir);
+        fs::write(dir.join("src.txt"), "x\n").unwrap();
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "baseline"]);
+
+        let spec_dir = dir.join(".mastermind/tasks/051-iter");
+        fs::create_dir_all(&spec_dir).unwrap();
+        let spec_path = spec_dir.join("spec.md");
+        fs::write(
+            &spec_path,
+            "# Iter 051\n\n## Goals\n- Edit `src.txt`\n## Alternatives Considered\n- a — rejected: r\n## Tests Plan\n- t\n## Documentation Plan\n- d\n## Observability Plan\n- n/a\n## Performance Considerations\n- O(1)\n",
+        )
+        .unwrap();
+
+        let index_path = dir.join("idx.db");
+        let _ = Store::open(&index_path).unwrap();
+
+        // First pre-flight → iteration 1
+        let outcome = run(
+            &spec_path,
+            &dir,
+            &index_path,
+            RunOpts {
+                pre_only: true,
+                allow_no_index: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(outcome, Outcome::PreReady);
+        let state_path = state_file_path(&dir, &spec_path);
+        assert_eq!(load_state(&state_path).unwrap().unwrap().iteration, 1);
+
+        // --reset → second pre-flight → iteration 2
+        let outcome = run(
+            &spec_path,
+            &dir,
+            &index_path,
+            RunOpts {
+                pre_only: true,
+                allow_no_index: true,
+                reset: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(outcome, Outcome::PreReady);
+        assert_eq!(load_state(&state_path).unwrap().unwrap().iteration, 2);
+
+        // --reset → third pre-flight → iteration 3
+        let outcome = run(
+            &spec_path,
+            &dir,
+            &index_path,
+            RunOpts {
+                pre_only: true,
+                allow_no_index: true,
+                reset: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(outcome, Outcome::PreReady);
+        assert_eq!(load_state(&state_path).unwrap().unwrap().iteration, 3);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn iteration_budget_exhaustion_returns_pre_failed() {
+        let dir = tmp("iter_budget_exhausted");
+        init_repo(&dir);
+        fs::write(dir.join("src.txt"), "x\n").unwrap();
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "baseline"]);
+
+        let spec_dir = dir.join(".mastermind/tasks/052-iter");
+        fs::create_dir_all(&spec_dir).unwrap();
+        let spec_path = spec_dir.join("spec.md");
+        fs::write(
+            &spec_path,
+            "# Iter 052\n\n## Goals\n- Edit `src.txt`\n## Alternatives Considered\n- a — rejected: r\n## Tests Plan\n- t\n## Documentation Plan\n- d\n## Observability Plan\n- n/a\n## Performance Considerations\n- O(1)\n",
+        )
+        .unwrap();
+
+        let index_path = dir.join("idx.db");
+        let _ = Store::open(&index_path).unwrap();
+        let base_opts = || RunOpts {
+            pre_only: true,
+            allow_no_index: true,
+            ..Default::default()
+        };
+
+        // Cycle through iterations 1, 2, 3
+        for _ in 0..3 {
+            run(
+                &spec_path,
+                &dir,
+                &index_path,
+                RunOpts {
+                    reset: true,
+                    ..base_opts()
+                },
+            );
+        }
+        let state_path = state_file_path(&dir, &spec_path);
+        assert_eq!(load_state(&state_path).unwrap().unwrap().iteration, 3);
+
+        // 4th attempt with --reset → would be iteration 4 → refused → PreFailed.
+        let outcome = run(
+            &spec_path,
+            &dir,
+            &index_path,
+            RunOpts {
+                reset: true,
+                ..base_opts()
+            },
+        );
+        assert_eq!(outcome, Outcome::PreFailed);
+
+        // Lesson appended
+        let lessons = std::fs::read_to_string(dir.join(".mastermind/tasks/_lessons.md")).unwrap();
+        assert!(lessons.contains("iteration_budget_exhausted"));
+        assert!(lessons.contains("052-iter"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn force_iteration_bypasses_budget() {
+        let dir = tmp("iter_force_bypass");
+        init_repo(&dir);
+        fs::write(dir.join("src.txt"), "x\n").unwrap();
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "baseline"]);
+
+        let spec_dir = dir.join(".mastermind/tasks/053-iter");
+        fs::create_dir_all(&spec_dir).unwrap();
+        let spec_path = spec_dir.join("spec.md");
+        fs::write(
+            &spec_path,
+            "# Iter 053\n\n## Goals\n- Edit `src.txt`\n## Alternatives Considered\n- a — rejected: r\n## Tests Plan\n- t\n## Documentation Plan\n- d\n## Observability Plan\n- n/a\n## Performance Considerations\n- O(1)\n",
+        )
+        .unwrap();
+
+        let index_path = dir.join("idx.db");
+        let _ = Store::open(&index_path).unwrap();
+        let base_opts = || RunOpts {
+            pre_only: true,
+            allow_no_index: true,
+            ..Default::default()
+        };
+
+        // Burn through the budget.
+        for _ in 0..3 {
+            run(
+                &spec_path,
+                &dir,
+                &index_path,
+                RunOpts {
+                    reset: true,
+                    ..base_opts()
+                },
+            );
+        }
+
+        // 4th attempt with --force-iteration → should succeed.
+        let outcome = run(
+            &spec_path,
+            &dir,
+            &index_path,
+            RunOpts {
+                reset: true,
+                force_iteration: true,
+                ..base_opts()
+            },
+        );
+        assert_eq!(outcome, Outcome::PreReady);
+        let state_path = state_file_path(&dir, &spec_path);
+        assert_eq!(load_state(&state_path).unwrap().unwrap().iteration, 4);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn legacy_state_without_iteration_deserializes_to_zero() {
+        let dir = tmp("iter_legacy_state");
+        let state_path = dir.join("legacy.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &state_path,
+            r#"{"spec_path":"foo.md","spec_hash":"abc","baseline_ref":"HEAD","started_at":0}"#,
+        )
+        .unwrap();
+
+        let state = load_state(&state_path).unwrap().expect("loads");
+        assert_eq!(state.iteration, 0, "missing field defaults to 0");
+
         fs::remove_dir_all(&dir).ok();
     }
 }

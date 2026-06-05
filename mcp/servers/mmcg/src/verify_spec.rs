@@ -606,9 +606,15 @@ mod tests {
     use std::path::PathBuf;
 
     fn tmp() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        // See `doctor.rs::tmp()` — same parallel-collision fix. The atomic
+        // counter guarantees a distinct directory per call; `process::id()` +
+        // nanos remain for cross-process uniqueness and debuggability.
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let p = std::env::temp_dir().join(format!(
-            "mmcg-verify-{}-{}",
+            "mmcg-verify-{}-{}-{}",
             std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()

@@ -82,7 +82,10 @@ pub fn do_init(
     if context_created {
         let label = match profile {
             Profile::Generic => "CONTEXT.md".to_string(),
-            _ => format!("CONTEXT.md (profile: {})", templates::profile_label(profile)),
+            _ => format!(
+                "CONTEXT.md (profile: {})",
+                templates::profile_label(profile)
+            ),
         };
         created.push(label);
     } else {

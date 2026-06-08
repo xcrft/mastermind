@@ -10,14 +10,10 @@ pub const CONTEXT_TEMPLATE: &str = include_str!("../templates/context.md");
 /// Mastermind workflow CLAUDE.md template.
 pub const WORKFLOW_TEMPLATE: &str = include_str!("../templates/workflow.md");
 
-const PROFILE_TYPESCRIPT_API: &str =
-    include_str!("../templates/profiles/typescript-api.md");
-const PROFILE_REACT_NATIVE: &str =
-    include_str!("../templates/profiles/react-native.md");
-const PROFILE_PYTHON_FASTAPI: &str =
-    include_str!("../templates/profiles/python-fastapi.md");
-const PROFILE_RUST_CLI: &str =
-    include_str!("../templates/profiles/rust-cli.md");
+const PROFILE_TYPESCRIPT_API: &str = include_str!("../templates/profiles/typescript-api.md");
+const PROFILE_REACT_NATIVE: &str = include_str!("../templates/profiles/react-native.md");
+const PROFILE_PYTHON_FASTAPI: &str = include_str!("../templates/profiles/python-fastapi.md");
+const PROFILE_RUST_CLI: &str = include_str!("../templates/profiles/rust-cli.md");
 
 /// Return the raw template text for a given profile.
 pub fn for_profile(profile: crate::Profile) -> &'static str {

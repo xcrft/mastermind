@@ -16,7 +16,7 @@ const SCHEMA_VERSION: &str = "6";
 pub struct Symbol {
     pub id: i64,
     pub name: String,
-    pub kind: String, // "function" | "class" | "method"
+    pub kind: String,
     pub file_path: String,
     pub line_start: u32,
     pub line_end: u32,

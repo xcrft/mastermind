@@ -102,7 +102,7 @@ printf '  ✓ %d CLAUDE.md templates → %s/templates/\n' "$n_templates" "$CLAUD
 printf '\n→ MCP server config\n'
 printf '  ℹ This installer no longer writes MCP config directly.\n'
 printf '    Run one of:\n'
-printf '      mmcg setup claude --write-mcp                        # global ~/.claude/.mcp.json\n'
+printf '      mmcg setup claude --write-mcp                        # user scope → ~/.claude.json\n'
 printf '      mmcg setup claude --project . --write-mcp            # project-local ./.mcp.json\n'
 printf '      mmcg setup claude                                    # dry-run: print diff and exit\n\n'
 printf '    See `mmcg setup claude --help` for `--with-workflow` (drop CLAUDE.md template)\n'

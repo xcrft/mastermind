@@ -85,8 +85,6 @@ plugins:
 sync-templates:
     cp agents/claude-md/mastermind-context.md {{MMCG}}/templates/context.md
     cp agents/claude-md/mastermind-workflow.md {{MMCG}}/templates/workflow.md
-    cp skills/workflow/mastermind-task-planning/references/spec-template.md \
-       {{MMCG}}/templates/spec-template.md
     @echo "Templates synced to {{MMCG}}/templates/. Run `just validate` to confirm parity."
 
 # Everything that should pass before pushing — matches what CI runs.

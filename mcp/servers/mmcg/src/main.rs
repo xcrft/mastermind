@@ -8,38 +8,23 @@
 //!   mastermind doctor         — health-check the setup
 //!   mastermind query <kind>   — one-shot query from the CLI (handy for debugging)
 
+mod commands;
+mod templates;
+
 use clap::{Parser, Subcommand, ValueEnum};
-use mmcg::indexer::Indexer;
 use mmcg::queries;
 use mmcg::store::Store;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
-/// Templates embedded at build time. These live inside the crate as a mirror of
-/// canonical sources (`agents/claude-md/mastermind-{context,workflow}.md`) so the
-/// published crate is self-contained — `cargo publish` cannot reach files outside
-/// the crate root, and reaching `../../../..` only works in a checked-out repo.
-///
-/// **Keep in sync** with the canonical files. `scripts/validate.py` enforces this
-/// (run after any edit to either side). To sync manually:
-///   cp agents/claude-md/mastermind-context.md mcp/servers/mmcg/templates/context.md
-///   cp agents/claude-md/mastermind-workflow.md mcp/servers/mmcg/templates/workflow.md
-const CONTEXT_TEMPLATE: &str = include_str!("../templates/context.md");
-const WORKFLOW_TEMPLATE: &str = include_str!("../templates/workflow.md");
-
-// Per-stack CONTEXT.md profiles (`mastermind init --profile <name>`). Each one is a
-// pre-seeded version of context.md with stack-specific layout conventions, test
-// commands, and gotchas baked in. Adding a new profile = add a file under
-// `templates/profiles/` + a const here + a `Profile` enum variant.
-const PROFILE_TYPESCRIPT_API: &str = include_str!("../templates/profiles/typescript-api.md");
-const PROFILE_REACT_NATIVE: &str = include_str!("../templates/profiles/react-native.md");
-const PROFILE_PYTHON_FASTAPI: &str = include_str!("../templates/profiles/python-fastapi.md");
-const PROFILE_RUST_CLI: &str = include_str!("../templates/profiles/rust-cli.md");
-
+/// CONTEXT.md profile variants. Adding a new profile:
+///   1. Add a file under `templates/profiles/`.
+///   2. Add a const in `templates.rs`.
+///   3. Add an arm in `templates::for_profile` and `templates::profile_label`.
+///   4. Add a variant here.
 #[derive(Copy, Clone, Debug, ValueEnum)]
 #[clap(rename_all = "kebab-case")]
-enum Profile {
+pub enum Profile {
     /// Generic CONTEXT.md (current default — no stack-specific seeding).
     Generic,
     /// TypeScript HTTP/REST/GraphQL API service.
@@ -55,33 +40,13 @@ enum Profile {
 /// Which parts of a Mastermind setup `uninstall` should remove.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 #[clap(rename_all = "kebab-case")]
-enum UninstallScope {
+pub enum UninstallScope {
     /// This project only: remove `.mastermind/` and the project `.mcp.json` mmcg entry.
     Project,
-    /// Global only: de-register mmcg from `~/.claude/.mcp.json` (leaves `.mastermind/` alone).
+    /// Global only: de-register mmcg from Claude Code user scope via `claude mcp remove` (leaves `.mastermind/` alone).
     Global,
     /// Both project and global.
     All,
-}
-
-fn profile_template(p: Profile) -> &'static str {
-    match p {
-        Profile::Generic => CONTEXT_TEMPLATE,
-        Profile::TypescriptApi => PROFILE_TYPESCRIPT_API,
-        Profile::ReactNative => PROFILE_REACT_NATIVE,
-        Profile::PythonFastapi => PROFILE_PYTHON_FASTAPI,
-        Profile::RustCli => PROFILE_RUST_CLI,
-    }
-}
-
-fn profile_label(p: Profile) -> &'static str {
-    match p {
-        Profile::Generic => "generic",
-        Profile::TypescriptApi => "typescript-api",
-        Profile::ReactNative => "react-native",
-        Profile::PythonFastapi => "python-fastapi",
-        Profile::RustCli => "rust-cli",
-    }
 }
 
 #[derive(Parser)]
@@ -165,16 +130,16 @@ enum Cmd {
     },
     /// Remove a Mastermind setup. By default (`--scope project`) deletes
     /// `.mastermind/` (index, tasks, run-state) and de-registers the `mmcg`
-    /// entry from the project `.mcp.json`. `--scope global` removes only the
-    /// `~/.claude/.mcp.json` entry; `--scope all` does both. Never touches
-    /// CONTEXT.md / CLAUDE.md. Safe by default: prints the plan and exits unless
-    /// `--force` is passed.
+    /// entry from the project `.mcp.json`. `--scope global` de-registers mmcg
+    /// from Claude Code user scope via `claude mcp remove`; `--scope all` does
+    /// both. Never touches CONTEXT.md / CLAUDE.md. Safe by default: prints the
+    /// plan and exits unless `--force` is passed.
     Uninstall {
         /// Project root. Defaults to cwd. (Ignored for `--scope global`.)
         #[arg(default_value = ".")]
         root: PathBuf,
         /// What to remove: `project` (.mastermind/ + project .mcp.json),
-        /// `global` (the ~/.claude/.mcp.json mmcg entry), or `all`.
+        /// `global` (de-register from Claude Code user scope via `claude mcp remove`), or `all`.
         #[arg(long, value_enum, default_value = "project")]
         scope: UninstallScope,
         /// Actually delete. Without this, prints what would be removed and exits.
@@ -422,8 +387,8 @@ enum SetupCmd {
     /// `mcpServers` rather than clobbering. Default = print diff + exit
     /// without writing. Pass `--write-mcp` to apply.
     Claude {
-        /// Project-local target: writes `<path>/.mcp.json` instead of the
-        /// global `~/.claude/.mcp.json`.
+        /// Project-local target: writes `<path>/.mcp.json` instead of
+        /// registering at user scope via `claude mcp add`.
         #[arg(long)]
         project: Option<PathBuf>,
         /// Actually write the config file. Without this, prints diff only.
@@ -465,7 +430,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .canonicalize()
                 .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
             let mut store = Store::open(&index_path)?;
-            let indexer = Indexer::new(&root);
+            let indexer = mmcg::indexer::Indexer::new(&root);
             let stats = indexer.index_all(&mut store, force)?;
             println!(
                 "indexed {} (unchanged {}, purged {}, failed {}) / scanned {} | {} symbols | {} edges | {} task specs | {} ms",
@@ -508,7 +473,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let root = root
                 .canonicalize()
                 .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
-            do_init(
+            commands::do_init(
                 &root,
                 with_claude_md,
                 force,
@@ -522,7 +487,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let root = root
                 .canonicalize()
                 .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
-            do_uninstall(&root, scope, force)?;
+            commands::do_uninstall(&root, scope, force)?;
         }
         Cmd::Setup(SetupCmd::Claude {
             project,
@@ -531,7 +496,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             with_workflow,
             force,
         }) => {
-            // `--dry-run` is the default (no-write); accepted for scripting clarity.
             let project_root = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
             let me = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
             let opts = mmcg::setup::Opts {
@@ -540,7 +504,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 with_workflow,
             };
             let outcome = if let Some(p) = project {
-                // Project scope → write `<root>/.mcp.json` (Claude Code reads this).
                 let root = p
                     .canonicalize()
                     .map_err(|e| format!("canonicalize {}: {e}", p.display()))?;
@@ -548,17 +511,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &mmcg::setup::Target::project(&root),
                     &me,
                     &project_root,
-                    &strip_template_comment(WORKFLOW_TEMPLATE),
+                    &templates::strip_comment(templates::WORKFLOW_TEMPLATE),
                     opts,
                 )
             } else {
-                // User (global) scope → `claude mcp add --scope user`, which writes
-                // ~/.claude.json. (The old path, ~/.claude/.mcp.json, is ignored by
-                // Claude Code, so global registration never actually took effect.)
                 mmcg::setup::add_claude_user(
                     &me,
                     &project_root,
-                    &strip_template_comment(WORKFLOW_TEMPLATE),
+                    &templates::strip_comment(templates::WORKFLOW_TEMPLATE),
                     opts,
                 )
             };
@@ -581,11 +541,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
             let parsed = mmcg::spec::parse_file(&spec)
                 .map_err(|e| format!("parse {}: {e}", spec.display()))?;
-            // Store is optional — skip live mmcg checks if no index. That
-            // still gives mandatory-sections + missing-files coverage.
             let store = Store::open(&index_path).ok();
             let mut report = mmcg::verify_spec::run(&parsed, store.as_ref(), &root);
-            // --strict implies --require-index; both hard-fail when no index.
             if (strict || require_index) && store.is_none() {
                 report.push_error(mmcg::verify_spec::Finding::StrictViolation {
                     reason:
@@ -625,9 +582,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 print!("{}", report.render_text());
             }
-            // Deterministic lesson log — bypasses the LLM-auditor path so
-            // `_lessons.md` accumulates even when the subagent isn't spawned.
-            // Best-effort: write failure prints a warning but never aborts.
             match mmcg::lessons::append_if_drift_or_broken(&root, &spec, &report) {
                 Ok(true) if !json => {
                     eprintln!("  appended lesson → .mastermind/tasks/_lessons.md")
@@ -643,8 +597,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let root = root
                 .canonicalize()
                 .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
-            // Use the binary we're already running for the MCP handshake check —
-            // guarantees the version under test matches what's installed.
             let me = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
             let report = mmcg::doctor::run(&root, &me);
             if json {
@@ -652,9 +604,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 print!("{}", report.render_text());
             }
-            // Doctor "failures" are environment problems, not runtime errors.
-            // Exit non-zero so CI / shell scripts can react; bypass the
-            // generic error-printing path in main().
             if report.has_failures() {
                 std::process::exit(1);
             }
@@ -685,9 +634,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 force_iteration,
             };
             let outcome = mmcg::run_task::run(&spec, &root, &index_path, opts);
-            // Map outcomes to exit codes: gate failures / contract breaks /
-            // executor failures all surface as non-zero so CI / shell pipelines
-            // can react. PostDrift is deliberately exit 0 — warnings, not blocks.
             if matches!(
                 outcome,
                 mmcg::run_task::Outcome::PreFailed
@@ -803,502 +749,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
-}
-
-/// Strip the HTML-comment "instructions to the user" block from a template so
-/// the copied file is what the adopter actually uses, not the template-meta.
-fn strip_template_comment(text: &str) -> String {
-    // Find the COPY FROM HERE marker; if absent, return text as-is.
-    let marker_open = "<!-- ─── COPY FROM HERE ─── -->";
-    let marker_close = "<!-- ─── COPY TO HERE ─── -->";
-    if let Some(start) = text.find(marker_open) {
-        let body_start = start + marker_open.len();
-        let body_end = text[body_start..]
-            .find(marker_close)
-            .map(|i| body_start + i)
-            .unwrap_or(text.len());
-        text[body_start..body_end].trim().to_string() + "\n"
-    } else {
-        text.to_string()
-    }
-}
-
-fn write_if_absent(
-    path: &Path,
-    contents: &str,
-    force: bool,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    if path.exists() && !force {
-        return Ok(false);
-    }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, contents)?;
-    Ok(true)
-}
-
-/// Bare `<name>.md` files at the top of `.mastermind/tasks/` — the 0.6.x flat layout.
-/// `_`-prefixed names (shared assets like `_lessons.md`) and
-/// `.`-prefixed names (`.gitignore` etc) are not migration candidates.
-fn collect_flat_specs(tasks_dir: &Path) -> Vec<String> {
-    let Ok(entries) = fs::read_dir(tasks_dir) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for dirent in entries.flatten() {
-        let path = dirent.path();
-        if !path.is_file() {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        if !name.ends_with(".md") || name.starts_with('_') || name.starts_with('.') {
-            continue;
-        }
-        out.push(name.to_string());
-    }
-    out.sort();
-    out
-}
-
-fn do_init(
-    root: &Path,
-    with_claude_md: bool,
-    force: bool,
-    profile: Profile,
-    index: bool,
-    claude: bool,
-    global: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut created: Vec<String> = Vec::new();
-    let mut skipped: Vec<String> = Vec::new();
-    let mut warnings: Vec<String> = Vec::new();
-    let mut context_fill_prompt: Option<String> = None;
-
-    // 1. .mastermind/ — single working-state folder, fully gitignored.
-    //    Contains tasks/, the mmcg index, and anything else session-scratch.
-    let mastermind_dir = root.join(".mastermind");
-    let tasks_dir = mastermind_dir.join("tasks");
-    if !mastermind_dir.exists() {
-        fs::create_dir_all(&mastermind_dir)?;
-        // Defensive inner .gitignore: even if the project's root .gitignore doesn't
-        // list .mastermind/, every file under here stays untracked. Add `!pattern`
-        // lines below the `*` if you ever want to share a specific file (e.g. a spec
-        // worth preserving as an example).
-        fs::write(
-            mastermind_dir.join(".gitignore"),
-            "# Generated by `mastermind init` — local working state, not for commit.\n\
-             # To share a specific file, add `!path/to/file` AFTER the `*` line below.\n\
-             *\n\
-             !.gitignore\n",
-        )?;
-        created.push(".mastermind/.gitignore".into());
-    } else {
-        skipped.push(".mastermind/ (already exists)".into());
-    }
-
-    // 2. .mastermind/tasks/ — per-task folders live here. Each task gets its own
-    //    folder (`<NNN>-<kebab-name>/spec.md` + any related artifacts). Shared
-    //    files (`_lessons.md`) stay at the top level.
-    //    Layout history: pre-0.6.0 root `.tasks/`, 0.6.x flat `.mastermind/tasks/*.md`,
-    //    0.7.0+ per-task folders.
-    if !tasks_dir.exists() {
-        fs::create_dir_all(&tasks_dir)?;
-        created.push(".mastermind/tasks/".into());
-    } else {
-        skipped.push(".mastermind/tasks/ (already exists)".into());
-    }
-
-    // Surface legacy `.tasks/` at project root (pre-0.6.0 layout) so the user knows
-    // to migrate it. Don't auto-move — user might have it in active use.
-    let legacy_tasks = root.join(".tasks");
-    if legacy_tasks.exists() {
-        warnings.push(
-            "legacy `.tasks/` directory exists at project root (pre-0.6.0 layout). \
-             Migrate it with: `mv .tasks/* .mastermind/tasks/ && rmdir .tasks` \
-             — specs now live under `.mastermind/tasks/`."
-                .to_string(),
-        );
-    }
-
-    // Surface flat-spec files (`.mastermind/tasks/NNN-name.md`, 0.6.x layout) so
-    // the user knows to migrate to per-task folders. Don't auto-move — the user
-    // may have related artifacts named with the same prefix.
-    let flat_specs = collect_flat_specs(&tasks_dir);
-    if !flat_specs.is_empty() {
-        let example = flat_specs.first().cloned().unwrap_or_default();
-        let stem = example.strip_suffix(".md").unwrap_or(&example);
-        warnings.push(format!(
-            "found {n} flat spec file(s) under `.mastermind/tasks/` (0.6.x layout, e.g. `{example}`). \
-             Migrate each `NNN-name.md` to `NNN-name/spec.md`. Example: \
-             `mkdir -p .mastermind/tasks/{stem} && mv .mastermind/tasks/{example} .mastermind/tasks/{stem}/spec.md` \
-             — flat specs are no longer indexed.",
-            n = flat_specs.len(),
-        ));
-    }
-
-    // 3. CONTEXT.md from the picked profile template (strip the HTML-comment
-    //    instructions block). `--profile generic` keeps the original
-    //    stack-agnostic template; stack-specific profiles pre-seed the file
-    //    with conventions / commands / gotchas — see `templates/profiles/`.
-    let context_path = root.join("CONTEXT.md");
-    let context_body = strip_template_comment(profile_template(profile));
-    let context_created = write_if_absent(&context_path, &context_body, force)?;
-    if context_created {
-        let label = match profile {
-            Profile::Generic => "CONTEXT.md".to_string(),
-            _ => format!("CONTEXT.md (profile: {})", profile_label(profile)),
-        };
-        created.push(label);
-    } else {
-        skipped.push("CONTEXT.md (already exists — pass --force to overwrite)".into());
-    }
-
-    // 4. CLAUDE.md (optional)
-    let mut claude_md_created = false;
-    if with_claude_md {
-        let claude_path = root.join("CLAUDE.md");
-        let claude_body = strip_template_comment(WORKFLOW_TEMPLATE);
-        if write_if_absent(&claude_path, &claude_body, force)? {
-            created.push("CLAUDE.md".into());
-            claude_md_created = true;
-        } else {
-            skipped.push("CLAUDE.md (already exists — pass --force to overwrite)".into());
-        }
-    }
-
-    // Surface obsolete `_spec-template.md` (pre-0.7.0 init dropped it here, but
-    // the planner skill never read it — it copies from its own bundled
-    // `references/spec-template.md`). Safe to remove on sight.
-    let obsolete_template = tasks_dir.join("_spec-template.md");
-    if obsolete_template.exists() {
-        warnings.push(
-            "found `.mastermind/tasks/_spec-template.md` — obsolete (the planner skill \
-             uses its own bundled template, this copy is unused). \
-             Safe to remove: `rm .mastermind/tasks/_spec-template.md`."
-                .to_string(),
-        );
-    }
-
-    // 5. Index database
-    let db_path = mastermind_dir.join("mmcg.db");
-    if !db_path.exists() {
-        let _ = Store::open(&db_path)?; // creates schema
-        created.push(".mastermind/mmcg.db".into());
-    } else {
-        skipped.push(".mastermind/mmcg.db (already exists)".into());
-    }
-
-    // 6. Build the index now so the project is queryable immediately — `init`
-    //    should leave you ready to use, not half-configured. `--no-index` opts out.
-    if index {
-        let mut store = Store::open(&db_path)?;
-        let indexer = Indexer::new(root);
-        match indexer.index_all(&mut store, false) {
-            Ok(stats) => created.push(format!(
-                "indexed {} files, {} symbols, {} edges ({} ms)",
-                stats.files_indexed, stats.symbols_total, stats.edges_total, stats.duration_ms
-            )),
-            Err(e) => warnings.push(format!(
-                "index build failed: {e} — run `mastermind index .` manually"
-            )),
-        }
-    } else {
-        skipped.push("index build (--no-index) — run `mastermind index .` when ready".into());
-    }
-
-    // 7. Draft the scaffold's project-specific content from the codebase via
-    //    `claude -p` — CONTEXT.md (when freshly created) and, with --with-claude-md,
-    //    the CLAUDE.md <PLACEHOLDER> sections. One claude run fills both. Only
-    //    targets files we just created (never clobbers user-edited ones). Best-effort:
-    //    a missing CLI or non-zero exit never fails init (we fall back to the prompt).
-    let fill_context = claude && context_created;
-    let fill_claude_md = claude && claude_md_created;
-    if fill_context || fill_claude_md {
-        let claude_md_path = root.join("CLAUDE.md");
-        let prompt = draft_prompt(
-            fill_context.then_some(context_path.as_path()),
-            fill_claude_md.then_some(claude_md_path.as_path()),
-        );
-        match run_claude_draft(root, &prompt) {
-            Ok(()) => {
-                if fill_context {
-                    created.push("CONTEXT.md populated via `claude -p`".into());
-                }
-                if fill_claude_md {
-                    created.push("CLAUDE.md placeholders filled via `claude -p`".into());
-                }
-            }
-            Err(e) => {
-                warnings.push(format!("claude -p auto-fill skipped: {e}"));
-                context_fill_prompt = Some(prompt);
-            }
-        }
-    }
-
-    // 9. Install the workflow subagents, skills, and commands into ~/.claude/ — the part the
-    //    npm binary alone doesn't give you. Overwrites Mastermind's own files so
-    //    they stay current; leaves other files in those dirs alone. `--no-global`
-    //    opts out. A cargo install ships no bundle, so it's skipped with a pointer
-    //    to the plugin marketplace.
-    if global {
-        match install_workflow_global() {
-            Ok(msg) => created.push(msg),
-            Err(e) => warnings.push(format!("global workflow install skipped — {e}")),
-        }
-    }
-
-    // Report
-    println!("Mastermind workflow initialized at {}", root.display());
-    if !created.is_empty() {
-        println!("\nCreated:");
-        for c in &created {
-            println!("  + {c}");
-        }
-    }
-    if !warnings.is_empty() {
-        println!("\nWarnings:");
-        for w in &warnings {
-            println!("  ! {w}");
-        }
-    }
-    if !skipped.is_empty() {
-        println!("\nSkipped:");
-        for s in &skipped {
-            println!("  - {s}");
-        }
-    }
-
-    println!("\nNext steps:");
-    println!("  1. Register with Claude Code:  mastermind setup claude --write-mcp");
-    println!("     (run once — the global server serves whichever project you open)");
-    println!("  2. Add `.mastermind/` to your project's root `.gitignore` (local working state)");
-    println!("  3. (Optional) Keep the index fresh in another terminal:  mastermind watch");
-    if !with_claude_md {
-        println!("  4. Adopt the workflow CLAUDE.md:  re-run `mastermind init --with-claude-md`");
-    } else if claude {
-        println!(
-            "  4. Review the drafted CLAUDE.md — placeholders were filled from your codebase."
-        );
-    } else {
-        println!("  4. Fill CLAUDE.md's <PLACEHOLDER> sections (--no-claude skipped auto-fill).");
-    }
-    if let Some(prompt) = context_fill_prompt {
-        println!(
-            "\nScaffold files were left as templates. To fill them, paste this into Claude Code:\n\n  {prompt}"
-        );
-    }
-
-    Ok(())
-}
-
-/// Build the `claude -p` prompt that fills the freshly-scaffolded files from the
-/// codebase. Each file gets scoped instructions so Claude fills only what should
-/// be project-specific and leaves accumulating sections as templates. Also used
-/// as the printed fallback when the Claude CLI is unavailable.
-fn draft_prompt(context: Option<&Path>, claude_md: Option<&Path>) -> String {
-    let mut s = String::from(
-        "Fill in the following freshly-scaffolded Mastermind files for THIS project by reading the \
-         codebase (use the mmcg MCP tools and file access). State only things that are true about the \
-         project and not trivially derivable; do not invent.",
-    );
-    if let Some(p) = context {
-        s.push_str(&format!(
-            "\n- `{}`: fill ONLY the Identity (what it is / what it is not / primary users) and Active \
-             goals sections. Leave Decision log, Known gotchas, Domain glossary, External dependencies, \
-             and Don't-touch list as the empty templates — those accumulate over time.",
-            p.display()
-        ));
-    }
-    if let Some(p) = claude_md {
-        s.push_str(&format!(
-            "\n- `{}`: replace the <PLACEHOLDER> tokens (project name, and the run / test / typecheck / \
-             lint commands) with the project's real values, inferred from package manifests, scripts, and \
-             config. Leave the workflow instructions intact — only fill the placeholders.",
-            p.display()
-        ));
-    }
-    s
-}
-
-/// Best-effort: shell out to `claude -p` to draft the scaffold files from the
-/// codebase. Runs in `root` with `--permission-mode acceptEdits` so the file
-/// writes apply without a prompt (it still prompts for Bash/other tools). Returns
-/// Err on spawn failure or non-zero exit so the caller can fall back to printing
-/// the prompt — auto-fill never fails the overall `init`.
-fn run_claude_draft(root: &Path, prompt: &str) -> Result<(), String> {
-    println!("\nDrafting scaffold files via `claude -p` (pass --no-claude to skip)...\n");
-    let status = std::process::Command::new("claude")
-        .arg("-p")
-        .arg(prompt)
-        .arg("--permission-mode")
-        .arg("acceptEdits")
-        .current_dir(root)
-        .stdin(std::process::Stdio::null())
-        .status()
-        .map_err(|e| {
-            format!("spawn claude: {e} — is the Claude Code CLI installed and on PATH?")
-        })?;
-    if !status.success() {
-        return Err(format!("claude exited with {status}"));
-    }
-    Ok(())
-}
-
-/// Install the bundled workflow subagents, skills, and slash commands into `~/.claude/` so the full
-/// Mastermind workflow — not just the codegraph — is available to Claude Code.
-/// Reads the bundle from `$MASTERMIND_SHARE_DIR` (set by the npm wrapper); a
-/// cargo install ships no bundle, so it's skipped with a marketplace pointer.
-/// Only runs when `~/.claude/` already exists (Claude Code is set up). Overwrites
-/// the files Mastermind ships; leaves any other files in those dirs untouched.
-fn install_workflow_global() -> Result<String, String> {
-    let share = std::env::var("MASTERMIND_SHARE_DIR")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            "no bundle (cargo install?) — add the workflow via the Claude Code plugin \
-             marketplace: `/plugin marketplace add xcrft/mastermind`"
-                .to_string()
-        })?;
-    let share = Path::new(&share);
-    let home = dirs::home_dir().ok_or_else(|| "no $HOME — cannot locate ~/.claude".to_string())?;
-    let claude = home.join(".claude");
-    if !claude.exists() {
-        return Err(format!(
-            "{} not found (is Claude Code installed?)",
-            claude.display()
-        ));
-    }
-
-    // Subagents → ~/.claude/agents/ (flat `.md` files).
-    let mut agents = 0usize;
-    let src_agents = share.join("agents");
-    if src_agents.is_dir() {
-        let dst = claude.join("agents");
-        fs::create_dir_all(&dst).map_err(|e| format!("create {}: {e}", dst.display()))?;
-        for entry in fs::read_dir(&src_agents).map_err(|e| e.to_string())? {
-            let p = entry.map_err(|e| e.to_string())?.path();
-            if p.extension().and_then(|x| x.to_str()) == Some("md") {
-                let name = p.file_name().expect("dir entry has a name");
-                fs::copy(&p, dst.join(name)).map_err(|e| format!("copy {}: {e}", p.display()))?;
-                agents += 1;
-            }
-        }
-    }
-
-    // Skills → ~/.claude/skills/<name>/ (directories, copied recursively).
-    let mut skills = 0usize;
-    let src_skills = share.join("skills");
-    if src_skills.is_dir() {
-        let dst_root = claude.join("skills");
-        for entry in fs::read_dir(&src_skills).map_err(|e| e.to_string())? {
-            let p = entry.map_err(|e| e.to_string())?.path();
-            if p.is_dir() {
-                let name = p.file_name().expect("dir entry has a name");
-                copy_dir_all(&p, &dst_root.join(name))
-                    .map_err(|e| format!("copy skill {}: {e}", p.display()))?;
-                skills += 1;
-            }
-        }
-    }
-
-    // Prompts → ~/.claude/commands/ (flat `.md` slash-command files).
-    let mut commands = 0usize;
-    let src_commands = share.join("commands");
-    if src_commands.is_dir() {
-        let dst = claude.join("commands");
-        fs::create_dir_all(&dst).map_err(|e| format!("create {}: {e}", dst.display()))?;
-        for entry in fs::read_dir(&src_commands).map_err(|e| e.to_string())? {
-            let p = entry.map_err(|e| e.to_string())?.path();
-            if p.extension().and_then(|x| x.to_str()) == Some("md") {
-                let name = p.file_name().expect("dir entry has a name");
-                fs::copy(&p, dst.join(name)).map_err(|e| format!("copy {}: {e}", p.display()))?;
-                commands += 1;
-            }
-        }
-    }
-
-    Ok(format!(
-        "installed {agents} subagents + {skills} skills + {commands} commands into {}",
-        claude.display()
-    ))
-}
-
-/// Recursively copy `src` into `dst` (created if missing), overwriting files.
-fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir_all(&from, &to)?;
-        } else {
-            fs::copy(&from, &to)?;
-        }
-    }
-    Ok(())
-}
-
-/// Reverse of `do_init`. `Project` scope removes `.mastermind/` + the project
-/// `.mcp.json` mmcg entry; `Global` removes the `~/.claude/.mcp.json` entry;
-/// `All` does both. Safe by default — prints the plan and exits unless `force`.
-/// Never touches CONTEXT.md / CLAUDE.md (user-edited).
-fn do_uninstall(
-    root: &Path,
-    scope: UninstallScope,
-    force: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let do_project = matches!(scope, UninstallScope::Project | UninstallScope::All);
-    let do_global = matches!(scope, UninstallScope::Global | UninstallScope::All);
-    println!(
-        "=== mastermind uninstall — scope: {} ===",
-        scope_label(scope)
-    );
-
-    if do_project {
-        let mastermind_dir = root.join(".mastermind");
-        if mastermind_dir.exists() {
-            if force {
-                fs::remove_dir_all(&mastermind_dir)?;
-                println!(
-                    "Removed {} (index, tasks, run-state).",
-                    mastermind_dir.display()
-                );
-            } else {
-                println!(
-                    "Would remove {} (index, tasks, run-state).",
-                    mastermind_dir.display()
-                );
-            }
-        } else {
-            println!(
-                "No `.mastermind/` at {} — nothing to remove there.",
-                root.display()
-            );
-        }
-        // Prints its own diff + dry-run / written notice.
-        mmcg::setup::remove_claude(&mmcg::setup::Target::project(root), force);
-    }
-
-    if do_global {
-        mmcg::setup::remove_claude_user(force);
-    }
-
-    if !force {
-        println!("\n(dry-run — pass --force to apply. CONTEXT.md / CLAUDE.md are never touched.)");
-    }
-    Ok(())
-}
-
-fn scope_label(s: UninstallScope) -> &'static str {
-    match s {
-        UninstallScope::Project => "project (.mastermind/ + project .mcp.json)",
-        UninstallScope::Global => "global (~/.claude/.mcp.json)",
-        UninstallScope::All => "all (project + global)",
-    }
 }
 
 fn main() -> ExitCode {

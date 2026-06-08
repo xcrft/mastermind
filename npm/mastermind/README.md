@@ -54,7 +54,7 @@ Three pieces — the split is the part that trips people up:
 |---|---|---|---|
 | **Index** — `init` + `index` | **per project** | `.mastermind/mmcg.db` in each repo | once per repo, refresh with `index` / `watch` |
 | **Workflow** — subagents, skills, commands | global | `~/.claude/{agents,skills,commands}/` | installed + refreshed by `init` |
-| **MCP registration** — `setup claude` | once | `~/.claude/.mcp.json` | once for all projects |
+| **MCP registration** — `setup claude` | once | `~/.claude.json` (via `claude mcp add`) | once for all projects |
 
 - **The index is always per-project.** Run `mastermind init` in *every* repo you want indexed. `doctor` reporting `index database not found` just means you haven't done this in the current directory yet (the exact situation if you run `doctor` from `/tmp` or a fresh shell).
 - **The workflow installs globally on `init`** — subagents, skills + slash commands land in `~/.claude/{agents,skills,commands}/`, overwriting Mastermind's own files to keep them current (`--no-global` to skip). Ships with the npm package; cargo installs use the plugin marketplace instead.
@@ -71,7 +71,7 @@ Three pieces — the split is the part that trips people up:
 npm install -g @xcraftmind/mastermind
 ```
 
-Puts `mastermind` on your PATH. `setup claude --write-mcp` registers `command: "mastermind"` in `~/.claude/.mcp.json`.
+Puts `mastermind` on your PATH. `setup claude --write-mcp` registers `command: "mastermind"` at Claude Code user scope via `claude mcp add --scope user` (writes `~/.claude.json`).
 
 ### Project-local
 
@@ -116,7 +116,7 @@ mastermind query callers <symbol>           # one-shot CLI query (agents use the
 mastermind uninstall [--scope <s>]          # remove project setup (.mastermind/ + project .mcp.json); --scope global|all for the global MCP entry
 ```
 
-`mmcg` is a legacy alias for the same binary (cargo installs expose it under that name) — prefer `mastermind`. See `mastermind <subcommand> --help` for full options.
+`mmcg` is the cargo binary name (`cargo install mmcg` puts `mmcg` on PATH rather than `mastermind`) — same code, same subcommands. See `mastermind <subcommand> --help` for full options.
 
 ## Supported platforms
 

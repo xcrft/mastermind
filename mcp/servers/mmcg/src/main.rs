@@ -12,8 +12,7 @@ mod commands;
 mod templates;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use mmcg::queries;
-use mmcg::store::Store;
+use mmcg::{queries, store::Store};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -536,33 +535,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             require_index,
             strict,
         } => {
-            let root = root
-                .canonicalize()
-                .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
-            let parsed = mmcg::spec::parse_file(&spec)
-                .map_err(|e| format!("parse {}: {e}", spec.display()))?;
-            let store = Store::open(&index_path).ok();
-            let mut report = mmcg::verify_spec::run(&parsed, store.as_ref(), &root);
-            if (strict || require_index) && store.is_none() {
-                report.push_error(mmcg::verify_spec::Finding::StrictViolation {
-                    reason:
-                        "no index — run `mastermind index .` (required by --strict / --require-index)"
-                            .into(),
-                });
-            }
-            if strict {
-                for f in mmcg::verify_spec::strict_check(&parsed) {
-                    report.push_error(f);
-                }
-            }
-            if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                print!("{}", report.render_text());
-            }
-            if report.has_failures() {
-                std::process::exit(1);
-            }
+            commands::verify_spec(&spec, root, json, require_index, strict, &index_path)?;
         }
         Cmd::AuditSpec {
             spec,
@@ -570,28 +543,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             root,
             json,
         } => {
-            let root = root
-                .canonicalize()
-                .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
-            let parsed = mmcg::spec::parse_file(&spec)
-                .map_err(|e| format!("parse {}: {e}", spec.display()))?;
-            let store = Store::open(&index_path)?;
-            let report = mmcg::audit_spec::run(&parsed, &store, &root, &since)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                print!("{}", report.render_text());
-            }
-            match mmcg::lessons::append_if_drift_or_broken(&root, &spec, &report) {
-                Ok(true) if !json => {
-                    eprintln!("  appended lesson → .mastermind/tasks/_lessons.md")
-                }
-                Err(e) if !json => eprintln!("  warning: lessons append failed: {e}"),
-                _ => {}
-            }
-            if report.has_failures() {
-                std::process::exit(1);
-            }
+            commands::audit_spec(&spec, &since, root, json, &index_path)?;
         }
         Cmd::Doctor { root, json } => {
             let root = root
@@ -643,110 +595,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         }
-        Cmd::Query(q) => {
-            let store = Store::open(&index_path)?;
-            let result = match q {
-                QueryCmd::Search {
-                    name,
-                    kind,
-                    language,
-                    no_collapse_partials,
-                } => serde_json::to_value(queries::search(
-                    &store,
-                    &name,
-                    kind.as_deref(),
-                    language.as_deref(),
-                    !no_collapse_partials,
-                )?)?,
-                QueryCmd::Callers {
-                    name,
-                    language,
-                    edge_kind,
-                } => serde_json::to_value(queries::callers(
-                    &store,
-                    &name,
-                    language.as_deref(),
-                    edge_kind.as_deref(),
-                )?)?,
-                QueryCmd::Callees {
-                    name,
-                    language,
-                    edge_kind,
-                } => serde_json::to_value(queries::callees(
-                    &store,
-                    &name,
-                    language.as_deref(),
-                    edge_kind.as_deref(),
-                )?)?,
-                QueryCmd::Impact {
-                    name,
-                    depth,
-                    language,
-                } => serde_json::to_value(queries::impact(
-                    &store,
-                    &name,
-                    depth,
-                    language.as_deref(),
-                )?)?,
-                QueryCmd::Files { prefix, language } => serde_json::to_value(queries::files(
-                    &store,
-                    prefix.as_deref(),
-                    language.as_deref(),
-                )?)?,
-                QueryCmd::SymbolsInFile { file } => {
-                    serde_json::to_value(queries::symbols_in_file(&store, &file)?)?
-                }
-                QueryCmd::Outline { file } => {
-                    serde_json::to_value(queries::outline(&store, &file)?)?
-                }
-                QueryCmd::Recent { since } => serde_json::to_value(
-                    queries::recent_changes(&store, &since)
-                        .map_err(|e| format!("recent_changes: {e}"))?,
-                )?,
-                QueryCmd::Unreferenced { kind, language } => serde_json::to_value(
-                    queries::unreferenced(&store, kind.as_deref(), language.as_deref())?,
-                )?,
-                QueryCmd::ApiSurface { prefix, language } => serde_json::to_value(
-                    queries::api_surface(&store, &prefix, language.as_deref())?,
-                )?,
-                QueryCmd::DependencyCycles { language, min_size } => serde_json::to_value(
-                    queries::dependency_cycles(&store, language.as_deref(), min_size)?,
-                )?,
-                QueryCmd::Centrality {
-                    prefix,
-                    language,
-                    kind,
-                    top,
-                } => serde_json::to_value(queries::centrality(
-                    &store,
-                    prefix.as_deref(),
-                    language.as_deref(),
-                    kind.as_deref(),
-                    top,
-                )?)?,
-                QueryCmd::Tasks { query, top } => {
-                    serde_json::to_value(queries::tasks(&store, &query, top)?)?
-                }
-                QueryCmd::SymbolsChangedSince { git_ref, root } => {
-                    let root = root
-                        .canonicalize()
-                        .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
-                    let diff = queries::symbols_changed_since(&store, &root, &git_ref)?;
-                    serde_json::to_value(diff)?
-                }
-                QueryCmd::ImportedBy {
-                    query,
-                    match_kind,
-                    language,
-                } => serde_json::to_value(queries::imported_by(
-                    &store,
-                    &query,
-                    &match_kind,
-                    language.as_deref(),
-                )?)?,
-            };
-            println!("{}", serde_json::to_string_pretty(&result)?);
-        }
+        Cmd::Query(q) => commands::dispatch_query(q, &index_path)?,
     }
     Ok(())
 }

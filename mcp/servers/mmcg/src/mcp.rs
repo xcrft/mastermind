@@ -50,26 +50,106 @@ struct ToolDef {
 
 /// Authoritative tool list — order matches `tools/list` output.
 static TOOLS: &[ToolDef] = &[
-    ToolDef { name: "mmcg_search",              schema: schema_search,              handler: handle_search              },
-    ToolDef { name: "mmcg_callers",             schema: schema_callers,             handler: handle_callers             },
-    ToolDef { name: "mmcg_callees",             schema: schema_callees,             handler: handle_callees             },
-    ToolDef { name: "mmcg_impact",              schema: schema_impact,              handler: handle_impact              },
-    ToolDef { name: "mmcg_symbols_in_file",     schema: schema_symbols_in_file,     handler: handle_symbols_in_file     },
-    ToolDef { name: "mmcg_outline",             schema: schema_outline,             handler: handle_outline             },
-    ToolDef { name: "mmcg_files",               schema: schema_files,               handler: handle_files               },
-    ToolDef { name: "mmcg_imports",             schema: schema_imports,             handler: handle_imports             },
-    ToolDef { name: "mmcg_imported_by",         schema: schema_imported_by,         handler: handle_imported_by         },
-    ToolDef { name: "mmcg_unreferenced",        schema: schema_unreferenced,        handler: handle_unreferenced        },
-    ToolDef { name: "mmcg_api_surface",         schema: schema_api_surface,         handler: handle_api_surface         },
-    ToolDef { name: "mmcg_symbols_changed_since", schema: schema_symbols_changed_since, handler: handle_symbols_changed_since },
-    ToolDef { name: "mmcg_dependency_cycles",   schema: schema_dependency_cycles,   handler: handle_dependency_cycles   },
-    ToolDef { name: "mmcg_tasks",               schema: schema_tasks,               handler: handle_tasks               },
-    ToolDef { name: "mmcg_centrality",          schema: schema_centrality,          handler: handle_centrality          },
-    ToolDef { name: "mmcg_recent_changes",      schema: schema_recent_changes,      handler: handle_recent_changes      },
-    ToolDef { name: "mmcg_status",              schema: schema_status,              handler: handle_status              },
-    ToolDef { name: "mmcg_scratchpad_append",   schema: schema_scratchpad_append,   handler: handle_scratchpad_append   },
-    ToolDef { name: "mmcg_scratchpad_read",     schema: schema_scratchpad_read,     handler: handle_scratchpad_read     },
-    ToolDef { name: "mmcg_change_class",        schema: schema_change_class,        handler: handle_change_class        },
+    ToolDef {
+        name: "mmcg_search",
+        schema: schema_search,
+        handler: handle_search,
+    },
+    ToolDef {
+        name: "mmcg_callers",
+        schema: schema_callers,
+        handler: handle_callers,
+    },
+    ToolDef {
+        name: "mmcg_callees",
+        schema: schema_callees,
+        handler: handle_callees,
+    },
+    ToolDef {
+        name: "mmcg_impact",
+        schema: schema_impact,
+        handler: handle_impact,
+    },
+    ToolDef {
+        name: "mmcg_symbols_in_file",
+        schema: schema_symbols_in_file,
+        handler: handle_symbols_in_file,
+    },
+    ToolDef {
+        name: "mmcg_outline",
+        schema: schema_outline,
+        handler: handle_outline,
+    },
+    ToolDef {
+        name: "mmcg_files",
+        schema: schema_files,
+        handler: handle_files,
+    },
+    ToolDef {
+        name: "mmcg_imports",
+        schema: schema_imports,
+        handler: handle_imports,
+    },
+    ToolDef {
+        name: "mmcg_imported_by",
+        schema: schema_imported_by,
+        handler: handle_imported_by,
+    },
+    ToolDef {
+        name: "mmcg_unreferenced",
+        schema: schema_unreferenced,
+        handler: handle_unreferenced,
+    },
+    ToolDef {
+        name: "mmcg_api_surface",
+        schema: schema_api_surface,
+        handler: handle_api_surface,
+    },
+    ToolDef {
+        name: "mmcg_symbols_changed_since",
+        schema: schema_symbols_changed_since,
+        handler: handle_symbols_changed_since,
+    },
+    ToolDef {
+        name: "mmcg_dependency_cycles",
+        schema: schema_dependency_cycles,
+        handler: handle_dependency_cycles,
+    },
+    ToolDef {
+        name: "mmcg_tasks",
+        schema: schema_tasks,
+        handler: handle_tasks,
+    },
+    ToolDef {
+        name: "mmcg_centrality",
+        schema: schema_centrality,
+        handler: handle_centrality,
+    },
+    ToolDef {
+        name: "mmcg_recent_changes",
+        schema: schema_recent_changes,
+        handler: handle_recent_changes,
+    },
+    ToolDef {
+        name: "mmcg_status",
+        schema: schema_status,
+        handler: handle_status,
+    },
+    ToolDef {
+        name: "mmcg_scratchpad_append",
+        schema: schema_scratchpad_append,
+        handler: handle_scratchpad_append,
+    },
+    ToolDef {
+        name: "mmcg_scratchpad_read",
+        schema: schema_scratchpad_read,
+        handler: handle_scratchpad_read,
+    },
+    ToolDef {
+        name: "mmcg_change_class",
+        schema: schema_change_class,
+        handler: handle_change_class,
+    },
 ];
 
 /// Run as an MCP stdio server. Blocks until stdin closes.
@@ -126,11 +206,21 @@ fn handle_request(store: &mut Store, method: &str, params: &Value, id: Value) ->
 }
 
 fn ok(id: Value, result: Value) -> JsonRpcResponse {
-    JsonRpcResponse { jsonrpc: "2.0", id, result: Some(result), error: None }
+    JsonRpcResponse {
+        jsonrpc: "2.0",
+        id,
+        result: Some(result),
+        error: None,
+    }
 }
 
 fn err(id: Value, code: i32, message: String) -> JsonRpcResponse {
-    JsonRpcResponse { jsonrpc: "2.0", id, result: None, error: Some(JsonRpcError { code, message }) }
+    JsonRpcResponse {
+        jsonrpc: "2.0",
+        id,
+        result: None,
+        error: Some(JsonRpcError { code, message }),
+    }
 }
 
 fn initialize_result() -> Value {
@@ -150,7 +240,10 @@ fn handle_tools_call(store: &mut Store, params: &Value) -> Result<Value, String>
         .get("name")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "missing 'name' in tools/call params".to_string())?;
-    let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let args = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
 
     let tool = TOOLS
         .iter()
@@ -563,7 +656,9 @@ fn handle_symbols_changed_since(store: &mut Store, args: &Value) -> Result<Value
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| std::path::PathBuf::from(".")),
     };
-    let root = root.canonicalize().map_err(|e| format!("canonicalize root: {e}"))?;
+    let root = root
+        .canonicalize()
+        .map_err(|e| format!("canonicalize root: {e}"))?;
     let diff = queries::symbols_changed_since(store, &root, git_ref).map_err(|e| e.to_string())?;
     serde_json::to_value(diff).map_err(|e| e.to_string())
 }
@@ -576,8 +671,7 @@ fn handle_dependency_cycles(store: &mut Store, args: &Value) -> Result<Value, St
         .and_then(|n| u32::try_from(n).ok())
         .unwrap_or(2)
         .clamp(2, 100);
-    let r =
-        queries::dependency_cycles(store, language, min_size).map_err(|e| e.to_string())?;
+    let r = queries::dependency_cycles(store, language, min_size).map_err(|e| e.to_string())?;
     serde_json::to_value(r).map_err(|e| e.to_string())
 }
 

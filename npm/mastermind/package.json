@@ -1,6 +1,6 @@
 {
   "name": "@xcraftmind/mastermind",
-  "version": "0.28.0",
+  "version": "0.28.1",
   "description": "Mastermind workflow CLI + mmcg codegraph for AI coding agents — verify-spec / audit-spec gates, MCP server, multi-language tree-sitter indexer (Python, TypeScript, JavaScript, Rust, C#, Go, Java, PHP, C/C++). Prebuilt native binaries via optional platform packages — no Rust toolchain required.",
   "license": "MIT",
   "author": "xcraftmind",

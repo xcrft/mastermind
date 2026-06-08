@@ -406,20 +406,18 @@ MMCG_TOOL_COUNT_DOCS: list[str] = [
 
 
 def extract_mmcg_tools() -> list[str]:
-    """Pull every `"name": "mmcg_xxx"` value from mcp.rs in declaration order.
+    """Pull every mmcg_xxx tool name from mcp.rs in declaration order.
 
-    The MCP tool definitions in `tools_list()` use JSON literals — a regex over
-    the `"name": "..."` keys is unambiguous because nothing else in mcp.rs uses
-    that exact pattern.
+    Reads from the typed TOOLS registry (``static TOOLS: &[ToolDef] = &[...]``),
+    where each entry is ``ToolDef { name: "mmcg_xxx", ... }``.  The Rust field
+    syntax ``name: "mmcg_xxx"`` is unambiguous — nothing else in the file uses
+    that pattern for non-tool names.
     """
     src = (REPO_ROOT / MMCG_MCP_SRC).read_text()
-    # Constrain to the tools_list() body to avoid catching the JSON-RPC
-    # `name` field in initialize_result() (which uses "name": "mmcg" — that
-    # would be a false positive).
-    start = src.find("fn tools_list()")
-    end = src.find("fn handle_tools_call", start) if start != -1 else -1
+    start = src.find("static TOOLS:")
+    end = src.find("];", start) + 2 if start != -1 else -1
     body = src[start:end] if start != -1 and end != -1 else src
-    return re.findall(r'"name":\s*"(mmcg_[a-z_]+)"', body)
+    return re.findall(r'name:\s*"(mmcg_[a-z_]+)"', body)
 
 
 def validate_mmcg_tool_drift() -> list[Issue]:

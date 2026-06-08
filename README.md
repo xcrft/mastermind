@@ -181,6 +181,51 @@ mastermind doctor                # 8 fail-soft checks: binary, index, freshness,
 
 `mastermind doctor --json` is CI-friendly (exit 1 if anything's unwired).
 
+## What `init` does — and what it doesn't
+
+Nothing contacts an external service unless the Claude Code CLI is installed and `--no-claude` is not passed.
+
+**Created locally** (always, no network):
+
+| Path | What it is |
+|---|---|
+| `.mastermind/` | Index directory. `.gitignore` inside wildcards everything so it's never committed. |
+| `.mastermind/tasks/` | Where your task specs live. |
+| `.mastermind/mmcg.db` | SQLite codegraph index — built locally from your source files by tree-sitter. Never leaves your machine. |
+| `CONTEXT.md` | Written from a template. Not overwritten if it already exists (unless `--force`). |
+
+**Installed globally** into `~/.claude/` (npm installs only; skippable with `--no-global`):
+
+Subagent `.md` files → `~/.claude/agents/`, skill directories → `~/.claude/skills/`, slash-command files → `~/.claude/commands/`. These are static Markdown files. No code runs during the copy.
+
+**What goes to Claude** (only if the Claude Code CLI is installed and `--no-claude` is not passed):
+
+`claude -p "<prompt>" --permission-mode acceptEdits` is invoked once to fill `CONTEXT.md` (and optionally `CLAUDE.md`) placeholders. The prompt asks Claude to read the codebase using MCP tools and fill only specific sections — it does not batch-upload raw source files. If the `claude` binary is not on PATH, this step is skipped with a warning and the templates are left unfilled.
+
+`mastermind setup claude --write-mcp` runs `claude mcp add --scope user mmcg -- mastermind serve`, which modifies `~/.claude.json`. That is the only file outside your project that `setup` touches.
+
+**Fully offline / no-LLM path:**
+
+```bash
+mastermind init --no-claude --no-index --no-global
+```
+
+Scaffolds `.mastermind/` and writes templates. Zero network calls, zero subprocesses.
+
+**Remove everything:**
+
+```bash
+mastermind uninstall --scope all --force
+# also remove the workflow files installed into ~/.claude/:
+rm ~/.claude/agents/mastermind-*.md
+rm -rf ~/.claude/skills/mastermind-*/
+rm ~/.claude/commands/mastermind-*.md
+```
+
+`CONTEXT.md` and `CLAUDE.md` are never touched by `uninstall` — they are your project's files.
+
+---
+
 ## Just the codegraph
 
 `mmcg` is a standalone [crate](https://crates.io/crates/mmcg) that works with any MCP stdio client (Cursor, Continue, custom) — 20 tools across nine languages: `search`, `callers`, `callees`, `impact`, `imports`, `imported_by`, `files`, `outline`, `symbols_in_file`, `recent_changes`, `unreferenced`, `api_surface`, `centrality`, `tasks`, `dependency_cycles`, `symbols_changed_since`, `scratchpad_append`, `scratchpad_read`, `change_class`, `status`.

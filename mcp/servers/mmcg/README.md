@@ -27,8 +27,6 @@ A small, fast Rust binary that builds a structural index of a codebase (Python, 
 
 > Installed via npm (`@xcraftmind/mastermind`)? The command is **`mastermind`** — the same binary. The `mmcg` name used throughout this doc is the cargo-installed alias (`cargo install mmcg`).
 
-**Status:** Python + TypeScript + JavaScript + Rust + C# + Go + Java + PHP + C/C++. Imports tracked with fully-qualified paths. File watcher. Incremental indexing. **Language filter** on all queries (defends against monorepo name collisions). **Rust type-method awareness** — `mmcg_callers SessionStore` now finds `SessionStore::new()` callers. **`mmcg_symbols_in_file`** — list all symbols in a file in source order. **Decorator/attribute-aware `mmcg_unreferenced`** — symbols decorated with framework registries (pytest, FastAPI, Triton, Rust `#[test]`, xUnit `[Fact]`, JUnit `@Test`, Spring `@GetMapping`, etc.) are excluded from dead-code candidates. **`mmcg verify-spec` / `audit-spec`** — mechanical pre/post gates around a `.mastermind/tasks/` spec. **`mmcg run-task`** — deterministic two-phase orchestrator: verify → risk report → executor hand-off (or `--exec` to `claude -p`) → audit → release-notes draft, with state persistence between phases. **The index is required by default** (`--allow-no-index` escape hatch for docs-only specs) because gates are only as strong as the codegraph they reason from. **`mmcg setup claude`** — safe MCP-config writer: diff-first, refuses to clobber, merges into existing `mcpServers`. `install.sh` no longer writes MCP config directly (it drifted from the canonical path) — single code path through `setup claude`. **`mmcg init --profile`** — stack-specific CONTEXT.md templates (typescript-api, react-native, python-fastapi, rust-cli). **YAML frontmatter on specs** — additive structured contract (`touches[]` with file+language-scoped symbol gates, `verify[].cmd` for PATH check, `expected_docs[]` for separate doc-audit, `breaking_changes.removed_symbols[]` for explicit removal ack). Heuristic Markdown parsing remains as fallback when frontmatter is absent. **C/C++ support is best-effort** — see Limitations for precision caveats (macros, templates, headers).
-
 ## What it indexes
 
 For each supported file, mmcg captures:
@@ -79,16 +77,16 @@ mmcg is intentionally narrow:
 
 On the mmcg crate itself (10 Rust files, 1 Python script): indexing takes **9 ms** for 186 symbols + 1294 edges.
 
-## Install
+## Build from source
 
-You need a Rust toolchain (1.75+):
+Requires Rust 1.75+ ([rustup](https://rustup.rs/)). No system libraries — SQLite and tree-sitter are bundled at compile time.
 
 ```bash
 cd mcp/servers/mmcg
-cargo install --path .
+cargo install --path .   # installs mmcg into ~/.cargo/bin/
 ```
 
-This installs the `mmcg` binary into `~/.cargo/bin/`. No system libraries required — SQLite and tree-sitter are bundled into the binary at build time.
+The recommended install for most users is `npm install -g @xcraftmind/mastermind` (prebuilt binary — no toolchain needed). See the [root README](../../README.md#install).
 
 ## CLI usage
 
@@ -165,7 +163,7 @@ mmcg setup claude --project . --write-mcp --with-workflow # also drop CLAUDE.md 
 mmcg setup claude --write-mcp --force                     # overwrite a customized mmcg entry
 
 # Remove a setup. --scope project (default) deletes .mastermind/ + the project
-# .mcp.json mmcg entry; --scope global removes the ~/.claude/.mcp.json entry;
+# .mcp.json mmcg entry; --scope global de-registers via `claude mcp remove`;
 # --scope all does both. Dry-run unless --force. Never touches CONTEXT.md/CLAUDE.md.
 mmcg uninstall                                            # dry-run: project teardown plan
 mmcg uninstall --force                                    # remove .mastermind/ + project MCP entry
@@ -216,7 +214,7 @@ The index lives at `.mastermind/mmcg.db` in the current directory by default. Ov
 mmcg serve
 ```
 
-Add to your MCP client config (e.g. `~/.claude/mcp.json` or `claude_desktop_config.json`):
+For Claude Code, run `mastermind setup claude --write-mcp` instead of editing JSON by hand. For other MCP stdio clients, add:
 
 ```json
 {
@@ -234,7 +232,7 @@ Add to your MCP client config (e.g. `~/.claude/mcp.json` or `claude_desktop_conf
 
 For best results, run `mmcg watch` in a separate terminal so the index stays current while you work.
 
-## MCP tools exposed (17)
+## MCP tools
 
 | Tool | Args | What it returns |
 |---|---|---|
@@ -301,41 +299,6 @@ mmcg serve
 - **Python module-level constants** (`MAX_RETRIES = 5`, `__all__ = [...]`, `HOST, PORT = ...`) are captured as `kind="constant"` since 0.14.0. Scoping is strict — only DIRECT children of the module node count; assignments inside `if` / `for` / `try` / class bodies / function bodies are not constants. `mmcg_unreferenced` **excludes constants by default** because the call/import graph doesn't track value-reads — every constant would otherwise appear as dead. Opt-in with `kind=constant` to surface unused constants explicitly. `mmcg_callers MAX_RETRIES` still works for the cases where a constant is referenced via `import` (`from foo import MAX_RETRIES` produces an `imports` edge) or attribute access (`foo.MAX_RETRIES` produces a `calls` edge to leaf `MAX_RETRIES`). Other languages: not extracted (TS/Rust/Go/etc. constants are typed declarations through different AST shapes — file a request if you need them).
 - **C/C++ is best-effort.** The C/C++ extractor uses tree-sitter alone — no preprocessor, no template instantiation, no semantic analysis. Concretely: (a) **macros are invisible** — `TEST(Suite, Name) { ... }` is seen as a call to `TEST`, not as a function definition, so gtest/Catch2 test bodies don't appear in `mmcg_search` and calls inside macro arguments may be lost; (b) **templates** record the template name but not instantiations (`vector<int>` doesn't create a `vector<int>` symbol); (c) **header/source split** produces two symbol rows (`void Foo::bar()` declared in `.h` and defined in `.cpp` = two `bar` hits); (d) **ADL/overload resolution** isn't performed (`swap(a, b)` records `swap` without knowing which namespace it resolves to); (e) **`#include`** records the header as an `imports` edge but doesn't follow its contents. For high-precision C++ structural analysis use `clangd` (semantic, slow, large) or `ctags` (similar tradeoffs to this extractor). mmcg uses one `tree-sitter-cpp` grammar for both `.c` and `.cpp` files — rare C-only code that uses C++ keywords as identifiers (e.g. a variable named `new`) may mis-parse.
 
-## Files in this artifact
+## CI
 
-| Path | What it is |
-|---|---|
-| `Cargo.toml` | Rust deps (rusqlite-bundled, tree-sitter + 3 grammars, rayon, notify, clap, serde) |
-| `config.json` | MCP server config snippet for client setup |
-| `src/main.rs` | CLI entry (`index`, `serve`, `watch`, `status`, `query`) |
-| `src/lib.rs` | Module facade |
-| `src/store.rs` | SQLite schema, batched writes, all read queries |
-| `src/indexer.rs` | Multi-language dispatch — `LanguageExtractor` trait + parallel file walk |
-| `src/indexer/python.rs` | Python extractor |
-| `src/indexer/typescript.rs` | TypeScript / TSX extractor (shared walker also used by JS) |
-| `src/indexer/javascript.rs` | JavaScript / JSX extractor — delegates to TS walker |
-| `src/indexer/rust_lang.rs` | Rust extractor (named to avoid `rust` keyword clash) |
-| `src/indexer/csharp.rs` | C# extractor — classes/structs/records/interfaces, methods, properties, attributes, using directives |
-| `src/indexer/go.rs` | Go extractor — funcs/methods/structs/interfaces, composite-literal construction, imports |
-| `src/indexer/java.rs` | Java extractor — classes/interfaces/records/enums, methods, annotations (decorators), imports |
-| `src/indexer/php.rs` | PHP extractor — classes/traits/interfaces/enums, namespaces, PHP 8 attributes, `use` directives |
-| `src/indexer/cpp.rs` | C/C++ extractor — best-effort syntactic scan, no preprocessor/template instantiation (see Limitations) |
-| `src/queries.rs` | High-level query API with serializable response types |
-| `src/mcp.rs` | JSON-RPC over stdio, MCP `initialize`/`tools/list`/`tools/call` |
-| `src/watcher.rs` | notify-based filesystem watcher with debouncing |
-| `src/diff.rs` | Git-ref-based symbol diff — powers `mmcg_symbols_changed_since` and the audit's `--since` |
-| `src/spec.rs` | Lenient parser for `.mastermind/tasks/<NNN>-<name>/spec.md` — sections, pre-edit snapshot, FIND blocks, VERIFY commands |
-| `src/verify_spec.rs` | Pre-execution gate (mandatory sections, missing symbols/files, snapshot drift, FIND staleness, VERIFY PATH) |
-| `src/audit_spec.rs` | Post-execution gate (scope creep, snapshot drift, removed-symbol-not-acknowledged, planned-test-not-added) |
-| `src/run_task.rs` | Two-phase orchestrator (`mmcg run-task`) — verify → risk report → executor → audit → release notes |
-| `src/doctor.rs` | `mmcg doctor` — environment health check (index, gitignore, CLAUDE.md markers, MCP config, handshake) |
-| `src/setup.rs` | `mmcg setup claude` — safe MCP-config writer (diff-first, atomic write, merge into existing `mcpServers`) |
-| `templates/profiles/*.md` | Stack-specific CONTEXT.md templates (`typescript-api`, `react-native`, `python-fastapi`, `rust-cli`) — picked via `mmcg init --profile <name>` |
-
-Tests live in `#[cfg(test)]` blocks in each module. Run with `cargo test` — 125 tests covering schema, queries, partial-class collapse, every extractor, spec parser (incl. YAML frontmatter), verify/audit gates (incl. frontmatter-authoritative file scope, file+language-scoped symbol checks, breaking-change ack), the run-task orchestrator (incl. the index-required gate), and the setup/diff/merge helpers.
-
-CI (`.github/workflows/ci-mmcg.yml`) runs the full suite plus an end-to-end smoke (`mmcg doctor --json` + `mmcg verify-spec` + `mmcg audit-spec` against `tests/ci-fixture/`) on a 6-target matrix every PR: x86_64/aarch64 Linux gnu + musl, aarch64 macOS (Apple Silicon), x86_64 Windows. macOS Intel (`x86_64-apple-darwin`) is intentionally out of scope — still buildable locally via `cargo install --target=x86_64-apple-darwin`, just not gated per-PR.
-
-## Integration with the Mastermind workflow
-
-This artifact is the **truth layer** for the `mastermind-workflow` — see that file for how planner/executor/researcher are taught to query mmcg first for code-structural questions. Integration wiring (skill updates that mandate codegraph-first lookups) lands in a follow-up round.
+`.github/workflows/ci-mmcg.yml` runs the full test suite plus an end-to-end smoke (`mmcg doctor --json` + `mmcg verify-spec` + `mmcg audit-spec` against `tests/ci-fixture/`) on a 6-target matrix every PR: x86_64/aarch64 Linux gnu + musl, aarch64 macOS (Apple Silicon), x86_64 Windows. macOS Intel (`x86_64-apple-darwin`) is not gated per-PR but builds locally via `cargo install --target=x86_64-apple-darwin`.

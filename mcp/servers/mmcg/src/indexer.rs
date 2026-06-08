@@ -66,7 +66,7 @@ pub fn extractor_for_path(path: &Path) -> Option<Box<dyn LanguageExtractor>> {
     }
 }
 
-/// Directory names skipped during the walk. Cheap to extend.
+/// Directory names skipped during the walk.
 const SKIP_DIRS: &[&str] = &[
     ".git",
     ".mastermind",

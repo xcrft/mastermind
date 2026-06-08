@@ -27,15 +27,6 @@ pub struct Target {
 }
 
 impl Target {
-    /// Global Claude Code config under the user's home directory.
-    pub fn global() -> Result<Self, String> {
-        let home =
-            dirs::home_dir().ok_or_else(|| "no $HOME — cannot locate ~/.claude".to_string())?;
-        Ok(Self {
-            path: home.join(".claude").join(".mcp.json"),
-            label: "~/.claude/.mcp.json".into(),
-        })
-    }
     /// Project-local `.mcp.json` at the given root.
     pub fn project(root: &Path) -> Self {
         Self {
@@ -269,17 +260,9 @@ fn merge_mmcg_entry(existing: &Value, mmcg_entry: &Value) -> Result<Value, Strin
     Ok(proposed)
 }
 
-/// Line-by-line diff that finds the common prefix/suffix and marks only the
-/// middle changed window. Includes up to 3 lines of surrounding context.
-///
-/// Limitation: assumes a single contiguous change region. For non-contiguous
-/// edits (which `setup claude` never produces because the merge is always
-/// additive on one key) this would produce a wider-than-necessary block. If we
-/// ever need finer diffs, pull in the `similar` crate.
-/// Reverse of `run_claude`: remove the `mmcg` entry from an MCP config.
-/// Safe by default — prints a diff and exits unless `write` is true. Leaves
-/// every other server intact, and leaves an empty `mcpServers` object behind
-/// rather than deleting the file (another tool may own it).
+/// Remove the `mmcg` entry from an MCP config file. Leaves every other server
+/// intact; leaves an empty `mcpServers` object rather than deleting the file.
+/// Safe by default — prints a diff and exits unless `write` is true.
 pub fn remove_claude(target: &Target, write: bool) -> Outcome {
     println!("=== mastermind uninstall claude ({}) ===", target.label);
 
@@ -463,6 +446,10 @@ fn claude_mcp_has(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Line-by-line diff: finds the common prefix/suffix, marks only the changed
+/// window with up to 3 context lines. Assumes a single contiguous change region
+/// (safe for all callers here — the merge is always additive on one key). Use
+/// the `similar` crate if multi-region diffs are ever needed.
 fn render_line_diff(before: &str, after: &str) -> String {
     if before == after {
         return "(no changes)\n".to_string();

@@ -183,7 +183,7 @@ mastermind doctor                # 8 fail-soft checks: binary, index, freshness,
 
 ## Just the codegraph
 
-`mmcg` is a standalone [crate](https://crates.io/crates/mmcg) that works with any MCP stdio client (Cursor, Continue, custom):
+`mmcg` is a standalone [crate](https://crates.io/crates/mmcg) that works with any MCP stdio client (Cursor, Continue, custom) — 20 tools across nine languages: `search`, `callers`, `callees`, `impact`, `imports`, `imported_by`, `files`, `outline`, `symbols_in_file`, `recent_changes`, `unreferenced`, `api_surface`, `centrality`, `tasks`, `dependency_cycles`, `symbols_changed_since`, `scratchpad_append`, `scratchpad_read`, `change_class`, `status`.
 
 ```bash
 cargo install mmcg

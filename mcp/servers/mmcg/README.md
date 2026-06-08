@@ -86,7 +86,7 @@ cd mcp/servers/mmcg
 cargo install --path .   # installs mmcg into ~/.cargo/bin/
 ```
 
-The recommended install for most users is `npm install -g @xcraftmind/mastermind` (prebuilt binary — no toolchain needed). See the [root README](../../README.md#install).
+The recommended install for most users is `npm install -g @xcraftmind/mastermind` (prebuilt binary — no toolchain needed).
 
 ## CLI usage
 

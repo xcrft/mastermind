@@ -218,6 +218,18 @@ flowchart TD
 
 ---
 
+## Decision Matrix
+
+| Option | Correctness | Complexity | Blast radius | Migration risk | Observability | Reversibility | Verdict |
+|---|---|---|---|---|---|---|---|
+| A — <name> | pass | low | low | none | good | easy | reject |
+| B — <name> | concern | medium | high | medium | weak | hard | reject |
+| C — <name> | pass | medium | low | none | good | easy | **chosen** |
+
+Column values: `pass / concern / fail` for Correctness; `low / medium / high` for complexity/blast/migration; `good / weak / none` for observability; `easy / medium / hard` for reversibility. Exactly one row is `chosen`.
+
+---
+
 ## Pre-edit snapshot *(filled by planner via mmcg)*
 
 <!-- delete if no code symbols touched -->
@@ -293,6 +305,7 @@ VERIFY: `<command>`
 - [ ] VERIFY: commands are runnable
 - [ ] **Alternatives Considered has ≥ 2 entries**
 - [ ] **Codeflow diagrams** present, nodes mmcg-verified or marked `[NEW]`
+- [ ] **Decision Matrix** filled — exactly one row is `chosen`
 - [ ] **Pre-edit snapshot** filled via mmcg (or deleted if no code symbols)
 - [ ] **Tests Plan** is concrete
 - [ ] **Documentation Plan** lists every doc touched
@@ -392,6 +405,18 @@ flowchart TD
 
 - **Grounding:** <mmcg evidence>
 - **Chosen because:** <concrete reason>
+
+---
+
+## Decision Matrix
+
+| Option | Correctness | Complexity | Blast radius | Migration risk | Observability | Reversibility | Verdict |
+|---|---|---|---|---|---|---|---|
+| A — <name> | pass | low | low | none | good | easy | reject |
+| B — <name> | concern | medium | high | medium | weak | hard | reject |
+| C — <name> | pass | medium | low | none | good | easy | **chosen** |
+
+Column values: `pass / concern / fail` for Correctness; `low / medium / high` for complexity/blast/migration; `good / weak / none` for observability; `easy / medium / hard` for reversibility. Exactly one row is `chosen`.
 
 ---
 
@@ -503,6 +528,7 @@ VERIFY: `<command>`
 - [ ] VERIFY: commands are runnable
 - [ ] **Alternatives Considered has ≥ 2 entries**
 - [ ] **Codeflow diagrams** present, all nodes mmcg-verified or marked `[NEW]`
+- [ ] **Decision Matrix** filled — exactly one row is `chosen`
 - [ ] **Risk Register** filled — every high-impact risk has a mitigation
 - [ ] **Evidence Ledger** filled — every non-trivial claim has a row, assumptions explicit
 - [ ] **Pre-edit snapshot** filled via mmcg for every edited function/method

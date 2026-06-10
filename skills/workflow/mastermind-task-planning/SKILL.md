@@ -66,7 +66,7 @@ Every task runs in one of three modes. Pick the mode first; it determines which 
 | Mode | When to use | Required spec sections |
 |---|---|---|
 | **lite** | One-file or trivial change, no auth/billing/migration | Goal, Scope, FIND/CHANGE TO, VERIFY |
-| **standard** | Normal feature or fix — multi-file, no sensitive areas | Everything in lite + Alternatives Considered, Codeflow, Tests Plan, Docs Plan, Observability, Performance |
+| **standard** | Normal feature or fix — multi-file, no sensitive areas | Everything in lite + Alternatives Considered, Codeflow, Decision Matrix, Tests Plan, Docs Plan, Observability, Performance |
 | **strict** | Auth, billing, migration, public API, data-loss risk, blast-radius ≥ 20 | Everything in standard + Evidence Ledger, Risk Register, 3-lens critic panel, Rollback Plan |
 
 `mastermind new-spec` defaults to `lite`. Pass `--mode standard` or `--mode strict` to get the richer template.
@@ -163,7 +163,7 @@ Spawn when:
 
 ### What to send the critic
 
-A focused brief — 1-2 paragraphs. **Must include `mmcg` evidence** — without it the critic flags dimension #7 as `fail`:
+A structured design brief. **Must include `mmcg` evidence** — without it the critic flags dimension #7 as `fail`. Use the canonical format in [`references/design-review-packet.md`](references/design-review-packet.md):
 
 ```markdown
 **Problem:** <1-2 sentences on what we're solving>
@@ -173,6 +173,13 @@ A focused brief — 1-2 paragraphs. **Must include `mmcg` evidence** — without
 **Alternatives considered (≥ 2 required for non-trivial):**
 - <Alt 1>: rejected because <concrete reason>
 - <Alt 2>: rejected because <concrete reason>
+
+**Decision Matrix:**
+| Option | Correctness | Complexity | Blast radius | Migration risk | Observability | Reversibility | Verdict |
+|---|---|---|---|---|---|---|---|
+| A | pass | low | low | none | good | easy | reject |
+| B | concern | medium | high | medium | weak | hard | reject |
+| C | pass | medium | low | none | good | easy | chosen |
 
 **Constraints:** <hard limits — language, deadline, compatibility, ops>
 

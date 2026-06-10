@@ -59,6 +59,110 @@ pub struct CallersResponse {
     pub callers: Vec<SymbolHit>,
 }
 
+/// Confidence and resolution metadata for a set of graph edges.
+///
+/// Precision depends on the source language: Rust and Go are syntactic with
+/// high confidence; Python and JavaScript are heuristic (leaf-name only, no
+/// type inference). C/C++ is syntactic but inherently low-confidence because
+/// macros are not expanded and includes are not followed.
+#[derive(Debug, Clone, Serialize)]
+pub struct EdgePrecision {
+    /// `"high"`, `"medium"`, or `"low"`.
+    pub confidence: &'static str,
+    /// `"syntactic"` — derived directly from AST;
+    /// `"heuristic"` — leaf-name guessing without type resolution.
+    pub resolution: &'static str,
+    /// Known gaps for this language's edge extraction.
+    pub limitations: Vec<&'static str>,
+}
+
+/// Derive edge precision from a file path's extension.
+pub fn lang_precision(file_path: &str) -> EdgePrecision {
+    let ext = std::path::Path::new(file_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    match ext {
+        "rs" => EdgePrecision {
+            confidence: "high",
+            resolution: "syntactic",
+            limitations: vec!["trait-object dynamic dispatch not resolved"],
+        },
+        "go" => EdgePrecision {
+            confidence: "high",
+            resolution: "syntactic",
+            limitations: vec![],
+        },
+        "java" => EdgePrecision {
+            confidence: "high",
+            resolution: "syntactic",
+            limitations: vec!["reflection not tracked", "generics erased at call sites"],
+        },
+        "cs" => EdgePrecision {
+            confidence: "high",
+            resolution: "syntactic",
+            limitations: vec!["reflection not tracked"],
+        },
+        "py" => EdgePrecision {
+            confidence: "medium",
+            resolution: "heuristic",
+            limitations: vec![
+                "obj.method() matched by leaf name only — no type inference",
+                "dynamic attributes not tracked",
+            ],
+        },
+        "ts" | "tsx" => EdgePrecision {
+            confidence: "medium",
+            resolution: "syntactic",
+            limitations: vec![
+                "no type-based dispatch resolution",
+                "dynamic imports not tracked",
+            ],
+        },
+        "js" | "jsx" | "mjs" | "cjs" => EdgePrecision {
+            confidence: "medium",
+            resolution: "heuristic",
+            limitations: vec!["no type resolution", "dynamic calls not tracked"],
+        },
+        "php" | "phtml" => EdgePrecision {
+            confidence: "medium",
+            resolution: "syntactic",
+            limitations: vec!["dynamic dispatch not tracked"],
+        },
+        "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh" | "hxx" | "ipp" | "tpp" => {
+            EdgePrecision {
+                confidence: "low",
+                resolution: "syntactic",
+                limitations: vec![
+                    "macros not expanded",
+                    "includes not followed",
+                    "overload resolution absent",
+                ],
+            }
+        }
+        _ => EdgePrecision {
+            confidence: "unknown",
+            resolution: "unknown",
+            limitations: vec!["unsupported or unrecognized language"],
+        },
+    }
+}
+
+fn lang_from_ext(ext: &str) -> &'static str {
+    match ext {
+        "rs" => "rust",
+        "go" => "go",
+        "java" => "java",
+        "cs" => "csharp",
+        "py" => "python",
+        "ts" | "tsx" => "typescript",
+        "js" | "jsx" | "mjs" | "cjs" => "javascript",
+        "php" | "phtml" => "php",
+        "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh" | "hxx" | "ipp" | "tpp" => "cpp",
+        _ => "unknown",
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct CalleesEntry {
     pub name: String,
@@ -71,6 +175,40 @@ pub struct CalleesResponse {
     pub matched: Option<SymbolHit>,
     pub count: u32,
     pub callees: Vec<CalleesEntry>,
+    /// Edge precision for calls made by this symbol, derived from its source language.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edge_precision: Option<EdgePrecision>,
+}
+
+/// A matched symbol with debug metadata for `mmcg query explain`.
+#[derive(Debug, Serialize)]
+pub struct ExplainSymbol {
+    pub id: i64,
+    pub name: String,
+    pub kind: String,
+    pub file: String,
+    pub line: u32,
+    pub language: &'static str,
+}
+
+/// Full debug output for `mmcg query explain <name>`: matched symbol IDs, files,
+/// edge counts, source-language precision, and known limitations.
+#[derive(Debug, Serialize)]
+pub struct ExplainResponse {
+    pub query: String,
+    /// Every raw symbol row matching the query (before partial-class collapsing).
+    pub matched: Vec<ExplainSymbol>,
+    /// Direct callers of the first match.
+    pub caller_count: u32,
+    /// Direct callees of the first match.
+    pub callee_count: u32,
+    /// Edge precision based on the first matched symbol's source language.
+    pub edge_precision: EdgePrecision,
+    /// Present when multiple partial-class rows exist for the same name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collapse_note: Option<String>,
+    /// Human-readable limitation list — same content as `edge_precision.limitations`.
+    pub limitations: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -303,6 +441,7 @@ pub fn callees(
         .search_symbols(name, None, language)?
         .into_iter()
         .next();
+    let edge_precision = matched.as_ref().map(|s| lang_precision(&s.file_path));
     let callees: Vec<CalleesEntry> = if let Some(ref sym) = matched {
         store
             .callees_of(sym.id, edge_kind)?
@@ -317,6 +456,73 @@ pub fn callees(
         matched: matched.map(SymbolHit::from),
         count: callees.len() as u32,
         callees,
+        edge_precision,
+    })
+}
+
+pub fn explain(
+    store: &Store,
+    name: &str,
+    language: Option<&str>,
+) -> rusqlite::Result<ExplainResponse> {
+    let symbols = store.search_symbols(name, None, language)?;
+
+    let first_file = symbols.first().map(|s| s.file_path.as_str()).unwrap_or("");
+    let precision = lang_precision(first_file);
+
+    let caller_count = store.callers_of(name, language, None)?.len() as u32;
+    let callee_count = symbols
+        .first()
+        .and_then(|s| store.callees_of(s.id, None).ok())
+        .map(|v| v.len() as u32)
+        .unwrap_or(0);
+
+    let partial_count = symbols
+        .iter()
+        .filter(|s| {
+            s.decorators
+                .as_deref()
+                .map(|d| d.contains(",partial,"))
+                .unwrap_or(false)
+        })
+        .count();
+    let collapse_note = if partial_count > 1 {
+        Some(format!(
+            "{partial_count} partial-class declarations — collapsed by default; \
+             use query search --no-collapse-partials to see all"
+        ))
+    } else {
+        None
+    };
+
+    let matched = symbols
+        .iter()
+        .map(|s| {
+            let ext = std::path::Path::new(&s.file_path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+            ExplainSymbol {
+                id: s.id,
+                name: s.name.clone(),
+                kind: s.kind.clone(),
+                file: s.file_path.clone(),
+                line: s.line_start,
+                language: lang_from_ext(ext),
+            }
+        })
+        .collect();
+
+    let limitations = precision.limitations.iter().map(|l| l.to_string()).collect();
+
+    Ok(ExplainResponse {
+        query: name.to_string(),
+        matched,
+        caller_count,
+        callee_count,
+        edge_precision: precision,
+        collapse_note,
+        limitations,
     })
 }
 

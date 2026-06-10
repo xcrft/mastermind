@@ -413,6 +413,15 @@ enum QueryCmd {
         #[arg(long)]
         language: Option<String>,
     },
+    /// Debug a symbol query: show matched symbol IDs, files, edge counts,
+    /// source-language edge precision, and known limitations. Useful when
+    /// mmcg returns unexpected results or you want to understand the trust
+    /// level of a callers/callees result.
+    Explain {
+        name: String,
+        #[arg(long)]
+        language: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

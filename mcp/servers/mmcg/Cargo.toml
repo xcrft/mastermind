@@ -72,6 +72,9 @@ walkdir = "2.5"
 # Cross-platform home dir lookup for `mmcg doctor`'s MCP-config check.
 dirs = "6"
 
+[dev-dependencies]
+tempfile = "3"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

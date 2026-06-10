@@ -93,11 +93,39 @@ You are <doing X> to achieve <Y, the goal in one sentence>.
 
 The planner must enumerate ≥ 2 plausible approaches and explain why each was rejected. For trivial changes (one-line fix, doc edit, throwaway exploration), write "trivial change — single approach". The critic uses this section to avoid re-suggesting rejected options.
 
-For green-field API / interface / module-boundary design, the planner generates 3 qualitatively different candidates and pastes the two unpicked options here.
+For non-trivial alternatives (multi-module, auth/billing/data-flow, API boundary, migration, anything touching ≥ 3 files), add a Mermaid codeflow diagram per alternative. Nodes must be real files, symbols, modules, or external boundaries — verified via `mmcg_search` or explicitly marked `[NEW]`. Keep each diagram ≤ 8 nodes. Generic boxes (`User → System → Database`) are AI slop and will be flagged by the critic.
 
-- **<Alt 1 short name>** — rejected because <concrete reason tied to mmcg findings or project constraint>
-- **<Alt 2 short name>** — rejected because <reason>
-- **<Picked approach>** — chosen because <concrete reason>
+### Alternative A — <name>
+
+```mermaid
+flowchart TD
+  <real_symbol_or_file> --> <real_symbol_or_file>
+```
+
+- **Grounding:** `mmcg_search <symbol>` → `<file:line>`, `mmcg_callers <symbol>` → `<N> callers`
+- **Tradeoff:** <concrete>
+- **Rejected because:** <concrete reason tied to mmcg findings or project constraint>
+
+### Alternative B — <name>
+
+```mermaid
+flowchart TD
+  <real_symbol_or_file> --> <real_symbol_or_file>
+```
+
+- **Grounding:** `mmcg_search <symbol>` → `<file:line>`
+- **Tradeoff:** <concrete>
+- **Rejected because:** <reason>
+
+### Picked approach — <name>
+
+```mermaid
+flowchart TD
+  <real_symbol_or_file> --> <real_symbol_or_file>
+```
+
+- **Grounding:** <mmcg evidence>
+- **Chosen because:** <concrete reason>
 
 ---
 

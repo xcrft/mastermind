@@ -176,6 +176,13 @@ Do not send the critic the whole brainstorming conversation — that imports you
 
 For green-field interface / API / module-boundary design, generate 3 qualitatively different shapes (not 3 variants of one idea) and pick one with a defended rationale. The two unpicked become the rejected alternatives in the brief and in the spec's "Alternatives Considered" section. Skip when modifying an existing API where the shape is already fixed.
 
+**Codeflow diagrams.** For each non-trivial alternative (auth, billing, data-flow, multi-module refactor, API boundary, migration, anything touching ≥ 3 files), include a small Mermaid `flowchart TD` diagram alongside the alternative. Rules:
+
+- **≤ 8 nodes per diagram.**
+- Every node must be a real file, symbol, module, or external boundary — verified via `mmcg_search` or explicitly marked `[NEW]`.
+- No generic box (`User → System → Database`) — that is AI slop and the critic will flag it.
+- Omit diagrams for trivial changes (one-line fix, docs, simple test, mechanical rename).
+
 ### How to read the critic's verdict
 
 The critic returns a **7-dimension table** plus an aggregate verdict. The dimensions are: Correctness, Performance & scale, Observability, Non-breaking, YAGNI, AI slop indicators, Test & doc completeness.

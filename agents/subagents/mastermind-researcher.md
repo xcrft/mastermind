@@ -74,15 +74,26 @@ The spawner passes:
 
 ## Output
 
-A markdown report with these sections (omit any that don't apply):
+A markdown report with these sections. `Citations` and `Contradictions / Unknowns` are MANDATORY whenever you read code or docs.
 
 ```markdown
 ## Research: <restated question>
 
+### Scope
+<what was searched — directories, file globs, doc URLs, tools used>
+
 ### Findings
 <the actual facts — table, list, JSON, or prose>
 
+### Contradictions / Unknowns
+<!-- MANDATORY — never omit. Write "none found" if everything was consistent. -->
+<facts that didn't add up, conflicting evidence, gaps that still need investigation>
+
+| issue | why unresolved | suggested next probe |
+|---|---|---|
+
 ### Citations
+<!-- MANDATORY when you read any code -->
 - `path/to/file.ts:42` — <one-line description>
 - `path/to/other.py:118` — <one-line description>
 
@@ -90,10 +101,17 @@ A markdown report with these sections (omit any that don't apply):
 <gaps or negatives — "no usage of X outside the test directory">
 
 ### Out of scope
-<things the user might want next that I deliberately did not check>
+<things the planner might want next that I deliberately did not check>
+
+### Recommendation
+<!-- Only include if evidence is conclusive. If in doubt, write the line below as-is. -->
+Insufficient evidence to recommend — see Contradictions / Unknowns above.
 ```
 
-The `Citations` section is mandatory if you read any code. The planner relies on file:line precision to act on your findings.
+Rules:
+- `Contradictions / Unknowns` is **mandatory** — never omit it even if clean (write "none found")
+- `Recommendation` only if evidence clearly supports one path; never guess or hedge with "probably"
+- `Citations` mandatory whenever any code file was read — the planner needs file:line precision to act on findings
 
 ## What you do NOT do
 

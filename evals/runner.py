@@ -279,20 +279,23 @@ _AUDIT_BLOCK_RE = re.compile(
 
 
 def extract_audit_verdict(output: str) -> str | None:
-    """Return the `verdict` field from a structured audit tail, or None."""
+    """Return the `verdict` field from a structured audit tail, or None.
+
+    Requires valid YAML inside the sentinel block — no regex fallback.
+    A malformed block is treated the same as an absent block (None),
+    so the caller will fail the case rather than guess.
+    """
     m = _AUDIT_BLOCK_RE.search(output)
     if not m:
         return None
-    if _YAML_AVAILABLE:
-        try:
-            data = _yaml.safe_load(m.group(1))
-            if isinstance(data, dict) and data.get("verdict"):
-                return str(data["verdict"]).lower().strip()
-        except Exception:
-            pass
-    raw = re.search(r"verdict\s*:\s*(\S+)", m.group(1))
-    if raw:
-        return raw.group(1).lower().strip()
+    if not _YAML_AVAILABLE:
+        return None
+    try:
+        data = _yaml.safe_load(m.group(1))
+        if isinstance(data, dict) and data.get("verdict"):
+            return str(data["verdict"]).lower().strip()
+    except Exception:
+        pass
     return None
 
 

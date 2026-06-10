@@ -14,7 +14,7 @@
 
 ## Quick start
 
-Requires Node.js 18+. No Rust toolchain.
+Requires Node.js 24+. No Rust toolchain.
 
 ```bash
 npm install -g @xcraftmind/mastermind

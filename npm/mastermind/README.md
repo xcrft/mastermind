@@ -14,7 +14,7 @@ Prebuilt native binaries via optional platform packages — **no Rust toolchain 
 
 ## Quick start
 
-Requires **Node.js 18+**. The CLI is a thin JS wrapper over a prebuilt native binary — no Rust toolchain needed.
+Requires **Node.js 24+**. The CLI is a thin JS wrapper over a prebuilt native binary — no Rust toolchain needed.
 
 **1. Install**
 

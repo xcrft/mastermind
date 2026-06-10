@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed answer leakage from all auditor eval fixture source files (meta-commentary moved to fixture READMEs).
 
 ### Changed
-- Restore `node >=18` engine constraint in `npm/mastermind/package.json` (was incorrectly bumped to `>=24`).
+- Align README and npm README to advertise the actual `node >=24` engine requirement (both previously said `18+`).
 - Refactor `run-task` CLI dispatch: individual flags collapsed into `RunOpts` struct.
 
 ## [0.28.0] - 2026-06-05

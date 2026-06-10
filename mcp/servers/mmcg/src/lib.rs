@@ -9,6 +9,7 @@
 //! Java, PHP, C/C++. C/C++ is best-effort syntactic — see README Limitations.
 
 pub mod audit_spec;
+pub mod context_doctor;
 pub mod diff;
 pub mod doctor;
 pub mod executor_report;

@@ -72,6 +72,18 @@ pub enum Finding {
     /// that doesn't appear in `symbol_diff.added`. Either the executor
     /// skipped it or the test name in the plan was wrong.
     PlannedTestNotAdded { test: String },
+    /// Executor claimed they added symbol X but it has no definition in the
+    /// live index. Either the add didn't happen or indexing missed it.
+    ClaimedSymbolMissing { symbol: String, file: Option<String> },
+    /// Executor claimed X calls existing Y but Y has no definition anywhere
+    /// in the index. Y was hallucinated.
+    HallucinatedSymbol { from_symbol: String, to_symbol: String },
+    /// Executor claimed X calls Y but there is no call edge from X to Y in
+    /// the index. The integration claim is false.
+    MissingCallEdge { from_symbol: String, to_symbol: String },
+    /// Executor claimed a test command passed, but no test files were found
+    /// in the relevant directory. The pass is vacuous (zero tests ran).
+    VacuousTestClaim { cmd: String, reason: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -106,9 +118,13 @@ impl Report {
                 | Finding::MissingExpectedFile { .. }
                 | Finding::SnapshotCallerDrift { .. }
                 | Finding::SnapshotSignatureDrift { .. }
-                | Finding::PlannedTestNotAdded { .. } => "⚠️ ",
+                | Finding::PlannedTestNotAdded { .. }
+                | Finding::VacuousTestClaim { .. } => "⚠️ ",
                 Finding::SnapshotSymbolGone { .. }
-                | Finding::RemovedSymbolNotAcknowledged { .. } => "❌",
+                | Finding::RemovedSymbolNotAcknowledged { .. }
+                | Finding::ClaimedSymbolMissing { .. }
+                | Finding::HallucinatedSymbol { .. }
+                | Finding::MissingCallEdge { .. } => "❌",
             };
             out.push_str(&format!("  {icon} {}\n", render_finding(f)));
         }
@@ -159,6 +175,19 @@ fn render_finding(f: &Finding) -> String {
         }
         Finding::PlannedTestNotAdded { test } => {
             format!("planned_test_not_added: Tests Plan named `{test}` but the diff doesn't show a new function with that name")
+        }
+        Finding::ClaimedSymbolMissing { symbol, file } => {
+            let loc = file.as_deref().map(|f| format!(" in `{f}`")).unwrap_or_default();
+            format!("claimed_symbol_missing: executor claimed they added `{symbol}`{loc} but it has no definition in the index")
+        }
+        Finding::HallucinatedSymbol { from_symbol, to_symbol } => {
+            format!("hallucinated_symbol: executor claimed `{from_symbol}` calls existing `{to_symbol}` but `{to_symbol}` has no definition in the index — it was hallucinated")
+        }
+        Finding::MissingCallEdge { from_symbol, to_symbol } => {
+            format!("missing_call_edge: executor claimed `{from_symbol}` calls `{to_symbol}` but no call edge from `{from_symbol}` to `{to_symbol}` exists in the index")
+        }
+        Finding::VacuousTestClaim { cmd, reason } => {
+            format!("vacuous_test_claim: `{cmd}` claimed passed but {reason}")
         }
     }
 }
@@ -309,6 +338,254 @@ pub fn run(
     })
 }
 
+/// Run Phase A checks + executor-report mechanical checks.
+///
+/// When `executor_report` is `None` this is equivalent to `run()`.
+/// When present, adds:
+///  - Integration-claim verifier (2.2): hallucinated symbol, missing call edge
+///  - Symbol-add verifier (2.1): claimed symbol not in index
+///  - Vacuous test detector (2.3): test command claimed passed, no test files
+pub fn run_with_report(
+    spec: &ParsedSpec,
+    store: &Store,
+    repo_root: &Path,
+    git_ref: &str,
+    executor_report: Option<&crate::executor_report::ExecutorReport>,
+) -> Result<Report, DiffError> {
+    let mut report = run(spec, store, repo_root, git_ref)?;
+
+    if let Some(er) = executor_report {
+        check_executor_claims(er, store, &mut report.findings);
+        check_vacuous_tests(er, repo_root, &mut report.findings);
+        report.verdict = compute_verdict(&report.findings);
+    }
+
+    Ok(report)
+}
+
+fn check_executor_claims(
+    er: &crate::executor_report::ExecutorReport,
+    store: &Store,
+    findings: &mut Vec<Finding>,
+) {
+    use crate::executor_report::Claim;
+
+    for claim in &er.claims {
+        match claim {
+            Claim::FunctionAdded { symbol, file } => {
+                let hits = store.search_symbols(symbol, None, None).unwrap_or_default();
+                if hits.is_empty() {
+                    findings.push(Finding::ClaimedSymbolMissing {
+                        symbol: symbol.clone(),
+                        file: file.clone(),
+                    });
+                }
+            }
+            Claim::Integration { from, to, .. } => {
+                let to_hits = store.search_symbols(to, None, None).unwrap_or_default();
+                if to_hits.is_empty() {
+                    findings.push(Finding::HallucinatedSymbol {
+                        from_symbol: from.clone(),
+                        to_symbol: to.clone(),
+                    });
+                    continue;
+                }
+                let from_sym = store.search_symbols(from, None, None).unwrap_or_default();
+                let call_exists = from_sym.first().is_some_and(|s| {
+                    store
+                        .callees_of(s.id, None)
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|(name, _)| name == to)
+                });
+                if !call_exists {
+                    findings.push(Finding::MissingCallEdge {
+                        from_symbol: from.clone(),
+                        to_symbol: to.clone(),
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn check_vacuous_tests(
+    er: &crate::executor_report::ExecutorReport,
+    repo_root: &Path,
+    findings: &mut Vec<Finding>,
+) {
+    for v in &er.verify {
+        let claimed_passed = v.claimed.as_deref().is_some_and(|c| {
+            c.eq_ignore_ascii_case("passed") || c.eq_ignore_ascii_case("pass")
+        });
+        if !claimed_passed {
+            continue;
+        }
+        if let Some(reason) = vacuous_test_reason(&v.cmd, repo_root) {
+            findings.push(Finding::VacuousTestClaim {
+                cmd: v.cmd.clone(),
+                reason,
+            });
+        }
+    }
+}
+
+/// Returns `Some(reason)` if we can determine the test run was vacuous
+/// (no test files exist in the relevant scope). Returns `None` when we
+/// can't determine either way — conservative: don't false-positive.
+fn vacuous_test_reason(cmd: &str, repo_root: &Path) -> Option<String> {
+    let cmd_lower = cmd.to_lowercase();
+
+    if cmd_lower.contains("go test") {
+        let pkg_dir = extract_go_package_dir(cmd, repo_root);
+        let dir = repo_root.join(&pkg_dir);
+        if dir.is_dir() && !has_files_matching(&dir, "_test.go") {
+            return Some(format!("no *_test.go files in {pkg_dir}"));
+        }
+    } else if cmd_lower.contains("pytest")
+        || cmd_lower.contains("python -m pytest")
+        || cmd_lower.contains("python3 -m pytest")
+    {
+        let scope = extract_pytest_scope(cmd, repo_root);
+        let dir = repo_root.join(&scope);
+        if dir.is_dir() && !has_files_matching_pattern(&dir, "test_", ".py") {
+            return Some(format!("no test_*.py files in {scope}"));
+        }
+    } else if cmd_lower.contains("cargo test") {
+        let src = repo_root.join("src");
+        let check_dir = if src.is_dir() { &src } else { repo_root };
+        if !has_test_attr_in_dir(check_dir) {
+            return Some("no #[test] attribute found in src/".to_string());
+        }
+    } else if (cmd_lower.contains("jest")
+        || cmd_lower.contains("vitest")
+        || cmd_lower.contains("npm test")
+        || cmd_lower.contains("yarn test"))
+        && !has_files_matching_pattern(repo_root, ".test.", "")
+        && !has_files_matching_pattern(repo_root, ".spec.", "")
+    {
+        return Some("no *.test.* or *.spec.* files found".to_string());
+    }
+
+    None
+}
+
+fn extract_go_package_dir(cmd: &str, _root: &Path) -> String {
+    for token in cmd.split_whitespace() {
+        if token.starts_with("./") {
+            let clean = token.trim_end_matches("/...");
+            return clean.trim_start_matches("./").to_string();
+        }
+    }
+    ".".to_string()
+}
+
+fn extract_pytest_scope(cmd: &str, _root: &Path) -> String {
+    let tokens: Vec<&str> = cmd.split_whitespace().collect();
+    for (i, t) in tokens.iter().enumerate() {
+        if *t == "pytest" || t.ends_with("pytest") {
+            if let Some(next) = tokens.get(i + 1) {
+                if !next.starts_with('-') {
+                    return next.to_string();
+                }
+            }
+        }
+    }
+    ".".to_string()
+}
+
+fn has_files_matching(dir: &Path, suffix: &str) -> bool {
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries.flatten().any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .ends_with(suffix)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn has_files_matching_pattern(dir: &Path, contains: &str, ends: &str) -> bool {
+    walkdir::WalkDir::new(dir)
+        .max_depth(5)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            if !e.file_type().is_file() {
+                return false;
+            }
+            let name = e.file_name().to_string_lossy();
+            name.contains(contains) && (ends.is_empty() || name.ends_with(ends))
+        })
+}
+
+fn has_test_attr_in_dir(dir: &Path) -> bool {
+    walkdir::WalkDir::new(dir)
+        .max_depth(6)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            if !e.file_type().is_file() {
+                return false;
+            }
+            if e.path().extension().and_then(|s| s.to_str()) != Some("rs") {
+                return false;
+            }
+            std::fs::read_to_string(e.path())
+                .map(|text| text.contains("#[test]"))
+                .unwrap_or(false)
+        })
+}
+
+// ----- evidence bundle ------------------------------------------------------
+
+/// Portable proof artifact written by `audit-spec --bundle`.
+#[derive(Debug, Serialize)]
+pub struct Bundle {
+    pub spec: String,
+    pub git_ref: String,
+    pub verdict: String,
+    pub files_diff: Vec<String>,
+    pub discrepancies: Vec<Finding>,
+    pub snapshot_drift: Vec<Finding>,
+    pub executor_report_path: Option<String>,
+}
+
+impl Bundle {
+    pub fn from_report(report: &Report, executor_report_path: Option<&str>) -> Self {
+        let files_diff = report
+            .symbol_diff
+            .as_ref()
+            .map(|d| d.files_in_diff.clone())
+            .unwrap_or_default();
+
+        let snapshot_drift: Vec<Finding> = report
+            .findings
+            .iter()
+            .filter(|f| {
+                matches!(
+                    f,
+                    Finding::SnapshotCallerDrift { .. }
+                        | Finding::SnapshotSignatureDrift { .. }
+                        | Finding::SnapshotSymbolGone { .. }
+                )
+            })
+            .cloned()
+            .collect();
+
+        Self {
+            spec: report.spec.clone(),
+            git_ref: report.git_ref.clone(),
+            verdict: format!("{:?}", report.verdict).to_lowercase(),
+            files_diff,
+            discrepancies: report.findings.clone(),
+            snapshot_drift,
+            executor_report_path: executor_report_path.map(str::to_string),
+        }
+    }
+}
+
 fn check_snapshot_claim(claim: &SymbolClaim, store: &Store, findings: &mut Vec<Finding>) {
     let hits = match store.search_symbols(&claim.name, None, None) {
         Ok(rows) => rows,
@@ -351,15 +628,14 @@ fn check_snapshot_claim(claim: &SymbolClaim, store: &Store, findings: &mut Vec<F
 }
 
 fn compute_verdict(findings: &[Finding]) -> Verdict {
-    // "Contract broken" = silent deletion of something the spec didn't warn
-    // about. Both SnapshotSymbolGone (pre-tracked symbol vanished) and
-    // RemovedSymbolNotAcknowledged (any symbol removed without spec mention)
-    // qualify — they're the strongest invariant violations we can detect
-    // mechanically.
     if findings.iter().any(|f| {
         matches!(
             f,
-            Finding::SnapshotSymbolGone { .. } | Finding::RemovedSymbolNotAcknowledged { .. }
+            Finding::SnapshotSymbolGone { .. }
+                | Finding::RemovedSymbolNotAcknowledged { .. }
+                | Finding::ClaimedSymbolMissing { .. }
+                | Finding::HallucinatedSymbol { .. }
+                | Finding::MissingCallEdge { .. }
         )
     }) {
         return Verdict::Broken;

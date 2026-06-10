@@ -11,6 +11,7 @@
 pub mod audit_spec;
 pub mod diff;
 pub mod doctor;
+pub mod executor_report;
 pub mod fingerprint;
 pub mod indexer;
 pub mod lessons;

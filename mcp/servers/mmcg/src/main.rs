@@ -187,6 +187,16 @@ enum Cmd {
         root: PathBuf,
         #[arg(long)]
         json: bool,
+        /// Path to a structured executor report (bare YAML or markdown with
+        /// `<!-- mastermind:executor-begin -->` sentinel). When provided,
+        /// integration-claim verification and vacuous-test detection run on
+        /// top of the standard Phase A checks.
+        #[arg(long)]
+        executor_report: Option<PathBuf>,
+        /// Write a portable audit bundle JSON to this path. Contains verdict,
+        /// files_diff, discrepancies, snapshot_drift, executor_report_path.
+        #[arg(long)]
+        bundle: Option<PathBuf>,
     },
     /// Health-check the environment for adoption — index existence,
     /// freshness, gitignore, CLAUDE.md workflow markers, MCP config,
@@ -567,8 +577,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             since,
             root,
             json,
+            executor_report,
+            bundle,
         } => {
-            commands::audit_spec(&spec, &since, root, json, &index_path)?;
+            commands::audit_spec(&spec, &since, root, json, &index_path, executor_report.as_deref(), bundle.as_deref())?;
         }
         Cmd::Doctor { root, json, explain } => {
             let root = root

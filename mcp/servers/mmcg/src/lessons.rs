@@ -102,6 +102,10 @@ fn summarize_findings(findings: &[Finding]) -> String {
             Finding::SnapshotSymbolGone { .. } => "snapshot symbol gone",
             Finding::RemovedSymbolNotAcknowledged { .. } => "silent symbol removal",
             Finding::PlannedTestNotAdded { .. } => "planned test missing",
+            Finding::ClaimedSymbolMissing { .. } => "claimed symbol missing",
+            Finding::HallucinatedSymbol { .. } => "hallucinated symbol",
+            Finding::MissingCallEdge { .. } => "missing call edge",
+            Finding::VacuousTestClaim { .. } => "vacuous test claim",
         };
         *counts.entry(key).or_insert(0) += 1;
     }

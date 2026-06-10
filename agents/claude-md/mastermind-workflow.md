@@ -30,7 +30,7 @@ Prerequisites — install these into the target project (or globally) before usi
   - subagent: agents/subagents/mastermind-researcher.md
   - subagent: agents/subagents/mastermind-critic.md
   - subagent: agents/subagents/mastermind-auditor.md
-  - subagent: agents/subagents/mastermind-release.md  (on-demand — invoked only when user asks to ship)
+  - subagent (optional): extras/subagents/mastermind-release.md  (on-demand — only when user asks to ship)
   - template: agents/claude-md/mastermind-context.md  (copy to project root as CONTEXT.md)
   - MCP server: mcp/servers/mmcg/  (truth layer — run `mmcg index .` then `mmcg watch` to keep current)
   - skill (intake gate):    skills/prompt-engineering/mastermind-prompt-refiner/
@@ -84,7 +84,7 @@ This project uses the **Mastermind workflow**: planning is separated from execut
 | **Executor** | `mastermind-task-executor` subagent | `mastermind-task-executor` | sonnet |
 | **Auditor** (post-flight) | `mastermind-auditor` subagent | (built into subagent) | opus |
 | **Reviewer** (semantic) | Planner, after auditor finishes | (same as planner) | opus |
-| **Release** (on-demand) | `mastermind-release` subagent | (built into subagent) | sonnet |
+| **Release** (extras, on-demand) | `mastermind-release` subagent in `extras/` | (built into subagent) | sonnet |
 
 ### Two independent Opus reviewers — different temporal phases
 
@@ -177,8 +177,8 @@ If `mmcg_status` returns nothing, the index isn't ready — run `mmcg index .` i
     | New term that took explaining during brainstorming | Domain glossary |
     | New external dependency added | External dependencies |
     | Code area found to have hidden constraints | Don't-touch list |
-13. **Planner reports to user** with the auditor's verdict table + semantic notes inline + a line on whether CONTEXT.md was updated. End-of-report line: "If you want this committed / PR'd, say the word — I'll spawn `mastermind-release`."
-14. **(On-demand) Release packaging.** Only if the user explicitly asks to ship (triggers: "ship it", "commit", "PR", "merge", "отправляй", "коммить", "мерж"). Planner spawns the `mastermind-release` subagent.
+13. **Planner reports to user** with the auditor's verdict table + semantic notes inline + a line on whether CONTEXT.md was updated. End-of-report line: "If you want this committed / PR'd, say the word."
+14. **(On-demand) Release packaging.** Only if the user explicitly asks to ship (triggers: "ship it", "commit", "PR", "merge", "отправляй", "коммить", "мерж"). If `mastermind-release` is installed (from `extras/subagents/mastermind-release.md`), planner spawns it. Otherwise planner writes the commit/PR inline mirroring recent commit style.
     - **Preconditions** (planner verifies before spawning): auditor verdict = `contract held`; `git status` non-empty; `git diff --name-only` matches spec scope (modulo formatter / lockfile noise).
     - **Subagent returns** a draft commit message + draft PR description + explicit stage list + execution checklist. It does **not** run any git/gh write commands.
     - **Planner shows the draft to the user.** User approves, edits, or rejects.

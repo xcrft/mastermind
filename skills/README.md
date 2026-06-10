@@ -6,21 +6,6 @@ See [`../docs/skill-anatomy.md`](../docs/skill-anatomy.md) for the format. Addin
 
 ## Index
 
-### code-review/
-| Skill | Description |
-|---|---|
-| [`pr-review`](code-review/pr-review/SKILL.md) | Review a pull request for correctness, security, and design issues — staff-engineer style. |
-
-### testing/
-| Skill | Description |
-|---|---|
-| [`flaky-finder`](testing/flaky-finder/SKILL.md) | Identify flaky tests by running the suite repeatedly and bisecting failures. |
-
-### docs/
-| Skill | Description |
-|---|---|
-| [`doc-stub-sync`](docs/doc-stub-sync/SKILL.md) | Sync local doc stubs with online sources — diff by hash, refetch only what changed, atomic writes, rate-limited. Ships with a Python script. |
-
 ### workflow/
 | Skill | Description |
 |---|---|

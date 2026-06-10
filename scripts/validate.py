@@ -359,9 +359,9 @@ MMCG_TEMPLATE_MIRRORS: list[tuple[str, str]] = [
 
 # The authoritative list of MCP tools lives in `mcp/servers/mmcg/src/mcp.rs`
 # inside the `tools_list()` JSON. Every doc file that enumerates tools — top
-# READMEs, plugin manifests, marketplace entries — must mention every tool by
-# name, or it drifts and lies about the API. This validator extracts the tool
-# names from the Rust source and asserts they all appear in each docfile.
+# READMEs and install-facing docs — must mention every tool by name, or it
+# drifts and lies about the API. This validator extracts the tool names from
+# the Rust source and asserts they all appear in each docfile.
 
 MMCG_MCP_SRC = "mcp/servers/mmcg/src/mcp.rs"
 

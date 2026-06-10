@@ -33,8 +33,8 @@ Prerequisites — install these into the target project (or globally) before usi
   - subagent: agents/subagents/mastermind-release.md  (on-demand — invoked only when user asks to ship)
   - template: agents/claude-md/mastermind-context.md  (copy to project root as CONTEXT.md)
   - MCP server: mcp/servers/mmcg/  (truth layer — run `mmcg index .` then `mmcg watch` to keep current)
-  - skill (optional):    skills/prompt-engineering/mastermind-prompt-refiner/
-  - subagent (optional): agents/subagents/mastermind-prompt-refiner.md
+  - skill (intake gate):    skills/prompt-engineering/mastermind-prompt-refiner/
+  - subagent (intake gate): agents/subagents/mastermind-prompt-refiner.md
 
 Copy from the next comment marker down into your project's CLAUDE.md.
 Fill in <PLACEHOLDERS>. Delete sections that don't apply.
@@ -77,7 +77,7 @@ This project uses the **Mastermind workflow**: planning is separated from execut
 
 | Role | Who | Skill | Model tier |
 |---|---|---|---|
-| **Refiner** (optional) | `mastermind-prompt-refiner` subagent | `mastermind-prompt-refiner` | sonnet |
+| **Refiner** (intake gate) | `mastermind-prompt-refiner` subagent | `mastermind-prompt-refiner` | sonnet |
 | **Planner / CTO** | Main agent (this conversation) | `mastermind-task-planning` | opus |
 | **Researcher** (on-demand) | `mastermind-researcher` subagent | (built into subagent) | haiku |
 | **Critic** (design-time) | `mastermind-critic` subagent | (built into subagent) | opus |
@@ -129,7 +129,7 @@ If `mmcg_status` returns nothing, the index isn't ready — run `mmcg index .` i
 ### Flow
 
 1. **User describes a problem** — "I want feature X".
-2. **(Optional) Refine the input.** If the user's request is rough, vague, or bundles multiple intents, spawn the `mastermind-prompt-refiner` subagent. It returns a tight refined prompt or 1-3 clarifying questions. Use the refined version as the planner's input.
+2. **Intake gate.** If the user's request is rough, vague, client-provided, or bundles multiple intents, spawn the `mastermind-prompt-refiner` subagent. It returns a refined prompt + intake metadata (action, workflow_mode, risk, needs_research, needs_critic), or 1-3 clarifying questions when the goal is ambiguous. Use the refined prompt as the planner's input. Skip when the request is already tight — do not run the refiner just to validate a clear request.
 3. **Planner brainstorms with user** — clarifies scope, surfaces tradeoffs, picks an approach. **Spawn the `mastermind-researcher` subagent** as needed for facts (callsites, signatures, doc excerpts). Researcher returns structured facts (mmcg-first); planner makes decisions.
 4. **Design-time challenge (MANDATORY for sensitive areas).** Before drafting the spec, planner spawns the `mastermind-critic` subagent with a focused brief (problem + design + ≥ 2 alternatives + constraints + **mmcg snapshot**). Critic returns a **7-dimension verdict table** (Correctness, Performance, Observability, Non-breaking, YAGNI, AI slop, Test/doc coverage) + aggregate verdict.
    - **Mandatory** for: auth/authz, billing, schema migrations, public API contracts, anything with rollback complexity
@@ -198,16 +198,20 @@ Do NOT spawn it when:
 - The information is in the conversation already
 - It's one quick file read the planner can do inline
 
-### When to use the refiner
+### When to use the intake gate
 
-Use it when:
-- The user dropped a rough idea, not a structured request
-- You're about to spend planning effort and want to confirm the brief first
-- The same prompt would be passed downstream multiple times (worth tightening once)
+Spawn `mastermind-prompt-refiner` when:
+- The user dropped a rough idea, a brain dump, or a client message verbatim
+- The request bundles multiple intents that need to be separated before planning
+- The request is ambiguous enough that you're unsure what spec to write
+- You're about to invest significant planning effort — confirm the brief first
 
 Skip it when:
-- The user's request is already tight (clear verb, deliverable, constraints)
+- The user's request is already tight (clear verb, deliverable, constraints, scope)
+- The work is a one-liner or docs-only change
 - The work is exploratory and tightening the brief prematurely would constrain ideation
+
+**Never route to executor without a spec.** The refiner's output always goes to the planner, not the executor. The executor only receives a validated spec.
 
 ### When to spawn the release subagent
 

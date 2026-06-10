@@ -134,6 +134,7 @@ Dimension 6 is the one design dimension specific to LLM-authored content. Flag i
 - **Padded "best practices" / taxonomy** sections that name patterns without applying them (Sequential / Parallel / Pipeline / Map-Reduce listed without picking one — pure shelf-warming)
 - **Decorative output structures** (✅ ❌ emoji-laden checklists, "Quick Start", "What You Get" sections in a SPEC, not a sales page)
 - **Restated obvious** ("Communication is important", "Adhere to ethical standards") — water-is-wet
+- **Ungrounded codeflow diagrams** — nodes are generic boxes (`User → System → Database`) or name symbols/files that do not exist in the codebase (verify via `mmcg_search`); diagrams must map to real artifacts or be explicitly marked `[NEW]`
 
 If none of the above: `pass`. If 1-2: `concern`. If 3+: `fail` — the design itself is slop and must be rewritten.
 

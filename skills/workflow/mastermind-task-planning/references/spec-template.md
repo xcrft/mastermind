@@ -129,6 +129,22 @@ flowchart TD
 
 ---
 
+## Decision Matrix *(required for standard/strict; skip for lite)*
+
+Crystallizes the alternatives comparison into an objective grid. Fill one row per option in Alternatives Considered above.
+
+| Option | Correctness | Complexity | Blast radius | Migration risk | Observability | Reversibility | Verdict |
+|---|---|---|---|---|---|---|---|
+| A — <name> | pass | low | low | low | good | easy | reject |
+| B — <name> | concern | low | high | medium | weak | hard | reject |
+| C — <name> | pass | medium | low | none | good | easy | **chosen** |
+
+Column values: `pass / concern / fail` for Correctness; `low / medium / high` for complexity/blast/migration; `good / weak / none` for observability; `easy / medium / hard` for reversibility.
+
+The `Verdict` row must be one of: `chosen`, `reject`, `candidate` (deferred alternative). Exactly one row gets `chosen`.
+
+---
+
 ## Risk Register *(required for strict specs; skip for trivial/lite)*
 
 Known risks of the chosen approach. Each risk must have mitigation assigned to a phase. If a risk has no mitigation, say so — don't omit it.
@@ -321,6 +337,7 @@ Explicit anti-patterns specific to this task. Distinct from the global Rules abo
 - [ ] `VERIFY:` commands look executable for this project
 - [ ] **Alternatives Considered has ≥ 2 entries** (or "trivial change" justification)
 - [ ] **Codeflow diagrams** present for every non-trivial alternative, each node mmcg-verified or marked `[NEW]` (or section explicitly skipped as trivial)
+- [ ] **Decision Matrix** filled for standard/strict specs, or explicitly skipped (write "lite — no decision matrix")
 - [ ] **Risk Register** filled for strict specs, or explicitly skipped (write "lite/standard — no risk register")
 - [ ] **Evidence Ledger** — every non-trivial claim has a row, assumptions are explicit (or section skipped for lite)
 - [ ] **Pre-edit symbol snapshot** filled via mmcg for every edited function/method (or section deleted if no code symbols touched)

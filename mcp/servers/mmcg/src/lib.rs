@@ -23,3 +23,4 @@ pub mod spec;
 pub mod store;
 pub mod verify_spec;
 pub mod watcher;
+pub mod workflow_status;

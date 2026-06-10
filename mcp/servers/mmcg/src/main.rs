@@ -12,7 +12,7 @@ mod commands;
 mod templates;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use mmcg::{queries, store::Store};
+use mmcg::store::Store;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -91,8 +91,20 @@ enum Cmd {
         #[arg(default_value = ".")]
         root: PathBuf,
     },
-    /// Print one-shot status (file count, symbol count, db path).
-    Status,
+    /// Show workflow status: index freshness, installed subagents/skills,
+    /// active tasks and their phase, and the recommended next step.
+    Status {
+        /// Project root. Defaults to cwd.
+        #[arg(default_value = ".")]
+        root: PathBuf,
+    },
+    /// Print only the next recommended action and the ready-to-paste Claude
+    /// prompt for the highest-priority pending task.
+    Next {
+        /// Project root. Defaults to cwd.
+        #[arg(default_value = ".")]
+        root: PathBuf,
+    },
     /// Scaffold a project for the Mastermind workflow: create .mastermind/tasks/,
     /// CONTEXT.md (only if missing) and the index, then build the index and
     /// (unless --no-claude) populate CONTEXT.md from the codebase via `claude -p`.
@@ -499,10 +511,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let store = Store::open(&index_path)?;
             mmcg::watcher::run(root, store)?;
         }
-        Cmd::Status => {
-            let store = Store::open(&index_path)?;
-            let s = queries::status(&store)?;
-            println!("{}", serde_json::to_string_pretty(&s)?);
+        Cmd::Status { root } => {
+            let root = root
+                .canonicalize()
+                .unwrap_or_else(|_| std::env::current_dir().unwrap_or(root));
+            let ws = mmcg::workflow_status::WorkflowStatus::scan(&root);
+            print!("{}", ws.render_text());
+        }
+        Cmd::Next { root } => {
+            let root = root
+                .canonicalize()
+                .unwrap_or_else(|_| std::env::current_dir().unwrap_or(root));
+            let ws = mmcg::workflow_status::WorkflowStatus::scan(&root);
+            print!("{}", ws.render_next_text());
         }
         Cmd::Init {
             root,

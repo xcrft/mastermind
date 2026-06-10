@@ -24,8 +24,6 @@ func ValidateCart(ids []string) bool {
 }
 
 // CancelOrder marks an order as cancelled.
-// NOTE: executor added CancelOrder per spec but ProcessPayment referenced
-// in the executor report was never defined — it was hallucinated.
 func CancelOrder(id string) error {
 	if id == "" {
 		return fmt.Errorf("id is required")

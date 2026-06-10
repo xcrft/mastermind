@@ -1,4 +1,4 @@
-//! Minimal SessionStore — fixture for auditor eval suite.
+//! Minimal SessionStore.
 
 use std::collections::HashMap;
 use std::sync::RwLock;

@@ -37,6 +37,12 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+try:
+    import yaml as _yaml
+    _YAML_AVAILABLE = True
+except ImportError:
+    _YAML_AVAILABLE = False
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EVALS_DIR = Path(__file__).resolve().parent
 FIXTURES_DIR = EVALS_DIR / "fixtures"
@@ -264,6 +270,32 @@ def render_auditor_input(
     )
 
 
+# ----- verdict extraction ---------------------------------------------------
+
+_AUDIT_BLOCK_RE = re.compile(
+    r"<!--\s*mastermind:audit-begin\s*-->.*?```ya?ml(.*?)```.*?<!--\s*mastermind:audit-end\s*-->",
+    re.S,
+)
+
+
+def extract_audit_verdict(output: str) -> str | None:
+    """Return the `verdict` field from a structured audit tail, or None."""
+    m = _AUDIT_BLOCK_RE.search(output)
+    if not m:
+        return None
+    if _YAML_AVAILABLE:
+        try:
+            data = _yaml.safe_load(m.group(1))
+            if isinstance(data, dict) and data.get("verdict"):
+                return str(data["verdict"]).lower().strip()
+        except Exception:
+            pass
+    raw = re.search(r"verdict\s*:\s*(\S+)", m.group(1))
+    if raw:
+        return raw.group(1).lower().strip()
+    return None
+
+
 # ----- per-case evaluator ---------------------------------------------------
 
 
@@ -289,6 +321,12 @@ def evaluate_case(
 
             db_path = fixture_path / ".mastermind" / "mmcg.db"
             has_mmcg = db_path.is_file()
+            if suite_name == "auditor" and not has_mmcg and not case.get("allow_no_mmcg"):
+                return Result(
+                    case_id, suite_name, False,
+                    ["mmcg index unavailable — build the mmcg binary first (`cargo build --release`)"],
+                    0, fixture_path,
+                )
             user_message = render_auditor_input(
                 case["input"],
                 fixture_path=fixture_path,
@@ -366,7 +404,21 @@ def evaluate_case(
                 if isinstance(expected_verdict, str)
                 else list(expected_verdict)
             )
-            if not any(
+            if suite_name == "auditor":
+                structured = extract_audit_verdict(output)
+                if structured is not None:
+                    if not any(v.lower() == structured for v in candidates):
+                        passed = False
+                        reasons.append(
+                            f"structured verdict {structured!r} not in expected {candidates}"
+                        )
+                else:
+                    passed = False
+                    reasons.append(
+                        "no structured audit verdict block found "
+                        "(<!-- mastermind:audit-begin --> ... <!-- mastermind:audit-end -->)"
+                    )
+            elif not any(
                 re.search(rf"\b{re.escape(v)}\b", output, re.IGNORECASE)
                 for v in candidates
             ):

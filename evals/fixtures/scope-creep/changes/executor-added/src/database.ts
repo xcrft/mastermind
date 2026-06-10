@@ -1,6 +1,4 @@
-// Database connection — scope-creep variant.
-// UNRELATED TO SPEC — executor changed connection pool defaults here.
-// Spec scoped changes to src/router.ts only.
+// Database connection.
 
 export interface DbConfig {
   host: string;

@@ -124,6 +124,35 @@ When you stop on a defect:
 - Set the top-level `status:` to `partial` (some phases done) or `failed`
   (Phase 1 didn't land).
 
+### Write state.json (REQUIRED)
+
+After writing the executor report to `executor-report.md`, write a `state.json` to the same task folder. This file is read by `mastermind status`, `mastermind next`, and `mastermind resume` to surface the task state without a Claude session.
+
+On success (all phases done, all VERIFYs pass):
+
+```json
+{
+  "status": "audit_required",
+  "risk": "low",
+  "next_step": "run_auditor",
+  "last_artifact": "executor-report.md"
+}
+```
+
+On partial or failed (stopped on a defect):
+
+```json
+{
+  "status": "held",
+  "risk": "medium",
+  "next_step": "planner_review",
+  "blocking_reason": "<one sentence: what failed and where>",
+  "last_artifact": "executor-report.md"
+}
+```
+
+`risk` field: `"low"` for clean runs, `"medium"` for partial, `"high"` if Phase 1 failed or a critical symbol was broken. Match it to the defect severity, not your confidence.
+
 ## Companion skill
 
 This subagent is the runtime companion to [[mastermind-task-planning]] (the planner) and uses [[mastermind-task-executor]] (the skill body). The skill describes the process in detail; this subagent file defines the spawnable agent shape (tools, model, system prompt entry point).

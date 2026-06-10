@@ -105,6 +105,18 @@ enum Cmd {
         #[arg(default_value = ".")]
         root: PathBuf,
     },
+    /// Print a full resume packet for the highest-priority pending task (or a
+    /// named task): current phase, state, goal excerpt, file list, and a
+    /// ready-to-paste Claude prompt. Use this when re-opening a session.
+    Resume {
+        /// Project root. Defaults to cwd.
+        #[arg(default_value = ".")]
+        root: PathBuf,
+        /// Task folder name to resume (e.g. `042-payment-routing`). If omitted,
+        /// picks the highest-priority pending task automatically.
+        #[arg(long)]
+        task: Option<String>,
+    },
     /// Scaffold a project for the Mastermind workflow: create .mastermind/tasks/,
     /// CONTEXT.md (only if missing) and the index, then build the index and
     /// (unless --no-claude) populate CONTEXT.md from the codebase via `claude -p`.
@@ -524,6 +536,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|_| std::env::current_dir().unwrap_or(root));
             let ws = mmcg::workflow_status::WorkflowStatus::scan(&root);
             print!("{}", ws.render_next_text());
+        }
+        Cmd::Resume { root, task } => {
+            let root = root
+                .canonicalize()
+                .unwrap_or_else(|_| std::env::current_dir().unwrap_or(root));
+            let ws = mmcg::workflow_status::WorkflowStatus::scan(&root);
+            print!("{}", ws.render_resume_text(task.as_deref()));
         }
         Cmd::Init {
             root,

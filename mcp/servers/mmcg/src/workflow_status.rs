@@ -5,6 +5,7 @@ pub enum TaskPhase {
     Ready,
     AwaitingExecutor,
     AwaitingAudit,
+    Held,
     Complete,
 }
 
@@ -14,9 +15,23 @@ impl TaskPhase {
             Self::Ready => "ready",
             Self::AwaitingExecutor => "awaiting executor",
             Self::AwaitingAudit => "awaiting audit",
+            Self::Held => "held",
             Self::Complete => "complete",
         }
     }
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct TaskState {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocking_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_artifact: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -24,6 +39,7 @@ pub struct TaskInfo {
     pub folder: String,
     pub spec_path: PathBuf,
     pub phase: TaskPhase,
+    pub state: Option<TaskState>,
 }
 
 pub struct IndexInfo {
@@ -93,6 +109,24 @@ impl WorkflowStatus {
                      Read the spec, implement each step in the Scope section, run the VERIFY \
                      commands, and write an executor report to {}/executor-report.md.",
                     task_dir.display()
+                )),
+            });
+        }
+        if let Some(task) = self.tasks.iter().find(|t| t.phase == TaskPhase::Held) {
+            let spec = task.spec_path.display().to_string();
+            let blocking = task
+                .state
+                .as_ref()
+                .and_then(|s| s.blocking_reason.as_deref())
+                .unwrap_or("see state.json for details");
+            return Some(NextAction {
+                description: format!("Task {} — HELD: {}", task.folder, blocking),
+                command: None,
+                claude_prompt: Some(format!(
+                    "Resume blocked Mastermind task:\n{spec}\n\n\
+                     This task is held. Blocking reason: {blocking}\n\n\
+                     Review the spec and state.json in the task folder. Decide: \
+                     modify the spec to unblock, close the task, or escalate.",
                 )),
             });
         }
@@ -185,13 +219,32 @@ impl WorkflowStatus {
                     TaskPhase::Complete => "✓",
                     TaskPhase::Ready => "○",
                     TaskPhase::AwaitingExecutor | TaskPhase::AwaitingAudit => "⚡",
+                    TaskPhase::Held => "⛔",
                 };
-                out.push_str(&format!(
-                    "  {marker} {:<width$}  {}\n",
+                let mut line = format!(
+                    "  {marker} {:<width$}  {}",
                     task.folder,
                     task.phase.label(),
                     width = name_w
-                ));
+                );
+                if task.phase == TaskPhase::Held {
+                    let risk_str = task
+                        .state
+                        .as_ref()
+                        .and_then(|s| s.risk.as_deref())
+                        .map(|r| format!("  risk:{r}"))
+                        .unwrap_or_default();
+                    let blocking_str = task
+                        .state
+                        .as_ref()
+                        .and_then(|s| s.blocking_reason.as_deref())
+                        .map(|b| format!("  — {b}"))
+                        .unwrap_or_default();
+                    line.push_str(&risk_str);
+                    line.push_str(&blocking_str);
+                }
+                line.push('\n');
+                out.push_str(&line);
             }
             out.push('\n');
         }
@@ -235,6 +288,149 @@ impl WorkflowStatus {
             }
         }
     }
+
+    pub fn render_resume_text(&self, task_name: Option<&str>) -> String {
+        let task = match task_name {
+            Some(name) => self.tasks.iter().find(|t| t.folder == name),
+            None => self
+                .tasks
+                .iter()
+                .find(|t| t.phase == TaskPhase::AwaitingAudit)
+                .or_else(|| {
+                    self.tasks
+                        .iter()
+                        .find(|t| t.phase == TaskPhase::AwaitingExecutor)
+                })
+                .or_else(|| {
+                    self.tasks.iter().find(|t| t.phase == TaskPhase::Held)
+                })
+                .or_else(|| {
+                    self.tasks.iter().find(|t| t.phase == TaskPhase::Ready)
+                }),
+        };
+
+        let Some(task) = task else {
+            return if self.tasks.is_empty() {
+                "No tasks found.\n\nCreate one: mastermind new-spec 'description'\n".into()
+            } else if task_name.is_some() {
+                format!(
+                    "Task '{}' not found. Run `mastermind status` to list tasks.\n",
+                    task_name.unwrap()
+                )
+            } else {
+                "All tasks complete. Nothing to resume.\n".into()
+            };
+        };
+
+        let mut out = String::new();
+        out.push_str(&format!("Resume: {}\n", task.folder));
+        out.push_str(&format!("Phase:  {}\n", task.phase.label()));
+
+        if let Some(ref s) = task.state {
+            out.push_str(&format!("Status: {}\n", s.status));
+            if let Some(ref r) = s.risk {
+                out.push_str(&format!("Risk:   {r}\n"));
+            }
+            if let Some(ref b) = s.blocking_reason {
+                out.push_str(&format!("Held:   {b}\n"));
+            }
+            if let Some(ref a) = s.last_artifact {
+                out.push_str(&format!("Last artifact: {a}\n"));
+            }
+        }
+
+        out.push('\n');
+
+        let spec_text = std::fs::read_to_string(&task.spec_path).unwrap_or_default();
+        let goal_snippet = extract_section(&spec_text, "Goal");
+        if !goal_snippet.is_empty() {
+            out.push_str("Goal\n");
+            for line in goal_snippet.lines().take(8) {
+                out.push_str(&format!("  {line}\n"));
+            }
+            out.push('\n');
+        }
+
+        let task_dir = task.spec_path.parent().unwrap_or(task.spec_path.as_path());
+        out.push_str("Files\n");
+        out.push_str(&format!("  spec:            {}\n", task.spec_path.display()));
+        if task_dir.join("state.json").is_file() {
+            out.push_str(&format!("  state.json:      {}/state.json\n", task_dir.display()));
+        }
+        if task_dir.join("executor-report.md").is_file() {
+            out.push_str(&format!("  executor-report: {}/executor-report.md\n", task_dir.display()));
+        }
+        if task_dir.join("audit.md").is_file() {
+            out.push_str(&format!("  audit:           {}/audit.md\n", task_dir.display()));
+        }
+        out.push('\n');
+
+        let prompt = match task.phase {
+            TaskPhase::AwaitingAudit => format!(
+                "Run the Mastermind post-flight audit for:\n{spec}\n\n\
+                 The executor report is in {dir}/executor-report.md. \
+                 Invoke the Mastermind auditor subagent to verify execution matched the spec.",
+                spec = task.spec_path.display(),
+                dir = task_dir.display()
+            ),
+            TaskPhase::AwaitingExecutor => format!(
+                "Run the Mastermind executor for:\n{spec}\n\n\
+                 Read the spec, implement each step in the Scope section, run all VERIFY \
+                 commands, and write an executor report to {dir}/executor-report.md.",
+                spec = task.spec_path.display(),
+                dir = task_dir.display()
+            ),
+            TaskPhase::Held => {
+                let blocking = task
+                    .state
+                    .as_ref()
+                    .and_then(|s| s.blocking_reason.as_deref())
+                    .unwrap_or("reason unknown");
+                format!(
+                    "This Mastermind task is held:\n{spec}\n\n\
+                     Blocking reason: {blocking}\n\n\
+                     Review the spec and state.json. Decide: modify the spec to unblock, close the task, or escalate.",
+                    spec = task.spec_path.display()
+                )
+            }
+            TaskPhase::Ready => format!(
+                "Run the Mastermind pre-flight gate for:\n{spec}\n\n  mastermind run-task {spec}",
+                spec = task.spec_path.display()
+            ),
+            TaskPhase::Complete => format!(
+                "Task {} is already complete. Audit report: {dir}/audit.md",
+                task.folder,
+                dir = task_dir.display()
+            ),
+        };
+
+        out.push_str("Paste into Claude:\n\n");
+        for line in prompt.lines() {
+            out.push_str(&format!("  {line}\n"));
+        }
+
+        out
+    }
+}
+
+fn extract_section(text: &str, heading: &str) -> String {
+    let mut in_section = false;
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        if line.starts_with("## ") {
+            if in_section {
+                break;
+            }
+            if line.contains(heading) {
+                in_section = true;
+                continue;
+            }
+        }
+        if in_section && !line.trim().is_empty() {
+            lines.push(line);
+        }
+    }
+    lines.join("\n")
 }
 
 fn scan_index(root: &Path) -> IndexInfo {
@@ -390,8 +586,10 @@ fn scan_tasks(root: &Path) -> Vec<TaskInfo> {
         if !spec_path.is_file() {
             continue;
         }
-        let phase = detect_phase(&spec_path, &inflight_spec);
-        tasks.push(TaskInfo { folder, spec_path, phase });
+        let task_dir = entry.path();
+        let state = read_task_state(&task_dir);
+        let phase = detect_phase(&spec_path, &inflight_spec, state.as_ref());
+        tasks.push(TaskInfo { folder, spec_path, phase, state });
     }
     tasks
 }
@@ -409,8 +607,31 @@ fn read_inflight_spec(root: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(state.spec_path))
 }
 
-fn detect_phase(spec_path: &Path, inflight_spec: &Option<PathBuf>) -> TaskPhase {
+fn read_task_state(task_dir: &Path) -> Option<TaskState> {
+    let path = task_dir.join("state.json");
+    if !path.is_file() {
+        return None;
+    }
+    let body = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&body).ok()
+}
+
+fn detect_phase(
+    spec_path: &Path,
+    inflight_spec: &Option<PathBuf>,
+    state: Option<&TaskState>,
+) -> TaskPhase {
     let task_dir = spec_path.parent().unwrap_or(spec_path);
+
+    if let Some(s) = state {
+        return match s.status.as_str() {
+            "learned" => TaskPhase::Complete,
+            "audit_required" => TaskPhase::AwaitingAudit,
+            "approved" | "executing" => TaskPhase::AwaitingExecutor,
+            "held" | "drift" | "broken" => TaskPhase::Held,
+            _ => TaskPhase::Ready,
+        };
+    }
 
     if task_dir.join("audit.md").is_file() {
         return TaskPhase::Complete;

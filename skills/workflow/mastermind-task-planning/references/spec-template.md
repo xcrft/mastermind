@@ -288,6 +288,7 @@ Explicit anti-patterns specific to this task. Distinct from the global Rules abo
 - [ ] `mmcg_impact` on each symbol-to-be-changed agrees with this spec's stated scope
 - [ ] `VERIFY:` commands look executable for this project
 - [ ] **Alternatives Considered has ≥ 2 entries** (or "trivial change" justification)
+- [ ] **Codeflow diagrams** present for every non-trivial alternative, each node mmcg-verified or marked `[NEW]` (or section explicitly skipped as trivial)
 - [ ] **Pre-edit symbol snapshot** filled via mmcg for every edited function/method (or section deleted if no code symbols touched)
 - [ ] **Tests Plan is concrete** (per-test what's covered)
 - [ ] **Documentation Plan** lists every doc touched

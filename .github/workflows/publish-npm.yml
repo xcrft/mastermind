@@ -275,12 +275,10 @@ jobs:
   publish:
     name: Publish to npm
     needs: assemble-and-smoke
-    # Two skip conditions:
-    #   - workflow_dispatch dry-run (default true)
-    #   - running on a fork (no NPM_TOKEN in env)
-    if: |
-      github.repository == 'xcrft/mastermind' &&
-      (github.event_name == 'push' || github.event.inputs.dry_run == 'false')
+    # Only tag-push events trigger a real publish. workflow_dispatch is
+    # dry-run only — the version/tag guard in assemble-and-smoke only runs
+    # on push, so a manual dispatch can never satisfy it and cannot publish.
+    if: github.repository == 'xcrft/mastermind' && github.event_name == 'push'
     runs-on: ubuntu-latest
     # `npm-prod` environment scopes the NPM_TOKEN secret and (if configured)
     # triggers required-reviewer / wait-timer protection rules.

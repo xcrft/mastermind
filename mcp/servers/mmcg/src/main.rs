@@ -311,6 +311,24 @@ enum Cmd {
         #[arg(long, default_value = ".")]
         root: std::path::PathBuf,
     },
+    /// Subcommands for inspecting project context quality.
+    #[command(subcommand)]
+    Context(ContextCmd),
+}
+
+#[derive(Subcommand)]
+enum ContextCmd {
+    /// Audit CONTEXT.md quality: placeholder residue, minimum content,
+    /// stack section presence, decision log, freshness vs task specs,
+    /// and _lessons.md existence. Exit code 1 if any check fails.
+    Doctor {
+        /// Project root. Defaults to cwd.
+        #[arg(default_value = ".")]
+        root: PathBuf,
+        /// Output JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -703,6 +721,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Cmd::Query(q) => commands::dispatch_query(q, &index_path)?,
+        Cmd::Context(ContextCmd::Doctor { root, json }) => {
+            let root = root
+                .canonicalize()
+                .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
+            let report = mmcg::context_doctor::run(&root);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", report.render_text());
+            }
+            if report.has_failures() {
+                std::process::exit(1);
+            }
+        }
     }
     Ok(())
 }

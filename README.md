@@ -63,7 +63,8 @@ Built on mmcg: a spec-driven pipeline where the planner never implements and the
 
 ```mermaid
 flowchart TB
-  U([User]) --> P[Planner • Opus]
+  U([User]) --> Ref[Intake Refiner • Sonnet]
+  Ref -->|clean brief| P[Planner • Opus]
   P -.->|stress-test design| C[Critic • Opus]
   C -.->|7-dim verdict| P
   P -.->|need facts| R[Researcher • Haiku]
@@ -71,7 +72,6 @@ flowchart TB
   P -->|spec| E[Executor • Sonnet]
   E -->|report| A[Auditor • Opus]
   A -.->|contract held / drift / broken| P
-  P -.->|on user request| Rel[Release • Sonnet]
 
   M[(mmcg codegraph)]
   P --- M
@@ -128,15 +128,19 @@ This is caught deterministically by the codegraph, not by asking the model to re
 Core
   mcp/servers/mmcg/     Rust codegraph binary (mmcg) — 20 MCP tools, 9 languages
 
-Workflow pack (installed into ~/.claude/ by `mastermind init`)
-  agents/               7 subagents: critic, auditor, researcher, task-executor,
-                        release, prompt-refiner + CLAUDE.md / CONTEXT.md templates
-  skills/               Workflow skills (mastermind-task-planning, mastermind-task-executor)
-                        and standalone skills (pr-review, flaky-finder, doc-stub-sync)
-  prompts/              Reusable prompt templates (api-shape-explorer)
+Workflow (installed into ~/.claude/ by `mastermind init`)
+  agents/subagents/     intake-refiner, planner-critic, researcher, task-executor, auditor
+  agents/claude-md/     CLAUDE.md workflow template
+  skills/workflow/      mastermind-task-planning, mastermind-task-executor, prompt-refiner
+  skills/prompt-engineering/  mastermind-prompt-refiner (intake gate)
+
+Proof
+  evals/                adversarial test suite — auditor, critic, intake cases
 ```
 
-Each folder is grouped by domain inside (e.g. `skills/code-review/`); every category ships a `_template/` to copy when adding something new. The naming and frontmatter standard lives in [`docs/conventions.md`](docs/conventions.md).
+Non-core artifacts (pr-review, flaky-finder, doc-stub-sync, release subagent, generic prompts) live in [`extras/`](extras/) — available but not installed by default.
+
+The naming and frontmatter standard lives in [`docs/conventions.md`](docs/conventions.md).
 
 ## Install
 

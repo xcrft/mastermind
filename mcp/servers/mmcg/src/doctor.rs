@@ -111,6 +111,66 @@ impl Report {
     pub fn has_failures(&self) -> bool {
         self.summary.fail > 0
     }
+
+    pub fn render_explain(&self, binary: &std::path::Path, index_path: &std::path::Path) -> String {
+        let mut out = String::new();
+        out.push_str(&format!(
+            "mastermind doctor --explain — environment at {}\n\n",
+            self.root
+        ));
+
+        out.push_str("Paths:\n");
+        out.push_str(&format!("  binary        {}\n", binary.display()));
+        out.push_str(&format!("  index         {}\n", index_path.display()));
+
+        let home = dirs::home_dir();
+        let user_cfg = home
+            .as_ref()
+            .map(|h| h.join(".claude.json"))
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(home dir unknown)".into());
+        out.push_str(&format!("  ~/.claude.json  {user_cfg}\n"));
+        out.push('\n');
+
+        let name_width = self
+            .checks
+            .iter()
+            .map(|c| c.name.chars().count())
+            .max()
+            .unwrap_or(20);
+        for c in &self.checks {
+            let marker = match c.status {
+                Status::Ok => "✅",
+                Status::Warn => "⚠️ ",
+                Status::Fail => "❌",
+            };
+            out.push_str(&format!(
+                "  {marker} {name:<width$}  {msg}\n",
+                marker = marker,
+                name = c.name,
+                width = name_width,
+                msg = c.message,
+            ));
+            if let Some(hint) = &c.hint {
+                out.push_str(&format!("       → {hint}\n"));
+            } else if c.status == Status::Ok {
+                out.push_str("       → OK\n");
+            }
+        }
+        out.push_str(&format!(
+            "\n{} ok, {} warn, {} fail\n",
+            self.summary.ok, self.summary.warn, self.summary.fail
+        ));
+
+        if self.summary.fail > 0 || self.summary.warn > 0 {
+            out.push_str("\nCommon fixes:\n");
+            out.push_str("  No index       run `mastermind init` or `mastermind index .`\n");
+            out.push_str("  No MCP config  run `mastermind setup claude --write-mcp`\n");
+            out.push_str("  Stale index    run `mastermind index .` or start `mastermind watch`\n");
+            out.push_str("  No .gitignore  add `.mastermind/` to your .gitignore\n");
+        }
+        out
+    }
 }
 
 /// Run every check against `root`. Returns a structured report.

@@ -102,6 +102,26 @@ Enforced by critic and auditor on every task:
 - **Mandatory spec sections** — Tests / Documentation / Observability / Performance. Empty sections fail pre-flight.
 - **Pre-edit snapshot** — planner records `mmcg_callers` counts + signatures before editing; auditor diffs post-execution to surface silent breakage.
 
+### Example: catching a hallucinated symbol
+
+The executor filed this report:
+
+```
+[x] Added CancelOrder() to pkg/checkout/checkout.go
+[x] Wired CancelOrder to call the existing ProcessPayment() for refund flow
+VERIFY: go test ./pkg/checkout/... — PASSED
+```
+
+The auditor ran `mmcg_search ProcessPayment` against the live index:
+
+```json
+{ "count": 0, "results": [] }
+```
+
+`ProcessPayment` was never defined — not in the baseline, not in the after-tree. The executor invented a call site to a function that does not exist. Verdict: **contract broken**.
+
+This is caught deterministically by the codegraph, not by asking the model to re-read the code.
+
 ## What's inside
 
 ```

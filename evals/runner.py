@@ -75,6 +75,12 @@ GIT_ENV = {
     "GIT_CONFIG_VALUE_0": "false",
 }
 
+# Base env for all subprocesses spawned by the runner.
+# TERM=dumb prevents tput from emitting warnings in non-interactive shells
+# (CI, piped output, shells where $TERM is unset). Prefer the caller's TERM
+# when available so color hints still work in interactive mode.
+_PROC_ENV: dict[str, str] = {**os.environ, "TERM": os.environ.get("TERM") or "dumb"}
+
 
 @dataclass
 class Result:
@@ -102,7 +108,7 @@ def _run_git(args: list[str], cwd: Path) -> None:
     proc = subprocess.run(
         ["git", *args],
         cwd=cwd,
-        env={**os.environ, **GIT_ENV},
+        env={**_PROC_ENV, **GIT_ENV},
         capture_output=True,
         text=True,
     )
@@ -180,6 +186,7 @@ def _build_mmcg_index(repo: Path) -> None:
     proc = subprocess.run(
         [MMCG_BIN, "--index", str(db_path), "index", str(repo)],
         cwd=repo,
+        env=_PROC_ENV,
         capture_output=True,
         text=True,
         timeout=60,
@@ -325,7 +332,8 @@ def evaluate_case(
         # generously at 480s to absorb tail-latency variance.
         try:
             proc = subprocess.run(
-                cmd, input=user_message, capture_output=True, text=True, timeout=480
+                cmd, input=user_message, capture_output=True, text=True,
+                env=_PROC_ENV, timeout=480,
             )
         except subprocess.TimeoutExpired:
             return Result(

@@ -129,6 +129,20 @@ flowchart TD
 
 ---
 
+## Risk Register *(required for strict specs; skip for trivial/lite)*
+
+Known risks of the chosen approach. Each risk must have mitigation assigned to a phase. If a risk has no mitigation, say so — don't omit it.
+
+| Risk | Probability | Impact | Evidence | Mitigation | Owner phase |
+|---|---|---|---|---|---|
+| breaks existing callers | medium | high | `mmcg_callers X → 45` | preserve signature, add compat wrapper | Phase 1 |
+| migration leaves stale data | low | high | schema diff shows nullable column | add backfill script, gate on count > 0 | Phase 2 |
+| no prod observability | low | medium | assumption — new code path | add log line + metric in Phase 3 | Phase 3 |
+
+A risk with `impact: high` and no mitigation = automatic critic `fail` on dimension #2 (Performance & scale) or #1 (Correctness).
+
+---
+
 ## Pre-edit symbol snapshot *(filled by planner via mmcg — auditor uses to detect silent breakage)*
 
 For each function / method this spec edits, planner records the current `mmcg_callers` count and signature so the auditor can compare post-execution. Delete this section if the spec doesn't touch any code symbols (pure doc / config change).
@@ -137,6 +151,24 @@ For each function / method this spec edits, planner records the current `mmcg_ca
 - `<another_symbol>` — <N> callers, signature `<sig>`
 
 Auditor will re-run `mmcg_callers` / `mmcg_search` post-execution and surface any delta (gained / lost callers, signature change). A delta isn't automatically a fail, but it MUST be acknowledged in the verdict.
+
+---
+
+## Evidence Ledger *(required for strict specs; skip for trivial/lite)*
+
+Every non-trivial claim in this spec must be backed by one of: mmcg evidence, file evidence, a runnable command, user-provided input, or an explicit assumption. If a claim has no backing, it's a guess — name it as an assumption so the critic and auditor can flag it.
+
+| Claim | Evidence type | Evidence | Confidence |
+|---|---|---|---|
+| `<symbol>` has N callers | mmcg | `mmcg_callers <symbol> → N` | high |
+| `<file>` contains `<pattern>` | file | `grep '<pattern>' <file>` | high |
+| no prod runtime | assumption | internal build script only; confirmed with user | medium |
+| `<claim>` | user-provided | user stated in session on <date> | medium |
+
+Rules:
+- No `"this should be safe"` without an evidence row
+- No `"existing callers are fine"` without a `mmcg_callers` count
+- Assumptions are allowed, but must be explicit — they become critic `concern` targets
 
 ---
 
@@ -289,6 +321,8 @@ Explicit anti-patterns specific to this task. Distinct from the global Rules abo
 - [ ] `VERIFY:` commands look executable for this project
 - [ ] **Alternatives Considered has ≥ 2 entries** (or "trivial change" justification)
 - [ ] **Codeflow diagrams** present for every non-trivial alternative, each node mmcg-verified or marked `[NEW]` (or section explicitly skipped as trivial)
+- [ ] **Risk Register** filled for strict specs, or explicitly skipped (write "lite/standard — no risk register")
+- [ ] **Evidence Ledger** — every non-trivial claim has a row, assumptions are explicit (or section skipped for lite)
 - [ ] **Pre-edit symbol snapshot** filled via mmcg for every edited function/method (or section deleted if no code symbols touched)
 - [ ] **Tests Plan is concrete** (per-test what's covered)
 - [ ] **Documentation Plan** lists every doc touched

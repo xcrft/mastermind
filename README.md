@@ -207,7 +207,7 @@ Nothing contacts an external service unless the Claude Code CLI is installed and
 
 **Installed globally** into `~/.claude/` (npm installs only; skippable with `--no-global`):
 
-Subagent `.md` files → `~/.claude/agents/`, skill directories → `~/.claude/skills/`, slash-command files → `~/.claude/commands/`. These are static Markdown files. No code runs during the copy.
+Subagent `.md` files → `~/.claude/agents/`, skill directories → `~/.claude/skills/`. These are static Markdown files. No code runs during the copy.
 
 **What goes to Claude** (only if the Claude Code CLI is installed and `--no-claude` is not passed):
 
@@ -230,7 +230,6 @@ mastermind uninstall --scope all --force
 # also remove the workflow files installed into ~/.claude/:
 rm ~/.claude/agents/mastermind-*.md
 rm -rf ~/.claude/skills/mastermind-*/
-rm ~/.claude/commands/mastermind-*.md
 ```
 
 `CONTEXT.md` and `CLAUDE.md` are never touched by `uninstall` — they are your project's files.

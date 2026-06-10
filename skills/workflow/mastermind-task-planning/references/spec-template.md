@@ -93,7 +93,7 @@ You are <doing X> to achieve <Y, the goal in one sentence>.
 
 The planner must enumerate ≥ 2 plausible approaches and explain why each was rejected. For trivial changes (one-line fix, doc edit, throwaway exploration), write "trivial change — single approach". The critic uses this section to avoid re-suggesting rejected options.
 
-For green-field API / interface / module-boundary design, the planner may generate candidates via the [[api-shape-explorer]] prompt and paste its two unpicked options here.
+For green-field API / interface / module-boundary design, the planner generates 3 qualitatively different candidates and pastes the two unpicked options here.
 
 - **<Alt 1 short name>** — rejected because <concrete reason tied to mmcg findings or project constraint>
 - **<Alt 2 short name>** — rejected because <reason>

@@ -1,8 +1,0 @@
-{
-  "name": "mastermind-workflow",
-  "version": "0.6.0",
-  "description": "Mastermind delegation workflow — planner / critic / executor / auditor / researcher / release subagents with mmcg as the truth layer. Includes a 14-step flow with pre-flight spec validation, 7-dimension critic verdict, post-flight audit (incl. pre-edit snapshot drift detection), and parallel incident-response workflow. Engineering canons enforced: no AI slop, YAGNI, non-breaking, mandatory Tests/Docs/Observability/Performance sections.",
-  "author": {
-    "name": "mastermind"
-  }
-}

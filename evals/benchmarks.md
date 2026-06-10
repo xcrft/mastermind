@@ -54,10 +54,30 @@ Run metadata required for any result recorded here:
 - has_mmcg: true (all cases)
 ```
 
+Run 2026-06-10:
+```
+- repo commit: 532458c
+- mmcg version: 0.28.1
+- claude cli: 2.1.153
+- runner: structured audit verdict required, mmcg required, no fixture leakage
+- command: python evals/runner.py --suite auditor --model opus
+- has_mmcg: true (all cases)
+```
+
 | date | model | commit | case id | failure mode | expect verdict | structured verdict | pass | approx s |
 |---|---|---|---|---|---|---|---|---|
+| 2026-06-10 | opus | 532458c | a-001-false-test-claim-broken | false test claim | broken | broken | ✅ | ~100 |
+| 2026-06-10 | opus | 532458c | a-002-scope-creep-drift | scope creep (config.rs) | drift/broken | broken | ✅ | ~282 |
+| 2026-06-10 | opus | 532458c | a-003-clean-execution-held | golden — clean pass | held | held | ✅ | ~117 |
+| 2026-06-10 | opus | 532458c | a-004-snapshot-drift-callers-lost | caller count drift (middleware_refresh deleted) | drift/broken | — | ❌ flaky | ~127 |
+| 2026-06-10 | opus | 532458c | a-005-hallucinated-symbol | hallucinated ProcessPayment symbol | drift/broken | broken | ✅ | ~104 |
+| 2026-06-10 | opus | 532458c | a-006-stale-find-block | stale symbol ref (authenticate → verify) | drift/broken | broken | ✅ | ~117 |
+| 2026-06-10 | opus | 532458c | a-007-scope-creep-ts | TS scope creep (auth.ts + database.ts) | drift/broken | broken | ✅ | ~218 |
+| 2026-06-10 | opus | 532458c | a-008-signature-drift-required-vs-optional | required vs optional param drift | drift/broken | broken | ✅ | ~138 |
 
-*Pending first post-tightening run.*
+> a-004 ❌: auditor produced correct reasoning but didn't emit `<!-- mastermind:audit-begin -->` sentinel. Retry the same day → ✅ pass ~117s. Flaky — model compliance, not a reasoning failure. No prompt change made.
+
+**Run total: 7/8 pass (a-004 flaky, passes on retry). Total wall-clock: 1203s.**
 
 Key phrase assertions verified per case (secondary — verdict is primary):
 

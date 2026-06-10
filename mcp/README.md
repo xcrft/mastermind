@@ -15,7 +15,7 @@ See [`../docs/mcp-anatomy.md`](../docs/mcp-anatomy.md) for the format.
 | Server | Transport | Description |
 |---|---|---|
 | [`filesystem-readonly`](servers/filesystem-readonly/README.md) | stdio | Read-only filesystem access — list directories and read files, no writes. |
-| [`mmcg`](servers/mmcg/README.md) | stdio | Mastermind Codegraph — fast Python/TS/JS/Rust code indexer with fully-qualified import paths. 12 structural query tools (search, callers/callees with edge_kind filter, impact, imports, imported_by, files, symbols_in_file, outline, recent_changes, unreferenced, api_surface) + file watcher. Truth layer for the Mastermind workflow. |
+| [`mmcg`](servers/mmcg/README.md) | stdio | Mastermind Codegraph — 20 structural query tools over a local SQLite index. Nine languages: Python, TS/JS, Rust, C#, Go, Java, PHP, C/C++. Truth layer for the Mastermind workflow. |
 
 ### integrations/
 *(none yet — contribute one!)*

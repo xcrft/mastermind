@@ -58,7 +58,7 @@ back to whatever `mmcg` is on `$PATH`. Build it first with
   "why": "what this catches — regression scenario or golden input",
   "input": { /* domain-specific */ },
   "expect": {
-    "verdict": "rethink",           // substring match, case-insensitive
+    "verdict": "rethink",           // prose regex match, case-insensitive word boundary
     "contains": ["fabricated"],     // case-insensitive, all must be present
     "not_contains": ["ship it"]     // none may be present
   }
@@ -67,6 +67,10 @@ back to whatever `mmcg` is on `$PATH`. Build it first with
 
 ### Auditor case (real git fixture)
 
+Verdict is checked against the **structured YAML tail** the auditor emits inside
+`<!-- mastermind:audit-begin --> … <!-- mastermind:audit-end -->` sentinels — not prose.
+If the auditor doesn't produce that block the case fails.
+
 ```jsonc
 {
   "id": "a-NNN-short-name",
@@ -74,13 +78,14 @@ back to whatever `mmcg` is on `$PATH`. Build it first with
   "fixture": "fake-session",        // dir under evals/fixtures/
   "baseline_ref": "baseline",       // tag name for the pre-edit commit
   "after_ref": "scope-creep",       // tag name for the executor commit; also the changes/ subdir
+  "allow_no_mmcg": false,           // optional; default false — hard-fail if mmcg index missing
   "input": {
     "spec_summary": "...",
     "executor_report": "..."        // NO git_diff — auditor runs it itself
   },
   "expect": {
-    "verdict": ["drift", "broken"], // string OR list (any-of)
-    "contains": ["config", "scope"],
+    "verdict": ["drift", "broken"], // matched against structured verdict field, string OR list
+    "contains": ["config", "scope"],// secondary: prose phrases in reasoning
     "not_contains": ["contract held"]
   }
 }

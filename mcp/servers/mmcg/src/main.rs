@@ -198,6 +198,10 @@ enum Cmd {
         /// Output JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
+        /// Show full context: binary path, index path, MCP config candidates,
+        /// Claude config path, and hints for every check (not just failing ones).
+        #[arg(long)]
+        explain: bool,
     },
     /// Two-phase orchestrator that wraps the mastermind workflow in mechanical
     /// gates. Auto-resumes via `.mastermind/run-state/<basename>.json`.
@@ -251,6 +255,27 @@ enum Cmd {
     /// One-shot query — handy for CLI debugging without going through MCP.
     #[command(subcommand)]
     Query(QueryCmd),
+    /// Self-contained demo: builds a temp repo, runs mmcg_search against a
+    /// hallucinated symbol, and prints the auditor verdict. Zero setup required.
+    /// Currently only `hallucinated-symbol` is supported.
+    Demo {
+        /// Which demo scenario to run. Currently: `hallucinated-symbol`.
+        #[arg(default_value = "hallucinated-symbol")]
+        scenario: String,
+    },
+    /// Scaffold a new task spec under `.mastermind/tasks/`. Picks the next
+    /// available NNN sequence number automatically.
+    NewSpec {
+        /// Short description of the task. Used as the spec title and folder slug.
+        description: String,
+        /// Template complexity: `lite` (Goal / Scope / Pre-edit snapshot / Verify)
+        /// or `strict` (adds Tests / Docs / Observability / Performance / Rollback).
+        #[arg(long, default_value = "lite")]
+        mode: String,
+        /// Project root. Defaults to cwd.
+        #[arg(long, default_value = ".")]
+        root: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -545,7 +570,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             commands::audit_spec(&spec, &since, root, json, &index_path)?;
         }
-        Cmd::Doctor { root, json } => {
+        Cmd::Doctor { root, json, explain } => {
             let root = root
                 .canonicalize()
                 .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
@@ -553,12 +578,31 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let report = mmcg::doctor::run(&root, &me);
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
+            } else if explain {
+                print!("{}", report.render_explain(&me, &index_path));
             } else {
                 print!("{}", report.render_text());
             }
             if report.has_failures() {
                 std::process::exit(1);
             }
+        }
+        Cmd::Demo { scenario } => {
+            if scenario != "hallucinated-symbol" {
+                return Err(format!(
+                    "unknown demo scenario {scenario:?} — available: hallucinated-symbol"
+                )
+                .into());
+            }
+            commands::demo()?;
+        }
+        Cmd::NewSpec { description, mode, root } => {
+            let root = root
+                .canonicalize()
+                .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
+            let mode = commands::new_spec::Mode::from_str(&mode)
+                .map_err(Box::<dyn std::error::Error>::from)?;
+            commands::new_spec(&description, mode, &root)?;
         }
         Cmd::RunTask {
             spec,

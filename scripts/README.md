@@ -41,6 +41,7 @@ Exit code is `0` on clean, `1` if any errors. Warnings don't fail the run.
 
 - `_template/` directories — they show example syntax, not real references
 - Top-level `docs/` — illustrates `[[slug]]` patterns as documentation
+- `extras/` — not part of the validated artifact tree
 - `research/`, build artifacts (`target/`, `node_modules/`, `__pycache__/`)
 
 ### Adding a new check

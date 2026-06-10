@@ -174,7 +174,7 @@ Do not send the critic the whole brainstorming conversation — that imports you
 
 **Alternatives mandate.** For any non-trivial change (multi-file, anything in sensitive areas, anything where the critic would be mandatory), the brief MUST include ≥ 2 rejected alternatives with concrete reasons. The critic checks this. The spec template's "Alternatives Considered" section is mandatory for the same reason — it's the audit trail for "we did think about other options".
 
-For green-field interface / API / module-boundary design, run the [[api-shape-explorer]] prompt first — it forces 3 *qualitatively* different shapes (not 3 variants of one idea) and picks one with a defended rationale. The two unpicked become the rejected alternatives in the brief and in the spec's "Alternatives Considered" section. Skip when modifying an existing API where the shape is already fixed.
+For green-field interface / API / module-boundary design, generate 3 qualitatively different shapes (not 3 variants of one idea) and pick one with a defended rationale. The two unpicked become the rejected alternatives in the brief and in the spec's "Alternatives Considered" section. Skip when modifying an existing API where the shape is already fixed.
 
 ### How to read the critic's verdict
 

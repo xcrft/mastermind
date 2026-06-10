@@ -83,11 +83,8 @@ def _has_template_part(p: Path) -> bool:
 
 
 def find_artifacts() -> Iterator[Artifact]:
-    """Yield every artifact in the repo. Skips templates, category index READMEs,
-    and the generated `plugins/` tree (it's built by scripts/build-plugins.py from
-    the canonical locations — validating it duplicates the canonical checks)."""
+    """Yield every artifact in the repo. Skips templates and category index READMEs."""
     skills = REPO_ROOT / "skills"
-    prompts = REPO_ROOT / "prompts"
     agents = REPO_ROOT / "agents"
     mcp = REPO_ROOT / "mcp"
 
@@ -102,22 +99,6 @@ def find_artifacts() -> Iterator[Artifact]:
     # skills/<domain>/<slug>.md (single-file)
     for p in skills.glob("*/*.md"):
         if _has_template_part(p) or p.name == "README.md":
-            continue
-        a = _load_artifact(p, slug=p.stem, domain=p.parts[-2])
-        if a:
-            yield a
-
-    # prompts/<domain>/<slug>/prompt.md (folder-style)
-    for p in prompts.glob("*/*/prompt.md"):
-        if _has_template_part(p):
-            continue
-        a = _load_artifact(p, slug=p.parts[-2], domain=p.parts[-3])
-        if a:
-            yield a
-
-    # prompts/<domain>/<slug>.md (single-file)
-    for p in prompts.glob("*/*.md"):
-        if _has_template_part(p) or p.name in ("README.md", "prompt.md"):
             continue
         a = _load_artifact(p, slug=p.stem, domain=p.parts[-2])
         if a:
@@ -260,7 +241,7 @@ def _is_excluded(path: Path) -> bool:
     except ValueError:
         return False
     rel_parts = rel.parts
-    if rel_parts and rel_parts[0] in {"docs", "research", "scripts", "examples", "plugins", "evals"}:
+    if rel_parts and rel_parts[0] in {"docs", "research", "scripts", "examples", "extras", "evals"}:
         return True
     # CLAUDE.md templates contain intentional links that resolve when copied
     # to a project root, not in the template's own location.
@@ -391,8 +372,6 @@ MMCG_MCP_SRC = "mcp/servers/mmcg/src/mcp.rs"
 MMCG_TOOL_LIST_DOCS: list[str] = [
     "mcp/servers/mmcg/README.md",
     "README.md",
-    "plugins/mmcg/.claude-plugin/plugin.json",
-    ".claude-plugin/marketplace.json",
 ]
 
 # Files that quote a tool *count* like "16 structural query tools" / "15 tools".
@@ -400,8 +379,6 @@ MMCG_TOOL_LIST_DOCS: list[str] = [
 MMCG_TOOL_COUNT_DOCS: list[str] = [
     "mcp/servers/mmcg/README.md",
     "README.md",
-    "plugins/mmcg/.claude-plugin/plugin.json",
-    ".claude-plugin/marketplace.json",
 ]
 
 

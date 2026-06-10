@@ -302,8 +302,9 @@ enum Cmd {
     NewSpec {
         /// Short description of the task. Used as the spec title and folder slug.
         description: String,
-        /// Template complexity: `lite` (Goal / Scope / Pre-edit snapshot / Verify)
-        /// or `strict` (adds Tests / Docs / Observability / Performance / Rollback).
+        /// Template complexity: `lite` (Goal / Scope / Pre-edit snapshot / Verify),
+        /// `standard` (adds Alternatives / Codeflow / Tests / Docs / Observability / Performance),
+        /// or `strict` (adds Risk Register / Evidence Ledger / Rollback / 3-lens critic panel).
         #[arg(long, default_value = "lite")]
         mode: String,
         /// Project root. Defaults to cwd.

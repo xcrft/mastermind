@@ -19,6 +19,7 @@ These are not installed by `mastermind init`. Copy what you need manually into `
 | `pr-review/` | Review a pull request for correctness, security, and design issues — staff-engineer style. |
 | `flaky-finder/` | Identify flaky tests by running the suite repeatedly and bisecting failures. |
 | `doc-stub-sync/` | Sync local doc stubs with online sources — diff by hash, refetch only what changed. Ships with a Python helper script. |
+| `mastermind-incident-response/` | Parallel workflow for production incidents — triage, stop bleed, root-cause via mmcg + git, blameless postmortem. Not part of the core intake → plan → execute → audit loop. |
 
 ### `prompts/`
 

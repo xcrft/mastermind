@@ -263,10 +263,51 @@ Bad lessons (symptom, not actionable):
 
 The lessons file is plain markdown and intentionally NOT indexed by `mmcg_tasks` (the `_` prefix excludes it from the FTS5 corpus — see indexer convention). Planners read it directly.
 
+## Write state.json (REQUIRED)
+
+After writing the audit report and the lessons entry, overwrite `state.json` in the task folder with the final state. This file is read by `mastermind status`, `mastermind next`, and `mastermind resume`.
+
+On `✅ contract held`:
+
+```json
+{
+  "status": "learned",
+  "risk": "low",
+  "next_step": "close",
+  "last_artifact": "audit.md"
+}
+```
+
+On `⚠️ partial drift`:
+
+```json
+{
+  "status": "drift",
+  "risk": "medium",
+  "next_step": "planner_review",
+  "blocking_reason": "<one sentence: which discrepancy is the highest concern>",
+  "last_artifact": "audit.md"
+}
+```
+
+On `❌ contract broken`:
+
+```json
+{
+  "status": "broken",
+  "risk": "high",
+  "next_step": "planner_review",
+  "blocking_reason": "<one sentence: what broke and which file/symbol>",
+  "last_artifact": "audit.md"
+}
+```
+
+The `blocking_reason` must be a single sentence naming the concrete discrepancy — not "see audit" or "contract broken". It appears verbatim in `mastermind status` and `mastermind resume` output.
+
 ## What you do NOT do
 
 - Run commands that modify state (no `git commit`, no `git push`, no destructive ops)
-- Open files in editors — only `Read` and `Write`/`Edit` for `_lessons.md` appends (and optionally the task folder's `audit.md`)
+- Open files in editors — only `Read` and `Write`/`Edit` for `_lessons.md` appends, `state.json` writes, and optionally the task folder's `audit.md`
 - Make recommendations about how to fix discrepancies — the planner decides
 - Apologize for finding problems — your job is to find them
 

@@ -24,7 +24,7 @@
     "LICENSE"
   ],
   "engines": {
-    "node": ">=24"
+    "node": ">=18"
   },
   "keywords": [
     "mcp",

@@ -571,6 +571,64 @@ def validate_installable_link_escape(links: dict[Path, set[str]]) -> list[Issue]
     return issues
 
 
+# ----- eval fixture clue guard ------------------------------------------
+
+BANNED_FIXTURE_CLUES: list[str] = [
+    "auditor must",
+    "auditor should",
+    "auditor catches",
+    "scope creep",
+    "unrelated to spec",
+    "hallucinated",
+    "mmcg_search",
+    "mmcg_callers",
+    "tsc would reject",
+    "tsc rejects",
+    "spec scoped",
+    "executor added",
+    "executor refactored",
+    "executor changed",
+    "not in the spec",
+    "never defined",
+]
+
+
+def validate_eval_fixture_clues() -> list[Issue]:
+    """Scan eval fixture source trees for embedded answer clues.
+
+    Only `baseline/` and `changes/` trees are scanned; READMEs are
+    excluded (they are the correct place for scenario explanations).
+    """
+    issues: list[Issue] = []
+    fixtures_dir = REPO_ROOT / "evals" / "fixtures"
+    if not fixtures_dir.is_dir():
+        return issues
+    for fixture_dir in sorted(fixtures_dir.iterdir()):
+        if not fixture_dir.is_dir():
+            continue
+        for tree_name in ("baseline", "changes"):
+            tree = fixture_dir / tree_name
+            if not tree.is_dir():
+                continue
+            for src_file in tree.rglob("*"):
+                if not src_file.is_file() or src_file.name == "README.md":
+                    continue
+                try:
+                    text = src_file.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                text_lower = text.lower()
+                for clue in BANNED_FIXTURE_CLUES:
+                    if clue.lower() in text_lower:
+                        issues.append(Issue(
+                            src_file,
+                            "error",
+                            f"eval fixture contains banned clue {clue!r} — move explanation to the fixture README.md",
+                        ))
+                        break
+    return issues
+
+
 # ----- entry point ------------------------------------------------------
 
 
@@ -589,6 +647,7 @@ def main(argv: list[str]) -> int:
 
     issues.extend(validate_mmcg_template_mirrors())
     issues.extend(validate_mmcg_tool_drift())
+    issues.extend(validate_eval_fixture_clues())
 
     issues.sort(key=lambda i: (str(i.path), 0 if i.level == "error" else 1, i.msg))
     for i in issues:

@@ -1,6 +1,4 @@
-// Auth middleware — scope-creep variant.
-// UNRELATED TO SPEC — executor refactored token validation logic here.
-// Spec scoped changes to src/router.ts only.
+// Auth middleware.
 import { Request, Response, NextFunction } from "express";
 
 const BEARER_PREFIX = "Bearer ";
@@ -21,7 +19,6 @@ export function requireAuth(
   next();
 }
 
-// Executor added this helper — also not in the spec.
 export function extractToken(header: string): string {
   return header.startsWith(BEARER_PREFIX)
     ? header.slice(BEARER_PREFIX.length)

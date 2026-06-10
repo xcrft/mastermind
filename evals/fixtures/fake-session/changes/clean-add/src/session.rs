@@ -1,8 +1,4 @@
-//! Minimal SessionStore — fixture for auditor eval suite.
-//!
-//! `clean-add` variant: executor added `session_count()` + its unit test
-//! exactly per spec. No scope creep, no caller drift. Auditor should verdict
-//! `contract held`.
+//! Minimal SessionStore.
 
 use std::collections::HashMap;
 use std::sync::RwLock;

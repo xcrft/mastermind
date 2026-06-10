@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.1] - 2026-06-10
+
+### Added
+- Auditor eval fixtures for hallucinated symbols, stale symbol refs, TypeScript scope creep, and required-vs-optional signature drift.
+- Language coverage table for mmcg.
+- Eval fixture clue guard in `scripts/validate.py` — blocks banned meta-commentary from landing in fixture source trees.
+
+### Fixed
+- Auditor eval runner now fails hard when mmcg index is unavailable (previously silently skipped, producing results that could not be attributed to codegraph-backed auditing).
+- Auditor eval runner now requires a structured `<!-- mastermind:audit-begin -->` verdict tail instead of prose keyword matching, eliminating false-positive passes.
+- Suppress TERM/tput warnings in eval runner.
+- Removed answer leakage from all auditor eval fixture source files (meta-commentary moved to fixture READMEs).
+
+### Changed
+- Restore `node >=18` engine constraint in `npm/mastermind/package.json` (was incorrectly bumped to `>=24`).
+- Refactor `run-task` CLI dispatch: individual flags collapsed into `RunOpts` struct.
+
 ## [0.28.0] - 2026-06-05
 
 ### Fixed
@@ -83,7 +100,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Seven prebuilt platform packages (`@xcraftmind/mmcg-*`) covering macOS (arm64, x64), Linux glibc and musl (x64, arm64), and Windows (x64). npm installs only the package matching the host's `os` / `cpu` / `libc`.
 - Install-mode-aware `setup claude` that writes the correct MCP `command` form for npx, global, project-local, and cargo installs.
 
-[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v0.28.0...HEAD
+[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v0.28.1...HEAD
+[0.28.1]: https://github.com/xcrft/mastermind/compare/npm-v0.28.0...npm-v0.28.1
 [0.28.0]: https://github.com/xcrft/mastermind/compare/npm-v0.27.1...npm-v0.28.0
 [0.27.1]: https://github.com/xcrft/mastermind/compare/npm-v0.27.0...npm-v0.27.1
 [0.27.0]: https://github.com/xcrft/mastermind/compare/npm-v0.26.0...npm-v0.27.0

@@ -180,6 +180,7 @@ Ask me one of those, or take this to the planner.
 
 ## Companion pieces
 
-- Planner that spawns you: `mastermind-task-planning`
+- Planner that spawns you: `mastermind-task-planning` (see "Subagent routing" section for researcher vs investigator decision)
+- Investigator for unknown-cause bugs: `mastermind-investigator` — use that instead when the cause is unknown; researcher gathers facts, investigator pursues root cause
 - Executor that runs after design: [`mastermind-task-executor`](mastermind-task-executor.md)
 - Workflow this fits in: `mastermind-workflow` (Roles table includes you as the Haiku tier)

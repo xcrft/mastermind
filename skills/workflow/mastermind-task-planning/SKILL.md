@@ -57,7 +57,19 @@ If you find yourself **guessing** at a function signature, a file path, or the n
 
 If mmcg is not configured (no `mmcg_status` response), say so to the user and ask whether to proceed without truth grounding or wait until the index is set up. Do not silently work blind.
 
-Spawning the `mastermind-researcher` subagent is a good way to batch mmcg lookups — the researcher returns a structured fact report you can paste into the spec context.
+### Subagent routing — researcher vs investigator vs self
+
+Before designing, pick the right fact-gathering tool:
+
+| Situation | Use |
+|---|---|
+| You need to batch mmcg lookups (callsites, imports, blast radius, config values) before drafting | `mastermind-researcher` (Haiku — cheap, read-only, returns structured facts) |
+| User reports a bug / unexpected behavior and you do **not know the cause** | `mastermind-investigator` (Sonnet — iterative, maintains Hypothesis Ledger, one probe per turn) |
+| Simple one-symbol lookup, 1-2 quick mmcg queries | Do it yourself inline — spawning a subagent for trivial lookups wastes tokens |
+
+**Researcher** gathers facts in one pass and returns. You do NOT iterate with the researcher — one question, one structured report, done.
+
+**Investigator** iterates. You spawn it with a symptom, it returns an updated ledger + one next probe. You run the probe (or hand it to the user), pass the result back, it updates the ledger again. Repeat until one hypothesis is `confirmed`. Then you open a spec.
 
 ### Workflow modes — pick before drafting
 
@@ -104,6 +116,68 @@ If the user request admits ≥ 2 reasonable interpretations, write them out in t
 If a *single* assumption is load-bearing (e.g. "the user means PostgreSQL, not generic SQL"; "the timeout is per-request, not session-wide"), state it in **Goals** as `Assumes: <X>` so the executor can flag it if they discover otherwise.
 
 The bar is concrete: if you can imagine a reasonable user reading the spec and saying "that's not what I meant", verbalize the fork upfront. The cost of a 2-line "Interpretation" note is negligible; the cost of an executor implementing the wrong interpretation is a full re-spec cycle.
+
+## Debug-time investigation — spawn the investigator
+
+When the user reports a bug, test failure, or unexpected behavior and the root cause is **not already known**, spawn `mastermind-investigator` before opening a spec. Opening a spec on a misdiagnosed bug wastes an entire executor + auditor cycle.
+
+### When to spawn the investigator — mandatory
+
+Spawn when:
+- User says "X is broken" but doesn't say why.
+- A test fails and the stack trace points to ≥ 2 plausible causes.
+- A behavior changed and no obvious commit explains it.
+- You find yourself guessing the cause ("probably the cache", "likely a race condition") without evidence.
+
+Do **not** spawn for:
+- Bugs where the cause is already known (a typo, a wrong constant, a confirmed missing import) — go straight to a spec.
+- Feature requests — the investigator is for unknown failures only.
+- Trivial one-liner fixes where the change is self-evident.
+
+### What to pass the investigator
+
+```markdown
+**Symptom:** <exact observable fact — verbatim error, log line, test name, behavior>
+
+**Scope:** <directory, file pattern, module, or service to search in>
+
+**Prior context (optional):** <any facts already known, hypotheses already considered>
+```
+
+Do not send a wall of context. The investigator needs a clean, cold start — your prior reasoning about the cause is bias, not fact.
+
+### The iteration protocol
+
+The investigator returns an updated **Hypothesis Ledger** and exactly one **Next probe**. Your job as planner:
+
+1. Read the ledger. Do not form your own opinion about which hypothesis is correct.
+2. Execute (or ask the user to run) the one Next probe.
+3. Pass the result back to the investigator as a follow-up with the updated ledger.
+4. Repeat until the ledger has one hypothesis in `confirmed` status.
+
+A `confirmed` hypothesis requires: `evidence_for` populated AND `evidence_against` checked. If the investigator returns a hypothesis as `confirmed` without an `evidence_against` entry, push back — that's premature closure.
+
+Do not run additional probes beyond the one the investigator specified. Uncoordinated parallel probes create conflicting evidence that the ledger can't cleanly incorporate.
+
+### Termination — when to stop investigating and open a spec
+
+Stop the investigation loop when:
+- Exactly one hypothesis is `confirmed` (evidence_for + evidence_against both populated).
+- The investigator's "Current best explanation" names a concrete code location, config value, or external dependency.
+
+At that point:
+1. Copy the "Current best explanation" into the spec's **Goal** section as the diagnosed root cause.
+2. Copy the Ruled out table into the spec's **Notes** — the executor should not re-investigate.
+3. Open the spec normally (pick mode, draft, critic if needed).
+
+If the investigator exhausts probes without confirming a cause: escalate to the user with the full ledger and ruled-out table. Do not guess a root cause. Do not open a spec on an unconfirmed hypothesis.
+
+### Anti-patterns
+
+- **Skipping the investigator because you think you know the answer.** "I'm pretty sure it's X" is exactly the cognitive bias the investigator exists to prevent. If you can't populate `evidence_against` for your hypothesis, you don't know — you guess.
+- **Running probes yourself in parallel with the investigator.** The investigator's probe sequence is deliberate: each result informs the next. Parallel probes create noise.
+- **Opening a spec on a `weakened` hypothesis.** Weakened ≠ confirmed. Wait for confirmation.
+- **Treating "no other hypothesis survived" as evidence_for.** Ruling out alternatives doesn't confirm the survivor — it may mean all hypotheses are wrong.
 
 ## Design-time challenge — spawn the critic
 

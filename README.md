@@ -175,10 +175,9 @@ Writes `./.mcp.json` with `command: "./node_modules/.bin/mastermind"`.
 /plugin marketplace add xcrft/mastermind
 /plugin install mastermind-workflow@mastermind   # workflow subagents
 /plugin install mmcg@mastermind                  # codegraph MCP config
-/plugin install mastermind-tools@mastermind      # standalone skills
 ```
 
-The `mmcg` plugin registers the MCP config; install the binary via `npm install -g @xcraftmind/mastermind`. The `plugins/` tree is generated from canonical artifacts by [`scripts/build-plugins.py`](scripts/build-plugins.py).
+The `mmcg` plugin registers the MCP config; install the binary via `npm install -g @xcraftmind/mastermind`. The `plugins/` tree is generated from canonical artifacts by [`scripts/build-plugins.py`](scripts/build-plugins.py). Optional extras (pr-review, flaky-finder, doc-stub-sync) are in [`extras/`](extras/) and not installed by default.
 </details>
 
 <details>

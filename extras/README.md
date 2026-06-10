@@ -1,6 +1,6 @@
 # Extras
 
-Non-core artifacts that extend Mastermind but are not part of the default install.
+Non-core artifacts that extend Mastermind but are not part of the default install and not part of the core proof loop (intake → plan → spec → execute → audit).
 
 These are not installed by `mastermind init`. Copy what you need manually into `~/.claude/`.
 

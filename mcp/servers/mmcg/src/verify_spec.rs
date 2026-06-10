@@ -38,6 +38,20 @@ pub const MANDATORY_SECTIONS: &[&str] = &[
     "Performance Considerations",
 ];
 
+/// Sections required only for lite mode (minimal spec).
+pub const LITE_MANDATORY_SECTIONS: &[&str] = &["Goals"];
+
+/// Return the set of mandatory sections to enforce given the spec's declared
+/// mode (from frontmatter). Falls back to `MANDATORY_SECTIONS` when no mode
+/// is declared (backward compat with hand-written specs that predate the
+/// `mode:` field).
+pub fn mandatory_sections_for_mode(mode: Option<&str>) -> &'static [&'static str] {
+    match mode {
+        Some("lite") => LITE_MANDATORY_SECTIONS,
+        _ => MANDATORY_SECTIONS,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Verdict {
@@ -263,7 +277,11 @@ pub fn run(spec: &ParsedSpec, store: Option<&Store>, repo_root: &Path) -> Report
     let mut warnings: Vec<Finding> = Vec::new();
 
     // 1. Mandatory sections non-empty.
-    for section in MANDATORY_SECTIONS {
+    let spec_mode = spec
+        .frontmatter
+        .as_ref()
+        .and_then(|f| f.mode.as_deref());
+    for section in mandatory_sections_for_mode(spec_mode) {
         match spec::section_body(spec, section) {
             None => errors.push(Finding::EmptyMandatorySection {
                 section: section.to_string(),

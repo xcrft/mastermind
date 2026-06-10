@@ -84,6 +84,10 @@ pub struct Frontmatter {
     /// "low" / "medium" / "high" — informational, surfaced in the risk report.
     #[serde(default)]
     pub risk: Option<String>,
+    /// Spec complexity mode: "lite" | "standard" | "strict". Controls which
+    /// sections verify-spec requires to be present and non-empty.
+    #[serde(default)]
+    pub mode: Option<String>,
     /// Files this spec authorizes the executor to modify, with optional
     /// symbol-level snapshots scoped by file + language.
     #[serde(default)]

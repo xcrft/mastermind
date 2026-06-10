@@ -92,6 +92,7 @@ fn render_lite(description: &str, id: &str) -> String {
 ---
 id: \"{id}\"
 title: {description}
+mode: lite
 risk: low
 ---
 
@@ -145,6 +146,7 @@ fn render_standard(description: &str, id: &str) -> String {
 ---
 id: \"{id}\"
 title: {description}
+mode: standard
 risk: medium
 
 touches:
@@ -327,6 +329,7 @@ fn render_strict(description: &str, id: &str) -> String {
 ---
 id: \"{id}\"
 title: {description}
+mode: strict
 risk: high
 
 touches:

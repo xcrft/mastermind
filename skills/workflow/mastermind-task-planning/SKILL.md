@@ -59,6 +59,20 @@ If mmcg is not configured (no `mmcg_status` response), say so to the user and as
 
 Spawning the `mastermind-researcher` subagent is a good way to batch mmcg lookups — the researcher returns a structured fact report you can paste into the spec context.
 
+### Workflow modes — pick before drafting
+
+Every task runs in one of three modes. Pick the mode first; it determines which spec sections are required. Do NOT use `strict` ceremony for a one-liner.
+
+| Mode | When to use | Required spec sections |
+|---|---|---|
+| **lite** | One-file or trivial change, no auth/billing/migration | Goal, Scope, FIND/CHANGE TO, VERIFY |
+| **standard** | Normal feature or fix — multi-file, no sensitive areas | Everything in lite + Alternatives Considered, Codeflow, Tests Plan, Docs Plan, Observability, Performance |
+| **strict** | Auth, billing, migration, public API, data-loss risk, blast-radius ≥ 20 | Everything in standard + Evidence Ledger, Risk Register, 3-lens critic panel, Rollback Plan |
+
+`mastermind new-spec` defaults to `lite`. Pass `--mode standard` or `--mode strict` to get the richer template.
+
+For `strict` mode, the critic panel (3 parallel lenses) is mandatory before drafting the spec. For `standard`, one critic spawn is recommended but not mandatory. For `lite`, skip the critic.
+
 ### Auto-fill the Pre-edit symbol snapshot
 
 For any function / method the spec touches, populate the spec's **Pre-edit symbol snapshot** section before showing to the user. For each symbol:

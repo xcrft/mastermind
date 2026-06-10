@@ -14,12 +14,13 @@ See [`../docs/agent-anatomy.md`](../docs/agent-anatomy.md) for the format of eac
 ### subagents/
 | Subagent | Description |
 |---|---|
+| [`mastermind-prompt-refiner`](subagents/mastermind-prompt-refiner.md) | Intake gate. Normalizes rough client prompts into planner-ready input before planning begins. |
 | [`mastermind-critic`](subagents/mastermind-critic.md) | Pre-spec design challenger. Stress-tests a proposed approach, returns 3 weaknesses + verdict. |
-| [`mastermind-task-executor`](subagents/mastermind-task-executor.md) | Executes `.mastermind/tasks/<NNN>-<name>/spec.md` phase by phase; stops on first failure. |
-| [`mastermind-prompt-refiner`](subagents/mastermind-prompt-refiner.md) | Refines a rough prompt and returns a clean version ready for the next agent. |
 | [`mastermind-researcher`](subagents/mastermind-researcher.md) | Haiku-tier fact-gatherer. Runs grep/read/glob and returns structured citations, never decides. |
+| [`mastermind-task-executor`](subagents/mastermind-task-executor.md) | Executes `.mastermind/tasks/<NNN>-<name>/spec.md` phase by phase; stops on first failure. |
 | [`mastermind-auditor`](subagents/mastermind-auditor.md) | Post-flight auditor. Verifies executor report claims against `git diff` and mmcg. |
-| [`mastermind-release`](subagents/mastermind-release.md) | Drafts commit message and PR description from spec + diff + auditor verdict. Read-only; never commits. |
+
+> `mastermind-release` moved to [`extras/subagents/`](../extras/subagents/) — not installed by default.
 
 ### claude-md/
 | Template | Description |

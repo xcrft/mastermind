@@ -1,6 +1,6 @@
 # Skills
 
-Markdown skills for AI coding agents. Each skill is a self-contained capability the agent can pick up and apply.
+Skills used by the Mastermind workflow. Core skills are installed by `mastermind init`. Non-core skills live in [`extras/`](../extras/).
 
 See [`../docs/skill-anatomy.md`](../docs/skill-anatomy.md) for the format. Adding a new skill? Copy [`_template/`](_template/) and follow [`../CONTRIBUTING.md`](../CONTRIBUTING.md).
 

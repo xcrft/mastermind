@@ -90,7 +90,7 @@ Every task spec has mandatory sections (Tests / Docs / Observability / Performan
 - **`mastermind audit-spec`** — post-execution: scope creep, signature drift vs the pre-edit snapshot, removed symbols not acknowledged, planned tests not added.
 - **`mastermind run-task`** — wires the two gates around executor hand-off with state persistence between phases.
 
-Full 14-step flow: the [workflow CLAUDE.md template](agents/claude-md/mastermind-workflow.md).
+Full workflow: the [workflow CLAUDE.md template](agents/claude-md/mastermind-workflow.md).
 
 ### Engineering canons
 
@@ -131,7 +131,7 @@ Core
 Workflow (installed into ~/.claude/ by `mastermind init`)
   agents/subagents/     intake-refiner, planner-critic, researcher, task-executor, auditor
   agents/claude-md/     CLAUDE.md workflow template
-  skills/workflow/      mastermind-task-planning, mastermind-task-executor, prompt-refiner
+  skills/workflow/      mastermind-task-planning, mastermind-task-executor
   skills/prompt-engineering/  mastermind-prompt-refiner (intake gate)
 
 Proof

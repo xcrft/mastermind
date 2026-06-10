@@ -43,7 +43,7 @@ mmcg is a Rust binary that tree-sitter-parses nine languages (Python, TypeScript
 | Architectural cycles? | `mmcg_dependency_cycles` |
 | Dead-code candidates? | `mmcg_unreferenced` |
 
-Full 20-tool reference: [`mcp/servers/mmcg/README.md`](mcp/servers/mmcg/README.md).
+All 20 tools: `mmcg_search` · `mmcg_callers` · `mmcg_callees` · `mmcg_impact` · `mmcg_imports` · `mmcg_imported_by` · `mmcg_symbols_in_file` · `mmcg_outline` · `mmcg_files` · `mmcg_api_surface` · `mmcg_unreferenced` · `mmcg_dependency_cycles` · `mmcg_symbols_changed_since` · `mmcg_centrality` · `mmcg_change_class` · `mmcg_recent_changes` · `mmcg_tasks` · `mmcg_status` · `mmcg_scratchpad_append` · `mmcg_scratchpad_read` — full reference: [`mcp/servers/mmcg/README.md`](mcp/servers/mmcg/README.md). Works with any MCP stdio client (Cursor, Continue, custom) — not just Claude Code.
 
 **Why not grep / LSP / ast-grep / Sourcegraph?**
 
@@ -225,18 +225,6 @@ rm ~/.claude/commands/mastermind-*.md
 `CONTEXT.md` and `CLAUDE.md` are never touched by `uninstall` — they are your project's files.
 
 ---
-
-## Just the codegraph
-
-`mmcg` is a standalone [crate](https://crates.io/crates/mmcg) that works with any MCP stdio client (Cursor, Continue, custom) — 20 tools across nine languages: `search`, `callers`, `callees`, `impact`, `imports`, `imported_by`, `files`, `outline`, `symbols_in_file`, `recent_changes`, `unreferenced`, `api_surface`, `centrality`, `tasks`, `dependency_cycles`, `symbols_changed_since`, `scratchpad_append`, `scratchpad_read`, `change_class`, `status`.
-
-```bash
-cargo install mmcg
-```
-
-Register it in your MCP client — snippet in [`mcp/servers/mmcg/README.md`](mcp/servers/mmcg/README.md).
-
-The subagent files use Claude Code's frontmatter format, but individual pieces are portable. A lone critic agent without the full pipeline is still a fine code reviewer; spec-driven contracts need the planner + auditor too.
 
 ## Contributing
 

@@ -1,8 +1,8 @@
 ---
 name: mastermind-prompt-refiner
-description: Refines a user's rough, vague, or under-specified prompt into a clean, executable one before handing it off to another agent or skill. Use as a front-stage filter in delegation workflows, or when the user says "improve this prompt", "rewrite this prompt for an agent", "make this clearer".
+description: Intake gate that normalizes raw client prompts before the planner sees them. Use as the first stage in any Mastermind workflow when the user's request is rough, vague, client-provided, or bundles multiple intents. Also invoked when the user says "improve this prompt", "rewrite this for an agent", "make this clearer".
 metadata:
-  version: 0.1.0
+  version: 0.2.0
   authors:
     - mastermind
   tags:
@@ -11,9 +11,9 @@ metadata:
   model: sonnet
 ---
 
-# Prompt Refiner
+# Prompt Refiner — Intake Gate
 
-Sits between the user and a downstream agent (planner, executor, reviewer, …) and rewrites the raw user input into a refined prompt. The downstream agent sees the refined version, not the user's brain dump.
+Sits between the user and the planner and normalizes raw user input into clean planner input. The planner sees the refined version, not the user's brain dump.
 
 This is a **one-pass** skill: input goes in, refined prompt comes out. Not a tutorial on prompt engineering, not a general-purpose advisor. If the user wants to learn prompt engineering, point them at [`references/techniques.md`](references/techniques.md) instead.
 
@@ -28,7 +28,7 @@ This is a **one-pass** skill: input goes in, refined prompt comes out. Not a tut
 
 ### 1. Read the input. Identify three things.
 - **Goal** — what does the user actually want to accomplish?
-- **Next consumer** — who reads the refined prompt next? (planner / executor / reviewer / unspecified)
+- **Next consumer** — who reads the refined prompt next? Default: `planner`. Use `executor` only if the spawner explicitly states a valid spec already exists — routing raw user intent to an executor bypasses the planning gate.
 - **Gaps** — what's vague, missing, or contradictory?
 
 ### 2. Decide: refine inline, or ask first?
@@ -55,7 +55,7 @@ For technique-level decisions (when to add CoT, few-shot, XML structure, role fr
 
 ### 4. Hand off.
 
-Output in this exact shape. The spawner copies the `## Refined prompt` block into the next agent's input:
+Output in this exact shape. The spawner copies the `## Refined prompt` block into the planner's input:
 
 ```markdown
 ## Refined prompt
@@ -71,9 +71,25 @@ Output in this exact shape. The spawner copies the `## Refined prompt` block int
 
 - <NEEDS: gap 1>
 - <NEEDS: gap 2>
+
+## Intake metadata
+
+<!-- mastermind:intake-begin -->
+```yaml
+action: refined
+workflow_mode: strict
+risk: medium
+needs_research: false
+needs_critic: false
+```
+<!-- mastermind:intake-end -->
 ```
 
-Omit the "Gaps" section entirely if there are none.
+`action` values: `refined` (prompt was rewritten) | `passthrough` (already tight, no changes) | `ask` (goal too ambiguous, questions emitted instead).
+`workflow_mode`: `strict` (auth, billing, schema, public API, rollback complexity) | `lite` (bounded, low-risk, single-file) | `unknown` (not enough context).
+`risk`: `high` (data loss, auth, production schema) | `medium` (multi-file, external API) | `low` (local, reversible, no external deps).
+
+Omit the "Gaps" section entirely if there are none. If asking clarifying questions, emit the questions then the intake block with `action: ask` — no refined prompt section.
 
 ## What you do NOT do
 
@@ -83,6 +99,7 @@ Omit the "Gaps" section entirely if there are none.
 - Stack multiple refinement passes in one call
 - Execute the prompt — that's the next agent's job
 - Critique the user's writing style — only fix what affects machine consumption
+- Route to executor when no spec exists — that bypasses the planning gate
 
 ## Output examples
 
@@ -116,6 +133,18 @@ Feedback message:
 ## Gaps the user still needs to fill
 
 - <NEEDS: actual feedback message to analyze>
+
+## Intake metadata
+
+<!-- mastermind:intake-begin -->
+```yaml
+action: refined
+workflow_mode: lite
+risk: low
+needs_research: false
+needs_critic: false
+```
+<!-- mastermind:intake-end -->
 ```
 
 ### Already-tight prompt → passthrough
@@ -131,6 +160,18 @@ Feedback message:
 ## What I changed and why
 
 No changes needed — prompt has clear role, format, constraints, and success criterion.
+
+## Intake metadata
+
+<!-- mastermind:intake-begin -->
+```yaml
+action: passthrough
+workflow_mode: unknown
+risk: low
+needs_research: false
+needs_critic: false
+```
+<!-- mastermind:intake-end -->
 ```
 
 ### Ambiguous goal → ask
@@ -145,6 +186,18 @@ I need 2 clarifications before I can refine this:
 2. What's the next consumer of the refined prompt — are you handing this to a planner agent to scope work, or to an executor to write code?
 
 (Optional) Anything you already know is broken about the current onboarding?
+
+## Intake metadata
+
+<!-- mastermind:intake-begin -->
+```yaml
+action: ask
+workflow_mode: unknown
+risk: unknown
+needs_research: false
+needs_critic: false
+```
+<!-- mastermind:intake-end -->
 ```
 
 ## References
@@ -154,4 +207,4 @@ I need 2 clarifications before I can refine this:
 
 ## Pair pieces
 
-The runtime companion is the `mastermind-prompt-refiner` subagent. Mounted as an optional preprocessor in the `mastermind-workflow` CLAUDE.md.
+The runtime companion is the `mastermind-prompt-refiner` subagent. Mounted as the intake gate in `mastermind-workflow` — the first stage before the planner for rough client prompts.

@@ -66,6 +66,12 @@ SUITES = {
         "renderer": "render_auditor_input",
         "uses_fixture": True,
     },
+    "intake": {
+        "subagent": REPO_ROOT / "agents/subagents/mastermind-prompt-refiner.md",
+        "cases": EVALS_DIR / "intake.jsonl",
+        "renderer": "render_intake_input",
+        "uses_fixture": False,
+    },
 }
 
 # Deterministic identity for fixture commits — avoids machine-specific git
@@ -221,6 +227,16 @@ def teardown_fixture(path: Path) -> None:
 # ----- renderers ------------------------------------------------------------
 
 
+def render_intake_input(inp: dict) -> str:
+    target = inp.get("target_consumer", "planner")
+    ctx = inp.get("project_context", "")
+    ctx_block = f"\n\n**Project context:** {ctx}" if ctx else ""
+    return (
+        f"**Target consumer:** {target}{ctx_block}\n\n"
+        f"**Raw prompt to refine:**\n\n{inp.get('raw_prompt', '')}"
+    )
+
+
 def render_critic_input(inp: dict) -> str:
     alternatives = inp.get("alternatives", "")
     if isinstance(alternatives, list):
@@ -277,6 +293,11 @@ _AUDIT_BLOCK_RE = re.compile(
     re.S,
 )
 
+_INTAKE_BLOCK_RE = re.compile(
+    r"<!--\s*mastermind:intake-begin\s*-->.*?```ya?ml(.*?)```.*?<!--\s*mastermind:intake-end\s*-->",
+    re.S,
+)
+
 
 def extract_audit_verdict(output: str) -> str | None:
     """Return the `verdict` field from a structured audit tail, or None.
@@ -294,6 +315,22 @@ def extract_audit_verdict(output: str) -> str | None:
         data = _yaml.safe_load(m.group(1))
         if isinstance(data, dict) and data.get("verdict"):
             return str(data["verdict"]).lower().strip()
+    except Exception:
+        pass
+    return None
+
+
+def extract_intake_action(output: str) -> str | None:
+    """Return the `action` field from a structured intake metadata block, or None."""
+    m = _INTAKE_BLOCK_RE.search(output)
+    if not m:
+        return None
+    if not _YAML_AVAILABLE:
+        return None
+    try:
+        data = _yaml.safe_load(m.group(1))
+        if isinstance(data, dict) and data.get("action"):
+            return str(data["action"]).lower().strip()
     except Exception:
         pass
     return None
@@ -351,6 +388,8 @@ def evaluate_case(
                     }
                 })
                 extra_cmd += ["--mcp-config", mcp_cfg]
+        elif suite_name == "intake":
+            user_message = render_intake_input(case["input"])
         else:
             user_message = render_critic_input(case["input"])
 
@@ -399,6 +438,22 @@ def evaluate_case(
         expect = case.get("expect", {})
         reasons: list[str] = []
         passed = True
+
+        expected_action = expect.get("action")
+        if expected_action and suite_name == "intake":
+            structured = extract_intake_action(output)
+            if structured is not None:
+                if structured != expected_action.lower():
+                    passed = False
+                    reasons.append(
+                        f"intake action {structured!r} != expected {expected_action!r}"
+                    )
+            else:
+                passed = False
+                reasons.append(
+                    "no structured intake metadata block found "
+                    "(<!-- mastermind:intake-begin --> ... <!-- mastermind:intake-end -->)"
+                )
 
         expected_verdict = expect.get("verdict")
         if expected_verdict:

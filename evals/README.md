@@ -1,14 +1,15 @@
 # Evals
 
-Adversarial test cases for `mastermind-critic` and `mastermind-auditor` — the two subagents whose output has clear verdict labels (`rethink`/`revise`/`ship` and `held`/`drift`/`broken`).
+Adversarial test cases for `mastermind-critic`, `mastermind-auditor`, and `mastermind-prompt-refiner` — subagents whose output has clear verdict labels.
 
 **This is not a coverage metric.** Each case is one regression scenario, not a guarantee.
 
 ## Files
 
-- `critic.jsonl` — designs we want flagged (or cleanly passed)
-- `auditor.jsonl` — executor reports we want verified (or caught lying)
-- `runner.py` — invokes the subagent via `claude -p`, asserts on verdict + key phrases
+- `critic.jsonl` — designs we want flagged (or cleanly passed); verdicts: `rethink`/`revise`/`ship`
+- `auditor.jsonl` — executor reports we want verified (or caught lying); verdicts: `held`/`drift`/`broken`
+- `intake.jsonl` — raw prompts the refiner should normalize; actions: `refined`/`passthrough`/`ask`
+- `runner.py` — invokes the subagent via `claude -p`, asserts on verdict/action + key phrases
 - `fixtures/` — real-git source trees used by auditor cases; see `fixtures/<name>/README.md`
 
 ## Run
@@ -100,10 +101,24 @@ Rules:
 - One scenario per case
 - Phrase-match assertions only — the runner doesn't use LLM-as-judge
 
+## Intake suite
+
+5 cases covering the refiner's core behaviors:
+
+| case | scenario | expected action |
+|---|---|---|
+| i-001 | vague client message with buried goal | `refined` — planner-ready prompt + NEEDS placeholders |
+| i-002 | already tight request with verb/deliverable/scope | `passthrough` — returned unchanged |
+| i-003 | genuinely ambiguous goal (multiple valid interpretations) | `ask` — 1-3 clarifying questions, no prompt |
+| i-004 | overbroad multi-intent bundle | `refined` — primary intent isolated, others marked out-of-scope |
+| i-005 | production database migration with risk signals | `refined` — strict mode, risk: high, rollback flagged as NEEDS |
+
+Each case asserts on the structured `<!-- mastermind:intake-begin --> ... <!-- mastermind:intake-end -->` YAML block the refiner emits. If the block is absent the case fails.
+
 ## When to run
 
-- Before editing `mastermind-critic.md` or `mastermind-auditor.md`
-- After editing them, to confirm dimensions still fire
+- Before editing `mastermind-critic.md`, `mastermind-auditor.md`, or `mastermind-prompt-refiner.md`
+- After editing them, to confirm behaviors still fire
 - When adding a new adversarial pattern as a regression test
 - After adding a fixture variant (smoke `--keep-fixtures` to inspect tmp repo)
 

@@ -86,7 +86,24 @@ For each symbol the executor said it changed:
 - Any file changed that the spec didn't mention is **scope creep** — flag explicitly
 - Common cases: `package.json`/`Cargo.toml` auto-updated, formatters auto-ran, IDE-related files
 
-### 6.5 Pre-edit snapshot drift (when snapshot section present)
+### 6.5 Integration-claim verification (when report says "wired to" or "calls existing")
+
+If the executor report contains any phrase of the form:
+- "wired X to call the existing Y"
+- "integrated X with Y"
+- "X now calls existing Y"
+- "uses the existing Y"
+- "routed through Y"
+
+…apply this three-part check before any other discrepancy evaluation:
+
+1. **Symbol existence** — run `mmcg_search <Y>` (and fall back to `Grep` for `func Y`/`def Y`/`function Y`). If zero definitions found outside of comments and report text, flag `kind: hallucinated_existing_symbol`.
+2. **Call site presence** — grep the changed file(s) for a call to `<Y>` (e.g. `Y(`, `Y::`, `.Y(`). If the call is absent in the diff, flag `kind: false_integration_claim`.
+3. **Test coverage** — if the integration is user-visible or contract-relevant and no test exercises the call path, flag `kind: vacuous_test_pass` if tests claimed to pass, or `kind: missing_test` if no test was mentioned.
+
+All three sub-checks must pass for the integration claim to be `verified`. Failure on any sub-check = `contradicted`.
+
+### 6.6 Pre-edit snapshot drift (when snapshot section present)
 
 If the spec includes a **Pre-edit symbol snapshot** section, for each entry:
 
@@ -166,6 +183,22 @@ The planner reads this for mechanical routing — discrepancies must use the
 `mastermind-task-planning` skill (auditor-discrepancy section). The full schema
 lives in that same skill's references as `structured-report-schema.md`. The
 agent has both loaded — no path lookup needed.
+
+Recognized `kind:` values (non-exhaustive — use the closest match):
+
+| kind | when to use |
+|---|---|
+| `scope_creep` | file in diff but not in spec scope |
+| `missing_change` | phase claimed done but CHANGE TO block absent |
+| `verify_failed` | re-run of a VERIFY command fails despite "PASSED" claim |
+| `caller_drift` | post-edit caller count ≠ pre-edit snapshot count |
+| `signature_changed` | symbol signature changed in a way spec did not intend |
+| `missing_test` | test named in Tests Plan not found in diff |
+| `hallucinated_existing_symbol` | report references a symbol that has no real definition in the codebase |
+| `false_integration_claim` | report says X calls/wires Y but the call site is absent in the changed code |
+| `vacuous_test_pass` | test suite reported as passing but contains zero relevant tests (no `*_test.*`/`def test_*` found) |
+| `report_code_mismatch` | executor report describes behavior that is directly contradicted by reading the changed code |
+| `suppression_masking` | broken callers hidden via `@ts-expect-error`, `#[allow(...)]`, `# noqa`, etc. |
 
 Minimal template:
 

@@ -572,10 +572,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             max_iterations,
             force_iteration,
         } => {
-            let root = root
-                .canonicalize()
-                .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
-            let opts = mmcg::run_task::RunOpts {
+            let outcome = commands::run_task(
+                &spec,
+                root,
+                &index_path,
                 reset,
                 pre_only,
                 post_only,
@@ -584,8 +584,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 strict,
                 max_iterations,
                 force_iteration,
-            };
-            let outcome = mmcg::run_task::run(&spec, &root, &index_path, opts);
+            )?;
             if matches!(
                 outcome,
                 mmcg::run_task::Outcome::PreFailed

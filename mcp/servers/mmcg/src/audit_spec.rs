@@ -391,7 +391,7 @@ fn check_executor_claims(
                     continue;
                 }
                 let from_sym = store.search_symbols(from, None, None).unwrap_or_default();
-                let call_exists = from_sym.first().is_some_and(|s| {
+                let call_exists = from_sym.iter().any(|s| {
                     store
                         .callees_of(s.id, None)
                         .unwrap_or_default()

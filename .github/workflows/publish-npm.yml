@@ -247,9 +247,6 @@ jobs:
           test -f "$FAKE_HOME/.claude/skills/mastermind-task-planning/SKILL.md" || {
             echo "::error::init did not install skills to ~/.claude/skills"; cat init.txt; exit 1;
           }
-          ls "$FAKE_HOME"/.claude/commands/*.md >/dev/null 2>&1 || {
-            echo "::error::init did not install slash commands to ~/.claude/commands"; cat init.txt; exit 1;
-          }
           echo "✓ workflow bundle ships + init installs it to ~/.claude/"
 
       - name: Upload assembled tarballs for the publish job

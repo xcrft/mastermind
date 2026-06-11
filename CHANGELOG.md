@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.2] - 2026-06-11
+
+### Fixed
+- `mastermind new-spec` no longer panics on Unicode descriptions (e.g. Cyrillic). `slugify` previously used byte-index slicing `slug[..40]` which could land inside a multi-byte UTF-8 codepoint. Now filters to ASCII-only chars and truncates with `.chars().take(40)`. Descriptions with no ASCII word characters fall back to the slug `"task"`.
+- Generated YAML frontmatter now quotes the title field. Unquoted `title: {description}` caused YAML parse failures on descriptions containing `:`, `#`, or `"`, which silently dropped `frontmatter.mode` and caused `verify-spec` to apply full mandatory sections even on `--mode lite` specs.
+- `audit-spec` integration verifier no longer produces false `MissingCallEdge` findings in monorepos with multiple symbols sharing the same name. Previously only the first `search_symbols` hit was checked; now all matching symbols are checked with `iter().any()`.
+- `context doctor` module docstring now matches actual thresholds (`fail < 50`, `warn 50–199`, `ok ≥ 200` non-whitespace chars) instead of the incorrect `< 100` claim.
+
+### Changed
+- README: added **Daily workflow commands** section (`status`, `next`, `new-spec`, `resume`, `verify-spec`, `audit-spec`, `demo`, `context doctor`).
+- README: `mastermind-investigator` now shown as debug-only path in pipeline diagram and `What's inside`, not as a main pipeline step.
+
+### Tests
+- 10 new unit tests in `new_spec.rs`: slug ASCII/Unicode/fallback/truncation, `yaml_quote` variants, frontmatter round-trip for all three modes.
+- 2 new unit tests in `verify_spec.rs`: `lite_mode_goals_section_passes`, `lite_mode_does_not_require_standard_sections`.
+
 ## [0.28.1] - 2026-06-10
 
 ### Added

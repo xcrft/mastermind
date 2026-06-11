@@ -6,7 +6,9 @@ fn setup_store(tmp: &TempDir, source_name: &str, content: &str) -> Store {
     fs::write(tmp.path().join(source_name), content).unwrap();
     let db_path = tmp.path().join("mmcg.db");
     let mut store = Store::open(&db_path).unwrap();
-    Indexer::new(tmp.path()).index_all(&mut store, true).unwrap();
+    Indexer::new(tmp.path())
+        .index_all(&mut store, true)
+        .unwrap();
     store
 }
 
@@ -141,7 +143,10 @@ impl Greeter {
 "#,
     );
     assert!(has_symbol(&store, "greet"), "function greet");
-    assert!(has_symbol_kind(&store, "Greeter", "struct"), "struct Greeter");
+    assert!(
+        has_symbol_kind(&store, "Greeter", "struct"),
+        "struct Greeter"
+    );
     assert!(has_symbol_kind(&store, "hello", "method"), "method hello");
     assert!(has_call(&store, "hello", "greet"), "hello → greet");
 }
@@ -168,7 +173,10 @@ func (g Greeter) Hello(name string) {
 }
 "#,
     );
-    assert!(has_symbol_kind(&store, "Greet", "function"), "function Greet");
+    assert!(
+        has_symbol_kind(&store, "Greet", "function"),
+        "function Greet"
+    );
     assert!(has_symbol_kind(&store, "Greeter", "struct"), "type Greeter");
     assert!(has_symbol_kind(&store, "Hello", "method"), "method Hello");
     assert!(has_call(&store, "Hello", "Greet"), "Hello → Greet");
@@ -242,7 +250,10 @@ class Greeter {
 }
 "#,
     );
-    assert!(has_symbol_kind(&store, "greet", "function"), "function greet");
+    assert!(
+        has_symbol_kind(&store, "greet", "function"),
+        "function greet"
+    );
     assert!(has_symbol_kind(&store, "Greeter", "class"), "class Greeter");
     assert!(has_symbol(&store, "hello"), "method hello");
     assert!(has_call(&store, "hello", "greet"), "hello → greet");
@@ -267,7 +278,10 @@ public:
 };
 "#,
     );
-    assert!(has_symbol_kind(&store, "greet", "function"), "function greet");
+    assert!(
+        has_symbol_kind(&store, "greet", "function"),
+        "function greet"
+    );
     assert!(has_symbol_kind(&store, "Greeter", "class"), "class Greeter");
     assert!(has_symbol(&store, "hello"), "method hello");
     assert!(has_call(&store, "hello", "greet"), "hello → greet");
@@ -298,7 +312,11 @@ def caller():
 "#,
     );
     let hello_syms = store.search_symbols("hello", None, None).unwrap();
-    assert_eq!(hello_syms.len(), 2, "both A.hello and B.hello are indexed as 'hello'");
+    assert_eq!(
+        hello_syms.len(),
+        2,
+        "both A.hello and B.hello are indexed as 'hello'"
+    );
 
     let callers = store.callers_of("hello", None, None).unwrap();
     assert!(

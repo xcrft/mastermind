@@ -69,6 +69,8 @@ flowchart TB
   C -.->|7-dim verdict| P
   P -.->|need facts| R[Researcher • Haiku]
   R -.->|citations| P
+  P -.->|unknown-cause bug| I[Investigator • Sonnet]
+  I -.->|confirmed root cause| P
   P -->|spec| E[Executor • Sonnet]
   E -->|report| A[Auditor • Opus]
   A -.->|contract held / drift / broken| P
@@ -130,6 +132,7 @@ Core
 
 Workflow (installed into ~/.claude/ by `mastermind init`)
   agents/subagents/     intake-refiner, planner-critic, researcher, task-executor, auditor
+                        investigator (debug-only — root-cause unknown bugs; not a main pipeline step)
   agents/claude-md/     CLAUDE.md workflow template
   skills/workflow/      mastermind-task-planning, mastermind-task-executor
   skills/prompt-engineering/  mastermind-prompt-refiner (intake gate)
@@ -191,6 +194,19 @@ mastermind doctor                # 8 fail-soft checks: binary, index, freshness,
 `init` indexes the codebase and drafts `CONTEXT.md` via `claude -p` — pass `--no-index` / `--no-claude` to skip, or `--with-claude-md` to also write the workflow CLAUDE.md template. It installs the workflow subagents, skills, and slash commands into `~/.claude/` (`--no-global` to skip). Keep the index live with `mastermind watch`. Tear a setup down with `mastermind uninstall` (`--scope project|global|all`; dry-run unless `--force`).
 
 `mastermind doctor --json` is CI-friendly (exit 1 if anything's unwired).
+
+## Daily workflow commands
+
+```bash
+mastermind status              # task list with phase labels + index health
+mastermind next                # single actionable next step
+mastermind new-spec "..."      # create a task spec (--mode lite|standard|strict)
+mastermind resume <task-id>    # paste-into-Claude prompt for the current phase
+mastermind verify-spec <spec>  # pre-execution gate: symbols, files, mandatory sections
+mastermind audit-spec <spec>   # post-execution gate: scope, drift, hallucinated calls
+mastermind demo hallucinated-symbol   # walkthrough of a caught hallucination
+mastermind context doctor      # audit CONTEXT.md quality (placeholder, freshness, stack)
+```
 
 ## What `init` does — and what it doesn't
 

@@ -79,7 +79,11 @@ impl WorkflowStatus {
     }
 
     pub fn next_action(&self) -> Option<NextAction> {
-        if let Some(task) = self.tasks.iter().find(|t| t.phase == TaskPhase::AwaitingAudit) {
+        if let Some(task) = self
+            .tasks
+            .iter()
+            .find(|t| t.phase == TaskPhase::AwaitingAudit)
+        {
             let spec = task.spec_path.display().to_string();
             let task_dir = task.spec_path.parent().unwrap_or(task.spec_path.as_path());
             return Some(NextAction {
@@ -94,7 +98,11 @@ impl WorkflowStatus {
                 )),
             });
         }
-        if let Some(task) = self.tasks.iter().find(|t| t.phase == TaskPhase::AwaitingExecutor) {
+        if let Some(task) = self
+            .tasks
+            .iter()
+            .find(|t| t.phase == TaskPhase::AwaitingExecutor)
+        {
             let spec = task.spec_path.display().to_string();
             let task_dir = task.spec_path.parent().unwrap_or(task.spec_path.as_path());
             return Some(NextAction {
@@ -133,10 +141,7 @@ impl WorkflowStatus {
         if let Some(task) = self.tasks.iter().find(|t| t.phase == TaskPhase::Ready) {
             return Some(NextAction {
                 description: format!("Task {} — spec ready for pre-flight", task.folder),
-                command: Some(format!(
-                    "mastermind run-task {}",
-                    task.spec_path.display()
-                )),
+                command: Some(format!("mastermind run-task {}", task.spec_path.display())),
                 claude_prompt: None,
             });
         }
@@ -165,7 +170,11 @@ impl WorkflowStatus {
             if self.index.stale_count == 0 {
                 out.push_str("  ✓ index up to date\n");
             } else {
-                let suffix = if self.index.stale_count >= 10 { " or more" } else { "" };
+                let suffix = if self.index.stale_count >= 10 {
+                    " or more"
+                } else {
+                    ""
+                };
                 out.push_str(&format!(
                     "  ⚠ {} source file(s){} changed since last index — run `mastermind index .`\n",
                     self.index.stale_count, suffix
@@ -178,9 +187,7 @@ impl WorkflowStatus {
         if self.install.claude_md_present {
             out.push_str("  ✓ CLAUDE.md present\n");
         } else {
-            out.push_str(
-                "  ⚠ CLAUDE.md not found — run `mastermind init --with-claude-md`\n",
-            );
+            out.push_str("  ⚠ CLAUDE.md not found — run `mastermind init --with-claude-md`\n");
         }
         if self.install.agents_count > 0 {
             out.push_str(&format!(
@@ -188,9 +195,7 @@ impl WorkflowStatus {
                 self.install.agents_count
             ));
         } else {
-            out.push_str(
-                "  ⚠ no subagents in ~/.claude/agents/ — run `mastermind init`\n",
-            );
+            out.push_str("  ⚠ no subagents in ~/.claude/agents/ — run `mastermind init`\n");
         }
         if self.install.skills_count > 0 {
             out.push_str(&format!(
@@ -301,12 +306,8 @@ impl WorkflowStatus {
                         .iter()
                         .find(|t| t.phase == TaskPhase::AwaitingExecutor)
                 })
-                .or_else(|| {
-                    self.tasks.iter().find(|t| t.phase == TaskPhase::Held)
-                })
-                .or_else(|| {
-                    self.tasks.iter().find(|t| t.phase == TaskPhase::Ready)
-                }),
+                .or_else(|| self.tasks.iter().find(|t| t.phase == TaskPhase::Held))
+                .or_else(|| self.tasks.iter().find(|t| t.phase == TaskPhase::Ready)),
         };
 
         let Some(task) = task else {
@@ -353,15 +354,27 @@ impl WorkflowStatus {
 
         let task_dir = task.spec_path.parent().unwrap_or(task.spec_path.as_path());
         out.push_str("Files\n");
-        out.push_str(&format!("  spec:            {}\n", task.spec_path.display()));
+        out.push_str(&format!(
+            "  spec:            {}\n",
+            task.spec_path.display()
+        ));
         if task_dir.join("state.json").is_file() {
-            out.push_str(&format!("  state.json:      {}/state.json\n", task_dir.display()));
+            out.push_str(&format!(
+                "  state.json:      {}/state.json\n",
+                task_dir.display()
+            ));
         }
         if task_dir.join("executor-report.md").is_file() {
-            out.push_str(&format!("  executor-report: {}/executor-report.md\n", task_dir.display()));
+            out.push_str(&format!(
+                "  executor-report: {}/executor-report.md\n",
+                task_dir.display()
+            ));
         }
         if task_dir.join("audit.md").is_file() {
-            out.push_str(&format!("  audit:           {}/audit.md\n", task_dir.display()));
+            out.push_str(&format!(
+                "  audit:           {}/audit.md\n",
+                task_dir.display()
+            ));
         }
         out.push('\n');
 
@@ -589,16 +602,18 @@ fn scan_tasks(root: &Path) -> Vec<TaskInfo> {
         let task_dir = entry.path();
         let state = read_task_state(&task_dir);
         let phase = detect_phase(&spec_path, &inflight_spec, state.as_ref());
-        tasks.push(TaskInfo { folder, spec_path, phase, state });
+        tasks.push(TaskInfo {
+            folder,
+            spec_path,
+            phase,
+            state,
+        });
     }
     tasks
 }
 
 fn read_inflight_spec(root: &Path) -> Option<PathBuf> {
-    let state_file = root
-        .join(".mastermind")
-        .join("run-state")
-        .join("spec.json");
+    let state_file = root.join(".mastermind").join("run-state").join("spec.json");
     if !state_file.is_file() {
         return None;
     }

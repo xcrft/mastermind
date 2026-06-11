@@ -12,8 +12,8 @@
 //! | 6 | `freshness`            | newest task spec is newer than CONTEXT.md              |
 //! | 7 | `lessons file`         | learned tasks exist but no _lessons.md                 |
 
-use std::path::Path;
 use serde::Serialize;
+use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -96,8 +96,12 @@ impl Report {
         if self.summary.fail > 0 || self.summary.warn > 0 {
             out.push_str("\nCommon fixes:\n");
             out.push_str("  Missing file       run `mastermind init` to scaffold CONTEXT.md\n");
-            out.push_str("  Placeholders left  fill every <PLACEHOLDER> / <TODO> with real project data\n");
-            out.push_str("  Stale context      add a Decision Log entry after each completed task\n");
+            out.push_str(
+                "  Placeholders left  fill every <PLACEHOLDER> / <TODO> with real project data\n",
+            );
+            out.push_str(
+                "  Stale context      add a Decision Log entry after each completed task\n",
+            );
             out.push_str("  No lessons file    create `.mastermind/tasks/_lessons.md` with lessons from audits\n");
         }
         out
@@ -153,7 +157,11 @@ fn check_placeholders(body: Option<&str>) -> Check {
         };
     };
     let markers = ["<PLACEHOLDER>", "<TODO>", "<FILL>", "<fill>", "<todo>"];
-    let hits: Vec<&str> = markers.iter().copied().filter(|m| text.contains(m)).collect();
+    let hits: Vec<&str> = markers
+        .iter()
+        .copied()
+        .filter(|m| text.contains(m))
+        .collect();
     if hits.is_empty() {
         Check {
             name: "no placeholders",
@@ -351,7 +359,8 @@ fn check_freshness(root: &Path, context_path: &Path) -> Check {
             status: Status::Warn,
             message: format!("newest task spec is {delta_label} newer than CONTEXT.md"),
             hint: Some(
-                "update CONTEXT.md Decision Log / Architecture section to reflect recent changes".into(),
+                "update CONTEXT.md Decision Log / Architecture section to reflect recent changes"
+                    .into(),
             ),
         }
     }

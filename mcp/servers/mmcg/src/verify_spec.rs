@@ -277,10 +277,7 @@ pub fn run(spec: &ParsedSpec, store: Option<&Store>, repo_root: &Path) -> Report
     let mut warnings: Vec<Finding> = Vec::new();
 
     // 1. Mandatory sections non-empty.
-    let spec_mode = spec
-        .frontmatter
-        .as_ref()
-        .and_then(|f| f.mode.as_deref());
+    let spec_mode = spec.frontmatter.as_ref().and_then(|f| f.mode.as_deref());
     for section in mandatory_sections_for_mode(spec_mode) {
         match spec::section_body(spec, section) {
             None => errors.push(Finding::EmptyMandatorySection {

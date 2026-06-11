@@ -129,17 +129,15 @@ pub fn lang_precision(file_path: &str) -> EdgePrecision {
             resolution: "syntactic",
             limitations: vec!["dynamic dispatch not tracked"],
         },
-        "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh" | "hxx" | "ipp" | "tpp" => {
-            EdgePrecision {
-                confidence: "low",
-                resolution: "syntactic",
-                limitations: vec![
-                    "macros not expanded",
-                    "includes not followed",
-                    "overload resolution absent",
-                ],
-            }
-        }
+        "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh" | "hxx" | "ipp" | "tpp" => EdgePrecision {
+            confidence: "low",
+            resolution: "syntactic",
+            limitations: vec![
+                "macros not expanded",
+                "includes not followed",
+                "overload resolution absent",
+            ],
+        },
         _ => EdgePrecision {
             confidence: "unknown",
             resolution: "unknown",
@@ -513,7 +511,11 @@ pub fn explain(
         })
         .collect();
 
-    let limitations = precision.limitations.iter().map(|l| l.to_string()).collect();
+    let limitations = precision
+        .limitations
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
 
     Ok(ExplainResponse {
         query: name.to_string(),

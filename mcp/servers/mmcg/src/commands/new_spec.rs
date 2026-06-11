@@ -13,7 +13,9 @@ impl Mode {
             "lite" => Ok(Mode::Lite),
             "standard" => Ok(Mode::Standard),
             "strict" => Ok(Mode::Strict),
-            other => Err(format!("unknown mode {other:?} — use `lite`, `standard`, or `strict`")),
+            other => Err(format!(
+                "unknown mode {other:?} — use `lite`, `standard`, or `strict`"
+            )),
         }
     }
 }
@@ -21,21 +23,18 @@ impl Mode {
 pub fn run(description: &str, mode: Mode, root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let tasks_dir = root.join(".mastermind").join("tasks");
     if !tasks_dir.exists() {
-        fs::create_dir_all(&tasks_dir)
-            .map_err(|e| format!("create .mastermind/tasks/: {e}"))?;
+        fs::create_dir_all(&tasks_dir).map_err(|e| format!("create .mastermind/tasks/: {e}"))?;
     }
 
     let next_n = next_task_number(&tasks_dir)?;
     let slug = slugify(description);
     let dir_name = format!("{:03}-{}", next_n, slug);
     let task_dir = tasks_dir.join(&dir_name);
-    fs::create_dir_all(&task_dir)
-        .map_err(|e| format!("create {}: {e}", task_dir.display()))?;
+    fs::create_dir_all(&task_dir).map_err(|e| format!("create {}: {e}", task_dir.display()))?;
 
     let spec_path = task_dir.join("spec.md");
     let content = render_spec(description, next_n, &mode);
-    fs::write(&spec_path, &content)
-        .map_err(|e| format!("write {}: {e}", spec_path.display()))?;
+    fs::write(&spec_path, &content).map_err(|e| format!("write {}: {e}", spec_path.display()))?;
 
     println!("Created {}", spec_path.display());
     Ok(())

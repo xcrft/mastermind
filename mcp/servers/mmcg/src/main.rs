@@ -648,9 +648,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             executor_report,
             bundle,
         } => {
-            commands::audit_spec(&spec, &since, root, json, &index_path, executor_report.as_deref(), bundle.as_deref())?;
+            commands::audit_spec(
+                &spec,
+                &since,
+                root,
+                json,
+                &index_path,
+                executor_report.as_deref(),
+                bundle.as_deref(),
+            )?;
         }
-        Cmd::Doctor { root, json, explain } => {
+        Cmd::Doctor {
+            root,
+            json,
+            explain,
+        } => {
             let root = root
                 .canonicalize()
                 .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
@@ -676,7 +688,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             commands::demo()?;
         }
-        Cmd::NewSpec { description, mode, root } => {
+        Cmd::NewSpec {
+            description,
+            mode,
+            root,
+        } => {
             let root = root
                 .canonicalize()
                 .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;

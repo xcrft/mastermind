@@ -98,7 +98,7 @@ risk: low
 
 # Task {id}: {description}
 
-## Goal
+## Goals
 
 {description}
 

@@ -1050,4 +1050,69 @@ verify:
             strict_check(&s)
         );
     }
+
+    #[test]
+    fn lite_mode_goals_section_passes() {
+        let root = tmp();
+        let body = "\
+---
+id: \"1\"
+mode: lite
+---
+
+## Goals
+
+Do the thing
+
+## Scope
+
+- **File:** `src/foo.rs`
+";
+        let s = spec::parse_str("t.md", body);
+        let r = run(&s, None, &root);
+        assert!(
+            !r.errors.iter().any(|e| matches!(
+                e,
+                Finding::EmptyMandatorySection { section } if section == "Goals"
+            )),
+            "lite spec with ## Goals populated should NOT flag Goals as missing; got {:?}",
+            r.errors
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn lite_mode_does_not_require_standard_sections() {
+        let root = tmp();
+        let body = "\
+---
+id: \"1\"
+mode: lite
+---
+
+## Goals
+
+Do the thing
+";
+        let s = spec::parse_str("t.md", body);
+        let r = run(&s, None, &root);
+        let standard_only = [
+            "Alternatives Considered",
+            "Tests Plan",
+            "Documentation Plan",
+            "Observability Plan",
+            "Performance Considerations",
+        ];
+        for section in &standard_only {
+            assert!(
+                !r.errors.iter().any(|e| matches!(
+                    e,
+                    Finding::EmptyMandatorySection { section: s } if s == section
+                )),
+                "lite mode should not require `{section}`; got {:?}",
+                r.errors
+            );
+        }
+        fs::remove_dir_all(&root).ok();
+    }
 }

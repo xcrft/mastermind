@@ -63,18 +63,24 @@ fn slugify(s: &str) -> String {
     let slug: String = s
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
     let slug = slug
         .split('-')
         .filter(|p| !p.is_empty())
         .collect::<Vec<_>>()
         .join("-");
-    if slug.len() > 40 {
-        slug[..40].trim_end_matches('-').to_string()
+    let slug: String = slug.chars().take(40).collect();
+    let slug = slug.trim_end_matches('-').to_string();
+    if slug.is_empty() {
+        "task".to_string()
     } else {
         slug
     }
+}
+
+fn yaml_quote(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 fn render_spec(description: &str, n: u32, mode: &Mode) -> String {
@@ -87,11 +93,12 @@ fn render_spec(description: &str, n: u32, mode: &Mode) -> String {
 }
 
 fn render_lite(description: &str, id: &str) -> String {
+    let title_yaml = yaml_quote(description);
     format!(
         "\
 ---
 id: \"{id}\"
-title: {description}
+title: {title_yaml}
 mode: lite
 risk: low
 ---
@@ -141,11 +148,12 @@ VERIFY: `<command>`
 }
 
 fn render_standard(description: &str, id: &str) -> String {
+    let title_yaml = yaml_quote(description);
     format!(
         "\
 ---
 id: \"{id}\"
-title: {description}
+title: {title_yaml}
 mode: standard
 risk: medium
 
@@ -324,11 +332,12 @@ VERIFY: `<command>`
 }
 
 fn render_strict(description: &str, id: &str) -> String {
+    let title_yaml = yaml_quote(description);
     format!(
         "\
 ---
 id: \"{id}\"
-title: {description}
+title: {title_yaml}
 mode: strict
 risk: high
 
@@ -562,4 +571,82 @@ VERIFY: `<command>`
 **Planner's disagreements (if any):** <if planner overrode any critic finding, document why>
 "
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slugify_ascii_basic() {
+        assert_eq!(slugify("fix the context doctor"), "fix-the-context-doctor");
+    }
+
+    #[test]
+    fn slugify_unicode_no_panic() {
+        let s = slugify("починить проверку контекста и аудит");
+        assert!(!s.is_empty());
+        assert!(s.is_ascii(), "slug must be ASCII-only, got: {s:?}");
+    }
+
+    #[test]
+    fn slugify_all_unicode_falls_back_to_task() {
+        assert_eq!(slugify("проверка"), "task");
+    }
+
+    #[test]
+    fn slugify_long_unicode_does_not_panic() {
+        let long = "абвгдеёжзийклмнопрстуфхцчшщъыьэюяabcde";
+        let s = slugify(long);
+        assert!(s.len() <= 40);
+        assert!(s.is_ascii());
+    }
+
+    #[test]
+    fn slugify_truncates_at_40_chars_cleanly() {
+        let long = "a".repeat(60);
+        let s = slugify(&long);
+        assert!(s.len() <= 40);
+    }
+
+    #[test]
+    fn yaml_quote_plain() {
+        assert_eq!(yaml_quote("hello world"), "\"hello world\"");
+    }
+
+    #[test]
+    fn yaml_quote_colon_in_title() {
+        let q = yaml_quote("fix: context doctor");
+        assert_eq!(q, "\"fix: context doctor\"");
+    }
+
+    #[test]
+    fn yaml_quote_inner_double_quote() {
+        let q = yaml_quote(r#"fix "broken" audit"#);
+        assert_eq!(q, r#""fix \"broken\" audit""#);
+    }
+
+    #[test]
+    fn lite_spec_with_colon_title_keeps_lite_mode() {
+        let content = render_spec("fix: context doctor", 1, &Mode::Lite);
+        assert!(
+            content.contains("mode: lite"),
+            "mode: lite must survive colon-in-title; got:\n{content}"
+        );
+        assert!(
+            content.contains("title: \"fix: context doctor\""),
+            "title must be quoted; got:\n{content}"
+        );
+    }
+
+    #[test]
+    fn new_spec_frontmatter_quotes_colon_title() {
+        for mode in [Mode::Lite, Mode::Standard, Mode::Strict] {
+            let content = render_spec("feat: add new thing", 1, &mode);
+            assert!(
+                content.contains("title: \"feat: add new thing\""),
+                "title must be quoted in all modes; got:\n{content}"
+            );
+        }
+    }
 }

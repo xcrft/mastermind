@@ -6,7 +6,7 @@
 //! |---|------------------------|--------------------------------------------------------|
 //! | 1 | `context.md exists`    | file is missing entirely                               |
 //! | 2 | `no placeholders`      | unfilled `<PLACEHOLDER>` / `<TODO>` / `<FILL>` tokens |
-//! | 3 | `minimum content`      | file is basically empty (< 100 non-whitespace chars)   |
+//! | 3 | `minimum content`      | fail < 50 / warn 50–199 non-whitespace chars           |
 //! | 4 | `stack section`        | no Stack / Tech / Language heading                     |
 //! | 5 | `decision log`         | completed tasks exist but no Decision Log section      |
 //! | 6 | `freshness`            | newest task spec is newer than CONTEXT.md              |

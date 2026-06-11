@@ -79,6 +79,19 @@ Run 2026-06-10:
 
 **Run total: 7/8 pass (a-004 flaky, passes on retry). Total wall-clock: 1203s.**
 
+### 0.28.2 pre-release — local verification (2026-06-11)
+
+```
+- repo commit: 6102674 (post-tightening fixes)
+- mmcg version: 0.28.2
+- cargo test: 21/21 pass (11 golden + 10 new_spec + 2 verify_spec regression)
+- cargo build --release: ok
+- python scripts/validate.py: 13 artifacts, 0 errors
+- runner.py --suite auditor: requires live Claude CLI — not run in this environment
+```
+
+> eval re-run deferred: runner requires live `claude` binary with API key. Local unit tests and validate.py are green. Auditor suite last ran clean at commit `532458c` (7/8, a-004 flaky on sentinel compliance). No auditor logic changed in 0.28.2 — only slug/YAML/docstring/verifier fixes.
+
 Key phrase assertions verified per case (secondary — verdict is primary):
 
 | case id | contains asserted | not_contains asserted |

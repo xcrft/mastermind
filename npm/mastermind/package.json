@@ -38,12 +38,12 @@
     "mastermind"
   ],
   "optionalDependencies": {
-    "@xcraftmind/mmcg-darwin-arm64": "0.28.1",
-    "@xcraftmind/mmcg-darwin-x64": "0.28.1",
-    "@xcraftmind/mmcg-linux-x64-gnu": "0.28.1",
-    "@xcraftmind/mmcg-linux-arm64-gnu": "0.28.1",
-    "@xcraftmind/mmcg-linux-x64-musl": "0.28.1",
-    "@xcraftmind/mmcg-linux-arm64-musl": "0.28.1",
-    "@xcraftmind/mmcg-win32-x64-msvc": "0.28.1"
+    "@xcraftmind/mmcg-darwin-arm64": "0.28.2",
+    "@xcraftmind/mmcg-darwin-x64": "0.28.2",
+    "@xcraftmind/mmcg-linux-x64-gnu": "0.28.2",
+    "@xcraftmind/mmcg-linux-arm64-gnu": "0.28.2",
+    "@xcraftmind/mmcg-linux-x64-musl": "0.28.2",
+    "@xcraftmind/mmcg-linux-arm64-musl": "0.28.2",
+    "@xcraftmind/mmcg-win32-x64-msvc": "0.28.2"
   }
 }

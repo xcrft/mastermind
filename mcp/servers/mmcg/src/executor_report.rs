@@ -62,14 +62,12 @@ impl ExecutorReport {
     }
 }
 
-
-
 /// Parse an executor report from a file. Accepts two formats:
 /// - Bare YAML file (no markdown wrapper)
 /// - Markdown file containing a sentinel-delimited YAML block
 pub fn parse_file(path: &Path) -> Result<ExecutorReport, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     parse_str(&text)
 }
 

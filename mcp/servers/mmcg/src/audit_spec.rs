@@ -74,13 +74,22 @@ pub enum Finding {
     PlannedTestNotAdded { test: String },
     /// Executor claimed they added symbol X but it has no definition in the
     /// live index. Either the add didn't happen or indexing missed it.
-    ClaimedSymbolMissing { symbol: String, file: Option<String> },
+    ClaimedSymbolMissing {
+        symbol: String,
+        file: Option<String>,
+    },
     /// Executor claimed X calls existing Y but Y has no definition anywhere
     /// in the index. Y was hallucinated.
-    HallucinatedSymbol { from_symbol: String, to_symbol: String },
+    HallucinatedSymbol {
+        from_symbol: String,
+        to_symbol: String,
+    },
     /// Executor claimed X calls Y but there is no call edge from X to Y in
     /// the index. The integration claim is false.
-    MissingCallEdge { from_symbol: String, to_symbol: String },
+    MissingCallEdge {
+        from_symbol: String,
+        to_symbol: String,
+    },
     /// Executor claimed a test command passed, but no test files were found
     /// in the relevant directory. The pass is vacuous (zero tests ran).
     VacuousTestClaim { cmd: String, reason: String },
@@ -177,13 +186,22 @@ fn render_finding(f: &Finding) -> String {
             format!("planned_test_not_added: Tests Plan named `{test}` but the diff doesn't show a new function with that name")
         }
         Finding::ClaimedSymbolMissing { symbol, file } => {
-            let loc = file.as_deref().map(|f| format!(" in `{f}`")).unwrap_or_default();
+            let loc = file
+                .as_deref()
+                .map(|f| format!(" in `{f}`"))
+                .unwrap_or_default();
             format!("claimed_symbol_missing: executor claimed they added `{symbol}`{loc} but it has no definition in the index")
         }
-        Finding::HallucinatedSymbol { from_symbol, to_symbol } => {
+        Finding::HallucinatedSymbol {
+            from_symbol,
+            to_symbol,
+        } => {
             format!("hallucinated_symbol: executor claimed `{from_symbol}` calls existing `{to_symbol}` but `{to_symbol}` has no definition in the index — it was hallucinated")
         }
-        Finding::MissingCallEdge { from_symbol, to_symbol } => {
+        Finding::MissingCallEdge {
+            from_symbol,
+            to_symbol,
+        } => {
             format!("missing_call_edge: executor claimed `{from_symbol}` calls `{to_symbol}` but no call edge from `{from_symbol}` to `{to_symbol}` exists in the index")
         }
         Finding::VacuousTestClaim { cmd, reason } => {
@@ -415,9 +433,10 @@ fn check_vacuous_tests(
     findings: &mut Vec<Finding>,
 ) {
     for v in &er.verify {
-        let claimed_passed = v.claimed.as_deref().is_some_and(|c| {
-            c.eq_ignore_ascii_case("passed") || c.eq_ignore_ascii_case("pass")
-        });
+        let claimed_passed = v
+            .claimed
+            .as_deref()
+            .is_some_and(|c| c.eq_ignore_ascii_case("passed") || c.eq_ignore_ascii_case("pass"));
         if !claimed_passed {
             continue;
         }
@@ -497,11 +516,9 @@ fn extract_pytest_scope(cmd: &str, _root: &Path) -> String {
 fn has_files_matching(dir: &Path, suffix: &str) -> bool {
     std::fs::read_dir(dir)
         .map(|entries| {
-            entries.flatten().any(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .ends_with(suffix)
-            })
+            entries
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().ends_with(suffix))
         })
         .unwrap_or(false)
 }

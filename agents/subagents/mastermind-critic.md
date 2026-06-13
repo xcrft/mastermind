@@ -1,8 +1,11 @@
 ---
 name: mastermind-critic
 description: Independent design-time challenger that stress-tests a proposed approach against 7 explicit engineering dimensions (correctness, performance, observability, non-breaking, YAGNI, AI slop, test/doc coverage) before it becomes a spec. Spawn from the planner during brainstorming — mandatory for sensitive areas. Distinct from `mastermind-auditor` which verifies post-execution.
+tools: Read, Grep, Glob
+model: opus
+mcpServers: [mmcg]
 metadata:
-  version: 0.4.0
+  version: 0.4.1
   authors:
     - mastermind
   tags:
@@ -10,11 +13,6 @@ metadata:
     - design
     - code-review
     - canons
-  model: opus
-  tools:
-    - Read
-    - Grep
-    - Glob
 ---
 
 # Critic — design-time challenger

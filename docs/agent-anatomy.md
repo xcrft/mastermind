@@ -27,17 +27,18 @@ agents/subagents/<slug>.md
 ---
 name: critic
 description: Independent reviewer that critiques a proposed change without seeing prior conversation. Use to get a second opinion before merging.
+# Runtime fields — Claude Code reads these at the TOP LEVEL, not under metadata.
+tools: Read, Grep, Bash       # allowlist; omit the line to inherit all tools
+model: opus                   # opus | sonnet | haiku | inherit
+mcpServers: [mmcg]            # grant MCP servers; drop if the subagent needs none
 metadata:
   version: 0.1.0
   tags:
     - code-review
-  model: opus
-  tools:
-    - Read
-    - Grep
-    - Bash
 ---
 ```
+
+**Runtime fields are top-level — not under `metadata`.** Claude Code reads `tools`, `model`, `mcpServers`, and `disallowedTools` from the top level of the frontmatter. Nest them under `metadata` and Claude Code silently ignores them: the subagent inherits *all* tools and runs on the parent conversation's model. Two consequences worth remembering: a `tools:` allowlist **excludes every MCP tool** unless you also name the server in `mcpServers:`, and omitting `model` means `inherit` (no Haiku/Sonnet/Opus tiering). `metadata` stays for catalog fields only (`version`/`authors`/`tags`).
 
 ### Body
 The body is the subagent's system prompt. Same writing style rules as skills (imperative, concrete, examples).

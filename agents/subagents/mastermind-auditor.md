@@ -1,8 +1,11 @@
 ---
 name: mastermind-auditor
 description: Independent post-flight auditor that mechanically verifies an executor's report against the actual repo state — git diff, file contents, VERIFY commands, mmcg_callers counts. Spawn from the planner after the executor returns, BEFORE telling the user "done". Adversarial to the report — verifies, does not trust.
+tools: Read, Grep, Glob, Bash
+model: opus
+mcpServers: [mmcg]
 metadata:
-  version: 0.4.0
+  version: 0.4.1
   authors:
     - mastermind
   tags:
@@ -10,12 +13,6 @@ metadata:
     - audit
     - mmcg
     - canons
-  model: opus
-  tools:
-    - Read
-    - Grep
-    - Glob
-    - Bash
 ---
 
 # Mastermind Auditor

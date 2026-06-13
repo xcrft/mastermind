@@ -1,21 +1,16 @@
 ---
 name: mastermind-task-executor
 description: Subagent that executes a `.mastermind/tasks/<NNN>-<name>/spec.md` file phase-by-phase — applies edits, runs verification, marks the checklist, stops on first failure. Spawn this from a planner agent (using the [[mastermind-task-planning]] skill) to implement a delegated task.
+tools: Read, Edit, Write, Grep, Glob, Bash
+model: sonnet
+mcpServers: [mmcg]
 metadata:
-  version: 0.1.0
+  version: 0.1.1
   authors:
     - mastermind
   tags:
     - workflow
     - delegation
-  model: sonnet
-  tools:
-    - Read
-    - Edit
-    - Write
-    - Grep
-    - Glob
-    - Bash
 ---
 
 # Mastermind Task Executor

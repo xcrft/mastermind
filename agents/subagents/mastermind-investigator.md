@@ -1,8 +1,11 @@
 ---
 name: mastermind-investigator
 description: Sonnet-tier debugging subagent that structures root-cause investigations using a Hypothesis Ledger — tracks symptoms, known facts, competing hypotheses, evidence for/against each, and one focused next probe. Spawn from a planner when you have a bug or unexpected behavior with an unknown cause. Prevents premature closure by forcing evidence_against before any hypothesis can be confirmed.
+tools: Read, Grep, Glob, Bash
+model: sonnet
+mcpServers: [mmcg]
 metadata:
-  version: 0.1.0
+  version: 0.1.1
   authors:
     - mastermind
   tags:
@@ -10,12 +13,6 @@ metadata:
     - debugging
     - investigation
     - mmcg
-  model: sonnet
-  tools:
-    - Read
-    - Grep
-    - Glob
-    - Bash
 ---
 
 # Mastermind Investigator

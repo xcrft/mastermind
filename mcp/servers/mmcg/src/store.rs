@@ -779,7 +779,7 @@ impl Store {
         language: Option<&str>,
         kind: Option<&str>,
         top: u32,
-    ) -> SqlResult<Vec<(Symbol, u32)>> {
+    ) -> SqlResult<Vec<(Symbol, u32, u32)>> {
         let pattern = path_prefix.map(|p| {
             if p.ends_with('%') {
                 p.to_string()
@@ -791,15 +791,25 @@ impl Store {
         // `mmcg_callers` semantics — a function with 5 calls to `foo` from the
         // same caller counts once, not five times.
         let sql = format!(
-            "SELECT {SYMBOL_COLS_S}, COUNT(DISTINCT e.from_id) AS in_degree
+            "WITH deg AS (
+                 SELECT nm, COUNT(DISTINCT from_id) AS d FROM (
+                     SELECT to_name AS nm, from_id FROM edges WHERE kind = 'calls'
+                     UNION ALL
+                     SELECT to_type AS nm, from_id FROM edges
+                       WHERE kind = 'calls' AND to_type IS NOT NULL AND to_type <> ''
+                 ) GROUP BY nm
+             ),
+             defs AS (
+                 SELECT name, COUNT(*) AS n FROM symbols WHERE kind != 'module' GROUP BY name
+             )
+             SELECT {SYMBOL_COLS_S}, deg.d AS in_degree, defs.n AS name_collision
              FROM symbols s
-             JOIN edges e ON e.kind = 'calls'
-                         AND (e.to_name = s.name OR e.to_type = s.name)
+             JOIN deg  ON deg.nm = s.name
+             JOIN defs ON defs.name = s.name
              WHERE s.kind != 'module'
                AND (?1 IS NULL OR s.file_path LIKE ?1)
                AND (?2 IS NULL OR s.language = ?2)
                AND (?3 IS NULL OR s.kind = ?3)
-             GROUP BY s.id
              ORDER BY in_degree DESC, s.file_path, s.line_start
              LIMIT ?4"
         );
@@ -808,7 +818,8 @@ impl Store {
             let sym = Self::row_to_symbol(r)?;
             // in_degree is the column after the 9 SYMBOL_COLS_S columns.
             let in_degree: u32 = r.get(9)?;
-            Ok((sym, in_degree))
+            let name_collision: u32 = r.get(10)?;
+            Ok((sym, in_degree, name_collision))
         })?;
         rows.collect()
     }
@@ -1542,13 +1553,14 @@ mod tests {
         let ranked = store.centrality(None, None, None, 10).unwrap();
         let by_name: std::collections::HashMap<&str, u32> = ranked
             .iter()
-            .map(|(s, deg)| (s.name.as_str(), *deg))
+            .map(|(s, deg, _coll)| (s.name.as_str(), *deg))
             .collect();
         assert_eq!(
             by_name["popular"], 3,
             "3 distinct callers, dup call ignored"
         );
         assert_eq!(by_name["medium"], 1);
+        assert!(ranked.iter().all(|(_, _, coll)| *coll == 1));
         // lonely has zero callers — excluded by the JOIN.
         assert!(!by_name.contains_key("lonely"));
         // popular ranks above medium.
@@ -1715,13 +1727,13 @@ mod tests {
 
         // Prefix filter: src/api/ excludes the class in src/core/.
         let api_only = store.centrality(Some("src/api/"), None, None, 10).unwrap();
-        let names: Vec<&str> = api_only.iter().map(|(s, _)| s.name.as_str()).collect();
+        let names: Vec<&str> = api_only.iter().map(|(s, _, _)| s.name.as_str()).collect();
         assert!(names.contains(&"api_target"));
         assert!(!names.contains(&"CoreClass"));
 
         // Kind filter: class only.
         let classes = store.centrality(None, None, Some("class"), 10).unwrap();
-        let class_names: Vec<&str> = classes.iter().map(|(s, _)| s.name.as_str()).collect();
+        let class_names: Vec<&str> = classes.iter().map(|(s, _, _)| s.name.as_str()).collect();
         assert!(class_names.contains(&"CoreClass"));
         assert!(!class_names.contains(&"api_target"));
         std::fs::remove_file(&path).ok();

@@ -304,6 +304,16 @@ On `❌ contract broken`:
 
 The `blocking_reason` must be a single sentence naming the concrete discrepancy — not "see audit" or "contract broken". It appears verbatim in `mastermind status` and `mastermind resume` output.
 
+## Final output self-check (REQUIRED — complete before ending your response)
+
+Before writing your last word, verify all three conditions:
+
+1. Does your response contain `<!-- mastermind:audit-begin -->`? If not, emit the full structured tail now.
+2. Does your response contain `<!-- mastermind:audit-end -->`? If not, close the block now.
+3. Is the YAML inside the block valid — `verdict:`, `discrepancies:`, `scope_match:` all present? If malformed, rewrite the block.
+
+A response without the sentinel block is **invalid** regardless of reasoning quality. The planner cannot route on prose alone.
+
 ## What you do NOT do
 
 - Run commands that modify state (no `git commit`, no `git push`, no destructive ops)

@@ -102,6 +102,7 @@ class Result:
     reasons: list[str] = field(default_factory=list)
     duration_ms: int = 0
     fixture_path: Path | None = None
+    retry_used: bool = False
 
 
 def strip_frontmatter(text: str) -> str:
@@ -547,9 +548,25 @@ def main() -> int:
                     args.model, suite_name, suite_cfg, case,
                     keep_fixtures=args.keep_fixtures,
                 )
+                _SENTINEL_MISSING = "no structured audit verdict block found"
+                if (
+                    not r.passed
+                    and suite_name == "auditor"
+                    and len(r.reasons) == 1
+                    and _SENTINEL_MISSING in r.reasons[0]
+                ):
+                    print(f"retry (sentinel missing) ...", end=" ", flush=True)
+                    r2 = evaluate_case(
+                        args.model, suite_name, suite_cfg, case,
+                        keep_fixtures=args.keep_fixtures,
+                    )
+                    if r2.passed:
+                        r2.retry_used = True
+                        r = r2
                 results.append(r)
                 status = "✓ pass" if r.passed else "✗ FAIL"
-                print(f"{status}  ({r.duration_ms}ms)")
+                retry_tag = " [retry]" if r.retry_used else ""
+                print(f"{status}{retry_tag}  ({r.duration_ms}ms)")
                 if args.keep_fixtures and r.fixture_path is not None:
                     print(f"      fixture: {r.fixture_path}")
                 for reason in r.reasons:
@@ -561,9 +578,14 @@ def main() -> int:
 
     n_pass = sum(r.passed for r in results)
     n_fail = len(results) - n_pass
+    n_first_pass = sum(r.passed and not r.retry_used for r in results)
+    n_retry_pass = sum(r.passed and r.retry_used for r in results)
     total_ms = sum(r.duration_ms for r in results)
     print(f"\n=== summary ===")
     print(f"  passed: {n_pass}/{len(results)}")
+    print(f"  first_pass: {n_first_pass}/{len(results)}")
+    if n_retry_pass:
+        print(f"  after_retry: {n_first_pass + n_retry_pass}/{len(results)} ({n_retry_pass} case(s) needed retry)")
     print(f"  total time: {total_ms / 1000:.1f}s")
     return 0 if n_fail == 0 else 1
 

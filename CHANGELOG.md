@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - `mmcg_symbols_changed_since` over MCP no longer errors with `canonicalize root: No such file or directory` when called without an explicit `root`. The default root is now derived from the canonicalized index file (`<root>/.mastermind/mmcg.db` → `<root>`); previously it climbed a *relative* db path to `""`, which failed to canonicalize and broke the default invocation.
+- Subagent definitions now declare `tools`, `model`, and (for mmcg-using roles) `mcpServers: [mmcg]` as **top-level** frontmatter keys. They were nested under `metadata:`, which the Claude Code runtime does not read — so on a stock install every subagent silently inherited all tools and the parent's model: no read-only restriction (researcher/critic/auditor could write files), no Haiku/Sonnet/Opus tiering, and MCP access worked only by accident of that inheritance. Fixed across `agents/subagents/`, `extras/subagents/mastermind-release.md`, `agents/_template/subagent.md`, and the convention docs (`docs/conventions.md` §2.4, `docs/agent-anatomy.md`).
 
 ### Tests
 - New unit test `changed_since_root_defaults_to_repo_root_from_db_path`; `centrality_ranks_by_in_degree` asserts the new `name_collision` field. 161 lib + 17 golden pass.

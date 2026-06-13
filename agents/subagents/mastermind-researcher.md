@@ -1,20 +1,17 @@
 ---
 name: mastermind-researcher
 description: Read-only Haiku-tier subagent that explores the codebase, reads documentation, and returns structured fact summaries without making decisions. Spawn from a planner when you need to gather facts before designing — bulk grep/read/glob work that doesn't deserve Opus time. Use when you'd otherwise burn the main agent's context on "find all callsites of X" or "list all configs under Y".
+tools: Read, Grep, Glob, Bash
+model: haiku
+mcpServers: [mmcg]
 metadata:
-  version: 0.2.0
+  version: 0.2.1
   authors:
     - mastermind
   tags:
     - workflow
     - research
     - mmcg
-  model: haiku
-  tools:
-    - Read
-    - Grep
-    - Glob
-    - Bash
 ---
 
 # Researcher

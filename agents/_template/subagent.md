@@ -1,17 +1,16 @@
 ---
 name: <your-slug>
 description: <One or two sentences. What this subagent does, when to spawn it.>
+# Runtime fields — Claude Code reads these at the TOP LEVEL, not under metadata.
+tools: Read, Grep              # ONLY the tools this subagent needs; omit the line to inherit all
+model: <opus | sonnet | haiku | inherit>
+mcpServers: [mmcg]             # grant MCP servers — a tools: allowlist excludes MCP otherwise; delete if none
 metadata:
   version: 0.1.0
   authors:
     - <github-handle>
   tags:
     - <domain>
-  model: <opus | sonnet | haiku>
-  tools:
-    - Read
-    - Grep
-    # List ONLY the tools this subagent needs. Avoid `*` unless truly necessary.
 ---
 
 # <Subagent Name>

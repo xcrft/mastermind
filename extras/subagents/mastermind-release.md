@@ -5,8 +5,10 @@ description: >-
   and auditor verdict. Read-only; never runs git commit / push / gh pr create itself. Returns
   drafts for user approval; planner executes after sign-off. Triggers — "ship it", "make a PR",
   "commit this", "отправляй", "мерж". Refuses if auditor verdict was not "contract held".
+tools: Read, Grep, Glob, Bash
+model: sonnet
 metadata:
-  version: 0.1.0
+  version: 0.1.1
   authors:
     - mastermind
   tags:
@@ -14,12 +16,6 @@ metadata:
     - release
     - git
     - canons
-  model: sonnet
-  tools:
-    - Read
-    - Grep
-    - Glob
-    - Bash
 ---
 
 # Mastermind Release

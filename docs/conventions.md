@@ -77,7 +77,10 @@ Bad:
 - `authors` — list of GitHub handles.
 - `tags` — domain + any helpful tags. First tag should be the domain folder.
 - `requires` — list of MCP servers, env vars, or tools the artifact needs.
-- `model` — recommended model (`opus`, `sonnet`, `haiku`) if the artifact is sensitive to this.
+
+### 2.4 Subagent runtime fields (top-level, not metadata)
+
+A subagent (`agents/subagents/<slug>.md`) is loaded by the **Claude Code runtime**, which reads `tools`, `model`, `mcpServers`, and `disallowedTools` as **top-level** frontmatter keys. Put them at the top level, alongside `name`/`description` — do **not** nest them under `metadata`. Nesting makes Claude Code ignore them: the subagent silently inherits every tool and the parent conversation's model, so tool restrictions and model tiering stop working. A `tools:` allowlist also excludes all MCP tools unless the server is named in `mcpServers:`. `metadata` is for catalog fields only (`version`/`authors`/`tags`). See [`agent-anatomy.md`](agent-anatomy.md) §1.
 
 ---
 

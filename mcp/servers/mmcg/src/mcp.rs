@@ -483,7 +483,7 @@ fn schema_tasks() -> Value {
 fn schema_centrality() -> Value {
     json!({
         "name": "mmcg_centrality",
-        "description": "Rank symbols by in-degree (distinct callers, matched by name OR type prefix). Pre-flight 'where is the gravity' tool — top hits are the codebase's structural load-bearing points. Filter by path `prefix` (e.g. 'src/auth/') and/or `kind` (function, class, method…). Higher `top` reveals the long tail; default 20 covers most planning needs.",
+        "description": "Rank symbols by in-degree (distinct callers, matched by name OR type prefix). Pre-flight 'where is the gravity' tool — top hits are the codebase's structural load-bearing points. Filter by path `prefix` (e.g. 'src/auth/') and/or `kind` (function, class, method…). Higher `top` reveals the long tail; default 20 covers most planning needs. Each hit carries `name_collision` — how many definitions share the leaf name; a high value means the in-degree is inflated by same-named call sites (edges resolve syntactically), not concentrated on this one symbol.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -644,21 +644,29 @@ fn handle_api_surface(store: &mut Store, args: &Value) -> Result<Value, String> 
     serde_json::to_value(r).map_err(|e| e.to_string())
 }
 
-fn handle_symbols_changed_since(store: &mut Store, args: &Value) -> Result<Value, String> {
-    let git_ref = str_arg(args, "git_ref")?;
-    let root_arg = opt_str_arg(args, "root");
+fn changed_since_root(
+    root_arg: Option<&str>,
+    db_path: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
     let root = match root_arg {
         Some(s) => std::path::PathBuf::from(s),
-        None => store
-            .db_path()
-            .parent()
-            .and_then(|d| d.parent())
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| std::path::PathBuf::from(".")),
+        None => {
+            let db = db_path
+                .canonicalize()
+                .map_err(|e| format!("canonicalize db_path: {e}"))?;
+            db.parent()
+                .and_then(|d| d.parent())
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+        }
     };
-    let root = root
-        .canonicalize()
-        .map_err(|e| format!("canonicalize root: {e}"))?;
+    root.canonicalize()
+        .map_err(|e| format!("canonicalize root: {e}"))
+}
+
+fn handle_symbols_changed_since(store: &mut Store, args: &Value) -> Result<Value, String> {
+    let git_ref = str_arg(args, "git_ref")?;
+    let root = changed_since_root(opt_str_arg(args, "root"), store.db_path())?;
     let diff = queries::symbols_changed_since(store, &root, git_ref).map_err(|e| e.to_string())?;
     serde_json::to_value(diff).map_err(|e| e.to_string())
 }
@@ -758,6 +766,21 @@ mod tests {
     fn unwrap_content(v: &serde_json::Value) -> serde_json::Value {
         let text = v["content"][0]["text"].as_str().expect("content[0].text");
         serde_json::from_str(text).expect("content[0].text was not valid JSON")
+    }
+
+    #[test]
+    fn changed_since_root_defaults_to_repo_root_from_db_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mastermind = tmp.path().join(".mastermind");
+        std::fs::create_dir_all(&mastermind).unwrap();
+        let db = mastermind.join("mmcg.db");
+        std::fs::write(&db, b"").unwrap();
+
+        let root = changed_since_root(None, &db).unwrap();
+        assert_eq!(root, tmp.path().canonicalize().unwrap());
+
+        let explicit = changed_since_root(Some(tmp.path().to_str().unwrap()), &db).unwrap();
+        assert_eq!(explicit, tmp.path().canonicalize().unwrap());
     }
 
     #[test]

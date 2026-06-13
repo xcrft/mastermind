@@ -176,7 +176,7 @@ impl WorkflowStatus {
                     ""
                 };
                 out.push_str(&format!(
-                    "  ⚠ {} source file(s){} changed since last index — run `mastermind index .`\n",
+                    "  ⚠ {} source file(s){} changed since last index — run `mastermind index .` (or `mastermind watch` to keep it live)\n",
                     self.index.stale_count, suffix
                 ));
             }

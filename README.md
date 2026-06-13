@@ -8,9 +8,10 @@
   <a href="https://www.npmjs.com/package/@xcraftmind/mastermind"><img src="https://img.shields.io/npm/v/@xcraftmind/mastermind.svg" alt="npm version"></a>
   <a href="https://github.com/xcrft/mastermind/actions/workflows/ci-mmcg.yml"><img src="https://github.com/xcrft/mastermind/actions/workflows/ci-mmcg.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="evals/benchmarks.md"><img src="https://img.shields.io/badge/auditor_eval-8%2F8-brightgreen" alt="Auditor eval: 8/8"></a>
 </p>
 
-**mmcg** indexes your codebase into a local SQLite graph and serves it to Claude Code over MCP. Built on top: a spec-driven workflow where every structural claim an agent makes is verified against that graph — not the model's memory.
+Mastermind is a spec-driven coding-agent workflow built on **mmcg** — a local codegraph that lets agents verify structural claims against the actual codebase, not model memory.
 
 ## Quick start
 
@@ -138,7 +139,7 @@ Workflow (installed into ~/.claude/ by `mastermind init`)
   skills/prompt-engineering/  mastermind-prompt-refiner (intake gate)
 
 Proof
-  evals/                adversarial test suite — auditor, critic, intake cases
+  evals/                adversarial eval suite — auditor 8/8, critic 5/5, intake cases
 ```
 
 Non-core artifacts (pr-review, flaky-finder, doc-stub-sync, release subagent, generic prompts) live in [`extras/`](extras/) — available but not installed by default.
@@ -167,7 +168,7 @@ npx mastermind setup claude --project . --write-mcp
 
 Writes `./.mcp.json` with `command: "./node_modules/.bin/mastermind"`.
 
-**One-shot** — `npx -y @xcraftmind/mastermind doctor`. Fine for one-offs; avoid for the MCP server (re-resolves through npm cache on every Claude Code launch).
+**One-shot** — `npx -y @xcraftmind/mastermind doctor`. Fine for quick checks; avoid for the MCP server (re-resolves on every Claude Code launch).
 
 **Supported platforms** — macOS (arm64 + x86_64), Linux glibc & musl/Alpine (x86_64 + arm64), Windows (x86_64). Other targets: `cargo install mmcg`.
 
@@ -188,12 +189,30 @@ Requires Rust 1.75+ ([rustup](https://rustup.rs/)). The binary is `mmcg` — sam
 ```bash
 mastermind init                  # scaffold .mastermind/, build the index, draft CONTEXT.md
 echo .mastermind/ >> .gitignore  # local working state — never committed
-mastermind doctor                # 8 fail-soft checks: binary, index, freshness, MCP config, serve handshake, …
+mastermind doctor                # 8 fail-soft checks: binary, index, freshness, MCP config, …
 ```
 
-`init` indexes the codebase and drafts `CONTEXT.md` via `claude -p` — pass `--no-index` / `--no-claude` to skip, or `--with-claude-md` to also write the workflow CLAUDE.md template. It installs the workflow subagents, skills, and slash commands into `~/.claude/` (`--no-global` to skip). Keep the index live with `mastermind watch`. Tear a setup down with `mastermind uninstall` (`--scope project|global|all`; dry-run unless `--force`).
+Pass `--no-index` / `--no-claude` to skip the index build or Claude invocation. `--with-claude-md` also writes the workflow CLAUDE.md template. `--no-global` skips installing subagents and skills into `~/.claude/`. Keep the index live with `mastermind watch`. Tear a setup down with `mastermind uninstall` (`--scope project|global|all`; dry-run unless `--force`).
 
 `mastermind doctor --json` is CI-friendly (exit 1 if anything's unwired).
+
+**What `init` does not do:** nothing contacts an external service unless the Claude Code CLI is installed and `--no-claude` is not passed. The SQLite index is built locally from your source files by tree-sitter and never leaves your machine. The only file outside your project that `setup` touches is `~/.claude.json`.
+
+**Fully offline:**
+
+```bash
+mastermind init --no-claude --no-index --no-global
+```
+
+**Remove everything:**
+
+```bash
+mastermind uninstall --scope all --force
+rm ~/.claude/agents/mastermind-*.md
+rm -rf ~/.claude/skills/mastermind-*/
+```
+
+`CONTEXT.md` and `CLAUDE.md` are never touched by `uninstall` — they are your project's files.
 
 ## Daily workflow commands
 
@@ -207,48 +226,6 @@ mastermind audit-spec <spec>   # post-execution gate: scope, drift, hallucinated
 mastermind demo hallucinated-symbol   # walkthrough of a caught hallucination
 mastermind context doctor      # audit CONTEXT.md quality (placeholder, freshness, stack)
 ```
-
-## What `init` does — and what it doesn't
-
-Nothing contacts an external service unless the Claude Code CLI is installed and `--no-claude` is not passed.
-
-**Created locally** (always, no network):
-
-| Path | What it is |
-|---|---|
-| `.mastermind/` | Index directory. `.gitignore` inside wildcards everything so it's never committed. |
-| `.mastermind/tasks/` | Where your task specs live. |
-| `.mastermind/mmcg.db` | SQLite codegraph index — built locally from your source files by tree-sitter. Never leaves your machine. |
-| `CONTEXT.md` | Written from a template. Not overwritten if it already exists (unless `--force`). |
-
-**Installed globally** into `~/.claude/` (npm installs only; skippable with `--no-global`):
-
-Subagent `.md` files → `~/.claude/agents/`, skill directories → `~/.claude/skills/`. These are static Markdown files. No code runs during the copy.
-
-**What goes to Claude** (only if the Claude Code CLI is installed and `--no-claude` is not passed):
-
-`claude -p "<prompt>" --permission-mode acceptEdits` is invoked once to fill `CONTEXT.md` (and optionally `CLAUDE.md`) placeholders. The prompt asks Claude to read the codebase using MCP tools and fill only specific sections — it does not batch-upload raw source files. If the `claude` binary is not on PATH, this step is skipped with a warning and the templates are left unfilled.
-
-`mastermind setup claude --write-mcp` runs `claude mcp add --scope user mmcg -- mastermind serve`, which modifies `~/.claude.json`. That is the only file outside your project that `setup` touches.
-
-**Fully offline / no-LLM path:**
-
-```bash
-mastermind init --no-claude --no-index --no-global
-```
-
-Scaffolds `.mastermind/` and writes templates. Zero network calls, zero subprocesses.
-
-**Remove everything:**
-
-```bash
-mastermind uninstall --scope all --force
-# also remove the workflow files installed into ~/.claude/:
-rm ~/.claude/agents/mastermind-*.md
-rm -rf ~/.claude/skills/mastermind-*/
-```
-
-`CONTEXT.md` and `CLAUDE.md` are never touched by `uninstall` — they are your project's files.
 
 ---
 

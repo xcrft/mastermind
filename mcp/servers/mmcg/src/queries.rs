@@ -24,6 +24,11 @@ pub struct SymbolHit {
     /// (e.g. `",Fact,"`, `",partial,sealed,"`). Skipped from output when absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decorators: Option<String>,
+    /// Graph-edge precision for this symbol's source language. Present on
+    /// `mmcg_search` results; absent on sub-lists (callers, callees) where
+    /// the parent response carries a single `edge_precision` field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub precision: Option<EdgePrecision>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -42,6 +47,7 @@ impl From<Symbol> for SymbolHit {
             signature: s.signature,
             locations: None,
             decorators: s.decorators,
+            precision: None,
         }
     }
 }
@@ -245,11 +251,14 @@ pub fn search(
     collapse_partials: bool,
 ) -> rusqlite::Result<SearchResponse> {
     let raw = store.search_symbols(name, kind, language)?;
-    let results = if collapse_partials {
+    let mut results: Vec<SymbolHit> = if collapse_partials {
         collapse_partial_hits(raw)
     } else {
         raw.into_iter().map(SymbolHit::from).collect()
     };
+    for hit in &mut results {
+        hit.precision = Some(lang_precision(&hit.file));
+    }
     Ok(SearchResponse {
         query: name.to_string(),
         results,

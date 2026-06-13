@@ -5,8 +5,26 @@ use std::path::Path;
 
 pub fn dispatch(q: QueryCmd, index_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let store = Store::open(index_path)?;
+    let is_explain = matches!(q, QueryCmd::Explain { .. });
     let result = execute(&store, q)?;
     println!("{}", serde_json::to_string_pretty(&result)?);
+    if is_explain {
+        if let Some(matched) = result.get("matched").and_then(|v| v.as_array()) {
+            if matched.is_empty() {
+                let query = result.get("query").and_then(|v| v.as_str()).unwrap_or("?");
+                eprintln!("\nMatched 0 symbols for {query:?}.");
+                eprintln!("Possible reasons:");
+                eprintln!("  - symbol not yet indexed (run: mastermind index .)");
+                eprintln!("  - generated dynamically (Python metaclass, TS decorators, macros)");
+                eprintln!("  - file not in index (check extension or .gitignore)");
+                eprintln!("  - language parser limitation (C++ macros, Rust proc-macros)");
+                eprintln!("  - wrong name (try a prefix: mmcg query search {query})");
+                eprintln!("\nTry:");
+                eprintln!("  mastermind query files --prefix <dir>");
+                eprintln!("  mastermind index --force .");
+            }
+        }
+    }
     Ok(())
 }
 

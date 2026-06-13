@@ -93,6 +93,23 @@ pub enum Finding {
     /// Executor claimed a test command passed, but no test files were found
     /// in the relevant directory. The pass is vacuous (zero tests ran).
     VacuousTestClaim { cmd: String, reason: String },
+    /// Executor claimed they added symbol X with a specific signature, but the
+    /// stored signature in the index does not match. Either the executor wrote a
+    /// different signature or the claim was copy-pasted from a draft spec.
+    ClaimedSignatureMismatch {
+        symbol: String,
+        file: Option<String>,
+        claimed: String,
+        actual: Option<String>,
+    },
+    /// Executor attached `observed: { exit_code: N }` but claimed the command
+    /// passed. The non-zero exit code contradicts the pass claim — the test run
+    /// likely failed or was skipped.
+    ObservedExitCodeNonZero { cmd: String, exit_code: i32 },
+    /// Executor attached `observed: { tests_run: 0 }` with `exit_code: 0`.
+    /// The command exited cleanly but ran zero tests — vacuous pass confirmed
+    /// by the executor's own output rather than a static file-existence check.
+    ObservedZeroTests { cmd: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -133,7 +150,10 @@ impl Report {
                 | Finding::RemovedSymbolNotAcknowledged { .. }
                 | Finding::ClaimedSymbolMissing { .. }
                 | Finding::HallucinatedSymbol { .. }
-                | Finding::MissingCallEdge { .. } => "❌",
+                | Finding::MissingCallEdge { .. }
+                | Finding::ClaimedSignatureMismatch { .. }
+                | Finding::ObservedExitCodeNonZero { .. }
+                | Finding::ObservedZeroTests { .. } => "❌",
             };
             out.push_str(&format!("  {icon} {}\n", render_finding(f)));
         }
@@ -151,6 +171,10 @@ impl Report {
     pub fn has_failures(&self) -> bool {
         matches!(self.verdict, Verdict::Broken)
     }
+}
+
+pub fn render_finding_text(f: &Finding) -> String {
+    render_finding(f)
 }
 
 fn render_finding(f: &Finding) -> String {
@@ -206,6 +230,31 @@ fn render_finding(f: &Finding) -> String {
         }
         Finding::VacuousTestClaim { cmd, reason } => {
             format!("vacuous_test_claim: `{cmd}` claimed passed but {reason}")
+        }
+        Finding::ClaimedSignatureMismatch {
+            symbol,
+            file,
+            claimed,
+            actual,
+        } => {
+            let loc = file
+                .as_deref()
+                .map(|f| format!(" in `{f}`"))
+                .unwrap_or_default();
+            let got = actual.as_deref().unwrap_or("<no signature stored>");
+            format!(
+                "claimed_signature_mismatch: `{symbol}`{loc} — executor claimed `{claimed}`, index has `{got}`"
+            )
+        }
+        Finding::ObservedExitCodeNonZero { cmd, exit_code } => {
+            format!(
+                "observed_exit_code_nonzero: `{cmd}` claimed passed but observed exit_code={exit_code}"
+            )
+        }
+        Finding::ObservedZeroTests { cmd } => {
+            format!(
+                "observed_zero_tests: `{cmd}` claimed passed but observed tests_run=0 — vacuous pass"
+            )
         }
     }
 }
@@ -381,6 +430,14 @@ pub fn run_with_report(
     Ok(report)
 }
 
+fn norm_path(p: &str) -> String {
+    p.replace('\\', "/").trim_start_matches("./").to_string()
+}
+
+fn norm_paths_eq(stored: &str, claimed: &str) -> bool {
+    norm_path(stored) == norm_path(claimed)
+}
+
 fn check_executor_claims(
     er: &crate::executor_report::ExecutorReport,
     store: &Store,
@@ -390,17 +447,57 @@ fn check_executor_claims(
 
     for claim in &er.claims {
         match claim {
-            Claim::FunctionAdded { symbol, file } => {
-                let hits = store.search_symbols(symbol, None, None).unwrap_or_default();
+            Claim::FunctionAdded {
+                symbol,
+                file,
+                signature,
+            } => {
+                let all_hits = store.search_symbols(symbol, None, None).unwrap_or_default();
+                let hits: Vec<_> = if let Some(f) = file {
+                    all_hits
+                        .into_iter()
+                        .filter(|s| norm_paths_eq(&s.file_path, f))
+                        .collect()
+                } else {
+                    all_hits
+                };
                 if hits.is_empty() {
                     findings.push(Finding::ClaimedSymbolMissing {
                         symbol: symbol.clone(),
                         file: file.clone(),
                     });
+                    continue;
+                }
+                if let Some(claimed_sig) = signature {
+                    let any_match = hits
+                        .iter()
+                        .any(|s| s.signature.as_deref() == Some(claimed_sig.as_str()));
+                    if !any_match {
+                        findings.push(Finding::ClaimedSignatureMismatch {
+                            symbol: symbol.clone(),
+                            file: file.clone(),
+                            claimed: claimed_sig.clone(),
+                            actual: hits.first().and_then(|s| s.signature.clone()),
+                        });
+                    }
                 }
             }
-            Claim::Integration { from, to, .. } => {
-                let to_hits = store.search_symbols(to, None, None).unwrap_or_default();
+            Claim::Integration {
+                from,
+                from_file,
+                to,
+                to_file,
+                ..
+            } => {
+                let all_to_hits = store.search_symbols(to, None, None).unwrap_or_default();
+                let to_hits: Vec<_> = if let Some(tf) = to_file {
+                    all_to_hits
+                        .into_iter()
+                        .filter(|s| norm_paths_eq(&s.file_path, tf))
+                        .collect()
+                } else {
+                    all_to_hits
+                };
                 if to_hits.is_empty() {
                     findings.push(Finding::HallucinatedSymbol {
                         from_symbol: from.clone(),
@@ -408,8 +505,16 @@ fn check_executor_claims(
                     });
                     continue;
                 }
-                let from_sym = store.search_symbols(from, None, None).unwrap_or_default();
-                let call_exists = from_sym.iter().any(|s| {
+                let all_from = store.search_symbols(from, None, None).unwrap_or_default();
+                let from_syms: Vec<_> = if let Some(ff) = from_file {
+                    all_from
+                        .into_iter()
+                        .filter(|s| norm_paths_eq(&s.file_path, ff))
+                        .collect()
+                } else {
+                    all_from
+                };
+                let call_exists = from_syms.iter().any(|s| {
                     store
                         .callees_of(s.id, None)
                         .unwrap_or_default()
@@ -439,6 +544,23 @@ fn check_vacuous_tests(
             .is_some_and(|c| c.eq_ignore_ascii_case("passed") || c.eq_ignore_ascii_case("pass"));
         if !claimed_passed {
             continue;
+        }
+        if let Some(obs) = &v.observed {
+            if let Some(code) = obs.exit_code {
+                if code != 0 {
+                    findings.push(Finding::ObservedExitCodeNonZero {
+                        cmd: v.cmd.clone(),
+                        exit_code: code,
+                    });
+                    continue;
+                }
+            }
+            if obs.exit_code == Some(0) {
+                if let Some(0) = obs.tests_run {
+                    findings.push(Finding::ObservedZeroTests { cmd: v.cmd.clone() });
+                    continue;
+                }
+            }
         }
         if let Some(reason) = vacuous_test_reason(&v.cmd, repo_root) {
             findings.push(Finding::VacuousTestClaim {
@@ -558,20 +680,59 @@ fn has_test_attr_in_dir(dir: &Path) -> bool {
 // ----- evidence bundle ------------------------------------------------------
 
 /// Portable proof artifact written by `audit-spec --bundle`.
+///
+/// v2 adds: `head`, `spec_files`, `changed_files`, `verified_claims`,
+/// `failed_claims`, `mmcg_queries`, `commands`, `human_summary`.
+/// The legacy fields (`files_diff`, `discrepancies`, `snapshot_drift`) are
+/// preserved for backward compatibility.
 #[derive(Debug, Serialize)]
 pub struct Bundle {
-    pub spec: String,
-    pub git_ref: String,
     pub verdict: String,
-    pub files_diff: Vec<String>,
+    pub spec: String,
+    /// Git ref the audit diffed against (typically `main` or a commit sha).
+    pub baseline: String,
+    /// Best-effort HEAD sha at the time the bundle was produced.
+    pub head: String,
+    /// Files the spec declared it would touch (authoritative when frontmatter
+    /// is present, heuristic otherwise).
+    pub spec_files: Vec<String>,
+    /// Files actually changed between `baseline` and HEAD per `git diff`.
+    pub changed_files: Vec<String>,
+    /// Executor claims that passed all mechanical checks.
+    pub verified_claims: Vec<String>,
+    /// Executor claims that failed at least one mechanical check.
+    pub failed_claims: Vec<String>,
+    /// Logical mmcg queries issued during the audit (for human inspection).
+    pub mmcg_queries: Vec<String>,
+    /// Verify commands extracted from the executor report.
+    pub commands: Vec<String>,
+    /// One-line verdict summary suitable for a PR comment title.
+    pub human_summary: String,
+    /// All findings (superset of `snapshot_drift`). Legacy field name kept.
     pub discrepancies: Vec<Finding>,
+    /// Snapshot-drift findings only. Legacy field kept.
     pub snapshot_drift: Vec<Finding>,
+    /// Legacy alias for `changed_files`. Kept for backward compatibility.
+    pub files_diff: Vec<String>,
+    /// Legacy alias for `baseline`. Kept for backward compatibility with
+    /// consumers that parsed the pre-v2 bundle format.
+    pub git_ref: String,
     pub executor_report_path: Option<String>,
 }
 
 impl Bundle {
     pub fn from_report(report: &Report, executor_report_path: Option<&str>) -> Self {
-        let files_diff = report
+        Self::from_report_full(report, None, None, executor_report_path, None)
+    }
+
+    pub fn from_report_full(
+        report: &Report,
+        executor_report: Option<&crate::executor_report::ExecutorReport>,
+        spec: Option<&crate::spec::ParsedSpec>,
+        executor_report_path: Option<&str>,
+        root: Option<&Path>,
+    ) -> Self {
+        let changed_files = report
             .symbol_diff
             .as_ref()
             .map(|d| d.files_in_diff.clone())
@@ -591,16 +752,209 @@ impl Bundle {
             .cloned()
             .collect();
 
+        let spec_files: Vec<String> = spec
+            .map(|s| {
+                s.frontmatter
+                    .as_ref()
+                    .filter(|fm| fm.has_file_scope())
+                    .map(|fm| {
+                        fm.touches
+                            .iter()
+                            .map(|t| t.file.clone())
+                            .chain(fm.expected_docs.iter().cloned())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_else(|| s.mentioned_files.clone())
+            })
+            .unwrap_or_default();
+
+        let mut mmcg_queries: Vec<String> = Vec::new();
+        let mut verified_claims: Vec<String> = Vec::new();
+        let mut failed_claims: Vec<String> = Vec::new();
+
+        if let Some(er) = executor_report {
+            use crate::executor_report::Claim;
+            for claim in &er.claims {
+                match claim {
+                    Claim::FunctionAdded { symbol, file, .. } => {
+                        let q = format!("mmcg_search {symbol}");
+                        if !mmcg_queries.contains(&q) {
+                            mmcg_queries.push(q);
+                        }
+                        let norm_file = file.as_deref().map(norm_path);
+                        let label = norm_file
+                            .as_deref()
+                            .map(|f| format!("function_added:{symbol}@{f}"))
+                            .unwrap_or_else(|| format!("function_added:{symbol}"));
+                        let failed = report.findings.iter().any(|f| match f {
+                            Finding::ClaimedSymbolMissing {
+                                symbol: s,
+                                file: ff,
+                            } => s == symbol && norm_file == ff.as_deref().map(norm_path),
+                            Finding::ClaimedSignatureMismatch {
+                                symbol: s,
+                                file: ff,
+                                ..
+                            } => s == symbol && norm_file == ff.as_deref().map(norm_path),
+                            _ => false,
+                        });
+                        if failed {
+                            failed_claims.push(label);
+                        } else {
+                            verified_claims.push(label);
+                        }
+                    }
+                    Claim::Integration {
+                        from,
+                        from_file,
+                        to,
+                        to_file,
+                        ..
+                    } => {
+                        for name in [to.as_str(), from.as_str()] {
+                            let q = format!("mmcg_search {name}");
+                            if !mmcg_queries.contains(&q) {
+                                mmcg_queries.push(q);
+                            }
+                        }
+                        let callees_q = format!("mmcg_callees {from}");
+                        if !mmcg_queries.contains(&callees_q) {
+                            mmcg_queries.push(callees_q);
+                        }
+                        let norm_ff = from_file.as_deref().map(norm_path);
+                        let norm_tf = to_file.as_deref().map(norm_path);
+                        let label = match (norm_ff.as_deref(), norm_tf.as_deref()) {
+                            (Some(ff), Some(tf)) => {
+                                format!("integration:{from}@{ff}→{to}@{tf}")
+                            }
+                            (Some(ff), None) => format!("integration:{from}@{ff}→{to}"),
+                            (None, Some(tf)) => format!("integration:{from}→{to}@{tf}"),
+                            (None, None) => format!("integration:{from}→{to}"),
+                        };
+                        let failed = report.findings.iter().any(|f| match f {
+                            Finding::HallucinatedSymbol {
+                                from_symbol: fs,
+                                to_symbol: ts,
+                            } => fs == from && ts == to,
+                            Finding::MissingCallEdge {
+                                from_symbol: fs,
+                                to_symbol: ts,
+                            } => fs == from && ts == to,
+                            _ => false,
+                        });
+                        if failed {
+                            failed_claims.push(label);
+                        } else {
+                            verified_claims.push(label);
+                        }
+                    }
+                }
+            }
+        }
+
+        let commands: Vec<String> = executor_report
+            .map(|er| er.verify.iter().map(|v| v.cmd.clone()).collect())
+            .unwrap_or_default();
+
+        let head = resolve_head_sha(root);
+
+        let human_summary = build_human_summary(report, &failed_claims, &verified_claims);
+
         Self {
-            spec: report.spec.clone(),
-            git_ref: report.git_ref.clone(),
             verdict: format!("{:?}", report.verdict).to_lowercase(),
-            files_diff,
+            spec: report.spec.clone(),
+            baseline: report.git_ref.clone(),
+            git_ref: report.git_ref.clone(),
+            head,
+            spec_files,
+            changed_files: changed_files.clone(),
+            verified_claims,
+            failed_claims,
+            mmcg_queries,
+            commands,
+            human_summary,
             discrepancies: report.findings.clone(),
             snapshot_drift,
+            files_diff: changed_files,
             executor_report_path: executor_report_path.map(str::to_string),
         }
     }
+}
+
+fn resolve_head_sha(root: Option<&Path>) -> String {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["rev-parse", "--short", "HEAD"]);
+    if let Some(r) = root {
+        cmd.current_dir(r);
+    }
+    cmd.output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                String::from_utf8(o.stdout)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn build_human_summary(
+    report: &Report,
+    failed_claims: &[String],
+    verified_claims: &[String],
+) -> String {
+    let verdict_str = match report.verdict {
+        Verdict::Held => "HELD",
+        Verdict::Drift => "DRIFT",
+        Verdict::Broken => "BROKEN",
+    };
+    let n_findings = report.findings.len();
+    if n_findings == 0 {
+        return format!("Mastermind audit: {verdict_str} — all checks passed");
+    }
+    if !failed_claims.is_empty() {
+        return format!(
+            "Mastermind audit: {verdict_str} — {} claim(s) failed, {} passed",
+            failed_claims.len(),
+            verified_claims.len()
+        );
+    }
+    format!(
+        "Mastermind audit: {verdict_str} — {n_findings} finding(s) ({} errors, {} warnings)",
+        report
+            .findings
+            .iter()
+            .filter(|f| matches!(
+                f,
+                Finding::SnapshotSymbolGone { .. }
+                    | Finding::RemovedSymbolNotAcknowledged { .. }
+                    | Finding::ClaimedSymbolMissing { .. }
+                    | Finding::HallucinatedSymbol { .. }
+                    | Finding::MissingCallEdge { .. }
+                    | Finding::ClaimedSignatureMismatch { .. }
+                    | Finding::ObservedExitCodeNonZero { .. }
+                    | Finding::ObservedZeroTests { .. }
+            ))
+            .count(),
+        report
+            .findings
+            .iter()
+            .filter(|f| !matches!(
+                f,
+                Finding::SnapshotSymbolGone { .. }
+                    | Finding::RemovedSymbolNotAcknowledged { .. }
+                    | Finding::ClaimedSymbolMissing { .. }
+                    | Finding::HallucinatedSymbol { .. }
+                    | Finding::MissingCallEdge { .. }
+                    | Finding::ClaimedSignatureMismatch { .. }
+                    | Finding::ObservedExitCodeNonZero { .. }
+                    | Finding::ObservedZeroTests { .. }
+            ))
+            .count(),
+    )
 }
 
 fn check_snapshot_claim(claim: &SymbolClaim, store: &Store, findings: &mut Vec<Finding>) {
@@ -653,6 +1007,9 @@ fn compute_verdict(findings: &[Finding]) -> Verdict {
                 | Finding::ClaimedSymbolMissing { .. }
                 | Finding::HallucinatedSymbol { .. }
                 | Finding::MissingCallEdge { .. }
+                | Finding::ClaimedSignatureMismatch { .. }
+                | Finding::ObservedExitCodeNonZero { .. }
+                | Finding::ObservedZeroTests { .. }
         )
     }) {
         return Verdict::Broken;
@@ -1137,6 +1494,55 @@ breaking_changes:
                 Finding::RemovedSymbolNotAcknowledged { symbol, .. } if symbol == "old_api"
             )),
             "old_api explicitly acked in frontmatter — should not flag"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn norm_path_strips_dotslash_and_backslash() {
+        assert_eq!(norm_path("./src/foo.ts"), "src/foo.ts");
+        assert_eq!(norm_path("src/foo.ts"), "src/foo.ts");
+        assert_eq!(norm_path(r"src\foo.ts"), "src/foo.ts");
+        assert_eq!(norm_path(r".\src\foo.ts"), "src/foo.ts");
+        assert!(norm_paths_eq("./src/foo.ts", "src/foo.ts"));
+        assert!(norm_paths_eq(r"src\foo.ts", "src/foo.ts"));
+        assert!(!norm_paths_eq("src/foo.ts", "src/bar.ts"));
+    }
+
+    #[test]
+    fn file_scoped_claim_dotslash_prefix_matches() {
+        let dir = init_repo("claim_norm_path");
+        write(
+            &dir,
+            "src/checkout.go",
+            "package main\nfunc CancelOrder() {}\n",
+        );
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "baseline"]);
+        git(&dir, &["tag", "baseline"]);
+        git(&dir, &["commit", "--allow-empty", "-q", "-m", "head"]);
+
+        let db = dir.join("idx.db");
+        let mut store = Store::open(&db).unwrap();
+        Indexer::new(&dir).index_all(&mut store, false).unwrap();
+
+        use crate::executor_report::{Claim, ExecutorReport};
+        let er = ExecutorReport {
+            claims: vec![Claim::FunctionAdded {
+                symbol: "CancelOrder".to_string(),
+                file: Some("./src/checkout.go".to_string()),
+                signature: None,
+            }],
+            verify: vec![],
+        };
+
+        let mut findings = Vec::new();
+        check_executor_claims(&er, &store, &mut findings);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| matches!(f, Finding::ClaimedSymbolMissing { .. })),
+            "./src/checkout.go claim should match stored src/checkout.go"
         );
         fs::remove_dir_all(&dir).ok();
     }

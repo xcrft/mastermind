@@ -289,13 +289,35 @@ enum Cmd {
     /// One-shot query — handy for CLI debugging without going through MCP.
     #[command(subcommand)]
     Query(QueryCmd),
-    /// Self-contained demo: builds a temp repo, runs mmcg_search against a
-    /// hallucinated symbol, and prints the auditor verdict. Zero setup required.
-    /// Currently only `hallucinated-symbol` is supported.
+    /// Self-contained demo: builds a temp repo, indexes it, runs mmcg queries,
+    /// and prints the mechanical auditor verdict. Zero setup — no Claude API key needed.
     Demo {
-        /// Which demo scenario to run. Currently: `hallucinated-symbol`.
+        /// Which demo scenario to run.
+        /// Available: hallucinated-symbol, scope-creep, stale-find-block, vacuous-test, signature-drift
         #[arg(default_value = "hallucinated-symbol")]
         scenario: String,
+    },
+    /// Print a guided walkthrough of the Mastermind workflow: index → demo → setup → spec → run → track.
+    Tour,
+    /// Generate a PR comment in GitHub Flavored Markdown from a bundle JSON
+    /// produced by `audit-spec --bundle`. Writes to stdout — pipe or redirect
+    /// to a file and post via `gh pr comment --body-file <file>`.
+    PrComment {
+        /// Path to the bundle JSON file (written by `audit-spec --bundle`).
+        bundle: PathBuf,
+    },
+    /// CI gate: index, verify all specs, run audit for every spec that has an
+    /// executor-report.md, and optionally write bundles. Exit 0 if all pass.
+    Ci {
+        /// Git ref to diff against (required for audit phase).
+        #[arg(long, default_value = "origin/main")]
+        since: String,
+        /// Project root. Defaults to cwd.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Write audit bundle JSONs to this directory (one per spec).
+        #[arg(long)]
+        bundle_dir: Option<PathBuf>,
     },
     /// Scaffold a new task spec under `.mastermind/tasks/`. Picks the next
     /// available NNN sequence number automatically.
@@ -680,13 +702,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Cmd::Demo { scenario } => {
-            if scenario != "hallucinated-symbol" {
-                return Err(format!(
-                    "unknown demo scenario {scenario:?} — available: hallucinated-symbol"
-                )
-                .into());
+            commands::demo(&scenario)?;
+        }
+        Cmd::Tour => {
+            commands::tour();
+        }
+        Cmd::PrComment { bundle } => {
+            commands::pr_comment(&bundle)?;
+        }
+        Cmd::Ci {
+            since,
+            root,
+            bundle_dir,
+        } => {
+            let ok = commands::ci(
+                commands::ci::CiOpts {
+                    since,
+                    root,
+                    bundle_dir,
+                },
+                &index_path,
+            )?;
+            if !ok {
+                std::process::exit(1);
             }
-            commands::demo()?;
         }
         Cmd::NewSpec {
             description,

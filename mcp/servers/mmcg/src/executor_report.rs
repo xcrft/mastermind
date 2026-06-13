@@ -10,14 +10,38 @@ pub enum Claim {
         symbol: String,
         #[serde(default)]
         file: Option<String>,
+        /// Optional exact signature the executor claims was written.
+        /// When present, the auditor verifies the stored signature matches.
+        #[serde(default)]
+        signature: Option<String>,
     },
     /// Executor claims symbol X calls existing symbol Y.
     Integration {
         from: String,
+        /// File containing `from` — scopes the callee-edge check.
+        #[serde(default)]
+        from_file: Option<String>,
         to: String,
+        /// File containing `to` — narrows the "does Y exist" lookup to that file.
+        #[serde(default)]
+        to_file: Option<String>,
         #[serde(default)]
         relation: Option<String>,
     },
+}
+
+/// Observed runtime outcome that the executor (or CI) can attach to a verify
+/// entry. When present, the auditor uses it to catch "claimed passed, but exit
+/// code was 1" contradictions without re-running the command.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ObservedOutcome {
+    /// Process exit code. 0 = success by convention.
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    /// Number of test cases the runner actually executed. 0 while `exit_code`
+    /// is 0 is the vacuous-pass signature.
+    #[serde(default)]
+    pub tests_run: Option<u32>,
 }
 
 /// One verify entry from the executor report.
@@ -26,6 +50,11 @@ pub struct VerifyResult {
     pub cmd: String,
     #[serde(default)]
     pub claimed: Option<String>,
+    /// Observed outcome attached by the executor or CI system. Optional —
+    /// when absent the auditor falls back to static heuristics (no test files,
+    /// no #[test] attrs, etc.).
+    #[serde(default)]
+    pub observed: Option<ObservedOutcome>,
 }
 
 /// The structured tail the executor appended to their report.
@@ -40,13 +69,19 @@ pub struct VerifyResult {
 ///   - kind: function_added
 ///     symbol: CancelOrder
 ///     file: pkg/checkout/checkout.go
+///     signature: "func CancelOrder(ctx context.Context, id string) error"
 ///   - kind: integration
 ///     from: CancelOrder
+///     from_file: pkg/checkout/checkout.go
 ///     to: ProcessPayment
+///     to_file: pkg/payment/payment.go
 ///     relation: calls
 /// verify:
 ///   - cmd: go test ./pkg/checkout/...
 ///     claimed: passed
+///     observed:
+///       exit_code: 0
+///       tests_run: 12
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExecutorReport {

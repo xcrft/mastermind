@@ -325,6 +325,157 @@ def caller():
     );
 }
 
+/// Callees: every language that records call edges should expose them via callees_of.
+#[test]
+fn golden_callees_rust() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = setup_store(
+        &tmp,
+        "test.rs",
+        r#"
+fn helper() {}
+fn orchestrate() {
+    helper();
+}
+fn unrelated() {}
+"#,
+    );
+    let syms = store.search_symbols("orchestrate", None, None).unwrap();
+    assert!(!syms.is_empty(), "orchestrate indexed");
+    let callees = store.callees_of(syms[0].id, None).unwrap();
+    assert!(
+        callees.iter().any(|(n, _)| n == "helper"),
+        "orchestrate → helper callee edge"
+    );
+    assert!(
+        !callees.iter().any(|(n, _)| n == "unrelated"),
+        "unrelated not a callee"
+    );
+}
+
+#[test]
+fn golden_callees_go() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = setup_store(
+        &tmp,
+        "test.go",
+        r#"
+package main
+
+func helper() {}
+
+func orchestrate() {
+    helper()
+}
+"#,
+    );
+    let syms = store.search_symbols("orchestrate", None, None).unwrap();
+    assert!(!syms.is_empty(), "orchestrate indexed");
+    let callees = store.callees_of(syms[0].id, None).unwrap();
+    assert!(
+        callees.iter().any(|(n, _)| n == "helper"),
+        "orchestrate → helper callee edge (Go)"
+    );
+}
+
+#[test]
+fn golden_callees_typescript() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = setup_store(
+        &tmp,
+        "test.ts",
+        r#"
+function helper(): void {}
+function orchestrate(): void {
+    helper();
+}
+"#,
+    );
+    let syms = store.search_symbols("orchestrate", None, None).unwrap();
+    assert!(!syms.is_empty(), "orchestrate indexed");
+    let callees = store.callees_of(syms[0].id, None).unwrap();
+    assert!(
+        callees.iter().any(|(n, _)| n == "helper"),
+        "orchestrate → helper callee edge (TypeScript)"
+    );
+}
+
+/// Known limitation: C++ macros are not expanded. A macro-defined function
+/// body will not have its call edges captured.
+#[test]
+fn golden_cpp_macro_limitation_documented() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = setup_store(
+        &tmp,
+        "test.cpp",
+        r#"
+void real_func() {}
+
+#define CALL_HIDDEN() real_func()
+
+void user() {
+    real_func();
+}
+"#,
+    );
+    assert!(has_symbol(&store, "real_func"), "real_func indexed");
+    assert!(has_symbol(&store, "user"), "user indexed");
+    let user_syms = store.search_symbols("user", None, None).unwrap();
+    let callees = store.callees_of(user_syms[0].id, None).unwrap();
+    assert!(
+        callees.iter().any(|(n, _)| n == "real_func"),
+        "direct call user → real_func captured"
+    );
+    let prec = mmcg::queries::lang_precision("test.cpp");
+    assert_eq!(prec.confidence, "low", "C++ is low confidence");
+    assert!(
+        prec.limitations.contains(&"macros not expanded"),
+        "macro limitation documented"
+    );
+}
+
+/// Known limitation: Python dynamic attributes (setattr / getattr patterns)
+/// are not tracked as call edges.
+#[test]
+fn golden_python_dynamic_attribute_limitation_documented() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = setup_store(
+        &tmp,
+        "test.py",
+        r#"
+class Dispatcher:
+    def dispatch(self, name):
+        method = getattr(self, name)
+        method()
+
+    def handle_login(self):
+        pass
+"#,
+    );
+    assert!(has_symbol(&store, "dispatch"), "dispatch indexed");
+    assert!(has_symbol(&store, "handle_login"), "handle_login indexed");
+    let prec = mmcg::queries::lang_precision("test.py");
+    assert!(
+        prec.limitations.contains(&"dynamic attributes not tracked"),
+        "dynamic attribute limitation documented"
+    );
+}
+
+/// `search()` attaches precision metadata to each SymbolHit.
+#[test]
+fn search_result_carries_precision() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = setup_store(&tmp, "test.rs", "fn check_precision() {}\n");
+    let resp = mmcg::queries::search(&store, "check_precision", None, None, true).unwrap();
+    assert!(!resp.results.is_empty(), "symbol found");
+    let prec = resp.results[0]
+        .precision
+        .as_ref()
+        .expect("precision field present");
+    assert_eq!(prec.confidence, "high");
+    assert_eq!(prec.resolution, "syntactic");
+}
+
 /// Edge precision structs carry the right confidence and resolution for each language.
 #[test]
 fn edge_precision_labels() {

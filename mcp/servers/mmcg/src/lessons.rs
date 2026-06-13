@@ -106,6 +106,9 @@ fn summarize_findings(findings: &[Finding]) -> String {
             Finding::HallucinatedSymbol { .. } => "hallucinated symbol",
             Finding::MissingCallEdge { .. } => "missing call edge",
             Finding::VacuousTestClaim { .. } => "vacuous test claim",
+            Finding::ClaimedSignatureMismatch { .. } => "claimed signature mismatch",
+            Finding::ObservedExitCodeNonZero { .. } => "observed exit code nonzero",
+            Finding::ObservedZeroTests { .. } => "observed zero tests",
         };
         *counts.entry(key).or_insert(0) += 1;
     }

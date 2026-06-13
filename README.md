@@ -8,7 +8,7 @@
   <a href="https://www.npmjs.com/package/@xcraftmind/mastermind"><img src="https://img.shields.io/npm/v/@xcraftmind/mastermind.svg" alt="npm version"></a>
   <a href="https://github.com/xcrft/mastermind/actions/workflows/ci-mmcg.yml"><img src="https://github.com/xcrft/mastermind/actions/workflows/ci-mmcg.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
-  <a href="evals/benchmarks.md"><img src="https://img.shields.io/badge/auditor_eval-8%2F8-brightgreen" alt="Auditor eval: 8/8"></a>
+  <a href="evals/benchmarks.md"><img src="https://img.shields.io/badge/auditor_eval-7%2F8_first%2C_8%2F8_retry-yellowgreen" alt="Auditor eval: 7/8 first pass, 8/8 after sentinel retry"></a>
 </p>
 
 Mastermind is a spec-driven coding-agent workflow built on **mmcg** — a local codegraph that lets agents verify structural claims against the actual codebase, not model memory.
@@ -139,7 +139,7 @@ Workflow (installed into ~/.claude/ by `mastermind init`)
   skills/prompt-engineering/  mastermind-prompt-refiner (intake gate)
 
 Proof
-  evals/                adversarial eval suite — auditor 8/8, critic 5/5, intake cases
+  evals/                adversarial eval suite — auditor 7/8 first pass, 8/8 after sentinel retry; critic 5/5
 ```
 
 Non-core artifacts (pr-review, flaky-finder, doc-stub-sync, release subagent, generic prompts) live in [`extras/`](extras/) — available but not installed by default.

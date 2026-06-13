@@ -69,7 +69,13 @@ pub fn audit(
 
     if let Some(bundle_path) = bundle_path {
         let er_path_str = executor_report_path.map(|p| p.display().to_string());
-        let bundle = mmcg::audit_spec::Bundle::from_report(&report, er_path_str.as_deref());
+        let bundle = mmcg::audit_spec::Bundle::from_report_full(
+            &report,
+            executor_report.as_ref(),
+            Some(&parsed),
+            er_path_str.as_deref(),
+            Some(&root),
+        );
         let bundle_json = serde_json::to_string_pretty(&bundle)?;
         std::fs::write(bundle_path, &bundle_json)
             .map_err(|e| format!("write bundle {}: {e}", bundle_path.display()))?;

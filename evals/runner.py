@@ -103,6 +103,7 @@ class Result:
     duration_ms: int = 0
     fixture_path: Path | None = None
     retry_used: bool = False
+    retry_attempted: bool = False
 
 
 def strip_frontmatter(text: str) -> str:
@@ -556,13 +557,16 @@ def main() -> int:
                     and _SENTINEL_MISSING in r.reasons[0]
                 ):
                     print(f"retry (sentinel missing) ...", end=" ", flush=True)
+                    first_duration_ms = r.duration_ms
                     r2 = evaluate_case(
                         args.model, suite_name, suite_cfg, case,
                         keep_fixtures=args.keep_fixtures,
                     )
+                    r2.retry_attempted = True
+                    r2.duration_ms += first_duration_ms
                     if r2.passed:
                         r2.retry_used = True
-                        r = r2
+                    r = r2
                 results.append(r)
                 status = "✓ pass" if r.passed else "✗ FAIL"
                 retry_tag = " [retry]" if r.retry_used else ""
@@ -579,13 +583,16 @@ def main() -> int:
     n_pass = sum(r.passed for r in results)
     n_fail = len(results) - n_pass
     n_first_pass = sum(r.passed and not r.retry_used for r in results)
+    n_retry_attempted = sum(r.retry_attempted for r in results)
     n_retry_pass = sum(r.passed and r.retry_used for r in results)
     total_ms = sum(r.duration_ms for r in results)
     print(f"\n=== summary ===")
     print(f"  passed: {n_pass}/{len(results)}")
     print(f"  first_pass: {n_first_pass}/{len(results)}")
+    if n_retry_attempted:
+        print(f"  retry_attempted: {n_retry_attempted}/{len(results)}")
     if n_retry_pass:
-        print(f"  after_retry: {n_first_pass + n_retry_pass}/{len(results)} ({n_retry_pass} case(s) needed retry)")
+        print(f"  after_retry: {n_first_pass + n_retry_pass}/{len(results)} ({n_retry_pass} case(s) passed on retry)")
     print(f"  total time: {total_ms / 1000:.1f}s")
     return 0 if n_fail == 0 else 1
 

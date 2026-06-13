@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-06-13
+
+### Added
+- `mastermind ci` gate: index, verify all specs, audit executor reports, write optional bundle artifacts. Fails with non-zero exit on any parse, audit, or write error.
+- `mastermind pr-comment <bundle.json>`: renders audit bundle as GitHub-flavored Markdown for PR comments.
+- `mastermind tour`: six-step guided onboarding walkthrough.
+- Five deterministic demo scenarios (`hallucinated-symbol`, `scope-creep`, `stale-find-block`, `vacuous-test`, `signature-drift`) — each runs in under one second, no API key required.
+- Integration docs for Claude Code, Cursor, Continue, Codex CLI, and generic MCP clients (`docs/integrations/`).
+- Audit bundle v2: `baseline`, `head`, `spec_files`, `changed_files`, `verified_claims`, `failed_claims`, `mmcg_queries`, `commands`, `human_summary`; legacy fields `files_diff` and `git_ref` preserved for backward compatibility.
+- File-scoped executor claims: `FunctionAdded` gains `file` and `signature`; `Integration` gains `from_file` and `to_file` — narrows symbol lookups to declared files.
+- `ObservedOutcome` on `VerifyResult`: CI can attach `exit_code` and `tests_run` so auditor catches "claimed passed but exit code 1" without re-running.
+- Three new `Broken`-severity `Finding` variants: `ClaimedSignatureMismatch`, `ObservedExitCodeNonZero`, `ObservedZeroTests`.
+- `SymbolHit.precision` field on `mmcg_search` results: carries `confidence`, `resolution`, and `limitations` per source language.
+- `mmcg query explain <symbol>`: zero-results diagnostic with actionable hints.
+- Six new golden tests: callee edges for Rust/Go/TypeScript, C++ macro limitation, Python dynamic attribute limitation, search precision field.
+
+### Changed
+- Auditor eval runner retries once on missing structured sentinel and tracks `first_pass` vs `after_retry` with honest duration accounting.
+- README proof badge: `7/8 first, 8/8 retry` (was `8/8` without retry disclosure).
+- `Bundle::from_report_full` now accepts `root: Option<&Path>` so `head` SHA is resolved relative to the audited project root, not the caller's working directory.
+- Integration claim classification in bundle uses `(from, to)` pair matching; `FunctionAdded` classification uses `(symbol, file)` — prevents one failing claim from polluting another.
+
+### Fixed
+- CI bundle write errors now propagate as hard failures (`create_dir_all`, serialization, and `fs::write` all use `?`).
+- File-scoped claim path matching normalizes `./` prefix and Windows `\` separators via `norm_path`/`norm_paths_eq`.
+- `resolve_head_sha` runs git in `current_dir(root)` — correct SHA when `mastermind ci --root` points to a different directory.
+
+### Tests
+- 187 total (160 unit + 10 new_spec + 17 golden) — all pass.
+- Two new unit tests: `norm_path_strips_dotslash_and_backslash`, `file_scoped_claim_dotslash_prefix_matches`.
+
 ## [0.28.2] - 2026-06-11
 
 ### Fixed

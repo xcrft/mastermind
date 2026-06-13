@@ -57,7 +57,7 @@ Three pieces — the split is the part that trips people up:
 | **MCP registration** — `setup claude` | once | `~/.claude.json` (via `claude mcp add`) | once for all projects |
 
 - **The index is always per-project.** Run `mastermind init` in *every* repo you want indexed. `doctor` reporting `index database not found` just means you haven't done this in the current directory yet (the exact situation if you run `doctor` from `/tmp` or a fresh shell).
-- **The workflow installs globally on `init`** — subagents, skills + slash commands land in `~/.claude/{agents,skills,commands}/`, overwriting Mastermind's own files to keep them current (`--no-global` to skip). Ships with the npm package; cargo installs use the plugin marketplace instead.
+- **The workflow installs globally on `init`** — subagents, skills + slash commands land in `~/.claude/{agents,skills,commands}/`, overwriting Mastermind's own files to keep them current (`--no-global` to skip). Ships with the npm package; a cargo install includes only the mmcg binary, not the workflow bundle.
 - **The MCP registration is usually once, globally.** The global entry launches `mastermind serve` from whichever project you open in Claude Code, so it picks up *that* project's `.mastermind/mmcg.db` automatically. You do **not** re-run `setup claude` per repo.
 - Use **per-project registration** only if you want the MCP config committed with the repo and version-pinned: `mastermind setup claude --project . --write-mcp` writes `./.mcp.json` with `command: "./node_modules/.bin/mastermind"` (pair it with a project-local install — see below).
 

@@ -17,8 +17,7 @@
 #     CARGO_REGISTRY_TOKEN is in scope and any env protection rules kick in.
 #
 # Release procedure:
-#   1. Bump version in mcp/servers/mmcg/Cargo.toml (+ README frontmatter +
-#      plugins/mmcg/.claude-plugin/plugin.json + .claude-plugin/marketplace.json)
+#   1. Bump version in mcp/servers/mmcg/Cargo.toml (+ README frontmatter)
 #   2. `just check` — validator passes (template mirrors in sync, etc.)
 #   3. Commit the bump on main
 #   4. Tag and push: `git tag mmcg-v0.6.0 && git push origin mmcg-v0.6.0`

@@ -29,18 +29,17 @@ file as [`structured-report-schema.md`](structured-report-schema.md).
 
 - **What**: Spec's Phase 3 (docs) covers fewer files than
   `scripts/validate.py::validate_mmcg_tool_drift` enforces. Validator finds tool
-  names in `mcp.rs` but missing from one or more of: mmcg README, repo README,
-  `.claude-plugin/marketplace.json`, `plugins/mmcg/.claude-plugin/plugin.json`.
+  names in `mcp.rs` but missing from one or more of: mmcg README
+  (`mcp/servers/mmcg/README.md`), repo `README.md`.
 - **Surfaced as**: `python3 scripts/validate.py` exits non-zero with
   `tool 'mmcg_X' missing — declared in mcp/servers/mmcg/src/mcp.rs but absent
   from this file` (one error per missing surface).
-- **Fix template**: Add the three missing surfaces to `expected_docs[]` in the
-  spec frontmatter, then add three Phase 3.x sub-steps with FIND/CHANGE TO blocks.
-  Pattern: `marketplace.json` and `plugin.json` each carry ONE prose `description`
-  string with the comma-separated tool list and `N tools` count; the repo
-  `README.md` carries TWO occurrences (table cell + standalone-crate paragraph).
-  Insert the new tool name before the trailing `status` entry in each list and
-  bump the count by 1.
+- **Fix template**: Add the missing surface(s) to `expected_docs[]` in the
+  spec frontmatter, then add Phase 3.x sub-steps with FIND/CHANGE TO blocks.
+  Pattern: the mmcg `README.md` carries ONE comma-separated tool list plus an
+  `N tools` count; the repo `README.md` carries TWO occurrences (table cell +
+  standalone-crate paragraph). Insert the new tool name before the trailing
+  entry in each list and bump the count by 1.
 - **First observed**: Task 001 Phase 4.
 
 ### `zero_filter_verify`

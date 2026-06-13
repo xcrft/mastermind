@@ -298,8 +298,10 @@ fn install_workflow_global() -> Result<String, String> {
         .ok()
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
-            "no bundle (cargo install?) — add the workflow via the Claude Code plugin \
-             marketplace: `/plugin marketplace add xcrft/mastermind`"
+            "no workflow bundle (a cargo install ships only the mmcg binary) — \
+             install via npm for the full workflow: \
+             `npm install -g @xcraftmind/mastermind`, or copy `agents/` and \
+             `skills/` from the repo into `~/.claude/` manually"
                 .to_string()
         })?;
     let share = Path::new(&share);

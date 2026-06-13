@@ -332,6 +332,7 @@ pub struct CentralityHit {
     pub file: String,
     pub line: u32,
     pub in_degree: u32,
+    pub name_collision: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -402,12 +403,13 @@ pub fn centrality(
     let raw = store.centrality(prefix, language, kind, top)?;
     let results: Vec<CentralityHit> = raw
         .into_iter()
-        .map(|(s, in_degree)| CentralityHit {
+        .map(|(s, in_degree, name_collision)| CentralityHit {
             name: s.name,
             kind: s.kind,
             file: s.file_path,
             line: s.line_start,
             in_degree,
+            name_collision,
             signature: s.signature,
             decorators: s.decorators,
         })

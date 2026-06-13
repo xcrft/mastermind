@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `mmcg_centrality` rewritten to pre-aggregate in-degree per name in a single pass (a CTE over the call edges) instead of a per-symbol correlated join. Full-index centrality on a ~34k-file / 1.3M-edge monorepo dropped from ~146s to ~4s. Each hit now also carries a `name_collision` field — how many definitions share the leaf name — so an `in_degree` inflated by same-named call sites (e.g. `get` across hundreds of view classes) is visible rather than misleading.
+- `mastermind status` suggests `mastermind watch` (alongside `index .`) when the index is stale, matching the hint `mastermind doctor` already gives.
+
+### Fixed
+- `mmcg_symbols_changed_since` over MCP no longer errors with `canonicalize root: No such file or directory` when called without an explicit `root`. The default root is now derived from the canonicalized index file (`<root>/.mastermind/mmcg.db` → `<root>`); previously it climbed a *relative* db path to `""`, which failed to canonicalize and broke the default invocation.
+
+### Tests
+- New unit test `changed_since_root_defaults_to_repo_root_from_db_path`; `centrality_ranks_by_in_degree` asserts the new `name_collision` field. 161 lib + 17 golden pass.
+
 ## [0.29.0] - 2026-06-13
 
 ### Added

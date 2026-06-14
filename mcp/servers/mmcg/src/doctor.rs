@@ -17,6 +17,7 @@
 //! | 6 | `CLAUDE.md`            | exists and references the workflow                     |
 //! | 7 | `MCP config`           | mmcg registered in `~/.claude.json` (user) or `./.mcp.json` (project) |
 //! | 8 | `MCP serve handshake`  | spawning `mastermind serve` responds to `initialize` + `tools/list` |
+//! | 9 | `subagent MCP scoping` | every subagent `mcpServers:` entry names a registered server |
 //!
 //! Output is human-readable by default. `--json` switches to a machine-
 //! parseable format for piping into other tools.
@@ -188,6 +189,7 @@ pub fn run(root: &Path, mmcg_binary: &Path) -> Report {
         check_claude_md(root),
         check_mcp_config(root),
         check_mcp_handshake(root, mmcg_binary),
+        check_subagent_mcp_servers(root),
     ];
     Report::from_checks(root, checks)
 }
@@ -641,6 +643,137 @@ fn format_bytes(n: u64) -> String {
     }
 }
 
+/// Server names registered for Claude Code: keys under `mcpServers` (or the
+/// legacy `servers`) in the project `.mcp.json` and the user `~/.claude.json`.
+fn registered_servers(root: &Path) -> std::collections::BTreeSet<String> {
+    let mut set = std::collections::BTreeSet::new();
+    let candidates: Vec<PathBuf> = std::iter::once(root.join(".mcp.json"))
+        .chain(dirs::home_dir().map(|h| h.join(".claude.json")))
+        .collect();
+    for path in candidates {
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else {
+            continue;
+        };
+        for key in ["mcpServers", "servers"] {
+            if let Some(map) = v.get(key).and_then(|m| m.as_object()) {
+                set.extend(map.keys().cloned());
+            }
+        }
+    }
+    set
+}
+
+/// The YAML frontmatter block between the opening `---` line and the next `---`
+/// line. `None` if the text doesn't open with frontmatter.
+fn frontmatter_block(md: &str) -> Option<&str> {
+    let rest = md
+        .strip_prefix("---\n")
+        .or_else(|| md.strip_prefix("---\r\n"))?;
+    let end = rest.find("\n---")?;
+    Some(&rest[..end])
+}
+
+/// MCP server names a subagent references in its top-level `mcpServers:` field —
+/// list entries or mapping keys (inline definitions). Empty if the field is
+/// absent or the frontmatter doesn't parse.
+fn subagent_mcp_refs(md: &str) -> Vec<String> {
+    let Some(fm) = frontmatter_block(md) else {
+        return vec![];
+    };
+    let Ok(v) = serde_norway::from_str::<serde_norway::Value>(fm) else {
+        return vec![];
+    };
+    match v.get("mcpServers") {
+        Some(serde_norway::Value::Sequence(seq)) => seq
+            .iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect(),
+        Some(serde_norway::Value::Mapping(map)) => map
+            .iter()
+            .filter_map(|(k, _)| k.as_str().map(String::from))
+            .collect(),
+        _ => vec![],
+    }
+}
+
+/// Pure core of `check_subagent_mcp_servers`: scan `agent_dirs` for subagent
+/// `.md` files and return `(any_declared, sorted unregistered "server (in file)"
+/// descriptions)`. Split out so tests can run against a controlled directory
+/// instead of the real `~/.claude/agents`.
+fn unregistered_subagent_servers(
+    agent_dirs: &[PathBuf],
+    registered: &std::collections::BTreeSet<String>,
+) -> (bool, Vec<String>) {
+    let mut declared = false;
+    let mut missing: Vec<String> = Vec::new();
+    for dir in agent_dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for ent in entries.flatten() {
+            let p = ent.path();
+            if p.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let body = std::fs::read_to_string(&p).unwrap_or_default();
+            for server in subagent_mcp_refs(&body) {
+                declared = true;
+                if !registered.contains(&server) {
+                    let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+                    missing.push(format!("{server} (in {fname})"));
+                }
+            }
+        }
+    }
+    missing.sort();
+    missing.dedup();
+    (declared, missing)
+}
+
+/// Every server a subagent scopes via `mcpServers:` should actually be
+/// registered — otherwise the subagent silently gets nothing for that entry.
+/// Scans the project `.claude/agents/` and the user `~/.claude/agents/`.
+fn check_subagent_mcp_servers(root: &Path) -> Check {
+    let registered = registered_servers(root);
+    let mut agent_dirs: Vec<PathBuf> = vec![root.join(".claude").join("agents")];
+    if let Some(h) = dirs::home_dir() {
+        agent_dirs.push(h.join(".claude").join("agents"));
+    }
+    let (declared, missing) = unregistered_subagent_servers(&agent_dirs, &registered);
+
+    if !declared {
+        return Check {
+            name: "subagent MCP scoping",
+            status: Status::Ok,
+            message: "no subagent declares `mcpServers:` — nothing to verify".into(),
+            hint: None,
+        };
+    }
+    if missing.is_empty() {
+        return Check {
+            name: "subagent MCP scoping",
+            status: Status::Ok,
+            message: "every subagent `mcpServers:` entry names a registered server".into(),
+            hint: None,
+        };
+    }
+    Check {
+        name: "subagent MCP scoping",
+        status: Status::Warn,
+        message: format!(
+            "subagent scopes an unregistered MCP server: {}",
+            missing.join(", ")
+        ),
+        hint: Some(
+            "register it (project `.mcp.json` / `mastermind setup claude --write-mcp`) or drop the `mcpServers:` entry"
+                .into(),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -766,5 +899,49 @@ mod tests {
         assert!(txt.contains("v0.14.0"));
         assert!(txt.contains("1 ok, 0 warn, 0 fail"));
         assert!(!report.has_failures());
+    }
+
+    #[test]
+    fn subagent_mcp_refs_parses_list_and_handles_absence() {
+        let list = "---\nname: r\ndescription: d\nmcpServers: [mmcg, foo]\n---\nbody";
+        assert_eq!(
+            subagent_mcp_refs(list),
+            vec!["mmcg".to_string(), "foo".to_string()]
+        );
+        let none = "---\nname: r\ndescription: d\ntools: Read\n---\nbody";
+        assert!(subagent_mcp_refs(none).is_empty());
+        let no_fm = "# heading only\n";
+        assert!(subagent_mcp_refs(no_fm).is_empty());
+    }
+
+    #[test]
+    fn unregistered_subagent_servers_flags_missing_then_clears() {
+        let root = tmp();
+        let agents = root.join("agents");
+        fs::create_dir_all(&agents).unwrap();
+        fs::write(
+            agents.join("r.md"),
+            "---\nname: r\ndescription: d\nmcpServers: [mmcg]\nmetadata:\n  version: 0.1.0\n---\nb",
+        )
+        .unwrap();
+        fs::write(
+            agents.join("p.md"),
+            "---\nname: p\ndescription: d\ntools: Read\nmetadata:\n  version: 0.1.0\n---\nb",
+        )
+        .unwrap();
+
+        let mut reg = std::collections::BTreeSet::new();
+        let (declared, missing) =
+            unregistered_subagent_servers(std::slice::from_ref(&agents), &reg);
+        assert!(declared, "r.md declares mcpServers");
+        assert_eq!(missing, vec!["mmcg (in r.md)".to_string()]);
+
+        reg.insert("mmcg".to_string());
+        let (declared2, missing2) =
+            unregistered_subagent_servers(std::slice::from_ref(&agents), &reg);
+        assert!(declared2);
+        assert!(missing2.is_empty(), "mmcg now registered");
+
+        fs::remove_dir_all(&root).ok();
     }
 }

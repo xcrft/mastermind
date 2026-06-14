@@ -18,7 +18,10 @@ See [`../docs/mcp-anatomy.md`](../docs/mcp-anatomy.md) for the format.
 | [`mmcg`](servers/mmcg/README.md) | stdio | Mastermind Codegraph — 20 structural query tools over a local SQLite index. Nine languages: Python, TS/JS, Rust, C#, Go, Java, PHP, C/C++. Truth layer for the Mastermind workflow. |
 
 ### integrations/
-*(none yet — contribute one!)*
+| Integration | Combines | Description |
+|---|---|---|
+| [`portable-baseline`](integrations/portable-baseline.md) | mmcg (+ context7 opt-in) | The project-agnostic MCP layer carried into every repo — local, offline, no org accounts. |
+| [`org-overlay`](integrations/org-overlay.md) | portable-baseline + per-project SaaS MCP | Layer a repo's own observability / tracker / chat / design MCP onto the baseline and scope each to the subagent role that needs it. |
 
 ---
 

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `mcp/integrations/portable-baseline.md` and `mcp/integrations/org-overlay.md` — recipes that split the portable MCP layer (mmcg, carried into every repo, offline, no org account) from the per-project org overlay (SaaS MCP declared in `.mcp.json` and scoped to subagent roles via top-level `mcpServers:`). Makes the workflow portable across projects: same subagents/skills travel, only the per-project `.mcp.json` differs.
+- `mastermind doctor` check #9 `subagent MCP scoping` — warns when a subagent's `mcpServers:` names a server not registered in the project `.mcp.json` or `~/.claude.json`. Catches "scoped a server to a role but never registered it".
+
 ### Changed
 - `mmcg_centrality` rewritten to pre-aggregate in-degree per name in a single pass (a CTE over the call edges) instead of a per-symbol correlated join. Full-index centrality on a ~34k-file / 1.3M-edge monorepo dropped from ~146s to ~4s. Each hit now also carries a `name_collision` field — how many definitions share the leaf name — so an `in_degree` inflated by same-named call sites (e.g. `get` across hundreds of view classes) is visible rather than misleading.
 - `mastermind status` suggests `mastermind watch` (alongside `index .`) when the index is stale, matching the hint `mastermind doctor` already gives.

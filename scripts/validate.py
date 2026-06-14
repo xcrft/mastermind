@@ -201,6 +201,23 @@ def validate_artifact(a: Artifact) -> list[Issue]:
             Issue(a.path, "error", f"unknown domain {a.domain!r}. Allowed: {sorted(ALLOWED_DOMAINS)}. Update docs/conventions.md if adding.")
         )
 
+    # Subagents are loaded by the Claude Code runtime, which reads `tools`, `model`,
+    # `mcpServers`, and `disallowedTools` as TOP-LEVEL frontmatter keys. Nesting them
+    # under `metadata` makes Claude Code silently ignore them — the subagent then
+    # inherits every tool and the parent's model (conventions §2.4). Catch the
+    # regression at lint time so it can't ship again.
+    if a.path.parent.name == "subagents" and isinstance(metadata, dict):
+        for field in ("tools", "model", "mcpServers", "disallowedTools"):
+            if field in metadata:
+                issues.append(
+                    Issue(
+                        a.path,
+                        "error",
+                        f"subagent runtime field {field!r} is nested under 'metadata' — "
+                        "Claude Code reads it only at the top level (conventions §2.4); move it up",
+                    )
+                )
+
     return issues
 
 

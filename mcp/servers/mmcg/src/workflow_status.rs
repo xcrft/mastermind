@@ -483,7 +483,7 @@ fn db_counts(db: &Path) -> Option<(u64, u64)> {
     Some((sym.max(0) as u64, fil.max(0) as u64))
 }
 
-fn count_stale(root: &Path, db_mtime: std::time::SystemTime, cap: usize) -> usize {
+pub(crate) fn count_stale(root: &Path, db_mtime: std::time::SystemTime, cap: usize) -> usize {
     let mut n = 0usize;
     for entry in walkdir::WalkDir::new(root)
         .into_iter()

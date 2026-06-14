@@ -290,7 +290,7 @@ fn schema_search() -> Value {
 fn schema_callers() -> Value {
     json!({
         "name": "mmcg_callers",
-        "description": "List symbols that reference the given name. Matches both leaf names (`obj.foo()` → 'foo') AND type prefixes (`SessionStore::new()` → 'SessionStore'). Use before editing to assess blast radius. Pass `language` to filter against monorepo collisions. Pass `edge_kind` (default 'calls') to switch between call/import/inherit edges.",
+        "description": "List symbols that reference the given name. Matches both leaf names (`obj.foo()` → 'foo') AND type prefixes (`SessionStore::new()` → 'SessionStore'). Use before editing to assess blast radius. Pass `language` to filter against monorepo collisions. Pass `edge_kind` (default 'calls') to switch between call/import/inherit edges. Result carries `name_collision` — how many definitions share this name; a value > 1 means the caller set pools across same-named symbols (edges resolve by name), so trust it less.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -322,7 +322,7 @@ fn schema_callees() -> Value {
 fn schema_impact() -> Value {
     json!({
         "name": "mmcg_impact",
-        "description": "Transitive callers of the symbol up to max_depth. Use for blast-radius analysis on widely-called functions. Matches by name OR type prefix (like mmcg_callers).",
+        "description": "Transitive callers of the symbol up to max_depth. Use for blast-radius analysis on widely-called functions. Matches by name OR type prefix (like mmcg_callers). Result carries `name_collision`: a value > 1 means the blast radius is pooled across same-named definitions and over-approximates the real reach — verify before acting on the number.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -513,7 +513,7 @@ fn schema_recent_changes() -> Value {
 fn schema_status() -> Value {
     json!({
         "name": "mmcg_status",
-        "description": "Show index health — file count, symbol count, db path.",
+        "description": "Show index health — file count, symbol count, db path, and `stale_files`: the number of source files modified since the last index (capped at 100). `stale_files` > 0 means the index is behind the working tree — re-index (`mmcg index .`) before trusting structural answers.",
         "inputSchema": { "type": "object", "properties": {} }
     })
 }

@@ -22,6 +22,7 @@ See [`../docs/mcp-anatomy.md`](../docs/mcp-anatomy.md) for the format.
 |---|---|---|
 | [`portable-baseline`](integrations/portable-baseline.md) | mmcg (+ context7 opt-in) | The project-agnostic MCP layer carried into every repo — local, offline, no org accounts. |
 | [`org-overlay`](integrations/org-overlay.md) | portable-baseline + per-project SaaS MCP | Layer a repo's own observability / tracker / chat / design MCP onto the baseline and scope each to the subagent role that needs it. |
+| [`context7`](integrations/context7.md) | portable-baseline + context7 | Opt-in live library docs for the researcher/executor — current API docs the model can't have. Hosted, so outside the offline default. |
 
 ---
 

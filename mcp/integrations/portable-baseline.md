@@ -28,7 +28,7 @@ per-project `.mcp.json` differs.
 | Tool | Default? | Why it's portable |
 |---|---|---|
 | [`mmcg`](../servers/mmcg/README.md) | **yes** | local SQLite codegraph, no account, nine languages — the truth layer the workflow is built on |
-| `context7` (live library docs) | opt-in | public docs for any project's dependencies; no org auth — see [`org-overlay`](org-overlay.md) for the recipe |
+| `context7` (live library docs) | opt-in | public docs for any project's dependencies; no org auth, but hosted — see [`context7`](context7.md) for the recipe |
 | `filesystem-readonly` | situational | [generic scoped file access](../servers/filesystem-readonly/README.md) when an agent needs to read outside its working dir |
 
 Browser drivers and `WebSearch`/`WebFetch` are portable too, but they're session

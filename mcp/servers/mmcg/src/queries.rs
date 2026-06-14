@@ -62,6 +62,9 @@ pub struct SearchResponse {
 pub struct CallersResponse {
     pub target: String,
     pub count: u32,
+    /// How many definitions share `target`'s name. Edges resolve by name, so a
+    /// value > 1 means these callers pool across several same-named symbols.
+    pub name_collision: u32,
     pub callers: Vec<SymbolHit>,
 }
 
@@ -226,6 +229,10 @@ pub struct ImpactResponse {
     pub target: String,
     pub max_depth: u32,
     pub count: u32,
+    /// How many definitions share `target`'s name (same caveat as
+    /// `CallersResponse`): a value > 1 means the blast radius is pooled across
+    /// same-named symbols and over-approximates the real reach.
+    pub name_collision: u32,
     pub impact: Vec<ImpactEntry>,
 }
 
@@ -241,6 +248,10 @@ pub struct StatusResponse {
     pub db_path: String,
     pub symbol_count: u32,
     pub file_count: u32,
+    /// Source files modified since the index was last written (capped at 100).
+    /// A value above 0 means the index is stale — re-index before trusting
+    /// structural answers. Best-effort: 0 if freshness can't be computed.
+    pub stale_files: usize,
 }
 
 pub fn search(
@@ -436,6 +447,7 @@ pub fn callers(
     Ok(CallersResponse {
         target: name.to_string(),
         count: callers.len() as u32,
+        name_collision: store.definition_count(name)?,
         callers,
     })
 }
@@ -558,6 +570,7 @@ pub fn impact(
         target: name.to_string(),
         max_depth: depth,
         count: impact.len() as u32,
+        name_collision: store.definition_count(name)?,
         impact,
     })
 }
@@ -697,11 +710,30 @@ pub fn api_surface(
 }
 
 pub fn status(store: &Store) -> rusqlite::Result<StatusResponse> {
+    let db_path = store.db_path();
     Ok(StatusResponse {
-        db_path: store.db_path().to_string_lossy().to_string(),
+        db_path: db_path.to_string_lossy().to_string(),
         symbol_count: store.symbol_count()?,
         file_count: store.file_count()?,
+        stale_files: stale_count(db_path),
     })
+}
+
+/// Best-effort count of source files modified since the index was last written
+/// (capped). Returns 0 on any error — `status` must never fail because freshness
+/// couldn't be computed. The db path may be relative, so canonicalize it before
+/// climbing to the project root.
+fn stale_count(db_path: &std::path::Path) -> usize {
+    let Ok(db_abs) = db_path.canonicalize() else {
+        return 0;
+    };
+    let Some(root) = db_abs.parent().and_then(|d| d.parent()) else {
+        return 0;
+    };
+    let Ok(db_mtime) = std::fs::metadata(&db_abs).and_then(|m| m.modified()) else {
+        return 0;
+    };
+    crate::workflow_status::count_stale(root, db_mtime, 100)
 }
 
 #[derive(Debug, Serialize)]

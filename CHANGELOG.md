@@ -11,17 +11,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `mcp/integrations/portable-baseline.md` and `mcp/integrations/org-overlay.md` — recipes that split the portable MCP layer (mmcg, carried into every repo, offline, no org account) from the per-project org overlay (SaaS MCP declared in `.mcp.json` and scoped to subagent roles via top-level `mcpServers:`). Makes the workflow portable across projects: same subagents/skills travel, only the per-project `.mcp.json` differs.
 - `mcp/integrations/context7.md` — opt-in recipe wiring the hosted context7 MCP (`resolve-library-id` + `query-docs`) into the researcher/executor for live, version-current library docs. Deliberately outside the offline default: it's the one place the portable layer reaches the network.
 - `mastermind doctor` check #9 `subagent MCP scoping` — warns when a subagent's `mcpServers:` names a server not registered in the project `.mcp.json` or `~/.claude.json`. Catches "scoped a server to a role but never registered it".
+- `mmcg_status` now reports `stale_files` — source files modified since the last index (capped at 100) — so an agent knows when the index is behind the working tree and structural answers may be wrong, instead of trusting a silently stale graph.
+- `mmcg_callers` and `mmcg_impact` now carry a `name_collision` field (how many definitions share the queried name), the same over-approximation signal `mmcg_centrality` already exposes — a value > 1 means the result pools call sites across same-named symbols.
+- `scripts/validate.py` lints subagent frontmatter: `tools` / `model` / `mcpServers` / `disallowedTools` nested under `metadata` (rather than top-level) is now a hard error, so the runtime-field regression can't ship again. Audit note: skills nest the same fields, but have a different runtime contract — flagged, not yet changed.
 
 ### Changed
 - `mmcg_centrality` rewritten to pre-aggregate in-degree per name in a single pass (a CTE over the call edges) instead of a per-symbol correlated join. Full-index centrality on a ~34k-file / 1.3M-edge monorepo dropped from ~146s to ~4s. Each hit now also carries a `name_collision` field — how many definitions share the leaf name — so an `in_degree` inflated by same-named call sites (e.g. `get` across hundreds of view classes) is visible rather than misleading.
 - `mastermind status` suggests `mastermind watch` (alongside `index .`) when the index is stale, matching the hint `mastermind doctor` already gives.
+- README: the workflow's determinism is now stated to live in the deterministic Rust gates (`verify-spec` / `audit-spec`), not in the subagents' MCP calls — the latter is LLM-interpreted context whose payoff scales with repo size. "Sub-millisecond queries" softened to distinguish point queries from whole-graph aggregations (centrality / impact / dependency cycles).
 
 ### Fixed
 - `mmcg_symbols_changed_since` over MCP no longer errors with `canonicalize root: No such file or directory` when called without an explicit `root`. The default root is now derived from the canonicalized index file (`<root>/.mastermind/mmcg.db` → `<root>`); previously it climbed a *relative* db path to `""`, which failed to canonicalize and broke the default invocation.
 - Subagent definitions now declare `tools`, `model`, and (for mmcg-using roles) `mcpServers: [mmcg]` as **top-level** frontmatter keys. They were nested under `metadata:`, which the Claude Code runtime does not read — so on a stock install every subagent silently inherited all tools and the parent's model: no read-only restriction (researcher/critic/auditor could write files), no Haiku/Sonnet/Opus tiering, and MCP access worked only by accident of that inheritance. Fixed across `agents/subagents/`, `extras/subagents/mastermind-release.md`, `agents/_template/subagent.md`, and the convention docs (`docs/conventions.md` §2.4, `docs/agent-anatomy.md`).
 
 ### Tests
-- New unit test `changed_since_root_defaults_to_repo_root_from_db_path`; `centrality_ranks_by_in_degree` asserts the new `name_collision` field. 161 lib + 17 golden pass.
+- New unit tests: `changed_since_root_defaults_to_repo_root_from_db_path`, `definition_count_counts_same_named_non_module_defs`, `subagent_mcp_refs_parses_list_and_handles_absence`, `unregistered_subagent_servers_flags_missing_then_clears`; `centrality_ranks_by_in_degree` asserts the new `name_collision` field. 164 lib + 17 golden pass.
 
 ## [0.29.0] - 2026-06-13
 

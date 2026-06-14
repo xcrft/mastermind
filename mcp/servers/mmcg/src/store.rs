@@ -1063,6 +1063,17 @@ impl Store {
         Ok(count)
     }
 
+    /// How many non-module symbols share this exact name — the over-approximation
+    /// factor for name-resolved edges (`callers` / `impact`). A high value means
+    /// those results pool call sites across many same-named definitions.
+    pub fn definition_count(&self, name: &str) -> SqlResult<u32> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM symbols WHERE name = ?1 AND kind != 'module'",
+            [name],
+            |r| r.get(0),
+        )
+    }
+
     fn row_to_symbol(r: &rusqlite::Row) -> SqlResult<Symbol> {
         Ok(Symbol {
             id: r.get(0)?,
@@ -1282,6 +1293,25 @@ mod tests {
 
         let none = store.search_symbols("bar", None, None).unwrap();
         assert!(none.is_empty());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn definition_count_counts_same_named_non_module_defs() {
+        let path = tmp_db("definition_count");
+        let store = Store::open(&path).unwrap();
+        store
+            .insert_symbol("get", "method", "a.rs", 1, 2, None, None)
+            .unwrap();
+        store
+            .insert_symbol("get", "method", "b.rs", 1, 2, None, None)
+            .unwrap();
+        store
+            .insert_symbol("unique", "function", "c.rs", 1, 2, None, None)
+            .unwrap();
+        assert_eq!(store.definition_count("get").unwrap(), 2);
+        assert_eq!(store.definition_count("unique").unwrap(), 1);
+        assert_eq!(store.definition_count("missing").unwrap(), 0);
         std::fs::remove_file(&path).ok();
     }
 

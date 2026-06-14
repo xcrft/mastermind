@@ -56,7 +56,7 @@ All 20 tools: `mmcg_search` · `mmcg_callers` · `mmcg_callees` · `mmcg_impact`
 | Sourcegraph | heavier infrastructure |
 | prompt-only workflows | no deterministic verification — claims about code are ungrounded |
 
-mmcg is intentionally narrow: nine languages, 20 tools that map directly to what a coding agent needs, read-only over MCP. Sub-millisecond queries, zero system dependencies, no daemon.
+mmcg is intentionally narrow: nine languages, 20 tools that map directly to what a coding agent needs, read-only over MCP. Point queries (search, callers, imports) are sub-millisecond; whole-graph aggregations (centrality, impact, dependency cycles) scale with repo size. Zero system dependencies, no daemon.
 
 ## The workflow layer
 
@@ -92,6 +92,8 @@ Every task spec has mandatory sections (Tests / Docs / Observability / Performan
 - **`mastermind verify-spec`** — pre-execution: mandatory sections present, every symbol in the spec exists in the index, all files on disk, FIND blocks not stale, PATH commands resolvable. Fails the spec before the executor touches code.
 - **`mastermind audit-spec`** — post-execution: scope creep, signature drift vs the pre-edit snapshot, removed symbols not acknowledged, planned tests not added.
 - **`mastermind run-task`** — wires the two gates around executor hand-off with state persistence between phases.
+
+**Where the guarantee lives.** These gates are deterministic Rust — they read the mmcg index directly and a verdict can't be argued out of them. The subagents query mmcg too, but that's an LLM *interpreting* results: useful context, not a guarantee, and its payoff scales with the repo. On a small single-language tree, grep often reaches the same answer; on a large polyglot monorepo, the codegraph is what keeps blast-radius and existence checks tractable. Trust the gates for correctness, the subagent's mmcg use for speed and reach.
 
 Full workflow: the [workflow CLAUDE.md template](agents/claude-md/mastermind-workflow.md).
 

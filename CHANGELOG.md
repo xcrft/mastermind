@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-06-14
+
 ### Added
 - `mcp/integrations/portable-baseline.md` and `mcp/integrations/org-overlay.md` — recipes that split the portable MCP layer (mmcg, carried into every repo, offline, no org account) from the per-project org overlay (SaaS MCP declared in `.mcp.json` and scoped to subagent roles via top-level `mcpServers:`). Makes the workflow portable across projects: same subagents/skills travel, only the per-project `.mcp.json` differs.
 - `mcp/integrations/context7.md` — opt-in recipe wiring the hosted context7 MCP (`resolve-library-id` + `query-docs`) into the researcher/executor for live, version-current library docs. Deliberately outside the offline default: it's the one place the portable layer reaches the network.

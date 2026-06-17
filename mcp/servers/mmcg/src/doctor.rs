@@ -1,9 +1,8 @@
 //! `mastermind doctor` — environment health-check for setup adoption.
 //!
-//! Runs a fixed set of fail-soft checks against the project at `root` (CWD by
-//! default) and prints a structured report. Each check is independent; one
-//! failing check does NOT abort the rest. Exit code is 0 unless any check
-//! returns `Fail`.
+//! Runs fail-soft checks against the project at `root` (CWD by default) and
+//! prints a structured report. Checks are independent — one failure does NOT
+//! abort the rest. Exit code 0 unless any check returns `Fail`.
 //!
 //! Checks (in order):
 //!
@@ -19,8 +18,7 @@
 //! | 8 | `MCP serve handshake`  | spawning `mastermind serve` responds to `initialize` + `tools/list` |
 //! | 9 | `subagent MCP scoping` | every subagent `mcpServers:` entry names a registered server |
 //!
-//! Output is human-readable by default. `--json` switches to a machine-
-//! parseable format for piping into other tools.
+//! Human-readable by default; `--json` switches to a machine-parseable format.
 
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -176,9 +174,8 @@ impl Report {
 
 /// Run every check against `root`. Returns a structured report.
 ///
-/// `mmcg_binary` is the path to the `mmcg` binary used for the MCP-serve
-/// handshake check. Usually `std::env::current_exe()`. Pass it in so tests
-/// can override.
+/// `mmcg_binary` is the binary used for the MCP-serve handshake check (usually
+/// `std::env::current_exe()`). Passed in so tests can override.
 pub fn run(root: &Path, mmcg_binary: &Path) -> Report {
     let checks = vec![
         check_binary(),
@@ -250,7 +247,6 @@ fn check_symbols_indexed(root: &Path) -> Check {
             };
         }
     };
-    // Cheap counts via existing helpers.
     let file_count = store.file_count().unwrap_or(0);
     let symbol_count = store.symbol_count().unwrap_or(0);
     if file_count == 0 || symbol_count == 0 {
@@ -270,9 +266,8 @@ fn check_symbols_indexed(root: &Path) -> Check {
     }
 }
 
-/// Walk the project for any extension we can index and check if any file's
-/// mtime is newer than the database mtime. Stops at the first 10 hits to keep
-/// the doctor fast on large repos.
+/// Walk indexable files; flag any whose mtime is newer than the db mtime.
+/// Stops at 10 hits to keep the doctor fast on large repos.
 fn check_index_freshness(root: &Path) -> Check {
     let p = db_path(root);
     if !p.is_file() {
@@ -333,8 +328,8 @@ fn check_index_freshness(root: &Path) -> Check {
             hint: None,
         }
     } else {
-        // Show up to 3 by name. If we hit the scan limit, total is ≥10 with
-        // "or more" — we can't know the exact total without finishing the walk.
+        // Show up to 3 by name. At the scan limit we report ≥N — the exact
+        // total is unknown without finishing the walk.
         let preview = stale.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
         let count_label = if stale.len() >= limit {
             format!("≥{} stale source files", stale.len())
@@ -436,13 +431,13 @@ fn check_claude_md(root: &Path) -> Check {
     }
 }
 
-/// Look for `mmcg` registered in known MCP config locations. We don't try
-/// every editor — just the two locations Claude Code uses today.
+/// Look for `mmcg` in the two MCP config locations Claude Code uses today (not
+/// every editor).
 fn check_mcp_config(root: &Path) -> Check {
-    // The two locations Claude Code actually reads: the project `.mcp.json`
-    // (project scope) and `~/.claude.json` top-level `mcpServers` (user scope,
-    // written by `claude mcp add --scope user`). NOT `~/.claude/.mcp.json`, which
-    // Claude Code ignores.
+    // The two locations Claude Code reads: project `.mcp.json` (project scope)
+    // and `~/.claude.json` top-level `mcpServers` (user scope, written by
+    // `claude mcp add --scope user`). NOT `~/.claude/.mcp.json`, which Claude
+    // Code ignores.
     let candidates: Vec<(PathBuf, &'static str)> =
         std::iter::once((root.join(".mcp.json"), "project .mcp.json"))
             .chain(
@@ -459,8 +454,8 @@ fn check_mcp_config(root: &Path) -> Check {
             Ok(v) => v,
             Err(_) => continue,
         };
-        // Two possible shapes: `{"mcpServers": {"mmcg": {...}}}` (Claude Code)
-        // or `{"servers": {...}}` (some VS Code extensions).
+        // Two shapes: `{"mcpServers": {"mmcg": {...}}}` (Claude Code) or
+        // `{"servers": {...}}` (some VS Code extensions).
         let has_mmcg = v.get("mcpServers").and_then(|m| m.get("mmcg")).is_some()
             || v.get("servers").and_then(|m| m.get("mmcg")).is_some();
         if has_mmcg {
@@ -482,8 +477,8 @@ fn check_mcp_config(root: &Path) -> Check {
 }
 
 /// Spawn `mmcg --index <db> serve`, write `initialize` + `tools/list`, read
-/// back the responses, count tools. Tight 3-second budget. If the binary
-/// can't be found OR the protocol handshake fails, fall through with a Fail.
+/// the responses, count tools. 3-second budget. Fails if the binary is missing
+/// OR the handshake fails.
 fn check_mcp_handshake(root: &Path, binary: &Path) -> Check {
     let db = db_path(root);
     if !db.is_file() {
@@ -553,8 +548,8 @@ fn perform_handshake(child: &mut std::process::Child) -> Result<usize, String> {
     let stdout = child.stdout.take().ok_or("no stdout pipe")?;
     let mut reader = BufReader::new(stdout);
 
-    // Read two response lines. Timeout is implemented by spawning a thread
-    // that does the read and joining with a deadline — simplest portable form.
+    // Read two response lines. Timeout via a reader thread joined against a
+    // deadline — simplest portable form.
     let (tx, rx) = std::sync::mpsc::channel::<Result<usize, String>>();
     std::thread::spawn(move || {
         let mut line = String::new();
@@ -643,8 +638,8 @@ fn format_bytes(n: u64) -> String {
     }
 }
 
-/// Server names registered for Claude Code: keys under `mcpServers` (or the
-/// legacy `servers`) in the project `.mcp.json` and the user `~/.claude.json`.
+/// Server names registered for Claude Code: keys under `mcpServers` (or legacy
+/// `servers`) in project `.mcp.json` and user `~/.claude.json`.
 fn registered_servers(root: &Path) -> std::collections::BTreeSet<String> {
     let mut set = std::collections::BTreeSet::new();
     let candidates: Vec<PathBuf> = std::iter::once(root.join(".mcp.json"))
@@ -666,8 +661,8 @@ fn registered_servers(root: &Path) -> std::collections::BTreeSet<String> {
     set
 }
 
-/// The YAML frontmatter block between the opening `---` line and the next `---`
-/// line. `None` if the text doesn't open with frontmatter.
+/// YAML frontmatter block between the opening `---` and the next `---`.
+/// `None` if the text doesn't open with frontmatter.
 fn frontmatter_block(md: &str) -> Option<&str> {
     let rest = md
         .strip_prefix("---\n")
@@ -678,7 +673,7 @@ fn frontmatter_block(md: &str) -> Option<&str> {
 
 /// MCP server names a subagent references in its top-level `mcpServers:` field —
 /// list entries or mapping keys (inline definitions). Empty if the field is
-/// absent or the frontmatter doesn't parse.
+/// absent or the frontmatter won't parse.
 fn subagent_mcp_refs(md: &str) -> Vec<String> {
     let Some(fm) = frontmatter_block(md) else {
         return vec![];
@@ -700,9 +695,9 @@ fn subagent_mcp_refs(md: &str) -> Vec<String> {
 }
 
 /// Pure core of `check_subagent_mcp_servers`: scan `agent_dirs` for subagent
-/// `.md` files and return `(any_declared, sorted unregistered "server (in file)"
-/// descriptions)`. Split out so tests can run against a controlled directory
-/// instead of the real `~/.claude/agents`.
+/// `.md` files; return `(any_declared, sorted unregistered "server (in file)"
+/// descriptions)`. Split out so tests use a controlled directory, not the real
+/// `~/.claude/agents`.
 fn unregistered_subagent_servers(
     agent_dirs: &[PathBuf],
     registered: &std::collections::BTreeSet<String>,
@@ -733,9 +728,9 @@ fn unregistered_subagent_servers(
     (declared, missing)
 }
 
-/// Every server a subagent scopes via `mcpServers:` should actually be
-/// registered — otherwise the subagent silently gets nothing for that entry.
-/// Scans the project `.claude/agents/` and the user `~/.claude/agents/`.
+/// Every server a subagent scopes via `mcpServers:` must be registered —
+/// otherwise the subagent silently gets nothing for that entry. Scans project
+/// `.claude/agents/` and user `~/.claude/agents/`.
 fn check_subagent_mcp_servers(root: &Path) -> Check {
     let registered = registered_servers(root);
     let mut agent_dirs: Vec<PathBuf> = vec![root.join(".claude").join("agents")];
@@ -783,12 +778,11 @@ mod tests {
     fn tmp() -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
         // Process-global monotonic counter. `process::id()` is identical across
-        // cargo's parallel test threads and the nanosecond clock can collide
-        // when two threads enter here in the same bucket — that collision is
-        // the root cause of the historical `check_gitignore` flake, where one
-        // test's `remove_dir_all` wiped another's working dir mid-run. The
-        // atomic `fetch_add` guarantees every call gets a distinct value, so no
-        // two `tmp()` invocations can ever resolve to the same directory.
+        // cargo's parallel test threads, and the nanosecond clock can collide
+        // when two threads land in the same bucket — the root cause of the old
+        // `check_gitignore` flake, where one test's `remove_dir_all` wiped
+        // another's working dir mid-run. `fetch_add` hands every call a distinct
+        // value, so no two `tmp()` invocations resolve to the same directory.
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let p = std::env::temp_dir().join(format!(
             "mmcg-doctor-{}-{}-{}",
@@ -829,12 +823,12 @@ mod tests {
     #[test]
     fn check_gitignore_warns_when_missing_or_unset() {
         let root = tmp();
-        // No .gitignore at all.
+        // No .gitignore.
         assert_eq!(check_gitignore(&root).status, Status::Warn);
         // .gitignore without .mastermind.
         fs::write(root.join(".gitignore"), "node_modules\n").unwrap();
         assert_eq!(check_gitignore(&root).status, Status::Warn);
-        // Now with .mastermind.
+        // With .mastermind.
         fs::write(root.join(".gitignore"), ".mastermind/\n").unwrap();
         assert_eq!(check_gitignore(&root).status, Status::Ok);
         fs::remove_dir_all(&root).ok();
@@ -866,13 +860,13 @@ mod tests {
     #[test]
     fn check_mcp_config_finds_local_or_home() {
         let root = tmp();
-        // No config anywhere → warn (we can't unset HOME safely, so just
-        // assert the local-config branch).
+        // No config anywhere → warn. Can't unset HOME safely, so only assert
+        // the local-config branch.
         let c = check_mcp_config(&root);
-        // Status may be Ok (if user has a real ~/.claude/.mcp.json with mmcg)
-        // or Warn. Tolerate both — the precise assertion is "doesn't crash".
+        // Ok (if the user has a real ~/.claude/.mcp.json with mmcg) or Warn —
+        // tolerate both; the real assertion is "doesn't crash".
         assert!(matches!(c.status, Status::Ok | Status::Warn));
-        // Add a project-local config — should bump to Ok.
+        // Project-local config — should bump to Ok.
         fs::write(
             root.join(".mcp.json"),
             r#"{"mcpServers":{"mmcg":{"command":"mmcg","args":["serve"]}}}"#,

@@ -17,7 +17,7 @@ impl TypescriptExtractor {
 
 impl LanguageExtractor for TypescriptExtractor {
     fn language(&self) -> tree_sitter::Language {
-        // tree-sitter 0.23+ exposes grammars as `LANGUAGE_*` (LanguageFn consts) — convert via .into().
+        // tree-sitter 0.23+ exposes grammars as `LANGUAGE_*` (LanguageFn consts) — .into() converts.
         if self.is_tsx {
             tree_sitter_typescript::LANGUAGE_TSX.into()
         } else {
@@ -44,9 +44,9 @@ impl LanguageExtractor for TypescriptExtractor {
     }
 }
 
-/// The walk logic is shared between TypeScript and JavaScript — both grammars
-/// use the same node kinds for the constructs we care about. TS-only nodes
-/// (`interface_declaration`, etc.) just never fire in JS files.
+/// Walk logic shared between TypeScript and JavaScript — both grammars use the
+/// same node kinds for the constructs we care about. TS-only nodes
+/// (`interface_declaration`, etc.) never fire in JS files.
 pub(super) fn walk(
     node: Node,
     source: &[u8],
@@ -147,9 +147,9 @@ fn call_target_with_type(
 }
 
 /// Returns (leaf_name, full_path_in_source, to_type).
-/// For `obj.foo` returns ("foo", Some("obj.foo"), None) — lowercase receiver.
-/// For `JSON.parse` or `Class.method` returns ("parse"/"method", path, Some("JSON"/"Class")).
-/// Heuristic: receiver identifier starting with uppercase letter is treated as type/namespace.
+/// `obj.foo` → ("foo", Some("obj.foo"), None) — lowercase receiver.
+/// `JSON.parse` / `Class.method` → ("parse"/"method", path, Some("JSON"/"Class")).
+/// Heuristic: uppercase-starting receiver identifier = type/namespace.
 fn leaf_and_path(node: &Node, source: &[u8]) -> Option<(String, Option<String>, Option<String>)> {
     let full = node_text(node, source).map(String::from);
     match node.kind() {
@@ -169,8 +169,8 @@ fn leaf_and_path(node: &Node, source: &[u8]) -> Option<(String, Option<String>, 
     }
 }
 
-/// Walk the `object` side of a member_expression to find a capital-letter
-/// receiver — that's the type/namespace by convention. `JSON.parse` → "JSON".
+/// Walk the `object` side of a member_expression for a capital-letter receiver —
+/// the type/namespace by convention. `JSON.parse` → "JSON".
 /// `pkg.Cls.method` → "Cls". `foo.bar.method` → None.
 fn type_prefix_from_object(member: &Node, source: &[u8]) -> Option<String> {
     let obj = member.child_by_field_name("object")?;
@@ -201,7 +201,7 @@ fn collect_import_names(
 ) {
     let line = line_of(import_stmt);
 
-    // Module source: `'bar'` in `import { foo } from 'bar'` — strip quotes.
+    // Module source: `'bar'` in `import { foo } from 'bar'`, quotes stripped.
     let module_source = import_stmt
         .child_by_field_name("source")
         .and_then(|n| node_text(&n, source))
@@ -261,8 +261,8 @@ fn collect_import_names(
     }
 }
 
-// The `for` form is needed here — `.find()` triggers a borrow-lifetime issue
-// because the `cursor` local would be dropped before the returned `Node<'tree>`.
+// `for` is needed here — `.find()` hits a borrow-lifetime issue: the `cursor`
+// local would drop before the returned `Node<'tree>`.
 #[allow(clippy::manual_find)]
 fn find_child_of_kind<'tree>(node: &Node<'tree>, target_kind: &str) -> Option<Node<'tree>> {
     let mut cursor = node.walk();
@@ -368,7 +368,7 @@ mod tests {
             .collect();
         // member call → property name
         assert!(calls.contains(&"log"));
-        // `new Foo()` → "Foo"
+        // new Foo() → "Foo"
         assert!(calls.contains(&"Foo"));
     }
 }

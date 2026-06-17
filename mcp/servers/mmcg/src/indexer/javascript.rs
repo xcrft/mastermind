@@ -1,6 +1,6 @@
-//! JavaScript / JSX extractor — shares the walker with TypeScript since the
-//! grammars use the same node kinds for what we care about (functions, classes,
-//! methods, calls, imports). TS-only node kinds simply don't appear in JS files.
+//! JavaScript / JSX extractor — shares the walker with TypeScript: the grammars
+//! use the same node kinds for what we care about (functions, classes, methods,
+//! calls, imports). TS-only node kinds don't appear in JS files.
 
 use super::typescript;
 use super::LanguageExtractor;
@@ -11,7 +11,7 @@ pub struct JavascriptExtractor;
 
 impl LanguageExtractor for JavascriptExtractor {
     fn language(&self) -> tree_sitter::Language {
-        // tree-sitter 0.25+ exposes grammar as `LANGUAGE` (LanguageFn const) — convert via .into().
+        // tree-sitter 0.25+ exposes grammar as `LANGUAGE` (LanguageFn const) — .into() converts.
         tree_sitter_javascript::LANGUAGE.into()
     }
 

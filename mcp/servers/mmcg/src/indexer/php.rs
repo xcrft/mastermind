@@ -40,9 +40,9 @@ fn walk(
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         match child.kind() {
-            // Namespaces are transparent containers — walk their bodies with the
-            // same parent context. Either `namespace X { ... }` (with body) or
-            // `namespace X;` (siblings become module-level).
+            // Namespaces are transparent — walk bodies with same parent context.
+            // Either `namespace X { ... }` (with body) or `namespace X;`
+            // (siblings become module-level).
             "namespace_definition" => {
                 if let Some(body) = child.child_by_field_name("body") {
                     walk(body, source, pending, parent_index, module_index);
@@ -202,7 +202,7 @@ fn walk(
                 walk(child, source, pending, parent_index, module_index);
             }
             "object_creation_expression" => {
-                // `new Foo(...)` — first child after `new` keyword is the class name expression.
+                // `new Foo(...)` — first child after `new` is the class name expr.
                 let mut oc = child.walk();
                 for sub in child.children(&mut oc) {
                     let leaf = match sub.kind() {
@@ -247,7 +247,7 @@ fn collect_use(decl: &Node, source: &[u8], pending: &mut PendingFile, module_ind
     };
     let raw = text.trim().trim_end_matches(';').trim();
     let after_use = raw.strip_prefix("use").unwrap_or(raw).trim_start();
-    // Skip optional `function ` / `const ` after `use`.
+    // Skip optional `function ` / `const `.
     let body = after_use
         .strip_prefix("function ")
         .or_else(|| after_use.strip_prefix("const "))
@@ -315,8 +315,8 @@ fn leaf_and_path(node: &Node, source: &[u8]) -> Option<(String, Option<String>, 
 }
 
 /// Collect PHP 8 attribute names from `#[Foo]` / `#[Foo, Bar(args)]` /
-/// `#[\\Ns\\Foo]`. `attribute_list` contains `attribute_group` nodes which
-/// contain `attribute` nodes. Each attribute has a name child.
+/// `#[\\Ns\\Foo]`. `attribute_list` → `attribute_group` → `attribute` nodes,
+/// each with a name child.
 fn collect_attributes(decl: &Node, source: &[u8]) -> Option<String> {
     let attrs = decl.child_by_field_name("attributes")?;
     let mut names: Vec<String> = Vec::new();
@@ -349,8 +349,8 @@ fn collect_attr_names(node: &Node, source: &[u8], out: &mut Vec<String>) {
     }
 }
 
-// Same lifetime constraint as `find_child_of_kind` in typescript.rs:
-// `.find()` would drop the cursor before the borrow ends.
+// Same lifetime constraint as `find_child_of_kind` in typescript.rs: `.find()`
+// would drop the cursor before the borrow ends.
 #[allow(clippy::manual_find)]
 fn first_named_child<'tree>(node: &Node<'tree>) -> Option<Node<'tree>> {
     let mut cursor = node.walk();

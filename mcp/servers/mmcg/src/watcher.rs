@@ -23,8 +23,8 @@ pub fn run(root: PathBuf, mut store: Store) -> Result<(), Box<dyn std::error::Er
     let root = root.canonicalize()?;
     let indexer = Indexer::new(&root);
 
-    // Initial pass — bring the index up to date before we start watching.
-    // Incremental: only re-parses files whose mtime is newer than the stored index.
+    // Initial pass — bring the index current before watching. Incremental:
+    // only re-parses files whose mtime is newer than the stored index.
     let stats = indexer.index_all(&mut store, false)?;
     eprintln!(
         "[mastermind watch] initial: indexed {} (unchanged {}, purged {}) in {} ms",
@@ -39,7 +39,7 @@ pub fn run(root: PathBuf, mut store: Store) -> Result<(), Box<dyn std::error::Er
     let mut pending_changes: HashMap<PathBuf, Instant> = HashMap::new();
 
     loop {
-        // Drain incoming events with a short timeout so we can also flush pending changes
+        // Short timeout so we can also flush pending changes between events.
         match rx.recv_timeout(RX_TIMEOUT) {
             Ok(Ok(event)) => handle_event(event, &root, &mut pending_changes, &mut store),
             Ok(Err(e)) => eprintln!("[mastermind watch] notify error: {e}"),
@@ -74,7 +74,7 @@ fn handle_event(
         EventKind::Remove(_) => {
             for path in event.paths {
                 if let Some(rel) = relative_path(&path, root) {
-                    // Drop from pending (race: a quick rm + write would otherwise re-add)
+                    // Drop from pending — a quick rm + write would otherwise re-add it.
                     pending.remove(&path);
                     if let Err(e) = store.purge_file(&rel) {
                         eprintln!("[mastermind watch] purge failed {rel}: {e}");
@@ -117,12 +117,11 @@ fn relative_path(absolute: &Path, root: &Path) -> Option<String> {
 
 /// Skip events for the index file itself and anything under skipped dirs.
 fn is_ignored(path: &Path, root: &Path) -> bool {
-    // Skip the index database
     if path.components().any(|c| {
         c.as_os_str() == ".mastermind" || c.as_os_str() == ".git" || c.as_os_str() == "target"
     }) {
         return true;
     }
-    // Also skip if the relative prefix is missing (event outside root somehow)
+    // Skip if the relative prefix is missing (event somehow outside root).
     path.strip_prefix(root).is_err()
 }

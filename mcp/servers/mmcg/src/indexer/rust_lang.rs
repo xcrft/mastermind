@@ -39,9 +39,9 @@ fn walk(
     module_index: usize,
 ) {
     let mut cursor = node.walk();
-    // Attributes appear as preceding siblings of the item they decorate.
-    // Accumulate them; on the next def-item, attach and clear; on any other
-    // node, clear (stray attributes don't carry to non-adjacent items).
+    // Attributes are preceding siblings of the item they decorate. Accumulate;
+    // on the next def-item attach and clear; on any other node clear (stray
+    // attributes don't carry to non-adjacent items).
     let mut pending_attrs: Vec<String> = Vec::new();
     for child in node.children(&mut cursor) {
         match child.kind() {
@@ -97,8 +97,8 @@ fn walk(
                 }
             }
             "impl_item" => {
-                // The impl block becomes a symbol named after its target type.
-                // Methods inside attribute their parent to this impl symbol.
+                // The impl block becomes a symbol named after its target type;
+                // methods inside parent to this impl symbol.
                 let target_name =
                     impl_target_name(&child, source).unwrap_or_else(|| "<impl>".to_string());
                 let sig = signature_until_body_or_semi(&child, source);
@@ -117,7 +117,7 @@ fn walk(
                 }
             }
             "mod_item" => {
-                // `mod foo { ... }` — treat as a container symbol.
+                // `mod foo { ... }` — container symbol.
                 let name = name_field(&child, source).unwrap_or("<anon>").to_string();
                 let sig = signature_until_body_or_semi(&child, source);
                 let attrs = take_attrs(&mut pending_attrs);
@@ -166,7 +166,7 @@ fn walk(
     }
 }
 
-/// Helper: take accumulated attributes and convert to comma-delimited decorator format.
+/// Take accumulated attributes, convert to comma-delimited decorator format.
 fn take_attrs(attrs: &mut Vec<String>) -> Option<String> {
     if attrs.is_empty() {
         None
@@ -177,7 +177,7 @@ fn take_attrs(attrs: &mut Vec<String>) -> Option<String> {
     }
 }
 
-/// Wrapper that picks `push_def` or `push_def_with_decorators` based on attrs presence.
+/// Picks `push_def` or `push_def_with_decorators` based on attrs presence.
 fn push_def_or_decorated(
     pending: &mut PendingFile,
     name: String,
@@ -202,17 +202,17 @@ fn push_def_or_decorated(
     }
 }
 
-/// Extract attribute name from `#[name]` or `#[name::sub]` or `#[name(args)]`.
-/// Returns the path part before any `(`, e.g. "test", "tokio::main", "derive", "cfg".
+/// Attribute name from `#[name]`, `#[name::sub]`, or `#[name(args)]` — the path
+/// part before any `(`, e.g. "test", "tokio::main", "derive", "cfg".
 fn extract_attribute_name(attr_item: &Node, source: &[u8]) -> Option<String> {
     let text = node_text(attr_item, source)?;
-    // text looks like "#[test]" or "#[tokio::main]" or "#[derive(Debug)]" or "#[cfg(test)]"
+    // e.g. "#[test]", "#[tokio::main]", "#[derive(Debug)]", "#[cfg(test)]".
     let inner = text
         .trim_start_matches('#')
         .trim_start_matches("![")
         .trim_start_matches('[');
     let inner = inner.trim_end_matches(']');
-    // cut at first '(' or whitespace or '='
+    // Cut at first '(', whitespace, or '='.
     let cut = inner
         .find(['(', ' ', '\t', '=', '\n'])
         .unwrap_or(inner.len());
@@ -229,8 +229,8 @@ fn name_field<'a>(node: &Node, source: &'a [u8]) -> Option<&'a str> {
         .and_then(|n| node_text(&n, source))
 }
 
-/// For `impl Foo { ... }` returns "Foo".
-/// For `impl Trait for Foo { ... }` returns "Foo" (the type, not the trait).
+/// `impl Foo { ... }` → "Foo". `impl Trait for Foo { ... }` → "Foo" (the type,
+/// not the trait).
 fn impl_target_name(impl_node: &Node, source: &[u8]) -> Option<String> {
     let type_node = impl_node.child_by_field_name("type")?;
     rightmost_identifier(&type_node, source)
@@ -252,7 +252,7 @@ fn rightmost_identifier(node: &Node, source: &[u8]) -> Option<String> {
             .and_then(|n| node_text(&n, source))
             .map(String::from),
         _ => {
-            // Last-ditch: walk children, return text of the rightmost identifier
+            // Last-ditch: walk children, return the rightmost identifier's text.
             let mut last: Option<String> = None;
             let mut c = node.walk();
             for ch in node.children(&mut c) {
@@ -268,7 +268,7 @@ fn rightmost_identifier(node: &Node, source: &[u8]) -> Option<String> {
 /// Returns (leaf_name, full_path, type_prefix).
 /// - `SessionStore::new()` → ("new", Some("SessionStore::new"), Some("SessionStore"))
 /// - `foo::bar::Baz::new()` → ("new", Some("foo::bar::Baz::new"), Some("Baz"))
-/// - `obj.method()` (field_expression) → ("method", Some("obj.method"), None)  — receiver is a value, not a type
+/// - `obj.method()` (field_expression) → ("method", Some("obj.method"), None)  — value receiver, not a type
 /// - `foo()` → ("foo", Some("foo"), None)
 fn call_target_with_type(
     call_node: &Node,
@@ -277,8 +277,8 @@ fn call_target_with_type(
     let fn_node = call_node.child_by_field_name("function")?;
     let leaf = rightmost_identifier(&fn_node, source)?;
     let path = node_text(&fn_node, source).map(String::from);
-    // Type prefix only when the function is a scoped_identifier (Type::method).
-    // field_expression (obj.method) has a value receiver, not a type — skip.
+    // Type prefix only for scoped_identifier (Type::method). field_expression
+    // (obj.method) has a value receiver, not a type — skip.
     let type_prefix = if fn_node.kind() == "scoped_identifier" {
         fn_node
             .child_by_field_name("path")
@@ -289,9 +289,9 @@ fn call_target_with_type(
     Some((leaf, path, type_prefix))
 }
 
-/// Walk a use-tree (argument of use_declaration) and emit import edges for
-/// each "imported into scope" leaf. `prefix` is the path so far when recursing
-/// into a `scoped_use_list` (e.g. `foo::{bar, baz}` → prefix is `foo`).
+/// Walk a use-tree (argument of use_declaration), emitting an import edge per
+/// imported-into-scope leaf. `prefix` is the path so far when recursing into a
+/// `scoped_use_list` (e.g. `foo::{bar, baz}` → prefix is `foo`).
 fn collect_use_names(
     node: &Node,
     source: &[u8],
@@ -308,7 +308,7 @@ fn collect_use_names(
             }
         }
         "scoped_identifier" => {
-            // use foo::bar — imports "bar", path is the full scoped expression
+            // use foo::bar — imports "bar", path is the full scoped expression.
             let full = node_text(node, source).map(String::from);
             let leaf_path = full.as_deref().unwrap_or("");
             let combined = if let Some(p) = prefix {
@@ -329,7 +329,7 @@ fn collect_use_names(
             }
         }
         "use_as_clause" => {
-            // use foo::bar as baz — name="baz", path="foo::bar" (or with prefix prepended)
+            // use foo::bar as baz — name="baz", path="foo::bar" (prefix prepended).
             let alias = node
                 .child_by_field_name("alias")
                 .and_then(|a| node_text(&a, source));
@@ -349,8 +349,8 @@ fn collect_use_names(
             }
         }
         "use_list" | "scoped_use_list" => {
-            // { a, b, c::d } — recurse into each entry.
-            // For scoped_use_list, the path child is the prefix, list holds entries.
+            // { a, b, c::d } — recurse into each entry. For scoped_use_list the
+            // path child is the prefix, list holds entries.
             let new_prefix = if node.kind() == "scoped_use_list" {
                 let local = node
                     .child_by_field_name("path")
@@ -391,7 +391,7 @@ fn collect_use_names(
             push_import(pending, module_index, "*".to_string(), path, line);
         }
         _ => {
-            // Be permissive: try the last identifier we can find.
+            // Permissive: try the last identifier we can find.
             if let Some(name) = rightmost_identifier(node, source) {
                 let path = compose_scoped(prefix, &name);
                 push_import(pending, module_index, name, Some(path), line);
@@ -408,12 +408,12 @@ fn compose_scoped(prefix: Option<&str>, leaf: &str) -> String {
 }
 
 fn signature_for_function(node: &Node, source: &[u8]) -> Option<String> {
-    // For fn item: stop before the body { ... }
+    // fn item: stop before the body { ... }.
     signature_until_body_or_semi(node, source)
 }
 
 fn signature_until_body_or_semi(node: &Node, source: &[u8]) -> Option<String> {
-    // Find the body or end of declaration; take everything before it.
+    // Take everything before the body or end of declaration.
     let cut = node
         .child_by_field_name("body")
         .map(|n| n.start_byte())

@@ -1,15 +1,14 @@
 //! Mechanical `_lessons.md` writer.
 //!
-//! `mastermind-auditor` (the LLM subagent) is supposed to append a one-line
-//! lesson to `.mastermind/tasks/_lessons.md` whenever its verdict is `Drift` or
-//! `Broken` — but that path depends on the planner remembering to spawn the
-//! auditor AND the auditor LLM remembering to call `Write` on the file. In
-//! practice the file stays empty even when audits surface drift.
+//! The `mastermind-auditor` LLM subagent is supposed to append a one-line
+//! lesson to `.mastermind/tasks/_lessons.md` on a `Drift`/`Broken` verdict —
+//! but that depends on the planner spawning the auditor AND the LLM remembering
+//! to `Write`. In practice the file stays empty even when audits surface drift.
 //!
-//! This module is the deterministic fallback: `mmcg audit-spec` and
-//! `mmcg run-task`'s post-phase call into here directly. Entries are prefixed
-//! `[auto]` so they're distinguishable from the LLM-auditor's root-cause
-//! analyses (the LLM still adds richer commentary when it runs).
+//! This is the deterministic fallback: `mmcg audit-spec` and `run-task`'s
+//! post-phase call in here directly. Entries are prefixed `[auto]` to
+//! distinguish them from the LLM-auditor's root-cause analyses (the LLM still
+//! adds richer commentary when it runs).
 
 use std::fs;
 use std::io::Write;
@@ -24,9 +23,9 @@ Lines prefixed with `[auto]` are written by `mmcg audit-spec` / `run-task` and\n
 summarize the mechanical findings. The LLM auditor appends richer root-cause\n\
 entries below them when it runs.\n\n";
 
-/// Append a lesson line to `.mastermind/tasks/_lessons.md` if the audit
-/// verdict is `Drift` or `Broken`. No-op on `Held`. Best-effort — IO errors
-/// bubble so the caller can log without failing the audit itself.
+/// Append a lesson line to `.mastermind/tasks/_lessons.md` on a `Drift`/`Broken`
+/// verdict. No-op on `Held`. Best-effort — IO errors bubble so the caller can
+/// log without failing the audit itself.
 pub fn append_if_drift_or_broken(
     repo_root: &Path,
     spec_path: &Path,
@@ -70,8 +69,8 @@ fn format_lesson_line(spec_path: &Path, report: &Report) -> String {
 /// Derive a stable task identifier from the spec path.
 ///
 /// Prefers the parent folder name (`.mastermind/tasks/042-name/spec.md` →
-/// `042-name`). Falls back to the filename stem for legacy flat layouts so
-/// pre-0.7.0 specs still produce a readable identifier.
+/// `042-name`). Falls back to the filename stem for legacy flat layouts, so
+/// pre-0.7.0 specs still get a readable identifier.
 fn derive_task_id(spec_path: &Path) -> String {
     let filename = spec_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     if filename == "spec.md" {
@@ -129,8 +128,8 @@ fn today_ymd() -> String {
 
 /// Convert a unix timestamp (seconds since epoch, UTC) to `YYYY-MM-DD`.
 ///
-/// Howard Hinnant's civil-calendar algorithm (public domain). Avoids pulling
-/// in a date crate (`time` / `chrono`) for a single format call.
+/// Howard Hinnant's civil-calendar algorithm (public domain). Avoids a date
+/// crate (`time` / `chrono`) for a single format call.
 fn ymd_from_unix(secs: u64) -> String {
     let days = (secs / 86_400) as i64;
     let z = days + 719_468;
@@ -170,9 +169,9 @@ mod tests {
         assert_eq!(ymd_from_unix(0), "1970-01-01");
         // 2026-06-03 00:00:00 UTC = 20_607 days * 86_400.
         assert_eq!(ymd_from_unix(1_780_444_800), "2026-06-03");
-        // Leap-day check: 2024-02-29
+        // Leap day: 2024-02-29
         assert_eq!(ymd_from_unix(1_709_164_800), "2024-02-29");
-        // End-of-year boundary: 2023-12-31
+        // Year-end boundary: 2023-12-31
         assert_eq!(ymd_from_unix(1_703_980_800), "2023-12-31");
     }
 
@@ -225,7 +224,7 @@ mod tests {
         assert!(body.contains("[auto]"));
         assert!(body.contains("1× scope creep"));
 
-        // A second drift append goes below without re-adding the header.
+        // Second append goes below without re-adding the header.
         let r2 = report(
             Verdict::Broken,
             vec![

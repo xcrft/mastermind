@@ -40,9 +40,9 @@ fn walk(
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         match child.kind() {
-            // Transparent containers — walk their children with the same parent context.
-            // C# 10 file-scoped namespaces (`namespace Foo;`) have their siblings as
-            // module-level, so we keep recursing past them.
+            // Transparent containers — walk children with same parent context.
+            // C# 10 file-scoped namespaces (`namespace Foo;`) keep siblings
+            // module-level, so recurse past them.
             "namespace_declaration" => {
                 if let Some(body) = child.child_by_field_name("body") {
                     walk(body, source, pending, parent_index, module_index);
@@ -155,7 +155,7 @@ fn walk(
                     parent_index,
                     collect_attributes(&child, source),
                 );
-                // Don't recurse into accessor bodies for symbols, but do walk for calls.
+                // Skip accessor bodies for symbols, but walk them for calls.
                 if let Some(acc) = child.child_by_field_name("accessors") {
                     walk(acc, source, pending, parent_index, module_index);
                 }
@@ -217,11 +217,11 @@ fn method_kind_for(parent_index: Option<usize>, pending: &PendingFile) -> &'stat
     }
 }
 
-/// Extract `(leaf, full_text, to_type)` for an invocation target or
-/// object-creation type. Mirrors the TS extractor's resolution rules:
+/// `(leaf, full_text, to_type)` for an invocation target or object-creation
+/// type. Mirrors the TS extractor's resolution rules:
 /// - `Foo()` → ("Foo", "Foo", None)
-/// - `obj.Bar()` → ("Bar", "obj.Bar", None) when receiver is lowercase
-/// - `Type.Bar()` → ("Bar", "Type.Bar", Some("Type")) when receiver is uppercase
+/// - `obj.Bar()` → ("Bar", "obj.Bar", None) — lowercase receiver
+/// - `Type.Bar()` → ("Bar", "Type.Bar", Some("Type")) — uppercase receiver
 fn leaf_and_path(node: &Node, source: &[u8]) -> Option<(String, Option<String>, Option<String>)> {
     let full = node_text(node, source).map(String::from);
     match node.kind() {
@@ -230,7 +230,7 @@ fn leaf_and_path(node: &Node, source: &[u8]) -> Option<(String, Option<String>, 
             Some((n, full, None))
         }
         "generic_name" => {
-            // Foo<T> — pull the leading identifier
+            // Foo<T> — pull the leading identifier.
             let n = node
                 .child_by_field_name("name")
                 .and_then(|c| node_text(&c, source))
@@ -246,7 +246,7 @@ fn leaf_and_path(node: &Node, source: &[u8]) -> Option<(String, Option<String>, 
             Some((leaf, full, to_type))
         }
         "qualified_name" => {
-            // `System.Console` used as a type or static call target
+            // `System.Console` as a type or static call target.
             let leaf = node
                 .child_by_field_name("name")
                 .and_then(|n| leaf_of_name(&n, source))?;
@@ -263,7 +263,7 @@ fn leaf_and_path(node: &Node, source: &[u8]) -> Option<(String, Option<String>, 
             leaf_and_path(&inner, source)
         }
         _ => {
-            // Best-effort fallback: drill into the first named child.
+            // Fallback: drill into the first named child.
             let inner = first_named_child(node)?;
             leaf_and_path(&inner, source)
         }
@@ -282,8 +282,8 @@ fn leaf_of_name(node: &Node, source: &[u8]) -> Option<String> {
     }
 }
 
-/// For `X.Y.Method` or `Type.Method` extract `Y`/`Type` as the receiver, mirroring
-/// the TS extractor's heuristic — uppercase receiver = type/namespace.
+/// For `X.Y.Method` or `Type.Method` extract `Y`/`Type` as the receiver.
+/// Mirrors the TS heuristic — uppercase receiver = type/namespace.
 fn type_prefix_from_expression(member: &Node, source: &[u8]) -> Option<String> {
     let expr = member.child_by_field_name("expression")?;
     let candidate = match expr.kind() {
@@ -333,8 +333,8 @@ fn first_named_child<'tree>(node: &Node<'tree>) -> Option<Node<'tree>> {
     found
 }
 
-/// `using System.Collections.Generic;` → import name "Generic",
-/// path "System.Collections.Generic::*". `using static System.Math;` and
+/// `using System.Collections.Generic;` → name "Generic", path
+/// "System.Collections.Generic::*". `using static System.Math;` and
 /// `using Alias = System.IO;` strip their prefixes the same way.
 fn collect_using(directive: &Node, source: &[u8], pending: &mut PendingFile, module_index: usize) {
     let line = line_of(directive);
@@ -348,7 +348,7 @@ fn collect_using(directive: &Node, source: &[u8], pending: &mut PendingFile, mod
         .strip_prefix("static ")
         .map(str::trim_start)
         .unwrap_or(after_using);
-    // Alias form: `Alias = Real.Namespace` — take the right side as the imported path.
+    // Alias form `Alias = Real.Namespace` — right side is the imported path.
     let path = if let Some((_, rhs)) = after_static.split_once('=') {
         rhs.trim()
     } else {
@@ -363,9 +363,8 @@ fn collect_using(directive: &Node, source: &[u8], pending: &mut PendingFile, mod
 }
 
 /// Collect attribute names from a declaration's `attribute_list` children.
-/// Returns `,Name1,Name2,` formatted so `unreferenced` can match individual
-/// names with `LIKE '%,Name1,%'`. Mirrors the Python decorator + Rust attribute
-/// schemes for cross-language consistency.
+/// Returns `,Name1,Name2,` so `unreferenced` can match individual names with
+/// `LIKE '%,Name1,%'`. Mirrors the Python decorator + Rust attribute schemes.
 fn collect_attributes(decl: &Node, source: &[u8]) -> Option<String> {
     let mut names: Vec<String> = Vec::new();
     let mut cursor = decl.walk();
@@ -383,10 +382,10 @@ fn collect_attributes(decl: &Node, source: &[u8]) -> Option<String> {
                 if raw.is_empty() {
                     continue;
                 }
-                // For qualified names like `System.Web.HttpGet` keep only the leaf.
+                // Qualified names like `System.Web.HttpGet` → keep only the leaf.
                 let leaf = raw.rsplit('.').next().unwrap_or(raw);
-                // Drop trailing `Attribute` suffix — C# convention allows `[Test]` for
-                // `TestAttribute`; both should match the same filter rule.
+                // Drop trailing `Attribute` — C# allows `[Test]` for
+                // `TestAttribute`; both must match the same filter rule.
                 let stripped = leaf.strip_suffix("Attribute").unwrap_or(leaf);
                 if !stripped.is_empty() {
                     names.push(stripped.to_string());
@@ -401,9 +400,9 @@ fn collect_attributes(decl: &Node, source: &[u8]) -> Option<String> {
     }
 }
 
-/// Collect modifier keywords (`partial`, `abstract`, `sealed`, `static`) from
-/// a declaration. Stored alongside attributes in the decorators column so
-/// queries can filter on them (e.g. partial-class collapse in `mmcg_search`).
+/// Collect modifier keywords (`partial`, `abstract`, `sealed`, `static`).
+/// Stored alongside attributes in the decorators column so queries can filter
+/// on them (e.g. partial-class collapse in `mmcg_search`).
 fn collect_modifiers(decl: &Node, source: &[u8]) -> Option<String> {
     const TRACKED: &[&str] = &["partial", "abstract", "sealed", "static"];
     let mut names: Vec<String> = Vec::new();
@@ -424,15 +423,15 @@ fn collect_modifiers(decl: &Node, source: &[u8]) -> Option<String> {
     }
 }
 
-/// Merge two `,name,` formatted decorator strings into one. Used to combine
-/// attributes (`[Fact]`) and modifiers (`partial`) on the same declaration.
+/// Merge two `,name,` decorator strings into one. Combines attributes
+/// (`[Fact]`) and modifiers (`partial`) on the same declaration.
 fn merge_decorators(a: Option<String>, b: Option<String>) -> Option<String> {
     match (a, b) {
         (None, None) => None,
         (Some(x), None) | (None, Some(x)) => Some(x),
         (Some(x), Some(y)) => {
-            // Both are `,name,` formatted — strip the trailing comma of `x` and the
-            // leading comma of `y` before joining.
+            // Both `,name,` — strip x's trailing comma and y's leading comma
+            // before joining.
             let trimmed_y = y.trim_start_matches(',');
             Some(format!("{x}{trimmed_y}"))
         }
@@ -581,7 +580,7 @@ mod tests {
         assert!(calls.contains(&"Helper"), "missing Helper call");
         assert!(calls.contains(&"List"), "missing List from new");
 
-        // WriteLine should carry Console as the type prefix
+        // WriteLine carries Console as the type prefix.
         let writeline_to_type = pending
             .edges
             .iter()

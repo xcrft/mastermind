@@ -1,25 +1,23 @@
 //! `mastermind setup claude` — MCP-config registrar.
 //!
 //! Registers mmcg with Claude Code. Two scopes:
-//!   - user (global, default): via `claude mcp add --scope user` → `~/.claude.json`,
-//!     the location Claude Code actually reads for global servers. (Earlier versions
-//!     wrote `~/.claude/.mcp.json`, which Claude Code ignores — see `add_claude_user`.)
-//!   - project (`--project .`): writes `<root>/.mcp.json`, merging into an existing
-//!     `mcpServers` object without clobbering other servers (see `run_claude`).
+//!   - user (global, default): `claude mcp add --scope user` → `~/.claude.json`
+//!     (why that path, not `~/.claude/.mcp.json`: see `add_claude_user`).
+//!   - project (`--project .`): writes `<root>/.mcp.json`, merging into an
+//!     existing `mcpServers` object without clobbering others (see `run_claude`).
 //!
-//! Safe by default: prints what it will do and exits unless `--write-mcp` is passed.
+//! Safe by default: prints what it will do and exits unless `--write-mcp`.
 //!
 //! Why hand-rolled diff (vs `similar` crate): the change is always additive +
 //! contiguous (one entry into one object), and `serde_json::to_string_pretty`
-//! produces stable line counts, so a prefix/suffix line-match algorithm covers
-//! it cleanly in ~30 lines with no new dependency. Trade-off documented in
-//! `render_line_diff`.
+//! gives stable line counts, so a prefix/suffix line-match covers it in ~30
+//! lines with no new dependency. Trade-off documented in `render_line_diff`.
 
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-/// Where the MCP config file lives on disk + a short label for diff headers.
+/// MCP config file location on disk + a short label for diff headers.
 #[derive(Debug, Clone)]
 pub struct Target {
     pub path: PathBuf,
@@ -38,7 +36,7 @@ impl Target {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Opts {
-    /// Actually write the file. Without this, prints diff + advisory message.
+    /// Actually write the file. Else prints diff + advisory.
     pub write: bool,
     /// Overwrite an existing customized `mmcg` entry or existing CLAUDE.md.
     pub force: bool,
@@ -62,7 +60,7 @@ pub enum Outcome {
 }
 
 /// Top-level entry point. Reads existing config, computes the merged proposal,
-/// renders a diff, optionally writes, and optionally drops a CLAUDE.md.
+/// renders a diff, optionally writes, optionally drops a CLAUDE.md.
 pub fn run_claude(
     target: &Target,
     mmcg_binary: &Path,
@@ -129,8 +127,7 @@ pub fn run_claude(
     };
 
     let before_pretty = if existing_text.trim().is_empty() {
-        // Empty file → show "(file does not exist)" as the before-state instead
-        // of an empty {} so the diff is honest about creation.
+        // Empty before-state (not `{}`) so the diff reads honestly as creation.
         String::new()
     } else {
         serde_json::to_string_pretty(&existing).unwrap_or_else(|_| existing_text.clone())
@@ -158,9 +155,8 @@ pub fn run_claude(
         Outcome::DryRun
     };
 
-    // CLAUDE.md drop is a side-channel — independent of the MCP write result so
-    // a user passing --with-workflow without --write-mcp still gets the file
-    // path advisory.
+    // CLAUDE.md drop is a side-channel — independent of the MCP write result, so
+    // --with-workflow without --write-mcp still gets the file-path advisory.
     if opts.with_workflow {
         handle_workflow_drop(project_root, workflow_template, opts);
     }
@@ -168,25 +164,22 @@ pub fn run_claude(
     outcome
 }
 
-/// Decide what `command` + `args` to write into the MCP config based on how
-/// this binary was invoked. Three sources of truth, checked in order:
+/// Decide `command` + `args` for the MCP config from how this binary was
+/// invoked. Two sources, checked in order:
 ///
-/// 1. `MASTERMIND_INSTALL_MODE` env var set by the npm JS wrapper. Values:
-///    - `npx` → user is one-shotting via `npx -y @xcraftmind/mastermind`. Pin the
-///      command to `npx -y @xcraftmind/mastermind@<version> serve` so the MCP
-///      client launches the same version every time.
-///    - `global` → `npm install -g`. Use the wrapper name (`mastermind`),
-///      which is on PATH.
+/// 1. `MASTERMIND_INSTALL_MODE` env var set by the npm JS wrapper:
+///    - `npx` → one-shot `npx -y @xcraftmind/mastermind`. Pin to
+///      `npx -y @xcraftmind/mastermind@<version> serve` so the MCP client
+///      launches the same version every time.
+///    - `global` → `npm install -g`. Use the wrapper name `mastermind` (on PATH).
 ///    - `project` → `npm install -D`. Use the project-local bin path so the
-///      project version pin is honored.
-///    - `unknown` → wrapper couldn't classify; treat as `global` (safest
-///      default — `mastermind` on PATH).
-/// 2. No env var → assume cargo-installed `mmcg` (the original path). Use
-///    the absolute path of the running binary, same as before npm support.
+///      version pin is honored.
+///    - `unknown` → couldn't classify; treat as `global` (safest default).
+/// 2. No env var → cargo-installed `mmcg` (original path). Use the running
+///    binary's absolute path, same as before npm support.
 ///
-/// The two-mode design keeps `cargo install mmcg` working with zero changes
-/// while letting npm users get a config that travels with their install
-/// method.
+/// Two-mode design keeps `cargo install mmcg` unchanged while giving npm users a
+/// config that travels with their install method.
 fn mmcg_entry(mmcg_binary: &Path) -> Value {
     let install_mode = std::env::var("MASTERMIND_INSTALL_MODE").ok();
     let version = std::env::var("MASTERMIND_VERSION").ok();
@@ -196,9 +189,9 @@ fn mmcg_entry(mmcg_binary: &Path) -> Value {
 
     match install_mode.as_deref() {
         Some("npx") => {
-            // Pin the version so the MCP client gets reproducible behavior;
-            // unpinned `npx @xcraftmind/mastermind` would silently upgrade and
-            // could break the integration on a future release.
+            // Pin the version for reproducibility; unpinned
+            // `npx @xcraftmind/mastermind` would silently upgrade and could
+            // break the integration on a future release.
             let pinned = match version {
                 Some(v) => format!("{package}@{v}"),
                 None => package,
@@ -209,8 +202,8 @@ fn mmcg_entry(mmcg_binary: &Path) -> Value {
             })
         }
         Some("project") => {
-            // Project-local install. Path is relative to the project root
-            // (where `.mcp.json` lives), so it survives `cd` into subdirs.
+            // Project-local install. Path relative to the project root (where
+            // `.mcp.json` lives), so it survives `cd` into subdirs.
             let bin = if cfg!(windows) {
                 "./node_modules/.bin/mastermind.cmd"
             } else {
@@ -230,8 +223,8 @@ fn mmcg_entry(mmcg_binary: &Path) -> Value {
         }
         _ => {
             // No env var → invoked directly (cargo install, manual build, etc.).
-            // Use the absolute path of the running binary — guarantees the
-            // exact binary the user just ran is what the MCP client launches.
+            // Absolute path of the running binary guarantees the MCP client
+            // launches the exact binary the user just ran.
             json!({
                 "command": mmcg_binary.display().to_string(),
                 "args": ["serve"],
@@ -244,8 +237,8 @@ fn mmcg_entry(mmcg_binary: &Path) -> Value {
 fn merge_mmcg_entry(existing: &Value, mmcg_entry: &Value) -> Result<Value, String> {
     let mut proposed = existing.clone();
     if !proposed.is_object() {
-        // Replace non-object roots (e.g. `null`, array) with an empty object —
-        // covers edge case of an empty-or-malformed file we already accepted.
+        // Replace non-object roots (`null`, array) with `{}` — covers an
+        // empty-or-malformed file we already accepted.
         proposed = json!({});
     }
     let obj = proposed.as_object_mut().unwrap();
@@ -260,9 +253,9 @@ fn merge_mmcg_entry(existing: &Value, mmcg_entry: &Value) -> Result<Value, Strin
     Ok(proposed)
 }
 
-/// Remove the `mmcg` entry from an MCP config file. Leaves every other server
-/// intact; leaves an empty `mcpServers` object rather than deleting the file.
-/// Safe by default — prints a diff and exits unless `write` is true.
+/// Remove the `mmcg` entry from an MCP config file. Leaves other servers intact
+/// and leaves an empty `mcpServers` object rather than deleting the file. Safe
+/// by default — prints a diff and exits unless `write`.
 pub fn remove_claude(target: &Target, write: bool) -> Outcome {
     println!("=== mastermind uninstall claude ({}) ===", target.label);
 
@@ -313,11 +306,11 @@ pub fn remove_claude(target: &Target, write: bool) -> Outcome {
     Outcome::Wrote
 }
 
-/// Register mmcg at Claude Code's **user scope** via the official `claude mcp add`
-/// CLI, which writes `~/.claude.json` — the location Claude Code actually reads
-/// for global servers. (The previous approach wrote `~/.claude/.mcp.json`, which
-/// Claude Code ignores, so global registration silently never took effect.)
-/// Safe by default: prints the command and exits unless `opts.write`.
+/// Register mmcg at Claude Code's **user scope** via the official `claude mcp
+/// add` CLI, which writes `~/.claude.json` — the location Claude Code actually
+/// reads for global servers. (The previous approach wrote `~/.claude/.mcp.json`,
+/// which Claude Code ignores, so global registration silently never took
+/// effect.) Safe by default: prints the command and exits unless `opts.write`.
 pub fn add_claude_user(
     mmcg_binary: &Path,
     project_root: &Path,
@@ -403,7 +396,7 @@ pub fn add_claude_user(
 }
 
 /// Remove mmcg from Claude Code's user scope via `claude mcp remove`. Safe by
-/// default: prints the command and exits unless `write`.
+/// default: prints the command, exits unless `write`.
 pub fn remove_claude_user(write: bool) -> Outcome {
     println!("=== mmcg uninstall claude (user scope via `claude mcp remove`) ===");
     if !claude_mcp_has("mmcg") {
@@ -435,7 +428,7 @@ pub fn remove_claude_user(write: bool) -> Outcome {
     }
 }
 
-/// True if `claude mcp get <name>` reports the server as registered (any scope).
+/// True if `claude mcp get <name>` reports the server registered (any scope).
 /// Best-effort: false if the Claude CLI is missing or errors.
 fn claude_mcp_has(name: &str) -> bool {
     std::process::Command::new("claude")
@@ -446,10 +439,10 @@ fn claude_mcp_has(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Line-by-line diff: finds the common prefix/suffix, marks only the changed
-/// window with up to 3 context lines. Assumes a single contiguous change region
-/// (safe for all callers here — the merge is always additive on one key). Use
-/// the `similar` crate if multi-region diffs are ever needed.
+/// Line diff: common prefix/suffix, marks only the changed window with up to 3
+/// context lines. Assumes a single contiguous change region (safe here — the
+/// merge is always additive on one key). Use `similar` if multi-region diffs are
+/// ever needed.
 fn render_line_diff(before: &str, after: &str) -> String {
     if before == after {
         return "(no changes)\n".to_string();
@@ -529,12 +522,11 @@ mod tests {
     use super::*;
     use std::fs;
 
-    // Process-global MASTERMIND_* env vars are read by `mmcg_entry`. Cargo runs
-    // tests in parallel within one process, so an env mutation in one test can
-    // leak into another. Every test that sets OR depends on the default value of
-    // these vars holds this lock for its duration, making them mutually
-    // exclusive. Poison-tolerant — one panicking test must not cascade-fail the
-    // rest.
+    // `mmcg_entry` reads process-global MASTERMIND_* env vars. Cargo runs tests
+    // in parallel in one process, so an env mutation in one test can leak into
+    // another. Every test that sets OR depends on the default of these vars holds
+    // this lock for its duration, making them mutually exclusive. Poison-tolerant
+    // — one panicking test must not cascade-fail the rest.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -669,7 +661,7 @@ mod tests {
             path: dir.join(".mcp.json"),
             label: "<test>".into(),
         };
-        // Seed with the exact entry mmcg_entry would produce.
+        // Seed the exact entry mmcg_entry would produce.
         fs::write(
             &target.path,
             r#"{
@@ -810,10 +802,10 @@ mod tests {
 
     #[test]
     fn mmcg_entry_cargo_mode_uses_absolute_binary_path() {
-        // No MASTERMIND_INSTALL_MODE → cargo-install / direct-invocation
-        // behavior. Must use the absolute binary path so the MCP client
-        // launches the exact binary the user just configured.
-        // Use a unique env-var prefix to avoid cross-test contamination.
+        // No MASTERMIND_INSTALL_MODE → cargo-install / direct-invocation. Must
+        // use the absolute binary path so the MCP client launches the exact
+        // binary the user just configured. Clear the vars to avoid cross-test
+        // contamination.
         let _guard = EnvGuard::clear(&[
             "MASTERMIND_INSTALL_MODE",
             "MASTERMIND_VERSION",
@@ -847,7 +839,7 @@ mod tests {
         let _guard = EnvGuard::set(&[("MASTERMIND_INSTALL_MODE", "project")]);
         let entry = mmcg_entry(Path::new("/ignored"));
         let cmd = entry.get("command").and_then(|v| v.as_str()).unwrap();
-        // Unix path on non-Windows; .cmd suffix on Windows.
+        // Unix path on non-Windows; .cmd on Windows.
         if cfg!(windows) {
             assert!(
                 cmd.ends_with("node_modules/.bin/mastermind.cmd")
@@ -868,7 +860,7 @@ mod tests {
         let entry = mmcg_entry(Path::new("/ignored"));
         assert_eq!(entry.get("command").and_then(|v| v.as_str()), Some("npx"));
         let args = entry.get("args").and_then(|v| v.as_array()).unwrap();
-        // Version is pinned in the package spec arg.
+        // Version pinned in the package spec arg.
         assert!(
             args.iter()
                 .any(|a| a.as_str() == Some("@xcraftmind/mastermind@0.22.0")),
@@ -879,8 +871,8 @@ mod tests {
 
     #[test]
     fn mmcg_entry_npx_mode_falls_back_when_version_absent() {
-        // No MASTERMIND_VERSION → unpinned npx command (with a warning the
-        // wrapper should emit). Still valid MCP config — just not pinned.
+        // No MASTERMIND_VERSION → unpinned npx command (wrapper should warn).
+        // Still valid MCP config, just not pinned.
         let _guard = EnvGuard::set(&[("MASTERMIND_INSTALL_MODE", "npx")]);
         std::env::remove_var("MASTERMIND_VERSION");
         let entry = mmcg_entry(Path::new("/ignored"));
@@ -892,16 +884,16 @@ mod tests {
         );
     }
 
-    /// RAII helper to set/unset env vars for a test scope and restore prior
+    /// RAII helper that sets/unsets env vars for a test scope and restores prior
     /// values on drop. Holds `ENV_LOCK` for its lifetime so env-driven tests are
-    /// mutually exclusive even under cargo's default parallel runner — reader
-    /// tests that depend on the default environment take the same lock via
-    /// `env_lock()`. No `--test-threads=1` required.
+    /// mutually exclusive even under cargo's parallel runner — reader tests that
+    /// depend on the default environment take the same lock via `env_lock()`. No
+    /// `--test-threads=1` required.
     struct EnvGuard {
         prior: Vec<(String, Option<String>)>,
         // Held until drop so env mutation + restore happen while no other
         // env-touching test runs. Declared after `prior` so it releases only
-        // after the Drop impl below has restored the prior values.
+        // after the Drop impl has restored the prior values.
         _lock: std::sync::MutexGuard<'static, ()>,
     }
 

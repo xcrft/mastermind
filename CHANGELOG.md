@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `.jsx` files were indexed under language `"jsx"`, which isn't in the MCP `language` enum and never matches a `language: "javascript"` filter — so `.jsx` definitions silently vanished from every language-scoped query (the exact monorepo cross-language-collision case the filter exists for, a silent false-negative). `guess_language_for` now folds `.jsx` into `"javascript"`, matching `lang_from_ext` and the schema enum.
+- `audit-spec` vacuous-test detection no longer false-flags `cargo test`. Two compounding bugs: (1) `"cargo test"` contains the substring `"go test"`, so the Go detector (checked first) shadowed the cargo branch entirely and flagged every `cargo test` run for having no `_test.go` files in the repo root; (2) the cargo branch only scanned `src/`, so a crate whose tests live entirely in `tests/*.rs` (integration tests, no `#[test]` in `src/`) was flagged vacuous. Now the Go branch is guarded against `cargo`, the scan covers `src/` **and** `tests/`, and recognizes `#[tokio::test]` / `#[async_std::test]` / `#[rstest]` alongside `#[test]`.
+- `audit-spec` no longer runs the static vacuous-test file-scan when the executor reported a positive `observed.tests_run` — a confirmed non-zero test count is authoritative and the heuristic must not override it.
+- npm install-mode detection now walks up from cwd to find the owning `node_modules`, so a command run from a monorepo subpackage whose dependency is hoisted to the workspace root is classified `project` (was misclassified `global`, making `setup claude` emit the wrong MCP `command` form).
+- mmcg MCP server now answers malformed JSON with a JSON-RPC `-32700` error (`id: null`) instead of silently dropping the line, so a strict stdio client doesn't block waiting for a reply. Valid notifications (no `id`) still correctly get no response.
+- `verify-spec` PATH resolution (`which_on_path`) now checks the executable bit on Unix (`mode & 0o111`), not just file existence — a non-executable file shadowing a command name no longer suppresses the "command not found" warning.
+- `mcp/servers/mmcg/README.md` frontmatter `metadata.version` bumped 0.28.1 → 0.30.0 to match the crate. The runtime `serverInfo.version` was already correct (`CARGO_PKG_VERSION`); only the doc metadata was stale.
+
+### Tests
+- New: `jsx_files_indexed_as_javascript`, `malformed_json_gets_parse_error_with_null_id`, `notification_without_id_gets_no_reply`, `file_has_test_attr_recognises_common_spellings`, `cargo_test_not_vacuous_with_only_integration_tests`. 169 lib + 17 golden pass.
+
 ## [0.30.0] - 2026-06-14
 
 ### Added

@@ -1,9 +1,8 @@
 //! Multi-language code indexer.
 //!
-//! Each supported language is implemented as a [`LanguageExtractor`] in its
-//! own submodule. The dispatch logic here walks the file tree, picks the right
-//! extractor per file extension, parses with tree-sitter in parallel via
-//! rayon, and serializes writes through a single SQLite connection.
+//! Each language is a [`LanguageExtractor`] in its own submodule. Dispatch here
+//! walks the file tree, picks an extractor per extension, parses with tree-sitter
+//! in parallel via rayon, and serializes writes through one SQLite connection.
 
 use crate::store::{PendingFile, PendingSymbol, Store};
 use rayon::prelude::*;
@@ -34,10 +33,10 @@ pub use typescript::TypescriptExtractor;
 
 /// Per-language symbol/edge extractor.
 ///
-/// Implementors receive a parsed tree-sitter tree plus the source bytes and
-/// append symbols and edges to a [`PendingFile`]. The synthetic module symbol
-/// is added at index `module_index` before `extract` is called — use it as
-/// the parent for top-level calls and as the source of import edges.
+/// Implementors receive a parsed tree plus source bytes and append symbols/edges
+/// to a [`PendingFile`]. The synthetic module symbol is added at `module_index`
+/// before `extract` runs — use it as parent for top-level calls and source of
+/// import edges.
 pub trait LanguageExtractor: Send + Sync {
     fn language(&self) -> tree_sitter::Language;
     fn name(&self) -> &'static str;
@@ -56,9 +55,9 @@ pub fn extractor_for_path(path: &Path) -> Option<Box<dyn LanguageExtractor>> {
         "go" => Some(Box::new(GoExtractor)),
         "java" => Some(Box::new(JavaExtractor)),
         "php" | "phtml" => Some(Box::new(PhpExtractor)),
-        // C / C++ share one tree-sitter-cpp grammar. Acceptable since C is mostly
-        // a C++ subset; rare C-only keyword identifiers (e.g. `new` as a var)
-        // may mis-parse — see cpp.rs precision disclaimer.
+        // C / C++ share one tree-sitter-cpp grammar — OK since C is mostly a C++
+        // subset; rare C-only keyword identifiers (e.g. `new` as a var) may
+        // mis-parse — see cpp.rs precision disclaimer.
         "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh" | "hxx" | "ipp" | "tpp" => {
             Some(Box::new(CppExtractor))
         }
@@ -88,23 +87,23 @@ const SKIP_DIRS: &[&str] = &[
 
 #[derive(Debug, Default, Clone)]
 pub struct IndexStats {
-    /// Files seen during the walk (including ones we don't have an extractor for).
+    /// Files seen during the walk (including ones with no extractor).
     pub files_scanned: u32,
-    /// Files we actually parsed and committed (re-indexed this run).
+    /// Files parsed and committed (re-indexed this run).
     pub files_indexed: u32,
     /// Files that failed to parse or commit.
     pub files_failed: u32,
-    /// Files with extensions we don't support — skipped before parsing.
+    /// Unsupported extensions — skipped before parsing.
     pub files_skipped: u32,
     /// Indexable files whose stored mtime is current — skipped without parsing.
     pub files_unchanged: u32,
-    /// Files that were in the index but no longer exist on disk — purged.
+    /// In the index but gone from disk — purged.
     pub files_purged: u32,
     pub symbols_total: u32,
     pub edges_total: u32,
     pub by_language: std::collections::BTreeMap<String, u32>,
-    /// Count of `.mastermind/tasks/<NNN>-<name>/spec.md` files added to the FTS5 corpus.
-    /// Zero when the directory doesn't exist (project hasn't run `mastermind init`).
+    /// Count of `.mastermind/tasks/<NNN>-<name>/spec.md` files added to the FTS5
+    /// corpus. Zero when the directory doesn't exist (no `mastermind init`).
     pub task_specs_indexed: u32,
     pub duration_ms: u128,
 }
@@ -119,12 +118,10 @@ impl Indexer {
     }
 
     /// Index everything reachable from `root`. Incremental by default — files whose
-    /// filesystem mtime is `<=` their stored mtime are skipped. Pass `force_full=true`
-    /// to re-index everything regardless of mtime (e.g., after a schema change or to
-    /// recover from a corrupted index).
+    /// filesystem mtime is `<=` stored mtime are skipped. `force_full=true` re-indexes
+    /// regardless of mtime (e.g. after a schema change or to recover a corrupted index).
     ///
-    /// Files that exist in the index but no longer on disk are purged at the end.
-    /// Writes to `store`.
+    /// Files in the index but gone from disk are purged at the end. Writes to `store`.
     pub fn index_all(&self, store: &mut Store, force_full: bool) -> Result<IndexStats, IndexError> {
         let start = SystemTime::now();
 
@@ -142,8 +139,8 @@ impl Indexer {
             ..Default::default()
         };
 
-        // Phase 2: classify each candidate serially (cheap — one indexed lookup per file).
-        // Build (to_parse, current_paths) for phases 3-5.
+        // Phase 2: classify candidates serially (cheap — one lookup per file).
+        // Builds (to_parse, current_paths) for phases 3-5.
         let mut to_parse: Vec<PathBuf> = Vec::new();
         let mut current_paths: std::collections::HashSet<String> =
             std::collections::HashSet::with_capacity(candidates.len());
@@ -179,7 +176,7 @@ impl Indexer {
             to_parse.push(path.clone());
         }
 
-        // Phase 3: parse stale files in parallel (extractor lookup is cheap, redo it)
+        // Phase 3: parse stale files in parallel (extractor lookup is cheap, redo it).
         let parsed: Vec<Result<PendingFile, IndexError>> = to_parse
             .par_iter()
             .filter_map(|p| {
@@ -206,9 +203,8 @@ impl Indexer {
             }
         }
 
-        // Phase 5: purge orphans (files in index but not on disk anymore).
-        // Only safe to do when we've scanned the FULL root — partial scans would
-        // wrongly purge anything outside the scanned subtree.
+        // Phase 5: purge orphans (in index, no longer on disk). Safe only after a
+        // FULL root scan — a partial scan would wrongly purge the unscanned subtree.
         if let Ok(indexed) = store.indexed_paths() {
             for path in indexed {
                 if !current_paths.contains(&path) && store.purge_file(&path).is_ok() {
@@ -217,12 +213,11 @@ impl Indexer {
             }
         }
 
-        // Phase 6: refresh the task-spec FTS5 corpus.
-        // Scan `.mastermind/tasks/<NNN>-<name>/spec.md` (each task is its own
-        // folder; top-level `_*.md` and bare `*.md` files are excluded — the
-        // former are shared assets, the latter is legacy 0.6.x layout). Whole-
-        // corpus replace — task spec sets are small (<100 files in practice),
-        // so atomic replace is cheaper than delta tracking and avoids stale
+        // Phase 6: refresh the task-spec FTS5 corpus. Scan
+        // `.mastermind/tasks/<NNN>-<name>/spec.md` (each task its own folder;
+        // top-level `_*.md` are shared assets and bare `*.md` is legacy 0.6.x
+        // layout, both excluded). Whole-corpus replace — spec sets are small
+        // (<100 files), so atomic replace beats delta tracking and avoids stale
         // entries on rename/delete.
         if let Ok(count) = self.index_task_specs(store) {
             stats.task_specs_indexed = count;
@@ -233,17 +228,17 @@ impl Indexer {
     }
 
     /// Scan `.mastermind/tasks/<NNN>-<name>/spec.md` and replace the FTS5 corpus.
-    /// Silent no-op when the directory doesn't exist (project hasn't run `mastermind init`).
-    /// Returns the count of indexed specs.
+    /// Silent no-op when the directory is absent (no `mastermind init`). Returns
+    /// the count of indexed specs.
     ///
-    /// Layout (since 0.7.0): each task is a folder containing `spec.md` and any
-    /// related artifacts (audit notes, screenshots, prior versions). Top-level
-    /// `_`-prefixed files (e.g. `_lessons.md`) are shared assets and
-    /// intentionally excluded from search.
+    /// Layout (since 0.7.0): each task is a folder holding `spec.md` plus related
+    /// artifacts (audit notes, screenshots, prior versions). Top-level
+    /// `_`-prefixed files (e.g. `_lessons.md`) are shared assets, excluded from
+    /// search.
     pub fn index_task_specs(&self, store: &mut Store) -> Result<u32, IndexError> {
         let tasks_dir = self.root.join(".mastermind").join("tasks");
         if !tasks_dir.is_dir() {
-            // No `.mastermind/tasks/` — also clear any stale entries from a prior run.
+            // No `.mastermind/tasks/` — clear any stale entries from a prior run too.
             store
                 .replace_task_specs(&[])
                 .map_err(|e| IndexError::Other(e.to_string()))?;
@@ -257,9 +252,8 @@ impl Indexer {
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            // Per-task folders only. Bare `.md` files at top level (legacy 0.6.x
-            // layout) and `_`-prefixed names (shared assets, private scratch) are
-            // excluded.
+            // Per-task folders only. Bare top-level `.md` (legacy 0.6.x) and
+            // `_`-prefixed names (shared assets, private scratch) are excluded.
             if !path.is_dir() || name.starts_with('_') || name.starts_with('.') {
                 continue;
             }
@@ -302,7 +296,7 @@ fn is_skipped_dir(name: &str) -> bool {
 }
 
 /// First `# Heading` line of a markdown spec — falls back to the filename
-/// without extension if no heading exists.
+/// (minus extension) if no heading exists.
 fn extract_spec_title(body: &str, filename: &str) -> String {
     for line in body.lines() {
         let trimmed = line.trim();
@@ -323,10 +317,15 @@ fn guess_language_for(rel_path: &str) -> Option<&'static str> {
         Some("tsx")
     } else if rel_path.ends_with(".ts") {
         Some("typescript")
-    } else if rel_path.ends_with(".jsx") {
-        Some("jsx")
-    } else if rel_path.ends_with(".js") || rel_path.ends_with(".mjs") || rel_path.ends_with(".cjs")
+    } else if rel_path.ends_with(".jsx")
+        || rel_path.ends_with(".js")
+        || rel_path.ends_with(".mjs")
+        || rel_path.ends_with(".cjs")
     {
+        // `.jsx` is a JavaScript dialect — store as "javascript", not a distinct
+        // "jsx". The MCP `language` enum and `lang_from_ext` already treat it as
+        // javascript; "jsx" made `.jsx` symbols invisible to every
+        // `language: "javascript"` filter.
         Some("javascript")
     } else if rel_path.ends_with(".rs") {
         Some("rust")
@@ -361,8 +360,8 @@ pub(crate) fn parse_one(
     extractor: &dyn LanguageExtractor,
 ) -> Result<PendingFile, IndexError> {
     let source = std::fs::read(path).map_err(|e| IndexError::Io(e.to_string()))?;
-    // Milliseconds — second-precision was missing edits made in the same second
-    // as the previous index run. i64 millis covers ~292M years.
+    // Milliseconds — second-precision missed edits within the same second as the
+    // previous index run. i64 millis covers ~292M years.
     let mtime = std::fs::metadata(path)
         .and_then(|m| m.modified())
         .map_err(|e| IndexError::Io(e.to_string()))?
@@ -380,12 +379,12 @@ pub(crate) fn parse_one(
 }
 
 /// Parse a file's bytes WITHOUT touching the filesystem. Used by
-/// `mmcg_symbols_changed_since` which needs the symbol set at an old git ref
-/// — the bytes come from `git show <ref>:<path>`, not from disk.
+/// `mmcg_symbols_changed_since`, which needs the symbol set at an old git ref —
+/// bytes come from `git show <ref>:<path>`, not disk.
 ///
-/// `mtime` is caller-supplied; for git-blob parsing pass `0` (the result is
-/// transient, never stored). `rel_path` is the path relative to the project
-/// root and is also used to pick the language extractor via its extension.
+/// `mtime` is caller-supplied; for git-blob parsing pass `0` (result is
+/// transient, never stored). `rel_path` is relative to the project root and
+/// picks the extractor via its extension.
 pub(crate) fn parse_blob(
     rel_path: &str,
     source: &[u8],
@@ -515,7 +514,7 @@ mod incremental_tests {
         let indexer = Indexer::new(&dir);
         indexer.index_all(&mut store, false).unwrap();
 
-        // Bump mtime on a.py to 10 seconds in the future — bypasses second-resolution issues.
+        // Bump a.py mtime 10s into the future — bypasses second-resolution issues.
         let f = fs::File::options().write(true).open(&a).unwrap();
         f.set_modified(SystemTime::now() + Duration::from_secs(10))
             .unwrap();
@@ -555,13 +554,13 @@ mod incremental_tests {
     #[test]
     fn task_specs_indexed_from_mastermind_dir() {
         let (dir, db) = setup("task_specs");
-        // No `.mastermind/tasks/` yet — first run should report 0 specs.
+        // No `.mastermind/tasks/` yet — first run reports 0 specs.
         let indexer = Indexer::new(&dir);
         let mut store = Store::open(&db).unwrap();
         let stats1 = indexer.index_all(&mut store, false).unwrap();
         assert_eq!(stats1.task_specs_indexed, 0);
 
-        // Add two task folders + one shared template (underscore prefix excluded).
+        // Two task folders + one shared template (underscore prefix excluded).
         // Layout: .mastermind/tasks/<NNN>-<name>/spec.md
         let tasks_dir = dir.join(".mastermind").join("tasks");
         let spec_a = tasks_dir.join("001-rate-limiter");
@@ -583,7 +582,7 @@ mod incremental_tests {
             "# Lessons — should not appear in search\n\nGeneric scaffold.\n",
         )
         .unwrap();
-        // A bare `.md` at top level (legacy 0.6.x layout) must be ignored.
+        // A bare top-level `.md` (legacy 0.6.x layout) must be ignored.
         fs::write(
             tasks_dir.join("099-legacy-flat.md"),
             "# Legacy flat spec\n\nShould be skipped — needs migration.\n",
@@ -596,12 +595,12 @@ mod incremental_tests {
             "underscore + legacy flat excluded"
         );
 
-        // FTS5 query proves the body content is searchable.
+        // FTS5 query proves body content is searchable.
         let hits = store.search_task_specs("token bucket", 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].path.contains("001-rate-limiter/spec.md"));
 
-        // Lessons file is excluded — searching for its unique phrase finds nothing.
+        // Lessons file excluded — its unique phrase finds nothing.
         let empty = store.search_task_specs("scaffold", 10).unwrap();
         assert!(empty.is_empty());
 
@@ -615,6 +614,39 @@ mod incremental_tests {
         assert_eq!(stats3.task_specs_indexed, 1);
         let gone = store.search_task_specs("LRU TTL", 10).unwrap();
         assert!(gone.is_empty());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn jsx_files_indexed_as_javascript() {
+        // Regression: `.jsx` stored under language "jsx" — not in the MCP
+        // `language` enum, never matches a `language: "javascript"` filter — so
+        // `.jsx` defs silently vanished from language-scoped queries (the exact
+        // case the filter exists for: monorepo collisions).
+        let (dir, db) = setup("jsx_as_js");
+        fs::write(
+            dir.join("App.jsx"),
+            "export function App() { return null; }\n",
+        )
+        .unwrap();
+
+        let mut store = Store::open(&db).unwrap();
+        Indexer::new(&dir).index_all(&mut store, false).unwrap();
+
+        // Must be reachable through a `language: "javascript"` filter.
+        let js_files = store.files_under(None, Some("javascript")).unwrap();
+        assert!(
+            js_files.iter().any(|f| f.path.ends_with("App.jsx")),
+            "App.jsx should be found under language=javascript"
+        );
+
+        // Nothing should remain under the bogus "jsx" language.
+        let jsx_files = store.files_under(None, Some("jsx")).unwrap();
+        assert!(
+            jsx_files.is_empty(),
+            "no file should be stored under language=jsx"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -636,9 +668,9 @@ pub(crate) mod common {
         push_def_with_decorators(pending, name, kind, node, signature, parent_index, None)
     }
 
-    /// Same as `push_def` but records decorator/attribute names. `decorators`
-    /// should be pre-formatted as `,name1,name2,` (leading/trailing commas)
-    /// so the `unreferenced` query can match individual names via `LIKE ',name,'`.
+    /// Like `push_def` but records decorator/attribute names. `decorators` must be
+    /// pre-formatted as `,name1,name2,` (leading/trailing commas) so the
+    /// `unreferenced` query can match individual names via `LIKE ',name,'`.
     pub fn push_def_with_decorators(
         pending: &mut PendingFile,
         name: String,
@@ -670,8 +702,8 @@ pub(crate) mod common {
         push_call_with_type(pending, from_index, to_name, to_path, None, line)
     }
 
-    /// For calls where the receiver/namespace is a type (e.g. Rust `SessionStore::new()`),
-    /// pass the type as `to_type` so `mmcg_callers <Type>` finds these sites.
+    /// When the receiver/namespace is a type (e.g. Rust `SessionStore::new()`),
+    /// pass it as `to_type` so `mmcg_callers <Type>` finds these sites.
     pub fn push_call_with_type(
         pending: &mut PendingFile,
         from_index: usize,

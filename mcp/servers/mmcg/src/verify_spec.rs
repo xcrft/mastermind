@@ -1,19 +1,17 @@
 //! `mastermind verify-spec` — pre-execution gate.
 //!
-//! Replaces the prompt-discipline checks the planner is supposed to do before
-//! handing off to the executor with **deterministic, mechanical** checks. The
-//! LLM auditor still handles semantic judgment; this catches the symbols-don't-
-//! exist / files-don't-exist / required-section-empty / oversized-blast-radius
-//! class of bugs at the contract level.
+//! **Deterministic, mechanical** version of the planner's pre-handoff
+//! prompt-discipline checks. The LLM auditor still does semantic judgment; this
+//! catches the symbol-missing / file-missing / section-empty / oversized-blast-
+//! radius class of bugs at the contract level.
 //!
 //! Verdict semantics:
 //! - `pass`  — no errors, no warnings
 //! - `warn`  — warnings only (e.g. large blast radius)
-//! - `fail`  — at least one error (missing symbol, missing file, empty
-//!   mandatory section)
+//! - `fail`  — ≥1 error (missing symbol, missing file, empty mandatory section)
 //!
-//! Exit code maps: 0 / 0 / 1. Warnings do NOT fail the gate by design — a
-//! 38-caller blast radius is a flag for the planner to read, not a block.
+//! Exit codes: 0 / 0 / 1. Warnings don't fail the gate by design — a 38-caller
+//! blast radius is a flag for the planner to read, not a block.
 
 use crate::spec::{self, ParsedSpec, SymbolClaim, TouchEntry};
 use crate::store::Store;
@@ -21,14 +19,13 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::path::Path;
 
-/// Threshold above which `blast_radius` becomes a warning. 30 is empirical —
-/// touching a function with >30 callers is rarely "small" and the planner
-/// should at least acknowledge the impact in Notes.
+/// `blast_radius` warning threshold. 30 is empirical — touching a function with
+/// >30 callers is rarely "small"; the planner should acknowledge it in Notes.
 pub const BLAST_RADIUS_WARN: u32 = 30;
 
-/// Sections the spec template marks `*(MANDATORY ...)*` (modulo "for
-/// non-trivial work" / "for code that runs in production" qualifiers we can't
-/// evaluate). All must be present AND non-empty for verdict to be `pass`.
+/// Sections the spec template marks `*(MANDATORY ...)*` (minus "for non-trivial
+/// work" / "for production" qualifiers we can't evaluate). All must be present
+/// AND non-empty for verdict `pass`.
 pub const MANDATORY_SECTIONS: &[&str] = &[
     "Goals",
     "Alternatives Considered",
@@ -41,10 +38,9 @@ pub const MANDATORY_SECTIONS: &[&str] = &[
 /// Sections required only for lite mode (minimal spec).
 pub const LITE_MANDATORY_SECTIONS: &[&str] = &["Goals"];
 
-/// Return the set of mandatory sections to enforce given the spec's declared
-/// mode (from frontmatter). Falls back to `MANDATORY_SECTIONS` when no mode
-/// is declared (backward compat with hand-written specs that predate the
-/// `mode:` field).
+/// Mandatory sections to enforce for the spec's declared `mode` (frontmatter).
+/// Falls back to `MANDATORY_SECTIONS` when no mode is declared (back-compat with
+/// hand-written specs predating the `mode:` field).
 pub fn mandatory_sections_for_mode(mode: Option<&str>) -> &'static [&'static str] {
     match mode {
         Some("lite") => LITE_MANDATORY_SECTIONS,
@@ -60,8 +56,8 @@ pub enum Verdict {
     Fail,
 }
 
-/// Tagged finding. `kind` is the machine-readable category, fields are the
-/// specific evidence. JSON-friendly (serde flattens enum + extra fields).
+/// Tagged finding: `kind` is the machine-readable category, fields are the
+/// evidence. JSON-friendly (serde flattens enum + extra fields).
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Finding {
@@ -81,45 +77,43 @@ pub enum Finding {
         callers: u32,
         threshold: u32,
     },
-    /// Pre-edit snapshot caller count doesn't match the live index. Pre-edit
-    /// snapshots go stale; planner should re-grab via `mmcg_callers` before
-    /// handing off.
+    /// Pre-edit snapshot caller count doesn't match the live index. Snapshots go
+    /// stale; planner should re-grab via `mmcg_callers` before handing off.
     SnapshotCallerCountDrift {
         symbol: String,
         spec_says: u32,
         index_says: u32,
     },
     /// Pre-edit snapshot signature doesn't match the live index. Same staleness
-    /// signal — somebody (or another commit) changed the signature between
-    /// when the planner ran `mmcg_search` and now.
+    /// signal — something changed the signature between the planner's
+    /// `mmcg_search` and now.
     SnapshotSignatureDrift {
         symbol: String,
         spec_says: String,
         index_says: Option<String>,
     },
-    /// FIND block payload not present in the target file — spec is stale or
-    /// the executor would fail at phase 1. Whitespace-sensitive substring match.
+    /// FIND block payload not in the target file — spec is stale or the executor
+    /// fails at phase 1. Whitespace-sensitive substring match.
     FindBlockMismatch {
         file: String,
         phase: Option<String>,
         find_text_preview: String,
     },
     /// VERIFY command's first token isn't a binary on `$PATH` — `cargo test`
-    /// when `cargo` isn't installed, `pnpm` when project uses `npm`, etc.
+    /// when `cargo` isn't installed, `pnpm` when the project uses `npm`, etc.
     /// Warning only — could be a project-local script the executor knows about.
     VerifyCommandNotFound { command: String, executable: String },
-    /// A symbol named in `frontmatter.touches[].symbols` was not found at the
-    /// declared file path. Distinct from `MissingSymbol`: this one is
-    /// file-scoped, so it catches monorepo leaf-name collisions that the
-    /// heuristic check would miss (`handleWebhook` exists in many controllers
-    /// — but not at `src/billing/billing.controller.ts`).
+    /// A `frontmatter.touches[].symbols` symbol not found at the declared file
+    /// path. Unlike `MissingSymbol`, this is file-scoped, so it catches monorepo
+    /// leaf-name collisions the heuristic misses (`handleWebhook` exists in many
+    /// controllers — but not at `src/billing/billing.controller.ts`).
     MissingSymbolAtFile {
         symbol: String,
         file: String,
         language: Option<String>,
     },
-    /// A `--strict` requirement was not met (missing frontmatter, unscoped
-    /// touch, no verify command, index required…). Only emitted in strict mode.
+    /// A `--strict` requirement unmet (missing frontmatter, unscoped touch, no
+    /// verify command, index required…). Only emitted in strict mode.
     StrictViolation { reason: String },
 }
 
@@ -159,8 +153,8 @@ impl Report {
         !self.errors.is_empty()
     }
 
-    /// Fold a hard error in and force the verdict to Fail. Used to layer
-    /// `--strict` / `--require-index` findings onto a report after `run`.
+    /// Fold a hard error in and force verdict to Fail. Layers `--strict` /
+    /// `--require-index` findings onto a report after `run`.
     pub fn push_error(&mut self, finding: Finding) {
         self.errors.push(finding);
         self.verdict = Verdict::Fail;
@@ -228,10 +222,10 @@ fn render_finding(f: &Finding) -> String {
     }
 }
 
-/// Extra requirements enforced only under `--strict`: a code-touching spec must
-/// carry YAML frontmatter that scopes what it changes (`touches`/`expected_docs`),
-/// scope each touch to a file, and declare at least one runnable verify command.
-/// Returns the violations as `StrictViolation` findings for the caller to fold in.
+/// `--strict`-only requirements: a code-touching spec must carry YAML
+/// frontmatter scoping what it changes (`touches`/`expected_docs`), scope each
+/// touch to a file, and declare ≥1 runnable verify command. Returns violations
+/// as `StrictViolation` findings for the caller to fold in.
 pub fn strict_check(spec: &ParsedSpec) -> Vec<Finding> {
     let mut out = Vec::new();
     match &spec.frontmatter {
@@ -268,10 +262,9 @@ pub fn strict_check(spec: &ParsedSpec) -> Vec<Finding> {
     out
 }
 
-/// Run all Phase A checks against a parsed spec, using `store` as the live
-/// truth source and `repo_root` to resolve file existence. `store` is
-/// optional — when `None` the symbol-existence + blast-radius checks are
-/// skipped (use case: running verify-spec outside an indexed project).
+/// Run all Phase A checks against a parsed spec, using `store` as live truth and
+/// `repo_root` to resolve file existence. `store` optional — `None` skips the
+/// symbol-existence + blast-radius checks (verify-spec outside an indexed project).
 pub fn run(spec: &ParsedSpec, store: Option<&Store>, repo_root: &Path) -> Report {
     let mut errors: Vec<Finding> = Vec::new();
     let mut warnings: Vec<Finding> = Vec::new();
@@ -294,12 +287,11 @@ pub fn run(spec: &ParsedSpec, store: Option<&Store>, repo_root: &Path) -> Report
     }
 
     // 2. Mentioned files exist on disk.
-    //    Frontmatter-authoritative when present: if frontmatter declares
-    //    `touches[]` or `expected_docs[]`, use ONLY that list. Heuristic
-    //    backticked-path-token extraction is too noisy for gates (it picks
-    //    up prose mentions like ``do not touch `README.md` `` as claims).
-    //    When frontmatter is absent (or has no file-scope fields), fall back
-    //    to the heuristic mentioned_files for backward compat.
+    //    Frontmatter-authoritative when present: if it declares `touches[]` or
+    //    `expected_docs[]`, use ONLY that list. Heuristic backticked-path-token
+    //    extraction is too noisy for gates (treats prose like ``do not touch
+    //    `README.md` `` as a claim). Absent (or no file-scope fields) → fall
+    //    back to heuristic mentioned_files for back-compat.
     let files_to_check: Vec<String> = match spec.frontmatter.as_ref() {
         Some(fm) if fm.has_file_scope() => {
             let mut seen: HashSet<String> = HashSet::new();
@@ -329,7 +321,7 @@ pub fn run(spec: &ParsedSpec, store: Option<&Store>, repo_root: &Path) -> Report
     //    Two sources, both contribute findings:
     //    a) heuristic `## Pre-edit symbol snapshot` bullets (name-only search)
     //    b) frontmatter `touches[].symbols` with file+language scoping —
-    //       catches monorepo collisions the heuristic misses.
+    //       catches monorepo collisions (a) misses.
     if let Some(store) = store {
         for claim in &spec.pre_edit_snapshot {
             check_symbol_claim(claim, store, &mut errors, &mut warnings);
@@ -341,18 +333,17 @@ pub fn run(spec: &ParsedSpec, store: Option<&Store>, repo_root: &Path) -> Report
         }
     }
 
-    // 4. FIND blocks — for every block with a target file, the FIND text must
-    //    be a literal substring of the current file contents. Stale FIND ⇒
-    //    executor fails at phase 1, so this is `error`, not warning.
+    // 4. FIND blocks — for each block with a target file, the FIND text must be
+    //    a literal substring of the current contents. Stale FIND ⇒ executor
+    //    fails at phase 1, so `error`, not warning.
     for block in &spec.find_blocks {
         check_find_block(block, repo_root, &mut errors);
     }
 
-    // 5. VERIFY commands — first token resolvable on `$PATH`. Soft warn:
-    //    might be a project-local script (`./scripts/check.sh`) which would
-    //    look like an unresolved binary but is fine. Includes both heuristic
-    //    phase-block `**VERIFY**: ...` lines AND frontmatter `verify[]` entries
-    //    with `cmd:` form (label-only entries are informational, skipped).
+    // 5. VERIFY commands — first token resolvable on `$PATH`. Soft warn: might be
+    //    a project-local script (`./scripts/check.sh`) that looks unresolved but
+    //    is fine. Covers heuristic phase-block `**VERIFY**: ...` lines AND
+    //    frontmatter `verify[]` `cmd:` entries (label-only entries skipped).
     let mut all_commands: Vec<String> = spec.verify_commands.clone();
     if let Some(fm) = &spec.frontmatter {
         for entry in &fm.verify {
@@ -402,7 +393,7 @@ fn check_symbol_claim(
         });
         return;
     }
-    // Caller-count check — compare spec's stated count against the live index.
+    // Caller-count check — spec's stated count vs the live index.
     let live_callers = match store.callers_of(&claim.name, None, None) {
         Ok(callers) => callers.len() as u32,
         Err(_) => return,
@@ -416,10 +407,10 @@ fn check_symbol_claim(
             });
         }
     }
-    // Signature check — if the bullet recorded a signature, the live signature
-    // of any matching symbol must equal it. Multiple matches (e.g. C# partial
-    // class collisions, monorepo same-name in two languages) → pass if ANY
-    // matches; the planner has the language filter to disambiguate elsewhere.
+    // Signature check — if the bullet recorded one, some matching symbol's live
+    // signature must equal it. Multiple matches (C# partial-class collisions,
+    // monorepo same-name across languages) pass if ANY matches; the planner has
+    // the language filter to disambiguate elsewhere.
     if let Some(spec_sig) = &claim.signature {
         let live_sigs: Vec<Option<String>> = hits.iter().map(|s| s.signature.clone()).collect();
         let any_match = live_sigs
@@ -442,11 +433,11 @@ fn check_symbol_claim(
     }
 }
 
-/// Validate one `frontmatter.touches[]` entry — the symbols listed must exist
-/// at the declared file path (and language, if given). Catches the leaf-name
-/// collision class of false positive that the heuristic `pre_edit_snapshot`
-/// path can't see: `handleWebhook` exists in many controllers, but the spec
-/// says THIS one is at `src/billing/billing.controller.ts`.
+/// Validate one `frontmatter.touches[]` entry — listed symbols must exist at the
+/// declared file path (and language, if given). Catches the leaf-name collision
+/// false positive the heuristic `pre_edit_snapshot` path can't see:
+/// `handleWebhook` exists in many controllers, but the spec says THIS one is at
+/// `src/billing/billing.controller.ts`.
 fn check_frontmatter_touch(
     touch: &TouchEntry,
     store: &Store,
@@ -455,14 +446,14 @@ fn check_frontmatter_touch(
 ) {
     for sym in &touch.symbols {
         let name = sym.name();
-        // Inherit file/language from the touch entry unless the Detailed
-        // variant overrides them.
+        // Inherit file/language from the touch entry unless the Detailed variant
+        // overrides them.
         let file = sym.file().unwrap_or(touch.file.as_str());
         let language = sym.language().or(touch.language.as_deref());
 
         let hits = match store.search_symbols(name, None, language) {
             Ok(rows) => rows,
-            Err(_) => continue, // store error — verify_spec already surfaces store failures elsewhere
+            Err(_) => continue, // store error — surfaced elsewhere in verify_spec
         };
         let scoped: Vec<_> = hits.into_iter().filter(|s| s.file_path == file).collect();
         if scoped.is_empty() {
@@ -473,10 +464,9 @@ fn check_frontmatter_touch(
             });
             continue;
         }
-        // Caller-count drift, same any-file scoping rule as the heuristic
-        // path. (Caller counts are inherently cross-file; we filter the symbol
-        // hit by file for existence, but don't try to attribute callers to a
-        // specific definition.)
+        // Caller-count drift — same any-file scoping as the heuristic path.
+        // Caller counts are inherently cross-file: we filter symbol hits by file
+        // for existence, but don't attribute callers to a specific definition.
         if let Some(declared) = sym.callers() {
             let live = match store.callers_of(name, language, None) {
                 Ok(callers) => callers.len() as u32,
@@ -513,18 +503,17 @@ fn check_frontmatter_touch(
     }
 }
 
-/// FIND-block validation: the planner's `FIND:` payload must appear as a
-/// substring of the target file. Whitespace-sensitive — matching the executor's
-/// reality (it does literal replace).
+/// FIND-block validation: the planner's `FIND:` payload must be a substring of
+/// the target file. Whitespace-sensitive — matching the executor (literal replace).
 fn check_find_block(block: &crate::spec::FindBlock, repo_root: &Path, errors: &mut Vec<Finding>) {
     let Some(file) = &block.file else {
-        // No `**File:**` marker — can't validate. Silent skip; verify-spec's
-        // mandatory-file-mentions check (#2) catches the typical case.
+        // No `**File:**` marker — can't validate. Silent skip; check #2
+        // (mandatory file mentions) catches the typical case.
         return;
     };
     let abs = repo_root.join(file);
     let Ok(body) = std::fs::read_to_string(&abs) else {
-        // Missing file is already flagged by check #2; don't double-report.
+        // Missing file already flagged by check #2; don't double-report.
         return;
     };
     if !body.contains(&block.find_text) {
@@ -544,16 +533,16 @@ fn check_find_block(block: &crate::spec::FindBlock, repo_root: &Path, errors: &m
     }
 }
 
-/// Check that the first token of a VERIFY command resolves on `$PATH`. Skips
-/// shell-syntactic intros (`cd …`, `pushd …`) and project-local paths starting
-/// with `./` or `/` — both are common and not actually missing.
+/// Check that a VERIFY command's first token resolves on `$PATH`. Skips
+/// shell-syntactic intros (`cd …`, `pushd …`) and project-local `./` or `/`
+/// paths — both common and not actually missing.
 fn check_verify_command(command: &str, warnings: &mut Vec<Finding>) {
     let first = match command.split_whitespace().next() {
         Some(t) => t,
         None => return,
     };
-    // Skip project-local paths (`./scripts/foo.sh`) — they're files, not
-    // PATH-resolved binaries. Existence is the executor's problem, not ours.
+    // Skip project-local paths (`./scripts/foo.sh`) — files, not PATH-resolved
+    // binaries. Existence is the executor's problem, not ours.
     if first.starts_with("./") || first.starts_with('/') {
         return;
     }
@@ -576,14 +565,14 @@ fn which_on_path(binary: &str) -> Option<std::path::PathBuf> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join(binary);
-        if candidate.is_file() {
+        if is_executable_file(&candidate) {
             return Some(candidate);
         }
-        // Windows: try common executable extensions if no extension present.
+        // Windows: try common executable extensions when none is present.
         if cfg!(windows) && !binary.contains('.') {
             for ext in ["exe", "cmd", "bat"] {
                 let c = dir.join(format!("{binary}.{ext}"));
-                if c.is_file() {
+                if is_executable_file(&c) {
                     return Some(c);
                 }
             }
@@ -592,16 +581,35 @@ fn which_on_path(binary: &str) -> Option<std::path::PathBuf> {
     None
 }
 
-/// Section body is effectively empty when it's whitespace, just the template
-/// placeholder bullets (`- <thing>` with angle-bracket placeholders), or
-/// commentary HTML comments only.
+/// A regular file that is also runnable. On Unix a `$PATH` name without the
+/// execute bit isn't a resolvable command, so existence is the wrong check; on
+/// Windows runnability isn't in the mode, so existence is the best signal.
+fn is_executable_file(p: &Path) -> bool {
+    if !p.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        p.metadata()
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// Body is effectively empty when it's only whitespace, template placeholder
+/// bullets (`- <thing>` with angle-bracket hints), or HTML comments.
 fn body_is_effectively_empty(body: &str) -> bool {
     let stripped: String = body
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .filter(|l| !l.starts_with("<!--"))
-        // Drop unchanged template placeholders: lines that contain angle-bracket
+        // Drop unchanged template placeholders: lines with balanced angle-bracket
         // hints like `- <Alt 1 short name>` or `<symbol>`.
         .filter(|l| {
             let open = l.matches('<').count();
@@ -622,9 +630,9 @@ mod tests {
 
     fn tmp() -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
-        // See `doctor.rs::tmp()` — same parallel-collision fix. The atomic
-        // counter guarantees a distinct directory per call; `process::id()` +
-        // nanos remain for cross-process uniqueness and debuggability.
+        // See `doctor.rs::tmp()` — same parallel-collision fix. Atomic counter
+        // gives a distinct dir per call; `process::id()` + nanos remain for
+        // cross-process uniqueness and debuggability.
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let p = std::env::temp_dir().join(format!(
             "mmcg-verify-{}-{}-{}",
@@ -657,7 +665,7 @@ mod tests {
     #[test]
     fn fails_when_mentioned_file_missing() {
         let root = tmp();
-        // Spec mentions a file that doesn't exist + valid mandatory sections.
+        // Spec mentions a nonexistent file + valid mandatory sections.
         let body = "\
 ## Goals
 Edit `src/missing.rs`
@@ -793,12 +801,12 @@ VERIFY: `definitely-not-on-path-12345`
     fn frontmatter_touch_catches_file_scoped_missing_symbol() {
         use crate::indexer::Indexer;
         let root = tmp();
-        // Two files with the SAME leaf name `handleWebhook` — monorepo collision.
+        // Monorepo collision: same leaf name `handleWebhook` in two files.
         fs::create_dir_all(root.join("src/billing")).unwrap();
         fs::create_dir_all(root.join("src/legacy")).unwrap();
         // The "right" file does NOT contain handleWebhook (yet) — spec is wrong
-        // about where it lives. Legacy does. Heuristic check would pass
-        // (handleWebhook exists somewhere); scoped check should fail.
+        // about where it lives; legacy has it. Heuristic check passes (exists
+        // somewhere); scoped check should fail.
         fs::write(
             root.join("src/billing/billing.ts"),
             "export function unrelated() {}\n",
@@ -815,8 +823,8 @@ VERIFY: `definitely-not-on-path-12345`
         Indexer::new(&root).index_all(&mut store, false).unwrap();
         drop(store);
 
-        // Frontmatter declares handleWebhook lives in billing.ts.
-        // Mandatory sections all present so we isolate the frontmatter check.
+        // Frontmatter declares handleWebhook in billing.ts. Mandatory sections
+        // all present to isolate the frontmatter check.
         let body = "---
 id: \"1\"
 touches:
@@ -842,8 +850,7 @@ touches:
         let s = spec::parse_str("t.md", body);
         let store = Store::open(&db).unwrap();
         let r = run(&s, Some(&store), &root);
-        // Heuristic would PASS (handleWebhook exists somewhere). Frontmatter
-        // scoped check must fail.
+        // Heuristic would PASS (exists somewhere); scoped check must fail.
         assert!(
             r.errors.iter().any(|e| matches!(
                 e,
@@ -883,8 +890,7 @@ verify:
 ";
         let s = spec::parse_str("t.md", body);
         let r = run(&s, None, &root);
-        // Label-only `typecheck` should NOT warn (no cmd). The `cmd:` entry
-        // for the bogus binary SHOULD warn.
+        // Label-only `typecheck` should NOT warn (no cmd); the bogus `cmd:` entry SHOULD.
         assert!(r.warnings.iter().any(|w| matches!(
             w,
             Finding::VerifyCommandNotFound { executable, .. } if executable == "definitely-not-on-path-87654"
@@ -898,15 +904,14 @@ verify:
 
     #[test]
     fn frontmatter_authoritative_ignores_prose_path_mentions() {
-        // Regression: prose mentions like ``do not touch `README.md` ``
-        // used to flag README.md as a claimed file (heuristic union path).
-        // When frontmatter declares file scope, the heuristic mentioned_files
-        // is ignored — frontmatter is authoritative.
+        // Regression: prose like ``do not touch `README.md` `` used to flag
+        // README.md as a claimed file (heuristic union path). With frontmatter
+        // file scope, heuristic mentioned_files is ignored — frontmatter wins.
         let root = tmp();
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(root.join("src/x.rs"), "fn x(){}").unwrap();
-        // No README.md on disk — the prose mention would flag MissingFile
-        // under the old union behavior.
+        // No README.md on disk — prose mention would flag MissingFile under the
+        // old union behavior.
         let body = "---
 id: \"1\"
 touches:
@@ -928,8 +933,8 @@ touches:
 ";
         let s = spec::parse_str("t.md", body);
         let r = run(&s, None, &root);
-        // Heuristic would have flagged README.md and docs/guide.md as missing.
-        // Frontmatter authoritative → only src/x.rs is in scope (and exists).
+        // Heuristic would flag README.md and docs/guide.md missing. Frontmatter
+        // authoritative → only src/x.rs in scope (and exists).
         assert!(
             !r.errors
                 .iter()
@@ -989,7 +994,7 @@ expected_docs:
     #[test]
     fn passes_clean_spec_without_store() {
         let root = tmp();
-        // Create the file the spec mentions so MissingFile doesn't trigger.
+        // Create the mentioned file so MissingFile doesn't trigger.
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(root.join("src/foo.rs"), "fn x() {}").unwrap();
         let body = "\

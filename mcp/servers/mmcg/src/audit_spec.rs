@@ -1,14 +1,14 @@
 //! `mastermind audit-spec` — post-execution mechanical audit.
 //!
-//! Complements the LLM auditor by handling the **deterministic** part of the
-//! audit contract: file-set comparison, pre-edit snapshot drift, symbol-level
-//! diff. The LLM still does semantic judgment (does the test plan actually
-//! cover the new behavior? is the doc update sufficient?) — this catches the
-//! "you claimed file X but git diff doesn't show it" / "snapshot said 8
-//! callers, now 5" class of bugs without prompt discipline.
+//! Handles the **deterministic** part of the audit contract: file-set
+//! comparison, pre-edit snapshot drift, symbol-level diff. The LLM auditor
+//! still does semantic judgment (does the test plan cover the new behavior? is
+//! the doc update sufficient?); this catches the "claimed file X but git diff
+//! doesn't show it" / "snapshot said 8 callers, now 5" bugs without needing
+//! prompt discipline.
 //!
-//! Inputs: a parsed spec + the git ref to compare against (typically
-//! `main` or the merge-base) + the indexed `Store` for live symbol counts.
+//! Inputs: parsed spec + git ref to compare against (typically `main` or the
+//! merge-base) + indexed `Store` for live symbol counts.
 //!
 //! Outputs structured findings:
 //! - `unexpected_file` — file changed in git but not mentioned in spec
@@ -17,8 +17,8 @@
 //! - `snapshot_signature_drift` — pre-edit signature != post-edit signature
 //! - `snapshot_symbol_gone` — pre-edit symbol no longer in the index
 //!
-//! Phase B (test/doc/observability plan validation, non-breaking API check)
-//! is deliberately out of scope for v1.
+//! Phase B (test/doc/observability plan validation, non-breaking API check) is
+//! deliberately out of scope for v1.
 
 use crate::diff::{self, DiffError, SymbolDiff};
 use crate::spec::{ParsedSpec, SymbolClaim};
@@ -32,11 +32,10 @@ use std::path::Path;
 pub enum Verdict {
     /// Every check passed — no drift, no scope creep.
     Held,
-    /// At least one finding but no contract violation — usually scope creep
-    /// (unexpected files) or minor signature drift. Planner reads + decides.
+    /// Finding(s) but no contract violation — usually scope creep (unexpected
+    /// files) or minor signature drift. Planner reads + decides.
     Drift,
-    /// Spec claimed something that didn't happen, OR pre-edit symbol now
-    /// missing entirely.
+    /// Spec claimed something that didn't happen, OR pre-edit symbol now gone.
     Broken,
 }
 
@@ -54,8 +53,8 @@ pub enum Finding {
         index_says: u32,
     },
     /// Pre-edit snapshot signature != current signature of the same symbol.
-    /// Could be intentional (executor changed param shape) or a side-effect.
-    /// LLM auditor decides; we just flag the mechanical fact.
+    /// May be intentional (executor changed param shape) or a side-effect — LLM
+    /// auditor decides; we flag the mechanical fact.
     SnapshotSignatureDrift {
         symbol: String,
         spec_says: String,
@@ -64,51 +63,50 @@ pub enum Finding {
     /// Symbol present in pre-edit snapshot has no current entry in mmcg —
     /// renamed, deleted, or moved out of the indexed tree.
     SnapshotSymbolGone { symbol: String },
-    /// A symbol disappeared between baseline and HEAD AND the spec text
-    /// doesn't mention the name anywhere — silent breaking change. Spec
-    /// should acknowledge intentional removals in Goals / Notes.
+    /// Symbol disappeared between baseline and HEAD AND the spec text doesn't
+    /// mention the name anywhere — silent breaking change. Spec should
+    /// acknowledge intentional removals in Goals / Notes.
     RemovedSymbolNotAcknowledged { symbol: String, file: String },
-    /// The Tests Plan section names a test (`test_foo`, `it('bar')`, etc.)
-    /// that doesn't appear in `symbol_diff.added`. Either the executor
-    /// skipped it or the test name in the plan was wrong.
+    /// Tests Plan names a test (`test_foo`, `it('bar')`, etc.) absent from
+    /// `symbol_diff.added` — executor skipped it or the planned name was wrong.
     PlannedTestNotAdded { test: String },
-    /// Executor claimed they added symbol X but it has no definition in the
-    /// live index. Either the add didn't happen or indexing missed it.
+    /// Executor claimed they added symbol X but it has no definition in the live
+    /// index — the add didn't happen or indexing missed it.
     ClaimedSymbolMissing {
         symbol: String,
         file: Option<String>,
     },
-    /// Executor claimed X calls existing Y but Y has no definition anywhere
-    /// in the index. Y was hallucinated.
+    /// Executor claimed X calls existing Y but Y has no definition anywhere in
+    /// the index — Y was hallucinated.
     HallucinatedSymbol {
         from_symbol: String,
         to_symbol: String,
     },
-    /// Executor claimed X calls Y but there is no call edge from X to Y in
-    /// the index. The integration claim is false.
+    /// Executor claimed X calls Y but no call edge from X to Y exists in the
+    /// index — the integration claim is false.
     MissingCallEdge {
         from_symbol: String,
         to_symbol: String,
     },
-    /// Executor claimed a test command passed, but no test files were found
-    /// in the relevant directory. The pass is vacuous (zero tests ran).
+    /// Executor claimed a test command passed, but no test files exist in the
+    /// relevant directory — vacuous pass (zero tests ran).
     VacuousTestClaim { cmd: String, reason: String },
-    /// Executor claimed they added symbol X with a specific signature, but the
-    /// stored signature in the index does not match. Either the executor wrote a
-    /// different signature or the claim was copy-pasted from a draft spec.
+    /// Executor claimed they added symbol X with a signature that doesn't match
+    /// the stored one — wrote a different signature, or copy-pasted the claim
+    /// from a draft spec.
     ClaimedSignatureMismatch {
         symbol: String,
         file: Option<String>,
         claimed: String,
         actual: Option<String>,
     },
-    /// Executor attached `observed: { exit_code: N }` but claimed the command
-    /// passed. The non-zero exit code contradicts the pass claim — the test run
-    /// likely failed or was skipped.
+    /// Executor attached `observed: { exit_code: N }` (N != 0) but claimed the
+    /// command passed — the exit code contradicts the claim; the run likely
+    /// failed or was skipped.
     ObservedExitCodeNonZero { cmd: String, exit_code: i32 },
-    /// Executor attached `observed: { tests_run: 0 }` with `exit_code: 0`.
-    /// The command exited cleanly but ran zero tests — vacuous pass confirmed
-    /// by the executor's own output rather than a static file-existence check.
+    /// Executor attached `observed: { tests_run: 0 }` with `exit_code: 0` —
+    /// exited cleanly but ran zero tests. Vacuous pass confirmed by the
+    /// executor's own output rather than a static file-existence check.
     ObservedZeroTests { cmd: String },
 }
 
@@ -118,8 +116,8 @@ pub struct Report {
     pub git_ref: String,
     pub verdict: Verdict,
     pub findings: Vec<Finding>,
-    /// Raw symbol-level diff from `mmcg_symbols_changed_since` — pasted in
-    /// so the LLM auditor has the full context for semantic judgment.
+    /// Raw symbol-level diff from `mmcg_symbols_changed_since` — pasted in so
+    /// the LLM auditor has full context for semantic judgment.
     pub symbol_diff: Option<SymbolDiff>,
 }
 
@@ -261,8 +259,8 @@ fn render_finding(f: &Finding) -> String {
 
 /// Run all Phase A checks against a parsed spec.
 ///
-/// `git_ref` must resolve via `git rev-parse` in `repo_root` — symbols-changed-
-/// since uses it as the baseline. `store` is the live index at HEAD.
+/// `git_ref` must resolve via `git rev-parse` in `repo_root` (baseline for
+/// symbols-changed-since). `store` is the live index at HEAD.
 pub fn run(
     spec: &ParsedSpec,
     store: &Store,
@@ -275,15 +273,14 @@ pub fn run(
     // 1. File scope check — symmetric difference of declared files vs
     //    git diff --name-only.
     //
-    //    Frontmatter-authoritative when present: `touches[].file` +
+    //    Frontmatter authoritative when present: `touches[].file` +
     //    `expected_docs[]` are the declared set. Heuristic mentioned_files
-    //    (backticked path tokens) is too noisy — picks up prose mentions
-    //    like ``do not touch `README.md` `` and flags scope creep on files
-    //    the planner never claimed.
+    //    (backticked path tokens) is too noisy — picks up prose like
+    //    ``do not touch `README.md` `` and flags files the planner never claimed.
     //
-    //    Filter `.mastermind/` from the diff side — that directory is local
-    //    working state (index DB, specs themselves), universally gitignored
-    //    in real projects; CI fixtures commit it for test reasons.
+    //    Filter `.mastermind/` from the diff side: local working state (index
+    //    DB, specs), universally gitignored in real projects; CI fixtures commit
+    //    it for test reasons.
     let spec_files_owned: Vec<String> = match spec.frontmatter.as_ref() {
         Some(fm) if fm.has_file_scope() => {
             let mut out: Vec<String> =
@@ -326,21 +323,18 @@ pub fn run(
         check_snapshot_claim(claim, store, &mut findings);
     }
 
-    // 3. Removed-symbol-not-acknowledged — for every symbol that disappeared
-    //    in the git diff, decide if it's a deliberate removal or a silent
-    //    breaking change.
+    // 3. Removed-symbol-not-acknowledged — for each symbol gone in the git diff,
+    //    decide: deliberate removal or silent breaking change?
     //
     //    Resolution order:
-    //    a) Frontmatter present + `breaking_changes.removed_symbols` non-empty
-    //       → AUTHORITATIVE. Exact-name match against that list. Anything not
-    //         in the list is flagged. No lowercase-substring fuzz, no false
-    //         positives from incidental mentions like `Do not remove old_api`.
-    //    b) Frontmatter present but no `removed_symbols` → strict mode. ANY
-    //         removed non-module symbol is flagged (frontmatter forces the
-    //         planner to explicitly ack removals).
-    //    c) No frontmatter → fall back to the legacy lowercase-substring
-    //         heuristic. Documented as imprecise; planners are encouraged to
-    //         migrate to frontmatter.
+    //    a) Frontmatter + `breaking_changes.removed_symbols` non-empty →
+    //       AUTHORITATIVE. Exact-name match; anything else is flagged. No
+    //       lowercase-substring fuzz, no false positives from incidental
+    //       mentions like `Do not remove old_api`.
+    //    b) Frontmatter but no `removed_symbols` → strict mode: ANY removed
+    //       non-module symbol is flagged (forces the planner to ack removals).
+    //    c) No frontmatter → legacy lowercase-substring heuristic. Imprecise;
+    //       planners encouraged to migrate to frontmatter.
     let frontmatter_acks: Option<std::collections::HashSet<String>> =
         spec.frontmatter.as_ref().map(|fm| {
             fm.breaking_changes
@@ -357,15 +351,14 @@ pub fn run(
         .join("\n")
         .to_lowercase();
     for removed in &symbol_diff.removed {
-        // Module-level synthetic symbols shouldn't trigger this — they're an
-        // artifact of file removal, not a public API delete.
+        // Module-level synthetic symbols are an artifact of file removal, not a
+        // public API delete — skip.
         if removed.kind == "module" {
             continue;
         }
         let acknowledged = match &frontmatter_acks {
-            // Frontmatter present → exact match against breaking_changes list.
-            // The empty-list case still goes through here and flags everything
-            // (strict mode, intended).
+            // Frontmatter → exact match against breaking_changes list. Empty list
+            // flows through here and flags everything (strict mode, intended).
             Some(acks) => acks.contains(&removed.name),
             // No frontmatter → legacy lowercase-substring fallback.
             None => spec_body_lower.contains(&removed.name.to_lowercase()),
@@ -379,7 +372,7 @@ pub fn run(
     }
 
     // 4. Test plan validation — extract test-function-name-shaped tokens from
-    //    Tests Plan, cross-reference against names added in symbol_diff.
+    //    Tests Plan, cross-reference against names in symbol_diff.added.
     if let Some(tests_body) = crate::spec::section_body(spec, "Tests Plan") {
         let planned = extract_planned_test_names(tests_body);
         let added_names: HashSet<&str> = symbol_diff
@@ -407,8 +400,7 @@ pub fn run(
 
 /// Run Phase A checks + executor-report mechanical checks.
 ///
-/// When `executor_report` is `None` this is equivalent to `run()`.
-/// When present, adds:
+/// `executor_report == None` is equivalent to `run()`. When present, adds:
 ///  - Integration-claim verifier (2.2): hallucinated symbol, missing call edge
 ///  - Symbol-add verifier (2.1): claimed symbol not in index
 ///  - Vacuous test detector (2.3): test command claimed passed, no test files
@@ -561,6 +553,13 @@ fn check_vacuous_tests(
                     continue;
                 }
             }
+            // A positive observed test count is authoritative: real tests ran,
+            // so the static file-scan below must not override it. Without this,
+            // `cargo test` with only `tests/*.rs` integration tests would
+            // false-positive as vacuous despite the executor reporting N ran.
+            if matches!(obs.tests_run, Some(n) if n > 0) {
+                continue;
+            }
         }
         if let Some(reason) = vacuous_test_reason(&v.cmd, repo_root) {
             findings.push(Finding::VacuousTestClaim {
@@ -571,13 +570,17 @@ fn check_vacuous_tests(
     }
 }
 
-/// Returns `Some(reason)` if we can determine the test run was vacuous
-/// (no test files exist in the relevant scope). Returns `None` when we
-/// can't determine either way — conservative: don't false-positive.
+/// `Some(reason)` if the test run is provably vacuous (no test files in the
+/// relevant scope). `None` when undeterminable — conservative: don't
+/// false-positive.
 fn vacuous_test_reason(cmd: &str, repo_root: &Path) -> Option<String> {
     let cmd_lower = cmd.to_lowercase();
 
-    if cmd_lower.contains("go test") {
+    // `go test` — exclude `cargo test`, which contains the substring "go test"
+    // ("car|go test"). Without the `cargo` guard it routes into the Go detector,
+    // gets flagged for no `_test.go` files, and shadows the `cargo test` branch
+    // below (unreachable for the literal command).
+    if cmd_lower.contains("go test") && !cmd_lower.contains("cargo") {
         let pkg_dir = extract_go_package_dir(cmd, repo_root);
         let dir = repo_root.join(&pkg_dir);
         if dir.is_dir() && !has_files_matching(&dir, "_test.go") {
@@ -593,10 +596,25 @@ fn vacuous_test_reason(cmd: &str, repo_root: &Path) -> Option<String> {
             return Some(format!("no test_*.py files in {scope}"));
         }
     } else if cmd_lower.contains("cargo test") {
-        let src = repo_root.join("src");
-        let check_dir = if src.is_dir() { &src } else { repo_root };
-        if !has_test_attr_in_dir(check_dir) {
-            return Some("no #[test] attribute found in src/".to_string());
+        // Unit tests live in `src/`, integration tests in `tests/`. Flag vacuous
+        // only when NEITHER carries a test attribute — a crate tested entirely
+        // integration-style (`tests/*.rs`, no `#[test]` in `src/`) is valid and
+        // must not be flagged.
+        let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+        for sub in ["src", "tests"] {
+            let d = repo_root.join(sub);
+            if d.is_dir() {
+                dirs.push(d);
+            }
+        }
+        if dirs.is_empty() {
+            dirs.push(repo_root.to_path_buf());
+        }
+        if !dirs.iter().any(|d| has_test_attr_in_dir(d)) {
+            return Some(
+                "no test attribute (#[test], #[tokio::test], #[rstest], …) in src/ or tests/"
+                    .to_string(),
+            );
         }
     } else if (cmd_lower.contains("jest")
         || cmd_lower.contains("vitest")
@@ -672,9 +690,17 @@ fn has_test_attr_in_dir(dir: &Path) -> bool {
                 return false;
             }
             std::fs::read_to_string(e.path())
-                .map(|text| text.contains("#[test]"))
+                .map(|text| file_has_test_attr(&text))
                 .unwrap_or(false)
         })
+}
+
+/// Recognises common Rust test-attribute spellings: built-in `#[test]`, async
+/// variants like `#[tokio::test]` / `#[async_std::test]` (end in `::test]`), and
+/// `#[rstest]` / `#[rstest(...)]`. Matching only literal `#[test]` used to
+/// false-flag crates testing exclusively via these.
+fn file_has_test_attr(text: &str) -> bool {
+    text.contains("#[test]") || text.contains("::test]") || text.contains("#[rstest")
 }
 
 // ----- evidence bundle ------------------------------------------------------
@@ -682,9 +708,8 @@ fn has_test_attr_in_dir(dir: &Path) -> bool {
 /// Portable proof artifact written by `audit-spec --bundle`.
 ///
 /// v2 adds: `head`, `spec_files`, `changed_files`, `verified_claims`,
-/// `failed_claims`, `mmcg_queries`, `commands`, `human_summary`.
-/// The legacy fields (`files_diff`, `discrepancies`, `snapshot_drift`) are
-/// preserved for backward compatibility.
+/// `failed_claims`, `mmcg_queries`, `commands`, `human_summary`. Legacy fields
+/// (`files_diff`, `discrepancies`, `snapshot_drift`) kept for back-compat.
 #[derive(Debug, Serialize)]
 pub struct Bundle {
     pub verdict: String,
@@ -693,16 +718,16 @@ pub struct Bundle {
     pub baseline: String,
     /// Best-effort HEAD sha at the time the bundle was produced.
     pub head: String,
-    /// Files the spec declared it would touch (authoritative when frontmatter
-    /// is present, heuristic otherwise).
+    /// Files the spec declared it would touch (authoritative under frontmatter,
+    /// heuristic otherwise).
     pub spec_files: Vec<String>,
-    /// Files actually changed between `baseline` and HEAD per `git diff`.
+    /// Files changed between `baseline` and HEAD per `git diff`.
     pub changed_files: Vec<String>,
     /// Executor claims that passed all mechanical checks.
     pub verified_claims: Vec<String>,
     /// Executor claims that failed at least one mechanical check.
     pub failed_claims: Vec<String>,
-    /// Logical mmcg queries issued during the audit (for human inspection).
+    /// Logical mmcg queries issued during the audit (human inspection).
     pub mmcg_queries: Vec<String>,
     /// Verify commands extracted from the executor report.
     pub commands: Vec<String>,
@@ -712,10 +737,10 @@ pub struct Bundle {
     pub discrepancies: Vec<Finding>,
     /// Snapshot-drift findings only. Legacy field kept.
     pub snapshot_drift: Vec<Finding>,
-    /// Legacy alias for `changed_files`. Kept for backward compatibility.
+    /// Legacy alias for `changed_files`, kept for back-compat.
     pub files_diff: Vec<String>,
-    /// Legacy alias for `baseline`. Kept for backward compatibility with
-    /// consumers that parsed the pre-v2 bundle format.
+    /// Legacy alias for `baseline`, kept for consumers parsing the pre-v2
+    /// bundle format.
     pub git_ref: String,
     pub executor_report_path: Option<String>,
 }
@@ -981,8 +1006,8 @@ fn check_snapshot_claim(claim: &SymbolClaim, store: &Store, findings: &mut Vec<F
             });
         }
     }
-    // Signature comparison — same any-match rule as verify_spec (multiple
-    // matches accepted if at least one signature still matches the claim).
+    // Signature comparison — same any-match rule as verify_spec (accept if at
+    // least one of multiple matches still matches the claim).
     if let Some(spec_sig) = &claim.signature {
         let live_sigs: Vec<Option<String>> = hits.iter().map(|s| s.signature.clone()).collect();
         let any_match = live_sigs
@@ -1023,23 +1048,21 @@ fn compute_verdict(findings: &[Finding]) -> Verdict {
 
 /// Heuristic test-name extractor over the Tests Plan section.
 ///
-/// **This is a best-effort signal, not a gate.** `PlannedTestNotAdded` lives
-/// in the Drift bucket (warning, not Broken) for exactly this reason — the
-/// detector below covers a slice of test-naming conventions and misses several
-/// common ones. Don't rely on it for "did the executor write the tests" — use
-/// frontmatter `verify[].cmd` to run the actual test suite for that.
+/// **Best-effort signal, not a gate.** `PlannedTestNotAdded` is Drift (warning,
+/// not Broken) for this reason — the detector covers a slice of naming
+/// conventions and misses several. Don't rely on it for "did the executor write
+/// the tests"; use frontmatter `verify[].cmd` to run the actual suite.
 ///
 /// Recognises:
 /// - backticked tokens shaped like `test_*`, `*_test`, `it_*`, `should_*`
-/// - bare-word `test_*` patterns even outside backticks (for plain bullets)
+/// - bare-word `test_*` even outside backticks (plain bullets)
 ///
-/// Does NOT recognise (planner: document these explicitly, don't rely on the
-/// heuristic for them):
-/// - Jest / Vitest `it("does x", ...)` / `describe(...)` — the test name is
-///   a string literal in the test file, not a function symbol
+/// Does NOT recognise (planner: document these explicitly):
+/// - Jest / Vitest `it("does x", ...)` / `describe(...)` — name is a string
+///   literal in the test file, not a function symbol
 /// - Playwright `test("logs in", ...)` — same shape, not a function symbol
-/// - Table-driven test cases (single Rust `#[test] fn cases() { for case in ... }`)
-/// - Golden / snapshot tests where the test "name" is a fixture filename
+/// - Table-driven cases (one Rust `#[test] fn cases() { for case in ... }`)
+/// - Golden / snapshot tests where the "name" is a fixture filename
 /// - Modifications to EXISTING tests — only new function symbols appear in
 ///   `symbol_diff.added`
 ///
@@ -1065,7 +1088,7 @@ fn extract_planned_test_names(body: &str) -> Vec<String> {
         }
     }
 
-    // Pass 2: bare `test_*` words (often appear in unbacked bullets).
+    // Pass 2: bare `test_*` words (often in unbacked bullets).
     for word in body.split(|c: char| !c.is_alphanumeric() && c != '_') {
         if is_test_name(word) && seen.insert(word.to_string()) {
             out.push(word.to_string());
@@ -1392,10 +1415,9 @@ Add caller2() in `src/lib.py`
 
     #[test]
     fn frontmatter_breaking_changes_replaces_lowercase_substring_match() {
-        // The legacy heuristic was fooled by `Do not remove `old_api`` (mention
-        // ≠ acknowledgement). With frontmatter, the audit ONLY trusts
-        // `breaking_changes.removed_symbols` — a prose mention is no longer
-        // sufficient ack.
+        // Legacy heuristic was fooled by `Do not remove `old_api`` (mention !=
+        // ack). With frontmatter the audit ONLY trusts
+        // `breaking_changes.removed_symbols`; prose mention no longer suffices.
         let dir = init_repo("frontmatter_breaking_strict");
         write(
             &dir,
@@ -1414,9 +1436,9 @@ Add caller2() in `src/lib.py`
         let mut store = Store::open(&db).unwrap();
         Indexer::new(&dir).index_all(&mut store, false).unwrap();
 
-        // Spec MENTIONS old_api in prose (`Do not remove`) but doesn't list it
-        // in breaking_changes. Under legacy heuristic, this passed silently.
-        // Under frontmatter strict mode, it's a Broken verdict.
+        // Spec mentions old_api in prose (`Do not remove`) but doesn't list it
+        // in breaking_changes. Legacy heuristic: passed silently. Frontmatter
+        // strict mode: Broken verdict.
         let spec_body = "---
 id: \"1\"
 breaking_changes:
@@ -1507,6 +1529,48 @@ breaking_changes:
         assert!(norm_paths_eq("./src/foo.ts", "src/foo.ts"));
         assert!(norm_paths_eq(r"src\foo.ts", "src/foo.ts"));
         assert!(!norm_paths_eq("src/foo.ts", "src/bar.ts"));
+    }
+
+    #[test]
+    fn file_has_test_attr_recognises_common_spellings() {
+        assert!(file_has_test_attr("#[test]\nfn t() {}"));
+        assert!(file_has_test_attr("#[tokio::test]\nasync fn t() {}"));
+        assert!(file_has_test_attr("#[async_std::test]\nasync fn t() {}"));
+        assert!(file_has_test_attr("#[rstest]\nfn t() {}"));
+        assert!(file_has_test_attr(
+            "#[rstest(input, case(1))]\nfn t(input: u8) {}"
+        ));
+        assert!(!file_has_test_attr("fn helper() {}\n// no tests here"));
+    }
+
+    #[test]
+    fn cargo_test_not_vacuous_with_only_integration_tests() {
+        // Regression: a crate with only integration-style tests (`tests/*.rs`,
+        // no `#[test]` in `src/`) used to be flagged vacuous because the scan
+        // looked only at `src/`.
+        let dir = init_repo("cargo_integration_only");
+        write(
+            &dir,
+            "src/lib.rs",
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+        );
+        write(
+            &dir,
+            "tests/it.rs",
+            "#[test]\nfn adds() { assert_eq!(2, 2); }\n",
+        );
+        assert!(
+            vacuous_test_reason("cargo test", dir.as_path()).is_none(),
+            "integration tests in tests/*.rs must not be flagged vacuous"
+        );
+
+        // A crate with no test attribute anywhere is still flagged.
+        let bare = init_repo("cargo_no_tests");
+        write(&bare, "src/lib.rs", "pub fn add() {}\n");
+        assert!(vacuous_test_reason("cargo test", bare.as_path()).is_some());
+
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&bare).ok();
     }
 
     #[test]

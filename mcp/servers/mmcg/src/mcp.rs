@@ -1,8 +1,8 @@
 //! MCP server — JSON-RPC over stdio.
 //!
 //! Implements `initialize`, `tools/list`, `tools/call` of the Model Context
-//! Protocol (https://modelcontextprotocol.io). Adding a tool: add one
-//! [`ToolDef`] entry to [`TOOLS`] with a `schema` fn and a `handler` fn.
+//! Protocol (https://modelcontextprotocol.io). To add a tool: one [`ToolDef`]
+//! entry in [`TOOLS`] with a `schema` fn and a `handler` fn.
 
 use crate::queries;
 use crate::store::Store;
@@ -39,9 +39,9 @@ struct JsonRpcError {
     message: String,
 }
 
-/// One MCP tool. `schema` returns the `tools/list` JSON entry; `handler` executes
-/// the call and returns the raw payload (the content envelope is added by
-/// [`handle_tools_call`]).
+/// One MCP tool. `schema` returns the `tools/list` JSON entry; `handler` runs
+/// the call and returns the raw payload ([`handle_tools_call`] adds the content
+/// envelope).
 struct ToolDef {
     name: &'static str,
     schema: fn() -> Value,
@@ -166,19 +166,9 @@ pub fn serve(mut store: Store) -> std::io::Result<()> {
             continue;
         }
 
-        let req: JsonRpcRequest = match serde_json::from_str(trimmed) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("[mmcg] parse error: {e} (line: {trimmed})");
-                continue;
-            }
-        };
-
-        let Some(id) = req.id.clone() else {
+        let Some(response) = handle_line(&mut store, trimmed) else {
             continue;
         };
-
-        let response = handle_request(&mut store, &req.method, &req.params, id);
 
         match serde_json::to_string(&response) {
             Ok(s) => {
@@ -189,6 +179,25 @@ pub fn serve(mut store: Store) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Process one line of JSON-RPC input. `Some(response)` to write back, or
+/// `None` for inputs that get no reply — a notification or any otherwise valid
+/// request without an `id`.
+fn handle_line(store: &mut Store, line: &str) -> Option<JsonRpcResponse> {
+    let req: JsonRpcRequest = match serde_json::from_str(line) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[mmcg] parse error: {e} (line: {line})");
+            // JSON-RPC 2.0: unparseable input gets -32700 with a null id (the id
+            // can't be recovered from malformed JSON). Without any reply, a
+            // strict stdio client blocks waiting for one.
+            return Some(err(Value::Null, -32700, format!("Parse error: {e}")));
+        }
+    };
+    // No id → notification; per spec, no reply.
+    let id = req.id.clone()?;
+    Some(handle_request(store, &req.method, &req.params, id))
 }
 
 fn handle_request(store: &mut Store, method: &str, params: &Value, id: Value) -> JsonRpcResponse {
@@ -766,6 +775,34 @@ mod tests {
     fn unwrap_content(v: &serde_json::Value) -> serde_json::Value {
         let text = v["content"][0]["text"].as_str().expect("content[0].text");
         serde_json::from_str(text).expect("content[0].text was not valid JSON")
+    }
+
+    #[test]
+    fn malformed_json_gets_parse_error_with_null_id() {
+        let path = std::env::temp_dir().join("mmcg_mcp_parse_err.db");
+        let _ = std::fs::remove_file(&path);
+        let mut store = crate::store::Store::open(&path).unwrap();
+
+        let resp = handle_line(&mut store, "{ not valid json").expect("parse error must reply");
+        assert_eq!(resp.id, Value::Null);
+        assert!(resp.result.is_none());
+        let e = resp.error.expect("error payload present");
+        assert_eq!(e.code, -32700);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn notification_without_id_gets_no_reply() {
+        let path = std::env::temp_dir().join("mmcg_mcp_notif.db");
+        let _ = std::fs::remove_file(&path);
+        let mut store = crate::store::Store::open(&path).unwrap();
+
+        // Valid JSON-RPC notification (no `id`) — server stays silent.
+        let none = handle_line(&mut store, r#"{"jsonrpc":"2.0","method":"initialized"}"#);
+        assert!(none.is_none());
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

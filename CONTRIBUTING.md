@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for thinking about contributing. The point of this repo is to be a **predictable** library — every artifact should look like every other artifact of its kind. That predictability is the value; please don't break it.
+The point of this repo is to be a **predictable** library — every artifact should look like every other artifact of its kind. That predictability is the value; please don't break it.
 
 ## Before you start
 

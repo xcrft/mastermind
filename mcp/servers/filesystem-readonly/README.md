@@ -14,7 +14,7 @@ metadata:
 
 # Filesystem (read-only)
 
-A thin wrapper over the official `@modelcontextprotocol/server-filesystem` that disables every write tool. Useful when you want to let an agent browse a directory tree for context — logs, sibling repos, reference docs — without giving it the ability to corrupt anything.
+A thin wrapper over the official `@modelcontextprotocol/server-filesystem` that disables every write tool. Use it to let an agent browse a directory tree for context — logs, sibling repos, reference docs — without write access.
 
 ## Tools exposed
 

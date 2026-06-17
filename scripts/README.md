@@ -1,6 +1,6 @@
 # Scripts
 
-Repo-level scripts. Each script is self-contained and documented at the top of its source.
+Repo-level scripts, each documented at the top of its source.
 
 ## validate.py — artifact validator
 

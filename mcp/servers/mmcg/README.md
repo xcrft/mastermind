@@ -2,7 +2,7 @@
 name: mmcg
 description: Mastermind Codegraph — fast multi-language code indexer (Python + TypeScript/TSX + JavaScript/JSX + Rust + C# + Go + Java + PHP + C/C++) exposed over MCP. Indexes symbols, calls, and imports (with fully-qualified paths) into a local SQLite database (`.mastermind/mmcg.db`) and exposes 20 structural query tools for AI agents in the Mastermind workflow. Includes FTS5 search over `.mastermind/tasks/` and an incremental file watcher.
 metadata:
-  version: 0.28.1
+  version: 0.30.0
   authors:
     - mastermind
   tags:
@@ -246,7 +246,7 @@ For Claude Code, run `mastermind setup claude --write-mcp` instead of editing JS
 }
 ```
 
-For best results, run `mmcg watch` in a separate terminal so the index stays current while you work.
+Run `mmcg watch` in a separate terminal so the index stays current while you work.
 
 ## MCP tools
 

@@ -61,7 +61,8 @@ function resolveBinary() {
  * MCP `command` form per install mode.
  *
  *   npx    — process.argv[1] lives under an npx cache (`/_npx/` or `\_npx\`)
- *   project — wrapper lives under `<cwd>/node_modules` (any depth)
+ *   project — wrapper lives under a `node_modules` of cwd or any ancestor
+ *             (monorepos hoist deps to the workspace root)
  *   global  — wrapper lives under a known npm global prefix
  *   cargo   — never reached here (cargo users invoke `mmcg` directly, no JS)
  *
@@ -74,10 +75,19 @@ function detectInstallMode() {
   if (self.includes(`${path.sep}_npx${path.sep}`) || self.includes("/_npx/")) {
     return "npx";
   }
-  const cwd = process.cwd();
-  const projectNodeModules = path.join(cwd, "node_modules") + path.sep;
-  if (self.startsWith(projectNodeModules)) {
-    return "project";
+  // Project install: the wrapper resolves from a `node_modules` belonging to
+  // cwd OR any ancestor. Monorepos hoist dependencies to the workspace root, so
+  // a command run in `packages/foo` loads its bin from `<repo-root>/node_modules`
+  // — still a project install, not global. Walk up the tree to catch that.
+  let dir = process.cwd();
+  for (;;) {
+    const nm = path.join(dir, "node_modules") + path.sep;
+    if (self.startsWith(nm)) {
+      return "project";
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break; // reached the filesystem root
+    dir = parent;
   }
   // Heuristic for global install: bin path lands under a directory whose
   // name suggests global npm (e.g. /usr/local/lib/node_modules, ~/.npm-global,

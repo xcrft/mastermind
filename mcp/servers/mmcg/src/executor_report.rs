@@ -10,8 +10,8 @@ pub enum Claim {
         symbol: String,
         #[serde(default)]
         file: Option<String>,
-        /// Optional exact signature the executor claims was written.
-        /// When present, the auditor verifies the stored signature matches.
+        /// Optional exact signature the executor claims was written. When
+        /// present, the auditor verifies the stored signature matches.
         #[serde(default)]
         signature: Option<String>,
     },
@@ -22,7 +22,7 @@ pub enum Claim {
         #[serde(default)]
         from_file: Option<String>,
         to: String,
-        /// File containing `to` — narrows the "does Y exist" lookup to that file.
+        /// File containing `to` — narrows the "does Y exist" lookup.
         #[serde(default)]
         to_file: Option<String>,
         #[serde(default)]
@@ -30,16 +30,16 @@ pub enum Claim {
     },
 }
 
-/// Observed runtime outcome that the executor (or CI) can attach to a verify
-/// entry. When present, the auditor uses it to catch "claimed passed, but exit
-/// code was 1" contradictions without re-running the command.
+/// Observed runtime outcome the executor (or CI) can attach to a verify entry.
+/// When present, the auditor catches "claimed passed, but exit code was 1"
+/// contradictions without re-running the command.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ObservedOutcome {
     /// Process exit code. 0 = success by convention.
     #[serde(default)]
     pub exit_code: Option<i32>,
-    /// Number of test cases the runner actually executed. 0 while `exit_code`
-    /// is 0 is the vacuous-pass signature.
+    /// Test cases the runner actually executed. 0 with `exit_code` 0 is the
+    /// vacuous-pass signature.
     #[serde(default)]
     pub tests_run: Option<u32>,
 }
@@ -50,18 +50,18 @@ pub struct VerifyResult {
     pub cmd: String,
     #[serde(default)]
     pub claimed: Option<String>,
-    /// Observed outcome attached by the executor or CI system. Optional —
-    /// when absent the auditor falls back to static heuristics (no test files,
-    /// no #[test] attrs, etc.).
+    /// Observed outcome from the executor or CI. Optional — when absent the
+    /// auditor falls back to static heuristics (no test files, no #[test] attrs,
+    /// etc.).
     #[serde(default)]
     pub observed: Option<ObservedOutcome>,
 }
 
 /// The structured tail the executor appended to their report.
 ///
-/// Parsed from a YAML block delimited by
-/// `<!-- mastermind:executor-begin -->` / `<!-- mastermind:executor-end -->`
-/// inside the executor-report file, OR from a bare YAML file.
+/// Parsed from a YAML block delimited by `<!-- mastermind:executor-begin -->` /
+/// `<!-- mastermind:executor-end -->` inside the report file, OR from a bare
+/// YAML file.
 ///
 /// Minimal format:
 /// ```yaml
@@ -97,9 +97,9 @@ impl ExecutorReport {
     }
 }
 
-/// Parse an executor report from a file. Accepts two formats:
+/// Parse an executor report from a file. Two formats:
 /// - Bare YAML file (no markdown wrapper)
-/// - Markdown file containing a sentinel-delimited YAML block
+/// - Markdown file with a sentinel-delimited YAML block
 pub fn parse_file(path: &Path) -> Result<ExecutorReport, String> {
     let text =
         std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;

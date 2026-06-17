@@ -1,8 +1,8 @@
 //! Compile-time template constants and utilities.
 //!
 //! Templates are embedded via `include_str!` so the published crate is
-//! self-contained. Parity between the crate-local copies and the repository
-//! sources is enforced by `scripts/validate.py`.
+//! self-contained. `scripts/validate.py` enforces parity between the
+//! crate-local copies and the repository sources.
 
 /// Generic CONTEXT.md scaffold (stack-agnostic).
 pub const CONTEXT_TEMPLATE: &str = include_str!("../templates/context.md");
@@ -38,10 +38,9 @@ pub fn profile_label(profile: crate::Profile) -> &'static str {
 }
 
 /// Strip the HTML-comment "instructions to the user" block from a template so
-/// the written file contains only what the adopter actually uses.
-///
-/// Looks for `<!-- ─── COPY FROM HERE ─── -->` … `<!-- ─── COPY TO HERE ─── -->`;
-/// if absent, returns the text unchanged.
+/// the written file contains only what the adopter uses. Looks for
+/// `<!-- ─── COPY FROM HERE ─── -->` … `<!-- ─── COPY TO HERE ─── -->`; returns
+/// the text unchanged if absent.
 pub fn strip_comment(text: &str) -> String {
     const MARKER_OPEN: &str = "<!-- ─── COPY FROM HERE ─── -->";
     const MARKER_CLOSE: &str = "<!-- ─── COPY TO HERE ─── -->";

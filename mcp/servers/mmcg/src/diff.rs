@@ -1,28 +1,27 @@
 //! Symbol-level diff between a git ref and the current index.
 //!
 //! Given a `<git-ref>`, computes which symbols were **added**, **removed**, or
-//! had their **signature changed** between that ref and the on-disk index.
-//! Used by `mmcg_symbols_changed_since` so PR-review agents can answer
-//! "what symbols did this branch touch?" without grep-rolling the diff.
+//! had their **signature changed** between that ref and the on-disk index. Used
+//! by `mmcg_symbols_changed_since` so PR-review agents can answer "what symbols
+//! did this branch touch?" without grep-rolling the diff.
 //!
 //! Implementation:
-//! 1. `git diff --name-only <ref>..HEAD` → list of files changed in the range
+//! 1. `git diff --name-only <ref>..HEAD` → files changed in the range
 //! 2. For each file, fetch its blob at `<ref>` via `git show <ref>:<path>`
 //! 3. Parse the old blob through the same extractor (see [`parse_blob`])
-//! 4. Compare the old (path, name, kind) set against `Store::symbols_in_file`
+//! 4. Compare old (path, name, kind) set against `Store::symbols_in_file`
 //!
-//! Files that didn't exist at `<ref>` produce only "added" entries. Files
-//! deleted in HEAD produce only "removed" entries (because the index has no
-//! current symbols for them).
+//! Files absent at `<ref>` produce only "added" entries. Files deleted in HEAD
+//! produce only "removed" (the index has no current symbols for them).
 //!
 //! Limitations:
-//! - Only considers files where git reports a change. Pure metadata edits
-//!   (chmod, rename) without content change won't surface symbols.
+//! - Only files where git reports a change. Pure metadata edits (chmod, rename)
+//!   without content change won't surface symbols.
 //! - Uses `git` via `subprocess` — fails fast if git isn't on PATH.
-//! - Signature comparison is exact-string; trivial reformatting (e.g.
-//!   parameter line wrapping) appears as a change.
-//! - Resolution is per-file: a symbol moved from `a.py` to `b.py` shows as
-//!   removed-from-a + added-to-b, not as "moved".
+//! - Signature comparison is exact-string; trivial reformatting (e.g. param
+//!   line wrapping) appears as a change.
+//! - Per-file resolution: a symbol moved `a.py`→`b.py` shows as removed-from-a
+//!   + added-to-b, not "moved".
 
 use crate::indexer::{extractor_for_path, parse_blob};
 use crate::store::{Store, Symbol};
@@ -67,14 +66,14 @@ pub struct SignatureChange {
 pub struct SymbolDiff {
     /// The git ref the diff is computed against (whatever the user passed).
     pub git_ref: String,
-    /// Files in scope (per `git diff --name-only <ref>..HEAD`). Includes files
-    /// we couldn't parse — they're listed here but contribute no symbols.
+    /// Files in scope (per `git diff --name-only <ref>..HEAD`). Includes
+    /// unparseable files — listed but contributing no symbols.
     pub files_in_diff: Vec<String>,
     pub added: Vec<SymbolRef>,
     pub removed: Vec<SymbolRef>,
     pub signature_changed: Vec<SignatureChange>,
-    /// Per-file errors (parse failure, blob-fetch failure). Non-fatal — other
-    /// files still produce results. Helps the caller debug.
+    /// Per-file errors (parse / blob-fetch failure). Non-fatal — other files
+    /// still produce results. Aids caller debugging.
     pub errors: Vec<String>,
 }
 
@@ -100,8 +99,8 @@ impl std::error::Error for DiffError {}
 /// Compute the symbol-level diff between `git_ref` and the current working
 /// state (assumed already indexed in `store`).
 ///
-/// `repo_root` is the directory all paths are relative to — the same root used
-/// when the codebase was indexed. `git_ref` must resolve via `git rev-parse`.
+/// `repo_root` is the directory paths are relative to — the same root used at
+/// index time. `git_ref` must resolve via `git rev-parse`.
 pub fn symbols_changed_since(
     store: &Store,
     repo_root: &Path,
@@ -126,7 +125,7 @@ pub fn symbols_changed_since(
         }
     }
 
-    // Stable output ordering.
+    // Stable output order.
     added.sort_by(|a, b| (a.file.as_str(), a.line).cmp(&(b.file.as_str(), b.line)));
     removed.sort_by(|a, b| (a.file.as_str(), a.line).cmp(&(b.file.as_str(), b.line)));
     signature_changed.sort_by(|a, b| (a.file.as_str(), &a.name).cmp(&(b.file.as_str(), &b.name)));
@@ -182,13 +181,13 @@ fn diff_file(
             .filter(|s| s.kind != "module")
             .collect()
     } else {
-        // No extractor for this extension — can't diff symbols meaningfully.
-        // Return empty old side; everything in new side will be "added".
+        // No extractor for this extension — can't diff symbols. Empty old side;
+        // everything in new side becomes "added".
         Vec::new()
     };
 
-    // Key by (name, kind). Two symbols with same name+kind in one file would
-    // be a partial-class-style anomaly; we accept the first match.
+    // Key by (name, kind). Same name+kind twice in one file is a
+    // partial-class-style anomaly; accept the first match.
     let mut old_by_key: HashMap<(String, String), &crate::store::PendingSymbol> = HashMap::new();
     for s in &old_symbols {
         old_by_key
@@ -290,8 +289,8 @@ fn git_diff_name_only(repo: &Path, git_ref: &str) -> Result<Vec<String>, DiffErr
     Ok(files)
 }
 
-/// Returns `Ok(None)` when the file didn't exist at `git_ref` (treated as
-/// "added in HEAD"). `Ok(Some(bytes))` is the raw blob content.
+/// `Ok(None)` when the file didn't exist at `git_ref` (treated as "added in
+/// HEAD"). `Ok(Some(bytes))` is the raw blob content.
 fn git_show_blob(repo: &Path, git_ref: &str, rel_path: &str) -> Result<Option<Vec<u8>>, String> {
     let spec = format!("{git_ref}:{rel_path}");
     let out = Command::new("git")
@@ -301,8 +300,8 @@ fn git_show_blob(repo: &Path, git_ref: &str, rel_path: &str) -> Result<Option<Ve
         .map_err(|e| format!("spawn git show: {e}"))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-        // git returns a generic "fatal: path '...' does not exist in '<ref>'"
-        // when the file is new. Treat that as no-blob, not as failure.
+        // git returns "fatal: path '...' does not exist in '<ref>'" for a new
+        // file. Treat as no-blob, not failure.
         if stderr.contains("does not exist") || stderr.contains("exists on disk, but not in") {
             return Ok(None);
         }
@@ -365,7 +364,7 @@ mod tests {
         run(&dir, &["commit", "-q", "-m", "baseline"]);
         run(&dir, &["tag", "baseline"]);
 
-        // HEAD: remove one function, change another's signature, add a new file.
+        // HEAD: remove a function, change another's signature, add a file.
         write(
             &dir,
             "src/a.py",

@@ -142,7 +142,7 @@ fn walk(
                         Some(o) => Some(format!("{o}.{n}")),
                         None => Some(n.clone()),
                     };
-                    // Uppercase receiver = type/Class.staticMethod
+                    // Uppercase receiver = type / Class.staticMethod.
                     let to_type = object
                         .as_deref()
                         .and_then(|o| o.rsplit('.').next().map(str::to_string))
@@ -220,9 +220,9 @@ fn collect_import(decl: &Node, source: &[u8], pending: &mut PendingFile, module_
     push_import(pending, module_index, leaf, to_path, line);
 }
 
-/// Capture all `@Annotation` / `@Marker` names attached to a declaration.
-/// Stripped to leaf name (`@org.junit.Test` → `Test`). Returned in the
-/// `,Name1,Name2,` format used by `mmcg_unreferenced` filtering.
+/// Capture all `@Annotation` / `@Marker` names on a declaration, stripped to
+/// leaf (`@org.junit.Test` → `Test`). Returned in the `,Name1,Name2,` format
+/// used by `mmcg_unreferenced` filtering.
 fn collect_annotations(decl: &Node, source: &[u8]) -> Option<String> {
     let mut names: Vec<String> = Vec::new();
     let mut cursor = decl.walk();
@@ -302,7 +302,7 @@ mod tests {
         let names: Vec<&str> = pending.symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"Foo"));
         assert!(names.contains(&"bar"));
-        // Constructor name = class name
+        // Constructor name = class name.
         let constructors: usize = pending
             .symbols
             .iter()

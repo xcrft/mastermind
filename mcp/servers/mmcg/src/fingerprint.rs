@@ -1,15 +1,14 @@
 //! Structural fingerprinting for files in the codegraph.
 //!
-//! The fingerprint hashes ONLY a file's structural extract — language tag,
-//! sorted `(kind, name, signature)` tuples for symbols, sorted
-//! `(kind, from_symbol_name, to_name, to_path)` tuples for edges. Line numbers,
-//! comments, whitespace, and raw bytes are excluded by design: that's the whole
-//! point of cosmetic-vs-structural classification.
+//! Hashes ONLY a file's structural extract — language tag, sorted
+//! `(kind, name, signature)` symbol tuples, sorted
+//! `(kind, from_symbol_name, to_name, to_path)` edge tuples. Line numbers,
+//! comments, whitespace, and raw bytes are excluded by design — the whole point
+//! of cosmetic-vs-structural classification.
 //!
-//! FNV-1a 64-bit is used (not `std::hash::DefaultHasher`, which is intentionally
-//! seeded and would drift across Rust versions / processes). 16-hex-character
-//! output. Collision risk at the project scale we care about (<10⁴ files) is
-//! negligible.
+//! Uses FNV-1a 64-bit, not `std::hash::DefaultHasher` (seeded — would drift
+//! across Rust versions / processes). 16-hex output. Collision risk at our
+//! scale (<10⁴ files) is negligible.
 
 use crate::store::PendingFile;
 
@@ -23,8 +22,8 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     h
 }
 
-/// Compute the structural fingerprint of a parsed file. Same source → same
-/// fingerprint, regardless of machine, Rust version, or parse order.
+/// Structural fingerprint of a parsed file. Same source → same fingerprint,
+/// regardless of machine, Rust version, or parse order.
 pub fn compute_structural_fingerprint(pending: &PendingFile) -> String {
     let mut parts: Vec<String> =
         Vec::with_capacity(1 + pending.symbols.len() + pending.edges.len());
@@ -43,8 +42,8 @@ pub fn compute_structural_fingerprint(pending: &PendingFile) -> String {
     parts.extend(sym_parts);
 
     // Edges — kind + from-symbol-name + to-name + to-path. Sorted for
-    // determinism. `from_index` is converted to a name lookup so that
-    // re-ordering of the `symbols` vec doesn't perturb the hash.
+    // determinism. `from_index` becomes a name lookup so reordering the
+    // `symbols` vec doesn't perturb the hash.
     let mut edge_parts: Vec<String> = pending
         .edges
         .iter()
@@ -100,9 +99,9 @@ mod tests {
 
     #[test]
     fn fnv1a64_known_vector() {
-        // FNV-1a 64-bit of empty input is the offset basis.
+        // Empty input → the offset basis.
         assert_eq!(fnv1a64(b""), 0xcbf29ce484222325);
-        // Well-known test vector: "foo" → 0xdcb27518fed9d577.
+        // Well-known vector: "foo" → 0xdcb27518fed9d577.
         assert_eq!(fnv1a64(b"foo"), 0xdcb27518fed9d577);
     }
 
@@ -122,8 +121,8 @@ mod tests {
 
     #[test]
     fn line_numbers_do_not_affect_fingerprint() {
-        // Two PendingFiles with identical structure but different line numbers
-        // must produce the same fingerprint — that's the cosmetic-edit case.
+        // Identical structure, different line numbers → same fingerprint. The
+        // cosmetic-edit case.
         let a = PendingFile {
             path: "x.rs".into(),
             mtime: 0,
@@ -145,7 +144,7 @@ mod tests {
                 ..edge(0, "bar", "calls")
             }],
         };
-        // Touch b to silence the unused_mut warning.
+        // Touch b — silences the unused_mut warning.
         b.symbols[0].name = "foo".into();
         assert_eq!(
             compute_structural_fingerprint(&a),
@@ -199,8 +198,8 @@ mod tests {
 
     #[test]
     fn symbol_reorder_does_not_perturb_fingerprint() {
-        // Parsing order shouldn't matter — sorted tuples mean any permutation
-        // of the same set hashes the same.
+        // Parse order shouldn't matter — sorted tuples make any permutation of
+        // the same set hash identically.
         let a = PendingFile {
             path: "x.rs".into(),
             mtime: 0,

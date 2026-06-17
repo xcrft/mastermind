@@ -51,18 +51,16 @@ fn walk(
                 let name = name_field(&child, source).unwrap_or("<anon>").to_string();
                 let signature = signature_until_body(&child, source);
                 // Go methods are top-level (not nested in a type body), so parent_index
-                // remains the module — but we capture the receiver type as the parent
-                // semantically through the symbol's own naming. For mmcg's purposes,
-                // emitting `kind=method` plus the literal receiver in the signature is
-                // enough; callers query by leaf name `Method` and match the receiver
-                // via `to_type` on the call site.
+                // stays the module. Emitting `kind=method` plus the literal receiver in
+                // the signature is enough for mmcg: callers query by leaf name `Method`
+                // and match the receiver via `to_type` on the call site.
                 let idx = push_def(pending, name, "method", &child, signature, parent_index);
                 if let Some(body) = child.child_by_field_name("body") {
                     walk(body, source, pending, Some(idx), module_index);
                 }
             }
             "type_declaration" => {
-                // `type Foo struct {...}` / `type Foo interface {...}` / `type Foo Other`.
+                // `type Foo struct {...}` / `interface {...}` / `Other`.
                 // Wraps one or more `type_spec` nodes.
                 let mut tc = child.walk();
                 for spec in child.children(&mut tc) {
@@ -106,7 +104,7 @@ fn walk(
                 walk(child, source, pending, parent_index, module_index);
             }
             "composite_literal" => {
-                // `Foo{...}` — treat as construction call to type Foo.
+                // `Foo{...}` — construction call to type Foo.
                 if let Some(t) = child.child_by_field_name("type") {
                     if let Some((name, path, _)) = leaf_and_path(&t, source) {
                         push_call_with_type(
@@ -166,7 +164,7 @@ fn emit_import_spec(
     if path.is_empty() {
         return;
     }
-    // Leaf: explicit alias if present, else last `/` segment of the path.
+    // Leaf: explicit alias if present, else last `/` segment.
     let leaf = spec
         .child_by_field_name("name")
         .and_then(|n| node_text(&n, source))
@@ -178,7 +176,7 @@ fn emit_import_spec(
 }
 
 /// `(leaf, full_text, to_type)` for a call target. `pkg.Func` → ("Func", "pkg.Func", Some("pkg"))
-/// when receiver starts uppercase; otherwise to_type=None. Plain identifier → just the name.
+/// when receiver starts uppercase, else to_type=None. Plain identifier → just the name.
 fn leaf_and_path(node: &Node, source: &[u8]) -> Option<(String, Option<String>, Option<String>)> {
     let full = node_text(node, source).map(String::from);
     match node.kind() {
@@ -195,12 +193,12 @@ fn leaf_and_path(node: &Node, source: &[u8]) -> Option<(String, Option<String>, 
                 .child_by_field_name("operand")
                 .and_then(|n| node_text(&n, source))
                 .and_then(|s| s.rsplit('.').next().map(str::to_string));
-            // Uppercase receiver = exported type / package — useful as to_type hint.
+            // Uppercase receiver = exported type / package — useful to_type hint.
             let to_type = operand.filter(|s| starts_uppercase(s));
             Some((field, full, to_type))
         }
         "qualified_type" => {
-            // `pkg.TypeName` used as constructor in composite_literal.
+            // `pkg.TypeName` as constructor in composite_literal.
             let name = node
                 .child_by_field_name("name")
                 .and_then(|n| node_text(&n, source))?
@@ -238,8 +236,8 @@ fn signature_until_body(node: &Node, source: &[u8]) -> Option<String> {
     }
 }
 
-// Currently unused — Go has no decorator/attribute syntax. Kept for future
-// build-tag / directive capture (`//go:build`, `//go:generate`).
+// Unused — Go has no decorator/attribute syntax. Kept for future build-tag /
+// directive capture (`//go:build`, `//go:generate`).
 #[allow(dead_code)]
 fn push_def_with_build_tags(
     pending: &mut PendingFile,
@@ -331,7 +329,7 @@ mod tests {
         assert!(imports
             .iter()
             .any(|(n, p)| *n == "j" && *p == Some("encoding/json::*")));
-        // _ and . aliases fall back to path leaf
+        // _ and . aliases fall back to path leaf.
         assert!(imports.iter().any(|(n, _)| *n == "effect"));
         assert!(imports.iter().any(|(n, _)| *n == "import"));
     }
@@ -357,13 +355,13 @@ mod tests {
             .filter(|e| e.kind == "calls")
             .map(|e| (e.to_name.as_str(), e.to_type.as_deref()))
             .collect();
-        // Member call captured with receiver as to_type when uppercase
+        // Member call: receiver as to_type when uppercase.
         assert!(calls
             .iter()
             .any(|(n, t)| *n == "Println" && (*t == Some("fmt") || t.is_none())));
-        // Composite literal Server{...} → call to "Server"
+        // Composite literal Server{...} → call to "Server".
         assert!(calls.iter().any(|(n, _)| *n == "Server"));
-        // s.Run() → call to "Run" (s is lowercase so to_type=None)
+        // s.Run() → call to "Run" (s lowercase, so to_type=None).
         assert!(calls.iter().any(|(n, _)| *n == "Run"));
     }
 }

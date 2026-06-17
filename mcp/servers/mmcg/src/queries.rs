@@ -1,7 +1,7 @@
 //! High-level query layer over the Store.
 //!
-//! Wraps the raw store methods with name-based lookup, structured response
-//! types, and JSON serialization for the MCP layer.
+//! Wraps raw store methods with name-based lookup, structured response types,
+//! and JSON serialization for the MCP layer.
 
 use crate::store::{FileEntry, Store, Symbol, TaskSpecHit};
 use serde::Serialize;
@@ -14,19 +14,19 @@ pub struct SymbolHit {
     pub line: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
-    /// Extra locations when this hit collapses several declarations of the same
-    /// symbol (e.g. C# partial classes split across files). The primary `file`/`line`
-    /// fields still point to the canonical (lex-first) declaration; this list
-    /// includes every declaration including the canonical one.
+    /// Extra locations when this hit collapses several declarations of one
+    /// symbol (e.g. C# partial classes across files). `file`/`line` still point
+    /// to the canonical (lex-first) declaration; this list includes every
+    /// declaration, canonical one included.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub locations: Option<Vec<SymbolLocation>>,
-    /// Decorators / attributes / modifiers captured from source
-    /// (e.g. `",Fact,"`, `",partial,sealed,"`). Skipped from output when absent.
+    /// Decorators / attributes / modifiers from source (e.g. `",Fact,"`,
+    /// `",partial,sealed,"`). Skipped from output when absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decorators: Option<String>,
-    /// Graph-edge precision for this symbol's source language. Present on
-    /// `mmcg_search` results; absent on sub-lists (callers, callees) where
-    /// the parent response carries a single `edge_precision` field.
+    /// Graph-edge precision for this symbol's language. Present on `mmcg_search`
+    /// results; absent on sub-lists (callers, callees), where the parent response
+    /// carries a single `edge_precision`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub precision: Option<EdgePrecision>,
 }
@@ -62,30 +62,29 @@ pub struct SearchResponse {
 pub struct CallersResponse {
     pub target: String,
     pub count: u32,
-    /// How many definitions share `target`'s name. Edges resolve by name, so a
-    /// value > 1 means these callers pool across several same-named symbols.
+    /// How many definitions share `target`'s name. Edges resolve by name, so
+    /// > 1 means these callers pool across several same-named symbols.
     pub name_collision: u32,
     pub callers: Vec<SymbolHit>,
 }
 
 /// Confidence and resolution metadata for a set of graph edges.
 ///
-/// Precision depends on the source language: Rust and Go are syntactic with
-/// high confidence; Python and JavaScript are heuristic (leaf-name only, no
-/// type inference). C/C++ is syntactic but inherently low-confidence because
-/// macros are not expanded and includes are not followed.
+/// Precision depends on language: Rust and Go are syntactic, high-confidence;
+/// Python and JavaScript heuristic (leaf-name only, no type inference). C/C++ is
+/// syntactic but inherently low-confidence — macros unexpanded, includes unfollowed.
 #[derive(Debug, Clone, Serialize)]
 pub struct EdgePrecision {
     /// `"high"`, `"medium"`, or `"low"`.
     pub confidence: &'static str,
-    /// `"syntactic"` — derived directly from AST;
-    /// `"heuristic"` — leaf-name guessing without type resolution.
+    /// `"syntactic"` — straight from AST; `"heuristic"` — leaf-name guessing
+    /// without type resolution.
     pub resolution: &'static str,
     /// Known gaps for this language's edge extraction.
     pub limitations: Vec<&'static str>,
 }
 
-/// Derive edge precision from a file path's extension.
+/// Edge precision derived from a file path's extension.
 pub fn lang_precision(file_path: &str) -> EdgePrecision {
     let ext = std::path::Path::new(file_path)
         .extension()
@@ -182,7 +181,7 @@ pub struct CalleesResponse {
     pub matched: Option<SymbolHit>,
     pub count: u32,
     pub callees: Vec<CalleesEntry>,
-    /// Edge precision for calls made by this symbol, derived from its source language.
+    /// Edge precision for calls made by this symbol, from its language.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edge_precision: Option<EdgePrecision>,
 }
@@ -203,18 +202,18 @@ pub struct ExplainSymbol {
 #[derive(Debug, Serialize)]
 pub struct ExplainResponse {
     pub query: String,
-    /// Every raw symbol row matching the query (before partial-class collapsing).
+    /// Every raw symbol row matching the query (before partial-class collapse).
     pub matched: Vec<ExplainSymbol>,
     /// Direct callers of the first match.
     pub caller_count: u32,
     /// Direct callees of the first match.
     pub callee_count: u32,
-    /// Edge precision based on the first matched symbol's source language.
+    /// Edge precision from the first matched symbol's language.
     pub edge_precision: EdgePrecision,
-    /// Present when multiple partial-class rows exist for the same name.
+    /// Present when multiple partial-class rows share the name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub collapse_note: Option<String>,
-    /// Human-readable limitation list — same content as `edge_precision.limitations`.
+    /// Human-readable limitations — same content as `edge_precision.limitations`.
     pub limitations: Vec<String>,
 }
 
@@ -230,8 +229,8 @@ pub struct ImpactResponse {
     pub max_depth: u32,
     pub count: u32,
     /// How many definitions share `target`'s name (same caveat as
-    /// `CallersResponse`): a value > 1 means the blast radius is pooled across
-    /// same-named symbols and over-approximates the real reach.
+    /// `CallersResponse`): > 1 means the blast radius pools across same-named
+    /// symbols and over-approximates real reach.
     pub name_collision: u32,
     pub impact: Vec<ImpactEntry>,
 }
@@ -249,7 +248,7 @@ pub struct StatusResponse {
     pub symbol_count: u32,
     pub file_count: u32,
     /// Source files modified since the index was last written (capped at 100).
-    /// A value above 0 means the index is stale — re-index before trusting
+    /// A non-zero count means the index is stale — re-index before trusting
     /// structural answers. Best-effort: 0 if freshness can't be computed.
     pub stale_files: usize,
 }
@@ -276,21 +275,21 @@ pub fn search(
     })
 }
 
-/// Collapse multiple Symbol rows for the same partial-class declaration into a
-/// single hit. A row is considered "partial" when its decorators field contains
-/// `,partial,` (set by the C# extractor for `partial class` / `partial record`).
+/// Collapse multiple Symbol rows for the same partial-class declaration into one
+/// hit. A row is "partial" when its decorators contain `,partial,` (set by the
+/// C# extractor for `partial class` / `partial record`).
 ///
-/// Rows that are NOT partial pass through unchanged — even if multiple rows
-/// share a name. Two non-partial classes with the same name (unusual but
-/// possible across namespaces) deserve to be reported as distinct hits.
+/// Non-partial rows pass through unchanged, even when several share a name: two
+/// non-partial same-named classes (unusual but possible across namespaces)
+/// deserve to be distinct hits.
 ///
-/// The canonical hit is the lex-first by file path; its `locations` field lists
-/// every declaration (including itself).
+/// Canonical hit is lex-first by file path; its `locations` lists every
+/// declaration (including itself).
 fn collapse_partial_hits(symbols: Vec<Symbol>) -> Vec<SymbolHit> {
     use std::collections::HashMap;
 
-    // Group key: (name, kind). Language not in the key — partials are C#-only
-    // and our SQL filters by language upstream.
+    // Group key: (name, kind). Language omitted — partials are C#-only and SQL
+    // filters by language upstream.
     let mut groups: HashMap<(String, String), Vec<Symbol>> = HashMap::new();
     let mut order: Vec<(String, String)> = Vec::new();
     let mut passthrough: Vec<SymbolHit> = Vec::new();
@@ -379,7 +378,7 @@ pub fn tasks(store: &Store, query: &str, top: u32) -> rusqlite::Result<TaskSearc
 pub struct DependencyCyclesResponse {
     pub count: u32,
     pub min_size: u32,
-    /// Each entry is one cycle (SCC) — file paths in lexicographic order.
+    /// Each entry is one cycle (SCC) — file paths in lex order.
     pub cycles: Vec<Vec<String>>,
 }
 
@@ -580,7 +579,7 @@ pub fn files(
     prefix: Option<&str>,
     language: Option<&str>,
 ) -> rusqlite::Result<FilesResponse> {
-    // SQL LIKE pattern — match anything beginning with prefix
+    // SQL LIKE pattern — match anything starting with prefix
     let pattern = prefix.map(|p| {
         if p.ends_with('%') {
             p.to_string()
@@ -628,12 +627,12 @@ pub struct RecentChangesResponse {
     pub files: Vec<FileEntry>,
 }
 
-/// Files re-indexed within the last `since` window (e.g. "2h").
-/// Useful for incident-response Phase 3 ("what's been touched recently?") and
-/// debugging stale-index symptoms.
+/// Files re-indexed within the last `since` window (e.g. "2h"). Useful for
+/// incident-response Phase 3 ("what's been touched recently?") and debugging
+/// stale-index symptoms.
 ///
-/// Note: `indexed_at` is stored in **milliseconds** by the indexer (see
-/// `indexer.rs` — `as_millis() as i64`), so the threshold is computed in ms too.
+/// `indexed_at` is stored in **milliseconds** by the indexer (see `indexer.rs` —
+/// `as_millis() as i64`), so the threshold is computed in ms too.
 pub fn recent_changes(store: &Store, since: &str) -> Result<RecentChangesResponse, String> {
     let window_secs = parse_duration(since)?;
     let now_ms = std::time::SystemTime::now()
@@ -662,7 +661,7 @@ pub struct UnreferencedResponse {
     pub symbols: Vec<SymbolHit>,
 }
 
-/// Symbols that nothing references. See `Store::unreferenced` for false-positive caveats.
+/// Symbols nothing references. See `Store::unreferenced` for false-positive caveats.
 pub fn unreferenced(
     store: &Store,
     kind: Option<&str>,
@@ -720,9 +719,8 @@ pub fn status(store: &Store) -> rusqlite::Result<StatusResponse> {
 }
 
 /// Best-effort count of source files modified since the index was last written
-/// (capped). Returns 0 on any error — `status` must never fail because freshness
-/// couldn't be computed. The db path may be relative, so canonicalize it before
-/// climbing to the project root.
+/// (capped). Returns 0 on any error — `status` must never fail over freshness.
+/// The db path may be relative, so canonicalize before climbing to project root.
 fn stale_count(db_path: &std::path::Path) -> usize {
     let Ok(db_abs) = db_path.canonicalize() else {
         return 0;
@@ -813,15 +811,15 @@ pub struct OutlineResponse {
     pub nodes: Vec<OutlineNode>,
 }
 
-/// Build a tree of symbols in a file using `parent_id` chains.
-/// Returns top-level nodes (parent_id IS NULL); each node contains its children
-/// sorted by line. Single SELECT, in-memory tree construction.
+/// Build a tree of a file's symbols via `parent_id` chains. Returns top-level
+/// nodes (parent_id IS NULL); each node holds its children sorted by line.
+/// Single SELECT, in-memory tree construction.
 pub fn outline(store: &Store, file: &str) -> rusqlite::Result<OutlineResponse> {
     use std::collections::HashMap;
     let flat = store.symbols_in_file(file)?;
     let total = flat.len() as u32;
 
-    // Build child lists keyed by parent id (None = root).
+    // Child lists keyed by parent id (None = root).
     let mut children_of: HashMap<Option<i64>, Vec<crate::store::Symbol>> = HashMap::new();
     for sym in flat {
         children_of.entry(sym.parent_id).or_default().push(sym);
@@ -880,8 +878,8 @@ pub fn imported_by(
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ChangeClass {
-    /// File has no stored fingerprint — never indexed (or indexed pre-0.28
-    /// before the column existed and not yet re-indexed).
+    /// No stored fingerprint — never indexed (or indexed pre-0.28 before the
+    /// column existed, not yet re-indexed).
     FirstSeen,
     /// Fingerprint matches — only line numbers / whitespace / comments differ.
     Cosmetic,
@@ -899,9 +897,9 @@ pub struct ChangeClassReport {
     pub current_fingerprint: String,
 }
 
-/// Classify a single file's current state against its last-indexed fingerprint.
-/// `rel_path` is relative to `root`. Errors if the file can't be parsed or the
-/// extension isn't supported by any extractor.
+/// Classify a file's current state against its last-indexed fingerprint.
+/// `rel_path` is relative to `root`. Errors if the file can't be parsed or no
+/// extractor supports the extension.
 pub fn classify_change(
     store: &crate::store::Store,
     root: &std::path::Path,
@@ -960,12 +958,12 @@ mod tests {
     fn recent_changes_filters() {
         let path = tmp_db("recent_changes_filters");
         let store = Store::open(&path).unwrap();
-        // indexer stores indexed_at in milliseconds — match its convention here
+        // indexer stores indexed_at in ms — match that convention
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as i64;
-        // file_a touched 30s ago, file_b touched 2h ago (all in ms)
+        // file_a touched 30s ago, file_b 2h ago (ms)
         store.upsert_file("file_a.py", now_ms - 30_000, 5).unwrap();
         store
             .upsert_file("file_b.py", now_ms - 7_200_000, 3)
@@ -976,7 +974,7 @@ mod tests {
         assert_eq!(recent.count, 1);
         assert_eq!(recent.files[0].path, "file_a.py");
 
-        // "3h" window catches both
+        // "3h" catches both
         let wider = recent_changes(&store, "3h").unwrap();
         assert_eq!(wider.count, 2);
 
@@ -987,7 +985,7 @@ mod tests {
     fn outline_tree() {
         let path = tmp_db("outline_tree");
         let store = Store::open(&path).unwrap();
-        // Class Foo at line 1, with method bar at line 5 and baz at line 10.
+        // Class Foo (line 1) with methods bar (5) and baz (10).
         let foo = store
             .insert_symbol("Foo", "class", "x.py", 1, 15, None, None)
             .unwrap();
@@ -1013,7 +1011,7 @@ mod tests {
                 Some(foo),
             )
             .unwrap();
-        // Sibling top-level function at line 20.
+        // Sibling top-level function (line 20).
         let _helper = store
             .insert_symbol("helper", "function", "x.py", 20, 22, None, None)
             .unwrap();
@@ -1075,8 +1073,8 @@ mod tests {
 
     #[test]
     fn collapse_partials_passes_non_partial_duplicates_unchanged() {
-        // Two distinct non-partial classes named `Foo` in different namespaces —
-        // these are NOT a partial collapse target and must remain separate hits.
+        // Two distinct non-partial `Foo` classes in different namespaces — NOT a
+        // partial collapse target, must remain separate hits.
         let symbols = vec![
             mk_sym("Foo", "class", "A/Foo.cs", 1, None),
             mk_sym("Foo", "class", "B/Foo.cs", 1, None),

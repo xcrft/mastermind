@@ -11,7 +11,7 @@ pub struct PythonExtractor;
 
 impl LanguageExtractor for PythonExtractor {
     fn language(&self) -> tree_sitter::Language {
-        // tree-sitter 0.23+ exposes grammars as `LANGUAGE` (LanguageFn const) — convert via .into().
+        // tree-sitter 0.23+ exposes grammars as `LANGUAGE` (LanguageFn const) — .into() converts.
         tree_sitter_python::LANGUAGE.into()
     }
 
@@ -21,35 +21,33 @@ impl LanguageExtractor for PythonExtractor {
 
     fn extract(&self, tree: &Tree, source: &[u8], pending: &mut PendingFile, module_index: usize) {
         let root = tree.root_node();
-        // First pass: capture module-level constants — DIRECT children of
-        // `module` only. This is scope-correct: assignments inside `if` / `for`
-        // / `try` / class bodies / function bodies are not module constants
-        // even when the file's top-level walk happens to reach them. The
+        // First pass: module-level constants — DIRECT children of `module` only.
+        // Scope-correct: assignments inside `if`/`for`/`try`/class/function bodies
+        // are not module constants even if the top-level walk reaches them. The
         // recursive `walk` below still processes those subtrees for calls and
-        // imports, but doesn't try to push them as constant symbols.
+        // imports, just doesn't push them as constants.
         let mut cursor = root.walk();
         for child in root.children(&mut cursor) {
             extract_module_constants(&child, source, pending, module_index);
         }
         // Then the usual walk for everything else (functions, classes, calls,
-        // imports). Constants are NOT re-pushed because `walk` doesn't handle
-        // the `assignment` case.
+        // imports). Constants aren't re-pushed — `walk` has no `assignment` case.
         walk(root, source, pending, Some(module_index), module_index);
     }
 }
 
 /// Push every binding from a module-level `expression_statement > assignment`
 /// as a `kind="constant"` symbol. No-op for other node kinds, augmented
-/// assignments, or assignments without a right-hand side.
+/// assignments, or assignments with no right-hand side.
 ///
-/// `child` is a direct child of the `module` node — the caller filters scope.
+/// `child` is a direct child of `module` — the caller filters scope.
 fn extract_module_constants(
     child: &Node,
     source: &[u8],
     pending: &mut PendingFile,
     module_index: usize,
 ) {
-    // Python tree-sitter wraps top-level assignments in `expression_statement`.
+    // tree-sitter-python wraps top-level assignments in `expression_statement`.
     let assignment = match child.kind() {
         "expression_statement" => child.named_child(0),
         // Defensive: some grammar versions surface bare assignment at module scope.
@@ -62,9 +60,9 @@ fn extract_module_constants(
     if assignment.kind() != "assignment" {
         return;
     }
-    // Skip augmented assignments (`+=`, etc.) — they're not declarations.
-    // tree-sitter-python uses a distinct `augmented_assignment` node, so this
-    // is mostly redundant — but defensive against grammar shifts.
+    // Skip augmented assignments (`+=`, etc.) — not declarations. tree-sitter-python
+    // uses a distinct `augmented_assignment` node, so this is mostly redundant —
+    // defensive against grammar shifts.
     let Some(left) = assignment.child_by_field_name("left") else {
         return;
     };
@@ -73,14 +71,14 @@ fn extract_module_constants(
         return;
     }
     let signature = node_text(&assignment, source).map(|s| {
-        // Single-line signature, trimmed; the value preview is useful for
-        // grep-like search but huge dict/list literals would explode storage.
+        // Single-line trimmed signature; the value preview helps grep-like search,
+        // but huge dict/list literals would explode storage.
         let one_line: String = s.split('\n').next().unwrap_or(s).trim().to_string();
         if one_line.len() > 120 {
-            // Walk back to a UTF-8 char boundary — a fixed byte slice at 120
-            // panics when it lands inside a multi-byte char (e.g. CJK constants
-            // like `WYNTXT_JA = "はい、…"`). `is_char_boundary` is O(1) and
-            // walks back at most 3 bytes (max UTF-8 code-point length is 4).
+            // Walk back to a UTF-8 char boundary — slicing at a fixed byte 120
+            // panics inside a multi-byte char (e.g. CJK constants like
+            // `WYNTXT_JA = "はい、…"`). `is_char_boundary` is O(1) and walks back
+            // at most 3 bytes (max UTF-8 code-point length is 4).
             let mut end = 120;
             while end > 0 && !one_line.is_char_boundary(end) {
                 end -= 1;
@@ -118,15 +116,15 @@ fn walk_targets(node: &Node, source: &[u8], out: &mut Vec<String>) {
                 out.push(name.to_string());
             }
         }
-        // `FOO: int = 5` — LHS field is the identifier; type is a sibling.
-        // tree-sitter exposes the identifier directly as the first named child.
+        // `FOO: int = 5` — LHS is the identifier, type is a sibling; tree-sitter
+        // exposes the identifier as the first named child.
         "pattern_list" | "tuple_pattern" | "list_pattern" => {
             let mut cursor = node.walk();
             for c in node.named_children(&mut cursor) {
                 walk_targets(&c, source, out);
             }
         }
-        // Annotated form: in some tree-sitter-python versions LHS is wrapped.
+        // Annotated form: some tree-sitter-python versions wrap the LHS.
         // Defensive: recurse into the first named child.
         _ => {
             if let Some(first) = node.named_child(0) {
@@ -153,10 +151,10 @@ fn walk(
                 handle_def(&child, source, pending, parent_index, module_index, None);
             }
             "decorated_definition" => {
-                // Collect decorator names AND walk decorator subtrees to preserve
-                // call edges from decorator arguments (e.g. `@app.route("/api")`
-                // is a call to `app.route` from module scope). Then find the
-                // inner def and handle with decorators attached.
+                // Collect decorator names AND walk decorator subtrees to keep call
+                // edges from decorator arguments (e.g. `@app.route("/api")` is a
+                // call to `app.route` at module scope). Then handle the inner def
+                // with decorators attached.
                 let mut names: Vec<String> = Vec::new();
                 let mut inner: Option<Node> = None;
                 let mut dc = child.walk();
@@ -166,8 +164,8 @@ fn walk(
                             if let Some(n) = extract_decorator_name(&sub, source) {
                                 names.push(n);
                             }
-                            // Walk decorator subtree — captures the call edges
-                            // for `@app.route("/api")` etc. at module scope.
+                            // Walk decorator subtree — captures call edges for
+                            // `@app.route("/api")` etc. at module scope.
                             walk(sub, source, pending, parent_index, module_index);
                         }
                         "function_definition"
@@ -218,8 +216,8 @@ fn walk(
     }
 }
 
-/// Push a def (function/method/class) and recurse into its body. Shared between
-/// the decorated and undecorated paths.
+/// Push a def (function/method/class) and recurse into its body. Shared by the
+/// decorated and undecorated paths.
 fn handle_def(
     def_node: &Node,
     source: &[u8],
@@ -259,8 +257,7 @@ fn handle_def(
     }
 }
 
-/// Extract the dotted name of a Python decorator. Returns the function name only
-/// (not arguments). Handles:
+/// Dotted name of a Python decorator — function name only, no arguments:
 ///   `@property`              → "property"
 ///   `@pytest.fixture`        → "pytest.fixture"
 ///   `@app.route("/api")`     → "app.route"
@@ -283,8 +280,8 @@ fn extract_decorator_name(decorator_node: &Node, source: &[u8]) -> Option<String
 /// Returns (leaf, full_path, to_type).
 /// `foo()` → ("foo", "foo", None)
 /// `obj.foo()` → ("foo", "obj.foo", None) — lowercase receiver, not a class
-/// `Class.foo()` → ("foo", "Class.foo", Some("Class")) — uppercase receiver, treat as class
-/// `pkg.Cls.foo()` → ("foo", "pkg.Cls.foo", Some("Cls")) — find rightmost-capitalized receiver
+/// `Class.foo()` → ("foo", "Class.foo", Some("Class")) — uppercase receiver = class
+/// `pkg.Cls.foo()` → ("foo", "pkg.Cls.foo", Some("Cls")) — rightmost-capitalized receiver
 fn call_target(
     call_node: &Node,
     source: &[u8],
@@ -308,10 +305,9 @@ fn call_target(
     }
 }
 
-/// For Python `attribute` node `obj.foo`, find the receiver. If the immediate
-/// receiver is uppercase-starting, treat as a class. For nested `pkg.Cls.foo`,
-/// the receiver is `pkg.Cls` (another attribute node) — recurse to find the
-/// rightmost identifier and check its case.
+/// For an `attribute` node `obj.foo`, find the receiver. Uppercase-starting
+/// receiver = class. For nested `pkg.Cls.foo` the receiver is `pkg.Cls` (another
+/// attribute node) — recurse to the rightmost identifier and check its case.
 fn type_prefix_from_object(attribute: &Node, source: &[u8]) -> Option<String> {
     let obj = attribute.child_by_field_name("object")?;
     let candidate = match obj.kind() {
@@ -371,13 +367,13 @@ fn handle_import(node: &Node, source: &[u8], pending: &mut PendingFile, module_i
 fn handle_import_from(node: &Node, source: &[u8], pending: &mut PendingFile, module_index: usize) {
     let line = line_of(node);
 
-    // The module name appears in field "module_name" in tree-sitter-python.
+    // Module name lives in field "module_name" in tree-sitter-python.
     let module = node
         .child_by_field_name("module_name")
         .and_then(|n| node_text(&n, source))
         .map(String::from);
 
-    // Walk children; the "name" field appears multiple times for each imported item.
+    // The "name" field appears once per imported item.
     let mut cursor = node.walk();
     for (i, child) in node.children(&mut cursor).enumerate() {
         let field = node.field_name_for_child(i as u32);
@@ -552,7 +548,7 @@ mod tests {
         let root = path.parent().unwrap();
         let pending = parse_one(&path, root, &PythonExtractor).unwrap();
 
-        // db should have decorators=,pytest.fixture,
+        // db → decorators=,pytest.fixture,
         let db = pending
             .symbols
             .iter()
@@ -560,7 +556,7 @@ mod tests {
             .expect("db symbol");
         assert_eq!(db.decorators.as_deref(), Some(",pytest.fixture,"));
 
-        // get_x should have decorators=,router.get,
+        // get_x → decorators=,router.get,
         let get_x = pending
             .symbols
             .iter()
@@ -568,7 +564,7 @@ mod tests {
             .expect("get_x symbol");
         assert_eq!(get_x.decorators.as_deref(), Some(",router.get,"));
 
-        // simple should have decorators=,property,
+        // simple → decorators=,property,
         let simple = pending
             .symbols
             .iter()
@@ -623,7 +619,7 @@ mod tests {
             .map(|s| s.name.as_str())
             .collect();
 
-        // Plain, annotated, and tuple-unpacking module-level assignments captured.
+        // Plain, annotated, tuple-unpacking module-level assignments captured.
         assert!(constants.contains(&"MAX_RETRIES"));
         assert!(constants.contains(&"TIMEOUT_SECS"));
         assert!(constants.contains(&"HOST"));
@@ -631,8 +627,8 @@ mod tests {
         assert!(constants.contains(&"__all__"));
         assert!(constants.contains(&"COUNTER"));
 
-        // Scoping: locals in function, class attributes, and conditional
-        // assignments are NOT module-level constants.
+        // Scoping: function locals, class attributes, and conditional assignments
+        // are NOT module-level constants.
         assert!(
             !constants.contains(&"local_var"),
             "function-local not a constant"
@@ -655,17 +651,16 @@ mod tests {
         assert_eq!(max_retries.signature.as_deref(), Some("MAX_RETRIES = 5"));
     }
 
-    /// Regression test for the UTF-8 char-boundary panic that crashed indexing
-    /// of any Python file containing a long CJK / emoji / multi-byte constant.
-    /// Before the fix, `&one_line[..120]` panicked when byte 120 landed inside
-    /// a multi-byte character (e.g. Japanese 'す' = 3 bytes).
+    /// Regression: UTF-8 char-boundary panic that crashed indexing of any Python
+    /// file with a long CJK / emoji / multi-byte constant. Pre-fix, `&one_line[..120]`
+    /// panicked when byte 120 landed inside a multi-byte char (e.g. Japanese 'す' = 3 bytes).
     #[test]
     fn long_multibyte_constant_does_not_panic_on_signature_truncation() {
         // Japanese sentence ~360 bytes (120+ chars × 3 bytes each).
         let body = "WYNTXT_JA = \"はい、ウィンダムリワードに登録して無料宿泊ポイントを獲得したいと思います。[ウィンダムホテルグループLLC](https://example.com)、[追加開示事項](https://example.com)、および[利用規約](https://example.com)を読み、同意します。\"\n";
         let path = write_tmp("multibyte.py", body);
         let root = path.parent().unwrap();
-        // Must NOT panic. Before fix: thread panicked at python.rs:80 with
+        // Must NOT panic. Pre-fix: panicked at python.rs:80 with
         // "end byte index 120 is not a char boundary; it is inside 'す'".
         let pending = parse_one(&path, root, &PythonExtractor).unwrap();
         let sym = pending
@@ -674,8 +669,8 @@ mod tests {
             .find(|s| s.name == "WYNTXT_JA")
             .expect("constant extracted");
         let sig = sym.signature.as_deref().expect("signature present");
-        // Truncated form must still be valid UTF-8 (we built it from a String)
-        // and end with the ellipsis we appended.
+        // Truncated form must still be valid UTF-8 (built from a String) and end
+        // with the appended ellipsis.
         assert!(
             sig.ends_with('…'),
             "signature should be ellipsis-truncated: {sig}"

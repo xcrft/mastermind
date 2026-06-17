@@ -22,9 +22,9 @@ pub struct Symbol {
     pub line_end: u32,
     pub signature: Option<String>,
     pub parent_id: Option<i64>,
-    /// Comma-bookended list of decorators / attributes / modifiers
-    /// (e.g. `",Fact,"`, `",partial,sealed,"`). `None` if no modifiers.
-    /// Used by `mmcg_unreferenced` filtering and by `mmcg_search` partial-class collapse.
+    /// Comma-bookended decorators/attributes/modifiers (e.g. `",Fact,"`,
+    /// `",partial,sealed,"`); `None` if none. Used by `mmcg_unreferenced`
+    /// filtering and `mmcg_search` partial-class collapse.
     pub decorators: Option<String>,
 }
 
@@ -85,10 +85,9 @@ pub struct TaskSpecHit {
 pub struct PendingFile {
     pub path: String,
     pub mtime: i64,
-    /// Programming language identifier — `python`, `typescript`, `tsx`,
-    /// `javascript`, `rust`. Stored on every symbol of this file. Enables the
-    /// `language` filter in queries (defends against cross-language name collisions
-    /// in monorepos).
+    /// Language id — `python`, `typescript`, `tsx`, `javascript`, `rust`.
+    /// Stored on every symbol of this file; powers the `language` query filter
+    /// (defends against cross-language name collisions in monorepos).
     pub language: String,
     pub symbols: Vec<PendingSymbol>,
     pub edges: Vec<PendingEdge>,
@@ -103,9 +102,9 @@ pub struct PendingSymbol {
     pub signature: Option<String>,
     /// Index into `symbols` vec of the parent (e.g. class for a method). None = top-level.
     pub parent_index: Option<usize>,
-    /// Decorator / attribute names attached to this symbol, comma-delimited with
-    /// leading and trailing commas for safe `LIKE ',name,'` matching. e.g.
-    /// `,pytest.fixture,property,` or `,tokio::main,` or None for none.
+    /// Decorator/attribute names, comma-delimited with leading+trailing commas
+    /// for safe `LIKE ',name,'` matching. e.g. `,pytest.fixture,property,`,
+    /// `,tokio::main,`, or None.
     pub decorators: Option<String>,
 }
 
@@ -115,13 +114,13 @@ pub struct PendingEdge {
     pub from_index: usize,
     /// Leaf name — `foo` in `obj.foo()`, `baz` in `from a.b import baz`.
     pub to_name: String,
-    /// Fully-qualified path as it appears in source — `obj.foo`, `a.b.baz`,
-    /// `Foo::bar`. None if the call/import has no resolvable path beyond the leaf.
+    /// Fully-qualified path as in source — `obj.foo`, `a.b.baz`, `Foo::bar`.
+    /// None if no resolvable path beyond the leaf.
     pub to_path: Option<String>,
-    /// Type/namespace prefix for the call — `SessionStore` for `SessionStore::new()`,
-    /// `Foo` for `Foo::bar()`. None if there's no type prefix (free function, plain
-    /// method on a variable). Used to make `mmcg_callers <Type>` find Rust constructor
-    /// and associated-function calls that would otherwise hide under their leaf name.
+    /// Type/namespace prefix — `SessionStore` for `SessionStore::new()`, `Foo`
+    /// for `Foo::bar()`. None if no prefix (free function, plain method on a
+    /// variable). Lets `mmcg_callers <Type>` find Rust constructor and
+    /// associated-function calls that would otherwise hide under their leaf name.
     pub to_type: Option<String>,
     pub kind: String,
     pub line: u32,
@@ -161,8 +160,8 @@ impl Store {
     }
 
     fn init_schema(&self) -> SqlResult<()> {
-        // Detect existing schema version. If it exists and doesn't match,
-        // drop everything and rebuild — we don't ship migrations.
+        // If a stored schema version exists and doesn't match, drop everything
+        // and rebuild — we don't ship migrations.
         let meta_exists: bool = self
             .conn
             .query_row(
@@ -249,8 +248,8 @@ impl Store {
             );
 
             -- Task-spec corpus, populated by the indexer from `.mastermind/tasks/<NNN>-<name>/spec.md`.
-            -- Used by `mmcg_tasks(query)` so planners can recall past designs and
-            -- learn from prior verdicts. FTS5 gives BM25 ranking + snippet().
+            -- `mmcg_tasks(query)` uses it so planners can recall past designs and
+            -- verdicts. FTS5 gives BM25 ranking + snippet().
             -- `path` is UNINDEXED — we don't tokenize file paths.
             CREATE VIRTUAL TABLE IF NOT EXISTS task_specs_fts USING fts5(
                 path UNINDEXED,
@@ -260,10 +259,10 @@ impl Store {
             );
 
             -- Cross-agent scratchpad. Live in-session channel between Mastermind
-            -- subagents (planner → executor → auditor). Counterpart to
-            -- `.mastermind/tasks/_lessons.md` which is cross-session.
-            -- Additive table — no SCHEMA_VERSION bump required; the IF NOT EXISTS
-            -- form lets existing DBs adopt it without a rebuild.
+            -- subagents (planner → executor → auditor); counterpart to the
+            -- cross-session `.mastermind/tasks/_lessons.md`.
+            -- Additive table — no SCHEMA_VERSION bump needed; IF NOT EXISTS lets
+            -- existing DBs adopt it without a rebuild.
             CREATE TABLE IF NOT EXISTS scratchpad (
                 id    INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts    INTEGER NOT NULL,
@@ -276,16 +275,15 @@ impl Store {
             "#,
         )?;
 
-        // Idempotent column add for upgrades from pre-0.28 DBs (the CREATE TABLE
-        // IF NOT EXISTS above is a no-op when the table already exists).
-        // SQLite raises a `duplicate column name` error if the column is already
-        // there — that's the steady-state case and we discard the result.
+        // Idempotent column add for pre-0.28 DBs (CREATE TABLE IF NOT EXISTS
+        // above is a no-op once the table exists). SQLite raises `duplicate
+        // column name` if already present — the steady-state case, so we discard.
         let _ = self.conn.execute(
             "ALTER TABLE files ADD COLUMN structural_fingerprint TEXT NOT NULL DEFAULT ''",
             [],
         );
 
-        // Stamp schema version on first init
+        // Stamp schema version on first init.
         self.conn.execute(
             "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?1)",
             params![SCHEMA_VERSION],
@@ -307,18 +305,18 @@ impl Store {
     }
 
     /// Commit a parsed file's symbols and edges in a single transaction.
-    /// This is the hot path during indexing — keep it batched.
+    /// Hot path during indexing — keep it batched.
     pub fn commit_file(&mut self, pending: PendingFile) -> SqlResult<()> {
         let tx = self.conn.transaction()?;
 
-        // Purge any existing data for this file
+        // Purge any existing data for this file.
         tx.execute(
             "DELETE FROM symbols WHERE file_path = ?1",
             params![&pending.path],
         )?;
         tx.execute("DELETE FROM files WHERE path = ?1", params![&pending.path])?;
 
-        // Insert symbols, remember the rowid each one got
+        // Insert symbols, remembering each rowid.
         let language = if pending.language.is_empty() {
             None
         } else {
@@ -347,7 +345,7 @@ impl Store {
             }
         }
 
-        // Insert edges (to_id left NULL — we resolve by name/type during queries)
+        // Insert edges (to_id left NULL — resolved by name/type during queries).
         {
             let mut stmt = tx.prepare_cached(
                 "INSERT INTO edges(from_id, to_id, to_name, to_path, to_type, kind, line)
@@ -361,7 +359,7 @@ impl Store {
             }
         }
 
-        // Stamp the file
+        // Stamp the file.
         let fingerprint = crate::fingerprint::compute_structural_fingerprint(&pending);
         tx.execute(
             "INSERT INTO files(path, indexed_at, symbol_count, structural_fingerprint) \
@@ -441,10 +439,9 @@ impl Store {
         rows.next()?.map(|r| r.get(0)).transpose()
     }
 
-    /// Return the stored structural fingerprint for a file path, or `None` if
-    /// the file was never indexed. An empty string is returned for files indexed
-    /// before 0.28 (the column existed but was backfilled with `''`); callers
-    /// should treat `Some("")` as `first-seen`.
+    /// Stored structural fingerprint for a file path, or `None` if never indexed.
+    /// Files indexed before 0.28 return `Some("")` (column backfilled with `''`);
+    /// callers should treat that as `first-seen`.
     pub fn file_fingerprint(&self, path: &str) -> SqlResult<Option<String>> {
         self.conn
             .query_row(
@@ -455,8 +452,8 @@ impl Store {
             .optional()
     }
 
-    /// All paths currently in the index. Used by the indexer to detect deletions —
-    /// any path that's no longer on disk gets purged at the end of an index run.
+    /// All paths currently in the index. The indexer uses this to detect
+    /// deletions — paths no longer on disk get purged at the end of an index run.
     pub fn indexed_paths(&self) -> SqlResult<Vec<String>> {
         let mut stmt = self.conn.prepare("SELECT path FROM files ORDER BY path")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
@@ -483,14 +480,14 @@ impl Store {
         rows.collect()
     }
 
-    /// Callers of a symbol — symbols connected to it via an edge whose `to_name`
-    /// OR `to_type` matches. The `to_type` match catches Rust constructor /
+    /// Callers of a symbol — symbols joined to it via an edge matching `to_name`
+    /// OR `to_type`. The `to_type` match catches Rust constructor /
     /// associated-function calls like `SessionStore::new()` that would otherwise
-    /// hide under the leaf name (`new`). Optional `language` filter scopes the
-    /// search (defends against cross-language name collisions in monorepos).
+    /// hide under the leaf name (`new`). Optional `language` filter (defends
+    /// against cross-language name collisions in monorepos).
     ///
     /// `edge_kind`:
-    ///   - `None` → defaults to `'calls'` (preserves the historical "who calls X" meaning)
+    ///   - `None` → `'calls'` (historical "who calls X")
     ///   - `Some("imports")` → who imports X (returns module pseudo-symbols)
     ///   - `Some("inherits")` → who inherits from X (when extractors emit inherit edges)
     pub fn callers_of(
@@ -513,8 +510,8 @@ impl Store {
         rows.collect()
     }
 
-    /// Callees of a symbol-id — names that the symbol references via the given
-    /// edge kind. `edge_kind = None` defaults to `'calls'`.
+    /// Callees of a symbol-id — names it references via the given edge kind.
+    /// `edge_kind = None` defaults to `'calls'`.
     pub fn callees_of(
         &self,
         symbol_id: i64,
@@ -531,18 +528,18 @@ impl Store {
         rows.collect()
     }
 
-    /// Transitive callers up to `max_depth`. Returns (symbol, depth) pairs.
-    /// Matches on `to_name OR to_type` to catch type-method calls like
-    /// `SessionStore::new()`. Optional `language` filter.
+    /// Transitive callers up to `max_depth`, as (symbol, depth) pairs. Matches
+    /// `to_name OR to_type` to catch type-method calls like `SessionStore::new()`.
+    /// Optional `language` filter.
     pub fn impact_of(
         &self,
         name: &str,
         max_depth: u32,
         language: Option<&str>,
     ) -> SqlResult<Vec<(Symbol, u32)>> {
-        // `d` must be appended AFTER the SYMBOL_COLS_S list so its index lines up
-        // with `row_to_symbol`'s column count. Adjust the `r.get(N)` for depth
-        // if you change SYMBOL_COLS.
+        // `d` must come AFTER SYMBOL_COLS_S so its index lines up with
+        // `row_to_symbol`'s column count. Adjust the depth `r.get(N)` if you
+        // change SYMBOL_COLS.
         let sql = format!(
             "WITH RECURSIVE impact(sym_id, name, depth) AS (
                  SELECT s.id, s.name, 1
@@ -570,27 +567,26 @@ impl Store {
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![name, max_depth, language], |r| {
             let sym = Self::row_to_symbol(r)?;
-            // Depth is the column AFTER the 9 SYMBOL_COLS_S columns.
+            // Depth is the column after the 9 SYMBOL_COLS_S columns.
             let depth: u32 = r.get(9)?;
             Ok((sym, depth))
         })?;
         rows.collect()
     }
 
-    /// Symbols that no edge references — neither by `to_name` nor `to_type`.
-    /// Excludes synthetic `<module>` rows (never "called" by definition) and
-    /// symbols decorated with framework-registered patterns (pytest, FastAPI/
-    /// Flask routes, Triton/Numba JIT, Click commands, Celery tasks, Rust
-    /// `#[test]` / `#[tokio::main]`). Also excludes pytest-convention test
-    /// functions (`test_*` names in test files).
+    /// Symbols no edge references by `to_name` or `to_type`. Excludes synthetic
+    /// `<module>` rows (never "called") and symbols with framework-registered
+    /// decorators (pytest, FastAPI/Flask routes, Triton/Numba JIT, Click
+    /// commands, Celery tasks, Rust `#[test]` / `#[tokio::main]`), plus
+    /// pytest-convention test functions (`test_*` in test files).
     ///
     /// **Remaining false-positives** (caller responsibility):
-    /// - Entry points (`main`, framework-registered handlers without decorators)
+    /// - Entry points (`main`, framework handlers without decorators)
     /// - Dynamic dispatch / reflection / trait objects whose calls don't surface
     /// - Cross-language calls
     /// - Functions registered via dict / list at runtime
     ///
-    /// Optional `kind` (e.g. "function") and `language` filters scope the result.
+    /// Optional `kind` (e.g. "function") and `language` filters.
     pub fn unreferenced(
         &self,
         kind: Option<&str>,
@@ -602,22 +598,21 @@ impl Store {
              WHERE (?1 IS NULL OR s.kind = ?1)
                AND (?2 IS NULL OR s.language = ?2)
                AND s.kind != 'module'
-               -- Module-level constants are referenced by VALUE-READ (not by
-               -- call/import edges), so they'd dominate the default output as
-               -- false positives. Exclude them unless the caller explicitly
-               -- asked for `kind=constant` (in which case the kind filter
-               -- itself controls the slice).
+               -- Module-level constants are referenced by VALUE-READ, not
+               -- call/import edges, so they'd dominate the default output as
+               -- false positives. Exclude unless caller asked for `kind=constant`
+               -- (then the kind filter controls the slice).
                AND (?1 IS NOT NULL OR s.kind != 'constant')
                AND NOT EXISTS (
                    SELECT 1 FROM edges e
                    WHERE e.to_name = s.name OR e.to_type = s.name
                )
-               -- Filter out pytest test functions by convention (test_* in *test* files)
+               -- pytest test functions by convention (test_* in *test*/*spec* files)
                AND NOT (
                    s.name LIKE 'test_%'
                    AND (s.file_path LIKE '%test%' OR s.file_path LIKE '%spec%')
                )
-               -- Filter out symbols decorated by framework registries
+               -- Symbols decorated by framework registries
                AND (s.decorators IS NULL OR (
                    -- pytest
                    s.decorators NOT LIKE '%,fixture,%'
@@ -682,7 +677,7 @@ impl Store {
                    AND s.decorators NOT LIKE '%,GlobalSetup,%'
                    AND s.decorators NOT LIKE '%,GlobalCleanup,%'
                    -- Java polymorphic dispatch — `@Override` means a parent's
-                   -- callsites resolve here; not visible to mmcg's call graph.
+                   -- callsites resolve here, invisible to mmcg's call graph.
                    AND s.decorators NOT LIKE '%,Override,%'
                    -- Java test frameworks (JUnit 4/5, TestNG)
                    AND s.decorators NOT LIKE '%,Test,%'
@@ -726,11 +721,11 @@ impl Store {
         rows.collect()
     }
 
-    /// Symbols defined in files under `path_prefix` that are referenced from
-    /// at least one file OUTSIDE the prefix. "Empirical API surface" — independent
-    /// of declared visibility (which mmcg doesn't extract).
+    /// Symbols defined under `path_prefix` referenced from at least one file
+    /// OUTSIDE the prefix. "Empirical API surface" — independent of declared
+    /// visibility (which mmcg doesn't extract).
     ///
-    /// `path_prefix` is matched via SQL `LIKE` — pass the prefix without `%`; we append it.
+    /// `path_prefix` matched via SQL `LIKE` — pass without `%`; we append it.
     /// Optional `language` filter.
     pub fn api_surface(&self, path_prefix: &str, language: Option<&str>) -> SqlResult<Vec<Symbol>> {
         let pattern = if path_prefix.ends_with('%') {
@@ -758,21 +753,20 @@ impl Store {
     }
 
     /// Rank symbols by **in-degree** — how many distinct symbols call them
-    /// (matched by `to_name` or `to_type`, like `callers_of`). The top of the
-    /// list is the codebase's structural attractor surface: utilities everyone
-    /// depends on, core domain types, framework registration points.
+    /// (matched by `to_name` or `to_type`, like `callers_of`). The top is the
+    /// codebase's structural attractor surface: utilities everyone depends on,
+    /// core domain types, framework registration points.
     ///
-    /// Use as a planner pre-flight on an unfamiliar codebase or path prefix:
-    /// "what are the 20 most-referenced symbols in `src/auth/`?" answers
-    /// "what should I read first" cheaply.
+    /// Planner pre-flight on an unfamiliar codebase or path prefix: "the 20
+    /// most-referenced symbols in `src/auth/`?" cheaply answers "read first".
     ///
-    /// - `path_prefix`: limit to symbols whose `file_path` starts with this
-    ///   prefix. `None` = whole index. Trailing `%` accepted, otherwise we append.
+    /// - `path_prefix`: limit to `file_path` starting with this prefix. `None` =
+    ///   whole index. Trailing `%` accepted, otherwise appended.
     /// - `language`, `kind`: standard filters.
-    /// - `top`: how many results to return (caller decides — no hard cap).
+    /// - `top`: result count (caller decides — no hard cap).
     ///
     /// Excludes synthetic `<module>` symbols (always-zero in-degree under
-    /// name-matched edges) and symbols not referenced anywhere (in-degree 0).
+    /// name-matched edges) and symbols referenced nowhere (in-degree 0).
     pub fn centrality(
         &self,
         path_prefix: Option<&str>,
@@ -787,9 +781,8 @@ impl Store {
                 format!("{p}%")
             }
         });
-        // In-degree = distinct CALLER symbols (not distinct call sites). Mirrors
-        // `mmcg_callers` semantics — a function with 5 calls to `foo` from the
-        // same caller counts once, not five times.
+        // In-degree = distinct CALLER symbols, not call sites. Mirrors
+        // `mmcg_callers` — 5 calls to `foo` from the same caller count once.
         let sql = format!(
             "WITH deg AS (
                  SELECT nm, COUNT(DISTINCT from_id) AS d FROM (
@@ -816,7 +809,7 @@ impl Store {
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![pattern, language, kind, top], |r| {
             let sym = Self::row_to_symbol(r)?;
-            // in_degree is the column after the 9 SYMBOL_COLS_S columns.
+            // in_degree / name_collision follow the 9 SYMBOL_COLS_S columns.
             let in_degree: u32 = r.get(9)?;
             let name_collision: u32 = r.get(10)?;
             Ok((sym, in_degree, name_collision))
@@ -824,9 +817,9 @@ impl Store {
         rows.collect()
     }
 
-    /// Replace the entire task-spec corpus with the supplied entries.
-    /// Called by `Indexer::index_task_specs` after scanning `.mastermind/tasks/<NNN>-<name>/spec.md`.
-    /// Single transaction — atomic from a reader's perspective.
+    /// Replace the entire task-spec corpus with the supplied entries. Called by
+    /// `Indexer::index_task_specs` after scanning `.mastermind/tasks/<NNN>-<name>/spec.md`.
+    /// Single transaction — atomic to readers.
     pub fn replace_task_specs(&mut self, entries: &[TaskSpecEntry]) -> SqlResult<()> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute("DELETE FROM task_specs_fts", [])?;
@@ -843,25 +836,22 @@ impl Store {
     /// Strongly-connected components of size ≥ `min_size` in the file-level
     /// import graph. A returned SCC = a circular-import group.
     ///
-    /// Edges are resolved by **leaf name match** — for each `imports` edge,
-    /// every file containing a same-named symbol becomes a target. This
-    /// over-approximates: two unrelated `Logger` symbols across the codebase
-    /// produce a cross-edge even if the importer didn't mean that one. The
-    /// upside is no extractor-specific import resolution; the downside is
-    /// false-positive cycles to manually verify.
+    /// Edges resolved by **leaf name match** — each `imports` edge targets every
+    /// file with a same-named symbol. Over-approximates: two unrelated `Logger`
+    /// symbols produce a cross-edge even if the importer meant neither. Upside:
+    /// no extractor-specific import resolution. Downside: false-positive cycles
+    /// to verify manually.
     ///
-    /// Files cycle-internally never edge to themselves (we exclude
-    /// `from_file = to_file`).
+    /// Self-edges excluded (`from_file = to_file`).
     ///
-    /// `min_size` defaults to 2 (the smallest possible cycle). Set higher to
-    /// surface only larger architectural problems (e.g. min_size=3 hides
-    /// trivial A→B→A patterns).
+    /// `min_size` defaults to 2 (smallest cycle). Higher surfaces only larger
+    /// problems (min_size=3 hides trivial A→B→A).
     pub fn dependency_cycles(
         &self,
         language: Option<&str>,
         min_size: usize,
     ) -> SqlResult<Vec<Vec<String>>> {
-        // Load the file-level adjacency: from_file → set of to_files.
+        // File-level adjacency: from_file → set of to_files.
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT
                 s_from.file_path AS from_file,
@@ -891,15 +881,15 @@ impl Store {
         let cycles = tarjan_scc(&adj);
         let mut out: Vec<Vec<String>> =
             cycles.into_iter().filter(|c| c.len() >= min_size).collect();
-        // Stable ordering: largest cycles first, lex order inside.
+        // Stable order: largest cycles first, lex within.
         out.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
         Ok(out)
     }
 
     /// Full-text search over the task-spec corpus. `query` is an FTS5 MATCH
-    /// expression — bare words AND-joined, phrases in double quotes, `NOT`/`OR`
-    /// supported. Returns `(path, title, snippet)` ordered by BM25 rank.
-    /// Empty / whitespace-only queries return no results (FTS5 errors otherwise).
+    /// expression — bare words AND-joined, phrases double-quoted, `NOT`/`OR`
+    /// supported. Returns `(path, title, snippet)` by BM25 rank. Empty /
+    /// whitespace queries return nothing (FTS5 errors otherwise).
     pub fn search_task_specs(&self, query: &str, top: u32) -> SqlResult<Vec<TaskSpecHit>> {
         let trimmed = query.trim();
         if trimmed.is_empty() {
@@ -932,8 +922,8 @@ impl Store {
             .query_row("SELECT COUNT(*) FROM task_specs_fts", [], |r| r.get(0))
     }
 
-    /// Files indexed within the last `window_secs` seconds (based on `indexed_at`).
-    /// Used by `mmcg_recent_changes` to answer "what has the watcher touched lately".
+    /// Files with `indexed_at >= threshold_unix`. Backs `mmcg_recent_changes`
+    /// ("what has the watcher touched lately").
     pub fn files_indexed_since(&self, threshold_unix: i64) -> SqlResult<Vec<FileEntry>> {
         let mut stmt = self.conn.prepare(
             "SELECT path, indexed_at, symbol_count FROM files
@@ -950,11 +940,10 @@ impl Store {
         rows.collect()
     }
 
-    /// Files indexed under a path prefix (path = None means everything).
-    /// Optional `language` filter — uses EXISTS subquery on symbols table since
-    /// language lives there, not on files. Files with zero symbols are excluded
-    /// when `language` is set (in practice every file has at least the synthetic
-    /// `<module>` symbol, so this is a no-op for indexed files).
+    /// Files indexed under a path prefix (None = everything). Optional `language`
+    /// filter via EXISTS on symbols (language lives there, not on files). When
+    /// set, zero-symbol files are excluded — a no-op in practice, since every
+    /// indexed file has at least the synthetic `<module>` symbol.
     pub fn files_under(
         &self,
         prefix: Option<&str>,
@@ -1009,8 +998,8 @@ impl Store {
         rows.collect()
     }
 
-    /// Files whose module imports the given name. Matches `to_name` (leaf binding).
-    /// Optional `language` filter scopes the search to a single language.
+    /// Files whose module imports the given name. Matches `to_name` (leaf
+    /// binding). Optional `language` filter.
     pub fn imported_by_name(&self, name: &str, language: Option<&str>) -> SqlResult<Vec<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT s.file_path FROM edges e
@@ -1025,10 +1014,9 @@ impl Store {
         rows.collect()
     }
 
-    /// Files whose module imports something at exactly this fully-qualified path.
-    /// Matches `to_path` precisely — use this when the same leaf name is imported
-    /// from multiple modules and you only want the ones from a specific module.
-    /// Optional `language` filter.
+    /// Files whose module imports exactly this fully-qualified path. Matches
+    /// `to_path` precisely — use when the same leaf name is imported from
+    /// multiple modules and you want only one. Optional `language` filter.
     pub fn imported_by_path(&self, path: &str, language: Option<&str>) -> SqlResult<Vec<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT s.file_path FROM edges e
@@ -1064,8 +1052,8 @@ impl Store {
     }
 
     /// How many non-module symbols share this exact name — the over-approximation
-    /// factor for name-resolved edges (`callers` / `impact`). A high value means
-    /// those results pool call sites across many same-named definitions.
+    /// factor for name-resolved edges (`callers` / `impact`). High = results pool
+    /// call sites across many same-named definitions.
     pub fn definition_count(&self, name: &str) -> SqlResult<u32> {
         self.conn.query_row(
             "SELECT COUNT(*) FROM symbols WHERE name = ?1 AND kind != 'module'",
@@ -1088,10 +1076,10 @@ impl Store {
         })
     }
 
-    /// Append a single scratchpad entry. Returns the inserted row's id + unix
-    /// timestamp. `kind` is freeform but conventionally one of `intent`,
-    /// `note`, `handoff`, `risk`. `body` must be ≤ 8 KiB; the caller (MCP
-    /// layer) enforces the bound — Store accepts whatever the caller passes.
+    /// Append a scratchpad entry. Returns the inserted row id + unix timestamp.
+    /// `kind` is freeform, conventionally `intent`/`note`/`handoff`/`risk`. The
+    /// ≤ 8 KiB `body` bound is enforced by the caller (MCP layer); Store accepts
+    /// whatever it's passed.
     pub fn scratchpad_append(
         &mut self,
         agent: &str,
@@ -1151,17 +1139,16 @@ impl Store {
     }
 }
 
-/// Tarjan's strongly-connected-components algorithm — iterative form to avoid
-/// stack overflow on deep import chains. O(V + E).
+/// Tarjan's SCC algorithm — iterative form to avoid stack overflow on deep
+/// import chains. O(V + E).
 ///
 /// Returns every SCC including singletons; `dependency_cycles()` filters by
-/// `min_size`. Node order within an SCC is sorted lexicographically for
-/// deterministic output.
+/// `min_size`. Nodes within an SCC are sorted lexicographically for determinism.
 fn tarjan_scc(adj: &std::collections::BTreeMap<String, Vec<String>>) -> Vec<Vec<String>> {
     use std::collections::HashMap;
 
-    // Intern node names → dense usize ids. Include nodes that only appear as
-    // edge targets (they may have no outgoing edges but still belong to SCCs).
+    // Intern node names → dense usize ids. Include edge-target-only nodes (no
+    // outgoing edges but still belong to SCCs).
     let mut all_names: Vec<&str> = adj.keys().map(|s| s.as_str()).collect();
     for vs in adj.values() {
         for v in vs {
@@ -1195,8 +1182,7 @@ fn tarjan_scc(adj: &std::collections::BTreeMap<String, Vec<String>>) -> Vec<Vec<
     let mut next_index: i64 = 0;
     let mut sccs: Vec<Vec<String>> = Vec::new();
 
-    // Work stack: (node, iterator-position over its successors).
-    // Using Vec<(usize, usize)> for indexable iteration.
+    // Work stack: each frame is a node plus its successor-iteration position.
     enum Action {
         Enter(usize),
         Resume(usize, usize),
@@ -1221,7 +1207,7 @@ fn tarjan_scc(adj: &std::collections::BTreeMap<String, Vec<String>>) -> Vec<Vec<
                 Action::Resume(v, i) => {
                     if i < succ[v].len() {
                         let w = succ[v][i];
-                        // Re-queue resume at i+1 so we come back after w finishes.
+                        // Re-queue at i+1 to resume after w finishes.
                         work.push(Action::Resume(v, i + 1));
                         if index[w] < 0 {
                             work.push(Action::Enter(w));
@@ -1229,8 +1215,8 @@ fn tarjan_scc(adj: &std::collections::BTreeMap<String, Vec<String>>) -> Vec<Vec<
                             lowlink[v] = lowlink[v].min(index[w]);
                         }
                     } else {
-                        // All successors processed — propagate lowlink to parent
-                        // (peek next Resume on the work stack, if any).
+                        // Successors done — propagate lowlink to parent (the next
+                        // Resume on the work stack, if any).
                         if let Some(Action::Resume(parent, _)) = work.last() {
                             let p = *parent;
                             lowlink[p] = lowlink[p].min(lowlink[v]);
@@ -1261,7 +1247,7 @@ mod tests {
     use super::*;
     use std::env;
 
-    /// Unique path per test — tests run in parallel so we can't share the file.
+    /// Unique path per test — parallel tests can't share the file.
     fn tmp_db(test_name: &str) -> PathBuf {
         let mut p = env::temp_dir();
         p.push(format!("mmcg-test-{}-{}.db", std::process::id(), test_name));
@@ -1350,7 +1336,7 @@ mod tests {
         let caller = store
             .insert_symbol("caller_fn", "function", "x.py", 10, 15, None, None)
             .unwrap();
-        // Module imports `target`; caller_fn calls `target`. Same to_name, different kinds.
+        // Module imports `target`; caller_fn calls it. Same to_name, different kinds.
         store
             .insert_edge(module, None, "target", "imports", 2)
             .unwrap();
@@ -1358,12 +1344,12 @@ mod tests {
             .insert_edge(caller, None, "target", "calls", 12)
             .unwrap();
 
-        // Default (None) → 'calls' only — finds caller_fn, not module
+        // Default (None) → 'calls' only — finds caller_fn, not module.
         let default_callers = store.callers_of("target", None, None).unwrap();
         assert_eq!(default_callers.len(), 1);
         assert_eq!(default_callers[0].name, "caller_fn");
 
-        // edge_kind = 'imports' — finds module, not caller_fn
+        // edge_kind = 'imports' — finds module, not caller_fn.
         let import_callers = store.callers_of("target", None, Some("imports")).unwrap();
         assert_eq!(import_callers.len(), 1);
         assert_eq!(import_callers[0].name, "<module>");
@@ -1388,8 +1374,8 @@ mod tests {
     fn unreferenced_excludes_decorated_and_tests() {
         let path = tmp_db("unreferenced_excludes_decorated");
         let store = Store::open(&path).unwrap();
-        // Direct insert via the connection — bypass the high-level insert_symbol API to
-        // include decorators column. Set up: 3 functions, none called by anything.
+        // Direct insert — insert_symbol can't set the decorators column.
+        // 3 functions, none called by anything.
         let conn = &store.conn;
         conn.execute(
             "INSERT INTO symbols(name, kind, file_path, line_start, line_end, signature, parent_id, language, decorators)
@@ -1409,17 +1395,17 @@ mod tests {
 
         let unref = store.unreferenced(None, None).unwrap();
         let names: Vec<&str> = unref.iter().map(|s| s.name.as_str()).collect();
-        // plain_dead survives — actually unreferenced, no decorator, no test pattern
+        // plain_dead survives — unreferenced, no decorator, no test pattern.
         assert!(
             names.contains(&"plain_dead"),
             "plain_dead is genuinely unreferenced"
         );
-        // db is filtered out — has pytest.fixture decorator
+        // db filtered — pytest.fixture decorator.
         assert!(
             !names.contains(&"db"),
             "db is filtered by @pytest.fixture decorator"
         );
-        // test_foo is filtered out — test_* in test file
+        // test_foo filtered — test_* in test file.
         assert!(
             !names.contains(&"test_foo"),
             "test_foo is filtered by pytest convention"
@@ -1443,7 +1429,7 @@ mod tests {
         let _orphan = store
             .insert_symbol("orphan", "function", "x.py", 20, 22, None, None)
             .unwrap();
-        // foo calls bar — bar referenced; foo and orphan have no incoming edges
+        // foo calls bar — bar referenced; foo and orphan have no incoming edges.
         store.insert_edge(foo, None, "bar", "calls", 7).unwrap();
 
         let unref = store.unreferenced(None, None).unwrap();
@@ -1472,7 +1458,7 @@ mod tests {
     fn api_surface_external_only() {
         let path = tmp_db("api_surface_external_only");
         let store = Store::open(&path).unwrap();
-        // pub_fn lives in src/api/, called from src/main.rs (OUTSIDE prefix)
+        // pub_fn in src/api/, called from src/main.rs (OUTSIDE prefix).
         let main_mod = store
             .insert_symbol("<module>", "module", "src/main.rs", 1, 1, None, None)
             .unwrap();
@@ -1483,7 +1469,7 @@ mod tests {
             .insert_edge(main_mod, None, "pub_fn", "calls", 10)
             .unwrap();
 
-        // internal_fn lives in src/api/, called only from src/api/util.rs (INSIDE prefix)
+        // internal_fn in src/api/, called only from src/api/util.rs (INSIDE prefix).
         let util_mod = store
             .insert_symbol("<module>", "module", "src/api/util.rs", 1, 1, None, None)
             .unwrap();
@@ -1563,7 +1549,7 @@ mod tests {
         let c3 = store
             .insert_symbol("c3", "function", "x.py", 50, 55, None, None)
             .unwrap();
-        // Same caller calling popular twice → still in_degree=1 (DISTINCT callers).
+        // Same caller twice → still in_degree=1 (DISTINCT callers).
         store
             .insert_edge(c1, Some(popular), "popular", "calls", 31)
             .unwrap();
@@ -1632,20 +1618,20 @@ mod tests {
         assert!(hits[0].path.contains("001-rate-limiter"));
         assert!(hits[0].excerpt.contains("«rate"));
 
-        // Multi-term implicit AND — both rate AND bucket match the first spec only.
+        // Implicit AND — rate AND bucket match the first spec only.
         let combo = store.search_task_specs("rate bucket", 10).unwrap();
         assert_eq!(combo.len(), 1);
 
-        // Stemming: "invalidate" stems to same root as "invalidation" via porter.
+        // Stemming: porter maps "invalidate" to the "invalidation" root.
         let stem = store.search_task_specs("invalidate", 10).unwrap();
         assert_eq!(stem.len(), 1);
         assert!(stem[0].path.contains("002-cache-invalidation"));
 
-        // Empty / whitespace query → no results (and no FTS5 syntax error).
+        // Empty / whitespace query → no results, no FTS5 syntax error.
         assert!(store.search_task_specs("", 10).unwrap().is_empty());
         assert!(store.search_task_specs("   ", 10).unwrap().is_empty());
 
-        // Replace is wholesale — re-replacing with a smaller set wipes the old.
+        // Replace is wholesale — a smaller set wipes the old.
         store.replace_task_specs(&entries[..1]).unwrap();
         assert_eq!(store.task_specs_count().unwrap(), 1);
         std::fs::remove_file(&path).ok();
@@ -1701,8 +1687,7 @@ mod tests {
     fn dependency_cycles_end_to_end() {
         let path = tmp_db("dep_cycles");
         let store = Store::open(&path).unwrap();
-        // a.py imports `bar` (lives in b.py); b.py imports `foo` (lives in a.py).
-        // Cycle: a.py ↔ b.py.
+        // a.py imports `bar` (in b.py); b.py imports `foo` (in a.py) → cycle a.py ↔ b.py.
         // c.py is acyclic (only imports `bar`).
         let a_mod = store
             .insert_symbol("<module>", "module", "a.py", 1, 100, None, None)
@@ -1755,7 +1740,7 @@ mod tests {
             .insert_edge(caller, Some(core_cls), "CoreClass", "calls", 3)
             .unwrap();
 
-        // Prefix filter: src/api/ excludes the class in src/core/.
+        // Prefix src/api/ excludes the class in src/core/.
         let api_only = store.centrality(Some("src/api/"), None, None, 10).unwrap();
         let names: Vec<&str> = api_only.iter().map(|(s, _, _)| s.name.as_str()).collect();
         assert!(names.contains(&"api_target"));
@@ -1776,7 +1761,7 @@ mod tests {
         let (id1, ts1) = store
             .scratchpad_append("planner", "intent", "drafting spec 042")
             .unwrap();
-        // Force a 1-second separation so the ORDER BY ts DESC is deterministic.
+        // 1-second separation makes ORDER BY ts DESC deterministic.
         std::thread::sleep(std::time::Duration::from_secs(1));
         let (id2, ts2) = store
             .scratchpad_append("executor", "handoff", "phase 1 done, ready for audit")
@@ -1816,7 +1801,7 @@ mod tests {
 
     #[test]
     fn scratchpad_table_idempotent_across_opens() {
-        // Re-opening an existing DB must not error out (CREATE TABLE IF NOT EXISTS).
+        // Re-opening an existing DB must not error (CREATE TABLE IF NOT EXISTS).
         let path = tmp_db("scratchpad_idempotent");
         {
             let mut store = Store::open(&path).unwrap();

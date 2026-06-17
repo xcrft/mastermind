@@ -3,26 +3,26 @@
 //! # Precision disclaimer (read before trusting query results)
 //!
 //! Unlike the Python/TS/Rust/C#/Go/Java/PHP extractors, C/C++ via tree-sitter
-//! alone is fundamentally lower precision because the language's semantics
-//! depend on the **preprocessor** and **template instantiation** which
-//! tree-sitter does not run. Known false-positive / false-negative classes:
+//! alone is fundamentally lower precision: semantics depend on the
+//! **preprocessor** and **template instantiation**, which tree-sitter doesn't
+//! run. Known false-positive / false-negative classes:
 //!
-//! - **Macros are invisible.** `TEST(SuiteName, TestName) { ... }` (gtest) is
-//!   parsed as a call to `TEST`, not as a function definition — so the test
-//!   body is unindexed and the synthetic function doesn't appear in
-//!   `mmcg_search`. Similarly any call inside `ASSERT_EQ(...)` or other macro
-//!   arguments may or may not be visible depending on the macro shape.
-//! - **Template instantiations** are not tracked. `foo<int>(x)` records a call
+//! - **Macros are invisible.** `TEST(SuiteName, TestName) { ... }` (gtest)
+//!   parses as a call to `TEST`, not a function definition — so the test body
+//!   is unindexed and the synthetic function is absent from `mmcg_search`.
+//!   Calls inside `ASSERT_EQ(...)` or other macro args may or may not be
+//!   visible depending on the macro shape.
+//! - **Template instantiations** aren't tracked. `foo<int>(x)` records a call
 //!   to `foo`, but `vector<T>::push_back(x)` records `push_back` with whatever
 //!   the receiver looks like syntactically.
-//! - **Header / source split.** `void Foo::bar()` defined in `.cpp` and
-//!   declared `void bar();` in `.h` produce two symbol rows with the same name.
-//!   No partial-class-style collapse — they're genuinely different declarations.
-//! - **ADL / overload resolution** is not performed. `swap(a, b)` records a
-//!   call to `swap`; whether that resolves to `std::swap`, a member, or a
-//!   namespace-qualified version requires semantic analysis we don't do.
+//! - **Header / source split.** `void Foo::bar()` in `.cpp` and `void bar();`
+//!   in `.h` produce two symbol rows with the same name. No partial-class-style
+//!   collapse — they're genuinely different declarations.
+//! - **ADL / overload resolution** isn't done. `swap(a, b)` records a call to
+//!   `swap`; resolving it to `std::swap`, a member, or a namespace-qualified
+//!   version needs semantic analysis we don't do.
 //! - **`#include`** is captured as an `imports` edge with the header name, but
-//!   the *contents* brought in by the include are NOT followed.
+//!   the *contents* it brings in are NOT followed.
 //!
 //! For high-precision C++ structural analysis use `clangd` (semantic, slow,
 //! large) or `ctags` (fast, similar precision tradeoffs to this extractor).
@@ -72,8 +72,8 @@ fn walk(
                     walk(body, source, pending, parent_index, module_index);
                 }
             }
-            // Templates wrap a single declaration — walk through with same parent.
-            // The wrapped declaration captures its own symbol; we don't push a
+            // Templates wrap a single declaration — walk through with same
+            // parent. The wrapped declaration captures its own symbol; no
             // separate symbol for the `template<>` itself.
             "template_declaration" => {
                 walk(child, source, pending, parent_index, module_index);
@@ -81,7 +81,7 @@ fn walk(
             "class_specifier" | "struct_specifier" | "union_specifier" => {
                 let name = name_field(&child, source).map(String::from);
                 let body = child.child_by_field_name("body");
-                // Forward declarations (`class Foo;` with no body) skip — they
+                // Skip forward declarations (`class Foo;`, no body) — they
                 // surface as duplicates of the real definition.
                 if body.is_none() {
                     walk(child, source, pending, parent_index, module_index);
@@ -121,9 +121,9 @@ fn walk(
                     None,
                 );
             }
-            // `function_definition` covers both top-level fns and class methods
-            // (when nested inside a class_specifier body) AND out-of-class method
-            // definitions like `void Foo::bar() {}`.
+            // `function_definition` covers top-level fns, class methods (nested
+            // in a class_specifier body), and out-of-class method definitions
+            // like `void Foo::bar() {}`.
             "function_definition" => {
                 let (name, receiver) = extract_function_name(&child, source);
                 let kind = if receiver.is_some()
@@ -225,8 +225,8 @@ fn extract_declarator_name(node: &Node, source: &[u8]) -> (String, Option<String
             None,
         ),
         "qualified_identifier" => {
-            // Walk the scope chain: scope::scope::name. Final `name` is the
-            // method, the rightmost scope is the receiver type.
+            // Scope chain scope::scope::name — final `name` is the method, the
+            // rightmost scope is the receiver type.
             let name = node
                 .child_by_field_name("name")
                 .map(|n| match n.kind() {
@@ -298,7 +298,7 @@ fn leaf_and_path(node: &Node, source: &[u8]) -> Option<(String, Option<String>, 
             Some((name, full, to_type))
         }
         "template_function" => {
-            // `foo<int>(...)` — pull just `foo`.
+            // `foo<int>(...)` — pull `foo`.
             let name = node
                 .child_by_field_name("name")
                 .and_then(|n| node_text(&n, source))?
@@ -337,9 +337,9 @@ fn emit_include(decl: &Node, source: &[u8], pending: &mut PendingFile, module_in
     );
 }
 
-/// `using std::vector;` → import edge with leaf = `vector`, path = `std::vector`.
-/// `using namespace std;` is harder (introduces every name in `std`) — we emit
-/// one edge with name `*` so `imported_by std` can find it.
+/// `using std::vector;` → leaf `vector`, path `std::vector`. `using namespace
+/// std;` introduces every name in `std` — emit one edge with name `*` so
+/// `imported_by std` can find it.
 fn emit_using(decl: &Node, source: &[u8], pending: &mut PendingFile, module_index: usize) {
     let line = line_of(decl);
     let Some(text) = node_text(decl, source) else {
@@ -421,7 +421,7 @@ mod tests {
             .collect();
         assert_eq!(by_name["Foo"], "class");
         assert_eq!(by_name["bar"], "method");
-        // Out-of-class definition `app::Foo::baz` recognized as method via receiver.
+        // Out-of-class `app::Foo::baz` recognized as method via receiver.
         assert_eq!(by_name["baz"], "method");
     }
 

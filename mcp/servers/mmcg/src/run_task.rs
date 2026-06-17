@@ -1,23 +1,20 @@
 //! `mastermind run-task` — deterministic shell around the probabilistic agents.
 //!
-//! Two-phase orchestrator that wraps the mastermind workflow in mechanical gates:
+//! Two-phase orchestrator wrapping the mastermind workflow in mechanical gates:
 //!
-//! 1. `verify_spec` — pre-flight checks (missing symbols, missing files,
-//!    snapshot drift, FIND-block staleness, VERIFY-command resolvability).
-//! 2. **Risk report** — blast radius totals, dependency-cycle membership of
+//! 1. `verify_spec` — pre-flight: missing symbols/files, snapshot drift,
+//!    FIND-block staleness, VERIFY-command resolvability.
+//! 2. **Risk report** — blast-radius totals, dependency-cycle membership of
 //!    mentioned files, top centrality of snapshot symbols.
-//! 3. Executor — hand-off message by default; with `--exec`, shells out to
-//!    `claude -p` synchronously.
-//! 4. `audit_spec` — post-flight drift detection (scope creep, snapshot drift,
-//!    silent removals, missing planned tests).
-//! 5. **Release notes draft** — H1 title + Goals + Tests Plan + `git diff --stat`
-//!    of the baseline-to-HEAD range. Written to stdout AND
-//!    `.mastermind/releases/<basename>.md` on the Held verdict.
+//! 3. Executor — hand-off message by default; `--exec` shells out to `claude -p`.
+//! 4. `audit_spec` — post-flight drift: scope creep, snapshot drift, silent
+//!    removals, missing planned tests.
+//! 5. **Release notes draft** — H1 + Goals + Tests Plan + `git diff --stat` of
+//!    baseline-to-HEAD. To stdout AND `.mastermind/releases/<basename>.md` on Held.
 //!
-//! State (`{spec_hash, baseline_ref, started_at}`) persists between pre- and
-//! post-flight under `.mastermind/run-state/<basename>.json`. Auto-resumes
-//! based on file presence: no state → pre, state present → post. Cleared on
-//! Held verdict; kept on Drift/Broken for retry after fixes.
+//! State (`{spec_hash, baseline_ref, started_at}`) persists between phases under
+//! `.mastermind/run-state/<basename>.json`. Auto-resumes by file presence: no
+//! state → pre, present → post. Cleared on Held; kept on Drift/Broken for retry.
 
 use crate::audit_spec;
 use crate::spec::{self, ParsedSpec};
@@ -35,24 +32,23 @@ use std::process::Command;
 pub struct RunState {
     /// Absolute path to the spec file pre-flight ran against.
     pub spec_path: String,
-    /// Hash of the spec body at pre-flight. Re-checked at post-flight to
-    /// warn if the spec was edited between phases.
+    /// Hash of the spec body at pre-flight. Re-checked at post-flight to warn if
+    /// the spec was edited between phases.
     pub spec_hash: String,
     /// `git rev-parse HEAD` captured at pre-flight — the audit's `--since`.
     pub baseline_ref: String,
     /// Unix epoch seconds at pre-flight.
     pub started_at: u64,
-    /// Iteration count for this spec — incremented on every pre-flight entry.
-    /// First fresh run is `1`. Survives `--reset` (the dispatcher reads the
-    /// old value before deleting the state file and carries it forward). Old
-    /// state files written before this field existed deserialize with the
-    /// serde default of `0`; they're treated as "iteration not yet counted".
+    /// Iteration count — +1 on every pre-flight entry; first fresh run is `1`.
+    /// Survives `--reset` (dispatcher carries the old value forward before
+    /// deleting state). Legacy state files lacking this field deserialize to the
+    /// serde default `0` — "not yet counted".
     #[serde(default)]
     pub iteration: u32,
 }
 
-/// What happened end-to-end. Mapped to exit codes by `main.rs`: any of the
-/// `*Failed` / `*Broken` variants exits non-zero so CI / scripts can react.
+/// End-to-end result. Mapped to exit codes by `main.rs`: every `*Failed` /
+/// `*Broken` variant exits non-zero so CI / scripts can react.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
@@ -62,17 +58,16 @@ pub enum Outcome {
     PreFailed,
     /// Post-flight clean — release notes emitted, state cleared.
     PostHeld,
-    /// Post-flight surfaced warnings only. State kept for retry.
+    /// Post-flight: warnings only. State kept for retry.
     PostDrift,
-    /// Post-flight surfaced contract-breaking findings. State kept.
+    /// Post-flight: contract-breaking findings. State kept.
     PostBroken,
     /// `--exec` shell-out to claude exited non-zero. State kept.
     ExecFailed,
 }
 
-/// Risk numbers surfaced after `verify_spec` in pre-flight — five-to-ten-line
-/// "what's at stake" summary so the planner can spot a runaway scope before
-/// inviting the executor in.
+/// Risk numbers surfaced after `verify_spec` — a short "what's at stake" summary
+/// so the planner can spot runaway scope before inviting the executor in.
 #[derive(Debug, Serialize)]
 pub struct RiskReport {
     pub snapshot_symbols: u32,
@@ -106,8 +101,8 @@ pub struct ReleaseNotes {
     pub audit_verdict: String,
 }
 
-/// Flags from `main.rs`. Kept as a single struct so the dispatcher signature
-/// stays stable as we add options (next likely: `--json`).
+/// Flags from `main.rs`. Single struct so the dispatcher signature stays stable
+/// as options are added (next likely: `--json`).
 #[derive(Debug, Clone, Copy)]
 pub struct RunOpts {
     /// Delete any existing state file before deciding which phase to run.
@@ -118,26 +113,24 @@ pub struct RunOpts {
     pub post_only: bool,
     /// Shell out to `claude -p` between phases. Default false — hand-off only.
     pub exec: bool,
-    /// Skip the "index must exist and be non-empty" pre-check. Use for
-    /// docs-only / spec-only specs that don't touch indexed source. Default
-    /// false: missing-or-empty index hard-fails pre-flight, because mmcg's
-    /// core claim is "grounded in the codegraph" — running gates without that
-    /// grounding silently degrades them to mandatory-section + file-existence
+    /// Skip the "index must exist and be non-empty" pre-check, for docs/spec-only
+    /// specs that don't touch indexed source. Default false: a missing-or-empty
+    /// index hard-fails pre-flight, since mmcg's core claim is "grounded in the
+    /// codegraph" — ungrounded gates degrade to mandatory-section + file-existence
     /// checks only.
     pub allow_no_index: bool,
     /// Contract-driven mode: fold `verify_spec::strict_check` into pre-flight —
     /// require frontmatter scoping, file-scoped touches, and a runnable verify.
     pub strict: bool,
-    /// Maximum number of pre-flight iterations on the same spec before the
-    /// dispatcher refuses to continue. Default 3 — matches the
-    /// `mastermind-task-planning` SKILL's "Iteration budget" convention and
-    /// forge's `ErrorTracker.max_retries=3` empirical anchor. Set to 0 to
-    /// disable the budget entirely (not recommended).
+    /// Max pre-flight iterations on one spec before the dispatcher refuses.
+    /// Default 3 — matches the `mastermind-task-planning` SKILL's "Iteration
+    /// budget" and forge's `ErrorTracker.max_retries=3` anchor. 0 disables the
+    /// budget (not recommended).
     pub max_iterations: u32,
-    /// Bypass the iteration-budget check. Use only when the planner has
-    /// explicitly decided the extra cycle is worth it (e.g. one specific
-    /// defect kind to mop up). Auto-lesson append still fires so the override
-    /// is visible to future planners.
+    /// Bypass the iteration-budget check. Use only when the planner has decided
+    /// the extra cycle is worth it (e.g. one specific defect kind to mop up).
+    /// Auto-lesson append still fires, keeping the override visible to future
+    /// planners.
     pub force_iteration: bool,
 }
 
@@ -178,8 +171,8 @@ fn spec_basename(spec_path: &Path) -> String {
         .to_string()
 }
 
-/// Read + deserialize state. Returns `Ok(None)` when the file doesn't exist —
-/// "no prior pre-flight" is the dominant non-error case.
+/// Read + deserialize state. `Ok(None)` when the file is absent — "no prior
+/// pre-flight" is the dominant non-error case.
 pub fn load_state(path: &Path) -> std::io::Result<Option<RunState>> {
     if !path.exists() {
         return Ok(None);
@@ -206,10 +199,10 @@ pub fn delete_state(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Deterministic hash of the spec body. Uses `DefaultHasher`, which is stable
-/// within a single Rust toolchain — fine for "did the spec change between
-/// pre and post" detection on the same machine. False positives across a
-/// toolchain upgrade are harmless (we only warn, not block).
+/// Deterministic hash of the spec body. `DefaultHasher` is stable within one
+/// Rust toolchain — fine for "did the spec change between pre and post" on the
+/// same machine. Cross-toolchain-upgrade false positives are harmless (warn,
+/// not block).
 fn hash_text(text: &str) -> String {
     let mut h = DefaultHasher::new();
     text.hash(&mut h);
@@ -268,8 +261,8 @@ fn extract_h1_title(body: &str) -> Option<String> {
 }
 
 /// Compute the risk report from a parsed spec + the live index. Pure: no I/O
-/// other than store queries. Missing or unindexed symbols silently contribute
-/// 0 — verify_spec already surfaces the existence check as an error.
+/// beyond store queries. Missing/unindexed symbols silently contribute 0 —
+/// verify_spec already surfaces the existence check as an error.
 pub fn compute_risk_report(spec: &ParsedSpec, store: &Store) -> RiskReport {
     let mut total_callers: u32 = 0;
     let mut worst: Option<WorstSymbol> = None;
@@ -297,8 +290,8 @@ pub fn compute_risk_report(spec: &ParsedSpec, store: &Store) -> RiskReport {
     central.sort_by_key(|e| std::cmp::Reverse(e.in_degree));
     central.truncate(3);
 
-    // Cycle membership of mentioned files. Walk all SCCs of size ≥ 2 in any
-    // language; collect mentioned files that appear inside.
+    // Cycle membership: walk all SCCs of size ≥ 2 in any language; collect
+    // mentioned files appearing inside.
     let mentioned: HashSet<&str> = spec.mentioned_files.iter().map(String::as_str).collect();
     let cycles = store.dependency_cycles(None, 2).unwrap_or_default();
     let mut files_in_cycles: Vec<String> = Vec::new();
@@ -397,8 +390,8 @@ pub fn render_release_notes(r: &ReleaseNotes) -> String {
 }
 
 /// Append a one-line `iteration_budget_exhausted` lesson to
-/// `.mastermind/tasks/_lessons.md`. Best-effort: silently swallows IO errors
-/// because the caller has already eprintln'd the user-facing reason.
+/// `.mastermind/tasks/_lessons.md`. Best-effort: swallows IO errors since the
+/// caller already eprintln'd the user-facing reason.
 fn append_iteration_budget_lesson(
     repo_root: &Path,
     spec_path: &Path,
@@ -434,14 +427,14 @@ fn append_iteration_budget_lesson(
     Ok(())
 }
 
-/// Top-level dispatcher — picks pre or post based on flags + state presence,
-/// then calls the corresponding phase function. Pure I/O orchestration; the
-/// computational pieces above are independently testable.
+/// Top-level dispatcher — picks pre or post from flags + state presence, then
+/// calls that phase function. Pure I/O orchestration; the computational pieces
+/// above are independently testable.
 pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts) -> Outcome {
     let state_path = state_file_path(repo_root, spec_path);
-    // Iteration carry-forward: if --reset is dropping a prior state, snapshot
-    // its iteration FIRST so the next pre-flight can resume the count.
-    // Without this the budget is trivially bypassed by repeated --reset.
+    // Iteration carry-forward: when --reset drops a prior state, snapshot its
+    // iteration FIRST so the next pre-flight resumes the count. Else the budget
+    // is trivially bypassed by repeated --reset.
     let preserved_iter: u32 = if opts.reset {
         let prior_iter = load_state(&state_path)
             .ok()
@@ -470,8 +463,8 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts)
         }
     };
 
-    // Decide phase. `--pre-only` / `--post-only` are explicit overrides;
-    // otherwise the state file's presence chooses for us.
+    // Phase select. `--pre-only` / `--post-only` are explicit overrides;
+    // otherwise state-file presence decides.
     if opts.post_only {
         let Some(state) = existing else {
             eprintln!(
@@ -494,7 +487,7 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts)
         );
     }
 
-    // Default mode + state present → resume into post.
+    // Default mode + state present → resume post.
     let state = existing.unwrap();
     run_post(spec_path, repo_root, index_path, &state, &state_path)
 }
@@ -507,10 +500,10 @@ fn run_pre(
     opts: RunOpts,
     preserved_iter: u32,
 ) -> Outcome {
-    // Iteration budget — refuse to enter pre-flight when the spec has already
-    // been through `max_iterations` cycles without landing Held. The dispatcher
-    // passes `preserved_iter` carrying forward any iteration count from a
-    // state file that --reset just dropped; we add 1 for THIS attempt.
+    // Iteration budget — refuse pre-flight once the spec has been through
+    // `max_iterations` cycles without landing Held. `preserved_iter` carries
+    // forward any count from a state file --reset just dropped; +1 for THIS
+    // attempt.
     let iteration = preserved_iter.saturating_add(1);
     if opts.max_iterations > 0 && iteration > opts.max_iterations && !opts.force_iteration {
         eprintln!(
@@ -538,10 +531,10 @@ fn run_pre(
     println!("=== Pre-flight: {} ===", spec_path.display());
 
     // Index existence + non-empty check — hard fail by default. mmcg's gates
-    // are only as strong as the codegraph they reason from; running them
-    // against an absent or empty index would silently degrade verify-spec to
-    // file-existence checks and turn audit-spec into git-diff-only. The
-    // escape hatch `--allow-no-index` exists for docs-only specs.
+    // are only as strong as the codegraph they reason from; against an absent
+    // or empty index, verify-spec silently degrades to file-existence checks and
+    // audit-spec to git-diff-only. Escape hatch `--allow-no-index` for docs-only
+    // specs.
     let store = Store::open(index_path).ok();
     if !opts.allow_no_index {
         match store.as_ref() {
@@ -563,15 +556,15 @@ fn run_pre(
                 Ok(_) => {}
                 Err(e) => {
                     eprintln!("warning: querying index symbol count: {e}");
-                    // Tolerate transient SQL errors here — verify-spec below
-                    // will fail more loudly if the store is actually broken.
+                    // Tolerate transient SQL errors — verify-spec below fails
+                    // louder if the store is actually broken.
                 }
             },
         }
     }
 
     // 1. verify-spec (store optional — without index, only mandatory-section +
-    //    missing-file checks contribute).
+    //    missing-file checks run).
     let mut verify = verify_spec::run(&parsed, store.as_ref(), repo_root);
     if opts.strict {
         for f in verify_spec::strict_check(&parsed) {
@@ -586,8 +579,8 @@ fn run_pre(
         return Outcome::PreFailed;
     }
 
-    // 2. risk report (needs an open store to compute callers; otherwise we'd
-    //    be misleading by reporting zeros).
+    // 2. risk report (needs an open store for caller counts; without one,
+    //    reporting zeros would mislead).
     match &store {
         Some(s) => print!("{}", render_risk_report(&compute_risk_report(&parsed, s))),
         None => println!(
@@ -701,8 +694,8 @@ fn run_post(
     print!("{}", audit.render_text());
 
     // Deterministic lesson log on Drift/Broken — no-op on Held. Pairs with the
-    // same call in `mmcg audit-spec` so `_lessons.md` accumulates whether the
-    // user runs the two-phase orchestrator or audit-spec directly.
+    // same call in `mmcg audit-spec`, so `_lessons.md` accumulates whether the
+    // user runs the orchestrator or audit-spec directly.
     match crate::lessons::append_if_drift_or_broken(repo_root, spec_path, &audit) {
         Ok(true) => println!("  appended lesson → .mastermind/tasks/_lessons.md"),
         Err(e) => eprintln!("  warning: lessons append failed: {e}"),
@@ -754,9 +747,9 @@ fn run_post(
     outcome
 }
 
-/// Invoke `claude -p` synchronously on this spec. Streams stdout/stderr
-/// through to the user's terminal. Returns Err on spawn failure or non-zero
-/// exit so the caller can keep state for retry.
+/// Invoke `claude -p` synchronously on this spec, streaming stdout/stderr to the
+/// user's terminal. Err on spawn failure or non-zero exit so the caller keeps
+/// state for retry.
 fn run_executor(spec_path: &Path) -> Result<(), String> {
     let prompt = format!(
         "Implement the mastermind spec at `{}` using the mastermind-task-executor workflow. \
@@ -822,7 +815,7 @@ mod tests {
         }
         // Ignore SQLite index files at repo root — tests put them there for
         // convenience, but they'd flood `git diff` with scope-creep noise.
-        // `.mastermind/` is already filtered by audit_spec, so no entry needed.
+        // `.mastermind/` is already filtered by audit_spec.
         fs::write(dir.join(".gitignore"), "idx.db\nidx.db-*\n").unwrap();
     }
 
@@ -880,7 +873,7 @@ mod tests {
         );
         assert_eq!(extract_h1_title("## Goals only"), None);
         assert_eq!(extract_h1_title(""), None);
-        // H1 hidden behind an H2 doesn't count — would be inside-a-section.
+        // H1 behind an H2 doesn't count — it's inside a section.
         assert_eq!(extract_h1_title("## Section\n# Not a title"), None);
     }
 
@@ -962,8 +955,8 @@ mod tests {
         let index_path = dir.join("idx.db");
         let _ = Store::open(&index_path).unwrap();
         let opts = RunOpts {
-            pre_only: true,       // don't even try to resume / exec
-            allow_no_index: true, // fixture has no source — skip index requirement
+            pre_only: true,       // don't resume / exec
+            allow_no_index: true, // fixture has no source — skip index check
             ..Default::default()
         };
         let outcome = run(&spec_path, &dir, &index_path, opts);
@@ -1002,7 +995,7 @@ mod tests {
             &index_path,
             RunOpts {
                 pre_only: true,
-                allow_no_index: true, // isolate failure to verify-spec, not index
+                allow_no_index: true, // isolate failure to verify-spec
                 ..Default::default()
             },
         );
@@ -1199,7 +1192,7 @@ mod tests {
         let _ = run(&spec_path, &dir, &index_path, RunOpts::default());
         let state_path = state_file_path(&dir, &spec_path);
 
-        // Executor added a file the spec didn't mention → scope creep / drift.
+        // Executor added an unmentioned file → scope creep / drift.
         fs::write(
             dir.join("src/lib.py"),
             "def stays(): pass\ndef tweaked(): pass\n",
@@ -1245,8 +1238,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        // Mapped to PreFailed because the dispatcher uses that variant to
-        // signal "couldn't get to post" — main.rs exits non-zero for it.
+        // PreFailed is the dispatcher's "couldn't get to post" signal —
+        // main.rs exits non-zero for it.
         assert_eq!(outcome, Outcome::PreFailed);
         fs::remove_dir_all(&dir).ok();
     }

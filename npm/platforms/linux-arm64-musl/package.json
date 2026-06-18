@@ -1,6 +1,6 @@
 {
   "name": "@xcraftmind/mmcg-linux-arm64-musl",
-  "version": "0.30.0",
+  "version": "0.31.0",
   "description": "Prebuilt mmcg binary for Linux arm64 musl (Alpine, distroless). Internal — installed automatically as an optional dependency of @xcraftmind/mastermind.",
   "license": "MIT",
   "author": "xcraftmind",

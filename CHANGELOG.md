@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-06-18
+
+### Added
+- Shared workflow skills so every agent reads one source instead of duplicating contracts: `mastermind-codegraph-research` (mmcg-first structural lookup), `mastermind-structured-report-contract` (the executor↔planner↔auditor report tail), `mastermind-investigation-ledger` (the unknown-bug hypothesis loop), and `mastermind-critical-review` (a compact design/spec review rubric). The planner and executor skills reference them; subagents (which have no Skill tool at runtime) keep the operational content inline.
+- `mastermind-security-auditor` subagent — an independent, Opus-tier security reviewer spawned only on security-sensitive scope (auth, tools, secrets, delegation, supply chain, prompt injection). Read-only Bash, evidence-first, never implements. Optional OWASP mode maps findings to the verified OWASP Top 10 for Agentic Applications (2026), shipped as the `mastermind-agent-security-review` reference pack rather than recited from memory.
+
+### Changed
+- Tightened code comments across the mmcg crate — compressed wording, kept every rationale.
+- Simplified and actualized the top-level README; trimmed filler from `CONTRIBUTING.md` and several sub-READMEs.
+
 ### Fixed
 - `.jsx` files were indexed under language `"jsx"`, which isn't in the MCP `language` enum and never matches a `language: "javascript"` filter — so `.jsx` definitions silently vanished from every language-scoped query (the exact monorepo cross-language-collision case the filter exists for, a silent false-negative). `guess_language_for` now folds `.jsx` into `"javascript"`, matching `lang_from_ext` and the schema enum.
 - `audit-spec` vacuous-test detection no longer false-flags `cargo test`. Two compounding bugs: (1) `"cargo test"` contains the substring `"go test"`, so the Go detector (checked first) shadowed the cargo branch entirely and flagged every `cargo test` run for having no `_test.go` files in the repo root; (2) the cargo branch only scanned `src/`, so a crate whose tests live entirely in `tests/*.rs` (integration tests, no `#[test]` in `src/`) was flagged vacuous. Now the Go branch is guarded against `cargo`, the scan covers `src/` **and** `tests/`, and recognizes `#[tokio::test]` / `#[async_std::test]` / `#[rstest]` alongside `#[test]`.

@@ -45,7 +45,7 @@ The spawner passes:
 ## Process
 
 1. **Restate the question** in one sentence before searching. If it's ambiguous or unscoped, ask one clarifying question and stop — don't guess.
-2. **Decide: structural or literal?**
+2. **Decide: structural or literal?** (canonical rules: [[mastermind-codegraph-research]], reproduced here — this subagent has no Skill tool to load it at runtime)
    - **Structural** questions (about symbols, callers, dependencies, blast radius) → use mmcg MCP tools. This is the truth layer — it's faster, cheaper, and more accurate than grep for code structure.
    - **Literal** questions (string contents, log messages, comments, config values) → use `Grep`/`Read`. mmcg doesn't index strings.
 3. **Pick the right tool for each lookup:**

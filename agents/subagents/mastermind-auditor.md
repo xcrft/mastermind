@@ -175,11 +175,11 @@ If verdict is anything other than `contract held`, the planner must address each
 
 After the prose verdict, emit a fenced-YAML structured audit tail wrapped in
 `<!-- mastermind:audit-begin -->` / `<!-- mastermind:audit-end -->` sentinels.
-The planner reads this for mechanical routing — discrepancies must use the
-`kind:` vocabulary from the `defect-taxonomy.md` reference in the
-`mastermind-task-planning` skill (auditor-discrepancy section). The full schema
-lives in that same skill's references as `structured-report-schema.md`. The
-agent has both loaded — no path lookup needed.
+The canonical schema is [[mastermind-structured-report-contract]] — reproduced
+inline here because this subagent runs without the Skill tool. Discrepancies must
+use the `kind:` vocabulary below; the full schema lives in
+`structured-report-schema.md`. Emit `verdict` as the enum value from the template
+below (`held` / `drift` / `broken`), not the prose label.
 
 Recognized `kind:` values (non-exhaustive — use the closest match):
 

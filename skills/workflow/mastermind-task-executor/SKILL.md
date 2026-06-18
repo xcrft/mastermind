@@ -122,17 +122,11 @@ Output a report in this exact shape:
 
 ### Structured tail (REQUIRED)
 
-After the prose sections above, emit a fenced-YAML structured tail wrapped in
+After the prose sections above, emit the executor report tail defined in
+[[mastermind-structured-report-contract]] — fenced YAML wrapped in
 `<!-- mastermind:report-begin -->` / `<!-- mastermind:report-end -->` sentinels.
-The planner reads this block to mechanically route on defect `kind:` — see
-[`structured-report-schema.md`](../mastermind-task-planning/references/structured-report-schema.md)
-for the full schema and
-[`defect-taxonomy.md`](../mastermind-task-planning/references/defect-taxonomy.md)
-for the closed `kind:` set.
-
-Even on a clean run (all phases done, every VERIFY passed) the tail is REQUIRED
-— with `status: complete` and `defects: []`. Planners rely on the sentinel block
-existing; absence is treated as a malformed reply.
+Required even on a clean run (`status: complete`, `defects: []`); a missing
+sentinel block is a malformed reply.
 
 ## Failure modes — and how to handle them
 

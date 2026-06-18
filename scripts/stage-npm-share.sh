@@ -6,7 +6,7 @@
 #   - in the publish workflow (assemble) and the ci-npm smoke, before `npm pack`
 #   - locally, before testing `init`'s global install
 #
-# Skills are allowlisted: only the three core skills ship in the default install.
+# Skills are allowlisted: only the core skills below ship in the default install.
 # Non-core skills live in extras/ and are not copied here.
 set -euo pipefail
 
@@ -24,7 +24,10 @@ cp "$REPO_ROOT"/agents/subagents/*.md "$SHARE/agents/"
 CORE_SKILLS=(
   skills/workflow/mastermind-task-planning
   skills/workflow/mastermind-task-executor
+  skills/workflow/mastermind-codegraph-research
+  skills/workflow/mastermind-structured-report-contract
   skills/prompt-engineering/mastermind-prompt-refiner
+  skills/debugging/mastermind-investigation-ledger
 )
 
 for skill_dir in "${CORE_SKILLS[@]}"; do

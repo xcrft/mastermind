@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `mastermind install` / `update` / `list` — one-command Claude Code setup. `install` copies the workflow subagents + skills into `~/.claude/` **and** registers the mmcg MCP server (reusing `setup claude --write-mcp`, so the agents can actually query the codegraph); `update` re-copies the agents; `list` shows what ships. Each prints a completion summary. The per-project codegraph index stays with `mastermind init`.
+
 ## [0.31.0] - 2026-06-18
 
 ### Added

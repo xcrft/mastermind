@@ -15,6 +15,13 @@ const pkg = require("../package.json");
 // subagents + skills that `init` installs into ~/.claude/.
 const pkgRoot = path.dirname(require.resolve("../package.json"));
 
+// `mastermind install / update / list` — manage the workflow subagents + skills
+// in Claude Code (~/.claude). No native binary needed; handled in JS (see ./install.js).
+if (["install", "update", "list"].includes(process.argv[2])) {
+  await import("./install.js");
+  process.exit(0);
+}
+
 function detectLibc() {
   if (process.platform !== "linux") return null;
   const report = process.report?.getReport?.();

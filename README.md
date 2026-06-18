@@ -136,6 +136,8 @@ npx mastermind setup claude --project . --write-mcp
 ```
 Writes `./.mcp.json` pointing at `./node_modules/.bin/mastermind`.
 
+**One-command setup** — `npx @xcraftmind/mastermind install` copies the subagents + skills into `~/.claude/` and registers the mmcg MCP. Then run `mastermind init` in a project to build the codegraph index. `list` shows what ships; `update` refreshes the agents.
+
 **Supported platforms:** macOS (arm64/x86_64), Linux glibc & musl/Alpine (x86_64/arm64), Windows (x86_64). Other targets: `cargo install mmcg`.
 
 <details>

@@ -19,6 +19,7 @@ See [`../docs/agent-anatomy.md`](../docs/agent-anatomy.md) for the format of eac
 | [`mastermind-researcher`](subagents/mastermind-researcher.md) | Haiku-tier fact-gatherer. Runs grep/read/glob and returns structured citations, never decides. |
 | [`mastermind-task-executor`](subagents/mastermind-task-executor.md) | Executes `.mastermind/tasks/<NNN>-<name>/spec.md` phase by phase; stops on first failure. |
 | [`mastermind-auditor`](subagents/mastermind-auditor.md) | Post-flight auditor. Verifies executor report claims against `git diff` and mmcg. |
+| [`mastermind-security-auditor`](subagents/mastermind-security-auditor.md) | Independent security reviewer. Spawned only on security-sensitive scope (auth, tools, secrets, delegation, supply chain, prompt injection); optional OWASP ASI mode. |
 
 > `mastermind-release` moved to [`extras/subagents/`](../extras/subagents/) — not installed by default.
 

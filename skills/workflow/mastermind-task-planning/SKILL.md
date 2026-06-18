@@ -59,6 +59,10 @@ Before designing, pick the right fact-gathering tool:
 
 Researcher = one question, one structured report, no iteration. Investigator = iterate probe-by-probe until a hypothesis is `confirmed` (protocol: [[mastermind-investigation-ledger]]), then open the spec.
 
+### Security audit — spawn the security auditor
+
+Spawn `mastermind-security-auditor` (independent Opus) only when the task touches auth/authz, permissions, roles, sessions, tokens, or secrets; MCP tools, shell/file/network access, or external connectors; prompt injection or untrusted tool/spec/doc output; subagent delegation or planner/executor/auditor trust boundaries; policy enforcement, allowlists, deny rules, or safety gates; plugin/skill/package supply chain; audit logging, compliance, or OWASP/ASI. Don't spawn for ordinary refactors or low-risk local changes. For strict specs in these areas, paste the security auditor's verdict and blocking findings into the spec Notes.
+
 ### Workflow modes — pick before drafting
 
 Every task runs in one of three modes. Pick the mode first; it determines which spec sections are required. Do NOT use `strict` ceremony for a one-liner.

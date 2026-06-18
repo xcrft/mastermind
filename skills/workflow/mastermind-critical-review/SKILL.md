@@ -29,6 +29,8 @@ This is the rubric; the spawnable agent that applies it is the `mastermind-criti
 
 Do NOT use for raw fact gathering — use [[mastermind-codegraph-research]] first when symbol existence, callers, imports, file paths, or blast radius are unknown. Do NOT use to implement fixes; this produces critique, not code.
 
+**Security scope:** if the review surfaces security-sensitive scope (auth, tools, secrets, delegation, supply chain, prompt injection), don't go deep inline — spawn `mastermind-security-auditor` and fold its verdict into the critique.
+
 ## Inputs
 
 - **Proposal** — the design, spec, report, or plan under review.

@@ -13,6 +13,7 @@ See [`../docs/skill-anatomy.md`](../docs/skill-anatomy.md) for the format. Addin
 | [`mastermind-task-executor`](workflow/mastermind-task-executor/SKILL.md) | Executes a `.mastermind/tasks/<NNN>-<name>/spec.md` file phase-by-phase, runs VERIFY, marks the checklist, stops on first failure. |
 | [`mastermind-codegraph-research`](workflow/mastermind-codegraph-research/SKILL.md) | Shared truth layer — ground structural claims (symbol existence, callers, blast radius, file paths) in mmcg, not memory. Used across plan / research / critique / audit. |
 | [`mastermind-structured-report-contract`](workflow/mastermind-structured-report-contract/SKILL.md) | The executor↔planner↔auditor report tail — sentinel-wrapped YAML, defect kinds, complete/partial/failed shapes. |
+| [`mastermind-critical-review`](workflow/mastermind-critical-review/SKILL.md) | Stress-test a design, spec, plan, or report for false assumptions, broken contracts, scope creep, missing evidence, and high-risk failure modes. |
 
 ### debugging/
 | Skill | Description |

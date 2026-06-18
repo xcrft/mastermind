@@ -26,6 +26,7 @@ CORE_SKILLS=(
   skills/workflow/mastermind-task-executor
   skills/workflow/mastermind-codegraph-research
   skills/workflow/mastermind-structured-report-contract
+  skills/workflow/mastermind-critical-review
   skills/prompt-engineering/mastermind-prompt-refiner
   skills/debugging/mastermind-investigation-ledger
 )

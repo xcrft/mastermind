@@ -117,6 +117,8 @@ When it confirms a cause: copy the "Current best explanation" into the spec's **
 
 Before drafting the spec, you decide on an approach. **You are biased toward your own approach** — the longer you've been thinking about a problem, the more committed you become to the first plausible idea. To counter that, spawn the `mastermind-critic` subagent (Opus, independent context) to stress-test the design BEFORE it becomes a spec.
 
+A compact, standalone version of this review — evidence / contract / failure-mode / scope / test / rollback checks with a severity and verdict ladder — is [[mastermind-critical-review]]. Use it for lighter reviews, or when you want the rubric without spawning the critic subagent.
+
 ### When to spawn the critic — mandatory
 
 Spawn for any design that touches:

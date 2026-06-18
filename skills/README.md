@@ -20,6 +20,11 @@ See [`../docs/skill-anatomy.md`](../docs/skill-anatomy.md) for the format. Addin
 |---|---|
 | [`mastermind-investigation-ledger`](debugging/mastermind-investigation-ledger/SKILL.md) | Diagnose unknown bugs with a hypothesis ledger and one-probe-at-a-time loop before drafting a spec. |
 
+### security/
+| Skill | Description |
+|---|---|
+| [`mastermind-agent-security-review`](security/mastermind-agent-security-review/SKILL.md) | OWASP reference pack for security audits — the verified OWASP ASI (Agentic) Top 10 mapped to Mastermind surfaces. Read by the `mastermind-security-auditor` subagent in OWASP mode (evidence-based, not from memory). |
+
 ### prompt-engineering/
 | Skill | Description |
 |---|---|

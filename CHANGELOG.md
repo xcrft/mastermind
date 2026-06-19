@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `mastermind install` / `update` / `list` — one-command Claude Code setup. `install` copies the workflow subagents + skills into `~/.claude/` **and** registers the mmcg MCP server (reusing `setup claude --write-mcp`, so the agents can actually query the codegraph); `update` re-copies the agents; `list` shows what ships. Each prints a completion summary. The per-project codegraph index stays with `mastermind init`.
+- `no-ai-slop-comments` skill (new `coding/` domain) — states the one rule LLMs break constantly: a comment must say something the code can't (the *why*); everything else (restating the code, section banners, `// added` edit markers, ownerless TODOs) is slop and gets deleted. Ships in the default install. The `coding/` domain is registered in `docs/conventions.md` §1.3 and the `scripts/validate.py` whitelist.
+
+### Changed
+- The task executor (subagent + skill), the canonical spec template, and the auditor now enforce a no-AI-slop-comment rule end to end. The executor applies each `CHANGE TO:` block verbatim and adds no comments of its own; every generated spec carries a global Rule against restating-the-code / edit-marker comments; the auditor gained a post-flight check (§6.7) that flags slop comments added against that Rule while leaving genuine *why* comments alone. Baked self-contained into the subagents (no Skill tool at runtime), with a `[[no-ai-slop-comments]]` pointer for readers.
+
+### Tests
+- New auditor eval `a-009-slop-comments-drift` + `slop-comments` fixture — the executor pads an in-scope function with restate-the-code comments and a section banner, then falsely reports it added none; the auditor must read the hunk and flag the contradiction (`drift`/`broken`).
 
 ## [0.31.0] - 2026-06-18
 

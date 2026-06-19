@@ -30,6 +30,7 @@ CORE_SKILLS=(
   skills/prompt-engineering/mastermind-prompt-refiner
   skills/debugging/mastermind-investigation-ledger
   skills/security/mastermind-agent-security-review
+  skills/coding/no-ai-slop-comments
 )
 
 for skill_dir in "${CORE_SKILLS[@]}"; do

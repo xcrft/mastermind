@@ -2,7 +2,7 @@
 name: mastermind-task-executor
 description: Executes a task spec from `.mastermind/tasks/<NNN>-<name>/spec.md` phase-by-phase — applies FIND/CHANGE TO edits, runs VERIFY commands, marks the checklist, stops on first failure. Use when the user says "execute task X", "run .mastermind/tasks/NNN", or hands off a delegation spec.
 metadata:
-  version: 0.2.0
+  version: 0.3.0
   authors:
     - mastermind
   tags:
@@ -41,6 +41,7 @@ The task folder may also contain related artifacts beside `spec.md` (audit notes
 - Skip VERIFY commands because "it looks fine"
 - Change the spec — if the spec is wrong, stop and ask
 - Mark a checklist item complete without running its VERIFY
+- Add code comments the spec didn't include — apply each `CHANGE TO:` block verbatim and comment only what the code can't say itself ([[no-ai-slop-comments]])
 
 ## Process
 

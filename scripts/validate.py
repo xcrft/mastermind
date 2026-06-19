@@ -34,6 +34,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # Allowed domain folders for skills/ and prompts/, per docs/conventions.md §1.3
 ALLOWED_DOMAINS = {
     "code-review",
+    "coding",
     "testing",
     "design",
     "debugging",

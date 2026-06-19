@@ -2,7 +2,7 @@
 name: mastermind-task-planning
 description: Acts as a CTO/planner that thinks, plans, and creates detailed task specs in `.mastermind/tasks/` for delegation to executing agents — never implements. Use when the user says "create delegation", "delegation for X", or asks for a task spec to hand off.
 metadata:
-  version: 0.11.0
+  version: 0.12.0
   authors:
     - mastermind
   tags:

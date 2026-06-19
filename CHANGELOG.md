@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Docs: npm package README rewritten to npm conventions and trimmed ~40%; top-level README onboarding aligned (`install`-led) and inventory updated (added the `coding/` skill domain, the `install` / `update` / `list` commands, and all three eval suites); binary `--help` now points npm users at the `mastermind install` shortcut.
+
 ## [0.32.0] - 2026-06-19
 
 ### Added

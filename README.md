@@ -8,7 +8,7 @@
   <a href="https://www.npmjs.com/package/@xcraftmind/mastermind"><img src="https://img.shields.io/npm/v/@xcraftmind/mastermind.svg" alt="npm version"></a>
   <a href="https://github.com/xcrft/mastermind/actions/workflows/ci-mmcg.yml"><img src="https://github.com/xcrft/mastermind/actions/workflows/ci-mmcg.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
-  <a href="evals/benchmarks.md"><img src="https://img.shields.io/badge/evals-auditor%20%2B%20critic-yellowgreen" alt="Evals"></a>
+  <a href="evals/benchmarks.md"><img src="https://img.shields.io/badge/evals-critic%20%2B%20auditor%20%2B%20intake-yellowgreen" alt="Evals"></a>
 </p>
 
 **Mastermind makes coding agents check their claims against your real code, not their memory.**
@@ -24,10 +24,10 @@ Requires Node.js 24+. No Rust toolchain.
 
 ```bash
 npm install -g @xcraftmind/mastermind
+mastermind install                     # workflow agents + skills + MCP → Claude Code (global, once)
 
 cd your-project
-mastermind init                        # build the index, scaffold .mastermind/, draft CONTEXT.md
-mastermind setup claude --write-mcp    # register the MCP server once, globally
+mastermind init                        # build the codegraph index for this repo
 mastermind doctor                      # verify — should be all green
 ```
 
@@ -111,9 +111,10 @@ Workflow (installed into ~/.claude/ by `mastermind init`)
   skills/debugging/     investigation-ledger
   skills/security/      agent-security-review (OWASP ASI reference pack)
   skills/prompt-engineering/  prompt-refiner (intake gate)
+  skills/coding/        no-ai-slop-comments
 
 Proof
-  evals/                adversarial eval suite — auditor + critic, real git fixtures
+  evals/                adversarial eval suites — critic · auditor (real git fixtures) · intake
 ```
 
 Shared contracts — codegraph queries, the executor↔auditor report format, the investigation loop — live in skills so every agent reads one source. Non-core artifacts (pr-review, flaky-finder, doc-stub-sync, …) live in [`extras/`](extras/), not installed by default. The naming + frontmatter standard is [`docs/conventions.md`](docs/conventions.md).
@@ -153,6 +154,8 @@ Same binary, `mmcg`, same subcommands.
 ## Commands
 
 ```bash
+mastermind install               # workflow agents + skills + MCP → Claude Code (global, once)
+mastermind update / list         # refresh the workflow bundle · show what ships
 mastermind init                  # scaffold .mastermind/, build the index, draft CONTEXT.md
 mastermind watch                 # keep the index live as you edit
 mastermind doctor                # fail-soft health checks (add --json for CI)
@@ -164,7 +167,7 @@ mastermind audit-spec <spec>     # post-execution gate
 mastermind uninstall --scope all # tear it down (dry-run unless --force)
 ```
 
-**Stays local.** The SQLite index is built from your files by tree-sitter and never leaves your machine; the only thing `setup` writes outside your project is `~/.claude.json`. Fully offline: `mastermind init --no-claude --no-index --no-global`. Add `.mastermind/` to `.gitignore` — it's local working state.
+**Stays local.** The SQLite index is built from your files by tree-sitter and never leaves your machine. `install` / `init` write the workflow bundle into `~/.claude/{agents,skills,commands}/` and `setup` registers the MCP server in `~/.claude.json` — all local, no network beyond the npm registry. Fully offline: `mastermind init --no-claude --no-index --no-global`. Add `.mastermind/` to `.gitignore` — it's local working state.
 
 ## Contributing
 

@@ -59,6 +59,7 @@ Onboard a project (run inside your repo):\n  \
 mastermind init                       scaffold .mastermind/, build the index, draft CONTEXT.md\n  \
 mastermind setup claude --write-mcp   register the codegraph with Claude Code (run once)\n  \
 mastermind doctor                     verify the setup\n\n\
+Installed via npm? `mastermind install` does the global setup (workflow agents + skills + MCP) in one step — then `mastermind init` per repo.\n\n\
 Then open the project in Claude Code — the codegraph tools (search, callers, impact, …) are available. \
 Remove it all with `mastermind uninstall`. (`mmcg` is an alias for `mastermind` — same binary.)"
 )]

@@ -5,7 +5,7 @@ tools: Read, Grep, Glob, Bash
 model: opus
 mcpServers: [mmcg]
 metadata:
-  version: 0.4.1
+  version: 0.5.0
   authors:
     - mastermind
   tags:
@@ -115,6 +115,17 @@ Report any delta:
 A drift is not automatically `contract broken` — legitimate refactors change both. But the verdict MUST mention each drift so the planner can confirm intentionality. If the snapshot section was missing AND the spec touched code symbols, that's a planner pre-flight failure — surface it.
 
 If mmcg index is stale (last indexed before the executor ran), say so honestly: "snapshot drift check skipped — index `indexed_at` predates executor's `git diff`; re-run `mmcg index .` and re-audit".
+
+### 6.7 Unrequested comments (only when the spec forbids them or the report claims none)
+
+The spec template carries a global Rule: *do not add code comments beyond what the CHANGE TO blocks contained — keep only comments that explain a reason the code can't show on its own.* Run this check **only** when the spec's Rules include that clause, OR the executor report claims it added no comments / applied the blocks verbatim. Otherwise skip it entirely — most specs don't forbid comments and this check must not fire on them.
+
+When it applies, read the added (`+`) comment lines in the diff hunks and classify each:
+
+- **Slop — flag it.** A comment that restates the adjacent code (`# increment i`), banners structure (`// --- helpers ---`, `// Step 1:`), or marks the edit (`// added`, `// changed`, `// new`). These violate the Rule.
+- **Legitimate — leave it.** A comment that explains a non-obvious *why*: a workaround with a reason, an invariant a caller must respect, a deliberately surprising choice. The Rule allows these — do NOT flag them, and do NOT manufacture a discrepancy to fill this check.
+
+If the report claimed it added no comments (or "applied the block verbatim") but the diff adds slop comments, the claim is contradicted → `kind: report_code_mismatch`. If slop was added silently against a spec Rule that forbade it → `kind: scope_creep`. One or two genuine *why* comments are never a violation. (Full taxonomy: [[no-ai-slop-comments]].)
 
 ### 7. Spec canon-sections actually addressed
 

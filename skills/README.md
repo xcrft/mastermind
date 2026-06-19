@@ -15,6 +15,11 @@ See [`../docs/skill-anatomy.md`](../docs/skill-anatomy.md) for the format. Addin
 | [`mastermind-structured-report-contract`](workflow/mastermind-structured-report-contract/SKILL.md) | The executor↔planner↔auditor report tail — sentinel-wrapped YAML, defect kinds, complete/partial/failed shapes. |
 | [`mastermind-critical-review`](workflow/mastermind-critical-review/SKILL.md) | Stress-test a design, spec, plan, or report for false assumptions, broken contracts, scope creep, missing evidence, and high-risk failure modes. |
 
+### coding/
+| Skill | Description |
+|---|---|
+| [`no-ai-slop-comments`](coding/no-ai-slop-comments/SKILL.md) | Keep only comments that explain a *why* the code can't — delete restating-the-code, section banners, edit markers, and the rest of the slop. Used by the executor when applying a spec. |
+
 ### debugging/
 | Skill | Description |
 |---|---|

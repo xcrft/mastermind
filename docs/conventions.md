@@ -20,6 +20,7 @@ The `name:` field in frontmatter must match the directory or file slug exactly. 
 Top-level is **type** (`skills/`, `prompts/`, `agents/`, `mcp/`). Second level is **domain**. Reuse existing domains:
 
 - `code-review/`
+- `coding/` (writing code — comment hygiene, idioms, output discipline)
 - `testing/`
 - `design/` (system, API, UI)
 - `debugging/`

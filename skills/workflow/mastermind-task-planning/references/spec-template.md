@@ -78,6 +78,7 @@ You are <doing X> to achieve <Y, the goal in one sentence>.
 **Rules (global):**
 - DO NOT add features beyond what this spec lists (YAGNI)
 - DO NOT refactor unrelated code (KISS)
+- DO NOT add code comments not already in the CHANGE TO blocks — keep only comments that explain a *why* the code can't; no restating-the-code, no edit markers (`// added`, `// changed`). See [[no-ai-slop-comments]]
 - DO NOT introduce breaking changes to public APIs without explicit Non-breaking section saying so
 - RUN `<project's typecheck command>` after each phase — must exit 0
 - VERIFY no imports break (`mmcg_callers` count stays consistent on touched symbols)

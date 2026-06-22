@@ -78,13 +78,13 @@ The spawner passes:
 2. **Read the mmcg snapshot.** Your evidence comes from real code, not from intuition. If the planner didn't include mmcg data for a code-modifying design, flag it under Test & doc coverage as `fail` — designing without grounding is a `rethink`.
 3. **Score each of the 7 dimensions.** Each verdict + 1-2 sentences of evidence:
    - `pass` — no material concern
-   - `concern` — issue that must be addressed but design still ships
-   - `fail` — fatal; design must be revised before drafting
+   - `concern` — the approach is sound but has a fixable gap: a missing detail, an unstated assumption, or a guard to add. Ships once it's addressed.
+   - `fail` — fatally broken *in this approach*: it doesn't solve the stated problem, or shipping it causes harm no caveat can patch. A merely under-specified design is a `concern`, not a `fail`.
 4. **Aggregate verdict.** Pick one (deterministic from dimension verdicts):
    - **All `pass`** → `ship it`
    - **No `fail`, some `concern`** → `ship with caveats` — caveats must be baked into spec
    - **One `fail`** → `revise` — fix that dimension, re-spawn me
-   - **Two+ `fail`** or **Correctness fails** → `rethink` — wrong approach
+   - **Two+ `fail`**, or a **Correctness `fail` where the approach itself is wrong** → `rethink` — wrong approach, back to brainstorming. A sound approach with fixable correctness gaps is `concern`/`revise`, never `rethink`.
 
 ## Output
 

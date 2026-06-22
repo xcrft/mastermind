@@ -115,6 +115,7 @@ Workflow (installed into ~/.claude/ by `mastermind init`)
 
 Proof
   evals/                adversarial eval suites — critic · auditor (real git fixtures) · intake
+                        + ablation study (vanilla vs mastermind catch-rate)
 ```
 
 Shared contracts — codegraph queries, the executor↔auditor report format, the investigation loop — live in skills so every agent reads one source. Non-core artifacts (pr-review, flaky-finder, doc-stub-sync, …) live in [`extras/`](extras/), not installed by default. The naming + frontmatter standard is [`docs/conventions.md`](docs/conventions.md).

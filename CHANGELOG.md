@@ -7,8 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-06-22
+
 ### Changed
 - Docs: npm package README rewritten to npm conventions and trimmed ~40%; top-level README onboarding aligned (`install`-led) and inventory updated (added the `coding/` skill domain, the `install` / `update` / `list` commands, and all three eval suites); binary `--help` now points npm users at the `mastermind install` shortcut.
+- Task specs now require VERIFY commands to be scoped, cheap, and terminating: the planner skill, executor skill, and canonical spec template forbid whole-repo suites in a per-step VERIFY (use `tsc -p packages/x`, `npm test -- billing`), reserve the full typecheck/test suite for the phase boundary and final block, and ban non-terminating commands (`dev`/`start`/`watch`/`serve`) that hang the executor to its tool timeout. Cuts executor wall-clock on large repos without losing per-step failure localization.
+
+### Tests
+- `evals/ablation.py` — ablation harness for the auditor's marginal value: runs each planted-defect fixture through a strong vanilla baseline (`claude -p` + git/grep/read, no mmcg, no auditor prompt) and reports catch-rate, so the codegraph + auditor uplift is evidence, not assertion. `--with-mastermind` runs both conditions head-to-head.
+
+### Fixed
+- Prompt-refiner subagent is now self-contained for passthrough — the intake gate inlines the passthrough decision rule and output format (previously only in the skill, which a subagent can't load at runtime), so an already-tight prompt is returned unchanged (`action: passthrough`) instead of being needlessly rewritten.
+- Critic verdict ladder sharpened — a sound approach with fixable gaps now scores `concern`/`revise`, and `rethink` is reserved for a genuinely wrong approach; stops the critic over-escalating under-specified-but-sound designs.
 
 ## [0.32.0] - 2026-06-19
 

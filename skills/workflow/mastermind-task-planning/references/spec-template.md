@@ -80,6 +80,9 @@ You are <doing X> to achieve <Y, the goal in one sentence>.
 - DO NOT refactor unrelated code (KISS)
 - DO NOT add code comments not already in the CHANGE TO blocks — keep only comments that explain a *why* the code can't; no restating-the-code, no edit markers (`// added`, `// changed`). See [[no-ai-slop-comments]]
 - DO NOT introduce breaking changes to public APIs without explicit Non-breaking section saying so
+- SCOPE each `VERIFY:` to the touched package/subtree — `tsc -p packages/x`, `npm test -- billing`, `pytest tests/test_foo.py` — never a whole-repo suite in a per-step VERIFY
+- KEEP per-step `VERIFY:` cheap and localizing — it proves *this* edit landed; the full typecheck/test suite runs once at the phase boundary and in the final block, not per step
+- `VERIFY:` commands MUST terminate — no `dev` / `start` / `watch` / `serve`; to check a running server, background it with a timeout and `curl` instead of blocking on it
 - RUN `<project's typecheck command>` after each phase — must exit 0
 - VERIFY no imports break (`mmcg_callers` count stays consistent on touched symbols)
 - <Other project-specific globals>
@@ -209,7 +212,8 @@ CHANGE TO:
 <exact new code>
 ```
 
-VERIFY: `<command that proves this change landed correctly>`
+<!-- VERIFY must be cheap, scoped, and terminating: the narrowest command that proves THIS edit. Not the full suite (that runs at the phase/final block), not a dev server. -->
+VERIFY: `<scoped command that proves this change landed — e.g. tsc -p packages/x, npm test -- billing>`
 
 ### 1.2 <Next specific action>
 
@@ -335,7 +339,7 @@ Explicit anti-patterns specific to this task. Distinct from the global Rules abo
 - [ ] All named symbols verified via `mmcg_search`
 - [ ] All `FIND:` blocks match current file contents (whitespace-sensitive)
 - [ ] `mmcg_impact` on each symbol-to-be-changed agrees with this spec's stated scope
-- [ ] `VERIFY:` commands look executable for this project
+- [ ] `VERIFY:` commands look executable, scoped to the touched subtree, and terminating (no `dev`/`start`/`watch`)
 - [ ] **Alternatives Considered has ≥ 2 entries** (or "trivial change" justification)
 - [ ] **Codeflow diagrams** present for every non-trivial alternative, each node mmcg-verified or marked `[NEW]` (or section explicitly skipped as trivial)
 - [ ] **Decision Matrix** filled for standard/strict specs, or explicitly skipped (write "lite — no decision matrix")

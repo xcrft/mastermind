@@ -81,10 +81,10 @@ The last phase usually has a block of commands like:
 
 ```bash
 bun run typecheck
-bun run dev
+bun test src/<area>
 ```
 
-Run **all** of them. Each must pass. If any fails, report — do not consider the task done.
+Run **all** of them. Each must pass. If any fails, report — do not consider the task done. Every command here must terminate: a `VERIFY:` that starts a dev server or watcher (`dev`, `start`, `watch`) hangs to the tool timeout — the spec should never include one.
 
 ### Step 4 — Report
 

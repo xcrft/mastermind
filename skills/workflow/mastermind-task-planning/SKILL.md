@@ -259,7 +259,7 @@ Then fill in every `<placeholder>` and delete sections that don't apply. See [`r
 | **Phases** | Work broken into verifiable chunks | yes — at least 1 |
 | **Pre-edit check via mmcg** | `mmcg_callers <symbol>` expectation — executor verifies before each function edit | per phase step that edits a named function |
 | **FIND / CHANGE TO** | Exact code transformations (whitespace-sensitive) | per phase step that edits |
-| **VERIFY** | Command(s) proving the step landed correctly | per phase step |
+| **VERIFY** | Command(s) proving the step landed correctly — scoped, cheap, terminating (full suite only at phase/final boundary) | per phase step |
 | **Checklist** | Executor ticks `[ ]` → `[x]` as it works; auditor verifies | yes |
 | **Do NOT Do** | Explicit anti-patterns specific to this task | yes — at least 2-3 |
 | **Notes → Pre-flight validation** | Your own checklist before showing the spec to the user | yes |
@@ -285,7 +285,7 @@ For each item in the spec, verify:
 | Every symbol mentioned in goals/rules | `mmcg_search` returns it |
 | Every `FIND:` block | Open the file with `Read` and confirm the exact substring exists, whitespace-sensitive |
 | Every function you say you'll edit | `mmcg_callers` count matches your scope expectation — if 0 expected but mmcg shows 50, your blast radius assessment is wrong, revise |
-| Every `VERIFY:` command | Looks like something that would actually run in this project (matches package manager, existing scripts) |
+| Every `VERIFY:` command | Runs in this project (matches package manager / existing scripts), is **scoped** to the touched package/subtree (not whole-repo), **terminates** (no `dev`/`start`/`watch`/`serve`), and per-step ones stay **cheap** — full suite only at the phase boundary and final block |
 
 If anything fails: **revise the spec, don't show it yet.** A spec is a contract; you don't show a draft contract.
 

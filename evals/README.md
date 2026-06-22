@@ -10,7 +10,9 @@ Adversarial test cases for `mastermind-critic`, `mastermind-auditor`, and `maste
 - `auditor.jsonl` — executor reports we want verified (or caught lying); verdicts: `held`/`drift`/`broken`
 - `intake.jsonl` — raw prompts the refiner should normalize; actions: `refined`/`passthrough`/`ask`
 - `runner.py` — invokes the subagent via `claude -p`, asserts on verdict/action + key phrases
+- `ablation.py` — vanilla-vs-mastermind catch-rate study over the planted-defect auditor cases (does the codegraph + auditor contract beat plain `claude -p` + grep/read?); see [Ablation](#ablation)
 - `fixtures/` — real-git source trees used by auditor cases; see `fixtures/<name>/README.md`
+- `benchmarks.md` — current pass-rates per suite + trust conditions + ablation pointer
 
 ## Run
 
@@ -114,6 +116,27 @@ Rules:
 | i-005 | production database migration with risk signals | `refined` — strict mode, risk: high, rollback flagged as NEEDS |
 
 Each case asserts on the structured `<!-- mastermind:intake-begin --> ... <!-- mastermind:intake-end -->` YAML block the refiner emits. If the block is absent the case fails.
+
+## Ablation
+
+`ablation.py` measures the **marginal value** of the codegraph + auditor contract:
+does the Mastermind auditor catch defects a strong *vanilla* agent misses? For each
+planted-defect auditor fixture it runs two conditions on the same git repo, scored
+with the same phrase signal as the suite:
+
+- **vanilla** — plain `claude -p` with shell access (git/grep/read) and a neutral
+  senior-reviewer prompt. No mmcg, no auditor system prompt — the honest "Claude +
+  grep/read" baseline, so the delta isolates the codegraph + contract, not a strawman.
+- **mastermind** — the real auditor path (auditor subagent + live mmcg). Re-run
+  head-to-head with `--with-mastermind`; otherwise it compares against the auditor
+  suite's own result.
+
+Golden (`held`) cases are excluded — nothing to catch. Record results in `benchmarks.md`.
+
+```bash
+python evals/ablation.py                   # vanilla over all defect cases
+python evals/ablation.py --with-mastermind # both conditions, head-to-head
+```
 
 ## When to run
 

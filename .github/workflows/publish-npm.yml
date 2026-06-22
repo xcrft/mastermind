@@ -91,7 +91,7 @@ jobs:
             artifact: mmcg
             install_musl: true
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -126,7 +126,7 @@ jobs:
     needs: build-binaries
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v6
         with:
@@ -287,7 +287,7 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v6
         with:

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-06-27
+
+### Added
+- Author style miner — `mastermind miner profile` learns your code-shape style ("write like me") into `~/.mastermind/style.md`, which the planner reads when drafting `CHANGE TO` blocks. Deterministic (git + line heuristics, no LLM): it derives code-shape idioms (indentation, quotes, line length, comment density, brace style, declarations) and commit conventions (prefix, subject length, body usage). A rule is emitted only with a dominant pattern over enough samples and names the counter-pattern it rejects — no signal, no rule.
+- Cross-repo style store — each mine enriches a user-global SQLite store (`~/.mastermind/style.db`) and regenerates `style.md` from the aggregate, so the profile is one fingerprint summed over every repo you mine. Idempotent per repo (re-mining replaces, never doubles), with retention that drops repos gone from disk or unmined for a year. A managed/manual split preserves hand edits across re-mines, and `mastermind doctor` nudges a re-mine once you've accrued enough new commits since the last one. `--deep` optionally adds an LLM-written "design patterns" section via `claude -p` (sends sampled lines + commit messages; off by default).
+
+### Changed
+- `mastermind init` is now batteries-included — it auto-detects the repo's stack from its manifests for CONTEXT.md and always installs the workflow CLAUDE.md, dropping the opt-in `--profile` / `--with-claude-md` / `--with-workflow` flags. The product is the whole workflow out of the box.
+
+### Removed
+- The standards-library layer — artifact `_template/` scaffolds, the `*-anatomy.md` docs, `docs/conventions.md`, the new-artifact contribution flow, and the unused `filesystem-readonly` MCP example. Mastermind is a product (codegraph + workflow), not a contributable artifact library; `CONTRIBUTING.md` and the PR template are rewritten product-focused.
+
 ## [0.33.0] - 2026-06-22
 
 ### Changed

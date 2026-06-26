@@ -1,37 +1,30 @@
 # Contributing
 
-The point of this repo is to be a **predictable** library — every artifact should look like every other artifact of its kind. That predictability is the value; please don't break it.
+Mastermind is two things: **mmcg** (a Rust codegraph binary) and a **spec-driven workflow** (the subagents + skills installed into Claude Code). Contributions to either are welcome.
 
-## Before you start
+## Project layout
 
-1. **Read [`docs/conventions.md`](docs/conventions.md).** This is the standard. Naming, frontmatter, file layout — all there.
-2. **Read the matching anatomy doc** for what you're adding:
-   - Skill → [`docs/skill-anatomy.md`](docs/skill-anatomy.md)
-   - Prompt → [`docs/prompt-anatomy.md`](docs/prompt-anatomy.md)
-   - Agent config → [`docs/agent-anatomy.md`](docs/agent-anatomy.md)
-   - MCP server → [`docs/mcp-anatomy.md`](docs/mcp-anatomy.md)
-3. **Search the existing tree.** If a similar artifact already exists, prefer improving it over creating a parallel one.
+| Path | What it is |
+|---|---|
+| `mcp/servers/mmcg/` | The mmcg binary — Rust crate: indexer, MCP server, CLI gates, miners. |
+| `skills/` · `agents/` | The workflow artifacts (markdown + YAML frontmatter) installed by `mastermind init`. |
+| `npm/mastermind/` | The npm wrapper that ships the prebuilt binary + the workflow bundle. |
+| `extras/` | Optional artifacts, not installed by default. |
+| `scripts/` | `validate.py` (artifact-structure check) and friends. |
+| `evals/` | Adversarial eval suites for the critic / auditor / intake agents. |
 
-## Adding a new artifact
+## Dev setup & checks
 
-1. Pick the right top-level folder (`skills/`, `prompts/`, `agents/`, `mcp/`).
-2. Pick the right domain folder inside (`code-review/`, `testing/`, `design/`, …). Create a new domain only if none of the existing ones fit and you can justify it in the PR.
-3. **Copy the `_template/` from that category** — do not invent your own structure.
-4. Fill it in. Run it. Make sure it actually works before opening a PR.
-5. Add an entry to the category's `README.md` index.
-6. Open a PR using the [PR template](.github/PULL_REQUEST_TEMPLATE.md).
+**Rust (`mcp/servers/mmcg/`)** — run all three before opening a PR:
 
-## What we'll ask in review
+```bash
+cd mcp/servers/mmcg
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo fmt -- --check
+```
 
-- **Does it work?** Have you actually used this artifact yourself?
-- **Is the description precise?** A skill's `description` field is what makes it trigger correctly. Vague descriptions are the #1 reason skills don't get picked up.
-- **Is the scope right?** A skill that does five unrelated things should be five skills.
-- **Does it match the standard?** Frontmatter, naming, file layout per `docs/conventions.md`. CI runs [`scripts/validate.py`](scripts/validate.py) on every PR — if it fails, fix what it flags.
-- **Does it duplicate something?** Check the category index first.
-
-## Running the validator locally
-
-Before opening a PR, run the same check CI will run:
+**Workflow artifacts (`skills/`, `agents/`)** — markdown with frontmatter; CI runs the structure validator, run it locally too:
 
 ```bash
 python3 -m venv .venv
@@ -39,17 +32,20 @@ python3 -m venv .venv
 .venv/bin/python scripts/validate.py
 ```
 
-Exit code is 0 if clean. See [`scripts/README.md`](scripts/README.md) for what it checks and how to extend it.
+Exit code 0 means clean. See [`scripts/README.md`](scripts/README.md) for what it checks.
 
-## Changing an existing artifact
+**Agent behavior** — if you change a subagent/skill prompt, run the evals: `python evals/runner.py --suite critic|auditor|intake` (needs the `claude` CLI on PATH). `validate.py` checks structure, not behavior.
 
-Backwards-compatible improvements: open a PR.
+## Pull requests
 
-Breaking changes (renames, removed fields, changed behavior): open an issue first to discuss.
+- Keep the change focused; describe **what** it does and **how you tested it**.
+- All checks above must pass — CI enforces them.
+- Commit subjects: a conventional prefix, imperative (`feat(miner): …`, `fix: …`); no long body needed.
+- Breaking changes (renames, removed flags, changed behavior): open an issue first to discuss.
 
 ## Reporting bugs
 
-Use the [bug issue template](.github/ISSUE_TEMPLATE/bug.md). Include the artifact path, what you expected, what happened, and your environment.
+Use the [bug issue template](.github/ISSUE_TEMPLATE/bug.md) — include the version (`mmcg --version`), what you expected, what happened, and your OS.
 
 ## Code of conduct
 

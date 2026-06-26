@@ -8,7 +8,7 @@
 2. Describe the issue with enough detail to reproduce — the more concrete, the faster the fix
 3. Include affected versions if you know them (e.g. `mmcg 0.6.0`, plugin `mastermind-workflow 0.6.0`)
 
-If GitHub's private reporting is unavailable to you, email the main contributor (see [`CONTRIBUTORS.md`](CONTRIBUTORS.md) for current handle → email is on the GitHub profile).
+If GitHub's private reporting is unavailable to you, reach the maintainer via their GitHub profile.
 
 ## What we consider in scope
 

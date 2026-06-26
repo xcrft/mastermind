@@ -7,8 +7,6 @@ Configurations that shape **how an agent behaves** in a project or session — d
 | [`subagents/`](subagents/) | Specialized agents the main agent can spawn (Claude Code subagent format) |
 | [`claude-md/`](claude-md/) | `CLAUDE.md` templates for common project shapes |
 
-See [`../docs/agent-anatomy.md`](../docs/agent-anatomy.md) for the format of each.
-
 ## Index
 
 ### subagents/
@@ -29,12 +27,3 @@ See [`../docs/agent-anatomy.md`](../docs/agent-anatomy.md) for the format of eac
 | [`mastermind-workflow`](claude-md/mastermind-workflow.md) | `CLAUDE.md` that pre-wires the planner+executor delegation workflow — drop-in setup for projects using `.mastermind/tasks/` specs. |
 | [`mastermind-context`](claude-md/mastermind-context.md) | `CONTEXT.md` template — project-level institutional memory (decision log, gotchas, glossary, don't-touch). Lives at project root alongside CLAUDE.md; updated by the planner during post-flight semantic review. |
 
----
-
-## Adding a new agent config
-
-1. Read [`../docs/agent-anatomy.md`](../docs/agent-anatomy.md) — pick the right sub-category first.
-2. Copy the matching template from `_template/`.
-3. Fill it in. Test it in a real project.
-4. Add to this index.
-5. Open a PR.

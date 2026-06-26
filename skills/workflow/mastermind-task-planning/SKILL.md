@@ -101,6 +101,14 @@ The lessons file is intentionally NOT searchable via `mmcg_tasks` (underscore pr
 
 If neither query returns anything relevant, that's fine — write that explicitly so the auditor knows you checked.
 
+### Write in the author's style
+
+If `~/.mastermind/style.md` exists, read it before drafting code. It's the user-global "write like me" profile that `mastermind miner profile` mines from the author's git history — code-shape idioms (indentation, quotes, line length, comment density), each with the counter-pattern it rejects and the evidence behind it.
+
+- Write every `CHANGE TO` block in that style, and fold the load-bearing rules into the spec's **Rules (global)** so the executor (which applies blocks verbatim) and the auditor both see the same constraints.
+- Precedence: the repo's own tooling (formatter, linter) and surrounding-file convention win; an explicit task instruction wins over both. The profile only decides what the code and tooling leave open — never override a project convention to match it.
+- Absent file → skip this. Do not invent style rules.
+
 ### Ambiguous requirements — verbalize, don't pick silently
 
 If the user request admits ≥ 2 reasonable interpretations, write them out in the spec's Notes section as `Interpretation A / B / picked C because <reason>` — **do not silently choose**. Both the critic and the executor work from the spec; if the spec says "X" but the user meant "Y", the silent fork happens *here*, not later, and the auditor cannot recover it.

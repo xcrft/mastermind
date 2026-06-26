@@ -23,7 +23,7 @@ metadata:
 
 # mmcg — Mastermind Codegraph
 
-A small, fast Rust binary that builds a structural index of a codebase (Python, TypeScript/TSX, JavaScript/JSX, Rust, C#, Go, Java, PHP, C/C++) and serves queries over MCP. Pair with the Mastermind workflow so the planner/executor reason from a real graph instead of grep heuristics.
+A small, fast Rust binary that builds a structural index of a codebase (Python, TypeScript/TSX, JavaScript/JSX, Rust, C#, Go, Java, PHP, C/C++). It serves the graph over **MCP** (20 read-only tools), but MCP is one surface — the same binary is the Mastermind workflow's **CLI**: the deterministic spec gates (`verify-spec` / `audit-spec`), project setup (`init` / `doctor`), and miners (`miner profile`, which learns your code-shape style into `~/.mastermind/style.md`) are all subcommands of it. Pair with the workflow so the planner/executor reason from a real graph instead of grep heuristics.
 
 > Installed via npm (`@xcraftmind/mastermind`)? The command is **`mastermind`** — the same binary. The `mmcg` name used throughout this doc is the cargo-installed alias (`cargo install mmcg`).
 

@@ -38,10 +38,8 @@ impl Target {
 pub struct Opts {
     /// Actually write the file. Else prints diff + advisory.
     pub write: bool,
-    /// Overwrite an existing customized `mmcg` entry or existing CLAUDE.md.
+    /// Overwrite an existing customized `mmcg` entry.
     pub force: bool,
-    /// Also drop the workflow CLAUDE.md template into the project root.
-    pub with_workflow: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -61,13 +59,7 @@ pub enum Outcome {
 
 /// Top-level entry point. Reads existing config, computes the merged proposal,
 /// renders a diff, optionally writes, optionally drops a CLAUDE.md.
-pub fn run_claude(
-    target: &Target,
-    mmcg_binary: &Path,
-    project_root: &Path,
-    workflow_template: &str,
-    opts: Opts,
-) -> Outcome {
+pub fn run_claude(target: &Target, mmcg_binary: &Path, opts: Opts) -> Outcome {
     println!("=== mastermind setup claude ({}) ===", target.label);
 
     let existing_text = match std::fs::read_to_string(&target.path) {
@@ -154,12 +146,6 @@ pub fn run_claude(
         println!("\n(dry-run) Pass --write-mcp to apply.");
         Outcome::DryRun
     };
-
-    // CLAUDE.md drop is a side-channel — independent of the MCP write result, so
-    // --with-workflow without --write-mcp still gets the file-path advisory.
-    if opts.with_workflow {
-        handle_workflow_drop(project_root, workflow_template, opts);
-    }
 
     outcome
 }
@@ -311,12 +297,7 @@ pub fn remove_claude(target: &Target, write: bool) -> Outcome {
 /// reads for global servers. (The previous approach wrote `~/.claude/.mcp.json`,
 /// which Claude Code ignores, so global registration silently never took
 /// effect.) Safe by default: prints the command and exits unless `opts.write`.
-pub fn add_claude_user(
-    mmcg_binary: &Path,
-    project_root: &Path,
-    workflow_template: &str,
-    opts: Opts,
-) -> Outcome {
+pub fn add_claude_user(mmcg_binary: &Path, opts: Opts) -> Outcome {
     println!("=== mmcg setup claude (user scope → ~/.claude.json via `claude mcp add`) ===");
 
     let entry = mmcg_entry(mmcg_binary);
@@ -345,18 +326,12 @@ pub fn add_claude_user(
         println!(
             "mmcg is already registered with Claude Code. Re-run with --force to re-register.\n  would run: {preview}"
         );
-        if opts.with_workflow {
-            handle_workflow_drop(project_root, workflow_template, opts);
-        }
         return Outcome::NoChange;
     }
 
     println!("Will run:\n  {preview}");
     if !opts.write {
         println!("\n(dry-run) Pass --write-mcp to apply.");
-        if opts.with_workflow {
-            handle_workflow_drop(project_root, workflow_template, opts);
-        }
         return Outcome::DryRun;
     }
 
@@ -389,9 +364,6 @@ pub fn add_claude_user(
             Outcome::Error
         }
     };
-    if opts.with_workflow {
-        handle_workflow_drop(project_root, workflow_template, opts);
-    }
     outcome
 }
 
@@ -488,33 +460,6 @@ fn write_atomic(path: &Path, body: &str) -> std::io::Result<()> {
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, body)?;
     std::fs::rename(&tmp, path)
-}
-
-fn handle_workflow_drop(project_root: &Path, workflow_template: &str, opts: Opts) {
-    let claude_md = project_root.join("CLAUDE.md");
-    if claude_md.exists() && !opts.force {
-        println!(
-            "\nCLAUDE.md already exists at `{}` — not overwritten (pass --force to replace).",
-            claude_md.display()
-        );
-        return;
-    }
-    if opts.write {
-        match std::fs::write(&claude_md, workflow_template) {
-            Ok(()) => println!(
-                "\nWrote {} ({} bytes)",
-                claude_md.display(),
-                workflow_template.len()
-            ),
-            Err(e) => eprintln!("error: writing `{}`: {e}", claude_md.display()),
-        }
-    } else {
-        println!(
-            "\n(dry-run) Would write workflow CLAUDE.md to `{}` ({} bytes).",
-            claude_md.display(),
-            workflow_template.len()
-        );
-    }
 }
 
 #[cfg(test)]
@@ -615,8 +560,6 @@ mod tests {
         let outcome = run_claude(
             &target,
             Path::new("/usr/local/bin/mmcg"),
-            &dir,
-            "WORKFLOW TEMPLATE",
             Opts::default(), // write=false
         );
         assert_eq!(outcome, Outcome::DryRun);
@@ -635,8 +578,6 @@ mod tests {
         let outcome = run_claude(
             &target,
             Path::new("/usr/local/bin/mmcg"),
-            &dir,
-            "WORKFLOW",
             Opts {
                 write: true,
                 ..Default::default()
@@ -679,8 +620,6 @@ mod tests {
         let outcome = run_claude(
             &target,
             Path::new("/usr/local/bin/mmcg"),
-            &dir,
-            "WORKFLOW",
             Opts {
                 write: true,
                 ..Default::default()
@@ -706,8 +645,6 @@ mod tests {
         let outcome = run_claude(
             &target,
             Path::new("/usr/local/bin/mmcg"),
-            &dir,
-            "WORKFLOW",
             Opts {
                 write: true,
                 ..Default::default()
@@ -736,67 +673,15 @@ mod tests {
         let outcome = run_claude(
             &target,
             Path::new("/usr/local/bin/mmcg"),
-            &dir,
-            "WORKFLOW",
             Opts {
                 write: true,
                 force: true,
-                ..Default::default()
             },
         );
         assert_eq!(outcome, Outcome::Wrote);
         let body = fs::read_to_string(&target.path).unwrap();
         assert!(body.contains("/usr/local/bin/mmcg"));
         assert!(!body.contains("--verbose"));
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn run_claude_with_workflow_drops_claude_md_when_absent() {
-        let dir = tmp("workflow_drop");
-        let target = Target {
-            path: dir.join(".mcp.json"),
-            label: "<test>".into(),
-        };
-        let outcome = run_claude(
-            &target,
-            Path::new("/usr/local/bin/mmcg"),
-            &dir,
-            "WORKFLOW BODY",
-            Opts {
-                write: true,
-                with_workflow: true,
-                ..Default::default()
-            },
-        );
-        assert_eq!(outcome, Outcome::Wrote);
-        let claude_md = dir.join("CLAUDE.md");
-        assert!(claude_md.exists());
-        assert_eq!(fs::read_to_string(&claude_md).unwrap(), "WORKFLOW BODY");
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn run_claude_with_workflow_skips_existing_without_force() {
-        let dir = tmp("workflow_skip_existing");
-        let target = Target {
-            path: dir.join(".mcp.json"),
-            label: "<test>".into(),
-        };
-        let claude_md = dir.join("CLAUDE.md");
-        fs::write(&claude_md, "ORIGINAL").unwrap();
-        let _ = run_claude(
-            &target,
-            Path::new("/usr/local/bin/mmcg"),
-            &dir,
-            "WORKFLOW BODY",
-            Opts {
-                write: true,
-                with_workflow: true,
-                ..Default::default()
-            },
-        );
-        assert_eq!(fs::read_to_string(&claude_md).unwrap(), "ORIGINAL");
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -948,8 +833,6 @@ mod tests {
         let _ = run_claude(
             &target,
             Path::new("/bin/mmcg"),
-            &dir,
-            "W",
             Opts {
                 write: true,
                 ..Default::default()

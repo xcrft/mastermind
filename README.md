@@ -52,6 +52,8 @@ All 20: `mmcg_search` · `mmcg_callers` · `mmcg_callees` · `mmcg_impact` · `m
 
 It's intentionally narrow — a syntactic graph, read-only, no daemon, zero system dependencies. Point queries are sub-millisecond; whole-graph aggregations (centrality, impact, cycles) scale with repo size. Faster and more precise than grep for "who calls what," and unlike an LSP it's trivial to snapshot and query from an agent.
 
+**More than an MCP server.** MCP is one surface; the same `mastermind` binary is the workflow's engine. The deterministic gates (`verify-spec` / `audit-spec`) read the index directly, `init` / `doctor` scaffold and health-check a project, and **miners** derive cross-repo signal the workflow can consume — e.g. `miner profile` learns your code-shape style ("write like me") into `~/.mastermind/style.md` for the planner to write in.
+
 ## The workflow
 
 A pipeline where **the planner never implements and the executor never improvises:**
@@ -100,7 +102,8 @@ The auditor ran `mmcg_search ProcessPayment` against the live index → `{ "coun
 
 ```
 Core
-  mcp/servers/mmcg/     the mmcg codegraph binary — 20 MCP tools, 9 languages
+  mcp/servers/mmcg/     the mmcg core binary — codegraph (20 MCP tools, 9 languages),
+                        deterministic CLI gates, and miners (author style profile)
 
 Workflow (installed into ~/.claude/ by `mastermind init`)
   agents/subagents/     prompt-refiner · critic · researcher · investigator
@@ -118,7 +121,7 @@ Proof
                         + ablation study (vanilla vs mastermind catch-rate)
 ```
 
-Shared contracts — codegraph queries, the executor↔auditor report format, the investigation loop — live in skills so every agent reads one source. Non-core artifacts (pr-review, flaky-finder, doc-stub-sync, …) live in [`extras/`](extras/), not installed by default. The naming + frontmatter standard is [`docs/conventions.md`](docs/conventions.md).
+Shared contracts — codegraph queries, the executor↔auditor report format, the investigation loop — live in skills so every agent reads one source. Non-core artifacts (pr-review, flaky-finder, doc-stub-sync, …) live in [`extras/`](extras/), not installed by default.
 
 ## Install
 
@@ -165,6 +168,7 @@ mastermind new-spec "..."        # create a task spec (--mode lite|standard|stri
 mastermind resume <task-id>      # paste-into-Claude prompt for the current phase
 mastermind verify-spec <spec>    # pre-execution gate
 mastermind audit-spec <spec>     # post-execution gate
+mastermind miner profile         # learn your code-shape style → ~/.mastermind/style.md
 mastermind uninstall --scope all # tear it down (dry-run unless --force)
 ```
 
@@ -172,7 +176,7 @@ mastermind uninstall --scope all # tear it down (dry-run unless --force)
 
 ## Contributing
 
-Read [`docs/conventions.md`](docs/conventions.md) (the standard) and the `*-anatomy.md` for your artifact type, copy the matching `_template/`, and open a PR. Process in [`CONTRIBUTING.md`](CONTRIBUTING.md).
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) — project layout, the checks to run, and how to open a PR.
 
 ## License
 

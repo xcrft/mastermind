@@ -53,10 +53,10 @@ The `serve handshake` check confirms Claude Code can start and query the MCP ser
 
 `mastermind init` installs the workflow subagents and skills into `~/.claude/agents/` and `~/.claude/skills/`. These are the planning, execution, auditing, and critique roles described in the workflow CLAUDE.md template.
 
-To install subagents without re-running init:
+To register the MCP server without re-running init:
 
 ```bash
-mastermind setup claude --with-workflow --write-mcp
+mastermind setup claude --write-mcp
 ```
 
 ## Troubleshooting

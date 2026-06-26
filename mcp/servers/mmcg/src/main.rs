@@ -24,7 +24,7 @@ use std::process::ExitCode;
 #[derive(Copy, Clone, Debug, ValueEnum)]
 #[clap(rename_all = "kebab-case")]
 pub enum Profile {
-    /// Generic CONTEXT.md (current default — no stack-specific seeding).
+    /// Generic CONTEXT.md — no stack-specific seeding.
     Generic,
     /// TypeScript HTTP/REST/GraphQL API service.
     TypescriptApi,
@@ -121,24 +121,15 @@ enum Cmd {
     /// Scaffold a project for the Mastermind workflow: create .mastermind/tasks/,
     /// CONTEXT.md (only if missing) and the index, then build the index and
     /// (unless --no-claude) populate CONTEXT.md from the codebase via `claude -p`.
-    /// Does NOT touch an existing CLAUDE.md (pass --with-claude-md to drop + fill the template).
+    /// Auto-detects the stack profile and always drops the workflow CLAUDE.md
+    /// (an existing CLAUDE.md is left alone unless --force).
     Init {
         /// Project root. Defaults to cwd.
         #[arg(default_value = ".")]
         root: PathBuf,
-        /// Also drop the Mastermind workflow CLAUDE.md template and fill its <PLACEHOLDER> sections
-        /// from the codebase via `claude -p` (unless --no-claude). Refuses to overwrite an existing
-        /// CLAUDE.md unless --force is passed.
-        #[arg(long)]
-        with_claude_md: bool,
         /// Overwrite existing files (CONTEXT.md, CLAUDE.md). Off by default.
         #[arg(long)]
         force: bool,
-        /// CONTEXT.md template variant. `generic` (default) is stack-agnostic.
-        /// Stack-specific profiles pre-seed the file with conventions, test
-        /// commands, and canonical gotchas — prune what doesn't apply.
-        #[arg(long, value_enum, default_value = "generic")]
-        profile: Profile,
         /// Skip the automatic index build (otherwise `init` runs `index .` for you).
         #[arg(long)]
         no_index: bool,
@@ -151,6 +142,10 @@ enum Cmd {
         /// is available; it overwrites Mastermind's own files there.
         #[arg(long)]
         no_global: bool,
+        /// Skip seeding `~/.mastermind/style.md` (the author's code-shape "write like me"
+        /// profile, mined from git history). On by default; seeds only if the file is absent.
+        #[arg(long)]
+        no_seed_style: bool,
     },
     /// Remove a Mastermind setup. By default (`--scope project`) deletes
     /// `.mastermind/` (index, tasks, run-state) and de-registers the `mmcg`
@@ -337,6 +332,10 @@ enum Cmd {
     /// Subcommands for inspecting project context quality.
     #[command(subcommand)]
     Context(ContextCmd),
+    /// Mine user-global signal from a repository's history (e.g. an author's
+    /// code-shape style). Output lives under `~/.mastermind/`, not the project.
+    #[command(subcommand)]
+    Miner(MinerCmd),
 }
 
 #[derive(Subcommand)]
@@ -351,6 +350,34 @@ enum ContextCmd {
         /// Output JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum MinerCmd {
+    /// Mine an author's style ("write like me") from their git history into
+    /// `~/.mastermind/style.md`: code-shape idioms (indentation, quotes, line
+    /// length, comment density, brace style, declarations) plus commit conventions
+    /// (prefix, subject length, body usage). Deterministic by default. Each run
+    /// enriches a user-global cross-repo store; hand edits in the manual block are
+    /// preserved across re-mines.
+    Profile {
+        /// Repository to mine. Defaults to cwd.
+        #[arg(default_value = ".")]
+        root: PathBuf,
+        /// Author to profile — substring of name or email. Defaults to
+        /// `git config user.name` (matches all the person's emails).
+        #[arg(long)]
+        author: Option<String>,
+        /// Rebuild the cross-repo store from scratch (drop every other repo's
+        /// contribution), then re-mine this one. Without it, mining enriches.
+        #[arg(long)]
+        force: bool,
+        /// Also run a deep LLM analysis (design patterns, tendencies) via `claude -p`.
+        /// Sends sampled added lines + commit messages to the CLI. Slower and
+        /// non-deterministic; not part of the deterministic core.
+        #[arg(long)]
+        deep: bool,
     },
 }
 
@@ -506,11 +533,7 @@ enum SetupCmd {
         /// Alias for the default (no-write) mode — useful for scripting clarity.
         #[arg(long)]
         dry_run: bool,
-        /// Also drop the workflow CLAUDE.md template into the project root.
-        /// Refuses to overwrite existing CLAUDE.md unless `--force`.
-        #[arg(long)]
-        with_workflow: bool,
-        /// Overwrite a customized `mmcg` entry or existing CLAUDE.md.
+        /// Overwrite a customized `mmcg` entry.
         #[arg(long)]
         force: bool,
     },
@@ -588,24 +611,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Cmd::Init {
             root,
-            with_claude_md,
             force,
-            profile,
             no_index,
             no_claude,
             no_global,
+            no_seed_style,
         } => {
             let root = root
                 .canonicalize()
                 .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
             commands::do_init(
                 &root,
-                with_claude_md,
-                force,
-                profile,
-                !no_index,
-                !no_claude,
-                !no_global,
+                commands::init::InitOpts {
+                    force,
+                    index: !no_index,
+                    claude: !no_claude,
+                    global: !no_global,
+                    seed_style: !no_seed_style,
+                },
             )?;
         }
         Cmd::Uninstall { root, scope, force } => {
@@ -618,34 +641,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             project,
             write_mcp,
             dry_run: _,
-            with_workflow,
             force,
         }) => {
-            let project_root = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
             let me = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
             let opts = mmcg::setup::Opts {
                 write: write_mcp,
                 force,
-                with_workflow,
             };
             let outcome = if let Some(p) = project {
                 let root = p
                     .canonicalize()
                     .map_err(|e| format!("canonicalize {}: {e}", p.display()))?;
-                mmcg::setup::run_claude(
-                    &mmcg::setup::Target::project(&root),
-                    &me,
-                    &project_root,
-                    &templates::strip_comment(templates::WORKFLOW_TEMPLATE),
-                    opts,
-                )
+                mmcg::setup::run_claude(&mmcg::setup::Target::project(&root), &me, opts)
             } else {
-                mmcg::setup::add_claude_user(
-                    &me,
-                    &project_root,
-                    &templates::strip_comment(templates::WORKFLOW_TEMPLATE),
-                    opts,
-                )
+                mmcg::setup::add_claude_user(&me, opts)
             };
             if matches!(
                 outcome,
@@ -790,6 +799,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if report.has_failures() {
                 std::process::exit(1);
             }
+        }
+        Cmd::Miner(MinerCmd::Profile {
+            root,
+            author,
+            force,
+            deep,
+        }) => {
+            let root = root
+                .canonicalize()
+                .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
+            mmcg::miner::profile::run(&root, author, force, deep)?;
         }
     }
     Ok(())

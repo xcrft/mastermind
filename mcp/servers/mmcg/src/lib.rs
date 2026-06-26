@@ -17,6 +17,7 @@ pub mod fingerprint;
 pub mod indexer;
 pub mod lessons;
 pub mod mcp;
+pub mod miner;
 pub mod queries;
 pub mod run_task;
 pub mod setup;

@@ -11,24 +11,41 @@ use std::path::Path;
 
 use crate::{templates, Profile};
 
+/// Options for [`do_init`].
+pub struct InitOpts {
+    /// Overwrite an existing CONTEXT.md / CLAUDE.md.
+    pub force: bool,
+    /// Run `mastermind index .` immediately after scaffolding.
+    pub index: bool,
+    /// Auto-fill CONTEXT.md / CLAUDE.md via `claude -p`.
+    pub claude: bool,
+    /// Install the workflow bundle into `~/.claude/`.
+    pub global: bool,
+    /// Seed `~/.mastermind/style.md` from the author's git history, only if
+    /// absent (never clobbers a hand-edited profile).
+    pub seed_style: bool,
+}
+
 /// Scaffold a Mastermind project at `root`.
-///
-/// * `index`  — run `mastermind index .` immediately after scaffolding.
-/// * `claude` — auto-fill CONTEXT.md / CLAUDE.md via `claude -p`.
-/// * `global` — install the workflow bundle into `~/.claude/`.
-pub fn do_init(
-    root: &Path,
-    with_claude_md: bool,
-    force: bool,
-    profile: Profile,
-    index: bool,
-    claude: bool,
-    global: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn do_init(root: &Path, opts: InitOpts) -> Result<(), Box<dyn std::error::Error>> {
+    let InitOpts {
+        force,
+        index,
+        claude,
+        global,
+        seed_style,
+    } = opts;
     let mut created: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     let mut context_fill_prompt: Option<String> = None;
+
+    // Batteries-included: auto-detect the CONTEXT.md stack profile from the repo.
+    let profile = detect_stack(root);
+    created.push(format!(
+        "auto-detected stack: {} CONTEXT.md profile",
+        templates::profile_label(profile)
+    ));
 
     let mastermind_dir = root.join(".mastermind");
     let tasks_dir = mastermind_dir.join("tasks");
@@ -92,12 +109,14 @@ pub fn do_init(
         skipped.push("CONTEXT.md (already exists — pass --force to overwrite)".into());
     }
 
+    // The workflow CLAUDE.md is always dropped — it IS Mastermind (skipped only
+    // if the repo already has its own CLAUDE.md, unless --force).
     let mut claude_md_created = false;
-    if with_claude_md {
+    {
         let claude_path = root.join("CLAUDE.md");
         let claude_body = templates::strip_comment(templates::WORKFLOW_TEMPLATE);
         if write_if_absent(&claude_path, &claude_body, force)? {
-            created.push("CLAUDE.md".into());
+            created.push("CLAUDE.md (workflow)".into());
             claude_md_created = true;
         } else {
             skipped.push("CLAUDE.md (already exists — pass --force to overwrite)".into());
@@ -169,6 +188,18 @@ pub fn do_init(
         }
     }
 
+    if seed_style {
+        match mmcg::miner::profile::mine(root, None, false, false) {
+            Ok(mmcg::miner::profile::SeedOutcome::Enriched { repos, rules, .. }) => created.push(
+                format!("~/.mastermind/style.md ({rules} rule(s) across {repos} repo(s))"),
+            ),
+            Ok(mmcg::miner::profile::SeedOutcome::NoCommits { .. }) => {
+                skipped.push("~/.mastermind/style.md (no commits by you in this repo yet)".into())
+            }
+            Err(e) => warnings.push(format!("style profile seed skipped — {e}")),
+        }
+    }
+
     println!("Mastermind workflow initialized at {}", root.display());
     if !created.is_empty() {
         println!("\nCreated:");
@@ -194,9 +225,7 @@ pub fn do_init(
     println!("     (run once — the global server serves whichever project you open)");
     println!("  2. Add `.mastermind/` to your project's root `.gitignore` (local working state)");
     println!("  3. (Optional) Keep the index fresh in another terminal:  mastermind watch");
-    if !with_claude_md {
-        println!("  4. Adopt the workflow CLAUDE.md:  re-run `mastermind init --with-claude-md`");
-    } else if claude {
+    if claude {
         println!(
             "  4. Review the drafted CLAUDE.md — placeholders were filled from your codebase."
         );
@@ -210,6 +239,37 @@ pub fn do_init(
     }
 
     Ok(())
+}
+
+/// Pick a CONTEXT.md stack profile by sniffing the repo's manifests. Order
+/// matters: React Native repos also carry TypeScript, so check them first.
+fn detect_stack(root: &Path) -> Profile {
+    let exists = |name: &str| root.join(name).exists();
+    let read = |name: &str| {
+        fs::read_to_string(root.join(name))
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+    };
+
+    let pkg = read("package.json");
+    if pkg.contains("\"react-native\"") || pkg.contains("\"expo\"") {
+        return Profile::ReactNative;
+    }
+    let ts_api = [
+        "express", "fastify", "@nestjs", "koa", "graphql", "apollo", "hapi",
+    ];
+    if (exists("tsconfig.json") || pkg.contains("\"typescript\""))
+        && ts_api.iter().any(|f| pkg.contains(f))
+    {
+        return Profile::TypescriptApi;
+    }
+    if read("pyproject.toml").contains("fastapi") || read("requirements.txt").contains("fastapi") {
+        return Profile::PythonFastapi;
+    }
+    if exists("Cargo.toml") && (read("Cargo.toml").contains("[[bin]]") || exists("src/main.rs")) {
+        return Profile::RustCli;
+    }
+    Profile::Generic
 }
 
 fn write_if_absent(
@@ -378,4 +438,58 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_stack_empty_is_generic() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(matches!(detect_stack(d.path()), Profile::Generic));
+    }
+
+    #[test]
+    fn detect_stack_rust_cli() {
+        let d = tempfile::tempdir().unwrap();
+        fs::write(
+            d.path().join("Cargo.toml"),
+            "[package]\nname = \"x\"\n[[bin]]\nname = \"x\"",
+        )
+        .unwrap();
+        assert!(matches!(detect_stack(d.path()), Profile::RustCli));
+    }
+
+    #[test]
+    fn detect_stack_react_native_wins_over_ts_api() {
+        let d = tempfile::tempdir().unwrap();
+        // RN repo that also carries express + typescript — RN must win.
+        fs::write(
+            d.path().join("package.json"),
+            r#"{"dependencies":{"react-native":"0.74","express":"4","typescript":"5"}}"#,
+        )
+        .unwrap();
+        fs::write(d.path().join("tsconfig.json"), "{}").unwrap();
+        assert!(matches!(detect_stack(d.path()), Profile::ReactNative));
+    }
+
+    #[test]
+    fn detect_stack_ts_api_and_fastapi() {
+        let d = tempfile::tempdir().unwrap();
+        fs::write(
+            d.path().join("package.json"),
+            r#"{"devDependencies":{"typescript":"5"},"dependencies":{"fastify":"4"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(detect_stack(d.path()), Profile::TypescriptApi));
+
+        let d2 = tempfile::tempdir().unwrap();
+        fs::write(
+            d2.path().join("requirements.txt"),
+            "fastapi==0.110\nuvicorn",
+        )
+        .unwrap();
+        assert!(matches!(detect_stack(d2.path()), Profile::PythonFastapi));
+    }
 }

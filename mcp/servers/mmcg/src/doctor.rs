@@ -17,6 +17,7 @@
 //! | 7 | `MCP config`           | mmcg registered in `~/.claude.json` (user) or `./.mcp.json` (project) |
 //! | 8 | `MCP serve handshake`  | spawning `mastermind serve` responds to `initialize` + `tools/list` |
 //! | 9 | `subagent MCP scoping` | every subagent `mcpServers:` entry names a registered server |
+//! | 10 | `style profile`       | author's `~/.mastermind/style.md` has fallen behind their commits |
 //!
 //! Human-readable by default; `--json` switches to a machine-parseable format.
 
@@ -187,8 +188,38 @@ pub fn run(root: &Path, mmcg_binary: &Path) -> Report {
         check_mcp_config(root),
         check_mcp_handshake(root, mmcg_binary),
         check_subagent_mcp_servers(root),
+        check_style_profile(root),
     ];
     Report::from_checks(root, checks)
+}
+
+/// Nudge a re-mine when the author's style profile has fallen behind their
+/// commits. An absent profile is fine — the feature is opt-in — so it's Ok.
+fn check_style_profile(root: &Path) -> Check {
+    use crate::miner::profile::Staleness;
+    match crate::miner::profile::staleness(root) {
+        Staleness::Absent => Check {
+            name: "style profile",
+            status: Status::Ok,
+            message: "none — `mastermind miner profile` to seed (optional)".into(),
+            hint: None,
+        },
+        Staleness::Fresh { mined_through } => Check {
+            name: "style profile",
+            status: Status::Ok,
+            message: format!("fresh (mined through {mined_through})"),
+            hint: None,
+        },
+        Staleness::Stale {
+            mined_through,
+            new_commits,
+        } => Check {
+            name: "style profile",
+            status: Status::Warn,
+            message: format!("{new_commits} new commits since last mined ({mined_through})"),
+            hint: Some("refresh with `mastermind miner profile --force`".into()),
+        },
+    }
 }
 
 // ----- individual checks ---------------------------------------------------

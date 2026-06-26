@@ -1,33 +1,29 @@
 <!--
-Thanks for contributing. Please fill in the sections below.
-Delete sections that don't apply (e.g., remove "Breaking change" if there isn't one).
+Thanks for contributing. Fill in the sections below; delete any that don't apply.
 -->
 
 ## What this PR does
 
-<One or two sentences. What artifact are you adding/changing, and what does it do?>
+<One or two sentences — what changes and why.>
 
 ## Type of change
 
-- [ ] New artifact (skill / prompt / agent / mcp — circle one)
-- [ ] Improvement to an existing artifact
-- [ ] Documentation / standard change
+- [ ] mmcg (Rust) — indexer / MCP / CLI / miner
+- [ ] Workflow artifact — skill / subagent / CLAUDE.md template
+- [ ] Docs
 - [ ] Bug fix
 
 ## Checklist
 
-- [ ] I read [`docs/conventions.md`](../docs/conventions.md) and the matching `*-anatomy.md`
-- [ ] I copied the `_template/` for my artifact type (didn't invent layout)
-- [ ] Frontmatter is complete and `name:` matches the file/folder slug
-- [ ] `description:` is specific enough that it wouldn't apply to a different artifact
-- [ ] I actually used this artifact myself — not just drafted it
-- [ ] I added an entry to the category's `README.md` index
-- [ ] `metadata.version` is set (and bumped if changing an existing artifact)
+- [ ] `cargo test` + `cargo clippy -- -D warnings` + `cargo fmt --check` pass (if Rust touched)
+- [ ] `python3 scripts/validate.py` passes (if artifacts touched)
+- [ ] Ran the evals for any changed subagent/skill prompt (`evals/runner.py`)
+- [ ] Change is focused; commit subjects use a conventional prefix
 
 ## How I tested it
 
-<Concrete. What did you run? What was the input? What was the output?>
+<Concrete. What did you run? Input → output.>
 
 ## Breaking change?
 
-<If yes, what breaks and what's the migration path. If no, delete this section.>
+<If yes: what breaks and the migration path. If no, delete this section.>

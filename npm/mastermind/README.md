@@ -34,7 +34,7 @@ Restart Claude Code. The agent can now answer structural questions (`who calls p
 mastermind install                          # copy workflow agents + skills into ~/.claude + register the MCP server
 mastermind update                           # refresh the agents + skills (MCP already registered)
 mastermind list                             # show the bundled agents + skills
-mastermind init [--profile <p>]             # scaffold .mastermind/, build index, draft CONTEXT.md (--no-index / --no-claude to skip)
+mastermind init                             # scaffold .mastermind/ (auto-detects stack), build index, draft CONTEXT.md + workflow CLAUDE.md (--no-index / --no-claude to skip)
 mastermind index .                          # build/refresh the codegraph (incremental; --force to re-parse all)
 mastermind watch                            # re-index on file changes
 mastermind status                           # file count, symbol count, db path

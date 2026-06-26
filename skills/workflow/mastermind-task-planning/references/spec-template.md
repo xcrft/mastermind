@@ -85,6 +85,7 @@ You are <doing X> to achieve <Y, the goal in one sentence>.
 - `VERIFY:` commands MUST terminate — no `dev` / `start` / `watch` / `serve`; to check a running server, background it with a timeout and `curl` instead of blocking on it
 - RUN `<project's typecheck command>` after each phase — must exit 0
 - VERIFY no imports break (`mmcg_callers` count stays consistent on touched symbols)
+- MATCH the author's code-shape style from `~/.mastermind/style.md` if present — fold its rules in here (repo tooling + this spec's explicit instructions take precedence)
 - <Other project-specific globals>
 
 **Critic findings baked into rules** *(if `mastermind-critic` was spawned — paste each `concern`/`fail` here as a hard rule; delete this block if no critic spawn):*

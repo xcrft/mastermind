@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `mastermind init` no longer prints `indexed 0 files, 0 symbols, 0 edges` when the index already exists and nothing changed. An incremental re-index is a no-op (0 files re-parsed), but the index stays fully populated — the old message read as if it were empty. It now reports the index totals from the db (`index up to date — N files, M symbols (0 reindexed, …)`), matching `mastermind status`.
+
 ## [0.34.0] - 2026-06-27
 
 ### Added

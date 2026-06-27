@@ -247,6 +247,9 @@ pub fn do_init(root: &Path, opts: InitOpts) -> Result<(), Box<dyn std::error::Er
     } else {
         println!("  4. Fill CLAUDE.md's <PLACEHOLDER> sections (--no-claude skipped auto-fill).");
     }
+    println!(
+        "  5. (Optional) richer \"write like me\" profile: run /mastermind-style-deep in Claude Code"
+    );
     if let Some(prompt) = context_fill_prompt {
         println!(
             "\nScaffold files were left as templates. To fill them, paste this into Claude Code:\n\n  {prompt}"

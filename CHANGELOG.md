@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `mastermind-style-deep` skill — writes the LLM-interpreted "Design patterns & tendencies" section of `~/.mastermind/style.md`: the structural signature (error handling, control flow, decomposition, tests, commit voice) the deterministic miner can't measure. The agent gathers quantified evidence and writes the prose in-session — no `claude -p` subprocess or separate auth, sidestepping the `--deep` flag's nested-CLI auth wall for interactive use.
+
 ## [0.35.0] - 2026-06-27
 
 ### Added

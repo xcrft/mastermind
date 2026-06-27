@@ -108,6 +108,7 @@ If `~/.mastermind/style.md` exists, read it before drafting code. It's the user-
 - Write every `CHANGE TO` block in that style, and fold the load-bearing rules into the spec's **Rules (global)** so the executor (which applies blocks verbatim) and the auditor both see the same constraints.
 - Precedence: the repo's own tooling (formatter, linter) and surrounding-file convention win; an explicit task instruction wins over both. The profile only decides what the code and tooling leave open — never override a project convention to match it.
 - Absent file → skip this. Do not invent style rules.
+- The deep `## Design patterns & tendencies` section carries structural signal (error handling, decomposition, tests) the measured rules can't. If `style.md` exists but lacks it — or carries only formatter-level rules (braces, quotes, indentation) — surface that to the user: `/mastermind-style-deep` writes it from their git history. Suggest it; don't auto-run it mid-plan.
 
 ### Ambiguous requirements — verbalize, don't pick silently
 

@@ -13,7 +13,7 @@ pub const WORKFLOW_TEMPLATE: &str = include_str!("../templates/workflow.md");
 const PROFILE_TYPESCRIPT_API: &str = include_str!("../templates/profiles/typescript-api.md");
 const PROFILE_REACT_NATIVE: &str = include_str!("../templates/profiles/react-native.md");
 const PROFILE_PYTHON_FASTAPI: &str = include_str!("../templates/profiles/python-fastapi.md");
-const PROFILE_RUST_CLI: &str = include_str!("../templates/profiles/rust-cli.md");
+const PROFILE_RUST: &str = include_str!("../templates/profiles/rust.md");
 const PROFILE_MONOREPO: &str = include_str!("../templates/profiles/monorepo.md");
 
 /// Return the raw template text for a given profile.
@@ -23,20 +23,8 @@ pub fn for_profile(profile: crate::Profile) -> &'static str {
         crate::Profile::TypescriptApi => PROFILE_TYPESCRIPT_API,
         crate::Profile::ReactNative => PROFILE_REACT_NATIVE,
         crate::Profile::PythonFastapi => PROFILE_PYTHON_FASTAPI,
-        crate::Profile::RustCli => PROFILE_RUST_CLI,
+        crate::Profile::Rust => PROFILE_RUST,
         crate::Profile::Monorepo => PROFILE_MONOREPO,
-    }
-}
-
-/// Return the kebab-case label for a profile (used in user-facing messages).
-pub fn profile_label(profile: crate::Profile) -> &'static str {
-    match profile {
-        crate::Profile::Generic => "generic",
-        crate::Profile::TypescriptApi => "typescript-api",
-        crate::Profile::ReactNative => "react-native",
-        crate::Profile::PythonFastapi => "python-fastapi",
-        crate::Profile::RustCli => "rust-cli",
-        crate::Profile::Monorepo => "monorepo",
     }
 }
 

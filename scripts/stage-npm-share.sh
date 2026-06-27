@@ -19,30 +19,18 @@ mkdir -p "$SHARE/agents" "$SHARE/skills"
 # Subagents — flat `.md` files.
 cp "$REPO_ROOT"/agents/subagents/*.md "$SHARE/agents/"
 
-# Core skills — explicit allowlist. Add here only skills that belong in the
-# default install (intake → plan → execute → audit loop).
-CORE_SKILLS=(
-  skills/workflow/mastermind-task-planning
-  skills/workflow/mastermind-task-executor
-  skills/workflow/mastermind-codegraph-research
-  skills/workflow/mastermind-structured-report-contract
-  skills/workflow/mastermind-critical-review
-  skills/prompt-engineering/mastermind-prompt-refiner
-  skills/debugging/mastermind-investigation-ledger
-  skills/security/mastermind-agent-security-review
-  skills/coding/no-ai-slop-comments
-)
-
-for skill_dir in "${CORE_SKILLS[@]}"; do
-  src="$REPO_ROOT/$skill_dir"
-  name="$(basename "$skill_dir")"
-  if [ ! -d "$src" ]; then
-    echo "ERROR: core skill not found: $src" >&2
-    exit 1
-  fi
-  cp -R "$src" "$SHARE/skills/$name"
-done
+# Core skills — every skill under `skills/` ships in the default install. Non-core
+# artifacts live in `extras/` (a separate tree), which this never scans, so adding
+# a skill under `skills/` ships it automatically — no allowlist to forget.
+while IFS= read -r skill_md; do
+  src="$(dirname "$skill_md")"
+  cp -R "$src" "$SHARE/skills/$(basename "$src")"
+done < <(find "$REPO_ROOT/skills" -name SKILL.md | sort)
 
 agents_n=$(find "$SHARE/agents" -name '*.md' | wc -l | tr -d ' ')
 skills_n=$(find "$SHARE/skills" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+if [ "$agents_n" -eq 0 ] || [ "$skills_n" -eq 0 ]; then
+  echo "ERROR: staged $agents_n subagents + $skills_n skills — discovery found nothing" >&2
+  exit 1
+fi
 echo "staged $agents_n subagents + $skills_n skills → npm/mastermind/share/"

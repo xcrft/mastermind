@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.1] - 2026-06-27
+
 ### Fixed
 - 0.36.0 shipped without the `mastermind-style-deep` skill in the default install — it was missing from the `stage-npm-share.sh` bundle allowlist, so `mastermind install` never copied it to `~/.claude/skills/`. The bundle now auto-discovers every skill under `skills/` instead of a hand-maintained allowlist (`extras/` stays excluded as a separate tree), so the skill ships and future skills can't be forgotten.
 

@@ -1,6 +1,6 @@
 {
   "name": "@xcraftmind/mmcg-linux-x64-gnu",
-  "version": "0.36.1",
+  "version": "0.36.2",
   "description": "Prebuilt mmcg binary for Linux x86_64 glibc. Internal — installed automatically as an optional dependency of @xcraftmind/mastermind.",
   "license": "MIT",
   "author": "xcraftmind",

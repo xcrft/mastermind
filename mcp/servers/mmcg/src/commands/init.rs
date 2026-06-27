@@ -204,9 +204,16 @@ pub fn do_init(root: &Path, opts: InitOpts) -> Result<(), Box<dyn std::error::Er
 
     if seed_style {
         match mmcg::miner::profile::mine(root, None, false, false) {
-            Ok(mmcg::miner::profile::SeedOutcome::Enriched { repos, rules, .. }) => created.push(
-                format!("~/.mastermind/style.md ({rules} rule(s) across {repos} repo(s))"),
-            ),
+            Ok(mmcg::miner::profile::SeedOutcome::Enriched {
+                author,
+                repo_commits,
+                repos,
+                rules,
+                ..
+            }) => created.push(format!(
+                "~/.mastermind/style.md — as `{author}` ({rules} rule(s), {repos} repo(s), \
+                 +{repo_commits} commits here)"
+            )),
             Ok(mmcg::miner::profile::SeedOutcome::NoCommits { .. }) => {
                 skipped.push("~/.mastermind/style.md (no commits by you in this repo yet)".into())
             }

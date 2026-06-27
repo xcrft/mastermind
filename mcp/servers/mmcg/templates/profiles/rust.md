@@ -1,6 +1,6 @@
 ---
-name: mastermind-context-rust-cli
-description: Project-level CONTEXT.md template — Rust command-line tool variant. Pre-seeded with stack conventions (src/main.rs + src/lib.rs split, clap-style CLI, cargo test/clippy/fmt commands) and Rust-CLI-canonical gotchas (MSRV drift, stdout vs stderr, signal handling, panic-to-exit-code mapping).
+name: mastermind-context-rust
+description: Project-level CONTEXT.md template — Rust project variant (CLI, service, or library). Pre-seeded with stack conventions (src/main.rs + src/lib.rs split, cargo test/clippy/fmt commands) and Rust-canonical gotchas (MSRV drift, stdout vs stderr, signal handling, panic-to-exit-code mapping). Prune the CLI-specific bits if you're shipping a library or service.
 metadata:
   version: 0.1.0
   authors:
@@ -10,18 +10,17 @@ metadata:
     - context
     - profile
     - rust
-    - cli
 ---
 
 <!--
-  Rust CLI profile — opinionated CONTEXT.md template for command-line tools.
+  Rust profile — opinionated CONTEXT.md template for Rust projects (CLI, service, library).
   Copy everything below the COPY FROM HERE marker to <project-root>/CONTEXT.md.
   Replace <PLACEHOLDERS>. Confirm whether you're shipping a binary, a library, or both.
 -->
 
 <!-- ─── COPY FROM HERE ─── -->
 
-# <PROJECT_NAME> — Context (Rust CLI)
+# <PROJECT_NAME> — Context (Rust)
 
 ## Identity
 

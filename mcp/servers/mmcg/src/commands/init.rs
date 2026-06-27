@@ -139,10 +139,24 @@ pub fn do_init(root: &Path, opts: InitOpts) -> Result<(), Box<dyn std::error::Er
         let mut store = Store::open(&db_path)?;
         let indexer = Indexer::new(root);
         match indexer.index_all(&mut store, false) {
-            Ok(stats) => created.push(format!(
-                "indexed {} files, {} symbols, {} edges ({} ms)",
-                stats.files_indexed, stats.symbols_total, stats.edges_total, stats.duration_ms
-            )),
+            Ok(stats) => {
+                // Report the index's *totals* (from the db), not just this run's
+                // delta — an incremental no-op indexes 0 files but the index is
+                // still fully populated, and "indexed 0 files" reads as empty.
+                let files = store.file_count().unwrap_or(stats.files_indexed);
+                let symbols = store.symbol_count().unwrap_or(stats.symbols_total);
+                if stats.files_indexed == 0 {
+                    created.push(format!(
+                        "index up to date — {files} files, {symbols} symbols (0 reindexed, {} ms)",
+                        stats.duration_ms
+                    ));
+                } else {
+                    created.push(format!(
+                        "indexed {} files, {symbols} symbols total ({} ms)",
+                        stats.files_indexed, stats.duration_ms
+                    ));
+                }
+            }
             Err(e) => warnings.push(format!(
                 "index build failed: {e} — run `mastermind index .` manually"
             )),
@@ -184,9 +198,16 @@ pub fn do_init(root: &Path, opts: InitOpts) -> Result<(), Box<dyn std::error::Er
 
     if seed_style {
         match mmcg::miner::profile::mine(root, None, false, false) {
-            Ok(mmcg::miner::profile::SeedOutcome::Enriched { repos, rules, .. }) => created.push(
-                format!("~/.mastermind/style.md ({rules} rule(s) across {repos} repo(s))"),
-            ),
+            Ok(mmcg::miner::profile::SeedOutcome::Enriched {
+                author,
+                repo_commits,
+                repos,
+                rules,
+                ..
+            }) => created.push(format!(
+                "~/.mastermind/style.md — as `{author}` ({rules} rule(s), {repos} repo(s), \
+                 +{repo_commits} commits here)"
+            )),
             Ok(mmcg::miner::profile::SeedOutcome::NoCommits { .. }) => {
                 skipped.push("~/.mastermind/style.md (no commits by you in this repo yet)".into())
             }

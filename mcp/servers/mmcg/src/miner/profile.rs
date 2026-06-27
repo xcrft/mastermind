@@ -35,6 +35,10 @@ const STALE_COMMITS: usize = 25;
 /// What [`mine`] did, so callers (the CLI, `init`) can report it their own way.
 pub enum SeedOutcome {
     Enriched {
+        /// The resolved author this run mined as (git user.name, or `--author`).
+        author: String,
+        /// Commits by `author` in *this* repo — its contribution this run.
+        repo_commits: i64,
         /// Repos now contributing to the global profile.
         repos: usize,
         rules: usize,
@@ -136,6 +140,8 @@ pub fn mine(
     std::fs::write(&path, &markdown)?;
 
     Ok(SeedOutcome::Enriched {
+        repo_commits: prov.commits_total as i64,
+        author,
         repos: agg.repos,
         rules: rules.len(),
         commits: agg.commits_total,
@@ -191,6 +197,8 @@ pub fn run(
             );
         }
         SeedOutcome::Enriched {
+            author,
+            repo_commits,
             repos,
             rules,
             commits,
@@ -199,7 +207,8 @@ pub fn run(
             empty,
         } => {
             println!(
-                "Enriched {} — {rules} rule(s) across {repos} repo(s), {commits} commit(s).",
+                "Enriched {} as `{author}` — {rules} rule(s) across {repos} repo(s), \
+                 {commits} commit(s) (+{repo_commits} from here).",
                 path.display(),
             );
             if pruned > 0 {
@@ -985,8 +994,29 @@ fn has_conventional_prefix(subject: &str) -> bool {
 }
 
 /// Commit conventions in one pass — prefix, subject length, body presence.
+/// A squash/PR-merge subject ends with `(#123)` — GitHub/GitLab append the PR
+/// number on merge, so it's the tool's format, not the author's hand-written
+/// voice. Counting these would teach the profile the merge convention.
+fn is_squash_merge(subject: &str) -> bool {
+    let Some(inner) = subject.trim_end().strip_suffix(')') else {
+        return false;
+    };
+    match inner.rfind("(#") {
+        Some(i) => {
+            let digits = &inner[i + 2..];
+            !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+        }
+        None => false,
+    }
+}
+
 fn acc_commits(commits: &[Commit], c: &mut Counts) {
     for cm in commits {
+        // Skip tool-generated squash/merge subjects — commit-voice rules should
+        // reflect commits the person actually wrote, not the merge format.
+        if is_squash_merge(&cm.subject) {
+            continue;
+        }
         bump(c, "commit.total", 1);
         if has_conventional_prefix(&cm.subject) {
             bump(c, "commit.prefix_with", 1);
@@ -1492,6 +1522,37 @@ diff --git a/app/bar.ts b/app/bar.ts
         assert!(has_conventional_prefix("fix(api)!: y"));
         assert!(!has_conventional_prefix("Merge branch main"));
         assert!(!has_conventional_prefix("WIP: stuff"));
+    }
+
+    #[test]
+    fn squash_merge_subjects() {
+        assert!(is_squash_merge("KSK-5781 workbench: rename (#13)"));
+        assert!(is_squash_merge("feat: thing (#48866)"));
+        assert!(is_squash_merge("trailing space (#9) "));
+        assert!(!is_squash_merge("feat: add x"));
+        assert!(!is_squash_merge("fix: handle (#) empty"));
+        assert!(!is_squash_merge("note (#12) mid-subject"));
+    }
+
+    #[test]
+    fn acc_commits_skips_squash_merges() {
+        let commits = vec![
+            Commit {
+                subject: "feat: hand-written".to_string(),
+                body: String::new(),
+            },
+            Commit {
+                subject: "KSK-1 squashed (#42)".to_string(),
+                body: String::new(),
+            },
+        ];
+        let mut c = Counts::new();
+        acc_commits(&commits, &mut c);
+        assert_eq!(
+            cget(&c, "commit.total"),
+            1,
+            "only the hand-written commit counts"
+        );
     }
 
     #[test]

@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `mastermind init` stack detection is now **runtime + detected framework** instead of a handful of narrow profiles. It reports a rich label — `rust`, `rust (tauri desktop)`, `node (react)`, `node (vue)`, `node (next.js)`, `node (api)`, `python (fastapi)`, `python (django)`, `go`, etc. — and picks the best lean CONTEXT.md template for it (the bespoke TypeScript-API / FastAPI / React-Native / Rust templates where they fit, the generic scaffold otherwise).
+- Polyglot monorepos are detected as their own profile rather than `generic`: a bare root whose subpackages carry manifests across ≥2 ecosystems reports `monorepo (go, python, typescript, …)` (enumerated from `git ls-files`) and scaffolds a monorepo CONTEXT.md that says each package owns its stack and tells the agent to read the nearest manifest / per-service CLAUDE.md.
+
 ### Changed
+- The `rust-cli` profile is now just `rust` — it was mislabelling Rust services and libraries as CLIs. Template renamed `rust-cli.md` → `rust.md` and generalized.
 - The style miner no longer learns commit conventions from squash/PR-merge commits (subjects ending in `(#123)`). These are tool-generated, not hand-written, so counting them taught the profile the merge format instead of the author's voice; in a squash-merged repo the commit-voice rules now correctly emit nothing rather than a wrong rule.
 - `mastermind miner profile` and `init` now report which identity they mined as and that repo's contribution (`enriched as \`<author>\` … (+N commits here)`), so a wrong author (e.g. a misconfigured `git user.name`) is visible instead of silent.
 

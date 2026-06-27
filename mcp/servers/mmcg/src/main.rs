@@ -16,11 +16,10 @@ use mmcg::store::Store;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-/// CONTEXT.md profile variants. Adding a new profile:
-///   1. Add a file under `templates/profiles/`.
-///   2. Add a const in `templates.rs`.
-///   3. Add an arm in `templates::for_profile` and `templates::profile_label`.
-///   4. Add a variant here.
+/// CONTEXT.md template variants (the lean set we ship). `detect_stack` produces
+/// the rich runtime+framework label; this picks which template to scaffold.
+/// Adding one: add a file under `templates/profiles/`, a const in `templates.rs`,
+/// an arm in `templates::for_profile`, and a variant here.
 #[derive(Copy, Clone, Debug, ValueEnum)]
 #[clap(rename_all = "kebab-case")]
 pub enum Profile {
@@ -32,8 +31,10 @@ pub enum Profile {
     ReactNative,
     /// Python FastAPI async API service.
     PythonFastapi,
-    /// Rust command-line tool.
-    RustCli,
+    /// Rust project (CLI, service, or library).
+    Rust,
+    /// Polyglot monorepo — no single root stack; manifests live per-package.
+    Monorepo,
 }
 
 /// Which parts of a Mastermind setup `uninstall` should remove.

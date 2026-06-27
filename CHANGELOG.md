@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.2] - 2026-06-27
+
 ### Changed
 - `mastermind-style-deep` now writes a grounded developer *portrait* — design approach, code shape, comments, tests, optimization habits, what the author pays attention to, and commit voice — organized by dimension, instead of a flat list of grepped counts. It gathers qualitative evidence (reads real files, checks enforcing lint/fmt config to drop tool-forced traits, counts each preference against its alternative), so the section reads like a description of how the person works rather than a lint report.
 

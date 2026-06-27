@@ -14,6 +14,7 @@ const PROFILE_TYPESCRIPT_API: &str = include_str!("../templates/profiles/typescr
 const PROFILE_REACT_NATIVE: &str = include_str!("../templates/profiles/react-native.md");
 const PROFILE_PYTHON_FASTAPI: &str = include_str!("../templates/profiles/python-fastapi.md");
 const PROFILE_RUST_CLI: &str = include_str!("../templates/profiles/rust-cli.md");
+const PROFILE_MONOREPO: &str = include_str!("../templates/profiles/monorepo.md");
 
 /// Return the raw template text for a given profile.
 pub fn for_profile(profile: crate::Profile) -> &'static str {
@@ -23,6 +24,7 @@ pub fn for_profile(profile: crate::Profile) -> &'static str {
         crate::Profile::ReactNative => PROFILE_REACT_NATIVE,
         crate::Profile::PythonFastapi => PROFILE_PYTHON_FASTAPI,
         crate::Profile::RustCli => PROFILE_RUST_CLI,
+        crate::Profile::Monorepo => PROFILE_MONOREPO,
     }
 }
 
@@ -34,6 +36,7 @@ pub fn profile_label(profile: crate::Profile) -> &'static str {
         crate::Profile::ReactNative => "react-native",
         crate::Profile::PythonFastapi => "python-fastapi",
         crate::Profile::RustCli => "rust-cli",
+        crate::Profile::Monorepo => "monorepo",
     }
 }
 

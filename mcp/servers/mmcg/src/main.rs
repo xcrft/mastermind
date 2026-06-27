@@ -34,6 +34,8 @@ pub enum Profile {
     PythonFastapi,
     /// Rust command-line tool.
     RustCli,
+    /// Polyglot monorepo — no single root stack; manifests live per-package.
+    Monorepo,
 }
 
 /// Which parts of a Mastermind setup `uninstall` should remove.

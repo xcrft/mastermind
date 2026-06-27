@@ -8,6 +8,7 @@ use mmcg::indexer::Indexer;
 use mmcg::store::Store;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 use crate::{templates, Profile};
 
@@ -42,9 +43,19 @@ pub fn do_init(root: &Path, opts: InitOpts) -> Result<(), Box<dyn std::error::Er
 
     // Batteries-included: auto-detect the CONTEXT.md stack profile from the repo.
     let profile = detect_stack(root);
+    // For a monorepo, name the ecosystems so "monorepo" reads as a finding, not
+    // a fallback — the bare root has no single stack but the subpackages do.
+    let stack_note = match profile {
+        Profile::Monorepo => match monorepo_ecosystems(root) {
+            langs if langs.is_empty() => String::new(),
+            langs => format!(" ({})", langs.join(", ")),
+        },
+        _ => String::new(),
+    };
     created.push(format!(
-        "auto-detected stack: {} CONTEXT.md profile",
-        templates::profile_label(profile)
+        "auto-detected stack: {}{} CONTEXT.md profile",
+        templates::profile_label(profile),
+        stack_note,
     ));
 
     let mastermind_dir = root.join(".mastermind");
@@ -269,7 +280,71 @@ fn detect_stack(root: &Path) -> Profile {
     if exists("Cargo.toml") && (read("Cargo.toml").contains("[[bin]]") || exists("src/main.rs")) {
         return Profile::RustCli;
     }
+    // No single root stack. A bare root whose subpackages carry manifests across
+    // ≥2 ecosystems is a polyglot monorepo, not a featureless "generic" repo.
+    if !root_has_manifest(root) && monorepo_ecosystems(root).len() >= 2 {
+        return Profile::Monorepo;
+    }
     Profile::Generic
+}
+
+/// Any root-level manifest means the repo has its own stack (one package), so it
+/// isn't a bare-root monorepo even when subdirectories also carry manifests.
+fn root_has_manifest(root: &Path) -> bool {
+    const MANIFESTS: &[&str] = &[
+        "package.json",
+        "Cargo.toml",
+        "pyproject.toml",
+        "requirements.txt",
+        "go.mod",
+        "composer.json",
+        "pom.xml",
+        "build.gradle",
+    ];
+    MANIFESTS.iter().any(|m| root.join(m).exists())
+}
+
+/// Distinct language ecosystems whose manifest lives in a *subdirectory*, via
+/// `git ls-files` (tracked files only). Python's two manifest kinds fold to one.
+/// Empty when `root` isn't a git repo. ≥2 with a bare root ⇒ polyglot monorepo.
+fn monorepo_ecosystems(root: &Path) -> Vec<&'static str> {
+    let out = match Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "ls-files",
+            "*/package.json",
+            "*/Cargo.toml",
+            "*/pyproject.toml",
+            "*/requirements.txt",
+            "*/go.mod",
+            "*/composer.json",
+            "*/pom.xml",
+            "*/build.gradle",
+        ])
+        .output()
+    {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return Vec::new(),
+    };
+    let listing = String::from_utf8_lossy(&out).to_ascii_lowercase();
+    let mut ecos = std::collections::BTreeSet::new();
+    for line in listing.lines() {
+        if line.ends_with("/package.json") {
+            ecos.insert("javascript");
+        } else if line.ends_with("/cargo.toml") {
+            ecos.insert("rust");
+        } else if line.ends_with("/pyproject.toml") || line.ends_with("/requirements.txt") {
+            ecos.insert("python");
+        } else if line.ends_with("/go.mod") {
+            ecos.insert("go");
+        } else if line.ends_with("/composer.json") {
+            ecos.insert("php");
+        } else if line.ends_with("/pom.xml") || line.ends_with("/build.gradle") {
+            ecos.insert("java");
+        }
+    }
+    ecos.into_iter().collect()
 }
 
 fn write_if_absent(
@@ -491,5 +566,51 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(detect_stack(d2.path()), Profile::PythonFastapi));
+    }
+
+    #[test]
+    fn detect_stack_polyglot_monorepo() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        // Bare root; manifests across 3 ecosystems live in subpackages.
+        for (dir, file, body) in [
+            ("services/api", "pyproject.toml", "[project]\nname=\"api\""),
+            ("web", "package.json", "{}"),
+            ("cmd/sync", "go.mod", "module x"),
+        ] {
+            let p = root.join(dir);
+            fs::create_dir_all(&p).unwrap();
+            fs::write(p.join(file), body).unwrap();
+        }
+        // `git ls-files` only sees tracked files, so init + add the tree.
+        for args in [["init", "-q"].as_slice(), ["add", "-A"].as_slice()] {
+            Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+                .unwrap();
+        }
+        assert!(matches!(detect_stack(root), Profile::Monorepo));
+        let langs = monorepo_ecosystems(root);
+        assert_eq!(langs, vec!["go", "javascript", "python"]);
+    }
+
+    #[test]
+    fn detect_stack_single_nested_ecosystem_is_generic() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        // One nested ecosystem only — not enough to call it a polyglot monorepo.
+        fs::create_dir_all(root.join("web")).unwrap();
+        fs::write(root.join("web/package.json"), "{}").unwrap();
+        for args in [["init", "-q"].as_slice(), ["add", "-A"].as_slice()] {
+            Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+                .unwrap();
+        }
+        assert!(matches!(detect_stack(root), Profile::Generic));
     }
 }

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `mastermind init` now detects a polyglot monorepo as its own CONTEXT.md profile instead of labelling it `generic`. When the repo root has no manifest of its own but subpackages carry manifests across ≥2 ecosystems, it reports `monorepo (go, java, python, …)` (enumerating the stacks from `git ls-files`) and scaffolds a monorepo CONTEXT.md — one that says each package owns its stack and tells the agent to read the nearest manifest / per-service CLAUDE.md rather than assume a single root toolchain.
+
 ## [0.34.0] - 2026-06-27
 
 ### Added

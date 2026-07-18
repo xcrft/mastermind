@@ -3372,7 +3372,7 @@ mod tests {
         full.push('\n');
         assert_eq!(
             full,
-            include_str!("../tests/fixtures/change-impact-schema-v1.json")
+            include_str!("../tests/fixtures/change-impact-schema-v1.json").replace("\r\n", "\n")
         );
         let value = serde_json::to_value(&response).unwrap();
         let projection = serde_json::json!({
@@ -3389,6 +3389,7 @@ mod tests {
         assert_eq!(
             projection,
             include_str!("../tests/fixtures/change-impact-test-projection-v1.json")
+                .replace("\r\n", "\n")
         );
         std::fs::remove_dir_all(root).ok();
     }

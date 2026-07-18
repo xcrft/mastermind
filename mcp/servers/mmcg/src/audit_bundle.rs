@@ -813,6 +813,12 @@ fn create_contained_output_dir_portable(
     }
     let mut options = OpenOptions::new();
     options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+        options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    }
     let directory = options
         .open(&cursor)
         .map_err(|e| BundleError::Io(e.to_string()))?;

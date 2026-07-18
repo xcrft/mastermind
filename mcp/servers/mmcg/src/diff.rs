@@ -1136,6 +1136,7 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    #[cfg(unix)]
     #[test]
     fn working_tree_diff_is_nul_safe_and_deterministic() {
         let dir = init_repo("worktree_nul");

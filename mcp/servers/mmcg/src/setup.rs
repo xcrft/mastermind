@@ -1150,7 +1150,7 @@ fn safe_replace(path: &Path, observed: Option<&[u8]>, body: &[u8]) -> Result<(),
         if !unchanged {
             return Err("config_changed_concurrently".into());
         }
-        std::fs::rename(&temp, path).map_err(|_| "atomic_replace_failed".to_string())?;
+        atomic_replace(&temp, path)?;
         sync_parent(parent)?;
         Ok(())
     })();
@@ -1230,6 +1230,12 @@ fn ensure_safe_target(path: &Path) -> Result<(), String> {
     let mut current = PathBuf::new();
     for component in absolute.components() {
         current.push(component.as_os_str());
+        // A Windows verbatim/UNC prefix is not a path that can be inspected
+        // until its root and at least one normal component have been joined.
+        // Filesystem roots cannot themselves be symlinks on either platform.
+        if matches!(component, Component::Prefix(_) | Component::RootDir) {
+            continue;
+        }
         match std::fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return Err("symlink_target_rejected".into())
@@ -1240,6 +1246,35 @@ fn ensure_safe_target(path: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn atomic_replace(temp: &Path, path: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let temp: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
+    let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: both pointers reference NUL-terminated buffers that remain alive
+    // for the duration of the call. The paths were constructed by this module.
+    let replaced = unsafe {
+        MoveFileExW(
+            temp.as_ptr(),
+            path.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if replaced == 0 {
+        return Err("atomic_replace_failed".into());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn atomic_replace(temp: &Path, path: &Path) -> Result<(), String> {
+    std::fs::rename(temp, path).map_err(|_| "atomic_replace_failed".to_string())
 }
 
 #[cfg(test)]

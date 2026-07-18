@@ -3,116 +3,88 @@
 [![npm](https://img.shields.io/npm/v/@xcraftmind/mastermind.svg)](https://www.npmjs.com/package/@xcraftmind/mastermind)
 [![downloads](https://img.shields.io/npm/dm/@xcraftmind/mastermind.svg)](https://www.npmjs.com/package/@xcraftmind/mastermind)
 [![node](https://img.shields.io/node/v/@xcraftmind/mastermind.svg)](https://nodejs.org)
-[![license: MIT](https://img.shields.io/npm/l/@xcraftmind/mastermind.svg)](./LICENSE)
+[![license: MIT](https://img.shields.io/npm/l/@xcraftmind/mastermind.svg)](https://github.com/xcrft/mastermind/blob/main/LICENSE)
 
-A queryable codegraph for Claude Code, plus a plan → execute → audit workflow with mechanical gates. Prebuilt native binaries — **no Rust toolchain required.**
+**A local codegraph and verifiable workflow for AI coding agents.**
 
-`mmcg` parses your repo with tree-sitter into a graph of definitions, callers/callees, imports, and blast radius, and serves it to Claude Code over MCP — so the agent queries structure instead of grepping. The package also installs the Mastermind workflow (planner / critic / executor / auditor subagents + skills) and the `verify-spec` / `audit-spec` gates that check coding tasks against the actual diff.
+Mastermind helps Claude Code, Codex, Cursor, and Continue understand repository structure, estimate change and test impact, and verify implementation claims against the real diff. The npm package ships prebuilt native binaries; no Rust toolchain or postinstall download is required.
 
-**Languages:** Python, TypeScript, JavaScript, Rust, C#, Go, Java, PHP, C/C++.
+**Languages:** Python, TypeScript/TSX, JavaScript/JSX, Rust, C#, Go, Java, PHP, and C/C++.
 
-## Requirements
+## Install once
 
-- **Node.js 24+**
-- **An MCP client** — Claude Code, Cursor, Codex, Continue, or a generic JSON/TOML/YAML config target
-- **Claude Code (optional)** — required only for `mastermind install`'s bundled multi-agent workflow
+Requires Node.js 24+.
 
-## Quick start
-
-```sh
-npm install -g @xcraftmind/mastermind
-mastermind install                  # workflow agents + skills + MCP → Claude Code (global, once)
-cd your-project && mastermind init  # build the codegraph index for this repo
-```
-
-Restart Claude Code. The agent can now answer structural questions (`who calls parseConfig?`, blast radius of a change) and run the planning workflow against your code.
-
-> **Two scopes — the part that trips people up.** The **index is per-project**: `.mastermind/mmcg.db` in each repo, built by `mastermind init` (run it in every repo you want indexed). The **workflow agents/skills + MCP registration are global** (`~/.claude/`): `mastermind install` sets them up once for all projects.
-
-## Commands
-
-```sh
-mastermind install                          # copy workflow agents + skills into ~/.claude + register the MCP server
-mastermind update                           # refresh the agents + skills (MCP already registered)
-mastermind list                             # show the bundled agents + skills
-mastermind init                             # scaffold .mastermind/ (auto-detects stack), build index, draft CONTEXT.md + workflow CLAUDE.md (--no-index / --no-claude to skip)
-mastermind index .                          # build/refresh the codegraph (incremental; --force to re-parse all)
-mastermind watch                            # re-index on file changes
-mastermind status                           # file count, symbol count, db path
-mastermind doctor                           # environment health check
-mastermind serve                            # MCP stdio server (what Claude Code launches)
-mastermind map . --format text              # deterministic architecture briefing
-mastermind impact --since main --format json # changed symbols, callers, candidate tests
-mastermind setup cursor --scope project     # safe preview for Claude/Cursor/Codex/Continue/generic
-mastermind setup cursor --scope project --write
-mastermind verify-spec <path>               # pre-execution gate on a task spec
-mastermind audit-spec <path> --since main   # post-execution audit vs a git baseline
-mastermind audit-spec <path> --since main --executor-report report.md --bundle audit.json
-mastermind audit verify audit.json --root . --expected-repository owner/repo --expected-baseline <oid> --expected-head <oid>
-mastermind run-task <path>                  # orchestrate verify → execute → audit
-mastermind query callers <symbol>           # one-shot CLI query (agents use the MCP tools)
-mastermind uninstall [--scope <s>]          # remove setup; --scope global|all for the global MCP entry
-```
-
-`setup` is dry-run-first. Claude and Cursor support project/user registration;
-Codex is user-only; Continue uses an owned YAML file; Generic requires an
-explicit config path. Add `--write` only after reviewing the redacted preview.
-Legacy Claude flags remain accepted. Run `mastermind <command> --help` for full
-options.
-
-The bundled workflow also includes product skills for project maps,
-change-impact briefs, focused test-impact plans, cross-client setup, and
-verifiable audit attestations. `mastermind list` shows the exact installed set.
-
-## Install options
-
-**Global** (recommended) — puts `mastermind` on PATH; `setup claude --scope user --write` registers `command: "mastermind"` at user scope.
-
-```sh
+```bash
 npm install -g @xcraftmind/mastermind
 ```
 
-**Project-local** — reproducible and version-pinned with the repo. Writes `./.mcp.json` with `command: "./node_modules/.bin/mastermind"` (commit it; keep ignoring `.mastermind/`).
+Connect the client you use:
 
-```sh
+```bash
+mastermind install                              # Claude workflow + skills + MCP
+mastermind setup codex --scope user --write    # Codex MCP
+mastermind setup cursor --scope user --write   # Cursor MCP
+mastermind setup continue --scope user --write # Continue MCP
+```
+
+These commands do not require a project or `mastermind init`. Omit `--write` to preview a redacted setup plan.
+
+## Use it in a repository
+
+Indexing alone enables codegraph, map, and impact features:
+
+```bash
+cd your-project
+mastermind index .
+mastermind map .
+mastermind impact --since main
+```
+
+Enable the complete spec-driven workflow only when you need it:
+
+```bash
+mastermind init
+mastermind doctor
+```
+
+The index is stored per repository in `.mastermind/mmcg.db` and stays local.
+
+## Project-local installation
+
+Pin Mastermind to a repository:
+
+```bash
 npm install -D @xcraftmind/mastermind
 npx mastermind setup claude --scope project --root . --write
 ```
 
-**One-shot** (no install) — fine for one-off commands; avoid for the long-running `serve`.
+Codex supports user scope only. Claude and Cursor support user and project scopes; Continue uses a Mastermind-owned YAML file. Generic MCP clients require an explicit config path.
 
-```sh
-npx -y @xcraftmind/mastermind doctor
-```
+## Included workflows
 
-**From source** — for unsupported platforms or contributors. Installs the binary as `mmcg` (same code and subcommands), without the workflow bundle.
+- Architecture maps and structural MCP queries
+- Change impact and evidence-ranked test candidates
+- Plan → execute → audit task contracts
+- Cross-client MCP setup
+- SHA-256 and Ed25519 audit attestations
+- GitHub Action integration
 
-```sh
-cargo install mmcg          # requires Rust 1.75+
-```
+Run `mastermind list` to inspect the installed Claude workflow bundle and `mastermind <command> --help` for CLI options.
 
-## Supported platforms
+## Platforms
 
-| OS | Arch |
-|---|---|
-| macOS | aarch64 (Apple Silicon), x86_64 (Intel) |
-| Linux · glibc | x86_64, aarch64 |
-| Linux · musl (Alpine) | x86_64, aarch64 |
-| Windows | x86_64 |
+Prebuilt packages are published for macOS arm64/x64, Linux glibc and musl arm64/x64, and Windows x64. Other targets can build `mmcg` from source with Rust 1.96+.
 
-Other targets fall back to `cargo install mmcg`.
+## Documentation
 
-## Packaging
-
-Prebuilt-platform-package pattern (the same one `esbuild`, `swc`, and `turbo` use): the root package is pure JS wrappers and lists the seven `@xcraftmind/mmcg-*` platform binaries as `optionalDependencies` — npm installs only the one matching your host and skips the rest. **No `postinstall` script, no network calls beyond the npm registry.**
-
-## Links
-
-- **Source & docs** — [github.com/xcrft/mastermind](https://github.com/xcrft/mastermind)
-- **Changelog** — [CHANGELOG.md](https://github.com/xcrft/mastermind/blob/main/CHANGELOG.md)
-- **Rust crate** — [crates.io/crates/mmcg](https://crates.io/crates/mmcg)
-- **MCP** — [modelcontextprotocol.io](https://modelcontextprotocol.io)
+- [Product overview](https://github.com/xcrft/mastermind)
+- [Getting started](https://github.com/xcrft/mastermind/blob/main/docs/getting-started.md)
+- [Client integrations](https://github.com/xcrft/mastermind/tree/main/docs/integrations)
+- [Workflow](https://github.com/xcrft/mastermind/blob/main/docs/workflow.md)
+- [mmcg reference](https://github.com/xcrft/mastermind/blob/main/docs/reference/mmcg.md)
+- [Changelog](https://github.com/xcrft/mastermind/blob/main/CHANGELOG.md)
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+MIT — see [LICENSE](https://github.com/xcrft/mastermind/blob/main/LICENSE).

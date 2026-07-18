@@ -121,6 +121,34 @@ mastermind init --no-index   # scaffold without indexing
 mastermind init --no-global  # do not update ~/.claude
 ```
 
+## Choose a workflow depth
+
+Most small changes do not need a task spec:
+
+```bash
+mastermind impact --since main
+# implement and test
+mastermind impact --since main
+```
+
+Use the default verified contract for normal multi-file or delegated work:
+
+```bash
+mastermind new-spec "Add account recovery"
+mastermind run-task .mastermind/tasks/001-add-account-recovery/spec.md --pre-only
+# hand spec.md to the implementation agent; it writes executor-report.md
+mastermind run-task .mastermind/tasks/001-add-account-recovery/spec.md --post-only
+```
+
+Use `--mode strict` for auth, billing, migrations, public APIs, data-loss,
+supply-chain, or difficult rollback. `lite` and `standard` remain compatible
+with old task files but are not recommended for new work.
+
+`run-task` stores lifecycle state beside each canonical spec as
+`<task>/state.json`. The executor owns only `<task>/executor-report.md`; the
+controller owns state, `audit.md`, and release-note eligibility. The default
+handoff is client-neutral. `--exec` is a legacy Claude CLI convenience.
+
 ## State and privacy
 
 | Location | Contains | Commit it? |
@@ -129,7 +157,7 @@ mastermind init --no-global  # do not update ~/.claude
 | `~/.codex/` | Installed Codex skills and ownership manifest | No |
 | User client config | MCP registration | No |
 | `.mastermind/mmcg.db` | Local codegraph and scratchpad | No |
-| `.mastermind/tasks/` | Optional task specs and lessons | Your choice |
+| `.mastermind/tasks/` | Optional specs, executor reports, audits, task state, and lessons | Your choice |
 | `CONTEXT.md`, `CLAUDE.md` | Optional repository guidance | Your choice |
 
 The index is generated from local source files and stays local. Add `.mastermind/` to `.gitignore` when you do not intend to version task artifacts.

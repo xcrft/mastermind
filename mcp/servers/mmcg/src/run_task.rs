@@ -12,9 +12,9 @@
 //! 5. **Release notes draft** — H1 + Goals + Tests Plan + `git diff --stat` of
 //!    baseline-to-HEAD. To stdout AND `.mastermind/releases/<basename>.md` on Held.
 //!
-//! State (`{spec_hash, baseline_ref, started_at}`) persists between phases under
-//! `.mastermind/run-state/<basename>.json`. Auto-resumes by file presence: no
-//! state → pre, present → post. Cleared on Held; kept on Drift/Broken for retry.
+//! State persists beside a canonical task spec as `<task>/state.json`, so every
+//! task has one controller-owned lifecycle record. Legacy flat specs keep using
+//! `.mastermind/run-state/<basename>.json` to avoid a shared `tasks/state.json`.
 
 use crate::audit_spec;
 use crate::spec::{self, ParsedSpec};
@@ -26,11 +26,23 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Persisted handshake between pre- and post-flight. Lives at
+/// Controller-owned handshake between pre- and post-flight. Canonical task
+/// specs keep it beside the spec as `<task>/state.json`; legacy flat specs use
 /// `<repo_root>/.mastermind/run-state/<spec-basename>.json`.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RunState {
-    /// Absolute path to the spec file pre-flight ran against.
+    /// User-facing lifecycle state consumed by `mastermind status` / `next`.
+    #[serde(default = "default_run_status")]
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_artifact: Option<String>,
+    /// Resolved path to the spec file pre-flight ran against.
     pub spec_path: String,
     /// Hash of the spec body at pre-flight. Re-checked at post-flight to warn if
     /// the spec was edited between phases.
@@ -47,6 +59,10 @@ pub struct RunState {
     pub iteration: u32,
 }
 
+fn default_run_status() -> String {
+    "approved".into()
+}
+
 /// End-to-end result. Mapped to exit codes by `main.rs`: every `*Failed` /
 /// `*Broken` variant exits non-zero so CI / scripts can react.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -56,7 +72,7 @@ pub enum Outcome {
     PreReady,
     /// `verify_spec` produced errors. State NOT written.
     PreFailed,
-    /// Post-flight clean — release notes emitted, state cleared.
+    /// Post-flight clean — release notes emitted, state marked complete.
     PostHeld,
     /// Post-flight: warnings only. State kept for retry.
     PostDrift,
@@ -149,8 +165,19 @@ impl Default for RunOpts {
     }
 }
 
-/// State file path — `<repo_root>/.mastermind/run-state/<spec-basename>.json`.
+/// Canonical specs own `<task>/state.json`. A legacy flat spec retains the old
+/// basename-keyed location; this avoids making every flat spec share
+/// `.mastermind/tasks/state.json` while fixing the old `spec.json` collision
+/// between canonical task folders.
 pub fn state_file_path(repo_root: &Path, spec_path: &Path) -> PathBuf {
+    if spec_path.file_name().and_then(|name| name.to_str()) == Some("spec.md") {
+        let resolved = if spec_path.is_absolute() {
+            spec_path.to_path_buf()
+        } else {
+            repo_root.join(spec_path)
+        };
+        return resolved.parent().unwrap_or(repo_root).join("state.json");
+    }
     repo_root
         .join(".mastermind/run-state")
         .join(format!("{}.json", spec_basename(spec_path)))
@@ -164,6 +191,15 @@ pub fn release_file_path(repo_root: &Path, spec_path: &Path) -> PathBuf {
 }
 
 fn spec_basename(spec_path: &Path) -> String {
+    if spec_path.file_name().and_then(|name| name.to_str()) == Some("spec.md") {
+        if let Some(task_name) = spec_path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+        {
+            return task_name.to_string();
+        }
+    }
     spec_path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -487,6 +523,18 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts)
         );
     }
 
+    if !opts.post_only
+        && existing
+            .as_ref()
+            .is_some_and(|state| state.status == "learned")
+    {
+        println!(
+            "Task already complete — state is `{}`. Use --reset to start a new iteration or --post-only to re-audit.",
+            state_path.display()
+        );
+        return Outcome::PostHeld;
+    }
+
     // Default mode + state present → resume post.
     let state = existing.unwrap();
     run_post(spec_path, repo_root, index_path, &state, &state_path)
@@ -597,8 +645,24 @@ fn run_pre(
             return Outcome::PreFailed;
         }
     };
+    let declared_risk = parsed
+        .frontmatter
+        .as_ref()
+        .and_then(|frontmatter| frontmatter.risk.as_deref())
+        .filter(|risk| matches!(*risk, "low" | "medium" | "high"))
+        .unwrap_or("low");
+    let resolved_spec_path = if spec_path.is_absolute() {
+        spec_path.to_path_buf()
+    } else {
+        repo_root.join(spec_path)
+    };
     let state = RunState {
-        spec_path: spec_path.display().to_string(),
+        status: "approved".into(),
+        risk: Some(declared_risk.into()),
+        next_step: Some("run_executor".into()),
+        blocking_reason: None,
+        last_artifact: Some("spec.md".into()),
+        spec_path: resolved_spec_path.display().to_string(),
         spec_hash: hash_text(&spec_body),
         baseline_ref: head.clone(),
         started_at: timestamp_now(),
@@ -636,8 +700,8 @@ fn run_pre(
     }
 
     println!(
-        "\nNext: invoke the executor on this spec (e.g. via the mastermind-task-executor \
-         subagent, or `claude -p` directly), then re-run:\n  mastermind run-task {}\nto audit + draft release notes.",
+        "\nNext: hand this spec to the implementation agent in your coding client. \
+         It must write `<task>/executor-report.md`. Then re-run:\n  mastermind run-task {}\nto audit + draft release notes.",
         spec_path.display()
     );
     Outcome::PreReady
@@ -684,14 +748,58 @@ fn run_post(
         }
     };
 
-    let audit = match audit_spec::run(&parsed, &store, repo_root, &state.baseline_ref) {
+    let report_path = spec_path
+        .parent()
+        .unwrap_or(spec_path)
+        .join("executor-report.md");
+    let executor_report = match crate::executor_report::parse_file(&report_path) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!(
+                "error: post-flight requires a canonical executor report at `{}`: {error}",
+                report_path.display()
+            );
+            let mut failed = state.clone();
+            failed.status = "held".into();
+            failed.risk = Some("medium".into());
+            failed.next_step = Some("planner_review".into());
+            failed.blocking_reason = Some("executor report missing or invalid".into());
+            failed.last_artifact = Some("spec.md".into());
+            let _ = save_state(state_path, &failed);
+            return Outcome::PostBroken;
+        }
+    };
+
+    let audit = match audit_spec::run_with_report(
+        &parsed,
+        &store,
+        repo_root,
+        &state.baseline_ref,
+        Some(&executor_report),
+    ) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: audit-spec: {e:?}");
             return Outcome::PostBroken;
         }
     };
-    print!("{}", audit.render_text());
+    let audit_body = audit.render_text();
+    print!("{audit_body}");
+    let audit_path = spec_path.parent().unwrap_or(spec_path).join("audit.md");
+    if let Err(error) = std::fs::write(&audit_path, &audit_body) {
+        eprintln!(
+            "error: failed to persist `{}`: {error}",
+            audit_path.display()
+        );
+        let mut failed = state.clone();
+        failed.status = "held".into();
+        failed.risk = Some("high".into());
+        failed.next_step = Some("planner_review".into());
+        failed.blocking_reason = Some("failed to persist audit.md".into());
+        failed.last_artifact = Some("executor-report.md".into());
+        let _ = save_state(state_path, &failed);
+        return Outcome::PostBroken;
+    }
 
     // Deterministic lesson log on Drift/Broken — no-op on Held. Pairs with the
     // same call in `mmcg audit-spec`, so `_lessons.md` accumulates whether the
@@ -734,10 +842,43 @@ fn run_post(
                 release_path.display()
             ),
         }
-        if let Err(e) = delete_state(state_path) {
-            eprintln!("warning: clearing state `{}`: {e}", state_path.display());
+        let mut complete = state.clone();
+        complete.status = "learned".into();
+        complete.risk = Some("low".into());
+        complete.next_step = Some("close".into());
+        complete.blocking_reason = None;
+        complete.last_artifact = Some("audit.md".into());
+        if let Err(error) = save_state(state_path, &complete) {
+            eprintln!(
+                "error: persisting complete state `{}`: {error}",
+                state_path.display()
+            );
+            return Outcome::PostBroken;
         }
     } else {
+        let mut failed = state.clone();
+        failed.status = match outcome {
+            Outcome::PostDrift => "drift",
+            _ => "broken",
+        }
+        .into();
+        failed.risk = Some(
+            if matches!(outcome, Outcome::PostBroken) {
+                "high"
+            } else {
+                "medium"
+            }
+            .into(),
+        );
+        failed.next_step = Some("planner_review".into());
+        failed.blocking_reason = Some(format!("post-flight verdict: {verdict_label}"));
+        failed.last_artifact = Some("audit.md".into());
+        if let Err(error) = save_state(state_path, &failed) {
+            eprintln!(
+                "warning: persisting failed state `{}`: {error}",
+                state_path.display()
+            );
+        }
         println!(
             "\nVerdict is {verdict_label} — release notes deferred. State kept at `{}` for re-run after fixes.",
             state_path.display()
@@ -754,8 +895,9 @@ fn run_executor(spec_path: &Path) -> Result<(), String> {
     let prompt = format!(
         "Implement the mastermind spec at `{}` using the mastermind-task-executor workflow. \
          Apply edits phase-by-phase, run any VERIFY commands, mark each checklist item as you \
-         complete it, and stop on the first failure. Ensure `mmcg` is available via your MCP \
-         configuration so verify/audit gates have the live index.",
+         complete it, and stop on the first failure. Write the canonical report to \
+         `<task>/executor-report.md`; do not write lifecycle state. Ensure `mmcg` is available \
+         via your MCP configuration so verify/audit gates have the live index.",
         spec_path.display(),
     );
     let status = Command::new("claude")
@@ -833,11 +975,46 @@ mod tests {
         );
     }
 
+    fn write_executor_report(spec_path: &Path, files: &[&str]) {
+        let files_yaml = files
+            .iter()
+            .map(|file| format!("  - {file}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let report = format!(
+            "<!-- mastermind:report-begin -->\n```yaml\n\
+schema_version: 1\n\
+spec: {}\n\
+status: complete\n\
+phases:\n  - id: \"1\"\n    status: done\n\
+files_modified:\n{}\n\
+claims: []\n\
+defects: []\n\
+verifications: []\n\
+```\n<!-- mastermind:report-end -->\n",
+            spec_path.display(),
+            files_yaml
+        );
+        fs::write(
+            spec_path
+                .parent()
+                .unwrap_or(spec_path)
+                .join("executor-report.md"),
+            report,
+        )
+        .unwrap();
+    }
+
     #[test]
     fn state_file_roundtrips_through_json() {
         let dir = tmp("state_roundtrip");
         let path = dir.join("s.json");
         let state = RunState {
+            status: "approved".into(),
+            risk: Some("low".into()),
+            next_step: Some("run_executor".into()),
+            blocking_reason: None,
+            last_artifact: Some("spec.md".into()),
             spec_path: "specs/foo.md".into(),
             spec_hash: "deadbeefcafef00d".into(),
             baseline_ref: "abc1234".into(),
@@ -853,6 +1030,31 @@ mod tests {
         delete_state(&path).unwrap();
         assert!(load_state(&path).unwrap().is_none());
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn canonical_tasks_have_distinct_state_and_release_paths() {
+        let root = Path::new("/repo");
+        let first = Path::new(".mastermind/tasks/001-first/spec.md");
+        let second = Path::new(".mastermind/tasks/002-second/spec.md");
+
+        assert_eq!(
+            state_file_path(root, first),
+            root.join(".mastermind/tasks/001-first/state.json")
+        );
+        assert_eq!(
+            state_file_path(root, second),
+            root.join(".mastermind/tasks/002-second/state.json")
+        );
+        assert_ne!(state_file_path(root, first), state_file_path(root, second));
+        assert_eq!(
+            release_file_path(root, first),
+            root.join(".mastermind/releases/001-first.md")
+        );
+        assert_eq!(
+            release_file_path(root, second),
+            root.join(".mastermind/releases/002-second.md")
+        );
     }
 
     #[test]
@@ -1081,7 +1283,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_resume_post_held_emits_release_notes_and_clears_state() {
+    fn auto_resume_post_held_emits_release_notes_and_completes_state() {
         let dir = tmp("autoresume_held");
         init_repo(&dir);
         // baseline: empty source file
@@ -1136,17 +1338,80 @@ mod tests {
         let mut store = Store::open(&index_path).unwrap();
         Indexer::new(&dir).index_all(&mut store, false).unwrap();
         drop(store);
+        write_executor_report(&spec_path, &["src/lib.py"]);
 
         // Second run auto-resumes into post-flight.
         let outcome = run(&spec_path, &dir, &index_path, RunOpts::default());
         assert_eq!(outcome, Outcome::PostHeld);
-        // Held → state cleared, release notes written.
-        assert!(load_state(&state_path).unwrap().is_none());
+        // Held → controller records completion and writes release notes.
+        let completed = load_state(&state_path).unwrap().expect("complete state");
+        assert_eq!(completed.status, "learned");
+        assert_eq!(completed.last_artifact.as_deref(), Some("audit.md"));
         let release_path = release_file_path(&dir, &spec_path);
         assert!(release_path.exists(), "release notes file should exist");
         let body = fs::read_to_string(&release_path).unwrap();
         assert!(body.starts_with("# Clean add"));
         assert!(body.contains("Audit: ✅ Held"));
+
+        // A normal re-run of a completed task is idempotent. Explicit
+        // --post-only remains available when the user really wants a re-audit.
+        fs::remove_file(spec_path.parent().unwrap().join("executor-report.md")).unwrap();
+        assert_eq!(
+            run(&spec_path, &dir, &index_path, RunOpts::default()),
+            Outcome::PostHeld
+        );
+        assert_eq!(load_state(&state_path).unwrap().unwrap().status, "learned");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn post_flight_without_executor_report_fails_closed() {
+        let dir = tmp("post_requires_report");
+        init_repo(&dir);
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(dir.join("src/lib.py"), "def stays(): pass\n").unwrap();
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "baseline"]);
+
+        let task_dir = dir.join(".mastermind/tasks/051-report-required");
+        fs::create_dir_all(&task_dir).unwrap();
+        let spec_path = task_dir.join("spec.md");
+        fs::write(
+            &spec_path,
+            "# Report required\n\n## Goals\n- Edit `src/lib.py`\n## Alternatives Considered\n- a — rejected\n## Tests Plan\n- n/a\n## Documentation Plan\n- n/a\n## Observability Plan\n- n/a\n## Performance Considerations\n- O(1)\n",
+        )
+        .unwrap();
+
+        let index_path = dir.join("idx.db");
+        let mut store = Store::open(&index_path).unwrap();
+        Indexer::new(&dir).index_all(&mut store, false).unwrap();
+        drop(store);
+
+        assert_eq!(
+            run(&spec_path, &dir, &index_path, RunOpts::default()),
+            Outcome::PreReady
+        );
+        let state_path = state_file_path(&dir, &spec_path);
+        assert_eq!(
+            run(
+                &spec_path,
+                &dir,
+                &index_path,
+                RunOpts {
+                    post_only: true,
+                    ..Default::default()
+                }
+            ),
+            Outcome::PostBroken
+        );
+        let state = load_state(&state_path).unwrap().unwrap();
+        assert_eq!(state.status, "held");
+        assert_eq!(state.next_step.as_deref(), Some("planner_review"));
+        assert_eq!(
+            state.blocking_reason.as_deref(),
+            Some("executor report missing or invalid")
+        );
+
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -1204,6 +1469,7 @@ mod tests {
         let mut store = Store::open(&index_path).unwrap();
         Indexer::new(&dir).index_all(&mut store, false).unwrap();
         drop(store);
+        write_executor_report(&spec_path, &["src/lib.py", "src/sneaky.py"]);
 
         let outcome = run(&spec_path, &dir, &index_path, RunOpts::default());
         assert_eq!(outcome, Outcome::PostDrift);

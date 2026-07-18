@@ -23,6 +23,23 @@ and registers the MCP server. It does not require `mastermind init` or a
 repository. To preview MCP registration without installing skills, use
 `mastermind setup codex --scope user`.
 
+Codex receives the portable planning, execution, project-map, impact, test,
+setup, review, and audit skills. It does not receive Claude Code's native
+spawnable subagent files because Codex has a different agent runtime. This is
+workflow-contract compatibility, not a claim that both clients expose identical
+role orchestration.
+
+The normal task handoff is client-neutral:
+
+```bash
+mastermind run-task .mastermind/tasks/001-example/spec.md --pre-only
+# ask Codex to implement the spec and write executor-report.md
+mastermind run-task .mastermind/tasks/001-example/spec.md --post-only
+```
+
+Avoid `run-task --exec` in Codex workflows; that compatibility flag invokes the
+Claude CLI specifically.
+
 Apply the native registration explicitly:
 
 ```bash

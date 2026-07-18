@@ -4,6 +4,7 @@ use std::path::Path;
 pub enum Mode {
     Lite,
     Standard,
+    Verified,
     Strict,
 }
 
@@ -12,9 +13,14 @@ impl Mode {
         match s {
             "lite" => Ok(Mode::Lite),
             "standard" => Ok(Mode::Standard),
+            "verified" => Ok(Mode::Verified),
+            "direct" => Err(
+                "direct mode does not create a task spec — use map/impact/tests and implement directly"
+                    .into(),
+            ),
             "strict" => Ok(Mode::Strict),
             other => Err(format!(
-                "unknown mode {other:?} — use `lite`, `standard`, or `strict`"
+                "unknown mode {other:?} — use `verified` or `strict` (`lite`/`standard` remain legacy-compatible)"
             )),
         }
     }
@@ -87,8 +93,76 @@ fn render_spec(description: &str, n: u32, mode: &Mode) -> String {
     match mode {
         Mode::Lite => render_lite(description, &id),
         Mode::Standard => render_standard(description, &id),
+        Mode::Verified => render_verified(description, &id),
         Mode::Strict => render_strict(description, &id),
     }
+}
+
+fn render_verified(description: &str, id: &str) -> String {
+    let title_yaml = yaml_quote(description);
+    format!(
+        "\
+---
+id: \"{id}\"
+title: {title_yaml}
+mode: verified
+risk: medium
+
+touches:
+  - file: <path/to/file.ext>
+    symbols: []
+
+verify:
+  - cmd: \"<focused test command>\"
+
+expected_docs: []
+---
+
+# Task {id}: {description}
+
+## Goals
+
+- {description}
+- <observable definition of done>
+
+## Scope
+
+- Change: `<path/to/file.ext>` — <intended outcome>
+- Do not change: <boundary>
+
+## Acceptance Criteria
+
+- [ ] <behavior that can be observed or asserted>
+- [ ] Existing relevant behavior remains compatible
+
+## Pre-edit Snapshot
+
+<!-- Delete for docs/config-only tasks. Record only symbols this task changes. -->
+- `<symbol>` — <N> callers; signature `<signature>`
+
+## Implementation Plan
+
+1. <outcome-oriented change; exact FIND/CHANGE blocks are optional>
+2. Add or update <test coverage>
+
+## Tests Plan
+
+- `<test name or command>` — proves <acceptance criterion>
+
+## Final Verification
+
+```bash
+<focused test command>
+<repository-required gate>
+```
+
+## Notes
+
+- Assumptions: <only load-bearing assumptions, or none>
+- Alternatives: <include only when a real design choice existed>
+- Observability/performance/docs: <material impact, or n/a>
+"
+    )
 }
 
 fn render_lite(description: &str, id: &str) -> String {
@@ -640,12 +714,28 @@ mod tests {
 
     #[test]
     fn new_spec_frontmatter_quotes_colon_title() {
-        for mode in [Mode::Lite, Mode::Standard, Mode::Strict] {
+        for mode in [Mode::Lite, Mode::Standard, Mode::Verified, Mode::Strict] {
             let content = render_spec("feat: add new thing", 1, &mode);
             assert!(
                 content.contains("title: \"feat: add new thing\""),
                 "title must be quoted in all modes; got:\n{content}"
             );
         }
+    }
+
+    #[test]
+    fn verified_is_the_compact_default_contract() {
+        let content = render_spec("change behavior", 7, &Mode::Verified);
+        assert!(content.contains("mode: verified"));
+        assert!(content.contains("## Acceptance Criteria"));
+        assert!(content.contains("## Final Verification"));
+        assert!(!content.contains("Decision Matrix"));
+        assert!(!content.contains("Risk Register"));
+    }
+
+    #[test]
+    fn direct_mode_does_not_create_a_spec() {
+        let error = Mode::from_str("direct").err().expect("direct is spec-free");
+        assert!(error.contains("does not create a task spec"));
     }
 }

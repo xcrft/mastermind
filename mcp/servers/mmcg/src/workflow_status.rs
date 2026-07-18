@@ -87,13 +87,16 @@ impl WorkflowStatus {
             let spec = task.spec_path.display().to_string();
             let task_dir = task.spec_path.parent().unwrap_or(task.spec_path.as_path());
             return Some(NextAction {
-                description: format!("Task {} — executor done, run post-flight audit", task.folder),
+                description: format!(
+                    "Task {} — executor done, run post-flight audit",
+                    task.folder
+                ),
                 command: Some(format!("mastermind run-task {} --post-only", spec)),
                 claude_prompt: Some(format!(
-                    "Run the Mastermind post-flight audit for:\n\
+                    "Run the deterministic Mastermind post-flight for:\n\
                      {spec}\n\n\
-                     The executor report is in {}. \
-                     Invoke the Mastermind auditor subagent to verify the execution matched the spec.",
+                     The canonical executor report is in {}. \
+                     Run `mastermind run-task {spec} --post-only`, then perform semantic review.",
                     task_dir.display()
                 )),
             });
@@ -187,7 +190,9 @@ impl WorkflowStatus {
         if self.install.claude_md_present {
             out.push_str("  ✓ CLAUDE.md present\n");
         } else {
-            out.push_str("  ⚠ CLAUDE.md not found — run `mastermind init --with-claude-md`\n");
+            out.push_str(
+                "  ○ project workflow not initialized — Direct mode is available; run `mastermind init` for Verified/Strict scaffolding\n",
+            );
         }
         if self.install.agents_count > 0 {
             out.push_str(&format!(
@@ -195,7 +200,9 @@ impl WorkflowStatus {
                 self.install.agents_count
             ));
         } else {
-            out.push_str("  ⚠ no subagents in ~/.claude/agents/ — run `mastermind init`\n");
+            out.push_str(
+                "  ○ Claude subagents not installed (optional) — run `mastermind install` for Claude workflow adapters\n",
+            );
         }
         if self.install.skills_count > 0 {
             out.push_str(&format!(
@@ -203,13 +210,15 @@ impl WorkflowStatus {
                 self.install.skills_count
             ));
         } else {
-            out.push_str("  ⚠ no skills in ~/.claude/skills/ — run `mastermind init`\n");
+            out.push_str(
+                "  ○ Claude skills not installed (optional) — run `mastermind install` for Claude workflow adapters\n",
+            );
         }
         out.push('\n');
 
         if self.tasks.is_empty() {
             out.push_str(
-                "Tasks\n  (none — create one with `mastermind new-spec 'description'`)\n\n",
+                "Tasks\n  (none — Direct mode needs no task; use `mastermind new-spec 'description'` for Verified/Strict work)\n\n",
             );
         } else {
             out.push_str("Tasks\n");
@@ -380,9 +389,9 @@ impl WorkflowStatus {
 
         let prompt = match task.phase {
             TaskPhase::AwaitingAudit => format!(
-                "Run the Mastermind post-flight audit for:\n{spec}\n\n\
-                 The executor report is in {dir}/executor-report.md. \
-                 Invoke the Mastermind auditor subagent to verify execution matched the spec.",
+                "Run the deterministic Mastermind post-flight for:\n{spec}\n\n\
+                 The executor report is in {dir}/executor-report.md.\n\
+                 mastermind run-task {spec} --post-only",
                 spec = task.spec_path.display(),
                 dir = task_dir.display()
             ),
@@ -417,7 +426,7 @@ impl WorkflowStatus {
             ),
         };
 
-        out.push_str("Paste into Claude:\n\n");
+        out.push_str("Paste into your coding client:\n\n");
         for line in prompt.lines() {
             out.push_str(&format!("  {line}\n"));
         }
@@ -639,6 +648,9 @@ fn detect_phase(
     let task_dir = spec_path.parent().unwrap_or(spec_path);
 
     if let Some(s) = state {
+        if s.status == "approved" && task_dir.join("executor-report.md").is_file() {
+            return TaskPhase::AwaitingAudit;
+        }
         return match s.status.as_str() {
             "learned" => TaskPhase::Complete,
             "audit_required" => TaskPhase::AwaitingAudit,
@@ -669,4 +681,40 @@ fn detect_phase(
     }
 
     TaskPhase::Ready
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn approved_task_with_executor_report_is_awaiting_audit() {
+        let root = std::env::temp_dir().join(format!(
+            "mmcg-status-report-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let task_dir = root.join(".mastermind/tasks/001-example");
+        fs::create_dir_all(&task_dir).unwrap();
+        let spec_path = task_dir.join("spec.md");
+        fs::write(&spec_path, "# Example\n").unwrap();
+        fs::write(task_dir.join("executor-report.md"), "report\n").unwrap();
+        let state = TaskState {
+            status: "approved".into(),
+            risk: Some("low".into()),
+            next_step: Some("run_executor".into()),
+            blocking_reason: None,
+            last_artifact: Some("spec.md".into()),
+        };
+
+        assert_eq!(
+            detect_phase(&spec_path, &None, Some(&state)),
+            TaskPhase::AwaitingAudit
+        );
+        fs::remove_dir_all(root).ok();
+    }
 }

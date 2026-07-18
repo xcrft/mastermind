@@ -1,9 +1,51 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 pub struct CiOpts {
     pub since: String,
     pub root: PathBuf,
     pub bundle_dir: Option<PathBuf>,
+    pub changed_only: bool,
+    pub require_executor_report: bool,
+}
+
+fn changed_task_folders(root: &Path, since: &str) -> Result<BTreeSet<PathBuf>, String> {
+    if since.starts_with('-') {
+        return Err("since ref must not start with '-'".into());
+    }
+    let range = format!("{since}..HEAD");
+    let output = Command::new("git")
+        .args([
+            "diff",
+            "--name-only",
+            "-z",
+            &range,
+            "--",
+            ".mastermind/tasks",
+        ])
+        .current_dir(root)
+        .output()
+        .map_err(|error| format!("git diff changed tasks: {error}"))?;
+    if !output.status.success() {
+        return Err("git diff changed tasks failed".into());
+    }
+    let mut folders = BTreeSet::new();
+    for raw in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|raw| !raw.is_empty())
+    {
+        let relative = std::str::from_utf8(raw)
+            .map_err(|_| "changed task path is not valid UTF-8".to_string())?;
+        let path = Path::new(relative);
+        if let Some(parent) = path.parent() {
+            if parent.parent() == Some(Path::new(".mastermind/tasks")) {
+                folders.insert(parent.to_path_buf());
+            }
+        }
+    }
+    Ok(folders)
 }
 
 pub fn run(opts: CiOpts, index_path: &Path) -> Result<bool, Box<dyn std::error::Error>> {
@@ -43,7 +85,23 @@ pub fn run(opts: CiOpts, index_path: &Path) -> Result<bool, Box<dyn std::error::
     }
     spec_paths.sort();
 
+    if opts.changed_only {
+        let changed = changed_task_folders(&root, &opts.since)?;
+        spec_paths.retain(|spec| {
+            spec.parent()
+                .and_then(|parent| parent.strip_prefix(&root).ok())
+                .is_some_and(|parent| changed.contains(parent))
+        });
+    }
+
     if spec_paths.is_empty() {
+        if opts.changed_only {
+            eprintln!(
+                "  [FAIL] no changed task contracts found for {}..HEAD",
+                opts.since
+            );
+            return Ok(false);
+        }
         eprintln!("  no spec.md files found in .mastermind/tasks/");
         return Ok(true);
     }
@@ -83,6 +141,16 @@ pub fn run(opts: CiOpts, index_path: &Path) -> Result<bool, Box<dyn std::error::
             .parent()
             .map(|d| d.join("executor-report.md"))
             .filter(|p| p.is_file());
+
+        if executor_report_path.is_none()
+            && (opts.require_executor_report || opts.bundle_dir.is_some())
+        {
+            eprintln!(
+                "  [FAIL] {spec_name} — canonical executor-report.md is required for CI evidence"
+            );
+            all_ok = false;
+            continue;
+        }
 
         let executor_report = match executor_report_path
             .as_deref()
@@ -171,4 +239,121 @@ pub fn run(opts: CiOpts, index_path: &Path) -> Result<bool, Box<dyn std::error::
     }
 
     Ok(all_ok)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn git(root: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn changed_task_folders_only_returns_changed_canonical_tasks() {
+        let root = std::env::temp_dir().join(format!(
+            "mmcg-ci-changed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join(".mastermind/tasks/001-old")).unwrap();
+        fs::create_dir_all(root.join(".mastermind/tasks/002-changed")).unwrap();
+        fs::write(root.join(".mastermind/tasks/001-old/spec.md"), "old\n").unwrap();
+        fs::write(
+            root.join(".mastermind/tasks/002-changed/spec.md"),
+            "before\n",
+        )
+        .unwrap();
+        fs::write(root.join("README.md"), "before\n").unwrap();
+
+        git(&root, &["init", "-q", "--initial-branch=main"]);
+        git(&root, &["config", "user.email", "t@t"]);
+        git(&root, &["config", "user.name", "t"]);
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "baseline"]);
+        let baseline = git(&root, &["rev-parse", "HEAD"]);
+
+        fs::write(
+            root.join(".mastermind/tasks/002-changed/executor-report.md"),
+            "report\n",
+        )
+        .unwrap();
+        fs::write(root.join("README.md"), "after\n").unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "change one task"]);
+
+        let changed = changed_task_folders(&root, &baseline).unwrap();
+        assert_eq!(
+            changed,
+            BTreeSet::from([PathBuf::from(".mastermind/tasks/002-changed")])
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn changed_task_folders_rejects_option_like_refs() {
+        assert!(changed_task_folders(Path::new("."), "--output=/tmp/x").is_err());
+    }
+
+    #[test]
+    fn changed_only_ci_fails_when_executor_report_is_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "mmcg-ci-report-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.py"), "def value(): return 1\n").unwrap();
+        git(&root, &["init", "-q", "--initial-branch=main"]);
+        git(&root, &["config", "user.email", "t@t"]);
+        git(&root, &["config", "user.name", "t"]);
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "baseline"]);
+        let baseline = git(&root, &["rev-parse", "HEAD"]);
+
+        let task_dir = root.join(".mastermind/tasks/001-change");
+        fs::create_dir_all(&task_dir).unwrap();
+        fs::write(root.join("src/lib.py"), "def value(): return 2\n").unwrap();
+        fs::write(
+            task_dir.join("spec.md"),
+            "---\nmode: verified\ntouches:\n  - file: src/lib.py\n---\n# Change\n## Goals\n- Change value\n## Scope\n- `src/lib.py`\n## Acceptance Criteria\n- [ ] Value is two\n## Tests Plan\n- focused test\n## Final Verification\n- repository gate\n",
+        )
+        .unwrap();
+        git(&root, &["add", "-A"]);
+        git(
+            &root,
+            &["commit", "-q", "-m", "changed task without report"],
+        );
+
+        let ok = run(
+            CiOpts {
+                since: baseline,
+                root: root.clone(),
+                bundle_dir: None,
+                changed_only: true,
+                require_executor_report: true,
+            },
+            &root.join(".mastermind/mmcg.db"),
+        )
+        .unwrap();
+        assert!(!ok, "CI evidence must fail closed without executor report");
+        fs::remove_dir_all(root).ok();
+    }
 }

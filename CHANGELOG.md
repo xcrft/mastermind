@@ -11,9 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Transactional, manifest-owned workflow installation for Claude Code and Codex, including SHA-256 content parity checks, rollback, retired-artifact cleanup, `mastermind doctor --workflow`, and native `init` delegation to the same installer.
 - Optional production-only project maps that exclude conventional tests, fixtures, examples, demos, generated/vendor/dependency/build paths before bounded component, boundary, hotspot, and cycle queries run.
 - A canonical strict executor-report schema shared by prompts, JSON Schema, fixtures, and the Rust audit parser, with backward compatibility for legacy report tails.
-- OpenAI adapter metadata for every shipped skill and seven prompt-level workflow eval cases covering planner, executor, project map, change/test impact, cross-client setup, and audit attestation.
+- OpenAI adapter metadata for every shipped skill and eight prompt-level workflow eval cases covering direct/verified planning, executor reports, project map, change/test impact, cross-client setup, and audit attestation.
 
 ### Changed
+- New work now chooses among Direct (no spec), Verified (compact default contract), and Strict (risk-driven review). Planner and project workflow prompts are shorter, outcome-oriented, and no longer force a critic or independent auditor onto normal work.
+- `run-task` now keeps controller-owned lifecycle state beside each canonical task, requires the executor's canonical report before post-flight, persists `audit.md`, and keeps completed runs idempotent. The default handoff is client-neutral; `--exec` remains a Claude-only compatibility path.
+- Pull-request audit execution now selects only changed canonical task folders and requires an executor report before producing evidence, instead of re-auditing every historical spec against the current baseline.
 - The auditor is repository-read-only; planner/controller code now owns audit artifacts, lessons, release eligibility, and task-state transitions.
 - Release workflows pin every third-party Action to a full commit SHA. Manual publish runs are verification-only, and package publication requires a tag push in `xcrft/mastermind`.
 

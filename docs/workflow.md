@@ -1,114 +1,108 @@
 # How the Mastermind workflow works
 
-Mastermind combines an LLM workflow with deterministic checks against the live repository. Agents can interpret intent and design a change; the codegraph and gates verify factual claims.
+Mastermind separates structural evidence from agent judgment. The codegraph
+answers what exists and what a change can affect; the workflow adds only as
+much ceremony as the risk justifies.
 
-## Lifecycle
+## Choose one mode
 
-```mermaid
-flowchart LR
-  R["Request"] --> I["Refine intent"]
-  I --> P["Plan from codegraph"]
-  P --> C["Challenge the design"]
-  C --> V["Verify the spec"]
-  V --> E["Execute the spec"]
-  E --> A["Audit the diff"]
-  A --> O["Release notes and evidence"]
-```
+| Mode | Use it for | Required artifact |
+|---|---|---|
+| **Direct** | Small, reversible, clearly scoped work | None. Use `map`, `impact`, and tests as needed. |
+| **Verified** | Normal multi-file or delegated work | A compact task spec with goals, scope, acceptance criteria, and verification. |
+| **Strict** | Auth, billing, migrations, public APIs, data-loss, supply-chain, or difficult rollback | A verified spec plus risk, evidence, rollback, and independent review. |
 
-The roles are deliberately separated:
+Direct mode works after `mastermind index .`; it does not require
+`mastermind init` or a task folder. `lite` and `standard` task modes remain
+readable for compatibility, but new tasks should use `verified` or `strict`.
 
-- **Prompt refiner:** turns a rough or multi-intent request into a bounded brief.
-- **Planner:** researches the repository and writes the implementation contract.
-- **Critic:** challenges the design before implementation.
-- **Researcher:** gathers codebase facts without making design decisions.
-- **Investigator:** maintains competing hypotheses for unknown-cause bugs.
-- **Security auditor:** reviews trust boundaries and high-risk changes.
-- **Executor:** implements the accepted spec and records verification evidence.
-- **Auditor:** compares the executor's report with the actual repository state.
-
-Roles are workflow responsibilities, not requirements for a particular model vendor or model name.
-
-## Project setup
-
-Initialize the full workflow in a repository:
+## Direct workflow
 
 ```bash
-mastermind init
-mastermind doctor
+mastermind index .
+mastermind map .
+mastermind impact --since main
+# implement the change
+mastermind impact --since main
+# run focused tests and the repository-required gate
 ```
 
-Create a task contract:
+This is the normal path for a small fix. Mastermind supplies structural facts;
+your coding client performs the edit and reports the checks it actually ran.
+
+## Verified workflow
+
+Create the contract:
 
 ```bash
-mastermind new-spec "Add account recovery"
-mastermind status
-mastermind next
+mastermind new-spec "Add account recovery"        # verified is the default
+mastermind run-task .mastermind/tasks/001-add-account-recovery/spec.md --pre-only
 ```
 
-Task specs live under `.mastermind/tasks/<NNN>-<name>/spec.md`. A spec records goals, non-goals, touched files, expected symbol state, implementation phases, and verification commands.
+The task folder owns four durable artifacts:
 
-## Deterministic gates
+| Artifact | Owner | Purpose |
+|---|---|---|
+| `spec.md` | Planner | Goals, scope, acceptance criteria, and verification contract |
+| `executor-report.md` | Executor | Files changed, claims, defects, and observed command results |
+| `audit.md` | Controller | Mechanical comparison of the report, spec, index, and real diff |
+| `state.json` | Controller | One task-local lifecycle record |
 
-Before implementation:
+After pre-flight, hand `spec.md` to the implementation agent in any coding
+client. The executor must write `executor-report.md`; it must not update
+`state.json`. Then run:
 
 ```bash
-mastermind verify-spec .mastermind/tasks/001-account-recovery/spec.md
+mastermind run-task .mastermind/tasks/001-add-account-recovery/spec.md --post-only
 ```
 
-`verify-spec` checks that required sections are present, referenced files exist, symbol claims match the codegraph, FIND blocks are current, and the planned blast radius is credible.
+Post-flight fails closed when the report is missing or malformed. A `held`
+verdict writes `audit.md`, marks the task complete, and drafts release notes.
+`drift` or `broken` keeps the task blocked for planner review. A completed task
+is idempotent unless `--post-only` explicitly requests another audit.
 
-After implementation:
+`run-task --exec` is a legacy convenience that shells out to `claude -p`.
+Normal handoff plus `--post-only` is client-neutral and works with Claude Code,
+Codex, Cursor, Continue, or another client.
+
+## Strict workflow
 
 ```bash
-mastermind audit-spec .mastermind/tasks/001-account-recovery/spec.md --since main
+mastermind new-spec "Rotate signing keys" --mode strict
 ```
 
-`audit-spec` compares the contract with the real diff. It detects unexpected files, missing planned tests, signature drift, removed symbols, and scope changes. Its verdict is `held`, `drift`, or `broken`.
+Strict mode uses the same controller and artifacts, but adds only material
+risk controls: alternatives, evidence ledger, rollback/migration, a design
+critic, and a read-only independent auditor. Security review is required when
+the change crosses auth, secrets, permissions, agent/tool boundaries, or the
+supply chain.
 
-The gates are deterministic Rust code. Agent interpretation helps with research and review, but it cannot override a failed gate.
+## What the checks prove
 
-## Two-phase task runner
+Pre-flight checks required sections, referenced paths, indexed symbols,
+snapshot drift, literal FIND blocks when present, and verification commands.
+Post-flight checks changed-file scope, removed or changed symbols, snapshot
+drift, planned tests, and executor claims.
 
-`run-task` provides a deterministic shell around execution:
+The graph is syntactic and bounded. Dynamic dispatch, reflection, re-exports,
+overloads, and cross-language calls can reduce precision. A held mechanical
+contract therefore still needs a short semantic check: did the implementation
+solve the original request, and do the tests demonstrate the acceptance
+criteria?
+
+## Client capabilities
+
+`mastermind install --client all` installs portable skills for Claude Code and
+Codex, plus spawnable subagent definitions for Claude Code. Codex receives the
+same workflow guidance as skills, but not Claude's native subagent runtime.
+Cursor and Continue use Mastermind through MCP; they do not receive a claimed
+native workflow bundle.
+
+Verify installed ownership and content hashes with:
 
 ```bash
-mastermind run-task .mastermind/tasks/001-account-recovery/spec.md
+mastermind doctor --workflow --client all
 ```
 
-The first invocation verifies the spec, records the baseline, and prepares the executor handoff. After implementation, the next invocation audits against that baseline. A held contract produces release-note material; drift or breakage keeps state for correction.
-
-## Codegraph support
-
-The workflow uses mmcg to answer repository questions such as:
-
-- Does a claimed symbol exist?
-- Which callers are affected?
-- Does the change cross a component boundary?
-- Which tests are structurally connected?
-- Did the implementation alter more files than the spec allowed?
-
-The graph is syntactic and bounded. Dynamic behavior and ambiguous same-name symbols remain limitations, so the workflow preserves precision notes and still runs the repository's full required test gate.
-
-## Installed skills
-
-The default workflow includes skills for:
-
-- task planning and execution;
-- codegraph research and project maps;
-- change and test impact;
-- critical review and structured reports;
-- investigation ledgers;
-- prompt refinement;
-- agent security review;
-- cross-client setup;
-- verifiable audit attestations.
-
-Run `mastermind list` to see the exact packaged bundle. Install the Claude and
-Codex adapters with `mastermind install --client all`, then verify package,
-manifest, and filesystem parity with `mastermind doctor --workflow --client
-all`. Claude receives the seven spawnable subagent adapters; both clients
-receive the portable skills.
-
-## Audit evidence
-
-An audit report can be sealed into a tamper-evident envelope and signed with Ed25519. For CI publication, use the privilege-separated workflows described in [Verifiable audits and GitHub Action](github-action.md).
+For signed, policy-bound CI evidence, see [Verifiable audits and GitHub
+Action](github-action.md).

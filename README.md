@@ -103,20 +103,30 @@ The MCP server exposes 23 bounded tools for symbol search, callers/callees, impo
 
 See the [mmcg reference](docs/reference/mmcg.md) for the complete tool and protocol contract.
 
-### Plan, execute, and verify
+### Use only the workflow depth you need
 
-The optional workflow turns an implementation request into a checked sequence:
+Small changes stay direct: query the graph, implement, and run the repository
+checks. Normal delegated work uses a compact verified contract. Auth,
+migrations, public APIs, data-loss, and supply-chain changes use strict review.
 
 ```mermaid
 flowchart LR
-  U["Request"] --> P["Plan from the live codegraph"]
-  P --> V["Verify the spec"]
+  U["Request"] --> M{"Risk"}
+  M -->|small| D["Direct: impact + tests"]
+  M -->|normal| P["Verified spec"]
+  M -->|high| S["Strict spec + review"]
+  P --> V["Verify"]
+  S --> V
   V --> E["Implement"]
   E --> A["Audit the real diff"]
-  A --> R["Release evidence"]
+  D --> R["Report evidence"]
+  A --> R
 ```
 
-The planner, executor, critic, and auditor have separate responsibilities. Deterministic Rust gates verify file, symbol, snapshot, scope, and test claims before and after implementation. Read [How the workflow works](docs/workflow.md) for the roles and task lifecycle.
+Direct mode needs only `mastermind index .`; no `init` or task spec is required.
+Verified and strict tasks keep planner, executor, and controller ownership
+separate, and post-flight requires a canonical executor report. Read [How the
+workflow works](docs/workflow.md) for the exact modes and task lifecycle.
 
 ### Produce verifiable audit evidence
 

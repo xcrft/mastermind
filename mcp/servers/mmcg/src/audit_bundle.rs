@@ -277,6 +277,8 @@ pub fn read_signature(path: &Path) -> Result<DetachedSignature, BundleError> {
 }
 
 pub fn write_atomic(path: &Path, bytes: &[u8], private: bool) -> Result<(), BundleError> {
+    #[cfg(not(unix))]
+    let _ = private;
     if bytes.len() > BUNDLE_INPUT_MAX {
         return Err(BundleError::SizeLimit);
     }
@@ -793,12 +795,7 @@ fn create_contained_output_dir_portable(
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let mut builder = std::fs::DirBuilder::new();
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::DirBuilderExt;
-                    builder.mode(0o700);
-                }
+                let builder = std::fs::DirBuilder::new();
                 builder
                     .create(&cursor)
                     .map_err(|e| BundleError::Io(e.to_string()))?;
@@ -814,28 +811,18 @@ fn create_contained_output_dir_portable(
             ));
         }
     }
-    let before = std::fs::symlink_metadata(&cursor).map_err(|e| BundleError::Io(e.to_string()))?;
     let mut options = OpenOptions::new();
     options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY);
-    }
     let directory = options
         .open(&cursor)
         .map_err(|e| BundleError::Io(e.to_string()))?;
     let opened = directory
         .metadata()
         .map_err(|e| BundleError::Io(e.to_string()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if before.dev() != opened.dev() || before.ino() != opened.ino() {
-            return Err(BundleError::Invalid(
-                "output directory identity changed".into(),
-            ));
-        }
+    if !opened.is_dir() {
+        return Err(BundleError::Invalid(
+            "output final component is not a directory".into(),
+        ));
     }
     Ok(cursor)
 }

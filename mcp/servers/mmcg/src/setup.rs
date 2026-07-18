@@ -596,7 +596,7 @@ fn run_continue(request: &Request, target: &Target, entry: &Value) -> Outcome {
 struct BoundedOutput {
     status: std::process::ExitStatus,
     stdout: Vec<u8>,
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     stderr: Vec<u8>,
     stdout_truncated: bool,
     stderr_truncated: bool,
@@ -1252,12 +1252,12 @@ thread_local! {
     };
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 struct TestNativeBinGuard {
     previous: Option<PathBuf>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl TestNativeBinGuard {
     fn new(directory: PathBuf) -> Self {
         let previous = TEST_NATIVE_BIN.with(|slot| slot.replace(Some(directory)));
@@ -1265,7 +1265,7 @@ impl TestNativeBinGuard {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl Drop for TestNativeBinGuard {
     fn drop(&mut self) {
         TEST_NATIVE_BIN.with(|slot| {
@@ -1410,12 +1410,12 @@ fn run_bounded_with_timeout(
                     .map_err(|_| "native_reader_failed".to_string())?;
                 let (stdout, stdout_truncated) = stdout?;
                 let (stderr, stderr_truncated) = stderr?;
-                #[cfg(not(test))]
+                #[cfg(not(all(test, unix)))]
                 let _ = stderr;
                 return Ok(BoundedOutput {
                     status,
                     stdout,
-                    #[cfg(test)]
+                    #[cfg(all(test, unix))]
                     stderr,
                     stdout_truncated,
                     stderr_truncated,
@@ -1485,10 +1485,10 @@ fn drain_bounded<R: Read>(mut reader: R) -> Result<(Vec<u8>, bool), String> {
     Ok((retained, truncated))
 }
 
-fn sync_parent(parent: &Path) -> Result<(), String> {
+fn sync_parent(_parent: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
-        std::fs::File::open(parent)
+        std::fs::File::open(_parent)
             .and_then(|directory| directory.sync_all())
             .map_err(|_| "parent_sync_failed".to_string())?;
     }
@@ -1678,6 +1678,7 @@ mod tests {
         BoundedOutput {
             status: successful_status(),
             stdout: stdout.to_vec(),
+            #[cfg(unix)]
             stderr: Vec::new(),
             stdout_truncated: truncated,
             stderr_truncated: false,
@@ -2373,7 +2374,6 @@ mod tests {
     fn native_runner_preserves_argv_without_shell_interpolation() {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             let root = tmp("native-argv");
             let script = root.join("capture");
             let output = root.join("argv");
@@ -2383,14 +2383,18 @@ mod tests {
                 "#!/bin/sh\nout=$1\nshift\nprintf '%s\\n' \"$@\" > \"$out\"\n",
             )
             .unwrap();
-            fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
             let args = vec![
                 output.to_string_lossy().into_owned(),
                 format!("; touch {}", marker.display()),
                 format!("$(touch {})", marker.display()),
                 "space value".into(),
             ];
-            assert!(run_bounded(&script, &args).unwrap().status.success());
+            let mut shell_args = vec![script.to_string_lossy().into_owned()];
+            shell_args.extend(args.clone());
+            assert!(run_bounded(Path::new("/bin/sh"), &shell_args)
+                .unwrap()
+                .status
+                .success());
             assert_eq!(
                 fs::read_to_string(output)
                     .unwrap()

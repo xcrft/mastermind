@@ -944,8 +944,10 @@ mod tests {
     use std::fs;
     use std::process::Command;
 
+    #[cfg(unix)]
     struct GitInvocationGuard;
 
+    #[cfg(unix)]
     impl Drop for GitInvocationGuard {
         fn drop(&mut self) {
             TEST_GIT_INVOCATION.with(|value| value.borrow_mut().take());
@@ -953,6 +955,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn override_git(program: &str, prefix: &[&str], timeout: Duration) -> GitInvocationGuard {
         TEST_GIT_INVOCATION.with(|value| {
             *value.borrow_mut() = Some((

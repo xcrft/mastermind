@@ -24,7 +24,7 @@ use crate::diff::{self, DiffError, SymbolDiff};
 use crate::spec::{ParsedSpec, SymbolClaim};
 use crate::store::Store;
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -904,6 +904,245 @@ impl Bundle {
             executor_report_path: executor_report_path.map(str::to_string),
         }
     }
+
+    pub fn into_manifest(
+        self,
+        root: &Path,
+    ) -> Result<crate::audit_bundle::Manifest, Box<dyn std::error::Error>> {
+        use crate::audit_bundle::{
+            normalize_repository_identity, sha256_hex, DiffBinding, InputBinding, Manifest,
+            RepositoryBinding, ToolBinding, BUNDLE_INPUT_MAX,
+        };
+
+        let root = root
+            .canonicalize()
+            .map_err(|e| format!("canonicalize audit root {}: {e}", root.display()))?;
+        let baseline_oid = resolve_commit(&root, &self.baseline)?;
+        let head_oid = resolve_commit(&root, "HEAD")?;
+        if baseline_oid == head_oid {
+            return Err("audit baseline and HEAD must differ".into());
+        }
+
+        let remote = git_bytes(&root, &["config", "--get", "remote.origin.url"], 4096).ok();
+        let identity = remote
+            .as_deref()
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .and_then(|value| normalize_repository_identity(value).ok());
+        let worktree_clean = git_bytes(
+            &root,
+            &["status", "--porcelain=v1", "-z", "--untracked-files=normal"],
+            BUNDLE_INPUT_MAX,
+        )?
+        .is_empty();
+
+        let spec_path = relative_binding_path(&root, Path::new(&self.spec))?;
+        let spec_bytes = read_bound_input(&root.join(&spec_path))?;
+        let (executor_report_path, executor_report_present, executor_report_sha256) =
+            if let Some(path) = self.executor_report_path.as_deref() {
+                let relative = relative_binding_path(&root, Path::new(path))?;
+                let bytes = read_bound_input(&root.join(&relative))?;
+                (
+                    Some(relative),
+                    true,
+                    Some(format!("sha256:{}", sha256_hex(&bytes))),
+                )
+            } else {
+                (None, false, None)
+            };
+
+        let range = format!("{baseline_oid}..{head_oid}");
+        let binary_diff = git_bytes(
+            &root,
+            &[
+                "-c",
+                "diff.external=",
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                "--binary",
+                &range,
+                "--",
+            ],
+            BUNDLE_INPUT_MAX,
+        )?;
+        let name_status = parse_name_status(&git_bytes(
+            &root,
+            &[
+                "-c",
+                "diff.external=",
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                "--name-status",
+                "-z",
+                &range,
+                "--",
+            ],
+            BUNDLE_INPUT_MAX,
+        )?)?;
+
+        let snapshot_head = resolve_commit(&root, "HEAD")?;
+        let snapshot_clean = git_bytes(
+            &root,
+            &["status", "--porcelain=v1", "-z", "--untracked-files=normal"],
+            BUNDLE_INPUT_MAX,
+        )?
+        .is_empty();
+        if snapshot_head != head_oid || snapshot_clean != worktree_clean {
+            return Err("snapshot_changed".into());
+        }
+
+        let mut audit_configuration = BTreeMap::new();
+        audit_configuration.insert("baseline_input".into(), serde_json::json!(self.baseline));
+        audit_configuration.insert("require_clean_worktree".into(), serde_json::json!(true));
+        let mut index_metadata = BTreeMap::new();
+        index_metadata.insert("source".into(), serde_json::json!("mmcg"));
+
+        Ok(Manifest {
+            repository: RepositoryBinding {
+                identity,
+                baseline_oid,
+                head_oid,
+                worktree_clean,
+            },
+            inputs: InputBinding {
+                spec_path,
+                spec_sha256: format!("sha256:{}", sha256_hex(&spec_bytes)),
+                executor_report_path,
+                executor_report_present,
+                executor_report_sha256,
+            },
+            diff: DiffBinding {
+                name_status,
+                binary_diff_sha256: format!("sha256:{}", sha256_hex(&binary_diff)),
+            },
+            tool: ToolBinding {
+                name: "mastermind".into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+                bundle_schema: crate::audit_bundle::ENVELOPE_SCHEMA,
+            },
+            audit_configuration,
+            index_metadata,
+            verdict: self.verdict,
+            declared_files: self.spec_files,
+            changed_files: self.changed_files,
+            verified_claims: self.verified_claims,
+            failed_claims: self.failed_claims,
+            discrepancies: self
+                .discrepancies
+                .iter()
+                .map(serde_json::to_value)
+                .collect::<Result<Vec<_>, _>>()?,
+            snapshot_drift: self
+                .snapshot_drift
+                .iter()
+                .map(serde_json::to_value)
+                .collect::<Result<Vec<_>, _>>()?,
+            snapshot_changed: false,
+            mmcg_queries: self.mmcg_queries,
+            verify_commands: self.commands,
+            human_summary: self.human_summary,
+        })
+    }
+}
+
+fn resolve_commit(root: &Path, reference: &str) -> Result<String, Box<dyn std::error::Error>> {
+    if reference.starts_with('-') || reference.contains(['\0', '\n', '\r']) {
+        return Err("unsafe git reference".into());
+    }
+    let expression = format!("{reference}^{{commit}}");
+    let bytes = git_bytes(
+        root,
+        &["rev-parse", "--verify", "--end-of-options", &expression],
+        128,
+    )?;
+    let oid = std::str::from_utf8(&bytes)?.trim().to_ascii_lowercase();
+    if oid.len() != 40 || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("git did not return a full object ID".into());
+    }
+    Ok(oid)
+}
+
+fn git_bytes(
+    root: &Path,
+    args: &[&str],
+    limit: usize,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let output = crate::diff::run_bounded_git_with_limit(root, args, None, limit)
+        .map_err(|error| format!("audit_git_{}", error.code()))?;
+    if !output.success {
+        return Err("audit_git_failed".into());
+    }
+    Ok(output.stdout)
+}
+
+fn relative_binding_path(root: &Path, path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let relative = if path.is_absolute() {
+        path.strip_prefix(root)
+            .map_err(|_| "audit input path is outside root")?
+    } else {
+        path
+    };
+    Ok(crate::audit_bundle::normalize_relative_path(relative)?)
+}
+
+fn read_bound_input(path: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("audit input is not a regular non-symlink file".into());
+    }
+    if metadata.len() > crate::audit_bundle::BUNDLE_INPUT_MAX as u64 {
+        return Err("audit input exceeds 16 MiB".into());
+    }
+    Ok(std::fs::read(path)?)
+}
+
+fn parse_name_status(
+    bytes: &[u8],
+) -> Result<Vec<crate::audit_bundle::DiffEntry>, Box<dyn std::error::Error>> {
+    let fields: Vec<&[u8]> = bytes
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+        .collect();
+    let mut entries = Vec::new();
+    let mut cursor = 0;
+    while cursor < fields.len() {
+        let status = std::str::from_utf8(fields[cursor])?.to_string();
+        cursor += 1;
+        if status.starts_with('R') || status.starts_with('C') {
+            if cursor + 1 >= fields.len() {
+                return Err("malformed git name-status output".into());
+            }
+            let old_path = crate::audit_bundle::normalize_relative_path(Path::new(
+                std::str::from_utf8(fields[cursor])?,
+            ))?;
+            let path = crate::audit_bundle::normalize_relative_path(Path::new(
+                std::str::from_utf8(fields[cursor + 1])?,
+            ))?;
+            cursor += 2;
+            entries.push(crate::audit_bundle::DiffEntry {
+                status,
+                path,
+                old_path: Some(old_path),
+            });
+        } else {
+            if cursor >= fields.len() {
+                return Err("malformed git name-status output".into());
+            }
+            let path = crate::audit_bundle::normalize_relative_path(Path::new(
+                std::str::from_utf8(fields[cursor])?,
+            ))?;
+            cursor += 1;
+            entries.push(crate::audit_bundle::DiffEntry {
+                status,
+                path,
+                old_path: None,
+            });
+        }
+    }
+    Ok(entries)
 }
 
 fn resolve_head_sha(root: Option<&Path>) -> String {

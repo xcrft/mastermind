@@ -274,7 +274,7 @@ pub fn compute_risk_report(spec: &ParsedSpec, store: &Store) -> RiskReport {
             .map(|c| c.len() as u32)
             .unwrap_or(0);
         total_callers = total_callers.saturating_add(n);
-        if worst.as_ref().map_or(true, |w| n > w.callers) {
+        if worst.as_ref().is_none_or(|w| n > w.callers) {
             worst = Some(WorstSymbol {
                 name: claim.name.clone(),
                 callers: n,

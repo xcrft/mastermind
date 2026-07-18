@@ -76,8 +76,10 @@ pub fn audit(
             er_path_str.as_deref(),
             Some(&root),
         );
-        let bundle_json = serde_json::to_string_pretty(&bundle)?;
-        std::fs::write(bundle_path, &bundle_json)
+        let manifest = bundle.into_manifest(&root)?;
+        let envelope = mmcg::audit_bundle::seal_checked(manifest, &root)?;
+        let bundle_json = serde_json::to_vec_pretty(&envelope)?;
+        mmcg::audit_bundle::write_atomic(bundle_path, &bundle_json, false)
             .map_err(|e| format!("write bundle {}: {e}", bundle_path.display()))?;
         if !json {
             eprintln!("  bundle → {}", bundle_path.display());

@@ -1,0 +1,567 @@
+name: Mastermind Audit Publication
+
+on:
+  workflow_run:
+    workflows: [Mastermind PR Audit]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  verify:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    outputs:
+      verified_artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      verified_artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+      source_run_id: ${{ steps.evidence.outputs.source_run_id }}
+      source_run_attempt: ${{ steps.evidence.outputs.source_run_attempt }}
+      source_artifact_name: ${{ steps.evidence.outputs.artifact_name }}
+      source_artifact_size: ${{ steps.evidence.outputs.artifact_size }}
+      verified_artifact_size: ${{ steps.verified-artifact.outputs.artifact_size }}
+      pr_number: ${{ steps.evidence.outputs.pr_number }}
+      base_sha: ${{ steps.evidence.outputs.base_sha }}
+      head_sha: ${{ steps.evidence.outputs.head_sha }}
+    steps:
+      - name: Resolve independent run, PR, workflow, and artifact evidence
+        id: evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_REPOSITORY: ${{ github.repository }}
+          EVENT_REPOSITORY_ID: ${{ github.repository_id }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          EXPECTED_WORKFLOW_PATH: .github/workflows/mastermind-audit-pr.yml
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$SOURCE_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
+          run=$(gh api "/repos/$EVENT_REPOSITORY/actions/runs/$SOURCE_RUN_ID?attempt_number=$SOURCE_RUN_ATTEMPT")
+          test "$(jq -r .repository.id <<<"$run")" = "$EVENT_REPOSITORY_ID"
+          test "$(jq -r .repository.full_name <<<"$run")" = "$EVENT_REPOSITORY"
+          test "$(jq -r .event <<<"$run")" = pull_request
+          test "$(jq -r .conclusion <<<"$run")" = success
+          source_run_attempt=$(jq -er '.run_attempt | select(type == "number" and . >= 1)' <<<"$run")
+          test "$source_run_attempt" = "$SOURCE_RUN_ATTEMPT"
+          test "$(jq -r .path <<<"$run")" = "$EXPECTED_WORKFLOW_PATH"
+          base_sha=$(jq -er '.pull_requests | if length == 1 then .[0].base.sha else error("one PR required") end' <<<"$run")
+          head_sha=$(jq -er '.pull_requests | if length == 1 then .[0].head.sha else error("one PR required") end' <<<"$run")
+          pr_number=$(jq -er '.pull_requests | if length == 1 then .[0].number else error("one PR required") end' <<<"$run")
+          head_repo_id=$(jq -er '.head_repository.id' <<<"$run")
+          [[ "$base_sha" =~ ^[0-9a-f]{40}$ && "$head_sha" =~ ^[0-9a-f]{40}$ && "$pr_number" =~ ^[0-9]+$ && "$head_repo_id" =~ ^[0-9]+$ ]]
+          workflow_id=$(jq -er .workflow_id <<<"$run")
+          workflow=$(gh api "/repos/$EVENT_REPOSITORY/actions/workflows/$workflow_id")
+          test "$(jq -r .path <<<"$workflow")" = "$EXPECTED_WORKFLOW_PATH"
+          executed_workflow_sha=$(jq -er '.workflow_sha | select(test("^[0-9a-f]{40}$"))' <<<"$run")
+          executed_workflow_ref=$(jq -er '.workflow_ref | select(type == "string" and length < 240)' <<<"$run")
+          default_branch=$(gh api "/repos/$EVENT_REPOSITORY" --jq .default_branch)
+          trusted_blob=$(gh api "/repos/$EVENT_REPOSITORY/contents/$EXPECTED_WORKFLOW_PATH?ref=$default_branch" --jq .sha)
+          executed_blob=$(gh api "/repos/$EVENT_REPOSITORY/contents/$EXPECTED_WORKFLOW_PATH?ref=$executed_workflow_sha" --jq .sha)
+          test "$executed_blob" = "$trusted_blob"
+          pr=$(gh api "/repos/$EVENT_REPOSITORY/pulls/$pr_number")
+          test "$(jq -r .base.sha <<<"$pr")" = "$base_sha"
+          test "$(jq -r .head.sha <<<"$pr")" = "$head_sha"
+          test "$(jq -r .head.repo.id <<<"$pr")" = "$head_repo_id"
+          expected_artifact_name="mastermind-pr-audit-attempt-$source_run_attempt"
+          artifacts=$(gh api "/repos/$EVENT_REPOSITORY/actions/runs/$SOURCE_RUN_ID/artifacts?name=$expected_artifact_name")
+          artifact=$(jq -cer --arg expected "$expected_artifact_name" '[.artifacts[] | select(.expired == false and .name == $expected)] | if length == 1 then .[0] else error("exactly one attempt-specific artifact required") end' <<<"$artifacts")
+          artifact_id=$(jq -er .id <<<"$artifact")
+          artifact_digest=$(jq -er .digest <<<"$artifact")
+          artifact_size=$(jq -er .size_in_bytes <<<"$artifact")
+          [[ "$artifact_id" =~ ^[0-9]+$ && "$artifact_digest" =~ ^sha256:[0-9a-f]{64}$ && "$artifact_size" =~ ^[0-9]+$ ]]
+          test "$artifact_size" -le 67108864
+          {
+            printf 'source_run_id=%s\n' "$SOURCE_RUN_ID"
+            printf 'source_run_attempt=%s\n' "$source_run_attempt"
+            printf 'pr_number=%s\n' "$pr_number"
+            printf 'base_sha=%s\n' "$base_sha"
+            printf 'head_sha=%s\n' "$head_sha"
+            printf 'artifact_id=%s\n' "$artifact_id"
+            printf 'artifact_name=%s\n' "$expected_artifact_name"
+            printf 'artifact_digest=%s\n' "$artifact_digest"
+            printf 'artifact_size=%s\n' "$artifact_size"
+            printf 'workflow_blob=%s\n' "$trusted_blob"
+            printf 'workflow_sha=%s\n' "$executed_workflow_sha"
+            printf 'workflow_ref=%s\n' "$executed_workflow_ref"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Download exact source artifact ID and hard-check server digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          ARTIFACT_ID: ${{ steps.evidence.outputs.artifact_id }}
+          ARTIFACT_DIGEST: ${{ steps.evidence.outputs.artifact_digest }}
+          ARTIFACT_SIZE: ${{ steps.evidence.outputs.artifact_size }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir source-download source
+          gh api "/repos/$REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" >source-download/source.zip
+          test "$(wc -c <source-download/source.zip)" -eq "$ARTIFACT_SIZE"
+          actual="sha256:$(sha256sum source-download/source.zip | cut -d' ' -f1)"
+          test "$actual" = "$ARTIFACT_DIGEST"
+          python3 - <<'PY'
+          import pathlib, stat, zipfile
+          archive = pathlib.Path("source-download/source.zip")
+          target = pathlib.Path("source").resolve()
+          allowed_meta = {"pr-number", "base-sha", "head-sha", "run-id", "run-attempt", "workflow-ref", "workflow-sha", "result.json"}
+          with zipfile.ZipFile(archive) as z:
+              infos = z.infolist()
+              if not infos or len(infos) > 256:
+                  raise SystemExit("invalid archive member count")
+              seen = set()
+              total = 0
+              for info in infos:
+                  name = info.filename
+                  path = pathlib.PurePosixPath(name)
+                  mode = info.external_attr >> 16
+                  if name in seen:
+                      raise SystemExit("duplicate artifact member")
+                  seen.add(name)
+                  total += info.file_size
+                  if info.file_size > 16 * 1024 * 1024 or total > 64 * 1024 * 1024:
+                      raise SystemExit("artifact size limit exceeded")
+                  if len(name.encode()) > 240 or path.is_absolute() or ".." in path.parts or len(path.parts) != 1:
+                      raise SystemExit("unsafe artifact path")
+                  if info.extra or not stat.S_ISREG(mode) or not (name.endswith(".bundle.json") or name in allowed_meta):
+                      raise SystemExit("unexpected artifact member")
+                  if name.endswith((".zip", ".tar", ".gz", ".tgz")):
+                      raise SystemExit("nested archive rejected")
+              for info in infos:
+                  name = info.filename
+                  destination = (target / name).resolve()
+                  if destination.parent != target:
+                      raise SystemExit("artifact path escaped")
+                  with z.open(info) as source, destination.open("xb") as output:
+                      output.write(source.read())
+          PY
+
+      - name: Verify source claims and envelopes with workflow-bound implementation
+        id: verifier
+        env:
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          EXPECTED_RUN_ID: ${{ steps.evidence.outputs.source_run_id }}
+          EXPECTED_RUN_ATTEMPT: ${{ steps.evidence.outputs.source_run_attempt }}
+          EXPECTED_PR: ${{ steps.evidence.outputs.pr_number }}
+          EXPECTED_BASE: ${{ steps.evidence.outputs.base_sha }}
+          EXPECTED_HEAD: ${{ steps.evidence.outputs.head_sha }}
+          EXPECTED_WORKFLOW_SHA: ${{ steps.evidence.outputs.workflow_sha }}
+          EXPECTED_WORKFLOW_REF: ${{ steps.evidence.outputs.workflow_ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re
+          def strict_pairs(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError("duplicate JSON key")
+                  result[key] = value
+              return result
+          def read_claim(name):
+              value = pathlib.Path("source", name).read_text().strip()
+              if any(ord(c) < 32 for c in value):
+                  raise SystemExit("control byte in source claim")
+              return value
+          def exact(value, keys, label):
+              if type(value) is not dict or set(value) != set(keys):
+                  raise SystemExit("invalid " + label + " fields")
+          def text(value, label, maximum=1048576):
+              if type(value) is not str or not value or len(value.encode()) > maximum:
+                  raise SystemExit("invalid " + label)
+          def nullable_text(value, label):
+              if value is not None:
+                  text(value, label)
+          def integer(value, label, low, high):
+              if type(value) is not int or value < low or value > high:
+                  raise SystemExit("invalid " + label)
+          def oid(value, label):
+              if type(value) is not str or re.fullmatch(r"[0-9a-f]{40}", value) is None:
+                  raise SystemExit("invalid " + label)
+          def digest(value, label):
+              if type(value) is not str or re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None:
+                  raise SystemExit("invalid " + label)
+          def relative_path(value, label):
+              text(value, label, 4096)
+              if value.startswith("/") or "\\" in value or any(part in {"", ".", ".."} for part in value.split("/")) or any(ord(c) < 32 for c in value):
+                  raise SystemExit("invalid " + label)
+          def string_list(value, label, paths=False):
+              if type(value) is not list:
+                  raise SystemExit("invalid " + label)
+              for item in value:
+                  if paths:
+                      relative_path(item, label)
+                  else:
+                      text(item, label)
+              if value != sorted(value):
+                  raise SystemExit("unsorted " + label)
+          finding_shapes = {
+              "unexpected_file": ({"kind", "file"}, {"file": "path"}),
+              "missing_expected_file": ({"kind", "file"}, {"file": "path"}),
+              "snapshot_caller_drift": ({"kind", "symbol", "spec_says", "index_says"}, {"symbol": "text", "spec_says": "u32", "index_says": "u32"}),
+              "snapshot_signature_drift": ({"kind", "symbol", "spec_says", "index_says"}, {"symbol": "text", "spec_says": "text", "index_says": "nullable"}),
+              "snapshot_symbol_gone": ({"kind", "symbol"}, {"symbol": "text"}),
+              "removed_symbol_not_acknowledged": ({"kind", "symbol", "file"}, {"symbol": "text", "file": "path"}),
+              "planned_test_not_added": ({"kind", "test"}, {"test": "text"}),
+              "claimed_symbol_missing": ({"kind", "symbol", "file"}, {"symbol": "text", "file": "nullable_path"}),
+              "hallucinated_symbol": ({"kind", "from_symbol", "to_symbol"}, {"from_symbol": "text", "to_symbol": "text"}),
+              "missing_call_edge": ({"kind", "from_symbol", "to_symbol"}, {"from_symbol": "text", "to_symbol": "text"}),
+              "vacuous_test_claim": ({"kind", "cmd", "reason"}, {"cmd": "text", "reason": "text"}),
+              "claimed_signature_mismatch": ({"kind", "symbol", "file", "claimed", "actual"}, {"symbol": "text", "file": "nullable_path", "claimed": "text", "actual": "nullable"}),
+              "observed_exit_code_non_zero": ({"kind", "cmd", "exit_code"}, {"cmd": "text", "exit_code": "i32"}),
+              "observed_zero_tests": ({"kind", "cmd"}, {"cmd": "text"}),
+          }
+          def finding(value, label, snapshot_only=False):
+              if type(value) is not dict or type(value.get("kind")) is not str or value["kind"] not in finding_shapes:
+                  raise SystemExit("invalid " + label)
+              if snapshot_only and value["kind"] not in {"snapshot_caller_drift", "snapshot_signature_drift", "snapshot_symbol_gone"}:
+                  raise SystemExit("invalid snapshot drift kind")
+              keys, fields = finding_shapes[value["kind"]]
+              exact(value, keys, label)
+              for name, kind in fields.items():
+                  item = value[name]
+                  if kind == "text": text(item, label)
+                  elif kind == "nullable": nullable_text(item, label)
+                  elif kind == "path": relative_path(item, label)
+                  elif kind == "nullable_path":
+                      if item is not None: relative_path(item, label)
+                  elif kind == "u32": integer(item, label, 0, 4294967295)
+                  elif kind == "i32": integer(item, label, -2147483648, 2147483647)
+          def finding_list(value, label, snapshot_only=False):
+              if type(value) is not list:
+                  raise SystemExit("invalid " + label)
+              for item in value:
+                  finding(item, label, snapshot_only)
+              rendered = [json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":")) for item in value]
+              if rendered != sorted(rendered):
+                  raise SystemExit("unsorted " + label)
+          def validate_manifest(manifest):
+              manifest_keys = {"repository", "inputs", "diff", "tool", "audit_configuration", "index_metadata", "verdict", "declared_files", "changed_files", "verified_claims", "failed_claims", "discrepancies", "snapshot_drift", "snapshot_changed", "mmcg_queries", "verify_commands", "human_summary"}
+              exact(manifest, manifest_keys, "manifest")
+              repository = manifest["repository"]
+              exact(repository, {"identity", "baseline_oid", "head_oid", "worktree_clean"}, "repository")
+              nullable_text(repository["identity"], "repository identity")
+              if repository["identity"] is not None and re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", repository["identity"]) is None:
+                  raise SystemExit("invalid repository identity")
+              oid(repository["baseline_oid"], "baseline OID")
+              oid(repository["head_oid"], "head OID")
+              if type(repository["worktree_clean"]) is not bool:
+                  raise SystemExit("invalid worktree clean flag")
+              inputs = manifest["inputs"]
+              exact(inputs, {"spec_path", "spec_sha256", "executor_report_path", "executor_report_present", "executor_report_sha256"}, "inputs")
+              relative_path(inputs["spec_path"], "spec path")
+              digest(inputs["spec_sha256"], "spec digest")
+              if type(inputs["executor_report_present"]) is not bool:
+                  raise SystemExit("invalid report presence")
+              if inputs["executor_report_present"]:
+                  relative_path(inputs["executor_report_path"], "report path")
+                  digest(inputs["executor_report_sha256"], "report digest")
+              elif inputs["executor_report_path"] is not None or inputs["executor_report_sha256"] is not None:
+                  raise SystemExit("invalid absent report binding")
+              diff = manifest["diff"]
+              exact(diff, {"name_status", "binary_diff_sha256"}, "diff")
+              digest(diff["binary_diff_sha256"], "binary diff digest")
+              if type(diff["name_status"]) is not list:
+                  raise SystemExit("invalid name status")
+              ordering = []
+              for entry in diff["name_status"]:
+                  exact(entry, {"status", "path", "old_path"}, "name status entry")
+                  if type(entry["status"]) is not str or re.fullmatch(r"[ACDMRTUXB][0-9]{0,3}", entry["status"]) is None:
+                      raise SystemExit("invalid name status code")
+                  relative_path(entry["path"], "diff path")
+                  if entry["old_path"] is not None: relative_path(entry["old_path"], "old diff path")
+                  ordering.append((entry["path"], entry["old_path"] or "", entry["status"]))
+              if ordering != sorted(ordering) or len(ordering) != len(set(ordering)):
+                  raise SystemExit("unsorted or duplicate name status")
+              tool = manifest["tool"]
+              exact(tool, {"name", "version", "bundle_schema"}, "tool")
+              if tool["name"] != "mastermind": raise SystemExit("invalid tool name")
+              text(tool["version"], "tool version", 128)
+              integer(tool["bundle_schema"], "bundle schema", 3, 3)
+              exact(manifest["audit_configuration"], {"baseline_input", "require_clean_worktree"}, "audit configuration")
+              text(manifest["audit_configuration"]["baseline_input"], "baseline input", 4096)
+              if manifest["audit_configuration"]["require_clean_worktree"] is not True: raise SystemExit("clean policy required")
+              exact(manifest["index_metadata"], {"source"}, "index metadata")
+              if manifest["index_metadata"]["source"] != "mmcg": raise SystemExit("invalid index source")
+              if manifest["verdict"] not in {"held", "drift", "broken"}: raise SystemExit("invalid verdict")
+              string_list(manifest["declared_files"], "declared files", True)
+              string_list(manifest["changed_files"], "changed files", True)
+              string_list(manifest["verified_claims"], "verified claims")
+              string_list(manifest["failed_claims"], "failed claims")
+              finding_list(manifest["discrepancies"], "discrepancies")
+              finding_list(manifest["snapshot_drift"], "snapshot drift", True)
+              if manifest["snapshot_changed"] is not False: raise SystemExit("snapshot changed")
+              string_list(manifest["mmcg_queries"], "mmcg queries")
+              string_list(manifest["verify_commands"], "verify commands")
+              text(manifest["human_summary"], "human summary")
+          claims = {
+              "run-id": os.environ["EXPECTED_RUN_ID"],
+              "run-attempt": os.environ["EXPECTED_RUN_ATTEMPT"],
+              "pr-number": os.environ["EXPECTED_PR"],
+              "base-sha": os.environ["EXPECTED_BASE"],
+              "head-sha": os.environ["EXPECTED_HEAD"],
+              "workflow-sha": os.environ["EXPECTED_WORKFLOW_SHA"],
+              "workflow-ref": os.environ["EXPECTED_WORKFLOW_REF"],
+          }
+          for name, expected in claims.items():
+              if read_claim(name) != expected:
+                  raise SystemExit("source claim mismatch: " + name)
+          envelopes = sorted(pathlib.Path("source").glob("*.bundle.json"))
+          if not envelopes:
+              raise SystemExit("no envelopes")
+          top = {"schema_version", "manifest", "integrity"}
+          for path in envelopes:
+              value = json.loads(path.read_text(), object_pairs_hook=strict_pairs, parse_float=lambda _: (_ for _ in ()).throw(ValueError("float forbidden")))
+              exact(value, top, "envelope")
+              integer(value["schema_version"], "envelope schema", 3, 3)
+              validate_manifest(value["manifest"])
+              integrity = value["integrity"]
+              exact(integrity, {"algorithm", "canonicalization", "manifest_digest"}, "integrity")
+              if integrity["algorithm"] != "sha256" or integrity["canonicalization"] != "mastermind-cjson-v1":
+                  raise SystemExit("unsupported envelope schema")
+              digest(integrity["manifest_digest"], "manifest digest")
+              canonical = json.dumps(value["manifest"], ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+              if integrity["manifest_digest"] != "sha256:" + hashlib.sha256(canonical).hexdigest():
+                  raise SystemExit("manifest digest mismatch")
+              repository = value["manifest"]["repository"]
+              if repository != {"identity": os.environ["EXPECTED_REPOSITORY"], "baseline_oid": os.environ["EXPECTED_BASE"], "head_oid": os.environ["EXPECTED_HEAD"], "worktree_clean": True}:
+                  raise SystemExit("repository policy mismatch")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("verifier-identity=mastermind-inline-schema-v3-verifier-v1\n")
+          PY
+
+      - name: Build deterministic verified statement and archive
+        env:
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ steps.evidence.outputs.source_run_id }}
+          RUN_ATTEMPT: ${{ steps.evidence.outputs.source_run_attempt }}
+          SOURCE_ARTIFACT_ID: ${{ steps.evidence.outputs.artifact_id }}
+          SOURCE_ARTIFACT_NAME: ${{ steps.evidence.outputs.artifact_name }}
+          SOURCE_ARTIFACT_DIGEST: ${{ steps.evidence.outputs.artifact_digest }}
+          SOURCE_ARTIFACT_SIZE: ${{ steps.evidence.outputs.artifact_size }}
+          PR_NUMBER: ${{ steps.evidence.outputs.pr_number }}
+          BASE_SHA: ${{ steps.evidence.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.evidence.outputs.head_sha }}
+          WORKFLOW_BLOB: ${{ steps.evidence.outputs.workflow_blob }}
+          VERIFIER_IDENTITY: ${{ steps.verifier.outputs.verifier-identity }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir verified
+          cp source/*.bundle.json verified/
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib
+          envelopes = []
+          for path in sorted(pathlib.Path("verified").glob("*.bundle.json")):
+              envelopes.append({"name": path.name, "sha256": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()})
+          statement = {
+              "schema_version": 1,
+              "meaning": "publication-workflow verification provenance",
+              "repository": os.environ["REPOSITORY"],
+              "source_run_id": int(os.environ["RUN_ID"]),
+              "source_run_attempt": int(os.environ["RUN_ATTEMPT"]),
+              "source_artifact_id": int(os.environ["SOURCE_ARTIFACT_ID"]),
+              "source_artifact_name": os.environ["SOURCE_ARTIFACT_NAME"],
+              "source_artifact_digest": os.environ["SOURCE_ARTIFACT_DIGEST"],
+              "source_artifact_size": int(os.environ["SOURCE_ARTIFACT_SIZE"]),
+              "pr_number": int(os.environ["PR_NUMBER"]),
+              "baseline_oid": os.environ["BASE_SHA"],
+              "head_oid": os.environ["HEAD_SHA"],
+              "workflow_blob": os.environ["WORKFLOW_BLOB"],
+              "verifier_identity": os.environ["VERIFIER_IDENTITY"],
+              "policy": {"exact_repository_baseline_head": True, "require_clean_worktree": True},
+              "envelopes": envelopes,
+              "result": "pass",
+          }
+          pathlib.Path("verified/verified-statement.json").write_bytes(json.dumps(statement, sort_keys=True, separators=(",", ":")).encode())
+          PY
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf verified.tar -C verified .
+
+      - name: Upload verified publication subject
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mastermind-verified-${{ github.run_id }}
+          path: |
+            verified.tar
+            verified/verified-statement.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Bind exact verified artifact metadata
+        id: verified-artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+          PUBLICATION_RUN_ID: ${{ github.run_id }}
+          PUBLICATION_RUN_ATTEMPT: ${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_ID" =~ ^[0-9]+$ && "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          server=$(gh api "/repos/$REPOSITORY/actions/artifacts/$ARTIFACT_ID")
+          test "$(jq -r .id <<<"$server")" = "$ARTIFACT_ID"
+          test "$(jq -r .digest <<<"$server")" = "$ARTIFACT_DIGEST"
+          test "$(jq -r .workflow_run.id <<<"$server")" = "$PUBLICATION_RUN_ID"
+          artifact_size=$(jq -er .size_in_bytes <<<"$server")
+          [[ "$artifact_size" =~ ^[0-9]+$ ]]
+          test "$artifact_size" -le 67108864
+          run=$(gh api "/repos/$REPOSITORY/actions/runs/$PUBLICATION_RUN_ID?attempt_number=$PUBLICATION_RUN_ATTEMPT")
+          test "$(jq -r .run_attempt <<<"$run")" = "$PUBLICATION_RUN_ATTEMPT"
+          printf 'artifact_size=%s\n' "$artifact_size" >>"$GITHUB_OUTPUT"
+
+  attest:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download exact verified artifact bytes and safely extract
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          ARTIFACT_ID: ${{ needs.verify.outputs.verified_artifact_id }}
+          ARTIFACT_DIGEST: ${{ needs.verify.outputs.verified_artifact_digest }}
+          ARTIFACT_SIZE: ${{ needs.verify.outputs.verified_artifact_size }}
+          PUBLICATION_RUN_ID: ${{ github.run_id }}
+          PUBLICATION_RUN_ATTEMPT: ${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_ID" =~ ^[0-9]+$ && "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          server=$(gh api "/repos/$REPOSITORY/actions/artifacts/$ARTIFACT_ID")
+          test "$(jq -r .digest <<<"$server")" = "$ARTIFACT_DIGEST"
+          test "$(jq -r .workflow_run.id <<<"$server")" = "$PUBLICATION_RUN_ID"
+          size=$(jq -er .size_in_bytes <<<"$server")
+          test "$size" = "$ARTIFACT_SIZE"
+          test "$size" -le 67108864
+          run=$(gh api "/repos/$REPOSITORY/actions/runs/$PUBLICATION_RUN_ID?attempt_number=$PUBLICATION_RUN_ATTEMPT")
+          test "$(jq -r .run_attempt <<<"$run")" = "$PUBLICATION_RUN_ATTEMPT"
+          mkdir verified-subject
+          gh api "/repos/$REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" >verified-subject.zip
+          test "$(wc -c <verified-subject.zip)" -eq "$ARTIFACT_SIZE"
+          actual="sha256:$(sha256sum verified-subject.zip | cut -d' ' -f1)"
+          test "$actual" = "$ARTIFACT_DIGEST"
+          python3 - <<'PY'
+          import pathlib, stat, zipfile
+          target = pathlib.Path("verified-subject").resolve()
+          allowed = {"verified.tar", "verified-statement.json"}
+          seen = set()
+          total = 0
+          with zipfile.ZipFile("verified-subject.zip") as archive:
+              infos = archive.infolist()
+              for info in infos:
+                  name = info.filename
+                  mode = info.external_attr >> 16
+                  if name in seen or name not in allowed or pathlib.PurePosixPath(name).is_absolute() or ".." in pathlib.PurePosixPath(name).parts:
+                      raise SystemExit("invalid verified artifact member")
+                  seen.add(name)
+                  total += info.file_size
+                  if info.extra or info.file_size > 16 * 1024 * 1024 or total > 64 * 1024 * 1024 or not stat.S_ISREG(mode):
+                      raise SystemExit("invalid verified artifact type or size")
+              if seen != allowed:
+                  raise SystemExit("missing verified artifact member")
+              for info in infos:
+                  name = info.filename
+                  with archive.open(info) as source, (target / name).open("xb") as output:
+                      output.write(source.read())
+          PY
+          test -f verified-subject/verified.tar
+          test -f verified-subject/verified-statement.json
+      - name: Attest verified archive and statement only
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-path: |
+            verified-subject/verified.tar
+            verified-subject/verified-statement.json
+
+  publish:
+    needs: [verify, attest]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    steps:
+      - name: Download exact verified bytes, safely extract, and post one bot-owned marker comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.verify.outputs.pr_number }}
+          EXPECTED_HEAD: ${{ needs.verify.outputs.head_sha }}
+          ARTIFACT_ID: ${{ needs.verify.outputs.verified_artifact_id }}
+          ARTIFACT_DIGEST: ${{ needs.verify.outputs.verified_artifact_digest }}
+          ARTIFACT_SIZE: ${{ needs.verify.outputs.verified_artifact_size }}
+          PUBLICATION_RUN_ID: ${{ github.run_id }}
+          PUBLICATION_RUN_ATTEMPT: ${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[0-9]+$ && "$EXPECTED_HEAD" =~ ^[0-9a-f]{40}$ && "$ARTIFACT_ID" =~ ^[0-9]+$ && "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "$(gh api "/repos/$REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha)" = "$EXPECTED_HEAD"
+          server=$(gh api "/repos/$REPOSITORY/actions/artifacts/$ARTIFACT_ID")
+          test "$(jq -r .digest <<<"$server")" = "$ARTIFACT_DIGEST"
+          test "$(jq -r .workflow_run.id <<<"$server")" = "$PUBLICATION_RUN_ID"
+          size=$(jq -er .size_in_bytes <<<"$server")
+          test "$size" = "$ARTIFACT_SIZE"
+          test "$size" -le 67108864
+          run=$(gh api "/repos/$REPOSITORY/actions/runs/$PUBLICATION_RUN_ID?attempt_number=$PUBLICATION_RUN_ATTEMPT")
+          test "$(jq -r .run_attempt <<<"$run")" = "$PUBLICATION_RUN_ATTEMPT"
+          mkdir verified-subject
+          gh api "/repos/$REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" >verified-subject.zip
+          test "$(wc -c <verified-subject.zip)" -eq "$ARTIFACT_SIZE"
+          actual="sha256:$(sha256sum verified-subject.zip | cut -d' ' -f1)"
+          test "$actual" = "$ARTIFACT_DIGEST"
+          python3 - <<'PY'
+          import pathlib, stat, zipfile
+          target = pathlib.Path("verified-subject").resolve()
+          allowed = {"verified.tar", "verified-statement.json"}
+          seen = set()
+          total = 0
+          with zipfile.ZipFile("verified-subject.zip") as archive:
+              infos = archive.infolist()
+              for info in infos:
+                  name = info.filename
+                  mode = info.external_attr >> 16
+                  if name in seen or name not in allowed or pathlib.PurePosixPath(name).is_absolute() or ".." in pathlib.PurePosixPath(name).parts:
+                      raise SystemExit("invalid verified artifact member")
+                  seen.add(name)
+                  total += info.file_size
+                  if info.extra or info.file_size > 16 * 1024 * 1024 or total > 64 * 1024 * 1024 or not stat.S_ISREG(mode):
+                      raise SystemExit("invalid verified artifact type or size")
+              if seen != allowed:
+                  raise SystemExit("missing verified artifact member")
+              for info in infos:
+                  name = info.filename
+                  with archive.open(info) as source, (target / name).open("xb") as output:
+                      output.write(source.read())
+          PY
+          test -f verified-subject/verified.tar
+          test -f verified-subject/verified-statement.json
+          marker='<!-- mastermind-verifiable-audit -->'
+          comments=$(gh api --paginate "/repos/$REPOSITORY/issues/$PR_NUMBER/comments")
+          matches=$(jq --arg marker "$marker" '[.[] | select(.user.login == "github-actions[bot]") | select(.body | startswith($marker))]' <<<"$comments")
+          count=$(jq length <<<"$matches")
+          test "$count" -le 1
+          body="$marker
+          ## ✅ Mastermind audit verified
+
+          Publication workflow independently verified the sealed envelope policy for head \`$EXPECTED_HEAD\`. The attestation subject is the verified statement/archive; it does not prove the PR analysis ran in a trusted environment or that findings are true."
+          if test "$count" -eq 1; then
+            comment_id=$(jq -r '.[0].id' <<<"$matches")
+            gh api --method PATCH "/repos/$REPOSITORY/issues/comments/$comment_id" -f body="$body" >/dev/null
+          else
+            gh api --method POST "/repos/$REPOSITORY/issues/$PR_NUMBER/comments" -f body="$body" >/dev/null
+          fi

@@ -4,6 +4,7 @@
 //! dispatcher. Shared types (`Profile`, `UninstallScope`) live in `main.rs`
 //! because they are `ValueEnum` variants embedded in the clap CLI spec.
 
+pub mod audit;
 pub mod ci;
 pub mod demo;
 pub mod init;

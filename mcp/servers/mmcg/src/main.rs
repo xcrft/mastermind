@@ -38,6 +38,21 @@ pub enum Profile {
 }
 
 /// Which parts of a Mastermind setup `uninstall` should remove.
+#[derive(Copy, Clone, Debug, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum MapFormat {
+    Text,
+    Json,
+    Mermaid,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum ImpactFormat {
+    Text,
+    Json,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 #[clap(rename_all = "kebab-case")]
 pub enum UninstallScope {
@@ -84,6 +99,31 @@ enum Cmd {
         /// Re-parse every file regardless of mtime. Use after schema changes or to recover from a stale index.
         #[arg(long)]
         force: bool,
+    },
+    /// Build a compact deterministic architecture briefing from the codegraph.
+    Map {
+        /// Repository-relative file or directory scope. Defaults to the index root.
+        #[arg(default_value = ".")]
+        path: String,
+        #[arg(long, value_enum, default_value = "text")]
+        format: MapFormat,
+        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..=6))]
+        depth: u8,
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=100))]
+        top: u32,
+    },
+    /// Analyze changed symbols, affected callers, component crossings, and candidate tests.
+    Impact {
+        #[arg(long)]
+        since: String,
+        #[arg(long, value_enum, default_value_t = ImpactFormat::Text)]
+        format: ImpactFormat,
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(1..=5))]
+        depth: u32,
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=500))]
+        top: u32,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
     },
     /// Run as an MCP stdio server. Reads JSON-RPC from stdin, writes to stdout.
     Serve,
@@ -166,9 +206,7 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
-    /// Interactive configuration for an external tool — currently only Claude
-    /// Code. Safe by default: prints a diff and exits without writing unless
-    /// `--write-mcp` is passed.
+    /// Dry-run-first MCP configuration for supported clients.
     #[command(subcommand)]
     Setup(SetupCmd),
     /// Pre-execution gate: mechanical checks on a spec file before handing
@@ -219,6 +257,9 @@ enum Cmd {
         #[arg(long)]
         bundle: Option<PathBuf>,
     },
+    /// Verify or sign sealed schema-v3 audit envelopes.
+    #[command(subcommand)]
+    Audit(AuditCmd),
     /// Health-check the environment for adoption — index existence,
     /// freshness, gitignore, CLAUDE.md workflow markers, MCP config,
     /// `mastermind serve` handshake. Exit code 0 if no checks fail.
@@ -300,9 +341,20 @@ enum Cmd {
     /// produced by `audit-spec --bundle`. Writes to stdout — pipe or redirect
     /// to a file and post via `gh pr comment --body-file <file>`.
     PrComment {
-        /// Path to the bundle JSON file (written by `audit-spec --bundle`).
+        /// Path to the sealed schema-v3 bundle JSON.
         bundle: PathBuf,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        expected_repository: String,
+        #[arg(long)]
+        expected_baseline: String,
+        #[arg(long)]
+        expected_head: String,
     },
+    /// Render an integrity-valid envelope without repository or signer trust.
+    /// The output is explicitly marked untrusted and is forbidden in publication.
+    PrCommentUntrusted { bundle: PathBuf },
     /// CI gate: index, verify all specs, run audit for every spec that has an
     /// executor-report.md, and optionally write bundles. Exit 0 if all pass.
     Ci {
@@ -351,6 +403,51 @@ enum ContextCmd {
         /// Output JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuditCmd {
+    /// Verify content integrity and one or more independent trust anchors.
+    Verify {
+        bundle: PathBuf,
+        #[arg(long)]
+        root: Option<PathBuf>,
+        #[arg(long)]
+        expected_repository: Option<String>,
+        #[arg(long)]
+        expected_baseline: Option<String>,
+        #[arg(long)]
+        expected_head: Option<String>,
+        #[arg(long, requires = "public_key")]
+        signature: Option<PathBuf>,
+        #[arg(long, requires = "signature")]
+        public_key: Option<PathBuf>,
+        #[arg(long)]
+        require_signature: bool,
+        #[arg(long = "trusted-key-id")]
+        trusted_key_ids: Vec<String>,
+        #[arg(long = "revoked-key-id")]
+        revoked_key_ids: Vec<String>,
+        #[arg(long, conflicts_with_all = ["expected_repository", "expected_baseline", "expected_head", "root", "signature", "public_key", "require_signature", "trusted_key_ids", "revoked_key_ids"])]
+        integrity_only: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Write a domain-separated Ed25519 detached signature.
+    Sign {
+        bundle: PathBuf,
+        #[arg(long)]
+        private_key: PathBuf,
+        #[arg(long)]
+        signature: PathBuf,
+    },
+    #[command(hide = true)]
+    PrepareOutput {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        path: PathBuf,
     },
 }
 
@@ -520,24 +617,97 @@ enum QueryCmd {
 
 #[derive(Subcommand)]
 enum SetupCmd {
-    /// Register mmcg with Claude Code's MCP layer. Merges into existing
-    /// `mcpServers` rather than clobbering. Default = print diff + exit
-    /// without writing. Pass `--write-mcp` to apply.
+    /// Configure Claude Code.
     Claude {
-        /// Project-local target: writes `<path>/.mcp.json` instead of
-        /// registering at user scope via `claude mcp add`.
-        #[arg(long)]
-        project: Option<PathBuf>,
-        /// Actually write the config file. Without this, prints diff only.
-        #[arg(long)]
-        write_mcp: bool,
-        /// Alias for the default (no-write) mode — useful for scripting clarity.
-        #[arg(long)]
-        dry_run: bool,
-        /// Overwrite a customized `mmcg` entry.
-        #[arg(long)]
-        force: bool,
+        #[command(flatten)]
+        args: SetupArgs,
     },
+    /// Configure Cursor.
+    Cursor {
+        #[command(flatten)]
+        args: SetupArgs,
+    },
+    /// Configure Codex.
+    Codex {
+        #[command(flatten)]
+        args: SetupArgs,
+    },
+    /// Configure Continue.
+    Continue {
+        #[command(flatten)]
+        args: SetupArgs,
+    },
+    /// Configure an explicit generic MCP JSON file.
+    Generic {
+        #[command(flatten)]
+        args: SetupArgs,
+    },
+}
+
+#[derive(clap::Args, Debug)]
+struct SetupArgs {
+    #[arg(long, value_enum, default_value_t = SetupScope::User)]
+    scope: SetupScope,
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+    #[arg(long)]
+    config: Option<PathBuf>,
+    #[arg(long, alias = "write-mcp")]
+    write: bool,
+    #[arg(long, hide = true)]
+    dry_run: bool,
+    #[arg(long)]
+    remove: bool,
+    #[arg(long)]
+    force: bool,
+    #[arg(long, hide = true)]
+    project: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+enum SetupScope {
+    Project,
+    User,
+}
+
+impl std::fmt::Display for SetupScope {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Project => "project",
+            Self::User => "user",
+        })
+    }
+}
+
+impl From<SetupScope> for mmcg::setup::Scope {
+    fn from(scope: SetupScope) -> Self {
+        match scope {
+            SetupScope::Project => Self::Project,
+            SetupScope::User => Self::User,
+        }
+    }
+}
+
+fn normalize_setup_args(
+    client: mmcg::setup::Client,
+    mut args: SetupArgs,
+) -> Result<SetupArgs, String> {
+    if args.dry_run && args.write {
+        return Err("legacy --dry-run conflicts with --write".into());
+    }
+    if let Some(project) = args.project.take() {
+        if client != mmcg::setup::Client::Claude
+            || args.scope != SetupScope::User
+            || args.root.as_path() != std::path::Path::new(".")
+            || args.config.is_some()
+        {
+            return Err("legacy --project conflicts with client, scope, root, or config".into());
+        }
+        args.scope = SetupScope::Project;
+        args.root = project;
+    }
+    Ok(args)
 }
 
 fn default_index_path() -> PathBuf {
@@ -553,8 +723,10 @@ fn parse_cli() -> Cli {
     Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
 }
 
-fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = parse_cli();
+fn run_cli_inner(
+    cli: Cli,
+    impact_engine: &mmcg::queries::ImpactEngine<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let index_path = cli.index.unwrap_or_else(default_index_path);
 
     match cli.cmd {
@@ -580,6 +752,32 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if stats.files_failed > 0 {
                 eprintln!("warning: {} files failed to parse", stats.files_failed);
             }
+        }
+        Cmd::Map {
+            path,
+            format,
+            depth,
+            top,
+        } => commands::query::dispatch_map(&path, format, depth, top, &index_path)?,
+        Cmd::Impact {
+            since,
+            format,
+            depth,
+            top,
+            root,
+        } => {
+            let root = root
+                .canonicalize()
+                .map_err(|_| mmcg::queries::ChangeImpactError::RootMismatch)?;
+            let store = Store::open(&index_path)
+                .map_err(|_| mmcg::queries::ChangeImpactError::IndexStale)?;
+            let top =
+                usize::try_from(top).map_err(|_| mmcg::queries::ChangeImpactError::InvalidRef)?;
+            let response = impact_engine(&store, &root, &since, depth, top)?;
+            print!(
+                "{}",
+                commands::query::render_change_impact(&response, format)?
+            );
         }
         Cmd::Serve => {
             let store = Store::open(&index_path)?;
@@ -638,25 +836,38 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
             commands::do_uninstall(&root, scope, force)?;
         }
-        Cmd::Setup(SetupCmd::Claude {
-            project,
-            write_mcp,
-            dry_run: _,
-            force,
-        }) => {
+        Cmd::Setup(setup_cmd) => {
             let me = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
-            let opts = mmcg::setup::Opts {
-                write: write_mcp,
-                force,
+            let (client, args) = match setup_cmd {
+                SetupCmd::Claude { args } => (mmcg::setup::Client::Claude, args),
+                SetupCmd::Cursor { args } => (mmcg::setup::Client::Cursor, args),
+                SetupCmd::Codex { args } => (mmcg::setup::Client::Codex, args),
+                SetupCmd::Continue { args } => (mmcg::setup::Client::Continue, args),
+                SetupCmd::Generic { args } => (mmcg::setup::Client::Generic, args),
             };
-            let outcome = if let Some(p) = project {
-                let root = p
-                    .canonicalize()
-                    .map_err(|e| format!("canonicalize {}: {e}", p.display()))?;
-                mmcg::setup::run_claude(&mmcg::setup::Target::project(&root), &me, opts)
+            let args = normalize_setup_args(client, args)?;
+            let scope = mmcg::setup::Scope::from(args.scope);
+            let invalid = (client == mmcg::setup::Client::Codex
+                && scope == mmcg::setup::Scope::Project)
+                || (client == mmcg::setup::Client::Generic && args.config.is_none())
+                || (client != mmcg::setup::Client::Generic && args.config.is_some());
+            let root = if invalid {
+                args.root
             } else {
-                mmcg::setup::add_claude_user(&me, opts)
+                args.root
+                    .canonicalize()
+                    .map_err(|e| format!("canonicalize {}: {e}", args.root.display()))?
             };
+            let request = mmcg::setup::Request {
+                client,
+                scope,
+                root,
+                config: args.config,
+                write: args.write,
+                remove: args.remove,
+                force: args.force,
+            };
+            let outcome = mmcg::setup::run(&request, &me);
             if matches!(
                 outcome,
                 mmcg::setup::Outcome::Error | mmcg::setup::Outcome::RefusedOverwrite
@@ -691,6 +902,45 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 bundle.as_deref(),
             )?;
         }
+        Cmd::Audit(AuditCmd::Verify {
+            bundle,
+            root,
+            expected_repository,
+            expected_baseline,
+            expected_head,
+            signature,
+            public_key,
+            require_signature,
+            trusted_key_ids,
+            revoked_key_ids,
+            integrity_only,
+            json,
+        }) => {
+            commands::audit::validate_key_ids(&trusted_key_ids)?;
+            commands::audit::validate_key_ids(&revoked_key_ids)?;
+            commands::audit::verify(commands::audit::VerifyOptions {
+                bundle,
+                root,
+                expected_repository,
+                expected_baseline,
+                expected_head,
+                signature,
+                public_key,
+                require_signature,
+                trusted_key_ids,
+                revoked_key_ids,
+                integrity_only,
+                json,
+            })?;
+        }
+        Cmd::Audit(AuditCmd::Sign {
+            bundle,
+            private_key,
+            signature,
+        }) => commands::audit::sign(&bundle, &private_key, &signature)?,
+        Cmd::Audit(AuditCmd::PrepareOutput { root, path }) => {
+            commands::audit::prepare_output(&root, &path)?;
+        }
         Cmd::Doctor {
             root,
             json,
@@ -718,8 +968,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::Tour => {
             commands::tour();
         }
-        Cmd::PrComment { bundle } => {
-            commands::pr_comment(&bundle)?;
+        Cmd::PrComment {
+            bundle,
+            root,
+            expected_repository,
+            expected_baseline,
+            expected_head,
+        } => {
+            commands::pr_comment(
+                &bundle,
+                &root,
+                &expected_repository,
+                &expected_baseline,
+                &expected_head,
+            )?;
+        }
+        Cmd::PrCommentUntrusted { bundle } => {
+            commands::pr_comment::run_untrusted(&bundle)?;
         }
         Cmd::Ci {
             since,
@@ -816,12 +1081,142 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn main() -> ExitCode {
-    match run() {
+fn run_cli(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    run_cli_inner(cli, &mmcg::queries::change_impact)
+}
+
+#[cfg(test)]
+fn run_cli_with_impact_engine(
+    cli: Cli,
+    impact_engine: &mmcg::queries::ImpactEngine<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    run_cli_inner(cli, impact_engine)
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    run_cli(parse_cli())
+}
+
+fn cli_error_line(error: &(dyn std::error::Error + 'static)) -> String {
+    if let Some(error) = error.downcast_ref::<mmcg::queries::ChangeImpactError>() {
+        error.code().to_string()
+    } else {
+        format!("mmcg error: {error}")
+    }
+}
+
+fn render_exit(
+    result: Result<(), Box<dyn std::error::Error>>,
+    stderr: &mut dyn std::io::Write,
+) -> ExitCode {
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("mmcg error: {e}");
+            let _ = writeln!(stderr, "{}", cli_error_line(e.as_ref()));
             ExitCode::FAILURE
         }
+    }
+}
+
+fn main() -> ExitCode {
+    render_exit(run(), &mut std::io::stderr())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn claude_setup_args(argv: &[&str]) -> SetupArgs {
+        let cli = Cli::try_parse_from(argv).unwrap();
+        let Cmd::Setup(SetupCmd::Claude { args }) = cli.cmd else {
+            panic!("expected claude setup command");
+        };
+        args
+    }
+
+    #[test]
+    fn legacy_claude_dry_run_flag_is_accepted_and_conflicts_with_write() {
+        let args = claude_setup_args(&["mastermind", "setup", "claude", "--dry-run"]);
+        assert!(normalize_setup_args(mmcg::setup::Client::Claude, args).is_ok());
+
+        let args = claude_setup_args(&["mastermind", "setup", "claude", "--dry-run", "--write"]);
+        assert_eq!(
+            normalize_setup_args(mmcg::setup::Client::Claude, args).unwrap_err(),
+            "legacy --dry-run conflicts with --write"
+        );
+    }
+
+    #[test]
+    fn impact_cli_dispatch_renders_all_engine_failures_as_code_only() {
+        let root =
+            std::env::temp_dir().join(format!("mmcg-cli-impact-errors-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let index = root.join("impact-errors.db");
+        for (error, code) in [
+            (mmcg::queries::ChangeImpactError::InvalidRef, "invalid_ref"),
+            (
+                mmcg::queries::ChangeImpactError::RootMismatch,
+                "root_mismatch",
+            ),
+            (mmcg::queries::ChangeImpactError::IndexStale, "index_stale"),
+            (
+                mmcg::queries::ChangeImpactError::SnapshotChanged,
+                "snapshot_changed",
+            ),
+            (mmcg::queries::ChangeImpactError::GitTimeout, "git_timeout"),
+            (
+                mmcg::queries::ChangeImpactError::GitOutputLimit,
+                "git_output_limit",
+            ),
+        ] {
+            let injected_detail = "injected-engine-detail-must-not-leak";
+            let cli = Cli::try_parse_from([
+                "mastermind",
+                "--index",
+                index.to_str().unwrap(),
+                "impact",
+                "--since",
+                injected_detail,
+                "--format",
+                "json",
+                "--root",
+                root.to_str().unwrap(),
+            ])
+            .unwrap();
+            let engine = |_: &Store, _: &std::path::Path, git_ref: &str, _: u32, _: usize| {
+                assert_eq!(git_ref, injected_detail);
+                Err(error)
+            };
+            let result = run_cli_with_impact_engine(cli, &engine);
+            let mut stderr = Vec::new();
+            assert_eq!(render_exit(result, &mut stderr), ExitCode::FAILURE);
+            let transcript = String::from_utf8(stderr).unwrap();
+            assert_eq!(transcript, format!("{code}\n"));
+            assert!(!transcript.contains(injected_detail));
+        }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn audit_verify_requires_both_signature_and_public_key() {
+        assert!(Cli::try_parse_from([
+            "mastermind",
+            "audit",
+            "verify",
+            "bundle.json",
+            "--signature",
+            "bundle.sig.json",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "mastermind",
+            "audit",
+            "verify",
+            "bundle.json",
+            "--public-key",
+            "audit.pub",
+        ])
+        .is_err());
     }
 }

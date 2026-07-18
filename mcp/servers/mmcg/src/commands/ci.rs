@@ -146,9 +146,14 @@ pub fn run(opts: CiOpts, index_path: &Path) -> Result<bool, Box<dyn std::error::
                 er_path_str.as_deref(),
                 Some(&root),
             );
-            let json = serde_json::to_string_pretty(&bundle)
+            let manifest = bundle
+                .into_manifest(&root)
+                .map_err(|e| format!("build audit manifest for {spec_name}: {e}"))?;
+            let envelope = mmcg::audit_bundle::seal_checked(manifest, &root)
+                .map_err(|e| format!("seal audit manifest for {spec_name}: {e}"))?;
+            let json = serde_json::to_vec_pretty(&envelope)
                 .map_err(|e| format!("serialize bundle for {spec_name}: {e}"))?;
-            std::fs::write(&bundle_path, json)
+            mmcg::audit_bundle::write_atomic(&bundle_path, &json, false)
                 .map_err(|e| format!("write bundle {}: {e}", bundle_path.display()))?;
             eprintln!("       bundle → {}", bundle_path.display());
         }

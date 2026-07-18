@@ -28,6 +28,150 @@ pub fn dispatch(q: QueryCmd, index_path: &Path) -> Result<(), Box<dyn std::error
     Ok(())
 }
 
+pub fn dispatch_map(
+    path: &str,
+    format: crate::MapFormat,
+    depth: u8,
+    top: u32,
+    index_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let store = Store::open(index_path)?;
+    let map = queries::project_map(&store, path, depth, top)?;
+    match format {
+        crate::MapFormat::Json => println!("{}", serde_json::to_string_pretty(&map)?),
+        crate::MapFormat::Text => print!("{}", render_map_text(&map)),
+        crate::MapFormat::Mermaid => print!("{}", render_map_mermaid(&map)),
+    }
+    Ok(())
+}
+
+fn safe_text(value: &str) -> String {
+    value.chars().flat_map(char::escape_default).collect()
+}
+
+fn mermaid_label(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        if ch.is_alphanumeric() || matches!(ch, ' ' | '/' | '.' | '_' | '-') {
+            out.push(ch);
+        } else {
+            out.push_str(&format!("&#{};", ch as u32));
+        }
+    }
+    out
+}
+
+fn render_map_text(map: &queries::ProjectMapResponse) -> String {
+    let mut out = format!(
+        "mastermind map — {} ({}, {} files)\n\nLanguages\n",
+        safe_text(&map.scope.path),
+        map.scope.kind,
+        map.files.total.unwrap_or(map.files.returned)
+    );
+    for language in &map.languages.items {
+        out.push_str(&format!(
+            "  {}: {}\n",
+            safe_text(&language.language),
+            language.file_count
+        ));
+    }
+    out.push_str("\nComponents\n");
+    for component in &map.components.items {
+        out.push_str(&format!(
+            "  {} ({} files, {} boundaries)\n",
+            safe_text(&component.path),
+            component.file_count,
+            component.boundaries.returned
+        ));
+    }
+    out.push_str("\nLikely entry points (heuristic)\n");
+    for entry in &map.entry_points.items {
+        out.push_str(&format!("  {}\n", safe_text(&entry.file)));
+    }
+    out.push_str("\nHotspots\n");
+    for hotspot in &map.hotspots.items {
+        out.push_str(&format!(
+            "  {} — {}:{} (in-degree {}, collisions {})\n",
+            safe_text(&hotspot.name),
+            safe_text(&hotspot.file),
+            hotspot.line,
+            hotspot.in_degree,
+            hotspot.name_collision
+        ));
+    }
+    out.push_str("\nPrecision notes\n");
+    for note in &map.precision_notes {
+        out.push_str(&format!("  {}: {}\n", note.code, safe_text(note.message)));
+    }
+    out
+}
+
+fn render_map_mermaid(map: &queries::ProjectMapResponse) -> String {
+    let mut out = String::from("flowchart TD\n");
+    out.push_str(&format!("  n0[\"{}\"]\n", mermaid_label(&map.scope.path)));
+    for (index, component) in map.components.items.iter().enumerate() {
+        let id = index + 1;
+        out.push_str(&format!(
+            "  n{id}[\"{}\"]\n  n0 --> n{id}\n",
+            mermaid_label(&component.path)
+        ));
+    }
+    out
+}
+
+pub fn render_change_impact(
+    response: &queries::ChangeImpactResponse,
+    format: crate::ImpactFormat,
+) -> Result<String, serde_json::Error> {
+    if matches!(format, crate::ImpactFormat::Json) {
+        let mut output = serde_json::to_string_pretty(response)?;
+        output.push('\n');
+        return Ok(output);
+    }
+    let mut output = format!(
+        "mastermind impact — {}..{}\n\nChanged symbols\n",
+        safe_text(&response.baseline.requested_ref),
+        safe_text(&response.baseline.head_oid)
+    );
+    for symbol in &response.changes.symbols.items {
+        output.push_str(&format!(
+            "  {} {} — {}:{} ({})\n",
+            safe_text(&symbol.kind),
+            safe_text(&symbol.name),
+            safe_text(&symbol.file),
+            symbol.line,
+            safe_text(&symbol.change)
+        ));
+    }
+    output.push_str("\nImpacted callers\n");
+    for impact in &response.impact.items {
+        output.push_str(&format!(
+            "  {} — {}:{} (depth {}, {} seeds)\n",
+            safe_text(&impact.symbol.name),
+            safe_text(&impact.symbol.file),
+            impact.symbol.line,
+            impact.minimum_depth,
+            impact.seeds.len()
+        ));
+    }
+    output.push_str("\nCandidate tests\n");
+    for test in &response.tests.items {
+        output.push_str(&format!(
+            "  {} — {}:{} ({}, {})\n",
+            safe_text(&test.symbol.name),
+            safe_text(&test.symbol.file),
+            test.symbol.line,
+            safe_text(&test.classification),
+            safe_text(&test.confidence)
+        ));
+    }
+    output.push_str("\nPrecision notes\n");
+    for note in &response.precision_notes {
+        output.push_str(&format!("  {}\n", safe_text(note)));
+    }
+    Ok(output)
+}
+
 fn execute(store: &Store, q: QueryCmd) -> Result<Value, Box<dyn std::error::Error>> {
     Ok(match q {
         QueryCmd::Search {
@@ -126,4 +270,21 @@ fn execute(store: &Store, q: QueryCmd) -> Result<Value, Box<dyn std::error::Erro
             serde_json::to_value(queries::explain(store, &name, language.as_deref())?)?
         }
     })
+}
+
+#[cfg(test)]
+mod map_tests {
+    use super::*;
+
+    #[test]
+    fn map_renderers_escape_repository_control_syntax() {
+        let hostile = "x\n\u{1b}]0;owned\u{7}%% click [\"`";
+        let text = safe_text(hostile);
+        assert!(!text.contains('\n'));
+        assert!(!text.contains('\u{1b}'));
+        let label = mermaid_label(hostile);
+        assert!(!label.contains("%%"));
+        assert!(!label.contains('['));
+        assert!(!label.contains('"'));
+    }
 }

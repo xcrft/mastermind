@@ -45,6 +45,8 @@ pub fn do_uninstall(
             );
         }
         mmcg::setup::remove_claude(&mmcg::setup::Target::project(root), force);
+        // Other clients are intentionally removed through the explicit,
+        // dry-run-first `mastermind setup <client> --remove` surface.
     }
 
     if do_global {

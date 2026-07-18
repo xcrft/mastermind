@@ -6,7 +6,9 @@
 //!   files(path, indexed_at, symbol_count)
 //!   meta(key, value)
 
-use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
+use rusqlite::{
+    params, types::Value as SqlValue, Connection, OptionalExtension, Result as SqlResult,
+};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -26,6 +28,39 @@ pub struct Symbol {
     /// `",partial,sealed,"`); `None` if none. Used by `mmcg_unreferenced`
     /// filtering and `mmcg_search` partial-class collapse.
     pub decorators: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MapBoundaryRow {
+    pub component: String,
+    pub symbol: Symbol,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapBoundaryMatch {
+    Direct,
+    Recursive,
+}
+
+#[derive(Debug, Clone)]
+pub struct MapBoundaryScope {
+    pub label: String,
+    pub path: String,
+    pub match_mode: MapBoundaryMatch,
+}
+
+#[derive(Debug, Clone)]
+pub struct MapCentralityRow {
+    pub symbol: Symbol,
+    pub in_degree: u32,
+    pub name_collision: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct SeedImpact {
+    pub seed: String,
+    pub symbol: Symbol,
+    pub depth: u32,
 }
 
 /// Column list for every SELECT that hydrates a [`Symbol`] via [`Store::row_to_symbol`].
@@ -85,6 +120,7 @@ pub struct TaskSpecHit {
 pub struct PendingFile {
     pub path: String,
     pub mtime: i64,
+    pub content_sha256: String,
     /// Language id — `python`, `typescript`, `tsx`, `javascript`, `rust`.
     /// Stored on every symbol of this file; powers the `language` query filter
     /// (defends against cross-language name collisions in monorepos).
@@ -239,7 +275,8 @@ impl Store {
                 path                    TEXT PRIMARY KEY,
                 indexed_at              INTEGER NOT NULL,
                 symbol_count            INTEGER NOT NULL,
-                structural_fingerprint  TEXT NOT NULL DEFAULT ''
+                structural_fingerprint  TEXT NOT NULL DEFAULT '',
+                content_sha256          TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS meta (
@@ -280,6 +317,10 @@ impl Store {
         // column name` if already present — the steady-state case, so we discard.
         let _ = self.conn.execute(
             "ALTER TABLE files ADD COLUMN structural_fingerprint TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = self.conn.execute(
+            "ALTER TABLE files ADD COLUMN content_sha256 TEXT NOT NULL DEFAULT ''",
             [],
         );
 
@@ -362,13 +403,14 @@ impl Store {
         // Stamp the file.
         let fingerprint = crate::fingerprint::compute_structural_fingerprint(&pending);
         tx.execute(
-            "INSERT INTO files(path, indexed_at, symbol_count, structural_fingerprint) \
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO files(path, indexed_at, symbol_count, structural_fingerprint, content_sha256) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 &pending.path,
                 pending.mtime,
                 pending.symbols.len() as u32,
-                &fingerprint
+                &fingerprint,
+                &pending.content_sha256
             ],
         )?;
 
@@ -450,6 +492,57 @@ impl Store {
                 |r| r.get(0),
             )
             .optional()
+    }
+
+    pub fn file_content_sha256(&self, path: &str) -> SqlResult<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT content_sha256 FROM files WHERE path = ?1",
+                params![path],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    pub fn set_meta(&self, key: &str, value: &str) -> SqlResult<()> {
+        self.conn.execute(
+            "INSERT INTO meta(key, value) VALUES (?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn meta_value(&self, key: &str) -> SqlResult<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    pub fn data_version(&self) -> SqlResult<u64> {
+        let value: i64 = self
+            .conn
+            .query_row("PRAGMA data_version", [], |row| row.get(0))?;
+        u64::try_from(value).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Integer,
+                Box::new(error),
+            )
+        })
+    }
+
+    pub fn begin_read_snapshot(&self) -> SqlResult<()> {
+        self.conn
+            .execute_batch("BEGIN DEFERRED; SELECT 1 FROM meta LIMIT 1")
+    }
+
+    pub fn end_read_snapshot(&self) -> SqlResult<()> {
+        self.conn.execute_batch("ROLLBACK")
     }
 
     /// All paths currently in the index. The indexer uses this to detect
@@ -571,6 +664,205 @@ impl Store {
             let depth: u32 = r.get(9)?;
             Ok((sym, depth))
         })?;
+        rows.collect()
+    }
+
+    pub fn impact_of_many(
+        &self,
+        names: &[String],
+        max_depth: u32,
+        row_limit: usize,
+    ) -> SqlResult<Vec<SeedImpact>> {
+        if names.is_empty() || names.len() > 200 {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "seed_count".to_string(),
+            ));
+        }
+        if !(1..=5).contains(&max_depth) {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "max_depth".to_string(),
+            ));
+        }
+        if !(1..=5001).contains(&row_limit) {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "row_limit".to_string(),
+            ));
+        }
+
+        let placeholders = (1..=names.len())
+            .map(|index| format!("(?{index})"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let depth_param = names.len() + 1;
+        let limit_param = names.len() + 2;
+        let sql = format!(
+            "WITH RECURSIVE seed(seed) AS (VALUES {placeholders}),
+             walk(seed, sym_id, name, depth, visited) AS (
+                 SELECT seed.seed, s.id, s.name, 1, ',' || s.id || ','
+                 FROM seed
+                 JOIN edges e ON e.kind = 'calls'
+                              AND (e.to_name = seed.seed OR e.to_type = seed.seed)
+                 JOIN symbols s ON s.id = e.from_id
+               UNION ALL
+                 SELECT walk.seed, s.id, s.name, walk.depth + 1,
+                        walk.visited || s.id || ','
+                 FROM walk
+                 JOIN edges e ON e.kind = 'calls'
+                              AND (e.to_name = walk.name OR e.to_type = walk.name)
+                 JOIN symbols s ON s.id = e.from_id
+                 WHERE walk.depth < ?{depth_param}
+                   AND instr(walk.visited, ',' || s.id || ',') = 0
+             ), minimum AS (
+                 SELECT seed, sym_id, MIN(depth) AS depth
+                 FROM walk
+                 GROUP BY seed, sym_id
+             )
+             SELECT minimum.seed, {SYMBOL_COLS_S}, minimum.depth
+             FROM minimum
+             JOIN symbols s ON s.id = minimum.sym_id
+             ORDER BY minimum.depth, s.file_path, s.line_start, minimum.seed,
+                      s.name, s.kind, s.id
+             LIMIT ?{limit_param}"
+        );
+        let mut values: Vec<SqlValue> = names.iter().cloned().map(SqlValue::Text).collect();
+        values.push(SqlValue::Integer(max_depth as i64));
+        values.push(SqlValue::Integer(row_limit as i64));
+
+        let started = std::time::Instant::now();
+        let operations = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handler_operations = operations.clone();
+        self.conn.progress_handler(
+            1_000,
+            Some(move || {
+                handler_operations.fetch_add(1, std::sync::atomic::Ordering::Relaxed) > 250_000
+                    || started.elapsed() > std::time::Duration::from_secs(2)
+            }),
+        )?;
+        let result = (|| {
+            let mut statement = self.conn.prepare(&sql)?;
+            let rows = statement.query_map(rusqlite::params_from_iter(values), |row| {
+                Ok(SeedImpact {
+                    seed: row.get(0)?,
+                    symbol: Symbol {
+                        id: row.get(1)?,
+                        name: row.get(2)?,
+                        kind: row.get(3)?,
+                        file_path: row.get(4)?,
+                        line_start: row.get(5)?,
+                        line_end: row.get(6)?,
+                        signature: row.get(7)?,
+                        parent_id: row.get(8)?,
+                        decorators: row.get(9)?,
+                    },
+                    depth: row.get(10)?,
+                })
+            })?;
+            rows.collect()
+        })();
+        self.conn.progress_handler(0, None::<fn() -> bool>)?;
+        result
+    }
+
+    pub fn scoped_paths_in_components(
+        &self,
+        components: &[String],
+        row_limit: usize,
+    ) -> SqlResult<Vec<String>> {
+        if components.is_empty() || row_limit == 0 || row_limit > 50_001 {
+            return Ok(Vec::new());
+        }
+        let placeholders = (1..=components.len())
+            .map(|index| format!("(?{index})"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let limit_param = components.len() + 1;
+        let sql = format!(
+            "WITH component(path) AS (VALUES {placeholders})
+             SELECT f.path
+             FROM files f
+             WHERE EXISTS (
+                 SELECT 1 FROM component c
+                 WHERE (c.path = '.' AND instr(f.path, '/') = 0)
+                    OR (c.path != '.' AND (
+                        f.path = c.path OR
+                        substr(f.path, 1, length(c.path) + 1) = c.path || '/'
+                    ))
+             )
+             ORDER BY f.path
+             LIMIT ?{limit_param}"
+        );
+        let mut values: Vec<SqlValue> = components.iter().cloned().map(SqlValue::Text).collect();
+        values.push(SqlValue::Integer(row_limit as i64));
+        let mut statement = self.conn.prepare(&sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(values), |row| row.get(0))?;
+        rows.collect()
+    }
+
+    pub fn test_symbols_in_components(
+        &self,
+        components: &[String],
+        row_limit: usize,
+    ) -> SqlResult<Vec<Symbol>> {
+        if components.is_empty() || row_limit == 0 || row_limit > 501 {
+            return Ok(Vec::new());
+        }
+        let placeholders = (1..=components.len())
+            .map(|index| format!("(?{index})"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let limit_param = components.len() + 1;
+        let sql = format!(
+            "WITH component(path) AS (VALUES {placeholders})
+             SELECT DISTINCT {SYMBOL_COLS_S}
+             FROM symbols s
+             WHERE s.kind != 'module'
+               AND EXISTS (
+                   SELECT 1 FROM component c
+                   WHERE (c.path = '.' AND instr(s.file_path, '/') = 0)
+                      OR (c.path != '.' AND (
+                          s.file_path = c.path OR
+                          substr(s.file_path, 1, length(c.path) + 1) = c.path || '/'
+                      ))
+               )
+               AND (
+                   lower(s.file_path) LIKE 'test_%'
+                   OR lower(s.file_path) LIKE '%/test_%'
+                   OR lower(s.file_path) LIKE '%/tests/%'
+                   OR lower(s.file_path) LIKE '%/test/%'
+                   OR lower(s.file_path) LIKE '%/spec/%'
+                   OR lower(s.file_path) LIKE '%.test.%'
+                   OR lower(s.file_path) LIKE '%.spec.%'
+                   OR lower(s.file_path) LIKE '%_test.rs'
+                   OR lower(s.file_path) LIKE '%tests.rs'
+               )
+               AND (
+                   lower(s.name) LIKE 'test%'
+                   OR lower(s.name) IN ('it', 'spec')
+                   OR instr(COALESCE(s.decorators, ''), ',test,') > 0
+                   OR instr(COALESCE(s.decorators, ''), ',tokio::test,') > 0
+                   OR instr(COALESCE(s.decorators, ''), ',async_std::test,') > 0
+                   OR instr(COALESCE(s.decorators, ''), ',Fact,') > 0
+                   OR instr(COALESCE(s.decorators, ''), ',Theory,') > 0
+                   OR instr(COALESCE(s.decorators, ''), ',TestMethod,') > 0
+                   OR instr(COALESCE(s.decorators, ''), ',TestCase,') > 0
+                   OR instr(COALESCE(s.decorators, ''), ',ParameterizedTest,') > 0
+               )
+               AND lower(s.name) NOT IN (
+                   'setup', 'teardown', 'setup_method', 'teardown_method',
+                   'beforeeach', 'aftereach', 'beforeall', 'afterall',
+                   'testinitialize', 'testcleanup'
+               )
+               AND instr(COALESCE(s.decorators, ''), ',fixture,') = 0
+               AND instr(COALESCE(s.decorators, ''), ',pytest.fixture,') = 0
+               AND instr(COALESCE(s.decorators, ''), ',SetUp,') = 0
+               AND instr(COALESCE(s.decorators, ''), ',TearDown,') = 0
+             ORDER BY s.file_path, s.line_start, s.name, s.kind, s.id
+             LIMIT ?{limit_param}"
+        );
+        let mut values: Vec<SqlValue> = components.iter().cloned().map(SqlValue::Text).collect();
+        values.push(SqlValue::Integer(row_limit as i64));
+        let mut statement = self.conn.prepare(&sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(values), Self::row_to_symbol)?;
         rows.collect()
     }
 
@@ -813,6 +1105,263 @@ impl Store {
             let in_degree: u32 = r.get(9)?;
             let name_collision: u32 = r.get(10)?;
             Ok((sym, in_degree, name_collision))
+        })?;
+        rows.collect()
+    }
+
+    pub fn map_paths(&self, scope: &str, kind: &str, limit: usize) -> SqlResult<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path
+             FROM files
+             WHERE ?2 = 'root'
+                OR (?2 = 'file' AND path = ?1)
+                OR (
+                    ?2 = 'directory'
+                    AND substr(path, 1, length(?1) + 1) = ?1 || '/'
+                )
+             ORDER BY path
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![scope, kind, limit as i64], |row| row.get(0))?;
+        rows.collect()
+    }
+
+    pub fn map_boundaries(
+        &self,
+        components: &[MapBoundaryScope],
+        limit_per_component: usize,
+        global_limit: usize,
+    ) -> SqlResult<Vec<MapBoundaryRow>> {
+        if components.is_empty() || limit_per_component == 0 || global_limit == 0 {
+            return Ok(Vec::new());
+        }
+        let placeholders = (0..components.len())
+            .map(|index| {
+                let first = index * 3 + 1;
+                format!("(?{first}, ?{}, ?{})", first + 1, first + 2)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let per_component_param = components.len() * 3 + 1;
+        let global_param = components.len() * 3 + 2;
+        let sql = format!(
+            "WITH component(component, path, direct_only) AS (VALUES {placeholders}),
+             ranked AS (
+                 SELECT c.component,
+                        {SYMBOL_COLS_S},
+                        COALESCE(parent.file_path, '') AS parent_file_path,
+                        COALESCE(parent.line_start, -1) AS parent_line_start,
+                        COALESCE(parent.name, '') AS parent_name,
+                        COALESCE(parent.kind, '') AS parent_kind,
+                        COALESCE(parent.line_end, -1) AS parent_line_end,
+                        COALESCE(parent.signature, '') AS parent_signature,
+                        COALESCE(parent.decorators, '') AS parent_decorators,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY c.component
+                            ORDER BY s.file_path, s.line_start, s.name, s.kind, s.line_end,
+                                     COALESCE(s.signature, ''), COALESCE(s.decorators, ''),
+                                     COALESCE(parent.file_path, ''),
+                                     COALESCE(parent.line_start, -1),
+                                     COALESCE(parent.name, ''), COALESCE(parent.kind, ''),
+                                     COALESCE(parent.line_end, -1),
+                                     COALESCE(parent.signature, ''),
+                                     COALESCE(parent.decorators, '')
+                        ) AS position
+                 FROM component c
+                 JOIN symbols s
+                   ON (
+                       c.direct_only = 1
+                       AND (
+                           (c.path = '' AND instr(s.file_path, '/') = 0)
+                           OR (
+                               c.path != ''
+                               AND substr(s.file_path, 1, length(c.path) + 1) = c.path || '/'
+                               AND instr(substr(s.file_path, length(c.path) + 2), '/') = 0
+                           )
+                       )
+                   ) OR (
+                       c.direct_only = 0
+                       AND substr(s.file_path, 1, length(c.path) + 1) = c.path || '/'
+                   )
+                 LEFT JOIN symbols parent ON parent.id = s.parent_id
+                 WHERE s.kind != 'module'
+                   AND EXISTS (
+                       SELECT 1
+                       FROM edges e
+                       JOIN symbols caller ON caller.id = e.from_id
+                       WHERE e.kind = 'calls'
+                         AND (e.to_name = s.name OR e.to_type = s.name)
+                         AND NOT (
+                             (
+                                 c.direct_only = 1
+                                 AND (
+                                     (c.path = '' AND instr(caller.file_path, '/') = 0)
+                                     OR (
+                                         c.path != ''
+                                         AND substr(caller.file_path, 1, length(c.path) + 1)
+                                             = c.path || '/'
+                                         AND instr(
+                                             substr(caller.file_path, length(c.path) + 2),
+                                             '/'
+                                         ) = 0
+                                     )
+                                 )
+                             ) OR (
+                                 c.direct_only = 0
+                                 AND substr(caller.file_path, 1, length(c.path) + 1)
+                                     = c.path || '/'
+                             )
+                         )
+                   )
+             )
+             SELECT component,
+                    id, name, kind, file_path, line_start, line_end, signature, parent_id, decorators
+             FROM ranked
+             WHERE position <= ?{per_component_param}
+             ORDER BY component, file_path, line_start, name, kind, line_end,
+                      COALESCE(signature, ''), COALESCE(decorators, ''),
+                      parent_file_path, parent_line_start, parent_name, parent_kind,
+                      parent_line_end, parent_signature, parent_decorators
+             LIMIT ?{global_param}"
+        );
+        let mut values = Vec::with_capacity(components.len() * 3 + 2);
+        for component in components {
+            values.push(SqlValue::Text(component.label.clone()));
+            values.push(SqlValue::Text(component.path.clone()));
+            values.push(SqlValue::Integer(match component.match_mode {
+                MapBoundaryMatch::Direct => 1,
+                MapBoundaryMatch::Recursive => 0,
+            }));
+        }
+        values.push(SqlValue::Integer(limit_per_component as i64));
+        values.push(SqlValue::Integer(global_limit as i64));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(values), |row| {
+            Ok(MapBoundaryRow {
+                component: row.get(0)?,
+                symbol: Symbol {
+                    id: row.get(1)?,
+                    name: row.get(2)?,
+                    kind: row.get(3)?,
+                    file_path: row.get(4)?,
+                    line_start: row.get(5)?,
+                    line_end: row.get(6)?,
+                    signature: row.get(7)?,
+                    parent_id: row.get(8)?,
+                    decorators: row.get(9)?,
+                },
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn map_centrality(
+        &self,
+        scope: &str,
+        kind: &str,
+        top_probe: usize,
+    ) -> SqlResult<Vec<MapCentralityRow>> {
+        let sql = format!(
+            "WITH scoped_defs AS (
+                 SELECT {SYMBOL_COLS_S},
+                        COALESCE(parent.file_path, '') AS parent_file_path,
+                        COALESCE(parent.line_start, -1) AS parent_line_start,
+                        COALESCE(parent.name, '') AS parent_name,
+                        COALESCE(parent.kind, '') AS parent_kind,
+                        COALESCE(parent.line_end, -1) AS parent_line_end,
+                        COALESCE(parent.signature, '') AS parent_signature,
+                        COALESCE(parent.decorators, '') AS parent_decorators
+                 FROM symbols s
+                 LEFT JOIN symbols parent ON parent.id = s.parent_id
+                 WHERE s.kind != 'module'
+                   AND (
+                       ?2 = 'root'
+                       OR (?2 = 'file' AND s.file_path = ?1)
+                       OR (
+                           ?2 = 'directory'
+                           AND substr(s.file_path, 1, length(?1) + 1) = ?1 || '/'
+                       )
+                   )
+             ),
+             degrees AS (
+                 SELECT d.id, COUNT(DISTINCT e.from_id) AS in_degree
+                 FROM scoped_defs d
+                 JOIN edges e
+                   ON e.kind = 'calls'
+                  AND (e.to_name = d.name OR e.to_type = d.name)
+                 GROUP BY d.id
+             ),
+             scoped_names AS (
+                 SELECT DISTINCT name
+                 FROM scoped_defs
+             ),
+             collisions AS (
+                 SELECT n.name,
+                        (
+                            SELECT COUNT(*)
+                            FROM symbols s INDEXED BY idx_symbols_name
+                            WHERE s.kind != 'module' AND s.name = n.name
+                        ) AS name_collision
+                 FROM scoped_names n
+             )
+             SELECT d.id, d.name, d.kind, d.file_path, d.line_start, d.line_end,
+                    d.signature, d.parent_id, d.decorators,
+                    degrees.in_degree, collisions.name_collision
+             FROM scoped_defs d
+             JOIN degrees ON degrees.id = d.id
+             JOIN collisions ON collisions.name = d.name
+             ORDER BY degrees.in_degree DESC, d.file_path, d.line_start, d.name,
+                      d.kind, d.line_end, COALESCE(d.signature, ''),
+                      COALESCE(d.decorators, ''), d.parent_file_path,
+                      d.parent_line_start, d.parent_name, d.parent_kind,
+                      d.parent_line_end, d.parent_signature, d.parent_decorators
+             LIMIT ?3"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![scope, kind, top_probe as i64], |row| {
+            Ok(MapCentralityRow {
+                symbol: Self::row_to_symbol(row)?,
+                in_degree: row.get(9)?,
+                name_collision: row.get(10)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn map_import_edges(
+        &self,
+        scope: &str,
+        kind: &str,
+        limit: usize,
+    ) -> SqlResult<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT source.file_path, target.file_path
+             FROM edges e
+             JOIN symbols source ON source.id = e.from_id
+             JOIN symbols target ON target.name = e.to_name
+             WHERE e.kind = 'imports'
+               AND source.file_path != target.file_path
+               AND (
+                   ?2 = 'root'
+                   OR (?2 = 'file' AND source.file_path = ?1)
+                   OR (
+                       ?2 = 'directory'
+                       AND substr(source.file_path, 1, length(?1) + 1) = ?1 || '/'
+                   )
+               )
+               AND (
+                   ?2 = 'root'
+                   OR (?2 = 'file' AND target.file_path = ?1)
+                   OR (
+                       ?2 = 'directory'
+                       AND substr(target.file_path, 1, length(?1) + 1) = ?1 || '/'
+                   )
+               )
+             ORDER BY source.file_path, target.file_path
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![scope, kind, limit as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?))
         })?;
         rows.collect()
     }
@@ -1755,6 +2304,356 @@ mod tests {
     }
 
     #[test]
+    fn map_scoped_queries_treat_percent_and_underscore_literally() {
+        let path = tmp_db("map_literal_scope");
+        let store = Store::open(&path).unwrap();
+        for file in [
+            "src/%dir/a.rs",
+            "src/%directory/b.rs",
+            "src/_dir/c.rs",
+            "src/xdir/d.rs",
+            "src/%file.rs",
+            "src/other.rs",
+        ] {
+            store.upsert_file(file, 1, 1).unwrap();
+        }
+
+        assert_eq!(
+            store.map_paths("src/%dir", "directory", 10).unwrap(),
+            vec!["src/%dir/a.rs"]
+        );
+        assert_eq!(
+            store.map_paths("src/_dir", "directory", 10).unwrap(),
+            vec!["src/_dir/c.rs"]
+        );
+        assert_eq!(
+            store.map_paths("src/%file.rs", "file", 10).unwrap(),
+            vec!["src/%file.rs"]
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn map_boundaries_use_one_batched_statement_and_exact_external_scope() {
+        let path = tmp_db("map_boundaries");
+        let store = Store::open(&path).unwrap();
+        let app_target = store
+            .insert_symbol(
+                "app_target",
+                "function",
+                "src/app/lib.rs",
+                10,
+                12,
+                None,
+                None,
+            )
+            .unwrap();
+        let core_target = store
+            .insert_symbol(
+                "core_target",
+                "function",
+                "src/core/lib.rs",
+                20,
+                22,
+                None,
+                None,
+            )
+            .unwrap();
+        let app_internal = store
+            .insert_symbol(
+                "app_internal",
+                "function",
+                "src/app/internal.rs",
+                1,
+                3,
+                None,
+                None,
+            )
+            .unwrap();
+        let app_sibling = store
+            .insert_symbol(
+                "app_sibling",
+                "function",
+                "src/application/caller.rs",
+                1,
+                3,
+                None,
+                None,
+            )
+            .unwrap();
+        let core_external = store
+            .insert_symbol("core_external", "function", "src/main.rs", 1, 3, None, None)
+            .unwrap();
+        store
+            .insert_edge(app_internal, Some(app_target), "app_target", "calls", 2)
+            .unwrap();
+        store
+            .insert_edge(app_sibling, Some(app_target), "app_target", "calls", 2)
+            .unwrap();
+        store
+            .insert_edge(core_external, Some(core_target), "core_target", "calls", 2)
+            .unwrap();
+
+        let rows = store
+            .map_boundaries(
+                &[
+                    MapBoundaryScope {
+                        label: "src/app".into(),
+                        path: "src/app".into(),
+                        match_mode: MapBoundaryMatch::Recursive,
+                    },
+                    MapBoundaryScope {
+                        label: "src/core".into(),
+                        path: "src/core".into(),
+                        match_mode: MapBoundaryMatch::Recursive,
+                    },
+                ],
+                20,
+                400,
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].component, "src/app");
+        assert_eq!(rows[0].symbol.name, "app_target");
+        assert_eq!(rows[1].component, "src/core");
+        assert_eq!(rows[1].symbol.name, "core_target");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn map_queries_obey_probe_limits_and_name_tie_order() {
+        let path = tmp_db("map_probe_limits");
+        let store = Store::open(&path).unwrap();
+        for file in ["src/a.rs", "src/b.rs", "src/c.rs"] {
+            store.upsert_file(file, 1, 1).unwrap();
+        }
+        assert_eq!(
+            store.map_paths("src", "directory", 2).unwrap(),
+            vec!["src/a.rs", "src/b.rs"]
+        );
+
+        let zed = store
+            .insert_symbol("zed", "function", "src/a.rs", 10, 12, None, None)
+            .unwrap();
+        let alpha = store
+            .insert_symbol("alpha", "function", "src/a.rs", 10, 12, None, None)
+            .unwrap();
+        let caller = store
+            .insert_symbol("caller", "function", "other.rs", 1, 3, None, None)
+            .unwrap();
+        store
+            .insert_edge(caller, Some(zed), "zed", "calls", 2)
+            .unwrap();
+        store
+            .insert_edge(caller, Some(alpha), "alpha", "calls", 3)
+            .unwrap();
+
+        let ranked = store.map_centrality("src", "directory", 1).unwrap();
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].symbol.name, "alpha");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn map_centrality_collision_work_is_seeded_by_scoped_names() {
+        let path = tmp_db("map_scoped_collision_work");
+        let store = Store::open(&path).unwrap();
+        let target = store
+            .insert_symbol("shared", "function", "src/app/lib.rs", 1, 3, None, None)
+            .unwrap();
+        store
+            .insert_symbol("shared", "function", "vendor/shared.rs", 1, 3, None, None)
+            .unwrap();
+        let caller = store
+            .insert_symbol("caller", "function", "outside.rs", 1, 3, None, None)
+            .unwrap();
+        store
+            .insert_edge(caller, Some(target), "shared", "calls", 2)
+            .unwrap();
+        for index in 0..2_000 {
+            store
+                .insert_symbol(
+                    &format!("unrelated_{index:04}"),
+                    "function",
+                    &format!("vendor/f{index:04}.rs"),
+                    1,
+                    1,
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+
+        let rows = store.map_centrality("src/app", "directory", 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].symbol.name, "shared");
+        assert_eq!(rows[0].name_collision, 2);
+
+        let mut stmt = store
+            .conn
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                 WITH scoped_defs AS (
+                     SELECT name
+                     FROM symbols
+                     WHERE kind != 'module'
+                       AND substr(file_path, 1, length(?1) + 1) = ?1 || '/'
+                 ),
+                 scoped_names AS (
+                     SELECT DISTINCT name FROM scoped_defs
+                 )
+                 SELECT n.name,
+                        (
+                            SELECT COUNT(*)
+                            FROM symbols s INDEXED BY idx_symbols_name
+                            WHERE s.kind != 'module' AND s.name = n.name
+                        )
+                 FROM scoped_names n",
+            )
+            .unwrap();
+        let plan = stmt
+            .query_map(params!["src/app"], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<SqlResult<Vec<_>>>()
+            .unwrap();
+        assert!(plan
+            .iter()
+            .any(|detail| detail.contains("CORRELATED SCALAR SUBQUERY")));
+        assert!(plan
+            .iter()
+            .any(|detail| detail.contains("idx_symbols_name")));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn map_store_ordering_never_uses_database_id_as_observable_tiebreak() {
+        type SymbolOrder = Vec<(String, Option<String>)>;
+
+        fn snapshot(path: &Path, reverse: bool) -> (SymbolOrder, SymbolOrder) {
+            let store = Store::open(path).unwrap();
+            store.upsert_file("src/lib.rs", 1, 1).unwrap();
+            store.upsert_file("outside.rs", 1, 1).unwrap();
+            let mut variants = vec![
+                ("function", Some("fn tied()")),
+                ("method", Some("fn tied(&self)")),
+            ];
+            if reverse {
+                variants.reverse();
+            }
+            let mut target = None;
+            for (kind, signature) in variants {
+                let id = store
+                    .insert_symbol("tied", kind, "src/lib.rs", 10, 12, signature, None)
+                    .unwrap();
+                target.get_or_insert(id);
+            }
+            let caller = store
+                .insert_symbol("caller", "function", "outside.rs", 1, 2, None, None)
+                .unwrap();
+            store
+                .insert_edge(caller, target, "tied", "calls", 1)
+                .unwrap();
+
+            let boundaries = store
+                .map_boundaries(
+                    &[MapBoundaryScope {
+                        label: ".".into(),
+                        path: "src".into(),
+                        match_mode: MapBoundaryMatch::Direct,
+                    }],
+                    21,
+                    401,
+                )
+                .unwrap()
+                .into_iter()
+                .map(|row| (row.symbol.kind, row.symbol.signature))
+                .collect();
+            let centrality = store
+                .map_centrality("src", "directory", 10)
+                .unwrap()
+                .into_iter()
+                .map(|row| (row.symbol.kind, row.symbol.signature))
+                .collect();
+            (boundaries, centrality)
+        }
+
+        let first_path = tmp_db("map_store_semantic_order_first");
+        let second_path = tmp_db("map_store_semantic_order_second");
+        let first = snapshot(&first_path, false);
+        let second_before = snapshot(&second_path, true);
+        assert_eq!(first, second_before);
+        assert_eq!(
+            first.0,
+            vec![
+                ("function".into(), Some("fn tied()".into())),
+                ("method".into(), Some("fn tied(&self)".into())),
+            ]
+        );
+        Store::open(&second_path)
+            .unwrap()
+            .conn
+            .execute_batch("VACUUM")
+            .unwrap();
+        let second_after = {
+            let store = Store::open(&second_path).unwrap();
+            let boundaries = store
+                .map_boundaries(
+                    &[MapBoundaryScope {
+                        label: ".".into(),
+                        path: "src".into(),
+                        match_mode: MapBoundaryMatch::Direct,
+                    }],
+                    21,
+                    401,
+                )
+                .unwrap()
+                .into_iter()
+                .map(|row| (row.symbol.kind, row.symbol.signature))
+                .collect::<Vec<_>>();
+            let centrality = store
+                .map_centrality("src", "directory", 10)
+                .unwrap()
+                .into_iter()
+                .map(|row| (row.symbol.kind, row.symbol.signature))
+                .collect::<Vec<_>>();
+            (boundaries, centrality)
+        };
+        assert_eq!(first, second_after);
+        std::fs::remove_file(&first_path).ok();
+        std::fs::remove_file(&second_path).ok();
+    }
+
+    #[test]
+    fn map_import_edges_are_scoped_before_fetch() {
+        let path = tmp_db("map_import_edges");
+        let store = Store::open(&path).unwrap();
+        let inside_source = store
+            .insert_symbol("<module>", "module", "src/app/a.rs", 1, 20, None, None)
+            .unwrap();
+        let outside_source = store
+            .insert_symbol("<module>", "module", "src/other.rs", 1, 20, None, None)
+            .unwrap();
+        store
+            .insert_symbol("target", "function", "src/app/b.rs", 1, 3, None, None)
+            .unwrap();
+        store
+            .insert_symbol("target", "function", "src/outside/b.rs", 1, 3, None, None)
+            .unwrap();
+        store
+            .insert_edge(inside_source, None, "target", "imports", 2)
+            .unwrap();
+        store
+            .insert_edge(outside_source, None, "target", "imports", 2)
+            .unwrap();
+
+        assert_eq!(
+            store.map_import_edges("src/app", "directory", 1).unwrap(),
+            vec![("src/app/a.rs".into(), "src/app/b.rs".into())]
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn scratchpad_append_and_read_newest_first() {
         let path = tmp_db("scratchpad_basic");
         let mut store = Store::open(&path).unwrap();
@@ -1810,5 +2709,78 @@ mod tests {
         let store = Store::open(&path).unwrap();
         let rows = store.scratchpad_read(None, None, None, 10).unwrap();
         assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn impact_of_many_preserves_seed_evidence_and_minimum_depth() {
+        let path = tmp_db("impact_many_evidence");
+        let store = Store::open(&path).unwrap();
+        let direct = store
+            .insert_symbol("direct", "function", "src/direct.rs", 1, 2, None, None)
+            .unwrap();
+        let converged = store
+            .insert_symbol("converged", "function", "tests/test.rs", 3, 4, None, None)
+            .unwrap();
+        store
+            .insert_edge(direct, None, "alpha", "calls", 1)
+            .unwrap();
+        store.insert_edge(direct, None, "beta", "calls", 1).unwrap();
+        store
+            .insert_edge(converged, None, "direct", "calls", 3)
+            .unwrap();
+
+        let rows = store
+            .impact_of_many(&["beta".to_string(), "alpha".to_string()], 3, 5001)
+            .unwrap();
+        assert!(rows
+            .iter()
+            .any(|row| { row.seed == "alpha" && row.symbol.name == "direct" && row.depth == 1 }));
+        assert!(rows
+            .iter()
+            .any(|row| { row.seed == "beta" && row.symbol.name == "converged" && row.depth == 2 }));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn impact_of_many_enforces_seed_and_row_limits() {
+        let path = tmp_db("impact_many_limits");
+        let store = Store::open(&path).unwrap();
+        assert!(store.impact_of_many(&[], 1, 1).is_err());
+        assert!(store
+            .impact_of_many(&vec!["seed".to_string(); 201], 1, 1)
+            .is_err());
+        assert!(store.impact_of_many(&["seed".to_string()], 0, 1).is_err());
+        assert!(store
+            .impact_of_many(&["seed".to_string()], 1, 5002)
+            .is_err());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn impact_of_many_aborts_dense_collision_cycle_work() {
+        let path = tmp_db("impact_many_dense_cycle");
+        let store = Store::open(&path).unwrap();
+        for index in 0..80 {
+            let name = format!("node{}", index % 8);
+            let id = store
+                .insert_symbol(
+                    &name,
+                    "function",
+                    &format!("src/{index}.rs"),
+                    1,
+                    2,
+                    None,
+                    None,
+                )
+                .unwrap();
+            for target in 0..8 {
+                store
+                    .insert_edge(id, None, &format!("node{target}"), "calls", 1)
+                    .unwrap();
+            }
+        }
+        let result = store.impact_of_many(&["node0".to_string()], 5, 5001);
+        assert!(result.is_err() || result.as_ref().is_ok_and(|rows| rows.len() <= 5001));
+        std::fs::remove_file(&path).ok();
     }
 }

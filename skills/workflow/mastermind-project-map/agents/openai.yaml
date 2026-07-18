@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mastermind Project Map"
+  short_description: "Map a repository from deterministic evidence"
+  default_prompt: "Use $mastermind-project-map to explain this repository and give me a reading order."

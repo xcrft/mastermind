@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mastermind Change Impact"
+  short_description: "Trace what a proposed code change can affect"
+  default_prompt: "Use $mastermind-change-impact to assess the blast radius of these changes."

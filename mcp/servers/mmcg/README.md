@@ -1,6 +1,6 @@
 ---
 name: mmcg
-description: Mastermind Codegraph — fast multi-language code indexer (Python + TypeScript/TSX + JavaScript/JSX + Rust + C# + Go + Java + PHP + C/C++) exposed over MCP. Indexes symbols, calls, and imports (with fully-qualified paths) into a local SQLite database (`.mastermind/mmcg.db`) and exposes 20 structural query tools for AI agents in the Mastermind workflow. Includes FTS5 search over `.mastermind/tasks/` and an incremental file watcher.
+description: Mastermind Codegraph — fast multi-language code indexer (Python + TypeScript/TSX + JavaScript/JSX + Rust + C# + Go + Java + PHP + C/C++) exposed over MCP. Indexes symbols, calls, and imports (with fully-qualified paths) into a local SQLite database (`.mastermind/mmcg.db`) and exposes 23 structural query tools for AI agents in the Mastermind workflow. Includes FTS5 search over `.mastermind/tasks/` and an incremental file watcher.
 metadata:
   version: 0.36.2
   authors:
@@ -23,7 +23,7 @@ metadata:
 
 # mmcg — Mastermind Codegraph
 
-A small, fast Rust binary that builds a structural index of a codebase (Python, TypeScript/TSX, JavaScript/JSX, Rust, C#, Go, Java, PHP, C/C++). It serves the graph over **MCP** (20 read-only tools), but MCP is one surface — the same binary is the Mastermind workflow's **CLI**: the deterministic spec gates (`verify-spec` / `audit-spec`), project setup (`init` / `doctor`), and miners (`miner profile`, which learns your code-shape style into `~/.mastermind/style.md`) are all subcommands of it. Pair with the workflow so the planner/executor reason from a real graph instead of grep heuristics.
+A small, fast Rust binary that builds a structural index of a codebase (Python, TypeScript/TSX, JavaScript/JSX, Rust, C#, Go, Java, PHP, C/C++). It serves the graph over **MCP** (22 read-only tools plus one additive local scratchpad write), but MCP is one surface — the same binary is the Mastermind workflow's **CLI**: the deterministic spec gates (`verify-spec` / `audit-spec`), project setup (`init` / `doctor`), and miners (`miner profile`, which learns your code-shape style into `~/.mastermind/style.md`) are all subcommands of it. Pair with the workflow so the planner/executor reason from a real graph instead of grep heuristics.
 
 > Installed via npm (`@xcraftmind/mastermind`)? The command is **`mastermind`** — the same binary. The `mmcg` name used throughout this doc is the cargo-installed alias (`cargo install mmcg`).
 
@@ -81,8 +81,8 @@ The Mastermind workflow needs structural queries every few seconds (planner deci
 
 mmcg is intentionally narrow:
 - Nine languages (Python, TypeScript/TSX, JavaScript/JSX, Rust, C#, Go, Java, PHP, C/C++) — extend by adding a parser, not by depending on multi-language toolchains
-- 20 query tools that map directly to the workflow's needs
-- Read-only over MCP (no writes from agents — only `mmcg index` and `mmcg watch` mutate the db)
+- 23 query tools that map directly to the workflow's needs
+- 22 read-only MCP tools plus `mmcg_scratchpad_append`, which makes an additive write to the gitignored local index
 
 ## Speed notes
 
@@ -95,7 +95,7 @@ On the mmcg crate itself (10 Rust files, 1 Python script): indexing takes **9 ms
 
 ## Build from source
 
-Requires Rust 1.75+ ([rustup](https://rustup.rs/)). No system libraries — SQLite and tree-sitter are bundled at compile time.
+Requires Rust 1.96+ ([rustup](https://rustup.rs/)). No system libraries — SQLite and tree-sitter are bundled at compile time.
 
 ```bash
 cd mcp/servers/mmcg
@@ -121,6 +121,15 @@ mmcg watch
 
 # Show what's in the index
 mmcg status
+
+# Build one bounded schema-v1 project map with safe text, JSON, or Mermaid projections
+mmcg map . --format text
+mmcg map src --format json --depth 2 --top 20
+mmcg map . --format mermaid
+
+# Analyze baseline vs staged, unstaged, and untracked changes.
+mmcg impact --since main --format text --depth 3 --top 100
+mmcg impact --since HEAD~1 --format json
 
 # Health-check the project setup (index, gitignore, CLAUDE.md, MCP config,
 # `mmcg serve` handshake). Exit code 1 if any check fails — wire into CI.
@@ -168,15 +177,12 @@ mmcg init --profile react-native      # mobile (Expo or bare)
 mmcg init --profile python-fastapi    # async Python API
 mmcg init --profile rust-cli          # command-line tool
 
-# Register mmcg with Claude Code's MCP layer. Safe by default — prints a diff
-# and exits without writing unless `--write-mcp` is passed. Merges into existing
-# `mcpServers` (preserves other servers). Refuses to overwrite a customized
-# mmcg entry without `--force`.
-mmcg setup claude                                         # dry-run: show the `claude mcp add` it would run
-mmcg setup claude --write-mcp                             # register at user scope (~/.claude.json) via `claude mcp add`
-mmcg setup claude --project . --write-mcp                 # write ./.mcp.json (project scope)
-mmcg setup claude --project . --write-mcp --with-workflow # also drop CLAUDE.md workflow template
-mmcg setup claude --write-mcp --force                     # overwrite a customized mmcg entry
+# Preview or apply one supported MCP client target.
+mmcg setup claude --scope user                            # dry-run via native `claude mcp`
+mmcg setup cursor --scope project --root . --write        # write .cursor/mcp.json
+mmcg setup codex --scope user --write                     # user-only via native `codex mcp`
+mmcg setup continue --scope project --root . --write      # owned mastermind.yaml
+mmcg setup generic --scope project --config ./mcp.json    # explicit JSON target, dry-run
 
 # Remove a setup. --scope project (default) deletes .mastermind/ + the project
 # .mcp.json mmcg entry; --scope global de-registers via `claude mcp remove`;
@@ -230,7 +236,24 @@ The index lives at `.mastermind/mmcg.db` in the current directory by default. Ov
 mmcg serve
 ```
 
-For Claude Code, run `mastermind setup claude --write-mcp` instead of editing JSON by hand. For other MCP stdio clients, add:
+### Protocol contract
+
+- Supported revisions are MCP `2025-11-25` and legacy `2024-11-05`. Unknown requested revisions receive the latest supported revision; clients that cannot support it disconnect.
+- Current results include compact JSON text and object `structuredContent`. Scratchpad reads keep their JSON-array text form and are wrapped as `{ "entries": [...] }` only in structured form. Legacy results remain content-only.
+- Tool execution and input errors use `isError: true`; malformed protocol requests and internal failures use JSON-RPC errors.
+- Input frames are limited to 1 MiB and an oversized frame closes the connection. Serialized result payloads are limited to 8 MiB and ask the caller to narrow the query.
+- Tool annotations are advisory metadata, and returned tool content is untrusted. Neither grants permission or bypasses confirmation.
+
+Use the dry-run-first setup surface instead of editing supported client configs by hand:
+
+```text
+mastermind setup <claude|cursor|codex|continue|generic> \
+  --scope <project|user> [--root .] [--config PATH] [--write] [--remove] [--force]
+```
+
+Claude supports project JSON and user-native registration; Cursor supports project and user JSON; Codex is user-only through its native CLI; Continue owns a standalone `mastermind.yaml`; Generic requires `--config`. `--force` permits customized replacement/removal but never implies `--write`; file-backed customized data is backed up privately under `~/.mastermind/setup-backups/`. Doctor compares bounded config data to the trusted current binary and never executes configured commands.
+
+The equivalent generic MCP JSON shape is:
 
 ```json
 {
@@ -268,6 +291,9 @@ Run `mmcg watch` in a separate terminal so the index stays current while you wor
 | `mmcg_unreferenced` | optional `kind`, `language` | Symbols that no edge references. Dead-code candidates. **Review manually** — see Limitations for false-positive scenarios. |
 | `mmcg_api_surface` | `prefix`, optional `language` | Symbols under `prefix` referenced from at least one file OUTSIDE `prefix`. Empirical "who-uses-this-module" map; doesn't need declared visibility. |
 | `mmcg_centrality` | optional `prefix`, `language`, `kind`, `top` (default 20) | Rank symbols by in-degree (distinct callers). Pre-flight "where is the gravity" — top hits are the structural attractors of the codebase or a subdirectory. Use to learn what to read first on unfamiliar code. Excludes synthetic `<module>` rows and zero-degree symbols. |
+| `mmcg_map` | optional `path` (default `.`), `depth` (1–6, default 2), `top` (1–100, default 20) | Schema-v1 architecture briefing with lexical file/directory scope: `%` and `_` are literal bytes, selected-directory components are relative to that directory, root components remain repository-relative, and selected files retain their paths. Caps are 50,000 aggregation paths, 20 languages, 20 components, 20 boundaries/component and 400 globally, 50 entry points, 100 hotspots, 50,000 scoped cycle edges, 50 cycles, and 500 cycle memberships. `path_work_limit` marks path-derived partial aggregates; `top_probe` marks a hotspot or per-component boundary cap+1 probe; `global_probe_limit` marks components whose certainty was prevented by the 401st global boundary row; cycle `work_limit` returns no cycles because SCC analysis was skipped before truncated edges could be analyzed. |
+| `mmcg_change_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Stable schema-v1 analysis of the resolved baseline against staged, unstaged, and untracked content. Reports added/removed/signature/body-changed symbols, batched transitive callers, component crossings, ranked test candidates, exact collection metadata, caps, and precision notes. Root, SHA-256 index freshness, Git snapshot, and SQLite snapshot checks fail closed with stable codes. |
+| `mmcg_test_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Exact test-focused projection of `mmcg_change_impact`. Changed tests and depth-1 graph tests are direct, deeper graph tests are transitive, and scoped filename candidates are heuristic. Focused candidates never replace the repository's full required gate. |
 | `mmcg_tasks` | `query`, optional `top` (default 10) | Full-text search past task specs (`.mastermind/tasks/<NNN>-<name>/spec.md`). FTS5 MATCH syntax (bare words AND-joined, `"phrases"`, `OR`/`NOT`). Returns paths, titles, and snippet excerpts with `«match»` highlights ranked by BM25. Use as planner pre-flight: "have we touched this area before?" surfaces past designs and prior verdicts. Top-level files prefixed with `_` (e.g. `_lessons.md`) and bare `.md` files at the top of `tasks/` (legacy 0.6.x layout) are intentionally excluded. |
 | `mmcg_dependency_cycles` | optional `language`, `min_size` (default 2) | Detect circular imports — strongly-connected components in the file-level import graph (Tarjan's algorithm). Each result is a cycle = a list of files. Pre-merge guard ("does this PR introduce a new cycle?") and architectural-hygiene survey. Resolves edges by leaf-name match — over-approximates (two unrelated `Logger` symbols cross-link) so verify before refactoring. Bump `min_size` to hide trivial A↔B and surface only larger structural problems. |
 | `mmcg_symbols_changed_since` | `git_ref`, optional `root` | Symbol-level diff between a git ref and the current index. Returns `{added, removed, signature_changed}` symbol sets for files in `git diff --name-only <ref>..HEAD`. Re-parses old blobs from `git show <ref>:<path>` using the same extractor. Different from `mmcg_recent_changes` (watcher mtime) — this is git-ref-based, answering "what symbols did THIS PR/branch touch?". PR-review pre-flight, auditor verification, "what new public API appeared in v2.3?". |
@@ -316,5 +342,13 @@ mmcg serve
 - **C/C++ is best-effort.** The C/C++ extractor uses tree-sitter alone — no preprocessor, no template instantiation, no semantic analysis. Concretely: (a) **macros are invisible** — `TEST(Suite, Name) { ... }` is seen as a call to `TEST`, not as a function definition, so gtest/Catch2 test bodies don't appear in `mmcg_search` and calls inside macro arguments may be lost; (b) **templates** record the template name but not instantiations (`vector<int>` doesn't create a `vector<int>` symbol); (c) **header/source split** produces two symbol rows (`void Foo::bar()` declared in `.h` and defined in `.cpp` = two `bar` hits); (d) **ADL/overload resolution** isn't performed (`swap(a, b)` records `swap` without knowing which namespace it resolves to); (e) **`#include`** records the header as an `imports` edge but doesn't follow its contents. For high-precision C++ structural analysis use `clangd` (semantic, slow, large) or `ctags` (similar tradeoffs to this extractor). mmcg uses one `tree-sitter-cpp` grammar for both `.c` and `.cpp` files — rare C-only code that uses C++ keywords as identifiers (e.g. a variable named `new`) may mis-parse.
 
 ## CI
+
+### Schema-v3 audit envelopes
+
+`mastermind audit-spec ... --bundle evidence.json` seals the mechanical report as canonical JSON with a manifest SHA-256 digest. A valid digest is tamper-evidence, not provenance: verification succeeds only with a complete exact repository/baseline/head/root/clean-worktree policy, a required Ed25519 signature rooted in an allowlisted non-revoked key ID, or both. `mastermind audit verify ... --integrity-only` is labelled untrusted and reports authenticity and policy as `not_evaluated`.
+
+Detached signatures use a domain-separated schema-v1 statement binding the envelope schema, hash algorithm, canonicalization, key ID, and manifest digest. Private keys are single-line base64 32-byte Ed25519 seeds with Unix mode 0600. Key owners are responsible for rotation, revocation allowlists, and protecting historical verification policy; Ed25519 alone provides neither signing time nor pre/post-compromise distinction.
+
+The Docker Action requires exact full baseline and head OIDs, a GitHub `owner/repo`, and a clean worktree. Its publication example treats `workflow_run` artifacts as hostile until independent run, attempt, workflow blob, PR, artifact ID/digest/size, envelope, and policy checks pass. The resulting attestation means only publication-workflow verification provenance; it does not prove that PR analysis ran in a trusted environment or that the findings are true.
 
 `.github/workflows/ci-mmcg.yml` runs the full test suite plus an end-to-end smoke (`mmcg doctor --json` + `mmcg verify-spec` + `mmcg audit-spec` against `tests/ci-fixture/`) on a 6-target matrix every PR: x86_64/aarch64 Linux gnu + musl, aarch64 macOS (Apple Silicon), x86_64 Windows. macOS Intel (`x86_64-apple-darwin`) is not gated per-PR but builds locally via `cargo install --target=x86_64-apple-darwin`.

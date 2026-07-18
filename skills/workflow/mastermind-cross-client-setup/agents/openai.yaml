@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mastermind Cross-Client Setup"
+  short_description: "Configure Mastermind safely for MCP clients"
+  default_prompt: "Use $mastermind-cross-client-setup to configure Mastermind for my MCP client."

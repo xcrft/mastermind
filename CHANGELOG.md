@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- MCP `2025-11-25` negotiation, lifecycle enforcement, version-gated structured tool results and behavior annotations, bounded stdio frames/results, and transcript regression coverage while retaining the legacy `2024-11-05` content-only contract.
+- Shared schema-v1 `mastermind map` / `mmcg_map` engine with safe text and Mermaid projections, literal `%`/`_` lexical scope, directory-relative components, and explicit caps for 50,000 aggregation paths, 20 languages, 20 components, 20/400 boundaries, 50 entry points, 100 hotspots, 50,000 cycle edges, 50 cycles, and 500 memberships. `path_work_limit`, `top_probe`, and cycle `work_limit` distinguish partial aggregation, hotspot probing, and skipped SCC analysis.
+- Dry-run-first, conflict-aware MCP setup and removal for Claude Code, Cursor, Codex user scope, Continue owned YAML, and explicit generic JSON targets, with bounded parsing/processes, private force backups, and data-only doctor validation.
+- Shared schema-v1 `mastermind impact` / `mmcg_change_impact` / `mmcg_test_impact` engine for staged, unstaged, and untracked changes, including body-only symbol evidence, bounded batched callers, component crossings, ranked test candidates, SHA-256 index freshness, coherent snapshot checks, stable failure codes, and explicit work-limit metadata. Focused candidates never replace the full repository gate.
+- Schema-v3 canonical audit envelopes, non-empty exact-snapshot and/or trusted Ed25519 verification policy, domain-separated detached signatures, policy-bound PR rendering, a pinned non-root Docker Action, and privilege-separated PR verification, attestation, and publication workflow examples.
+
+### Changed
+- MCP tool failures now distinguish malformed protocol requests, model-correctable tool errors, and sanitized internal failures. Documentation now describes the truthful 22-read-only/1-additive-write tool split.
+
 ## [0.36.2] - 2026-06-27
 
 ### Changed

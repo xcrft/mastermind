@@ -1,71 +1,45 @@
 # Continue integration
 
-[Continue](https://continue.dev) supports MCP servers via `~/.continue/config.json`.
+Continue setup uses one Mastermind-owned YAML document at `.continue/mcpServers/mastermind.yaml` for project scope or `~/.continue/mcpServers/mastermind.yaml` for user scope.
 
 ## Setup
 
-**1. Install Mastermind**
+```text
+mastermind setup <claude|cursor|codex|continue|generic> \
+  --scope <project|user> [--root .] [--config PATH] [--write] [--remove] [--force]
+```
+
+Install and index Mastermind, then preview the selected owned file:
 
 ```bash
 npm install -g @xcraftmind/mastermind
-```
-
-**2. Index your project**
-
-```bash
 cd your-project
 mastermind index .
+mastermind setup continue --scope project --root .
 ```
 
-**3. Add mmcg to Continue config**
+Apply project or user registration explicitly:
 
-Edit `~/.continue/config.json` and add an `experimental.modelContextProtocolServers` entry:
-
-```json
-{
-  "experimental": {
-    "modelContextProtocolServers": [
-      {
-        "transport": {
-          "type": "stdio",
-          "command": "mastermind",
-          "args": ["serve"]
-        }
-      }
-    ]
-  }
-}
+```bash
+mastermind setup continue --scope project --root . --write
+mastermind setup continue --scope user --write
 ```
 
-If the `experimental` key doesn't exist, add it at the top level alongside your `models` config.
+The owned document contains only `schema: 1`, `owner: mastermind`, `name: mmcg`, `command`, and `args`. Mastermind does not merge this entry into Continue's general JSON configuration.
 
-**4. Reload Continue**
+## Updating and removing
 
-Use the Continue reload command (`Cmd/Ctrl+Shift+P` → "Continue: Reload") or restart your editor. The codegraph tools should appear in Continue's tool list.
+A canonical owned document is an idempotent no-op and can be removed safely. Customized content is refused unless `--force` is supplied; `--force` never implies `--write`. Before a forced change, the old bytes are backed up privately under `~/.mastermind/setup-backups/`.
 
-## Scoping to a project index
-
-By default `mastermind serve` uses `.mastermind/mmcg.db` relative to the current working directory — whichever directory your editor launched from. To explicitly point to a project's index:
-
-```json
-{
-  "experimental": {
-    "modelContextProtocolServers": [
-      {
-        "transport": {
-          "type": "stdio",
-          "command": "mastermind",
-          "args": ["--index", "/path/to/your-project/.mastermind/mmcg.db", "serve"]
-        }
-      }
-    ]
-  }
-}
+```bash
+mastermind setup continue --scope project --root . --remove          # dry-run
+mastermind setup continue --scope project --root . --remove --write
 ```
 
-## Notes
+## Verification
 
-- The workflow subagents (planner, auditor, critic, etc.) are Claude Code-specific.
-- mmcg tools are available to any model configured in Continue.
-- The Continue MCP integration is experimental — check the [Continue changelog](https://github.com/continuedev/continue/releases) for API changes.
-- Add `.mastermind/` to `.gitignore`.
+```bash
+mastermind doctor
+```
+
+Doctor parses the owned YAML as bounded data, rejects symlinked files or existing path ancestors, compares the document structurally with the trusted current entry, and never executes its configured command. Reload Continue after applying a change. The former experimental JSON instructions are not supported.

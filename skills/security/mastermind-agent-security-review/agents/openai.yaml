@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mastermind Agent Security Review"
+  short_description: "Review agent systems against explicit security controls"
+  default_prompt: "Use $mastermind-agent-security-review to review this agent workflow against the requested security framework."

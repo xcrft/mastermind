@@ -2,7 +2,7 @@
 name: mastermind-critical-review
 description: Stress-test a proposed design, task spec, implementation plan, or executor report for false assumptions, broken contracts, scope creep, missing evidence, and high-risk failure modes. Use before drafting sensitive specs, before approving a plan, or when a critic/auditor needs a compact review rubric.
 metadata:
-  version: 0.1.0
+  version: 0.1.1
   authors:
     - mastermind
   tags:
@@ -17,7 +17,8 @@ metadata:
 
 Challenge a proposed design or completed change before it becomes accepted work. The goal is not to be negative — it's to prevent confident wrongness.
 
-This is the rubric; the spawnable agent that applies it is the `mastermind-critic` subagent (Opus, independent context).
+This is the rubric; the spawnable agent that applies it is the
+`mastermind-critic` subagent in independent context.
 
 ## When to use
 

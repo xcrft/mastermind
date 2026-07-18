@@ -2,7 +2,7 @@
 //!
 //! Scaffolds a project for the Mastermind workflow: creates `.mastermind/`,
 //! writes CONTEXT.md (and optionally CLAUDE.md), builds the index, and
-//! optionally installs the workflow bundle into `~/.claude/`.
+//! optionally reconciles the npm workflow bundle into `~/.claude/`.
 
 use mmcg::indexer::Indexer;
 use mmcg::store::Store;
@@ -20,7 +20,7 @@ pub struct InitOpts {
     pub index: bool,
     /// Auto-fill CONTEXT.md / CLAUDE.md via `claude -p`.
     pub claude: bool,
-    /// Install the workflow bundle into `~/.claude/`.
+    /// Reconcile the npm workflow bundle into `~/.claude/`.
     pub global: bool,
     /// Seed `~/.mastermind/style.md` from the author's git history, only if
     /// absent (never clobbers a hand-edited profile).
@@ -507,90 +507,30 @@ fn run_claude_draft(root: &Path, prompt: &str) -> Result<(), String> {
 }
 
 fn install_workflow_global() -> Result<String, String> {
-    let share = std::env::var("MASTERMIND_SHARE_DIR")
+    let installer = std::env::var("MASTERMIND_INSTALLER_JS")
         .ok()
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
             "no workflow bundle (a cargo install ships only the mmcg binary) — \
              install via npm for the full workflow: \
-             `npm install -g @xcraftmind/mastermind`, or copy `agents/` and \
-             `skills/` from the repo into `~/.claude/` manually"
+             `npm install -g @xcraftmind/mastermind`"
                 .to_string()
         })?;
-    let share = Path::new(&share);
-    let home = dirs::home_dir().ok_or_else(|| "no $HOME — cannot locate ~/.claude".to_string())?;
-    let claude = home.join(".claude");
-    if !claude.exists() {
-        return Err(format!(
-            "{} not found (is Claude Code installed?)",
-            claude.display()
-        ));
+    let node = std::env::var("MASTERMIND_NODE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "npm wrapper did not provide the Node.js executable".to_string())?;
+    let status = Command::new(node)
+        .arg(installer)
+        .arg("update")
+        .arg("--client")
+        .arg("claude")
+        .status()
+        .map_err(|e| format!("spawn workflow installer: {e}"))?;
+    if !status.success() {
+        return Err(format!("workflow installer exited with {status}"));
     }
-
-    let mut agents = 0usize;
-    let src_agents = share.join("agents");
-    if src_agents.is_dir() {
-        let dst = claude.join("agents");
-        fs::create_dir_all(&dst).map_err(|e| format!("create {}: {e}", dst.display()))?;
-        for entry in fs::read_dir(&src_agents).map_err(|e| e.to_string())? {
-            let p = entry.map_err(|e| e.to_string())?.path();
-            if p.extension().and_then(|x| x.to_str()) == Some("md") {
-                let name = p.file_name().expect("dir entry has a name");
-                fs::copy(&p, dst.join(name)).map_err(|e| format!("copy {}: {e}", p.display()))?;
-                agents += 1;
-            }
-        }
-    }
-
-    let mut skills = 0usize;
-    let src_skills = share.join("skills");
-    if src_skills.is_dir() {
-        let dst_root = claude.join("skills");
-        for entry in fs::read_dir(&src_skills).map_err(|e| e.to_string())? {
-            let p = entry.map_err(|e| e.to_string())?.path();
-            if p.is_dir() {
-                let name = p.file_name().expect("dir entry has a name");
-                copy_dir_all(&p, &dst_root.join(name))
-                    .map_err(|e| format!("copy skill {}: {e}", p.display()))?;
-                skills += 1;
-            }
-        }
-    }
-
-    let mut commands = 0usize;
-    let src_commands = share.join("commands");
-    if src_commands.is_dir() {
-        let dst = claude.join("commands");
-        fs::create_dir_all(&dst).map_err(|e| format!("create {}: {e}", dst.display()))?;
-        for entry in fs::read_dir(&src_commands).map_err(|e| e.to_string())? {
-            let p = entry.map_err(|e| e.to_string())?.path();
-            if p.extension().and_then(|x| x.to_str()) == Some("md") {
-                let name = p.file_name().expect("dir entry has a name");
-                fs::copy(&p, dst.join(name)).map_err(|e| format!("copy {}: {e}", p.display()))?;
-                commands += 1;
-            }
-        }
-    }
-
-    Ok(format!(
-        "installed {agents} subagents + {skills} skills + {commands} commands into {}",
-        claude.display()
-    ))
-}
-
-fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir_all(&from, &to)?;
-        } else {
-            fs::copy(&from, &to)?;
-        }
-    }
-    Ok(())
+    Ok("reconciled the Claude workflow bundle and ownership manifest".into())
 }
 
 #[cfg(test)]

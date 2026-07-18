@@ -2,7 +2,7 @@
 name: mastermind-agent-security-review
 description: OWASP reference pack for Mastermind security audits — the verified OWASP ASI (Agentic) Top 10 mapped to Mastermind surfaces, plus slots for LLM/Web/API. Read by the security auditor in OWASP mode so mappings are evidence-based, not from memory.
 metadata:
-  version: 0.1.0
+  version: 0.1.1
   authors:
     - mastermind
   tags:

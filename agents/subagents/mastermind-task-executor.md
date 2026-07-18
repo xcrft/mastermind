@@ -5,7 +5,7 @@ tools: Read, Edit, Write, Grep, Glob, Bash
 model: sonnet
 mcpServers: [mmcg]
 metadata:
-  version: 0.2.0
+  version: 0.3.0
   authors:
     - mastermind
   tags:
@@ -100,6 +100,7 @@ Minimal template (populate every field, even on a clean run):
 ````markdown
 <!-- mastermind:report-begin -->
 ```yaml
+schema_version: 1
 spec: <absolute path to spec.md>
 status: complete | partial | failed
 phases:
@@ -109,10 +110,14 @@ phases:
     status: done
 files_modified:
   - <relative path>
+claims: []
 defects: []
 verifications:
   - cmd: "<command>"
     result: pass
+    observed:
+      exit_code: 0
+      tests_run: <count when the runner reports one>
 ```
 <!-- mastermind:report-end -->
 ````
@@ -123,6 +128,12 @@ When you stop on a defect:
 - Set the corresponding phase's `status` to `stopped_here`.
 - Set the top-level `status:` to `partial` (some phases done) or `failed`
   (Phase 1 didn't land).
+
+Populate `claims[]` only for deterministic assertions the audit backend can
+check: `function_added` (exact symbol, file, optional indexed signature) and
+`integration` (changed caller, existing callee, optional files, `relation:
+calls`). Use `claims: []` when neither applies. The canonical schema is v1;
+never add ad-hoc keys to the tail.
 
 ### Write state.json (REQUIRED)
 

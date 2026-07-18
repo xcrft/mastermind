@@ -2,7 +2,7 @@
 name: mastermind-style-deep
 description: Write a grounded portrait of how the author actually develops — design approach, code shape, comments, tests, optimization habits, what they pay attention to, and commit voice — into the "Design patterns & tendencies" section of ~/.mastermind/style.md. The structural signature the deterministic miner can't measure. Use when the user wants a real "write like me" profile, says "deep style", "design patterns", "qualitative profile", or notices `mastermind miner profile` only produced formatter-level rules.
 metadata:
-  version: 0.2.0
+  version: 0.2.1
   authors:
     - mastermind
   tags:

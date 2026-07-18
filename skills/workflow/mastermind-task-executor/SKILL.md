@@ -2,7 +2,7 @@
 name: mastermind-task-executor
 description: Executes a task spec from `.mastermind/tasks/<NNN>-<name>/spec.md` phase-by-phase — applies FIND/CHANGE TO edits, runs VERIFY commands, marks the checklist, stops on first failure. Use when the user says "execute task X", "run .mastermind/tasks/NNN", or hands off a delegation spec.
 metadata:
-  version: 0.3.0
+  version: 0.4.0
   authors:
     - mastermind
   tags:
@@ -10,7 +10,6 @@ metadata:
     - execution
     - delegation
     - mmcg
-  model: sonnet
 ---
 
 # Mastermind - Task Executor Skill
@@ -73,7 +72,11 @@ For each Phase:
 
 ### When mmcg is unavailable
 
-If `mmcg_status` returns nothing (no index, or the MCP server isn't connected), report this once at the start of execution and proceed with `Grep`-based callers checks as a fallback. Document the fallback in your report so the reviewer knows the pre-edit check was approximate.
+If the MCP tool is unavailable, try the equivalent read-only CLI preflight:
+`mastermind status`. If neither interface can provide a fresh index, stop before
+editing and report the missing truth layer. Do not silently replace structural
+caller checks with grep; the planner and user must decide whether to index the
+repository or revise the spec to remove the structural claim.
 
 ### Step 3 — Final verification
 
@@ -108,7 +111,7 @@ Output a report in this exact shape:
 ### Pre-edit blast radius (from mmcg_callers)
 - `function_name` → N callers (expected ≤M per spec scope) — ✓ within scope
 - `other_fn` → N callers (expected: documented in spec) — ✓
-- (omit this section if mmcg was unavailable; note the fallback instead)
+- (execution stops before edits when no fresh structural truth layer exists)
 
 ### Files modified
 - `path/to/file.ts` (Phase 1.1, 1.3)

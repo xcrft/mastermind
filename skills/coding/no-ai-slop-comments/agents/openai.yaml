@@ -1,0 +1,4 @@
+interface:
+  display_name: "No AI Slop Comments"
+  short_description: "Keep code comments factual and load-bearing"
+  default_prompt: "Use $no-ai-slop-comments to review the comments in this change."

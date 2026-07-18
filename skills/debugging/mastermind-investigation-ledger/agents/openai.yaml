@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mastermind Investigation Ledger"
+  short_description: "Investigate unknown causes without premature closure"
+  default_prompt: "Use $mastermind-investigation-ledger to investigate this failure and maintain competing hypotheses."

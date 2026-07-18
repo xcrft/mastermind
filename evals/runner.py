@@ -72,7 +72,25 @@ SUITES = {
         "renderer": "render_intake_input",
         "uses_fixture": False,
     },
+    "workflow": {
+        "subagent": None,
+        "cases": EVALS_DIR / "workflow.jsonl",
+        "renderer": "render_workflow_input",
+        "uses_fixture": False,
+    },
 }
+
+WORKFLOW_ARTIFACTS = frozenset(
+    {
+        "skills/workflow/mastermind-task-planning/SKILL.md",
+        "agents/subagents/mastermind-task-executor.md",
+        "skills/workflow/mastermind-project-map/SKILL.md",
+        "skills/workflow/mastermind-change-impact/SKILL.md",
+        "skills/workflow/mastermind-test-impact/SKILL.md",
+        "skills/workflow/mastermind-cross-client-setup/SKILL.md",
+        "skills/workflow/mastermind-audit-attestation/SKILL.md",
+    }
+)
 
 # Deterministic identity for fixture commits — avoids machine-specific git
 # config noise in eval reproducibility.
@@ -252,6 +270,24 @@ def render_critic_input(inp: dict) -> str:
     )
 
 
+def render_workflow_input(inp: dict) -> str:
+    return str(inp.get("prompt", ""))
+
+
+def workflow_prompt_path(case: dict) -> Path:
+    artifact = case.get("artifact")
+    if artifact not in WORKFLOW_ARTIFACTS:
+        raise ValueError(f"workflow artifact is not allowlisted: {artifact!r}")
+    path = (REPO_ROOT / artifact).resolve()
+    try:
+        path.relative_to(REPO_ROOT.resolve())
+    except ValueError as error:
+        raise ValueError("workflow artifact must stay inside the repository") from error
+    if not path.is_file():
+        raise FileNotFoundError(f"workflow artifact not found: {path}")
+    return path
+
+
 def render_auditor_input(
     inp: dict,
     *,
@@ -350,7 +386,12 @@ def evaluate_case(
     keep_fixtures: bool,
 ) -> Result:
     case_id = case["id"]
-    system_prompt = strip_frontmatter(suite_cfg["subagent"].read_text())
+    prompt_path = (
+        workflow_prompt_path(case)
+        if suite_name == "workflow"
+        else suite_cfg["subagent"]
+    )
+    system_prompt = strip_frontmatter(prompt_path.read_text())
 
     fixture_path: Path | None = None
     extra_cmd: list[str] = []
@@ -392,20 +433,27 @@ def evaluate_case(
                 extra_cmd += ["--mcp-config", mcp_cfg]
         elif suite_name == "intake":
             user_message = render_intake_input(case["input"])
+        elif suite_name == "workflow":
+            user_message = render_workflow_input(case["input"])
         else:
             user_message = render_critic_input(case["input"])
 
         # Pass the user message via stdin — passing it as a positional arg
         # collides with `--add-dir <directories...>` (variadic), which would
         # swallow the message as another directory.
+        prompt_flag = "--system-prompt" if suite_name == "workflow" else "--append-system-prompt"
+        workflow_safety = (
+            ["--safe-mode", "--tools", ""] if suite_name == "workflow" else []
+        )
         cmd = [
             "claude",
             "-p",
             "--model", model,
-            "--append-system-prompt", system_prompt,
+            prompt_flag, system_prompt,
             "--output-format", "json",
             "--no-session-persistence",
-            "--permission-mode", "default",
+            "--permission-mode", "dontAsk",
+            *workflow_safety,
             *extra_cmd,
         ]
 
@@ -415,7 +463,9 @@ def evaluate_case(
         try:
             proc = subprocess.run(
                 cmd, input=user_message, capture_output=True, text=True,
-                env=_PROC_ENV, timeout=480,
+                env=_PROC_ENV,
+                cwd=tempfile.gettempdir() if suite_name == "workflow" else None,
+                timeout=480,
             )
         except subprocess.TimeoutExpired:
             return Result(

@@ -1782,6 +1782,9 @@ const MAP_ENTRY_LIMIT: usize = 50;
 const MAP_CYCLE_EDGE_LIMIT: usize = 50_000;
 const MAP_CYCLE_LIMIT: usize = 50;
 const MAP_CYCLE_MEMBERSHIP_LIMIT: usize = 500;
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 #[derive(Debug, Serialize)]
 pub struct MapSection<T> {
@@ -1808,6 +1811,8 @@ pub struct MapScope {
     pub kind: String,
     pub depth: u8,
     pub aggregation_paths_truncated: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub production_only: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -2047,6 +2052,16 @@ pub fn project_map(
     depth: u8,
     top: u32,
 ) -> Result<ProjectMapResponse, String> {
+    project_map_with_options(store, path, depth, top, false)
+}
+
+pub fn project_map_with_options(
+    store: &Store,
+    path: &str,
+    depth: u8,
+    top: u32,
+    production_only: bool,
+) -> Result<ProjectMapResponse, String> {
     let depth = depth.clamp(1, 6);
     let top = top.clamp(1, 100);
     let normalized = normalize_map_path(path)?;
@@ -2062,10 +2077,15 @@ pub fn project_map(
         "directory"
     };
     let mut selected = store
-        .map_paths(&normalized, kind, MAP_PATH_LIMIT + 1)
+        .map_paths_filtered(&normalized, kind, MAP_PATH_LIMIT + 1, production_only)
         .map_err(|error| error.to_string())?;
     if selected.is_empty() {
-        return Err("map scope has no indexed files".into());
+        return Err(if production_only {
+            "map production scope has no indexed files"
+        } else {
+            "map scope has no indexed files"
+        }
+        .into());
     }
     let paths_truncated = selected.len() > MAP_PATH_LIMIT;
     selected.truncate(MAP_PATH_LIMIT);
@@ -2096,10 +2116,11 @@ pub fn project_map(
         .filter_map(|(component, _)| boundary_scope(&normalized, kind, component))
         .collect::<Vec<_>>();
     let boundary_rows = store
-        .map_boundaries(
+        .map_boundaries_filtered(
             &boundary_scopes,
             MAP_BOUNDARY_LIMIT + 1,
             MAP_BOUNDARY_GLOBAL_LIMIT + 1,
+            production_only,
         )
         .map_err(|error| error.to_string())?;
     let boundary_global_probe = (boundary_rows.len() > MAP_BOUNDARY_GLOBAL_LIMIT)
@@ -2193,9 +2214,11 @@ pub fn project_map(
         .map(|(_, entry)| entry)
         .collect::<Vec<_>>();
 
-    let mut hotspot_items = store
-        .map_centrality(&normalized, kind, top as usize + 1)
-        .map_err(|error| error.to_string())?
+    let hotspot_probe = top as usize + 1;
+    let hotspot_rows = store
+        .map_centrality_filtered(&normalized, kind, hotspot_probe, production_only)
+        .map_err(|error| error.to_string())?;
+    let mut hotspot_items = hotspot_rows
         .into_iter()
         .map(|row| MapHotspot {
             name: row.symbol.name,
@@ -2213,7 +2236,7 @@ pub fn project_map(
     }
 
     let import_edges = store
-        .map_import_edges(&normalized, kind, MAP_CYCLE_EDGE_LIMIT + 1)
+        .map_import_edges_filtered(&normalized, kind, MAP_CYCLE_EDGE_LIMIT + 1, production_only)
         .map_err(|error| error.to_string())?;
     let cycle_work_truncated = import_edges.len() > MAP_CYCLE_EDGE_LIMIT;
     let (cycle_total, cycle_items) = if cycle_work_truncated {
@@ -2280,6 +2303,7 @@ pub fn project_map(
             kind: kind.into(),
             depth,
             aggregation_paths_truncated: paths_truncated,
+            production_only,
         },
         files: MapCount {
             total: (!paths_truncated).then_some(selected.len() as u32),
@@ -2443,6 +2467,62 @@ mod tests {
             serde_json::to_value(project_map(&store, "src/main.rs", 2, 20).unwrap()).unwrap();
         assert_eq!(file["scope"]["kind"], "file");
         assert_eq!(file["components"]["items"][0]["path"], "src/main.rs");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn project_map_production_only_excludes_non_production_paths() {
+        let path = tmp_db("project_map_production_only");
+        let store = Store::open(&path).unwrap();
+        for file in [
+            "src/main.rs",
+            "src/core/service.rs",
+            "tests/fixture/main.rs",
+            "examples/demo.rs",
+        ] {
+            store.upsert_file(file, 1, 1).unwrap();
+        }
+        let production = store
+            .insert_symbol(
+                "production_target",
+                "function",
+                "src/core/service.rs",
+                1,
+                3,
+                None,
+                None,
+            )
+            .unwrap();
+        let fixture = store
+            .insert_symbol(
+                "fixture_target",
+                "function",
+                "tests/fixture/main.rs",
+                1,
+                3,
+                None,
+                None,
+            )
+            .unwrap();
+        let caller = store
+            .insert_symbol("caller", "function", "src/main.rs", 1, 3, None, None)
+            .unwrap();
+        store
+            .insert_edge(caller, Some(production), "production_target", "calls", 2)
+            .unwrap();
+        store
+            .insert_edge(caller, Some(fixture), "fixture_target", "calls", 3)
+            .unwrap();
+
+        let value =
+            serde_json::to_value(project_map_with_options(&store, ".", 2, 20, true).unwrap())
+                .unwrap();
+        assert_eq!(value["scope"]["production_only"], true);
+        assert_eq!(value["files"]["total"], 2);
+        let rendered = serde_json::to_string(&value).unwrap();
+        assert!(!rendered.contains("tests/fixture"));
+        assert!(!rendered.contains("examples/demo"));
+        assert!(rendered.contains("production_target"));
         std::fs::remove_file(&path).ok();
     }
 

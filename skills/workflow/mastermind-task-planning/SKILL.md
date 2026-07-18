@@ -2,7 +2,7 @@
 name: mastermind-task-planning
 description: Acts as a CTO/planner that thinks, plans, and creates detailed task specs in `.mastermind/tasks/` for delegation to executing agents — never implements. Use when the user says "create delegation", "delegation for X", or asks for a task spec to hand off.
 metadata:
-  version: 0.12.0
+  version: 0.13.0
   authors:
     - mastermind
   tags:
@@ -14,7 +14,6 @@ metadata:
     - critic
     - context
     - canons
-  model: opus
 ---
 
 # Mastermind - Task Planning Skill
@@ -36,7 +35,7 @@ You are in Mastermind/CTO mode. You think, plan, and create task specs. You NEVE
 ## What You Do NOT Do
 
 - Write implementation code
-- Run agents or delegate tasks
+- Spawn an executor before the user has approved the spec and its scope
 - Create files without user approval
 
 ## Shared skills
@@ -53,15 +52,15 @@ Before designing, pick the right fact-gathering tool:
 
 | Situation | Use |
 |---|---|
-| You need to batch mmcg lookups (callsites, imports, blast radius, config values) before drafting | `mastermind-researcher` (Haiku — cheap, read-only, returns structured facts) |
-| User reports a bug / unexpected behavior and you do **not know the cause** | `mastermind-investigator` (Sonnet — iterative, maintains Hypothesis Ledger, one probe per turn) |
+| You need to batch mmcg lookups (callsites, imports, blast radius, config values) before drafting | `mastermind-researcher` (fast, read-only, returns structured facts) |
+| User reports a bug / unexpected behavior and you do **not know the cause** | `mastermind-investigator` (iterative, maintains Hypothesis Ledger, one probe per turn) |
 | Simple one-symbol lookup, 1-2 quick mmcg queries | Do it yourself inline — spawning a subagent for trivial lookups wastes tokens |
 
 Researcher = one question, one structured report, no iteration. Investigator = iterate probe-by-probe until a hypothesis is `confirmed` (protocol: [[mastermind-investigation-ledger]]), then open the spec.
 
 ### Security audit — spawn the security auditor
 
-Spawn `mastermind-security-auditor` (independent Opus) only when the task touches auth/authz, permissions, roles, sessions, tokens, or secrets; MCP tools, shell/file/network access, or external connectors; prompt injection or untrusted tool/spec/doc output; subagent delegation or planner/executor/auditor trust boundaries; policy enforcement, allowlists, deny rules, or safety gates; plugin/skill/package supply chain; audit logging, compliance, or OWASP/ASI. Don't spawn for ordinary refactors or low-risk local changes. For strict specs in these areas, paste the security auditor's verdict and blocking findings into the spec Notes.
+Spawn `mastermind-security-auditor` as an independent high-reasoning reviewer only when the task touches auth/authz, permissions, roles, sessions, tokens, or secrets; MCP tools, shell/file/network access, or external connectors; prompt injection or untrusted tool/spec/doc output; subagent delegation or planner/executor/auditor trust boundaries; policy enforcement, allowlists, deny rules, or safety gates; plugin/skill/package supply chain; audit logging, compliance, or OWASP/ASI. Don't spawn for ordinary refactors or low-risk local changes. For strict specs in these areas, paste the security auditor's verdict and blocking findings into the spec Notes.
 
 ### Workflow modes — pick before drafting
 
@@ -128,7 +127,7 @@ When it confirms a cause: copy the "Current best explanation" into the spec's **
 
 ## Design-time challenge — spawn the critic
 
-Before drafting the spec, you decide on an approach. **You are biased toward your own approach** — the longer you've been thinking about a problem, the more committed you become to the first plausible idea. To counter that, spawn the `mastermind-critic` subagent (Opus, independent context) to stress-test the design BEFORE it becomes a spec.
+Before drafting the spec, you decide on an approach. **You are biased toward your own approach** — the longer you've been thinking about a problem, the more committed you become to the first plausible idea. To counter that, spawn the `mastermind-critic` subagent in independent context to stress-test the design BEFORE it becomes a spec.
 
 A compact, standalone version of this review — evidence / contract / failure-mode / scope / test / rollback checks with a severity and verdict ladder — is [[mastermind-critical-review]]. Use it for lighter reviews, or when you want the rubric without spawning the critic subagent.
 
@@ -141,7 +140,8 @@ Spawn for any design that touches:
 - **Public API contracts** — anything external consumers depend on
 - **Anything with rollback complexity** — deploys you can't easily reverse
 
-For these, the critic is not optional. The cost of a wrong design here vastly exceeds the cost of one Opus spawn.
+For these, the critic is not optional. The cost of a wrong design here vastly
+exceeds the cost of one independent review.
 
 ### Critic panel — three lenses in parallel for sensitive specs
 
@@ -167,7 +167,8 @@ Same brief, same mmcg snapshot, same alternatives — only the lens directive di
 
 Paste **all three** dimension tables in the spec's Notes section so the auditor (and later you) can see which lens caught what. If two lenses agree and one disagrees, the disagreement is signal — note it in "Planner's disagreements" with a one-line reason.
 
-**Cost reality:** 3× Opus spawn on sensitive specs (≈5–10% of work in practice). Outside the mandatory list, stick to one critic.
+Three independent reviews are intentionally expensive, so reserve the panel for
+the strict-mode risk categories above. Outside that list, use one critic.
 
 ### When to spawn the critic — consider
 
@@ -318,7 +319,7 @@ The executor sends a report claiming what it did. Post-flight has **two halves**
 
 ### Step 9a — Mechanical audit (delegate to mastermind-auditor)
 
-You are biased toward your own spec. To get an honest check, spawn the `mastermind-auditor` subagent — an independent Opus-tier reviewer with no prior conversation context. It will mechanically verify every claim in the executor's report:
+You are biased toward your own spec. To get an honest check, spawn the `mastermind-auditor` subagent — an independent reviewer with no prior conversation context. It will mechanically verify every claim in the executor's report:
 
 - Claimed files modified vs `git diff --name-only`
 - Each `[x] Phase N` vs visible code in the diff
@@ -341,7 +342,20 @@ After the auditor returns, you do the **semantic** half on top of the auditor's 
 
 The auditor catches lies. You catch judgment misalignment. Both are needed.
 
-### Step 9c — Update CONTEXT.md (when applicable)
+### Step 9c — Persist the reviewed result (planner/controller only)
+
+The auditor is repository-read-only. After parsing its structured tail and
+completing the semantic review, persist the report as `audit.md` yourself. If
+the task was started through `mastermind run-task`, invoke its post-flight so
+the deterministic controller owns lessons, release notes, and state cleanup.
+
+For a manual task with no run-state, update `state.json` from the parsed enum:
+`held` → `learned/close`, `drift` → `drift/planner_review`, `broken` →
+`broken/planner_review`. Only the planner performs this write, after the
+auditor has finished; never ask the auditor to mutate evidence or lifecycle
+state while it is verifying them.
+
+### Step 9d — Update CONTEXT.md (when applicable)
 
 Project-level institutional memory lives in `CONTEXT.md` at the project root. The template is in `agents/claude-md/mastermind-context.md` — copy it during workflow setup if the project doesn't have one yet.
 
@@ -365,7 +379,7 @@ Append to `CONTEXT.md` ONLY when the discovery is worth preserving across sessio
 
 If nothing in this task is worth preserving, that's fine — say so explicitly in the report ("no CONTEXT.md updates"). Don't pad the file with low-value entries.
 
-### Step 9d — Report to user
+### Step 9e — Report to user
 
 If both audit and semantic review pass, report to the user with:
 - The auditor's verdict table
@@ -380,12 +394,12 @@ Each task lives in its own folder under `.mastermind/tasks/`:
 
 ```
 .mastermind/tasks/
-├── _lessons.md              # shared audit lessons (underscore-prefixed, not indexed; auditor appends to it)
+├── _lessons.md              # controller/planner lessons (underscore-prefixed, not indexed)
 ├── 001-rate-limiter/
 │   └── spec.md              # the spec itself
 ├── 002-cache-eviction/
 │   ├── spec.md
-│   ├── audit.md             # auditor's verdict, kept beside the spec
+│   ├── audit.md             # planner-persisted auditor verdict, kept beside the spec
 │   ├── notes.md             # ad-hoc planning notes
 │   └── screenshots/         # any related artifacts
 └── 003-…/

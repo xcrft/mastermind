@@ -29,13 +29,8 @@ on:
   push:
     tags:
       - "mmcg-v*"
-  # Manual dry-runs from the Actions tab — runs verify only, never publishes.
+  # Manual runs from the Actions tab are verify-only and can never publish.
   workflow_dispatch:
-    inputs:
-      dry_run:
-        description: "Dry run — verify only, no publish (default: true)"
-        type: boolean
-        default: true
 
 concurrency:
   group: publish-mmcg-${{ github.ref }}
@@ -54,13 +49,13 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
       - name: Cache cargo registry + target
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -94,7 +89,7 @@ jobs:
         run: cargo package
 
       - name: Stash packaged crate for the publish job
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mmcg-crate
           path: mcp/servers/mmcg/target/package/*.crate
@@ -104,14 +99,10 @@ jobs:
   publish:
     name: Publish to crates.io
     needs: verify
-    # Skip when:
-    #   - this is a workflow_dispatch dry-run (default true), OR
-    #   - the workflow is running on a fork (forks don't have CARGO_REGISTRY_TOKEN
-    #     in their `prod` environment; without this guard, the job would start, hit
-    #     the env gate, and fail noisily after waiting on reviewers).
+    # Tag pushes from the canonical repository are the only publish authority.
+    # Forks do not have CARGO_REGISTRY_TOKEN in their `prod` environment.
     if: |
-      github.repository == 'xcrft/mastermind' &&
-      (github.event_name == 'push' || github.event.inputs.dry_run == 'false')
+      github.repository == 'xcrft/mastermind' && github.event_name == 'push'
     runs-on: ubuntu-latest
     # Pulls CARGO_REGISTRY_TOKEN from the `prod` environment and triggers any
     # protection rules configured on it (required reviewers, wait timer, etc.).
@@ -122,10 +113,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
       - name: cargo publish
         env:
@@ -135,7 +126,7 @@ jobs:
   dry-run-notice:
     name: Dry-run notice
     needs: verify
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run != 'false'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - run: echo "Dry run complete — verify passed (package built clean). No publish performed."

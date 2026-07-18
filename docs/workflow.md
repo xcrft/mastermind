@@ -103,7 +103,11 @@ The default workflow includes skills for:
 - cross-client setup;
 - verifiable audit attestations.
 
-Run `mastermind list` to see the exact bundle installed by your version.
+Run `mastermind list` to see the exact packaged bundle. Install the Claude and
+Codex adapters with `mastermind install --client all`, then verify package,
+manifest, and filesystem parity with `mastermind doctor --workflow --client
+all`. Claude receives the seven spawnable subagent adapters; both clients
+receive the portable skills.
 
 ## Audit evidence
 

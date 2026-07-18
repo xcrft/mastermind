@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mastermind Critical Review"
+  short_description: "Challenge a design with an evidence-first rubric"
+  default_prompt: "Use $mastermind-critical-review to identify the highest-severity problems in this proposal."

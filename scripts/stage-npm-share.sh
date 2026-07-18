@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Stage the runtime workflow artifacts (subagents + skills) into the npm root
-# package so `mastermind init` can install them into ~/.claude/. The staged
+# package so `mastermind install` and `mastermind init` can install them into
+# the Claude and Codex workflow homes. The staged
 # `npm/mastermind/share/` tree is gitignored and (re)built from the canonical
 # `agents/subagents/` + `skills/` trees by this script. Run it:
 #   - in the publish workflow (assemble) and the ci-npm smoke, before `npm pack`

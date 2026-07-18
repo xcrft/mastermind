@@ -2,7 +2,7 @@
 name: mastermind-project-map
 description: Build an evidence-backed architecture briefing with `mastermind map` or `mmcg_map`. Use when exploring an unfamiliar repository, identifying components and entry points, choosing a reading order, inspecting dependency cycles or hotspots, or explaining codegraph precision and truncation limits.
 metadata:
-  version: 0.1.0
+  version: 0.2.0
   authors: [mastermind]
   tags: [workflow, mmcg, architecture]
 ---
@@ -25,6 +25,10 @@ from filenames or model intuition when the backend is available.
    mastermind map PATH --format json --depth 2 --top 20
    ```
 
+   Add `--production-only` for architecture work where tests, fixtures,
+   examples, generated output, vendored code, and dependency trees would
+   otherwise dominate the briefing. With MCP, pass `production_only: true`.
+
    Use `mmcg_map` instead when MCP is the active interface. Treat both as the
    same schema-v1 engine.
 4. Check `scope`, every collection's `truncated`/`truncation_reason`, `limits`,
@@ -33,8 +37,10 @@ from filenames or model intuition when the backend is available.
    boundaries, and cycles. Cite repository-relative files and symbol lines.
 
 Treat directory-derived components as navigation groups, not proven semantic
-subsystems. De-prioritize fixture/example/generated paths and high-collision
-symbol names unless the user explicitly asks about them. A `top_probe` proves
+subsystems. Prefer the explicit production filter over manually ignoring
+fixture/example/generated results. Keep those paths when the user is asking
+about tests, examples, or packaging. De-prioritize high-collision symbol names.
+A `top_probe` proves
 only that more rows exist; do not imply the backend can return an uncapped full
 list. Narrow the path or change `top` within its supported range instead.
 

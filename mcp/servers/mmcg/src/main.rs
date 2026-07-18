@@ -111,6 +111,9 @@ enum Cmd {
         depth: u8,
         #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=100))]
         top: u32,
+        /// Exclude tests, fixtures, examples, generated code, and vendored dependencies.
+        #[arg(long)]
+        production_only: bool,
     },
     /// Analyze changed symbols, affected callers, component crossings, and candidate tests.
     Impact {
@@ -178,9 +181,9 @@ enum Cmd {
         /// when the Claude Code CLI isn't installed). The bare template is left in place.
         #[arg(long)]
         no_claude: bool,
-        /// Skip installing the workflow subagents, skills, and slash commands into ~/.claude/. npm
-        /// installs do this by default so the full workflow (not just the codegraph)
-        /// is available; it overwrites Mastermind's own files there.
+        /// Skip reconciling the npm workflow bundle into ~/.claude/. npm installs do this by
+        /// default so the full workflow (not just the codegraph) is available. Only artifacts
+        /// recorded in Mastermind's ownership manifest are retired on later updates.
         #[arg(long)]
         no_global: bool,
         /// Skip seeding `~/.mastermind/style.md` (the author's code-shape "write like me"
@@ -247,7 +250,8 @@ enum Cmd {
         #[arg(long)]
         json: bool,
         /// Path to a structured executor report (bare YAML or markdown with
-        /// `<!-- mastermind:executor-begin -->` sentinel). When provided,
+        /// `<!-- mastermind:report-begin -->` sentinel; legacy executor
+        /// sentinels remain accepted). When provided,
         /// integration-claim verification and vacuous-test detection run on
         /// top of the standard Phase A checks.
         #[arg(long)]
@@ -758,7 +762,10 @@ fn run_cli_inner(
             format,
             depth,
             top,
-        } => commands::query::dispatch_map(&path, format, depth, top, &index_path)?,
+            production_only,
+        } => {
+            commands::query::dispatch_map(&path, format, depth, top, production_only, &index_path)?
+        }
         Cmd::Impact {
             since,
             format,

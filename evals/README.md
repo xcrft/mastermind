@@ -1,6 +1,7 @@
 # Evals
 
-Adversarial test cases for `mastermind-critic`, `mastermind-auditor`, and `mastermind-prompt-refiner` — subagents whose output has clear verdict labels.
+Adversarial test cases for the review subagents plus the planner, executor, and
+user-facing workflow skills.
 
 **This is not a coverage metric.** Each case is one regression scenario, not a guarantee.
 
@@ -9,6 +10,7 @@ Adversarial test cases for `mastermind-critic`, `mastermind-auditor`, and `maste
 - `critic.jsonl` — designs we want flagged (or cleanly passed); verdicts: `rethink`/`revise`/`ship`
 - `auditor.jsonl` — executor reports we want verified (or caught lying); verdicts: `held`/`drift`/`broken`
 - `intake.jsonl` — raw prompts the refiner should normalize; actions: `refined`/`passthrough`/`ask`
+- `workflow.jsonl` — planner/executor and product-skill contract regressions; each case names the exact prompt artifact it evaluates
 - `runner.py` — invokes the subagent via `claude -p`, asserts on verdict/action + key phrases
 - `ablation.py` — vanilla-vs-mastermind catch-rate study over the planted-defect auditor cases (does the codegraph + auditor contract beat plain `claude -p` + grep/read?); see [Ablation](#ablation)
 - `fixtures/` — real-git source trees used by auditor cases; see `fixtures/<name>/README.md`
@@ -21,6 +23,7 @@ Needs `claude` CLI **and** `git` on PATH. Auth uses your Claude Code login (no A
 ```bash
 ./evals/runner.py                                # all suites
 ./evals/runner.py --suite critic                 # one suite
+./evals/runner.py --suite workflow               # planner/executor/product skills
 ./evals/runner.py --case c-001-slop-rethink      # one case
 ./evals/runner.py --model sonnet                 # default: opus
 ./evals/runner.py --keep-fixtures                # don't delete tmp git repos (debug)
@@ -103,6 +106,26 @@ Rules:
 - One scenario per case
 - Phrase-match assertions only — the runner doesn't use LLM-as-judge
 
+### Workflow case
+
+Workflow cases load the named repository artifact as the system prompt. This
+keeps the eval tied to the shipped skill or subagent instead of a copied prompt.
+The artifact set is exact and allowlisted. Workflow cases run from the system
+temporary directory in Claude safe mode with an empty tool set, so a changed
+prompt is evaluated as text and cannot operate on the maintainer's checkout.
+
+```jsonc
+{
+  "id": "w-NNN-short-name",
+  "artifact": "skills/workflow/example/SKILL.md",
+  "input": {"prompt": "A self-contained scenario"},
+  "expect": {
+    "contains": ["required signal"],
+    "not_contains": ["forbidden claim"]
+  }
+}
+```
+
 ## Intake suite
 
 5 cases covering the refiner's core behaviors:
@@ -140,7 +163,7 @@ python evals/ablation.py --with-mastermind # both conditions, head-to-head
 
 ## When to run
 
-- Before editing `mastermind-critic.md`, `mastermind-auditor.md`, or `mastermind-prompt-refiner.md`
+- Before editing any evaluated subagent or workflow skill
 - After editing them, to confirm behaviors still fire
 - When adding a new adversarial pattern as a regression test
 - After adding a fixture variant (smoke `--keep-fixtures` to inspect tmp repo)

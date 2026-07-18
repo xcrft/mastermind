@@ -8,7 +8,7 @@
   <a href="https://www.npmjs.com/package/@xcraftmind/mastermind"><img src="https://img.shields.io/npm/v/@xcraftmind/mastermind.svg" alt="npm version"></a>
   <a href="https://github.com/xcrft/mastermind/actions/workflows/ci-mmcg.yml"><img src="https://github.com/xcrft/mastermind/actions/workflows/ci-mmcg.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
-  <a href="evals/benchmarks.md"><img src="https://img.shields.io/badge/evals-critic%20%2B%20auditor%20%2B%20intake-yellowgreen" alt="Evals"></a>
+  <a href="evals/benchmarks.md"><img src="https://img.shields.io/badge/evals-critic%20%2B%20auditor%20%2B%20intake%20%2B%20workflow-yellowgreen" alt="Evals"></a>
 </p>
 
 **A local codegraph and verifiable workflow for AI coding agents.**
@@ -39,11 +39,14 @@ npm install -g @xcraftmind/mastermind
 Connect the client you use:
 
 ```bash
-mastermind install                              # Claude workflow + skills + MCP
-mastermind setup codex --scope user --write    # Codex MCP
+mastermind install --client all                # Claude + Codex workflow adapters and MCP
 mastermind setup cursor --scope user --write   # Cursor MCP
 mastermind setup continue --scope user --write # Continue MCP
 ```
+
+Use `mastermind install` for Claude only or `mastermind install --client codex`
+for Codex only. `mastermind doctor --workflow --client all` verifies that the
+ownership manifests, artifact lists, and SHA-256 content match the current package.
 
 Global installation and MCP registration do **not** require a project or `mastermind init`. Setup is dry-run-first when `--write` is omitted.
 
@@ -73,6 +76,7 @@ See [Getting started](docs/getting-started.md) for global vs per-repository stat
 mastermind map .                     # readable architecture briefing
 mastermind map src --format mermaid  # scoped diagram
 mastermind map . --format json       # stable schema for automation
+mastermind map . --production-only   # hide tests, fixtures, examples, generated/vendor code
 ```
 
 The map highlights languages, components, entry points, dependency boundaries, hotspots, and cycles without asking an agent to grep the entire repository.
@@ -125,7 +129,8 @@ See [Verifiable audits and GitHub Action](docs/github-action.md).
 | State | Scope | Created by |
 |---|---|---|
 | `mastermind` CLI | Global or project-local npm install | `npm install` |
-| Claude workflow, agents, and skills | Global | `mastermind install` |
+| Claude workflow agents and skills | Global | `mastermind install` |
+| Codex workflow skills | Global | `mastermind install --client codex` |
 | MCP client registration | User or project, depending on client | `mastermind setup …` |
 | `.mastermind/mmcg.db` codegraph | Per repository | `mastermind index .` or `mastermind init` |
 | Task specs and project context | Per repository, optional | `mastermind init` |

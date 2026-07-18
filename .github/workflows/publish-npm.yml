@@ -3,7 +3,7 @@
 # all 8 packages (root + 7 platforms) with the same version.
 #
 # Tag-driven: pushing `npm-v<semver>` (e.g. `npm-v0.22.0`) triggers verify
-# + publish. `workflow_dispatch` runs verify-only (dry-run by default) so
+# + publish. `workflow_dispatch` always runs verify-only so
 # the assembly + smoke path can be tested before tagging.
 #
 # Setup (one-time before first publish):
@@ -31,11 +31,6 @@ on:
     tags:
       - "npm-v*"
   workflow_dispatch:
-    inputs:
-      dry_run:
-        description: "Dry run — verify + smoke only, no publish (default: true)"
-        type: boolean
-        default: true
 
 concurrency:
   group: publish-npm-${{ github.ref }}
@@ -91,9 +86,9 @@ jobs:
             artifact: mmcg
             install_musl: true
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           targets: ${{ matrix.target }}
 
@@ -102,7 +97,7 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -yq musl-tools
 
       - name: Cache cargo
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -114,7 +109,7 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mmcg-${{ matrix.target }}
           path: mcp/servers/mmcg/target/${{ matrix.target }}/release/${{ matrix.artifact }}
@@ -126,15 +121,15 @@ jobs:
     needs: build-binaries
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
 
       - name: Download all build artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: build-artifacts
 
@@ -250,7 +245,7 @@ jobs:
           echo "✓ workflow bundle ships + init installs it to ~/.claude/"
 
       - name: Upload assembled tarballs for the publish job
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: npm-tarballs
           path: packed/
@@ -287,15 +282,15 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
 
       - name: Download assembled tarballs
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: npm-tarballs
           path: packed
@@ -330,7 +325,7 @@ jobs:
   dry-run-notice:
     name: Dry-run notice
     needs: assemble-and-smoke
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run != 'false'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - run: echo "Dry run complete — build + assemble + smoke passed. No publish performed."

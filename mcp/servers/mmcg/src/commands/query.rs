@@ -33,10 +33,11 @@ pub fn dispatch_map(
     format: crate::MapFormat,
     depth: u8,
     top: u32,
+    production_only: bool,
     index_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let store = Store::open(index_path)?;
-    let map = queries::project_map(&store, path, depth, top)?;
+    let map = queries::project_map_with_options(&store, path, depth, top, production_only)?;
     match format {
         crate::MapFormat::Json => println!("{}", serde_json::to_string_pretty(&map)?),
         crate::MapFormat::Text => print!("{}", render_map_text(&map)),

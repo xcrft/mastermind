@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mastermind Audit Attestation"
+  short_description: "Verify audit integrity, signatures, and policy"
+  default_prompt: "Use $mastermind-audit-attestation to verify this audit bundle and its provenance."

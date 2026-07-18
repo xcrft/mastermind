@@ -1,0 +1,73 @@
+name: Mastermind PR Audit
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact pull-request head
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Record hostile source metadata as data
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p .mastermind/audit-source-metadata
+          printf '%s\n' "$PR_NUMBER" >.mastermind/audit-source-metadata/pr-number
+          printf '%s\n' "$BASE_SHA" >.mastermind/audit-source-metadata/base-sha
+          printf '%s\n' "$HEAD_SHA" >.mastermind/audit-source-metadata/head-sha
+          printf '%s\n' "$RUN_ID" >.mastermind/audit-source-metadata/run-id
+          printf '%s\n' "$RUN_ATTEMPT" >.mastermind/audit-source-metadata/run-attempt
+          printf '%s\n' "$WORKFLOW_REF" >.mastermind/audit-source-metadata/workflow-ref
+          printf '%s\n' "$WORKFLOW_SHA" >.mastermind/audit-source-metadata/workflow-sha
+
+      - name: Produce and verify audit envelopes
+        id: mastermind
+        uses: ./
+        with:
+          root: .
+          since: ${{ github.event.pull_request.base.sha }}
+          bundle-dir: .mastermind/audit-output
+          expected-repository: ${{ github.repository }}
+          expected-baseline: ${{ github.event.pull_request.base.sha }}
+          expected-head: ${{ github.event.pull_request.head.sha }}
+          require-clean-worktree: "true"
+
+      - name: Assemble attempt-specific source artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir .mastermind/mastermind-pr-audit
+          cp .mastermind/audit-output/*.bundle.json .mastermind/mastermind-pr-audit/
+          cp .mastermind/audit-output/result.json .mastermind/mastermind-pr-audit/
+          cp .mastermind/audit-source-metadata/* .mastermind/mastermind-pr-audit/
+
+      - name: Upload one source artifact
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mastermind-pr-audit-attempt-${{ github.run_attempt }}
+          path: .mastermind/mastermind-pr-audit
+          if-no-files-found: error
+          include-hidden-files: false
+          compression-level: 0
+          retention-days: 7

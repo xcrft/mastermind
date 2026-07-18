@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mastermind Test Impact"
+  short_description: "Prioritize tests from deterministic change evidence"
+  default_prompt: "Use $mastermind-test-impact to build a focused test plan for this change."

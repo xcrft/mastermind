@@ -1,0 +1,32 @@
+name: Mastermind verifiable audit
+description: Produce and independently verify schema-v3 Mastermind audit envelopes
+inputs:
+  root:
+    description: Repository root below GITHUB_WORKSPACE
+    default: .
+  since:
+    description: Exact full baseline commit OID
+    required: true
+  bundle-dir:
+    description: New repository-relative output directory
+    default: .mastermind/audit-output
+  expected-repository:
+    description: Expected GitHub owner/repo identity
+    required: true
+  expected-baseline:
+    description: Expected full baseline commit OID
+    required: true
+  expected-head:
+    description: Expected full HEAD commit OID
+    required: true
+  require-clean-worktree:
+    description: Reject any dirty snapshot
+    default: "true"
+outputs:
+  bundle-dir:
+    description: Verified envelope directory
+  result-json:
+    description: Aggregate verification result path
+runs:
+  using: docker
+  image: Dockerfile.audit-action

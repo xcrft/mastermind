@@ -8,19 +8,93 @@ use crate::queries;
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::io::{BufRead, Write};
+use std::io::{self, BufRead, Write};
 
-const PROTOCOL_VERSION: &str = "2024-11-05";
+const CURRENT_PROTOCOL_VERSION: &str = "2025-11-25";
+const LEGACY_PROTOCOL_VERSION: &str = "2024-11-05";
+const MCP_FRAME_MAX: usize = 1024 * 1024;
+const MCP_RESULT_MAX: usize = 8 * 1024 * 1024;
+const SERVER_NOT_INITIALIZED: i32 = -32002;
 const SCRATCHPAD_BODY_MAX: usize = 8 * 1024;
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
-    #[allow(dead_code)]
-    jsonrpc: Option<String>,
-    id: Option<Value>,
+    jsonrpc: String,
     method: String,
     #[serde(default)]
     params: Value,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProtocolVersion {
+    Legacy,
+    Current,
+}
+
+impl ProtocolVersion {
+    fn negotiate(requested: &str) -> Self {
+        if requested == LEGACY_PROTOCOL_VERSION {
+            Self::Legacy
+        } else {
+            Self::Current
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => LEGACY_PROTOCOL_VERSION,
+            Self::Current => CURRENT_PROTOCOL_VERSION,
+        }
+    }
+
+    fn is_current(self) -> bool {
+        self == Self::Current
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum SessionState {
+    #[default]
+    Cold,
+    Negotiated(ProtocolVersion),
+    Ready(ProtocolVersion),
+}
+
+impl SessionState {
+    fn protocol(self) -> Option<ProtocolVersion> {
+        match self {
+            Self::Cold => None,
+            Self::Negotiated(version) | Self::Ready(version) => Some(version),
+        }
+    }
+
+    fn is_ready(self) -> bool {
+        matches!(self, Self::Ready(_))
+    }
+}
+
+enum Frame {
+    Line(String),
+    InvalidUtf8,
+    TooLarge(usize),
+}
+
+#[derive(Debug)]
+enum HandlerError {
+    InvalidArguments(String),
+    Internal { class: &'static str },
+}
+
+impl HandlerError {
+    fn internal(class: &'static str, _error: impl std::fmt::Display) -> Self {
+        Self::Internal { class }
+    }
+}
+
+#[derive(Debug)]
+enum ToolCallError {
+    InvalidParams(String),
+    Internal { class: &'static str },
 }
 
 #[derive(Debug, Serialize)]
@@ -42,175 +116,280 @@ struct JsonRpcError {
 /// One MCP tool. `schema` returns the `tools/list` JSON entry; `handler` runs
 /// the call and returns the raw payload ([`handle_tools_call`] adds the content
 /// envelope).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToolBehavior {
+    ReadOnly,
+    AdditiveNonIdempotent,
+}
+
 struct ToolDef {
     name: &'static str,
     schema: fn() -> Value,
-    handler: fn(&mut Store, &Value) -> Result<Value, String>,
+    handler: fn(&mut Store, &Value) -> Result<Value, HandlerError>,
+    behavior: ToolBehavior,
+}
+
+const fn read_only_tool(
+    name: &'static str,
+    schema: fn() -> Value,
+    handler: fn(&mut Store, &Value) -> Result<Value, HandlerError>,
+) -> ToolDef {
+    ToolDef {
+        name,
+        schema,
+        handler,
+        behavior: ToolBehavior::ReadOnly,
+    }
+}
+
+const fn additive_tool(
+    name: &'static str,
+    schema: fn() -> Value,
+    handler: fn(&mut Store, &Value) -> Result<Value, HandlerError>,
+) -> ToolDef {
+    ToolDef {
+        name,
+        schema,
+        handler,
+        behavior: ToolBehavior::AdditiveNonIdempotent,
+    }
 }
 
 /// Authoritative tool list — order matches `tools/list` output.
 static TOOLS: &[ToolDef] = &[
-    ToolDef {
-        name: "mmcg_search",
-        schema: schema_search,
-        handler: handle_search,
-    },
-    ToolDef {
-        name: "mmcg_callers",
-        schema: schema_callers,
-        handler: handle_callers,
-    },
-    ToolDef {
-        name: "mmcg_callees",
-        schema: schema_callees,
-        handler: handle_callees,
-    },
-    ToolDef {
-        name: "mmcg_impact",
-        schema: schema_impact,
-        handler: handle_impact,
-    },
-    ToolDef {
-        name: "mmcg_symbols_in_file",
-        schema: schema_symbols_in_file,
-        handler: handle_symbols_in_file,
-    },
-    ToolDef {
-        name: "mmcg_outline",
-        schema: schema_outline,
-        handler: handle_outline,
-    },
-    ToolDef {
-        name: "mmcg_files",
-        schema: schema_files,
-        handler: handle_files,
-    },
-    ToolDef {
-        name: "mmcg_imports",
-        schema: schema_imports,
-        handler: handle_imports,
-    },
-    ToolDef {
-        name: "mmcg_imported_by",
-        schema: schema_imported_by,
-        handler: handle_imported_by,
-    },
-    ToolDef {
-        name: "mmcg_unreferenced",
-        schema: schema_unreferenced,
-        handler: handle_unreferenced,
-    },
-    ToolDef {
-        name: "mmcg_api_surface",
-        schema: schema_api_surface,
-        handler: handle_api_surface,
-    },
-    ToolDef {
-        name: "mmcg_symbols_changed_since",
-        schema: schema_symbols_changed_since,
-        handler: handle_symbols_changed_since,
-    },
-    ToolDef {
-        name: "mmcg_dependency_cycles",
-        schema: schema_dependency_cycles,
-        handler: handle_dependency_cycles,
-    },
-    ToolDef {
-        name: "mmcg_tasks",
-        schema: schema_tasks,
-        handler: handle_tasks,
-    },
-    ToolDef {
-        name: "mmcg_centrality",
-        schema: schema_centrality,
-        handler: handle_centrality,
-    },
-    ToolDef {
-        name: "mmcg_recent_changes",
-        schema: schema_recent_changes,
-        handler: handle_recent_changes,
-    },
-    ToolDef {
-        name: "mmcg_status",
-        schema: schema_status,
-        handler: handle_status,
-    },
-    ToolDef {
-        name: "mmcg_scratchpad_append",
-        schema: schema_scratchpad_append,
-        handler: handle_scratchpad_append,
-    },
-    ToolDef {
-        name: "mmcg_scratchpad_read",
-        schema: schema_scratchpad_read,
-        handler: handle_scratchpad_read,
-    },
-    ToolDef {
-        name: "mmcg_change_class",
-        schema: schema_change_class,
-        handler: handle_change_class,
-    },
+    read_only_tool("mmcg_search", schema_search, handle_search),
+    read_only_tool("mmcg_callers", schema_callers, handle_callers),
+    read_only_tool("mmcg_callees", schema_callees, handle_callees),
+    read_only_tool("mmcg_impact", schema_impact, handle_impact),
+    read_only_tool(
+        "mmcg_symbols_in_file",
+        schema_symbols_in_file,
+        handle_symbols_in_file,
+    ),
+    read_only_tool("mmcg_outline", schema_outline, handle_outline),
+    read_only_tool("mmcg_files", schema_files, handle_files),
+    read_only_tool("mmcg_imports", schema_imports, handle_imports),
+    read_only_tool("mmcg_imported_by", schema_imported_by, handle_imported_by),
+    read_only_tool(
+        "mmcg_unreferenced",
+        schema_unreferenced,
+        handle_unreferenced,
+    ),
+    read_only_tool("mmcg_api_surface", schema_api_surface, handle_api_surface),
+    read_only_tool(
+        "mmcg_symbols_changed_since",
+        schema_symbols_changed_since,
+        handle_symbols_changed_since,
+    ),
+    read_only_tool(
+        "mmcg_dependency_cycles",
+        schema_dependency_cycles,
+        handle_dependency_cycles,
+    ),
+    read_only_tool("mmcg_tasks", schema_tasks, handle_tasks),
+    read_only_tool("mmcg_centrality", schema_centrality, handle_centrality),
+    read_only_tool("mmcg_map", schema_map, handle_map),
+    read_only_tool(
+        "mmcg_change_impact",
+        schema_change_impact,
+        handle_change_impact,
+    ),
+    read_only_tool("mmcg_test_impact", schema_test_impact, handle_test_impact),
+    read_only_tool(
+        "mmcg_recent_changes",
+        schema_recent_changes,
+        handle_recent_changes,
+    ),
+    read_only_tool("mmcg_status", schema_status, handle_status),
+    additive_tool(
+        "mmcg_scratchpad_append",
+        schema_scratchpad_append,
+        handle_scratchpad_append,
+    ),
+    read_only_tool(
+        "mmcg_scratchpad_read",
+        schema_scratchpad_read,
+        handle_scratchpad_read,
+    ),
+    read_only_tool(
+        "mmcg_change_class",
+        schema_change_class,
+        handle_change_class,
+    ),
 ];
 
 /// Run as an MCP stdio server. Blocks until stdin closes.
-pub fn serve(mut store: Store) -> std::io::Result<()> {
-    let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    let input = stdin.lock();
+pub fn serve(mut store: Store) -> io::Result<()> {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    serve_io(&mut store, stdin.lock(), stdout.lock())
+}
 
-    for line in input.lines() {
-        let line = line?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let Some(response) = handle_line(&mut store, trimmed) else {
-            continue;
+fn serve_io<R: BufRead, W: Write>(
+    store: &mut Store,
+    mut input: R,
+    mut output: W,
+) -> io::Result<()> {
+    let mut state = SessionState::Cold;
+    loop {
+        let Some(frame) = read_frame(&mut input)? else {
+            return Ok(());
         };
-
-        match serde_json::to_string(&response) {
-            Ok(s) => {
-                writeln!(out, "{s}")?;
-                out.flush()?;
+        let response = match frame {
+            Frame::Line(line) if line.trim().is_empty() => continue,
+            Frame::Line(line) => handle_line(&mut state, store, line.trim()),
+            Frame::InvalidUtf8 => {
+                eprintln!("[mmcg] parse error class=invalid_utf8");
+                Some(err(Value::Null, -32700, "Parse error".into()))
             }
-            Err(e) => eprintln!("[mmcg] serialize error: {e}"),
+            Frame::TooLarge(size) => {
+                eprintln!("[mmcg] protocol error class=frame_too_large bytes={size}");
+                write_response(
+                    &mut output,
+                    &err(Value::Null, -32600, "Request frame exceeds 1 MiB".into()),
+                )?;
+                return Ok(());
+            }
+        };
+        if let Some(response) = response {
+            write_response(&mut output, &response)?;
         }
     }
-    Ok(())
 }
 
-/// Process one line of JSON-RPC input. `Some(response)` to write back, or
-/// `None` for inputs that get no reply — a notification or any otherwise valid
-/// request without an `id`.
-fn handle_line(store: &mut Store, line: &str) -> Option<JsonRpcResponse> {
-    let req: JsonRpcRequest = match serde_json::from_str(line) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("[mmcg] parse error: {e} (line: {line})");
-            // JSON-RPC 2.0: unparseable input gets -32700 with a null id (the id
-            // can't be recovered from malformed JSON). Without any reply, a
-            // strict stdio client blocks waiting for one.
-            return Some(err(Value::Null, -32700, format!("Parse error: {e}")));
+fn read_frame<R: BufRead>(input: &mut R) -> io::Result<Option<Frame>> {
+    let mut bytes = Vec::new();
+    loop {
+        let (newline, consumed) = {
+            let available = input.fill_buf()?;
+            if available.is_empty() {
+                if bytes.is_empty() {
+                    return Ok(None);
+                }
+                break;
+            }
+            let newline = available.iter().position(|byte| *byte == b'\n');
+            let consumed = newline.map_or(available.len(), |index| index + 1);
+            let total = bytes.len().saturating_add(consumed);
+            if total > MCP_FRAME_MAX {
+                return Ok(Some(Frame::TooLarge(total)));
+            }
+            bytes.extend_from_slice(&available[..consumed]);
+            (newline, consumed)
+        };
+        input.consume(consumed);
+        if newline.is_some() {
+            break;
+        }
+    }
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+    }
+    if bytes.last() == Some(&b'\r') {
+        bytes.pop();
+    }
+    Ok(Some(match String::from_utf8(bytes) {
+        Ok(line) => Frame::Line(line),
+        Err(_) => Frame::InvalidUtf8,
+    }))
+}
+
+fn write_response<W: Write>(output: &mut W, response: &JsonRpcResponse) -> io::Result<()> {
+    let encoded = serde_json::to_string(response)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    writeln!(output, "{encoded}")?;
+    output.flush()
+}
+
+fn handle_line(state: &mut SessionState, store: &mut Store, line: &str) -> Option<JsonRpcResponse> {
+    let raw: Value = match serde_json::from_str(line) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("[mmcg] parse error class=invalid_json detail={error}");
+            return Some(err(Value::Null, -32700, "Parse error".into()));
         }
     };
-    // No id → notification; per spec, no reply.
-    let id = req.id.clone()?;
-    Some(handle_request(store, &req.method, &req.params, id))
+    let Some(object) = raw.as_object() else {
+        return Some(err(Value::Null, -32600, "Invalid Request".into()));
+    };
+    let id = match object.get("id") {
+        None => None,
+        Some(value) if valid_request_id(value) => Some(value.clone()),
+        Some(_) => return Some(err(Value::Null, -32600, "Invalid Request".into())),
+    };
+    let request: JsonRpcRequest = match serde_json::from_value::<JsonRpcRequest>(raw) {
+        Ok(request) if request.jsonrpc == "2.0" => request,
+        _ => {
+            return Some(err(
+                id.unwrap_or(Value::Null),
+                -32600,
+                "Invalid Request".into(),
+            ))
+        }
+    };
+    match id {
+        Some(id) => Some(handle_request(
+            state,
+            store,
+            &request.method,
+            &request.params,
+            id,
+        )),
+        None => {
+            handle_notification(state, &request.method);
+            None
+        }
+    }
 }
 
-fn handle_request(store: &mut Store, method: &str, params: &Value, id: Value) -> JsonRpcResponse {
+fn valid_request_id(value: &Value) -> bool {
+    match value {
+        Value::String(_) => true,
+        Value::Number(number) => number.as_i64().is_some() || number.as_u64().is_some(),
+        _ => false,
+    }
+}
+
+fn handle_notification(state: &mut SessionState, method: &str) {
+    if method == "notifications/initialized" {
+        if let SessionState::Negotiated(version) = *state {
+            *state = SessionState::Ready(version);
+        }
+    }
+}
+
+fn handle_request(
+    state: &mut SessionState,
+    store: &mut Store,
+    method: &str,
+    params: &Value,
+    id: Value,
+) -> JsonRpcResponse {
+    if method == "initialize" {
+        return match initialize_result(state, params) {
+            Ok(result) => ok(id, result),
+            Err(message) => err(id, -32602, message),
+        };
+    }
+    if method == "ping" {
+        return ok(id, json!({}));
+    }
+    if !state.is_ready() {
+        return err(id, SERVER_NOT_INITIALIZED, "Server not initialized".into());
+    }
     match method {
-        "initialize" => ok(id, initialize_result()),
-        "initialized" | "notifications/initialized" => ok(id, json!({})),
-        "tools/list" => ok(id, tools_list()),
-        "tools/call" => match handle_tools_call(store, params) {
-            Ok(v) => ok(id, v),
-            Err(msg) => err(id, -32603, msg),
-        },
-        "ping" => ok(id, json!({})),
-        other => err(id, -32601, format!("method not found: {other}")),
+        "tools/list" => ok(id, tools_list(state.protocol().expect("ready protocol"))),
+        "tools/call" => {
+            match handle_tools_call(state.protocol().expect("ready protocol"), store, params) {
+                Ok(result) => ok(id, result),
+                Err(ToolCallError::InvalidParams(message)) => err(id, -32602, message),
+                Err(ToolCallError::Internal { class }) => {
+                    eprintln!("[mmcg] tool error class={class}");
+                    err(id, -32603, "Internal tool error".into())
+                }
+            }
+        }
+        _ => err(id, -32601, "Method not found".into()),
     }
 }
 
@@ -232,43 +411,182 @@ fn err(id: Value, code: i32, message: String) -> JsonRpcResponse {
     }
 }
 
-fn initialize_result() -> Value {
-    json!({
-        "protocolVersion": PROTOCOL_VERSION,
-        "capabilities": { "tools": {} },
-        "serverInfo": { "name": "mmcg", "version": env!("CARGO_PKG_VERSION") }
-    })
-}
-
-fn tools_list() -> Value {
-    json!({ "tools": TOOLS.iter().map(|t| (t.schema)()).collect::<Vec<_>>() })
-}
-
-fn handle_tools_call(store: &mut Store, params: &Value) -> Result<Value, String> {
-    let tool_name = params
-        .get("name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "missing 'name' in tools/call params".to_string())?;
-    let args = params
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-
-    let tool = TOOLS
-        .iter()
-        .find(|t| t.name == tool_name)
-        .ok_or_else(|| format!("unknown tool: {tool_name}"))?;
-
-    let payload = (tool.handler)(store, &args)?;
+fn initialize_result(state: &mut SessionState, params: &Value) -> Result<Value, String> {
+    if *state != SessionState::Cold {
+        return Err("Connection is already initialized".into());
+    }
+    let requested = params
+        .get("protocolVersion")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Invalid initialize params".to_string())?;
+    let capabilities_valid = params
+        .get("capabilities")
+        .and_then(Value::as_object)
+        .is_some();
+    let client_info = params.get("clientInfo").and_then(Value::as_object);
+    let client_info_valid = client_info
+        .and_then(|value| value.get("name"))
+        .and_then(Value::as_str)
+        .is_some()
+        && client_info
+            .and_then(|value| value.get("version"))
+            .and_then(Value::as_str)
+            .is_some();
+    if !capabilities_valid || !client_info_valid {
+        return Err("Invalid initialize params".into());
+    }
+    let version = ProtocolVersion::negotiate(requested);
+    *state = SessionState::Negotiated(version);
     Ok(json!({
-        "content": [{ "type": "text", "text": serde_json::to_string_pretty(&payload).unwrap_or_default() }]
+        "protocolVersion": version.as_str(),
+        "capabilities": { "tools": { "listChanged": false } },
+        "serverInfo": { "name": "mmcg", "version": env!("CARGO_PKG_VERSION") }
     }))
 }
 
-fn str_arg<'a>(args: &'a Value, name: &str) -> Result<&'a str, String> {
+fn tools_list(version: ProtocolVersion) -> Value {
+    let tools = TOOLS
+        .iter()
+        .map(|tool| {
+            let mut schema = (tool.schema)();
+            if version.is_current() {
+                let annotations = match tool.behavior {
+                    ToolBehavior::ReadOnly => json!({ "readOnlyHint": true }),
+                    ToolBehavior::AdditiveNonIdempotent => json!({
+                        "readOnlyHint": false,
+                        "destructiveHint": false,
+                        "idempotentHint": false
+                    }),
+                };
+                schema
+                    .as_object_mut()
+                    .expect("tool schema object")
+                    .insert("annotations".into(), annotations);
+            }
+            schema
+        })
+        .collect::<Vec<_>>();
+    json!({ "tools": tools })
+}
+
+fn handle_tools_call(
+    version: ProtocolVersion,
+    store: &mut Store,
+    params: &Value,
+) -> Result<Value, ToolCallError> {
+    handle_tools_call_inner(version, store, params, None)
+}
+
+fn handle_tools_call_inner(
+    version: ProtocolVersion,
+    store: &mut Store,
+    params: &Value,
+    impact_engine: Option<&queries::ImpactEngine<'_>>,
+) -> Result<Value, ToolCallError> {
+    let params = params
+        .as_object()
+        .ok_or_else(|| ToolCallError::InvalidParams("Invalid tools/call params".into()))?;
+    let tool_name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ToolCallError::InvalidParams("Invalid tools/call params".into()))?;
+    let arguments = match params.get("arguments") {
+        None => json!({}),
+        Some(value) if value.is_object() => value.clone(),
+        Some(_) => {
+            return Err(ToolCallError::InvalidParams(
+                "Invalid tools/call params".into(),
+            ))
+        }
+    };
+    let tool = TOOLS
+        .iter()
+        .find(|tool| tool.name == tool_name)
+        .ok_or_else(|| ToolCallError::InvalidParams("Unknown tool".into()))?;
+    let handled = match (tool_name, impact_engine) {
+        ("mmcg_change_impact", Some(engine)) => {
+            handle_change_impact_with_engine(store, &arguments, engine)
+        }
+        ("mmcg_test_impact", Some(engine)) => {
+            handle_test_impact_with_engine(store, &arguments, engine)
+        }
+        _ => (tool.handler)(store, &arguments),
+    };
+    match handled {
+        Ok(payload) => tool_result(version, payload, false),
+        Err(HandlerError::InvalidArguments(message)) => {
+            tool_result(version, json!({ "error": message }), true)
+        }
+        Err(HandlerError::Internal { class }) => Err(ToolCallError::Internal { class }),
+    }
+}
+
+#[cfg(test)]
+fn handle_tools_call_with_impact_engine(
+    version: ProtocolVersion,
+    store: &mut Store,
+    params: &Value,
+    impact_engine: &queries::ImpactEngine<'_>,
+) -> Result<Value, ToolCallError> {
+    handle_tools_call_inner(version, store, params, Some(impact_engine))
+}
+
+fn tool_result(
+    version: ProtocolVersion,
+    payload: Value,
+    is_error: bool,
+) -> Result<Value, ToolCallError> {
+    let text = serde_json::to_string(&payload).map_err(|_| ToolCallError::Internal {
+        class: "serialize_tool_payload",
+    })?;
+    if text.len() > MCP_RESULT_MAX {
+        return small_tool_error(version, "Tool result exceeds 8 MiB; narrow the query");
+    }
+    let structured = if version.is_current() {
+        Some(match payload {
+            Value::Object(object) => Value::Object(object),
+            Value::Array(entries) => json!({ "entries": entries }),
+            value => json!({ "value": value }),
+        })
+    } else {
+        None
+    };
+    let mut result = json!({
+        "content": [{ "type": "text", "text": text }],
+        "isError": is_error
+    });
+    if let Some(structured) = structured {
+        result
+            .as_object_mut()
+            .expect("tool result object")
+            .insert("structuredContent".into(), structured);
+    }
+    Ok(result)
+}
+
+fn small_tool_error(
+    version: ProtocolVersion,
+    message: &'static str,
+) -> Result<Value, ToolCallError> {
+    let payload = json!({ "error": message });
+    let text = serde_json::to_string(&payload).expect("static error serializes");
+    let mut result = json!({
+        "content": [{ "type": "text", "text": text }],
+        "isError": true
+    });
+    if version.is_current() {
+        result
+            .as_object_mut()
+            .expect("tool result object")
+            .insert("structuredContent".into(), payload);
+    }
+    Ok(result)
+}
+
+fn str_arg<'a>(args: &'a Value, name: &str) -> Result<&'a str, HandlerError> {
     args.get(name)
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| format!("missing or non-string argument '{name}'"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| HandlerError::InvalidArguments(format!("Invalid argument: {name}")))
 }
 
 fn opt_str_arg<'a>(args: &'a Value, name: &str) -> Option<&'a str> {
@@ -505,6 +823,52 @@ fn schema_centrality() -> Value {
     })
 }
 
+fn schema_map() -> Value {
+    json!({
+        "name": "mmcg_map",
+        "description": "Build a bounded deterministic architecture briefing for an indexed repository scope. Entry points are heuristic; graph precision and truncation are explicit in the result.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "default": ".", "description": "Repository-relative file or directory scope" },
+                "depth": { "type": "integer", "minimum": 1, "maximum": 6, "default": 2 },
+                "top": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
+            }
+        }
+    })
+}
+
+fn impact_input_schema(name: &str, description: &str) -> Value {
+    json!({
+        "name": name,
+        "description": description,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "since": { "type": "string", "description": "Git ref used as the baseline" },
+                "root": { "type": "string", "description": "Repository root or a subdirectory within the indexed repository" },
+                "depth": { "type": "integer", "minimum": 1, "maximum": 5, "default": 3 },
+                "top": { "type": "integer", "minimum": 1, "maximum": 500, "default": 100 }
+            },
+            "required": ["since"]
+        }
+    })
+}
+
+fn schema_change_impact() -> Value {
+    impact_input_schema(
+        "mmcg_change_impact",
+        "Deterministic schema-v1 analysis of working-tree changes, callers, component crossings, and candidate tests.",
+    )
+}
+
+fn schema_test_impact() -> Value {
+    impact_input_schema(
+        "mmcg_test_impact",
+        "Exact candidate-test projection of mmcg_change_impact. Focused candidates never replace the full repository gate.",
+    )
+}
+
 fn schema_recent_changes() -> Value {
     json!({
         "name": "mmcg_recent_changes",
@@ -573,96 +937,107 @@ fn schema_change_class() -> Value {
     })
 }
 
-fn handle_search(store: &mut Store, args: &Value) -> Result<Value, String> {
+fn handle_search(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let name = str_arg(args, "name")?;
     let kind = opt_str_arg(args, "kind");
     let language = opt_str_arg(args, "language");
     let collapse = opt_bool_arg(args, "collapse_partials").unwrap_or(true);
-    let r = queries::search(store, name, kind, language, collapse).map_err(|e| e.to_string())?;
-    serde_json::to_value(r).map_err(|e| e.to_string())
+    let r = queries::search(store, name, kind, language, collapse)
+        .map_err(|error| HandlerError::internal("search_query", error))?;
+    serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
-fn handle_callers(store: &mut Store, args: &Value) -> Result<Value, String> {
+fn handle_callers(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let name = str_arg(args, "name")?;
     let language = opt_str_arg(args, "language");
     let edge_kind = opt_str_arg(args, "edge_kind");
-    let r = queries::callers(store, name, language, edge_kind).map_err(|e| e.to_string())?;
-    serde_json::to_value(r).map_err(|e| e.to_string())
+    let r = queries::callers(store, name, language, edge_kind)
+        .map_err(|error| HandlerError::internal("callers_query", error))?;
+    serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
-fn handle_callees(store: &mut Store, args: &Value) -> Result<Value, String> {
+fn handle_callees(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let name = str_arg(args, "name")?;
     let language = opt_str_arg(args, "language");
     let edge_kind = opt_str_arg(args, "edge_kind");
-    let r = queries::callees(store, name, language, edge_kind).map_err(|e| e.to_string())?;
-    serde_json::to_value(r).map_err(|e| e.to_string())
+    let r = queries::callees(store, name, language, edge_kind)
+        .map_err(|error| HandlerError::internal("callees_query", error))?;
+    serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
-fn handle_impact(store: &mut Store, args: &Value) -> Result<Value, String> {
+fn handle_impact(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let name = str_arg(args, "name")?;
     let max_depth = args.get("max_depth").and_then(|v| v.as_u64()).unwrap_or(2) as u32;
     let language = opt_str_arg(args, "language");
-    let r = queries::impact(store, name, max_depth, language).map_err(|e| e.to_string())?;
-    serde_json::to_value(r).map_err(|e| e.to_string())
+    let r = queries::impact(store, name, max_depth, language)
+        .map_err(|error| HandlerError::internal("impact_query", error))?;
+    serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
-fn handle_symbols_in_file(store: &mut Store, args: &Value) -> Result<Value, String> {
+fn handle_symbols_in_file(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let file = str_arg(args, "file")?;
-    let r = queries::symbols_in_file(store, file).map_err(|e| e.to_string())?;
-    serde_json::to_value(r).map_err(|e| e.to_string())
+    let r = queries::symbols_in_file(store, file)
+        .map_err(|error| HandlerError::internal("symbols_in_file_query", error))?;
+    serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
-fn handle_outline(store: &mut Store, args: &Value) -> Result<Value, String> {
+fn handle_outline(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let file = str_arg(args, "file")?;
-    let r = queries::outline(store, file).map_err(|e| e.to_string())?;
-    serde_json::to_value(r).map_err(|e| e.to_string())
+    let r = queries::outline(store, file)
+        .map_err(|error| HandlerError::internal("outline_query", error))?;
+    serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
-fn handle_files(store: &mut Store, args: &Value) -> Result<Value, String> {
+fn handle_files(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let prefix = opt_str_arg(args, "prefix");
     let language = opt_str_arg(args, "language");
-    let r = queries::files(store, prefix, language).map_err(|e| e.to_string())?;
-    serde_json::to_value(r).map_err(|e| e.to_string())
+    let r = queries::files(store, prefix, language)
+        .map_err(|error| HandlerError::internal("files_query", error))?;
+    serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
-fn handle_imports(store: &mut Store, args: &Value) -> Result<Value, String> {
+fn handle_imports(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let file = str_arg(args, "file")?;
-    let r = queries::imports(store, file).map_err(|e| e.to_string())?;
-    serde_json::to_value(r).map_err(|e| e.to_string())
+    let r = queries::imports(store, file)
+        .map_err(|error| HandlerError::internal("imports_query", error))?;
+    serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
-fn handle_imported_by(store: &mut Store, args: &Value) -> Result<Value, String> {
+fn handle_imported_by(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let query = str_arg(args, "query").or_else(|_| str_arg(args, "name"))?;
     let match_kind = opt_str_arg(args, "match").unwrap_or("name");
     let language = opt_str_arg(args, "language");
-    let r = queries::imported_by(store, query, match_kind, language).map_err(|e| e.to_string())?;
-    serde_json::to_value(r).map_err(|e| e.to_string())
+    let r = queries::imported_by(store, query, match_kind, language)
+        .map_err(|error| HandlerError::internal("imported_by_query", error))?;
+    serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
-fn handle_unreferenced(store: &mut Store, args: &Value) -> Result<Value, String> {
+fn handle_unreferenced(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let kind = opt_str_arg(args, "kind");
     let language = opt_str_arg(args, "language");
-    let r = queries::unreferenced(store, kind, language).map_err(|e| e.to_string())?;
-    serde_json::to_value(r).map_err(|e| e.to_string())
+    let r = queries::unreferenced(store, kind, language)
+        .map_err(|error| HandlerError::internal("unreferenced_query", error))?;
+    serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
-fn handle_api_surface(store: &mut Store, args: &Value) -> Result<Value, String> {
+fn handle_api_surface(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let prefix = str_arg(args, "prefix")?;
     let language = opt_str_arg(args, "language");
-    let r = queries::api_surface(store, prefix, language).map_err(|e| e.to_string())?;
-    serde_json::to_value(r).map_err(|e| e.to_string())
+    let r = queries::api_surface(store, prefix, language)
+        .map_err(|error| HandlerError::internal("api_surface_query", error))?;
+    serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
 fn changed_since_root(
     root_arg: Option<&str>,
     db_path: &std::path::Path,
-) -> Result<std::path::PathBuf, String> {
+) -> Result<std::path::PathBuf, HandlerError> {
     let root = match root_arg {
         Some(s) => std::path::PathBuf::from(s),
         None => {
             let db = db_path
                 .canonicalize()
-                .map_err(|e| format!("canonicalize db_path: {e}"))?;
+                .map_err(|error| HandlerError::internal("changed_since_root", error))?;
             db.parent()
                 .and_then(|d| d.parent())
                 .map(|p| p.to_path_buf())
@@ -670,17 +1045,18 @@ fn changed_since_root(
         }
     };
     root.canonicalize()
-        .map_err(|e| format!("canonicalize root: {e}"))
+        .map_err(|error| HandlerError::internal("changed_since_root", error))
 }
 
-fn handle_symbols_changed_since(store: &mut Store, args: &Value) -> Result<Value, String> {
+fn handle_symbols_changed_since(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let git_ref = str_arg(args, "git_ref")?;
     let root = changed_since_root(opt_str_arg(args, "root"), store.db_path())?;
-    let diff = queries::symbols_changed_since(store, &root, git_ref).map_err(|e| e.to_string())?;
-    serde_json::to_value(diff).map_err(|e| e.to_string())
+    let diff = queries::symbols_changed_since(store, &root, git_ref)
+        .map_err(|error| HandlerError::internal("git_diff", error))?;
+    serde_json::to_value(diff).map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
-fn handle_dependency_cycles(store: &mut Store, args: &Value) -> Result<Value, String> {
+fn handle_dependency_cycles(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let language = opt_str_arg(args, "language");
     let min_size = args
         .get("min_size")
@@ -688,11 +1064,12 @@ fn handle_dependency_cycles(store: &mut Store, args: &Value) -> Result<Value, St
         .and_then(|n| u32::try_from(n).ok())
         .unwrap_or(2)
         .clamp(2, 100);
-    let r = queries::dependency_cycles(store, language, min_size).map_err(|e| e.to_string())?;
-    serde_json::to_value(r).map_err(|e| e.to_string())
+    let r = queries::dependency_cycles(store, language, min_size)
+        .map_err(|error| HandlerError::internal("dependency_cycles_query", error))?;
+    serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
-fn handle_tasks(store: &mut Store, args: &Value) -> Result<Value, String> {
+fn handle_tasks(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let query = str_arg(args, "query")?;
     let top = args
         .get("top")
@@ -700,11 +1077,12 @@ fn handle_tasks(store: &mut Store, args: &Value) -> Result<Value, String> {
         .and_then(|n| u32::try_from(n).ok())
         .unwrap_or(10)
         .clamp(1, 50);
-    let r = queries::tasks(store, query, top).map_err(|e| e.to_string())?;
-    serde_json::to_value(r).map_err(|e| e.to_string())
+    let r = queries::tasks(store, query, top)
+        .map_err(|error| HandlerError::internal("tasks_query", error))?;
+    serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
-fn handle_centrality(store: &mut Store, args: &Value) -> Result<Value, String> {
+fn handle_centrality(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let prefix = opt_str_arg(args, "prefix");
     let language = opt_str_arg(args, "language");
     let kind = opt_str_arg(args, "kind");
@@ -714,39 +1092,170 @@ fn handle_centrality(store: &mut Store, args: &Value) -> Result<Value, String> {
         .and_then(|n| u32::try_from(n).ok())
         .unwrap_or(20)
         .clamp(1, 200);
-    let r = queries::centrality(store, prefix, language, kind, top).map_err(|e| e.to_string())?;
-    serde_json::to_value(r).map_err(|e| e.to_string())
+    let r = queries::centrality(store, prefix, language, kind, top)
+        .map_err(|error| HandlerError::internal("centrality_query", error))?;
+    serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
-fn handle_recent_changes(store: &mut Store, args: &Value) -> Result<Value, String> {
+fn handle_map(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
+    let path = match args.get("path") {
+        None => ".",
+        Some(value) => value
+            .as_str()
+            .ok_or_else(|| HandlerError::InvalidArguments("Invalid argument: path".into()))?,
+    };
+    queries::normalize_map_path(path)
+        .map_err(|_| HandlerError::InvalidArguments("Invalid argument: path".into()))?;
+    let depth = match args.get("depth") {
+        None => 2,
+        Some(value) => value
+            .as_u64()
+            .filter(|value| (1..=6).contains(value))
+            .ok_or_else(|| HandlerError::InvalidArguments("Invalid argument: depth".into()))?,
+    };
+    let top = match args.get("top") {
+        None => 20,
+        Some(value) => value
+            .as_u64()
+            .filter(|value| (1..=100).contains(value))
+            .ok_or_else(|| HandlerError::InvalidArguments("Invalid argument: top".into()))?,
+    };
+    let result = queries::project_map(store, path, depth as u8, top as u32)
+        .map_err(|error| HandlerError::internal("project_map_query", error))?;
+    serde_json::to_value(result)
+        .map_err(|error| HandlerError::internal("serialize_response", error))
+}
+
+fn impact_arguments(
+    store: &Store,
+    args: &Value,
+) -> Result<(String, std::path::PathBuf, u32, usize), HandlerError> {
+    let since = str_arg(args, "since")?.to_string();
+    let root = match args.get("root") {
+        None => changed_since_root(None, store.db_path())?,
+        Some(Value::String(value)) => std::path::PathBuf::from(value)
+            .canonicalize()
+            .map_err(|_| HandlerError::InvalidArguments("root_mismatch".to_string()))?,
+        Some(_) => {
+            return Err(HandlerError::InvalidArguments(
+                "Invalid argument: root".to_string(),
+            ))
+        }
+    };
+    let depth = match args.get("depth") {
+        None => 3,
+        Some(value) => value
+            .as_u64()
+            .filter(|value| (1..=5).contains(value))
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| HandlerError::InvalidArguments("Invalid argument: depth".into()))?,
+    };
+    let top = match args.get("top") {
+        None => 100,
+        Some(value) => value
+            .as_u64()
+            .filter(|value| (1..=500).contains(value))
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| HandlerError::InvalidArguments("Invalid argument: top".into()))?,
+    };
+    Ok((since, root, depth, top))
+}
+
+fn run_change_impact(
+    store: &Store,
+    args: &Value,
+) -> Result<queries::ChangeImpactResponse, HandlerError> {
+    run_change_impact_with_engine(store, args, &queries::change_impact)
+}
+
+fn run_change_impact_with_engine(
+    store: &Store,
+    args: &Value,
+    impact_engine: &queries::ImpactEngine<'_>,
+) -> Result<queries::ChangeImpactResponse, HandlerError> {
+    let (since, root, depth, top) = impact_arguments(store, args)?;
+    impact_engine(store, &root, &since, depth, top)
+        .map_err(|error| HandlerError::InvalidArguments(error.code().to_string()))
+}
+
+fn handle_change_impact(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
+    let response = run_change_impact(store, args)?;
+    serde_json::to_value(response)
+        .map_err(|error| HandlerError::internal("serialize_response", error))
+}
+
+fn handle_change_impact_with_engine(
+    store: &mut Store,
+    args: &Value,
+    impact_engine: &queries::ImpactEngine<'_>,
+) -> Result<Value, HandlerError> {
+    let response = run_change_impact_with_engine(store, args, impact_engine)?;
+    serde_json::to_value(response)
+        .map_err(|error| HandlerError::internal("serialize_response", error))
+}
+
+fn test_impact_projection(
+    response: &queries::ChangeImpactResponse,
+) -> Result<Value, serde_json::Error> {
+    let value = serde_json::to_value(response)?;
+    Ok(json!({
+        "schema_version": value["schema_version"],
+        "baseline": value["baseline"],
+        "scope": value["scope"],
+        "changes": value["changes"],
+        "tests": value["tests"],
+        "limits": value["limits"],
+        "precision_notes": value["precision_notes"],
+    }))
+}
+
+fn handle_test_impact(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
+    let response = run_change_impact(store, args)?;
+    test_impact_projection(&response)
+        .map_err(|error| HandlerError::internal("serialize_response", error))
+}
+
+fn handle_test_impact_with_engine(
+    store: &mut Store,
+    args: &Value,
+    impact_engine: &queries::ImpactEngine<'_>,
+) -> Result<Value, HandlerError> {
+    let response = run_change_impact_with_engine(store, args, impact_engine)?;
+    test_impact_projection(&response)
+        .map_err(|error| HandlerError::internal("serialize_response", error))
+}
+
+fn handle_recent_changes(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let since = str_arg(args, "since")?;
-    let r = queries::recent_changes(store, since)?;
-    serde_json::to_value(r).map_err(|e| e.to_string())
+    queries::parse_duration(since)
+        .map_err(|_| HandlerError::InvalidArguments("Invalid argument: since".into()))?;
+    let r = queries::recent_changes(store, since)
+        .map_err(|error| HandlerError::internal("recent_changes_query", error))?;
+    serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
-fn handle_status(store: &mut Store, _args: &Value) -> Result<Value, String> {
-    let r = queries::status(store).map_err(|e| e.to_string())?;
-    serde_json::to_value(r).map_err(|e| e.to_string())
+fn handle_status(store: &mut Store, _args: &Value) -> Result<Value, HandlerError> {
+    let r =
+        queries::status(store).map_err(|error| HandlerError::internal("status_query", error))?;
+    serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
-fn handle_scratchpad_append(store: &mut Store, args: &Value) -> Result<Value, String> {
+fn handle_scratchpad_append(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let agent = str_arg(args, "agent")?;
     let kind = str_arg(args, "kind")?;
     let body = str_arg(args, "body")?;
     if body.len() > SCRATCHPAD_BODY_MAX {
-        return Err(format!(
-            "scratchpad body too large: {} bytes (max {})",
-            body.len(),
-            SCRATCHPAD_BODY_MAX
+        return Err(HandlerError::InvalidArguments(
+            "Scratchpad body exceeds 8 KiB".into(),
         ));
     }
     let (id, ts) = store
         .scratchpad_append(agent, kind, body)
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| HandlerError::internal("scratchpad_write", error))?;
     Ok(json!({ "id": id, "ts": ts }))
 }
 
-fn handle_scratchpad_read(store: &mut Store, args: &Value) -> Result<Value, String> {
+fn handle_scratchpad_read(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let since = args.get("since").and_then(|v| v.as_i64());
     let agent = opt_str_arg(args, "agent");
     let kind = opt_str_arg(args, "kind");
@@ -757,24 +1266,76 @@ fn handle_scratchpad_read(store: &mut Store, args: &Value) -> Result<Value, Stri
         .min(200) as u32;
     let r = store
         .scratchpad_read(since, agent, kind, limit)
-        .map_err(|e| e.to_string())?;
-    serde_json::to_value(r).map_err(|e| e.to_string())
+        .map_err(|error| HandlerError::internal("scratchpad_read", error))?;
+    serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
-fn handle_change_class(store: &mut Store, args: &Value) -> Result<Value, String> {
+fn handle_change_class(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let file = str_arg(args, "file")?;
-    let root = std::env::current_dir().map_err(|e| e.to_string())?;
-    let r = queries::classify_change(store, &root, file)?;
-    serde_json::to_value(r).map_err(|e| e.to_string())
+    let root = std::env::current_dir()
+        .map_err(|error| HandlerError::internal("change_class_root", error))?;
+    let r = queries::classify_change(store, &root, file)
+        .map_err(|error| HandlerError::internal("change_class_query", error))?;
+    serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     fn unwrap_content(v: &serde_json::Value) -> serde_json::Value {
         let text = v["content"][0]["text"].as_str().expect("content[0].text");
         serde_json::from_str(text).expect("content[0].text was not valid JSON")
+    }
+
+    #[derive(Default)]
+    struct CountingWriter {
+        bytes: Vec<u8>,
+        flushes: usize,
+    }
+
+    impl std::io::Write for CountingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+    }
+
+    struct CountingBufRead {
+        bytes: Vec<u8>,
+        position: usize,
+        fill_buf_calls: usize,
+        consume_calls: usize,
+        read_calls: usize,
+    }
+
+    impl std::io::Read for CountingBufRead {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.read_calls += 1;
+            let remaining = &self.bytes[self.position..];
+            let count = remaining.len().min(buf.len());
+            buf[..count].copy_from_slice(&remaining[..count]);
+            self.position += count;
+            Ok(count)
+        }
+    }
+
+    impl std::io::BufRead for CountingBufRead {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            self.fill_buf_calls += 1;
+            Ok(&self.bytes[self.position..])
+        }
+
+        fn consume(&mut self, amount: usize) {
+            self.consume_calls += 1;
+            self.position = self.position.saturating_add(amount).min(self.bytes.len());
+        }
     }
 
     #[test]
@@ -782,8 +1343,10 @@ mod tests {
         let path = std::env::temp_dir().join("mmcg_mcp_parse_err.db");
         let _ = std::fs::remove_file(&path);
         let mut store = crate::store::Store::open(&path).unwrap();
+        let mut state = SessionState::Cold;
 
-        let resp = handle_line(&mut store, "{ not valid json").expect("parse error must reply");
+        let resp = handle_line(&mut state, &mut store, "{ not valid json")
+            .expect("parse error must reply");
         assert_eq!(resp.id, Value::Null);
         assert!(resp.result.is_none());
         let e = resp.error.expect("error payload present");
@@ -797,12 +1360,614 @@ mod tests {
         let path = std::env::temp_dir().join("mmcg_mcp_notif.db");
         let _ = std::fs::remove_file(&path);
         let mut store = crate::store::Store::open(&path).unwrap();
+        let mut state = SessionState::Cold;
 
         // Valid JSON-RPC notification (no `id`) — server stays silent.
-        let none = handle_line(&mut store, r#"{"jsonrpc":"2.0","method":"initialized"}"#);
+        let none = handle_line(
+            &mut state,
+            &mut store,
+            r#"{"jsonrpc":"2.0","method":"initialized"}"#,
+        );
         assert!(none.is_none());
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn protocol_version_is_gated_per_connection() {
+        for (requested, expected, version) in [
+            (
+                LEGACY_PROTOCOL_VERSION,
+                LEGACY_PROTOCOL_VERSION,
+                ProtocolVersion::Legacy,
+            ),
+            (
+                CURRENT_PROTOCOL_VERSION,
+                CURRENT_PROTOCOL_VERSION,
+                ProtocolVersion::Current,
+            ),
+            (
+                "2099-01-01",
+                CURRENT_PROTOCOL_VERSION,
+                ProtocolVersion::Current,
+            ),
+        ] {
+            let mut state = SessionState::Cold;
+            let params = json!({
+                "protocolVersion": requested,
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "1" }
+            });
+            let result = initialize_result(&mut state, &params).unwrap();
+            assert_eq!(result["protocolVersion"], expected);
+            assert_eq!(state, SessionState::Negotiated(version));
+            assert!(initialize_result(&mut state, &params).is_err());
+            assert_eq!(state, SessionState::Negotiated(version));
+            handle_notification(&mut state, "notifications/initialized");
+            assert_eq!(state, SessionState::Ready(version));
+        }
+    }
+
+    #[test]
+    fn lifecycle_rejects_side_effecting_notifications() {
+        let path = std::env::temp_dir().join("mmcg_mcp_lifecycle.db");
+        let _ = std::fs::remove_file(&path);
+        let mut store = crate::store::Store::open(&path).unwrap();
+        let mut state = SessionState::Cold;
+
+        for line in [
+            r#"{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"tools/list","params":{}}"#,
+            r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"mmcg_scratchpad_append","arguments":{"agent":"executor","kind":"test","body":"must not write"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"ping","params":{}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
+        ] {
+            assert!(handle_line(&mut state, &mut store, line).is_none());
+        }
+        assert_eq!(state, SessionState::Cold);
+
+        let initialized = handle_line(
+            &mut state,
+            &mut store,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
+        )
+        .unwrap();
+        assert!(initialized.error.is_none());
+        assert_eq!(state, SessionState::Negotiated(ProtocolVersion::Current));
+        handle_notification(&mut state, "notifications/initialized");
+        handle_notification(&mut state, "notifications/initialized");
+        assert_eq!(state, SessionState::Ready(ProtocolVersion::Current));
+
+        let none = handle_line(
+            &mut state,
+            &mut store,
+            r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"mmcg_scratchpad_append","arguments":{"agent":"executor","kind":"test","body":"must not write"}}}"#,
+        );
+        assert!(none.is_none());
+        assert!(store
+            .scratchpad_read(None, None, None, 10)
+            .unwrap()
+            .is_empty());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn invalid_envelopes_have_stable_codes() {
+        let path = std::env::temp_dir().join("mmcg_mcp_invalid_envelopes.db");
+        let _ = std::fs::remove_file(&path);
+        let mut store = crate::store::Store::open(&path).unwrap();
+        let mut state = SessionState::Cold;
+
+        let malformed = handle_line(&mut state, &mut store, "{raw repository data").unwrap();
+        assert_eq!(malformed.error.as_ref().unwrap().code, -32700);
+        assert_eq!(malformed.error.as_ref().unwrap().message, "Parse error");
+        for line in [
+            "[]",
+            r#"{"jsonrpc":"1.0","id":7,"method":"ping"}"#,
+            r#"{"jsonrpc":"2.0","id":8}"#,
+            r#"{"jsonrpc":"2.0","id":null,"method":"ping"}"#,
+            r#"{"jsonrpc":"2.0","id":true,"method":"ping"}"#,
+            r#"{"jsonrpc":"2.0","id":{},"method":"ping"}"#,
+            r#"{"jsonrpc":"2.0","id":[],"method":"ping"}"#,
+            r#"{"jsonrpc":"2.0","id":1.5,"method":"ping"}"#,
+        ] {
+            let response = handle_line(&mut state, &mut store, line).unwrap();
+            assert_eq!(response.error.as_ref().unwrap().code, -32600);
+            assert_eq!(response.error.as_ref().unwrap().message, "Invalid Request");
+        }
+        let bad_initialize = handle_line(
+            &mut state,
+            &mut store,
+            r#"{"jsonrpc":"2.0","id":9,"method":"initialize","params":{}}"#,
+        )
+        .unwrap();
+        assert_eq!(bad_initialize.error.as_ref().unwrap().code, -32602);
+        assert_eq!(state, SessionState::Cold);
+
+        initialize_result(
+            &mut state,
+            &json!({
+                "protocolVersion": CURRENT_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "1" }
+            }),
+        )
+        .unwrap();
+        handle_notification(&mut state, "notifications/initialized");
+        for params in [
+            json!({ "name": "mmcg_search", "arguments": [] }),
+            json!({ "name": "private-repository-tool", "arguments": {} }),
+        ] {
+            let response = handle_request(&mut state, &mut store, "tools/call", &params, json!(10));
+            let error = response.error.unwrap();
+            assert_eq!(error.code, -32602);
+            assert!(!error.message.contains("private-repository-tool"));
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn tool_errors_are_typed_and_sanitized() {
+        let path = std::env::temp_dir().join("mmcg_mcp_tool_errors.db");
+        let _ = std::fs::remove_file(&path);
+        let mut store = crate::store::Store::open(&path).unwrap();
+        let mut state = SessionState::Ready(ProtocolVersion::Current);
+
+        let invalid = handle_request(
+            &mut state,
+            &mut store,
+            "tools/call",
+            &json!({ "name": "mmcg_search", "arguments": {} }),
+            json!(1),
+        );
+        let result = invalid.result.unwrap();
+        assert_eq!(result["isError"], true);
+        assert_eq!(unwrap_content(&result)["error"], "Invalid argument: name");
+
+        let internal = handle_request(
+            &mut state,
+            &mut store,
+            "tools/call",
+            &json!({
+                "name": "mmcg_symbols_changed_since",
+                "arguments": { "git_ref": "HEAD", "root": "/path/that/does/not/exist" }
+            }),
+            json!(2),
+        );
+        let error = internal.error.unwrap();
+        assert_eq!(error.code, -32603);
+        assert_eq!(error.message, "Internal tool error");
+        assert!(!error.message.contains("/path/that/does/not/exist"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn internal_errors_discard_raw_detail() {
+        const SENTINEL: &str = "AUDIT_RAW_ARGUMENT_SENTINEL.secret";
+        let handler_error =
+            HandlerError::internal("audit_internal", format!("downstream detail {SENTINEL}"));
+        let handler_debug = format!("{handler_error:?}");
+        assert!(!handler_debug.contains(SENTINEL));
+        assert!(!handler_debug.contains("downstream detail"));
+
+        let path = std::env::temp_dir().join("mmcg_mcp_raw_detail.db");
+        let _ = std::fs::remove_file(&path);
+        let mut store = crate::store::Store::open(&path).unwrap();
+        let params = json!({
+            "name": "mmcg_symbols_changed_since",
+            "arguments": { "git_ref": "HEAD", "root": SENTINEL }
+        });
+        let typed_error =
+            handle_tools_call(ProtocolVersion::Current, &mut store, &params).unwrap_err();
+        let typed_debug = format!("{typed_error:?}");
+        assert!(!typed_debug.contains(SENTINEL));
+        assert!(!typed_debug.contains("No such file"));
+
+        let mut state = SessionState::Ready(ProtocolVersion::Current);
+        let public_error = handle_request(&mut state, &mut store, "tools/call", &params, json!(1));
+        let public_diagnostic = serde_json::to_string(&public_error).unwrap();
+        assert!(!public_diagnostic.contains(SENTINEL));
+        assert!(!public_diagnostic.contains("No such file"));
+        assert_eq!(public_error.error.unwrap().message, "Internal tool error");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn tool_results_are_versioned_and_bounded() {
+        let object = json!({ "value": 1 });
+        let legacy = tool_result(ProtocolVersion::Legacy, object.clone(), false).unwrap();
+        assert_eq!(unwrap_content(&legacy), object);
+        assert!(legacy.get("structuredContent").is_none());
+        assert_eq!(legacy["isError"], false);
+
+        let current = tool_result(ProtocolVersion::Current, object.clone(), false).unwrap();
+        assert_eq!(unwrap_content(&current), object);
+        assert_eq!(current["structuredContent"], object);
+        assert_eq!(current["content"][0]["text"], r#"{"value":1}"#);
+
+        let array = json!([{ "body": "handoff" }]);
+        let scratchpad = tool_result(ProtocolVersion::Current, array.clone(), false).unwrap();
+        assert_eq!(unwrap_content(&scratchpad), array);
+        assert_eq!(scratchpad["structuredContent"], json!({ "entries": array }));
+
+        let bounded = tool_result(
+            ProtocolVersion::Current,
+            json!({ "blob": "x".repeat(MCP_RESULT_MAX) }),
+            false,
+        )
+        .unwrap();
+        assert_eq!(bounded["isError"], true);
+        assert!(bounded["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("narrow the query"));
+    }
+
+    #[test]
+    fn tool_annotations_match_behavior_table() {
+        let legacy = tools_list(ProtocolVersion::Legacy);
+        assert_eq!(legacy["tools"].as_array().unwrap().len(), 23);
+        assert!(legacy["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|tool| tool.get("annotations").is_none()));
+
+        let current = tools_list(ProtocolVersion::Current);
+        let tools = current["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 23);
+        let mut readers = 0;
+        for tool in tools {
+            let annotations = &tool["annotations"];
+            assert!(annotations.get("openWorldHint").is_none());
+            if tool["name"] == "mmcg_scratchpad_append" {
+                assert_eq!(
+                    annotations,
+                    &json!({
+                        "readOnlyHint": false,
+                        "destructiveHint": false,
+                        "idempotentHint": false
+                    })
+                );
+            } else {
+                assert_eq!(annotations, &json!({ "readOnlyHint": true }));
+                readers += 1;
+            }
+        }
+        assert_eq!(readers, 22);
+    }
+
+    #[test]
+    fn serve_io_bounds_frames_and_flushes_once() {
+        let path = std::env::temp_dir().join("mmcg_mcp_serve_io.db");
+        let _ = std::fs::remove_file(&path);
+        let mut store = crate::store::Store::open(&path).unwrap();
+        let input = "\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1\"}}}\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\",\"params\":{}}\n".to_string();
+        let mut output = CountingWriter::default();
+        serve_io(&mut store, Cursor::new(input.into_bytes()), &mut output).unwrap();
+        assert_eq!(output.flushes, 2);
+        assert_eq!(output.bytes.split(|byte| *byte == b'\n').count() - 1, 2);
+
+        let mut invalid_output = CountingWriter::default();
+        serve_io(
+            &mut store,
+            Cursor::new(vec![0xff, b'\n']),
+            &mut invalid_output,
+        )
+        .unwrap();
+        assert_eq!(invalid_output.flushes, 1);
+
+        let mut oversized = vec![b'x'; MCP_FRAME_MAX + 1];
+        oversized.push(b'\n');
+        oversized.extend_from_slice(br#"{"jsonrpc":"2.0","id":3,"method":"ping"}\n"#);
+        let mut oversized_output = CountingWriter::default();
+        serve_io(&mut store, Cursor::new(oversized), &mut oversized_output).unwrap();
+        assert_eq!(oversized_output.flushes, 1);
+        assert_eq!(
+            oversized_output.bytes.split(|byte| *byte == b'\n').count() - 1,
+            1
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn oversized_buffer_is_rejected_before_copy_or_consume() {
+        let path = std::env::temp_dir().join("mmcg_mcp_counting_reader.db");
+        let _ = std::fs::remove_file(&path);
+        let mut store = crate::store::Store::open(&path).unwrap();
+        let mut bytes = vec![b'x'; MCP_FRAME_MAX + 1];
+        bytes.push(b'\n');
+        bytes.extend_from_slice(br#"{"jsonrpc":"2.0","id":3,"method":"ping"}\n"#);
+        let mut input = CountingBufRead {
+            bytes,
+            position: 0,
+            fill_buf_calls: 0,
+            consume_calls: 0,
+            read_calls: 0,
+        };
+        let mut output = CountingWriter::default();
+        serve_io(&mut store, &mut input, &mut output).unwrap();
+        assert_eq!(input.fill_buf_calls, 1);
+        assert_eq!(input.consume_calls, 0);
+        assert_eq!(input.read_calls, 0);
+        assert_eq!(output.flushes, 1);
+        assert_eq!(output.bytes.split(|byte| *byte == b'\n').count() - 1, 1);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn map_tool_matches_the_shared_engine_payload() {
+        let path = std::env::temp_dir().join("mmcg_mcp_map.db");
+        let _ = std::fs::remove_file(&path);
+        let mut store = crate::store::Store::open(&path).unwrap();
+        store.upsert_file("src/main.rs", 1, 1).unwrap();
+        store.upsert_file("src/lib.rs", 1, 1).unwrap();
+        let expected =
+            serde_json::to_value(queries::project_map(&store, ".", 2, 20).unwrap()).unwrap();
+        let actual = handle_map(&mut store, &json!({})).unwrap();
+        assert_eq!(actual, expected);
+        let listed = tools_list(ProtocolVersion::Current);
+        let map = listed["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "mmcg_map")
+            .unwrap();
+        assert_eq!(map["annotations"], json!({ "readOnlyHint": true }));
+        std::fs::remove_file(&path).ok();
+    }
+
+    fn impact_fixture(name: &str) -> (std::path::PathBuf, crate::store::Store) {
+        let root =
+            std::env::temp_dir().join(format!("mmcg-mcp-impact-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let run = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(&["init", "-q", "--initial-branch=main"]);
+        run(&["config", "user.email", "t@t"]);
+        run(&["config", "user.name", "t"]);
+        run(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.join("src/app.py"), "def value():\n    return 1\n").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "baseline"]);
+        std::fs::write(root.join("src/app.py"), "def value():\n    return 2\n").unwrap();
+        let db =
+            std::env::temp_dir().join(format!("mmcg-mcp-impact-{}-{name}.db", std::process::id()));
+        let _ = std::fs::remove_file(&db);
+        let mut store = crate::store::Store::open(db).unwrap();
+        crate::indexer::Indexer::new(&root)
+            .index_all(&mut store, true)
+            .unwrap();
+        (root, store)
+    }
+
+    #[test]
+    fn change_impact_cli_and_mcp_share_the_same_payload() {
+        let (root, mut store) = impact_fixture("shared");
+        let expected =
+            serde_json::to_value(queries::change_impact(&store, &root, "HEAD", 3, 100).unwrap())
+                .unwrap();
+        let actual = handle_change_impact(
+            &mut store,
+            &json!({ "since": "HEAD", "root": root.to_string_lossy(), "depth": 3, "top": 100 }),
+        )
+        .unwrap();
+        assert_eq!(actual, expected);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn test_impact_is_an_exact_projection_of_change_impact() {
+        let (root, mut store) = impact_fixture("projection");
+        let full = handle_change_impact(
+            &mut store,
+            &json!({ "since": "HEAD", "root": root.to_string_lossy(), "depth": 3, "top": 100 }),
+        )
+        .unwrap();
+        let projected = handle_test_impact(
+            &mut store,
+            &json!({ "since": "HEAD", "root": root.to_string_lossy(), "depth": 3, "top": 100 }),
+        )
+        .unwrap();
+        assert_eq!(projected["schema_version"], full["schema_version"]);
+        for field in [
+            "baseline",
+            "scope",
+            "changes",
+            "tests",
+            "limits",
+            "precision_notes",
+        ] {
+            assert_eq!(projected[field], full[field]);
+        }
+        let keys = projected
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            [
+                "baseline",
+                "changes",
+                "limits",
+                "precision_notes",
+                "schema_version",
+                "scope",
+                "tests"
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect()
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn impact_tools_validate_depth_top_and_root() {
+        let path = std::env::temp_dir().join("mmcg-mcp-impact-validation.db");
+        let _ = std::fs::remove_file(&path);
+        let mut store = crate::store::Store::open(&path).unwrap();
+        for (argument, value) in [
+            ("depth", json!(0)),
+            ("depth", json!(6)),
+            ("depth", json!("3")),
+            ("top", json!(0)),
+            ("top", json!(501)),
+            ("top", json!(false)),
+            ("root", json!(false)),
+        ] {
+            for tool in ["mmcg_change_impact", "mmcg_test_impact"] {
+                let mut args = json!({ "since": "HEAD" });
+                args[argument] = value.clone();
+                let result = handle_tools_call(
+                    ProtocolVersion::Current,
+                    &mut store,
+                    &json!({ "name": tool, "arguments": args }),
+                )
+                .unwrap();
+                assert_eq!(result["isError"], true);
+            }
+        }
+        let order: Vec<_> = TOOLS.iter().map(|tool| tool.name).collect();
+        let map = order.iter().position(|name| *name == "mmcg_map").unwrap();
+        assert_eq!(order[map + 1], "mmcg_change_impact");
+        assert_eq!(order[map + 2], "mmcg_test_impact");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn impact_failure_codes_are_sanitized_in_cli_current_and_legacy_mcp() {
+        let path = std::env::temp_dir().join("mmcg-mcp-impact-errors.db");
+        let _ = std::fs::remove_file(&path);
+        let mut store = crate::store::Store::open(&path).unwrap();
+        let root = std::env::temp_dir().canonicalize().unwrap();
+        for (error, code) in [
+            (queries::ChangeImpactError::InvalidRef, "invalid_ref"),
+            (queries::ChangeImpactError::RootMismatch, "root_mismatch"),
+            (queries::ChangeImpactError::IndexStale, "index_stale"),
+            (
+                queries::ChangeImpactError::SnapshotChanged,
+                "snapshot_changed",
+            ),
+            (queries::ChangeImpactError::GitTimeout, "git_timeout"),
+            (
+                queries::ChangeImpactError::GitOutputLimit,
+                "git_output_limit",
+            ),
+        ] {
+            assert_eq!(error.to_string(), code);
+            for version in [ProtocolVersion::Current, ProtocolVersion::Legacy] {
+                for tool in ["mmcg_change_impact", "mmcg_test_impact"] {
+                    let injected_detail = "injected-engine-detail-must-not-leak";
+                    let engine =
+                        |_: &Store, _: &std::path::Path, git_ref: &str, _: u32, _: usize| {
+                            assert_eq!(git_ref, injected_detail);
+                            Err(error)
+                        };
+                    let result = handle_tools_call_with_impact_engine(
+                        version,
+                        &mut store,
+                        &json!({
+                            "name": tool,
+                            "arguments": {
+                                "since": injected_detail,
+                                "root": root.to_string_lossy(),
+                                "depth": 3,
+                                "top": 100
+                            }
+                        }),
+                        &engine,
+                    )
+                    .unwrap();
+                    assert_eq!(result["isError"], true);
+                    assert_eq!(unwrap_content(&result), json!({ "error": code }));
+                    let transcript = serde_json::to_string(&result).unwrap();
+                    assert!(!transcript.contains(injected_detail));
+                    if version == ProtocolVersion::Current {
+                        assert_eq!(result["structuredContent"], json!({ "error": code }));
+                    } else {
+                        assert!(result.get("structuredContent").is_none());
+                    }
+                }
+            }
+        }
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn map_tool_rejects_wrong_typed_optional_arguments() {
+        let path = std::env::temp_dir().join("mmcg_mcp_map_types.db");
+        let _ = std::fs::remove_file(&path);
+        let mut store = crate::store::Store::open(&path).unwrap();
+        let cases = [
+            ("path", json!(null)),
+            ("path", json!(true)),
+            ("path", json!(7)),
+            ("path", json!([])),
+            ("path", json!({})),
+            ("depth", json!(null)),
+            ("depth", json!(true)),
+            ("depth", json!("2")),
+            ("depth", json!(2.5)),
+            ("depth", json!(-1)),
+            ("depth", json!(0)),
+            ("depth", json!(7)),
+            ("depth", json!(u64::MAX)),
+            ("top", json!(null)),
+            ("top", json!(false)),
+            ("top", json!("20")),
+            ("top", json!(20.5)),
+            ("top", json!(-1)),
+            ("top", json!(0)),
+            ("top", json!(101)),
+            ("top", json!(u64::MAX)),
+        ];
+
+        for version in [ProtocolVersion::Current, ProtocolVersion::Legacy] {
+            for (name, value) in &cases {
+                let mut arguments = json!({});
+                arguments[*name] = value.clone();
+                let result = handle_tools_call(
+                    version,
+                    &mut store,
+                    &json!({
+                        "name": "mmcg_map",
+                        "arguments": arguments
+                    }),
+                )
+                .unwrap();
+                assert_eq!(result["isError"], true);
+                assert_eq!(
+                    unwrap_content(&result)["error"],
+                    format!("Invalid argument: {name}")
+                );
+                if version.is_current() {
+                    assert_eq!(result["structuredContent"], unwrap_content(&result));
+                } else {
+                    assert!(result.get("structuredContent").is_none());
+                }
+            }
+        }
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
@@ -827,6 +1992,7 @@ mod tests {
         let mut store = crate::store::Store::open(&path).unwrap();
 
         let append_env = handle_tools_call(
+            ProtocolVersion::Current,
             &mut store,
             &serde_json::json!({
                 "name": "mmcg_scratchpad_append",
@@ -843,6 +2009,7 @@ mod tests {
         assert!(append.get("ts").and_then(|v| v.as_i64()).is_some());
 
         let read_env = handle_tools_call(
+            ProtocolVersion::Current,
             &mut store,
             &serde_json::json!({
                 "name": "mmcg_scratchpad_read",
@@ -858,15 +2025,16 @@ mod tests {
         assert_eq!(arr[0]["body"], "spec 001 ready for executor");
 
         let too_big = "x".repeat(8 * 1024 + 1);
-        let err = handle_tools_call(
+        let too_big_env = handle_tools_call(
+            ProtocolVersion::Current,
             &mut store,
             &serde_json::json!({
                 "name": "mmcg_scratchpad_append",
                 "arguments": { "agent": "a", "kind": "n", "body": too_big }
             }),
         )
-        .unwrap_err();
-        assert!(err.contains("too large"));
+        .unwrap();
+        assert_eq!(too_big_env["isError"], true);
 
         let _ = std::fs::remove_file(&path);
     }
@@ -886,6 +2054,7 @@ mod tests {
         let _ = std::env::set_current_dir(&tmp);
 
         let first_env = handle_tools_call(
+            ProtocolVersion::Current,
             &mut store,
             &serde_json::json!({
                 "name": "mmcg_change_class",
@@ -918,6 +2087,7 @@ mod tests {
         )
         .unwrap();
         let cosmetic_env = handle_tools_call(
+            ProtocolVersion::Current,
             &mut store,
             &serde_json::json!({
                 "name": "mmcg_change_class",
@@ -938,6 +2108,7 @@ mod tests {
         )
         .unwrap();
         let structural_env = handle_tools_call(
+            ProtocolVersion::Current,
             &mut store,
             &serde_json::json!({
                 "name": "mmcg_change_class",
@@ -954,7 +2125,7 @@ mod tests {
     #[test]
     fn tools_list_covers_every_handler() {
         let listed: Vec<&str> = TOOLS.iter().map(|t| t.name).collect();
-        assert_eq!(listed.len(), 20, "expected 20 tools, got {}", listed.len());
+        assert_eq!(listed.len(), 23, "expected 23 tools, got {}", listed.len());
         for name in &listed {
             assert!(
                 TOOLS.iter().any(|t| &t.name == name),

@@ -1,97 +1,45 @@
 # Cursor integration
 
-Cursor supports MCP servers via `.cursor/mcp.json` (project-local) or `~/.cursor/mcp.json` (global).
+Cursor supports project MCP configuration at `.cursor/mcp.json` and user configuration at `~/.cursor/mcp.json`.
 
 ## Setup
 
-**1. Install Mastermind**
+```text
+mastermind setup <claude|cursor|codex|continue|generic> \
+  --scope <project|user> [--root .] [--config PATH] [--write] [--remove] [--force]
+```
+
+Install and index Mastermind, then preview the selected target:
 
 ```bash
 npm install -g @xcraftmind/mastermind
-```
-
-**2. Index your project**
-
-```bash
 cd your-project
 mastermind index .
+mastermind setup cursor --scope project --root .
 ```
 
-**3. Register the MCP server**
-
-Project-local (recommended — version-pinned per project):
+Apply project or user registration explicitly:
 
 ```bash
-mkdir -p .cursor
-cat > .cursor/mcp.json << 'EOF'
-{
-  "mcpServers": {
-    "mmcg": {
-      "command": "mastermind",
-      "args": ["serve"]
-    }
-  }
-}
-EOF
+mastermind setup cursor --scope project --root . --write
+mastermind setup cursor --scope user --write
 ```
 
-Global (available in all Cursor projects):
+The setup engine preserves unrelated root fields and MCP servers, rejects duplicate JSON keys and unsafe paths, and does not write without `--write`.
+
+## Updating and removing
+
+A canonical entry is an idempotent no-op. Customized replacement or removal requires `--force`, which does not imply `--write`. Forced file-backed changes save the previous bytes privately under `~/.mastermind/setup-backups/`.
 
 ```bash
-mkdir -p ~/.cursor
-cat > ~/.cursor/mcp.json << 'EOF'
-{
-  "mcpServers": {
-    "mmcg": {
-      "command": "mastermind",
-      "args": ["serve"]
-    }
-  }
-}
-EOF
+mastermind setup cursor --scope project --root . --remove          # dry-run
+mastermind setup cursor --scope project --root . --remove --write
 ```
 
-**4. Restart Cursor**
-
-MCP servers are loaded at startup. After restarting, the 20 codegraph tools (`mmcg_search`, `mmcg_callers`, `mmcg_impact`, etc.) are available to Cursor's AI.
-
-## Using a project-local binary
-
-If you install Mastermind as a dev dependency to pin the version:
+## Verification
 
 ```bash
-npm install -D @xcraftmind/mastermind
+mastermind doctor
 ```
 
-Update the MCP config to use the local binary:
-
-```json
-{
-  "mcpServers": {
-    "mmcg": {
-      "command": "./node_modules/.bin/mastermind",
-      "args": ["serve"]
-    }
-  }
-}
-```
-
-## Keeping the index current
-
-The codegraph index lives at `.mastermind/mmcg.db`. Re-index after significant changes:
-
-```bash
-mastermind index .
-```
-
-Or run the watcher to re-index automatically on file save:
-
-```bash
-mastermind watch
-```
-
-## Notes
-
-- The workflow subagents (planner, auditor, critic, etc.) are Claude Code-specific and not applicable to Cursor.
-- mmcg tools work with any MCP-capable AI in Cursor — Cursor's built-in models, GPT-4, Claude, etc.
-- Add `.mastermind/` to `.gitignore` — the index is local state and should not be committed.
+Doctor treats Cursor configuration as bounded data, reports only structural status, and never executes the configured command. Restart Cursor after applying a change. Keep `.mastermind/` out of version control.

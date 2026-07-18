@@ -1,73 +1,44 @@
 # Codex CLI integration
 
-[OpenAI Codex CLI](https://github.com/openai/codex) supports MCP servers via `~/.codex/config.yaml`.
+Codex setup is supported at user scope through the native `codex mcp` command. Project scope is intentionally unsupported.
 
 ## Setup
 
-**1. Install Mastermind**
+```text
+mastermind setup <claude|cursor|codex|continue|generic> \
+  --scope <project|user> [--root .] [--config PATH] [--write] [--remove] [--force]
+```
+
+Install and index Mastermind, then preview registration:
 
 ```bash
 npm install -g @xcraftmind/mastermind
-```
-
-**2. Index your project**
-
-```bash
 cd your-project
 mastermind index .
+mastermind setup codex --scope user
 ```
 
-**3. Add mmcg to Codex config**
-
-Edit `~/.codex/config.yaml`:
-
-```yaml
-mcp_servers:
-  - name: mmcg
-    command: mastermind
-    args:
-      - serve
-```
-
-**4. Verify**
+Apply the native registration explicitly:
 
 ```bash
-codex --list-tools
+mastermind setup codex --scope user --write
 ```
 
-The 20 `mmcg_*` tools should appear in the output.
+`mastermind setup codex --scope project` is rejected before configuration reads or subprocesses. Codex is resolved only from absolute `PATH` entries outside the current repository and invoked without a shell. Its JSON inspection must contain the exact stdio command and ordered arguments, truncated output fails closed, and executable identity is rechecked before every inspect or mutation within the ten-second bound.
 
-## Project-specific index
+## Updating and removing
 
-If you work across multiple projects and want Codex to use the correct index, pass the index path explicitly:
+A matching native entry is an idempotent no-op. A customized entry requires `--force`; `--force` never implies `--write`.
 
-```yaml
-mcp_servers:
-  - name: mmcg
-    command: mastermind
-    args:
-      - --index
-      - /path/to/your-project/.mastermind/mmcg.db
-      - serve
+```bash
+mastermind setup codex --scope user --remove          # dry-run
+mastermind setup codex --scope user --remove --write
 ```
 
-Alternatively, launch Codex from the project root — `mastermind serve` resolves `.mastermind/mmcg.db` relative to the current working directory.
+## Verification
 
-## Using mmcg in Codex sessions
-
-Once connected, reference mmcg tools in your Codex prompts:
-
-```
-Who calls parseConfig? Use mmcg_callers.
-What's the blast radius of changing AuthService? Use mmcg_impact.
-List dead-code candidates in the auth/ prefix. Use mmcg_unreferenced.
+```bash
+mastermind doctor
 ```
 
-Codex will invoke the tools directly and include the graph results in its context.
-
-## Notes
-
-- The Mastermind workflow subagents (planner, auditor, critic, etc.) are Claude Code-specific.
-- mmcg tools work with any model Codex is configured to use.
-- Add `.mastermind/` to `.gitignore`.
-- Codex MCP support may vary by version — check the [Codex CLI releases](https://github.com/openai/codex/releases) for the minimum supported version.
+Doctor recognizes only the `[mcp_servers.mmcg]` table with a string `command` and ordered string `args` in `~/.codex/config.toml`. It parses the file as TOML, including normal quoting, comments, and multiline arrays, while rejecting malformed types, duplicate keys, and symlinked config ancestry. Doctor never executes Codex or a configured command. The old YAML configuration instructions are not supported.

@@ -14,7 +14,8 @@ A queryable codegraph for Claude Code, plus a plan → execute → audit workflo
 ## Requirements
 
 - **Node.js 24+**
-- **Claude Code** — for the MCP server and the workflow agents
+- **An MCP client** — Claude Code, Cursor, Codex, Continue, or a generic JSON/TOML/YAML config target
+- **Claude Code (optional)** — required only for `mastermind install`'s bundled multi-agent workflow
 
 ## Quick start
 
@@ -40,19 +41,32 @@ mastermind watch                            # re-index on file changes
 mastermind status                           # file count, symbol count, db path
 mastermind doctor                           # environment health check
 mastermind serve                            # MCP stdio server (what Claude Code launches)
-mastermind setup claude --write-mcp         # register with Claude Code's MCP layer
+mastermind map . --format text              # deterministic architecture briefing
+mastermind impact --since main --format json # changed symbols, callers, candidate tests
+mastermind setup cursor --scope project     # safe preview for Claude/Cursor/Codex/Continue/generic
+mastermind setup cursor --scope project --write
 mastermind verify-spec <path>               # pre-execution gate on a task spec
 mastermind audit-spec <path> --since main   # post-execution audit vs a git baseline
+mastermind audit-spec <path> --since main --executor-report report.md --bundle audit.json
+mastermind audit verify audit.json --root . --expected-repository owner/repo --expected-baseline <oid> --expected-head <oid>
 mastermind run-task <path>                  # orchestrate verify → execute → audit
 mastermind query callers <symbol>           # one-shot CLI query (agents use the MCP tools)
 mastermind uninstall [--scope <s>]          # remove setup; --scope global|all for the global MCP entry
 ```
 
-`setup claude` is safe by default — without `--write-mcp` it prints the diff and exits. Run `mastermind <command> --help` for full options.
+`setup` is dry-run-first. Claude and Cursor support project/user registration;
+Codex is user-only; Continue uses an owned YAML file; Generic requires an
+explicit config path. Add `--write` only after reviewing the redacted preview.
+Legacy Claude flags remain accepted. Run `mastermind <command> --help` for full
+options.
+
+The bundled workflow also includes product skills for project maps,
+change-impact briefs, focused test-impact plans, cross-client setup, and
+verifiable audit attestations. `mastermind list` shows the exact installed set.
 
 ## Install options
 
-**Global** (recommended) — puts `mastermind` on PATH; `setup claude --write-mcp` registers `command: "mastermind"` at user scope.
+**Global** (recommended) — puts `mastermind` on PATH; `setup claude --scope user --write` registers `command: "mastermind"` at user scope.
 
 ```sh
 npm install -g @xcraftmind/mastermind
@@ -62,7 +76,7 @@ npm install -g @xcraftmind/mastermind
 
 ```sh
 npm install -D @xcraftmind/mastermind
-npx mastermind setup claude --project . --write-mcp
+npx mastermind setup claude --scope project --root . --write
 ```
 
 **One-shot** (no install) — fine for one-off commands; avoid for the long-running `serve`.

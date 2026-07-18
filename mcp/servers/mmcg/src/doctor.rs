@@ -462,49 +462,197 @@ fn check_claude_md(root: &Path) -> Check {
     }
 }
 
-/// Look for `mmcg` in the two MCP config locations Claude Code uses today (not
-/// every editor).
 fn check_mcp_config(root: &Path) -> Check {
-    // The two locations Claude Code reads: project `.mcp.json` (project scope)
-    // and `~/.claude.json` top-level `mcpServers` (user scope, written by
-    // `claude mcp add --scope user`). NOT `~/.claude/.mcp.json`, which Claude
-    // Code ignores.
-    let candidates: Vec<(PathBuf, &'static str)> =
-        std::iter::once((root.join(".mcp.json"), "project .mcp.json"))
-            .chain(
-                dirs::home_dir().map(|h| (h.join(".claude.json"), "~/.claude.json (user scope)")),
-            )
-            .collect();
-
-    for (path, label) in &candidates {
-        if !path.is_file() {
-            continue;
-        }
-        let body = std::fs::read_to_string(path).unwrap_or_default();
-        let v: serde_json::Value = match serde_json::from_str(&body) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        // Two shapes: `{"mcpServers": {"mmcg": {...}}}` (Claude Code) or
-        // `{"servers": {...}}` (some VS Code extensions).
-        let has_mmcg = v.get("mcpServers").and_then(|m| m.get("mmcg")).is_some()
-            || v.get("servers").and_then(|m| m.get("mmcg")).is_some();
-        if has_mmcg {
+    let trusted_binary = match std::env::current_exe() {
+        Ok(binary) => binary,
+        Err(_) => {
             return Check {
                 name: "MCP config",
-                status: Status::Ok,
-                message: format!("registered in {label}"),
-                hint: None,
-            };
+                status: Status::Warn,
+                message: "trusted-binary=unavailable".into(),
+                hint: Some("rerun `mastermind doctor` from the installed binary".into()),
+            }
         }
+    };
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    check_mcp_config_at(
+        &canonical_root,
+        dirs::home_dir().as_deref(),
+        &crate::setup::canonical_entry(&trusted_binary),
+    )
+}
+
+fn check_mcp_config_at(root: &Path, home: Option<&Path>, canonical: &serde_json::Value) -> Check {
+    let mut statuses = Vec::new();
+    let mut canonical_found = false;
+    let mut config_found = false;
+
+    let mut json_candidates = vec![
+        ("claude-project", root.join(".mcp.json")),
+        ("cursor-project", root.join(".cursor/mcp.json")),
+    ];
+    if let Some(home) = home {
+        json_candidates.push(("claude-user", home.join(".claude.json")));
+        json_candidates.push(("cursor-user", home.join(".cursor/mcp.json")));
+    }
+    for (label, path) in json_candidates {
+        let present = std::fs::symlink_metadata(&path).is_ok();
+        if present {
+            config_found = true;
+        }
+        let status = match crate::setup::read_json_mmcg(&path) {
+            Ok(Some(entry)) if entry == *canonical => {
+                canonical_found = true;
+                "canonical"
+            }
+            Ok(Some(_)) => "customized",
+            Ok(None) if present => "missing",
+            Ok(None) => "absent",
+            Err(class) => doctor_config_error_class(&class),
+        };
+        statuses.push(format!("{label}={status}"));
+    }
+
+    let continue_shape = serde_json::json!({
+        "schema": 1,
+        "owner": "mastermind",
+        "name": "mmcg",
+        "command": canonical.get("command").cloned().unwrap_or(serde_json::Value::Null),
+        "args": canonical.get("args").cloned().unwrap_or_else(|| serde_json::json!([])),
+    });
+    let mut continue_candidates = vec![(
+        "continue-project",
+        root.join(".continue/mcpServers/mastermind.yaml"),
+    )];
+    if let Some(home) = home {
+        continue_candidates.push((
+            "continue-user",
+            home.join(".continue/mcpServers/mastermind.yaml"),
+        ));
+    }
+    for (label, path) in continue_candidates {
+        let present = std::fs::symlink_metadata(&path).is_ok();
+        if present {
+            config_found = true;
+        }
+        let status = match doctor_read_capped(&path).and_then(|bytes| {
+            bytes
+                .map(|bytes| {
+                    std::str::from_utf8(&bytes)
+                        .map_err(|_| "invalid_encoding".to_string())
+                        .and_then(|body| {
+                            serde_norway::from_str::<serde_json::Value>(body)
+                                .map_err(|_| "invalid_yaml".to_string())
+                        })
+                })
+                .transpose()
+        }) {
+            Ok(Some(value)) if value == continue_shape => {
+                canonical_found = true;
+                "canonical"
+            }
+            Ok(Some(_)) => "customized",
+            Ok(None) => "absent",
+            Err(class) => doctor_config_error_class(&class),
+        };
+        statuses.push(format!("{label}={status}"));
+    }
+
+    if let Some(home) = home {
+        let path = home.join(".codex/config.toml");
+        let present = std::fs::symlink_metadata(&path).is_ok();
+        if present {
+            config_found = true;
+        }
+        let status = match doctor_read_capped(&path).and_then(|bytes| {
+            bytes
+                .map(|bytes| parse_codex_mmcg(&bytes))
+                .transpose()
+                .map(Option::flatten)
+        }) {
+            Ok(Some(entry)) if entry == *canonical => {
+                canonical_found = true;
+                "canonical"
+            }
+            Ok(Some(_)) => "customized",
+            Ok(None) if present => "missing",
+            Ok(None) => "absent",
+            Err(class) => doctor_config_error_class(&class),
+        };
+        statuses.push(format!("codex-user={status}"));
     }
 
     Check {
         name: "MCP config",
-        status: Status::Warn,
-        message: "mmcg not registered (project `.mcp.json` or `~/.claude.json` user scope)".into(),
-        hint: Some("run `mastermind setup claude --write-mcp`".into()),
+        status: if canonical_found {
+            Status::Ok
+        } else {
+            Status::Warn
+        },
+        message: statuses.join(", "),
+        hint: if canonical_found {
+            None
+        } else if config_found {
+            Some("run `mastermind setup <client>` to preview a canonical repair".into())
+        } else {
+            Some("run `mastermind setup <client>` to preview registration".into())
+        },
     }
+}
+
+fn doctor_read_capped(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    crate::setup::read_config_capped(path)
+}
+
+fn doctor_config_error_class(class: &str) -> &'static str {
+    match class {
+        "parent_traversal_rejected"
+        | "symlink_target_rejected"
+        | "target_inspection_failed"
+        | "config_not_regular" => "unsafe_path",
+        "config_too_large" => "too_large",
+        _ => "malformed",
+    }
+}
+
+fn parse_codex_mmcg(bytes: &[u8]) -> Result<Option<serde_json::Value>, String> {
+    let body = std::str::from_utf8(bytes).map_err(|_| "invalid_encoding".to_string())?;
+    let value: toml::Value = toml::from_str(body).map_err(|_| "invalid_toml".to_string())?;
+    let root = value
+        .as_table()
+        .ok_or_else(|| "invalid_toml_shape".to_string())?;
+    let Some(servers) = root.get("mcp_servers") else {
+        return Ok(None);
+    };
+    let servers = servers
+        .as_table()
+        .ok_or_else(|| "invalid_toml_shape".to_string())?;
+    let Some(mmcg) = servers.get("mmcg") else {
+        return Ok(None);
+    };
+    let mmcg = mmcg
+        .as_table()
+        .ok_or_else(|| "invalid_toml_shape".to_string())?;
+    let command = mmcg
+        .get("command")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| "invalid_codex_command".to_string())?;
+    let args = mmcg
+        .get("args")
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| "invalid_codex_args".to_string())?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| "invalid_codex_args".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(serde_json::json!({
+        "command": command,
+        "args": args,
+    })))
 }
 
 /// Spawn `mmcg --index <db> serve`, write `initialize` + `tools/list`, read
@@ -566,25 +714,50 @@ fn check_mcp_handshake(root: &Path, binary: &Path) -> Check {
     }
 }
 
+fn doctor_initialize_request() -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": { "name": "mastermind-doctor", "version": env!("CARGO_PKG_VERSION") }
+        }
+    })
+}
+
+fn doctor_ready_requests() -> (serde_json::Value, serde_json::Value) {
+    (
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        }),
+    )
+}
+
 fn perform_handshake(child: &mut std::process::Child) -> Result<usize, String> {
     use std::io::{BufRead, BufReader, Write};
 
     let stdin = child.stdin.as_mut().ok_or("no stdin pipe")?;
-    let initialize = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
-    let tools_list = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#;
+    let initialize = doctor_initialize_request();
     writeln!(stdin, "{initialize}").map_err(|e| format!("write initialize: {e}"))?;
-    writeln!(stdin, "{tools_list}").map_err(|e| format!("write tools/list: {e}"))?;
-    stdin.flush().map_err(|e| format!("flush: {e}"))?;
+    stdin
+        .flush()
+        .map_err(|e| format!("flush initialize: {e}"))?;
 
     let stdout = child.stdout.take().ok_or("no stdout pipe")?;
     let mut reader = BufReader::new(stdout);
-
-    // Read two response lines. Timeout via a reader thread joined against a
-    // deadline — simplest portable form.
-    let (tx, rx) = std::sync::mpsc::channel::<Result<usize, String>>();
+    let (tx, rx) = std::sync::mpsc::channel::<Result<Option<usize>, String>>();
     std::thread::spawn(move || {
         let mut line = String::new();
-        // initialize response
         if let Err(e) = reader.read_line(&mut line) {
             let _ = tx.send(Err(format!("read initialize: {e}")));
             return;
@@ -604,7 +777,17 @@ fn perform_handshake(child: &mut std::process::Child) -> Result<usize, String> {
             let _ = tx.send(Err(format!("initialize error: {}", v["error"])));
             return;
         }
-        // tools/list response
+        if v.get("result")
+            .and_then(|result| result.get("protocolVersion"))
+            .and_then(serde_json::Value::as_str)
+            != Some("2025-11-25")
+        {
+            let _ = tx.send(Err("unexpected initialize protocol version".into()));
+            return;
+        }
+        if tx.send(Ok(None)).is_err() {
+            return;
+        }
         line.clear();
         if let Err(e) = reader.read_line(&mut line) {
             let _ = tx.send(Err(format!("read tools/list: {e}")));
@@ -623,11 +806,32 @@ fn perform_handshake(child: &mut std::process::Child) -> Result<usize, String> {
             .and_then(|t| t.as_array())
             .map(|a| a.len())
             .unwrap_or(0);
-        let _ = tx.send(Ok(tools));
+        let _ = tx.send(Ok(Some(tools)));
     });
 
-    rx.recv_timeout(std::time::Duration::from_secs(3))
-        .map_err(|_| "timeout waiting for MCP server response (3s)".to_string())?
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    match rx
+        .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+        .map_err(|_| "timeout waiting for MCP server response (3s)".to_string())??
+    {
+        None => {}
+        Some(_) => return Err("unexpected tools response before initialized".into()),
+    }
+
+    let (initialized, tools_list) = doctor_ready_requests();
+    writeln!(stdin, "{initialized}").map_err(|e| format!("write initialized: {e}"))?;
+    writeln!(stdin, "{tools_list}").map_err(|e| format!("write tools/list: {e}"))?;
+    stdin
+        .flush()
+        .map_err(|e| format!("flush tools/list: {e}"))?;
+
+    match rx
+        .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+        .map_err(|_| "timeout waiting for MCP server response (3s)".to_string())??
+    {
+        Some(tool_count) => Ok(tool_count),
+        None => Err("missing tools response".into()),
+    }
 }
 
 // ----- helpers -------------------------------------------------------------
@@ -833,6 +1037,24 @@ mod tests {
     }
 
     #[test]
+    fn mcp_handshake_sequence_uses_current_revision() {
+        let initialize = doctor_initialize_request();
+        assert_eq!(initialize["method"], "initialize");
+        assert_eq!(initialize["params"]["protocolVersion"], "2025-11-25");
+        assert!(initialize["params"]["capabilities"].is_object());
+        assert_eq!(
+            initialize["params"]["clientInfo"]["name"],
+            "mastermind-doctor"
+        );
+
+        let (initialized, tools_list) = doctor_ready_requests();
+        assert_eq!(initialized["method"], "notifications/initialized");
+        assert!(initialized.get("id").is_none());
+        assert_eq!(tools_list["method"], "tools/list");
+        assert_eq!(tools_list["id"], 2);
+    }
+
+    #[test]
     fn check_index_db_fails_when_missing() {
         let root = tmp();
         let c = check_index_db(&root);
@@ -900,11 +1122,258 @@ mod tests {
         // Project-local config — should bump to Ok.
         fs::write(
             root.join(".mcp.json"),
-            r#"{"mcpServers":{"mmcg":{"command":"mmcg","args":["serve"]}}}"#,
+            serde_json::to_vec(&serde_json::json!({
+                "mcpServers": {
+                    "mmcg": crate::setup::canonical_entry(&std::env::current_exe().unwrap())
+                }
+            }))
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(check_mcp_config(&root).status, Status::Ok);
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn check_mcp_config_recognizes_each_supported_data_shape() {
+        let canonical = serde_json::json!({
+            "command": "/trusted/mmcg",
+            "args": ["serve"],
+        });
+        for label in [
+            "claude-project",
+            "claude-user",
+            "cursor-project",
+            "cursor-user",
+            "continue-project",
+            "continue-user",
+            "codex-user",
+        ] {
+            let root = tmp().canonicalize().unwrap();
+            let home = tmp().canonicalize().unwrap();
+            let path = match label {
+                "claude-project" => root.join(".mcp.json"),
+                "claude-user" => home.join(".claude.json"),
+                "cursor-project" => root.join(".cursor/mcp.json"),
+                "cursor-user" => home.join(".cursor/mcp.json"),
+                "continue-project" => root.join(".continue/mcpServers/mastermind.yaml"),
+                "continue-user" => home.join(".continue/mcpServers/mastermind.yaml"),
+                "codex-user" => home.join(".codex/config.toml"),
+                _ => unreachable!(),
+            };
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            if label.starts_with("continue") {
+                let shape = serde_json::json!({
+                    "schema": 1,
+                    "owner": "mastermind",
+                    "name": "mmcg",
+                    "command": "/trusted/mmcg",
+                    "args": ["serve"],
+                });
+                fs::write(&path, serde_norway::to_string(&shape).unwrap()).unwrap();
+            } else if label == "codex-user" {
+                fs::write(
+                    &path,
+                    "[mcp_servers.mmcg]\ncommand = \"/trusted/mmcg\"\nargs = [\"serve\"]\n",
+                )
+                .unwrap();
+            } else {
+                fs::write(
+                    &path,
+                    serde_json::to_vec(&serde_json::json!({
+                        "mcpServers": {"mmcg": canonical.clone()}
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+            }
+            let check = check_mcp_config_at(&root, Some(&home), &canonical);
+            assert_eq!(check.status, Status::Ok, "{label}: {}", check.message);
+            assert!(check.message.contains(&format!("{label}=canonical")));
+            fs::remove_dir_all(root).ok();
+            fs::remove_dir_all(home).ok();
+        }
+    }
+
+    #[test]
+    fn check_mcp_config_never_executes_configured_command() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let root = tmp().canonicalize().unwrap();
+            let home = tmp().canonicalize().unwrap();
+            let marker = root.join("executed");
+            let sentinel = root.join("configured-command");
+            fs::write(&sentinel, "#!/bin/sh\n: > \"$1\"\n").unwrap();
+            fs::set_permissions(&sentinel, fs::Permissions::from_mode(0o700)).unwrap();
+            let command = sentinel.to_string_lossy().into_owned();
+            let marker_arg = marker.to_string_lossy().into_owned();
+            let configured = serde_json::json!({
+                "command": command,
+                "args": [marker_arg],
+            });
+
+            for path in [
+                root.join(".mcp.json"),
+                root.join(".cursor/mcp.json"),
+                home.join(".claude.json"),
+                home.join(".cursor/mcp.json"),
+            ] {
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(
+                    path,
+                    serde_json::to_vec(&serde_json::json!({
+                        "mcpServers": {"mmcg": configured.clone()}
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+            }
+            let continue_shape = serde_json::json!({
+                "schema": 1,
+                "owner": "mastermind",
+                "name": "mmcg",
+                "command": command,
+                "args": [marker_arg],
+            });
+            for path in [
+                root.join(".continue/mcpServers/mastermind.yaml"),
+                home.join(".continue/mcpServers/mastermind.yaml"),
+            ] {
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, serde_norway::to_string(&continue_shape).unwrap()).unwrap();
+            }
+            let codex = home.join(".codex/config.toml");
+            fs::create_dir_all(codex.parent().unwrap()).unwrap();
+            fs::write(
+                codex,
+                format!("[mcp_servers.mmcg]\ncommand = {command:?}\nargs = [{marker_arg:?}]\n"),
+            )
+            .unwrap();
+
+            let canonical = serde_json::json!({"command": "/trusted/mmcg", "args": ["serve"]});
+            let check = check_mcp_config_at(&root, Some(&home), &canonical);
+            assert_eq!(check.status, Status::Warn);
+            for label in [
+                "claude-project=customized",
+                "claude-user=customized",
+                "cursor-project=customized",
+                "cursor-user=customized",
+                "continue-project=customized",
+                "continue-user=customized",
+                "codex-user=customized",
+            ] {
+                assert!(check.message.contains(label));
+            }
+            assert!(!marker.exists());
+            fs::remove_dir_all(root).ok();
+            fs::remove_dir_all(home).ok();
+        }
+    }
+
+    #[test]
+    fn check_mcp_config_rejects_symlinked_continue_and_codex_parents() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let root = tmp().canonicalize().unwrap();
+            let home = tmp().canonicalize().unwrap();
+            let continue_real = root.join("continue-real/mcpServers");
+            let codex_real = home.join("codex-real");
+            fs::create_dir_all(&continue_real).unwrap();
+            fs::create_dir_all(&codex_real).unwrap();
+            fs::write(
+                continue_real.join("mastermind.yaml"),
+                "schema: 1\nowner: mastermind\nname: mmcg\ncommand: /trusted/mmcg\nargs: [serve]\n",
+            )
+            .unwrap();
+            fs::write(
+                codex_real.join("config.toml"),
+                "[mcp_servers.mmcg]\ncommand = '/trusted/mmcg'\nargs = ['serve']\n",
+            )
+            .unwrap();
+            symlink(root.join("continue-real"), root.join(".continue")).unwrap();
+            symlink(&codex_real, home.join(".codex")).unwrap();
+
+            let canonical = serde_json::json!({"command": "/trusted/mmcg", "args": ["serve"]});
+            let check = check_mcp_config_at(&root, Some(&home), &canonical);
+            assert_eq!(check.status, Status::Warn);
+            assert!(check.message.contains("continue-project=unsafe_path"));
+            assert!(check.message.contains("codex-user=unsafe_path"));
+            fs::remove_dir_all(root).ok();
+            fs::remove_dir_all(home).ok();
+        }
+    }
+
+    #[test]
+    fn check_mcp_config_accepts_valid_codex_toml_variants() {
+        let canonical = serde_json::json!({"command": "/trusted/mmcg", "args": ["serve"]});
+        let variants = [
+            "# before\n[mcp_servers.mmcg]\ncommand = '/trusted/mmcg'\nargs = [\n  'serve', # inline\n]\n[unrelated]\nenabled = true\n",
+            "[unrelated]\nvalue = 1\n\n[mcp_servers.mmcg] # table comment\ncommand = \"/trusted/mmcg\"\nargs = [\"serve\"]\n",
+        ];
+        for body in variants {
+            let root = tmp().canonicalize().unwrap();
+            let home = tmp().canonicalize().unwrap();
+            let codex = home.join(".codex/config.toml");
+            fs::create_dir_all(codex.parent().unwrap()).unwrap();
+            fs::write(codex, body).unwrap();
+            let check = check_mcp_config_at(&root, Some(&home), &canonical);
+            assert_eq!(check.status, Status::Ok, "{}", check.message);
+            assert!(check.message.contains("codex-user=canonical"));
+            fs::remove_dir_all(root).ok();
+            fs::remove_dir_all(home).ok();
+        }
+    }
+
+    #[test]
+    fn check_mcp_config_rejects_duplicate_or_wrong_typed_codex_toml() {
+        let canonical = serde_json::json!({"command": "/trusted/mmcg", "args": ["serve"]});
+        let invalid = [
+            "[mcp_servers.mmcg]\ncommand = '/trusted/mmcg'\ncommand = '/other'\nargs = ['serve']\n",
+            "[mcp_servers.mmcg]\ncommand = 42\nargs = ['serve']\n",
+            "[mcp_servers.mmcg]\ncommand = '/trusted/mmcg'\nargs = ['serve', 42]\n",
+        ];
+        for body in invalid {
+            let root = tmp().canonicalize().unwrap();
+            let home = tmp().canonicalize().unwrap();
+            let codex = home.join(".codex/config.toml");
+            fs::create_dir_all(codex.parent().unwrap()).unwrap();
+            fs::write(codex, body).unwrap();
+            let check = check_mcp_config_at(&root, Some(&home), &canonical);
+            assert_eq!(check.status, Status::Warn);
+            assert!(check.message.contains("codex-user=malformed"));
+            fs::remove_dir_all(root).ok();
+            fs::remove_dir_all(home).ok();
+        }
+    }
+
+    #[test]
+    fn check_mcp_config_does_not_render_secret_values() {
+        let root = tmp().canonicalize().unwrap();
+        let home = tmp().canonicalize().unwrap();
+        let secret = "doctor-secret-value";
+        fs::write(
+            root.join(".mcp.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "mcpServers": {
+                    "mmcg": {
+                        "command": "/custom/mmcg",
+                        "args": ["serve"],
+                        "env": {"TOKEN": secret}
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let canonical = serde_json::json!({"command": "/trusted/mmcg", "args": ["serve"]});
+        let check = check_mcp_config_at(&root, Some(&home), &canonical);
+        let rendered = format!("{} {}", check.message, check.hint.unwrap_or_default());
+        assert!(!rendered.contains(secret));
+        assert!(rendered.contains("claude-project=customized"));
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(home).ok();
     }
 
     #[test]

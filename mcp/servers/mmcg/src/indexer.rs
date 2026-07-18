@@ -6,6 +6,7 @@
 
 use crate::store::{PendingFile, PendingSymbol, Store};
 use rayon::prelude::*;
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tree_sitter::{Parser, Tree};
@@ -223,6 +224,14 @@ impl Indexer {
             stats.task_specs_indexed = count;
         }
 
+        let canonical_root = self
+            .root
+            .canonicalize()
+            .map_err(|error| IndexError::Io(error.to_string()))?;
+        store
+            .set_meta("index_root", &canonical_root.to_string_lossy())
+            .map_err(|error| IndexError::Other(error.to_string()))?;
+
         stats.duration_ms = start.elapsed().map(|d| d.as_millis()).unwrap_or(0);
         Ok(stats)
     }
@@ -405,6 +414,7 @@ pub(crate) fn parse_blob(
     let mut pending = PendingFile {
         path: rel_path.to_string(),
         mtime,
+        content_sha256: format!("{:x}", Sha256::digest(source)),
         language,
         symbols: Vec::new(),
         edges: Vec::new(),
@@ -648,6 +658,24 @@ mod incremental_tests {
             "no file should be stored under language=jsx"
         );
 
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn index_all_stamps_canonical_root_and_content_sha256() {
+        let (dir, db) = setup("impact_snapshot_metadata");
+        let bytes = b"def value():\n    return 1\n";
+        fs::write(dir.join("app.py"), bytes).unwrap();
+        let mut store = Store::open(&db).unwrap();
+        Indexer::new(&dir).index_all(&mut store, true).unwrap();
+        assert_eq!(
+            store.meta_value("index_root").unwrap().as_deref(),
+            Some(dir.canonicalize().unwrap().to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            store.file_content_sha256("app.py").unwrap().as_deref(),
+            Some(format!("{:x}", Sha256::digest(bytes)).as_str())
+        );
         fs::remove_dir_all(&dir).ok();
     }
 }

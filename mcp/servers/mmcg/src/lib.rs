@@ -8,6 +8,7 @@
 //! Supported languages: Python, TypeScript/TSX, JavaScript/JSX, Rust, C#, Go,
 //! Java, PHP, C/C++. C/C++ is best-effort syntactic — see README Limitations.
 
+pub mod audit_bundle;
 pub mod audit_spec;
 pub mod context_doctor;
 pub mod diff;

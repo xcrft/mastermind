@@ -1,0 +1,161 @@
+{
+  "baseline": {
+    "baseline_oid": "d87b2bc1eb8deff0accf1eb70e9286c747568d7a",
+    "head_oid": "d87b2bc1eb8deff0accf1eb70e9286c747568d7a",
+    "includes_untracked": true,
+    "includes_worktree": true,
+    "requested_ref": "HEAD"
+  },
+  "changes": {
+    "files": {
+      "items": [
+        {
+          "path": "core/app.py",
+          "status": "modified"
+        },
+        {
+          "path": "core/test_core.py",
+          "status": "modified"
+        }
+      ],
+      "returned": 2,
+      "total": 2,
+      "truncated": false,
+      "truncation_reason": null
+    },
+    "symbols": {
+      "items": [
+        {
+          "change": "body_changed",
+          "file": "core/app.py",
+          "kind": "function",
+          "line": 1,
+          "name": "target"
+        },
+        {
+          "change": "body_changed",
+          "file": "core/test_core.py",
+          "kind": "function",
+          "line": 3,
+          "name": "test_direct"
+        }
+      ],
+      "returned": 2,
+      "total": 2,
+      "truncated": false,
+      "truncation_reason": null
+    }
+  },
+  "limits": {
+    "changed_files": 10000,
+    "changed_seeds": 200,
+    "crossings": 500,
+    "graph_rows": 5000,
+    "heuristic_paths": 50000,
+    "impact": 100,
+    "max_depth": 3,
+    "tests": 500
+  },
+  "precision_notes": [
+    "focused_tests_do_not_replace_full_gate"
+  ],
+  "schema_version": 1,
+  "scope": {
+    "repository_relative_root": "."
+  },
+  "tests": {
+    "items": [
+      {
+        "classification": "direct",
+        "confidence": "high",
+        "evidence": [
+          {
+            "component": null,
+            "kind": "changed_test_symbol",
+            "seed": {
+              "change": "body_changed",
+              "file": "core/test_core.py",
+              "kind": "function",
+              "line": 3,
+              "name": "test_direct"
+            }
+          },
+          {
+            "component": null,
+            "kind": "graph_seed",
+            "seed": {
+              "change": "body_changed",
+              "file": "core/app.py",
+              "kind": "function",
+              "line": 1,
+              "name": "target"
+            }
+          },
+          {
+            "component": "core",
+            "kind": "same_component_test_filename",
+            "seed": null
+          }
+        ],
+        "minimum_depth": 0,
+        "symbol": {
+          "file": "core/test_core.py",
+          "kind": "function",
+          "line": 3,
+          "name": "test_direct"
+        }
+      },
+      {
+        "classification": "transitive",
+        "confidence": "medium",
+        "evidence": [
+          {
+            "component": null,
+            "kind": "graph_seed",
+            "seed": {
+              "change": "body_changed",
+              "file": "core/app.py",
+              "kind": "function",
+              "line": 1,
+              "name": "target"
+            }
+          },
+          {
+            "component": "core",
+            "kind": "same_component_test_filename",
+            "seed": null
+          }
+        ],
+        "minimum_depth": 2,
+        "symbol": {
+          "file": "core/test_core.py",
+          "kind": "function",
+          "line": 7,
+          "name": "test_transitive"
+        }
+      },
+      {
+        "classification": "heuristic",
+        "confidence": "low",
+        "evidence": [
+          {
+            "component": "core",
+            "kind": "same_component_test_filename",
+            "seed": null
+          }
+        ],
+        "minimum_depth": null,
+        "symbol": {
+          "file": "core/test_core.py",
+          "kind": "function",
+          "line": 10,
+          "name": "test_heuristic"
+        }
+      }
+    ],
+    "returned": 3,
+    "total": 3,
+    "truncated": false,
+    "truncation_reason": null
+  }
+}

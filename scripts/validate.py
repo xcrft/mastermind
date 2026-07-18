@@ -400,23 +400,56 @@ MMCG_TOOL_COUNT_DOCS: list[str] = [
 ]
 
 
-def extract_mmcg_tools() -> list[str]:
-    """Pull every mmcg_xxx tool name from mcp.rs in declaration order.
-
-    Reads from the typed TOOLS registry (``static TOOLS: &[ToolDef] = &[...]``),
-    where each entry is ``ToolDef { name: "mmcg_xxx", ... }``.  The Rust field
-    syntax ``name: "mmcg_xxx"`` is unambiguous — nothing else in the file uses
-    that pattern for non-tool names.
-    """
-    src = (REPO_ROOT / MMCG_MCP_SRC).read_text()
+def _extract_mmcg_tools_from_source(src: str) -> list[str]:
     start = src.find("static TOOLS:")
     end = src.find("];", start) + 2 if start != -1 else -1
     body = src[start:end] if start != -1 and end != -1 else src
-    return re.findall(r'name:\s*"(mmcg_[a-z_]+)"', body)
+    pattern = re.compile(
+        r'name:\s*"(mmcg_[a-z_]+)"'
+        r'|(?:read_only_tool|additive_tool)\s*\(\s*"(mmcg_[a-z_]+)"'
+    )
+    tools: list[str] = []
+    seen: set[str] = set()
+    for match in pattern.finditer(body):
+        name = match.group(1) or match.group(2)
+        if name not in seen:
+            seen.add(name)
+            tools.append(name)
+    return tools
+
+
+def extract_mmcg_tools() -> list[str]:
+    """Pull every mmcg_xxx tool name from mcp.rs in declaration order."""
+    src = (REPO_ROOT / MMCG_MCP_SRC).read_text()
+    return _extract_mmcg_tools_from_source(src)
+
+
+def validate_mmcg_tool_extractor_fixture() -> list[Issue]:
+    fixture = '''
+static TOOLS: &[ToolDef] = &[
+    ToolDef { name: "mmcg_legacy", schema: schema_legacy, handler: handle_legacy },
+    read_only_tool("mmcg_reader", schema_reader, handle_reader),
+    additive_tool("mmcg_writer", schema_writer, handle_writer),
+    read_only_tool("mmcg_reader", schema_reader, handle_reader),
+];
+'''
+    expected = ["mmcg_legacy", "mmcg_reader", "mmcg_writer"]
+    actual = _extract_mmcg_tools_from_source(fixture)
+    if actual == expected:
+        return []
+    return [
+        Issue(
+            REPO_ROOT / "scripts/validate.py",
+            "error",
+            f"mmcg tool extractor fixture failed — expected {expected}, got {actual}",
+        )
+    ]
 
 
 def validate_mmcg_tool_drift() -> list[Issue]:
-    issues: list[Issue] = []
+    issues = validate_mmcg_tool_extractor_fixture()
+    if issues:
+        return issues
     src_path = REPO_ROOT / MMCG_MCP_SRC
     if not src_path.is_file():
         return [Issue(src_path, "error", "mcp.rs missing — cannot derive tool list")]
@@ -624,6 +657,235 @@ def validate_eval_fixture_clues() -> list[Issue]:
     return issues
 
 
+# ----- verifiable audit Action security contract -----------------------
+
+AUDIT_ACTION_PINS = {
+    "actions/checkout": "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
+    "actions/upload-artifact": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    "actions/download-artifact": "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+    "actions/attest": "f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6",
+}
+AUDIT_EXAMPLES = (
+    "docs/examples/mastermind-audit-pr.yml",
+    "docs/examples/mastermind-audit-publish.yml",
+)
+
+
+def _workflow_trigger(workflow: dict) -> object:
+    return workflow.get("on", workflow.get(True))
+
+
+def audit_pr_contract_errors(text: str, workflow: dict) -> list[str]:
+    errors: list[str] = []
+    expected_name = "mastermind-pr-audit-attempt-${{ github.run_attempt }}"
+    jobs = workflow.get("jobs", {}) if isinstance(workflow, dict) else {}
+    steps = jobs.get("audit", {}).get("steps", []) if isinstance(jobs, dict) else []
+    upload_names = []
+    if isinstance(steps, list):
+        for step in steps:
+            if isinstance(step, dict) and step.get("uses") == f"actions/upload-artifact@{AUDIT_ACTION_PINS['actions/upload-artifact']}":
+                upload_names.append(step.get("with", {}).get("name"))
+    if upload_names != [expected_name]:
+        errors.append("PR producer must upload exactly one attempt-specific artifact name from github.run_attempt")
+    if "name: mastermind-pr-audit\n" in text:
+        errors.append("PR producer must not use a run-wide fixed artifact name")
+    return errors
+
+
+def audit_publication_contract_errors(text: str, workflow: dict) -> list[str]:
+    errors: list[str] = []
+    required_counts = {
+        "exact run-attempt API binding": ("?attempt_number=$PUBLICATION_RUN_ATTEMPT", 2),
+        "exact raw artifact ID download": ("actions/artifacts/$ARTIFACT_ID/zip", 3),
+        "raw artifact digest comparison": ('test "$actual" = "$ARTIFACT_DIGEST"', 3),
+        "raw artifact size comparison": ('wc -c <', 3),
+        "regular-file archive preflight": ("not stat.S_ISREG(mode)", 3),
+        "special archive metadata preflight": ("info.extra", 3),
+        "duplicate archive preflight": ("name in seen", 3),
+        "per-file archive size cap": ("16 * 1024 * 1024", 3),
+        "total archive size cap": ("64 * 1024 * 1024", 3),
+    }
+    for label, (fragment, minimum) in required_counts.items():
+        if text.count(fragment) < minimum:
+            errors.append(f"publication workflow lacks {label} in every consumer")
+    if "printf 'artifact_size=%s\\n' \"$artifact_size\"" not in text:
+        errors.append("source artifact size is not exported from independent evidence")
+    if "?attempt_number=$SOURCE_RUN_ATTEMPT" not in text:
+        errors.append("source run evidence is not bound to the exact run attempt")
+    attempt_binding = {
+        'source_run_attempt=$(jq -er \'.run_attempt | select(type == "number" and . >= 1)\' <<<"$run")': "API-confirmed source run attempt",
+        'expected_artifact_name="mastermind-pr-audit-attempt-$source_run_attempt"': "attempt-specific expected artifact name",
+        'artifacts?name=$expected_artifact_name': "exact attempt-specific artifact query",
+        '.name == $expected': "exact artifact-name filter",
+        '[.artifacts[] | select(.expired == false and .name == $expected)] | if length == 1 then .[0] else error("exactly one attempt-specific artifact required") end': "single non-expired exact-name artifact requirement",
+        "printf 'artifact_name=%s\\n' \"$expected_artifact_name\"": "artifact-name evidence output",
+    }
+    for fragment, label in attempt_binding.items():
+        if fragment not in text:
+            errors.append(f"publication workflow lacks {label}")
+    if "artifact_created" in text or "run_started" in text:
+        errors.append("publication workflow must not use timestamps as attempt identity")
+    if "source_artifact_size: ${{ steps.evidence.outputs.artifact_size }}" not in text:
+        errors.append("source artifact size is not bound as a verify output")
+    if "verified_artifact_size: ${{ steps.verified-artifact.outputs.artifact_size }}" not in text:
+        errors.append("verified artifact size is not bound as a verify output")
+    if text.count('test "$size" = "$ARTIFACT_SIZE"') < 2:
+        errors.append("privileged consumers do not bind server size to verified evidence")
+    if text.count('test "$(jq -r .id <<<"$server")" = "$ARTIFACT_ID"') < 1:
+        errors.append("verified artifact metadata is not bound to the exact artifact ID")
+    if "REPLACE_WITH_FULL_" in text or "REPLACE_WITH_ALLOWED_VERIFIER" in text:
+        errors.append("executable publication workflow contains an unresolved verifier reference")
+
+    jobs = workflow.get("jobs", {}) if isinstance(workflow, dict) else {}
+    if not isinstance(jobs, dict):
+        return errors + ["publication jobs must be a mapping"]
+    publish_needs = jobs.get("publish", {}).get("needs", [])
+    if not isinstance(publish_needs, list) or set(publish_needs) != {"verify", "attest"}:
+        errors.append("publish must be blocked on both verify and attest")
+    attest_steps = jobs.get("attest", {}).get("steps", [])
+    attest_subjects = []
+    if isinstance(attest_steps, list):
+        for step in attest_steps:
+            if isinstance(step, dict) and step.get("uses") == f"actions/attest@{AUDIT_ACTION_PINS['actions/attest']}":
+                subject = step.get("with", {}).get("subject-path", "")
+                attest_subjects = [line.strip() for line in subject.splitlines() if line.strip()]
+    if attest_subjects != ["verified-subject/verified.tar", "verified-subject/verified-statement.json"]:
+        errors.append("attestation subjects do not exactly match the digest-verified extracted files")
+    return errors
+
+
+def validate_audit_action_security() -> list[Issue]:
+    issues: list[Issue] = []
+    parsed: dict[str, dict] = {}
+    for relative in AUDIT_EXAMPLES:
+        path = REPO_ROOT / relative
+        if not path.is_file():
+            issues.append(Issue(path, "error", "required audit workflow example is missing"))
+            continue
+        text = path.read_text(encoding="utf-8")
+        if "pull_request_target" in text:
+            issues.append(Issue(path, "error", "pull_request_target is forbidden"))
+        try:
+            value = yaml.safe_load(text)
+        except yaml.YAMLError as error:
+            issues.append(Issue(path, "error", f"invalid workflow YAML: {error}"))
+            continue
+        if not isinstance(value, dict):
+            issues.append(Issue(path, "error", "workflow root must be a mapping"))
+            continue
+        parsed[relative] = value
+        for match in re.finditer(r"uses:\s*([^\s#]+)", text):
+            reference = match.group(1)
+            if reference == "./":
+                if relative != "docs/examples/mastermind-audit-pr.yml" or not (REPO_ROOT / "action.yml").is_file():
+                    issues.append(Issue(path, "error", "local Action reference is absent or outside the unprivileged PR workflow"))
+                continue
+            if "@" not in reference:
+                issues.append(Issue(path, "error", f"Action reference lacks immutable revision: {reference}"))
+                continue
+            action, revision = reference.rsplit("@", 1)
+            if action in AUDIT_ACTION_PINS:
+                if revision != AUDIT_ACTION_PINS[action]:
+                    issues.append(Issue(path, "error", f"{action} must use audited commit {AUDIT_ACTION_PINS[action]}"))
+            elif action == "xcrft/mastermind":
+                if not re.fullmatch(r"[0-9a-f]{40}", revision):
+                    issues.append(Issue(path, "error", "Mastermind Action must use a full commit SHA"))
+            elif action == "xcrft/mastermind/.github/actions/verify-only":
+                issues.append(Issue(path, "error", "missing external verify-only Action is forbidden; use the workflow-bound verifier"))
+            else:
+                issues.append(Issue(path, "error", f"Action is not in the audit allowlist: {action}"))
+            if revision in {"main", "master"} or re.fullmatch(r"v\d+(?:\.\d+)*", revision):
+                issues.append(Issue(path, "error", f"mutable Action reference is forbidden: {reference}"))
+
+    pr_path = REPO_ROOT / AUDIT_EXAMPLES[0]
+    pr = parsed.get(AUDIT_EXAMPLES[0])
+    if pr:
+        trigger = _workflow_trigger(pr)
+        if not isinstance(trigger, dict) or set(trigger) != {"pull_request"}:
+            issues.append(Issue(pr_path, "error", "PR audit must trigger only on pull_request"))
+        permissions = pr.get("permissions")
+        if permissions != {"contents": "read"}:
+            issues.append(Issue(pr_path, "error", "PR audit top-level permissions must be exactly contents: read"))
+        text = pr_path.read_text(encoding="utf-8")
+        if "id-token: write" in text or "secrets:" in text:
+            issues.append(Issue(pr_path, "error", "PR audit must not receive OIDC or secrets"))
+        if "persist-credentials: false" not in text:
+            issues.append(Issue(pr_path, "error", "PR checkout must disable credential persistence"))
+        if "uses: ./" not in text:
+            issues.append(Issue(pr_path, "error", "unprivileged PR workflow must use the present repository Action"))
+        for error in audit_pr_contract_errors(text, pr):
+            issues.append(Issue(pr_path, "error", error))
+
+    publish_path = REPO_ROOT / AUDIT_EXAMPLES[1]
+    publish = parsed.get(AUDIT_EXAMPLES[1])
+    if publish:
+        trigger = _workflow_trigger(publish)
+        if not isinstance(trigger, dict) or set(trigger) != {"workflow_run"}:
+            issues.append(Issue(publish_path, "error", "publication must trigger only on workflow_run"))
+        text = publish_path.read_text(encoding="utf-8")
+        if "actions/checkout@" in text:
+            issues.append(Issue(publish_path, "error", "privileged publication must never checkout source"))
+        if "id-token: write" not in text or "attestations: write" not in text:
+            issues.append(Issue(publish_path, "error", "attestation job must receive OIDC and attestation authority"))
+        jobs = publish.get("jobs", {})
+        publish_permissions = jobs.get("publish", {}).get("permissions", {}) if isinstance(jobs, dict) else {}
+        if publish_permissions.get("pull-requests") != "write" or "id-token" in publish_permissions:
+            issues.append(Issue(publish_path, "error", "publication job must have PR write but no OIDC"))
+        if "REPLACE_WITH_FULL_" in text or "REPLACE_WITH_ALLOWED_VERIFIER" in text:
+            issues.append(Issue(publish_path, "error", "executable publication workflow must not contain unresolved verifier references"))
+        if "mastermind-inline-schema-v3-verifier-v1" not in text:
+            issues.append(Issue(publish_path, "error", "publication workflow lacks the allowlisted workflow-bound verifier identity"))
+        for error in audit_publication_contract_errors(text, publish):
+            issues.append(Issue(publish_path, "error", error))
+
+    action_path = REPO_ROOT / "action.yml"
+    try:
+        action = yaml.safe_load(action_path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as error:
+        issues.append(Issue(action_path, "error", f"invalid Action metadata: {error}"))
+    else:
+        required_inputs = {"root", "since", "bundle-dir", "expected-repository", "expected-baseline", "expected-head", "require-clean-worktree"}
+        if not isinstance(action, dict) or not required_inputs.issubset(set(action.get("inputs", {}))):
+            issues.append(Issue(action_path, "error", "Action metadata lacks mandatory immutable-snapshot inputs"))
+
+    docker_path = REPO_ROOT / "Dockerfile.audit-action"
+    try:
+        docker_text = docker_path.read_text(encoding="utf-8")
+    except OSError as error:
+        issues.append(Issue(docker_path, "error", f"cannot read Dockerfile: {error}"))
+    else:
+        expected_from = {
+            "rust:1.96-bookworm@sha256:a339861ae23e9abb272cea45dfafde21760d2ce6577a70f8a926153677902663",
+            "buildpack-deps:bookworm-scm@sha256:877e9e4d949edfbcbedabc3a2d7ab593955fee5d6d0777adf3a991eb30c750d8",
+        }
+        actual_from = {line.split()[1] for line in docker_text.splitlines() if line.startswith("FROM ")}
+        if actual_from != expected_from:
+            issues.append(Issue(docker_path, "error", "Docker stages must use the two audited immutable OCI digests"))
+        if "cargo +1.96.0 build" not in docker_text or "--locked" not in docker_text or "USER 65532:65532" not in docker_text:
+            issues.append(Issue(docker_path, "error", "Docker Action must build with Rust 1.96 locked and run as the fixed non-root user"))
+        if "RUN git --version" not in docker_text or "ENV HOME=/tmp/mastermind" not in docker_text:
+            issues.append(Issue(docker_path, "error", "Docker runtime must prove Git exists and provide the non-root private HOME"))
+        if re.search(r"\b(?:apt|apk|yum|dnf)(?:-get)?\b", docker_text):
+            issues.append(Issue(docker_path, "error", "Docker Action must not perform an unpinned package install"))
+
+    entrypoint_path = REPO_ROOT / "scripts/audit-action-entrypoint.sh"
+    try:
+        entrypoint = entrypoint_path.read_text(encoding="utf-8")
+    except OSError as error:
+        issues.append(Issue(entrypoint_path, "error", f"cannot read Action entrypoint: {error}"))
+    else:
+        if "set -eu" not in entrypoint:
+            issues.append(Issue(entrypoint_path, "error", "Action entrypoint must use set -eu"))
+        if re.search(r"(^|\s)(eval|source|\.)\s", entrypoint, re.MULTILINE):
+            issues.append(Issue(entrypoint_path, "error", "Action entrypoint must not eval or source repository data"))
+        if "--expected-baseline" not in entrypoint or "--expected-head" not in entrypoint or "--expected-repository" not in entrypoint:
+            issues.append(Issue(entrypoint_path, "error", "Action entrypoint must enforce exact repository/baseline/head policy"))
+        if "audit prepare-output" not in entrypoint or 'test "$1" = "."' not in entrypoint:
+            issues.append(Issue(entrypoint_path, "error", "Action entrypoint must accept root dot and delegate output creation to the Rust no-follow helper"))
+
+    return issues
+
+
 # ----- entry point ------------------------------------------------------
 
 
@@ -643,6 +905,7 @@ def main(argv: list[str]) -> int:
     issues.extend(validate_mmcg_template_mirrors())
     issues.extend(validate_mmcg_tool_drift())
     issues.extend(validate_eval_fixture_clues())
+    issues.extend(validate_audit_action_security())
 
     issues.sort(key=lambda i: (str(i.path), 0 if i.level == "error" else 1, i.msg))
     for i in issues:

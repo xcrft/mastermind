@@ -1,0 +1,311 @@
+{
+  "schema_version": 1,
+  "baseline": {
+    "requested_ref": "HEAD",
+    "baseline_oid": "d87b2bc1eb8deff0accf1eb70e9286c747568d7a",
+    "head_oid": "d87b2bc1eb8deff0accf1eb70e9286c747568d7a",
+    "includes_worktree": true,
+    "includes_untracked": true
+  },
+  "scope": {
+    "repository_relative_root": "."
+  },
+  "changes": {
+    "files": {
+      "total": 2,
+      "returned": 2,
+      "truncated": false,
+      "truncation_reason": null,
+      "items": [
+        {
+          "path": "core/app.py",
+          "status": "modified"
+        },
+        {
+          "path": "core/test_core.py",
+          "status": "modified"
+        }
+      ]
+    },
+    "symbols": {
+      "total": 2,
+      "returned": 2,
+      "truncated": false,
+      "truncation_reason": null,
+      "items": [
+        {
+          "file": "core/app.py",
+          "name": "target",
+          "kind": "function",
+          "line": 1,
+          "change": "body_changed"
+        },
+        {
+          "file": "core/test_core.py",
+          "name": "test_direct",
+          "kind": "function",
+          "line": 3,
+          "change": "body_changed"
+        }
+      ]
+    }
+  },
+  "affected_components": {
+    "total": 2,
+    "returned": 2,
+    "truncated": false,
+    "truncation_reason": null,
+    "items": [
+      {
+        "component": "api",
+        "changed_symbols": 0,
+        "impacted_symbols": 1,
+        "candidate_tests": 0
+      },
+      {
+        "component": "core",
+        "changed_symbols": 2,
+        "impacted_symbols": 3,
+        "candidate_tests": 3
+      }
+    ]
+  },
+  "impact": {
+    "total": 4,
+    "returned": 4,
+    "truncated": false,
+    "truncation_reason": null,
+    "items": [
+      {
+        "symbol": {
+          "file": "api/entry.py",
+          "name": "external_caller",
+          "kind": "function",
+          "line": 3
+        },
+        "minimum_depth": 1,
+        "seeds": [
+          {
+            "file": "core/app.py",
+            "name": "target",
+            "kind": "function",
+            "line": 1,
+            "change": "body_changed"
+          }
+        ],
+        "name_collision_count": 1,
+        "edge_precision": [
+          "dynamic attributes not tracked",
+          "medium:heuristic",
+          "obj.method() matched by leaf name only — no type inference"
+        ]
+      },
+      {
+        "symbol": {
+          "file": "core/app.py",
+          "name": "helper",
+          "kind": "function",
+          "line": 4
+        },
+        "minimum_depth": 1,
+        "seeds": [
+          {
+            "file": "core/app.py",
+            "name": "target",
+            "kind": "function",
+            "line": 1,
+            "change": "body_changed"
+          }
+        ],
+        "name_collision_count": 1,
+        "edge_precision": [
+          "dynamic attributes not tracked",
+          "medium:heuristic",
+          "obj.method() matched by leaf name only — no type inference"
+        ]
+      },
+      {
+        "symbol": {
+          "file": "core/test_core.py",
+          "name": "test_direct",
+          "kind": "function",
+          "line": 3
+        },
+        "minimum_depth": 1,
+        "seeds": [
+          {
+            "file": "core/app.py",
+            "name": "target",
+            "kind": "function",
+            "line": 1,
+            "change": "body_changed"
+          }
+        ],
+        "name_collision_count": 1,
+        "edge_precision": [
+          "dynamic attributes not tracked",
+          "medium:heuristic",
+          "obj.method() matched by leaf name only — no type inference"
+        ]
+      },
+      {
+        "symbol": {
+          "file": "core/test_core.py",
+          "name": "test_transitive",
+          "kind": "function",
+          "line": 7
+        },
+        "minimum_depth": 2,
+        "seeds": [
+          {
+            "file": "core/app.py",
+            "name": "target",
+            "kind": "function",
+            "line": 1,
+            "change": "body_changed"
+          }
+        ],
+        "name_collision_count": 1,
+        "edge_precision": [
+          "dynamic attributes not tracked",
+          "medium:heuristic",
+          "obj.method() matched by leaf name only — no type inference"
+        ]
+      }
+    ]
+  },
+  "api_crossings": {
+    "total": 1,
+    "returned": 1,
+    "truncated": false,
+    "truncation_reason": null,
+    "items": [
+      {
+        "seed": {
+          "file": "core/app.py",
+          "name": "target",
+          "kind": "function",
+          "line": 1,
+          "change": "body_changed"
+        },
+        "changed_component": "core",
+        "impacted": {
+          "file": "api/entry.py",
+          "name": "external_caller",
+          "kind": "function",
+          "line": 3
+        },
+        "impacted_component": "api",
+        "minimum_depth": 1
+      }
+    ]
+  },
+  "tests": {
+    "total": 3,
+    "returned": 3,
+    "truncated": false,
+    "truncation_reason": null,
+    "items": [
+      {
+        "symbol": {
+          "file": "core/test_core.py",
+          "name": "test_direct",
+          "kind": "function",
+          "line": 3
+        },
+        "classification": "direct",
+        "minimum_depth": 0,
+        "confidence": "high",
+        "evidence": [
+          {
+            "kind": "changed_test_symbol",
+            "seed": {
+              "file": "core/test_core.py",
+              "name": "test_direct",
+              "kind": "function",
+              "line": 3,
+              "change": "body_changed"
+            },
+            "component": null
+          },
+          {
+            "kind": "graph_seed",
+            "seed": {
+              "file": "core/app.py",
+              "name": "target",
+              "kind": "function",
+              "line": 1,
+              "change": "body_changed"
+            },
+            "component": null
+          },
+          {
+            "kind": "same_component_test_filename",
+            "seed": null,
+            "component": "core"
+          }
+        ]
+      },
+      {
+        "symbol": {
+          "file": "core/test_core.py",
+          "name": "test_transitive",
+          "kind": "function",
+          "line": 7
+        },
+        "classification": "transitive",
+        "minimum_depth": 2,
+        "confidence": "medium",
+        "evidence": [
+          {
+            "kind": "graph_seed",
+            "seed": {
+              "file": "core/app.py",
+              "name": "target",
+              "kind": "function",
+              "line": 1,
+              "change": "body_changed"
+            },
+            "component": null
+          },
+          {
+            "kind": "same_component_test_filename",
+            "seed": null,
+            "component": "core"
+          }
+        ]
+      },
+      {
+        "symbol": {
+          "file": "core/test_core.py",
+          "name": "test_heuristic",
+          "kind": "function",
+          "line": 10
+        },
+        "classification": "heuristic",
+        "minimum_depth": null,
+        "confidence": "low",
+        "evidence": [
+          {
+            "kind": "same_component_test_filename",
+            "seed": null,
+            "component": "core"
+          }
+        ]
+      }
+    ]
+  },
+  "limits": {
+    "changed_files": 10000,
+    "changed_seeds": 200,
+    "graph_rows": 5000,
+    "impact": 100,
+    "tests": 500,
+    "crossings": 500,
+    "heuristic_paths": 50000,
+    "max_depth": 3
+  },
+  "precision_notes": [
+    "focused_tests_do_not_replace_full_gate"
+  ]
+}

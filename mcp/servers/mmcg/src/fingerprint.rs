@@ -110,6 +110,7 @@ mod tests {
         let pending = PendingFile {
             path: "x.rs".into(),
             mtime: 0,
+            content_sha256: String::new(),
             language: "rust".into(),
             symbols: vec![sym("foo", "fn", Some("fn foo()"))],
             edges: vec![],
@@ -126,6 +127,7 @@ mod tests {
         let a = PendingFile {
             path: "x.rs".into(),
             mtime: 0,
+            content_sha256: String::new(),
             language: "rust".into(),
             symbols: vec![sym("foo", "fn", Some("fn foo()"))],
             edges: vec![edge(0, "bar", "calls")],
@@ -133,6 +135,7 @@ mod tests {
         let mut b = PendingFile {
             path: "x.rs".into(),
             mtime: 99, // mtime irrelevant — not in fingerprint
+            content_sha256: String::new(),
             language: "rust".into(),
             symbols: vec![PendingSymbol {
                 line_start: 100, // line shifted
@@ -157,6 +160,7 @@ mod tests {
         let a = PendingFile {
             path: "x.rs".into(),
             mtime: 0,
+            content_sha256: String::new(),
             language: "rust".into(),
             symbols: vec![sym("foo", "fn", Some("fn foo()"))],
             edges: vec![],
@@ -164,6 +168,7 @@ mod tests {
         let b = PendingFile {
             path: "x.rs".into(),
             mtime: 0,
+            content_sha256: String::new(),
             language: "rust".into(),
             symbols: vec![sym("foo", "fn", Some("fn foo(x: i32) -> i32"))],
             edges: vec![],
@@ -179,6 +184,7 @@ mod tests {
         let a = PendingFile {
             path: "x.rs".into(),
             mtime: 0,
+            content_sha256: String::new(),
             language: "rust".into(),
             symbols: vec![sym("foo", "fn", Some("fn foo()"))],
             edges: vec![],
@@ -186,6 +192,7 @@ mod tests {
         let b = PendingFile {
             path: "x.rs".into(),
             mtime: 0,
+            content_sha256: String::new(),
             language: "rust".into(),
             symbols: vec![sym("foo", "fn", Some("fn foo()"))],
             edges: vec![edge(0, "bar", "calls")],
@@ -203,6 +210,7 @@ mod tests {
         let a = PendingFile {
             path: "x.rs".into(),
             mtime: 0,
+            content_sha256: String::new(),
             language: "rust".into(),
             symbols: vec![
                 sym("foo", "fn", Some("fn foo()")),
@@ -213,6 +221,7 @@ mod tests {
         let b = PendingFile {
             path: "x.rs".into(),
             mtime: 0,
+            content_sha256: String::new(),
             language: "rust".into(),
             symbols: vec![
                 sym("bar", "fn", Some("fn bar()")),

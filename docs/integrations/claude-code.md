@@ -1,74 +1,56 @@
 # Claude Code integration
 
-Mastermind's primary integration. The `mastermind setup claude` command handles registration automatically.
+Claude Code supports project-local JSON and user-scope registration through its native MCP CLI.
 
-## Quick setup
+## Setup
+
+```text
+mastermind setup <claude|cursor|codex|continue|generic> \
+  --scope <project|user> [--root .] [--config PATH] [--write] [--remove] [--force]
+```
+
+Install and index Mastermind, then preview user registration:
 
 ```bash
 npm install -g @xcraftmind/mastermind
 cd your-project
 mastermind init
-mastermind setup claude --write-mcp
+mastermind setup claude --scope user
 ```
 
-Restart Claude Code. The codegraph tools are now available in every session.
+The preview resolves the trusted current Mastermind command and shows only a redacted command summary. Apply it with:
 
-## What `setup claude` does
-
-Runs `claude mcp add --scope user mmcg -- mastermind serve`, which writes an entry to `~/.claude.json`:
-
-```json
-{
-  "mcpServers": {
-    "mmcg": {
-      "command": "mastermind",
-      "args": ["serve"]
-    }
-  }
-}
+```bash
+mastermind setup claude --scope user --write
 ```
 
-The `--scope user` flag makes the server available across all projects without per-project config.
+User scope uses the bounded native `claude mcp` contract. Mastermind compares the exact trimmed `Command:` and `Args:` fields, fails closed if inspection output is truncated, and rejects a changed executable identity before any later inspect or mutation. The process is invoked without a shell, limited to ten seconds, and its raw output is never printed.
 
 ## Project-local registration
 
-To pin the version per project instead of using the global install:
-
 ```bash
 npm install -D @xcraftmind/mastermind
-mastermind setup claude --project . --write-mcp
+mastermind setup claude --scope project --root .          # dry-run
+mastermind setup claude --scope project --root . --write
 ```
 
-This writes `.mcp.json` in the project root with `command: "./node_modules/.bin/mastermind"`. Claude Code picks up `.mcp.json` automatically when the project is open.
+Project scope safely merges the canonical `mmcg` entry into `.mcp.json` while preserving unrelated root fields and servers. The legacy spelling `--project . --write-mcp` remains compatible.
 
-## Verifying the connection
+## Updating and removing
+
+A matching entry is an idempotent no-op. A customized entry is refused unless `--force` is supplied; `--force` never implies `--write`. Before forced file-backed replacement or removal, the old bytes are stored privately under `~/.mastermind/setup-backups/`.
+
+```bash
+mastermind setup claude --scope project --root . --remove          # dry-run
+mastermind setup claude --scope project --root . --remove --write
+```
+
+## Verification
 
 ```bash
 mastermind doctor
 ```
 
-The `serve handshake` check confirms Claude Code can start and query the MCP server. All checks should be green before starting a workflow session.
+Doctor parses supported configuration locations as bounded data, rejects symlinked config files or existing path ancestors, reports only client labels and structural statuses, and never executes commands read from configuration. Its separate MCP handshake starts only the trusted current Mastermind binary.
 
-## Workflow subagents
-
-`mastermind init` installs the workflow subagents and skills into `~/.claude/agents/` and `~/.claude/skills/`. These are the planning, execution, auditing, and critique roles described in the workflow CLAUDE.md template.
-
-To register the MCP server without re-running init:
-
-```bash
-mastermind setup claude --write-mcp
-```
-
-## Troubleshooting
-
-**`mmcg` not found after `setup claude`** — ensure `mastermind` is on PATH (`which mastermind`). If installed globally via npm, check that npm's bin directory is in PATH.
-
-**MCP server not showing in Claude Code** — restart Claude Code after running `setup claude`. The server list is read on startup.
-
-**`mastermind doctor` fails on `serve handshake`** — run `mastermind serve` manually and check for startup errors. Common causes: index file missing (run `mastermind index .`) or stale binary path after reinstall.
-
-**Re-registering after reinstall** — use `--force` to overwrite an existing entry:
-
-```bash
-mastermind setup claude --write-mcp --force
-```
+Restart Claude Code after changing registration.

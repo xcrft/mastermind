@@ -26,3 +26,6 @@ jobs:
 
       - name: Run validator
         run: python scripts/validate.py
+
+      - name: Run audit workflow security fixtures
+        run: python scripts/test_audit_workflow_security.py

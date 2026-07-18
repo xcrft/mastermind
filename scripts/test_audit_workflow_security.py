@@ -243,7 +243,7 @@ class InlineVerifierSchemaTests(unittest.TestCase):
                 "name_status": [{"status": "M", "path": "src/lib.py", "old_path": None}],
                 "binary_diff_sha256": "sha256:" + "4" * 64,
             },
-            "tool": {"name": "mastermind", "version": "0.36.2", "bundle_schema": 3},
+            "tool": {"name": "mastermind", "version": "0.37.0", "bundle_schema": 3},
             "audit_configuration": {"baseline_input": "main", "require_clean_worktree": True},
             "index_metadata": {"source": "mmcg"},
             "verdict": "drift",

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-07-18
+
 ### Added
 - MCP `2025-11-25` negotiation, lifecycle enforcement, version-gated structured tool results and behavior annotations, bounded stdio frames/results, and transcript regression coverage while retaining the legacy `2024-11-05` content-only contract.
 - Shared schema-v1 `mastermind map` / `mmcg_map` engine with safe text and Mermaid projections, literal `%`/`_` lexical scope, directory-relative components, and explicit caps for 50,000 aggregation paths, 20 languages, 20 components, 20/400 boundaries, 50 entry points, 100 hotspots, 50,000 cycle edges, 50 cycles, and 500 memberships. `path_work_limit`, `top_probe`, and cycle `work_limit` distinguish partial aggregation, hotspot probing, and skipped SCC analysis.
@@ -267,7 +269,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Seven prebuilt platform packages (`@xcraftmind/mmcg-*`) covering macOS (arm64, x64), Linux glibc and musl (x64, arm64), and Windows (x64). npm installs only the package matching the host's `os` / `cpu` / `libc`.
 - Install-mode-aware `setup claude` that writes the correct MCP `command` form for npx, global, project-local, and cargo installs.
 
-[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v0.28.1...HEAD
+[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v0.37.0...HEAD
+[0.37.0]: https://github.com/xcrft/mastermind/compare/npm-v0.36.2...npm-v0.37.0
 [0.28.1]: https://github.com/xcrft/mastermind/compare/npm-v0.28.0...npm-v0.28.1
 [0.28.0]: https://github.com/xcrft/mastermind/compare/npm-v0.27.1...npm-v0.28.0
 [0.27.1]: https://github.com/xcrft/mastermind/compare/npm-v0.27.0...npm-v0.27.1

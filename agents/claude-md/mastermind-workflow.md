@@ -55,22 +55,23 @@ and truncation caveats; source reads and tests remain authoritative for runtime 
 ### Verified and Strict tasks
 
 1. Use `mastermind-task-planning` to create and ground the contract.
-2. The user approves Scope and Acceptance Criteria.
-3. Run pre-flight:
+2. Run the read-only contract validator: `mastermind verify-spec <spec>`.
+3. The user approves Scope and Acceptance Criteria.
+4. Run the state-writing pre-flight:
 
    ```bash
    mastermind run-task .mastermind/tasks/<task>/spec.md --pre-only
    ```
 
-4. Use `mastermind-task-executor`. It writes
+5. Use `mastermind-task-executor`. It writes
    `<task>/executor-report.md` and never writes lifecycle state.
-5. Run controller-owned post-flight:
+6. Run controller-owned post-flight:
 
    ```bash
    mastermind run-task .mastermind/tasks/<task>/spec.md --post-only
    ```
 
-6. Perform semantic review. Strict work additionally requires the read-only
+7. Perform semantic review. Strict work additionally requires the read-only
    `mastermind-auditor`.
 
 The controller is the only owner of `state.json`, `audit.md`, lessons, and

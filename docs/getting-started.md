@@ -135,6 +135,8 @@ Use the default verified contract for normal multi-file or delegated work:
 
 ```bash
 mastermind new-spec "Add account recovery"
+mastermind verify-spec .mastermind/tasks/001-add-account-recovery/spec.md
+# approve Scope and Acceptance Criteria
 mastermind run-task .mastermind/tasks/001-add-account-recovery/spec.md --pre-only
 # hand spec.md to the implementation agent; it writes executor-report.md
 mastermind run-task .mastermind/tasks/001-add-account-recovery/spec.md --post-only

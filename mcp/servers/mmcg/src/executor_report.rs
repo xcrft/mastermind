@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::Path;
 
@@ -66,7 +67,7 @@ impl ExecutorReport {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ReportStatus {
     Complete,
@@ -74,7 +75,7 @@ enum ReportStatus {
     Failed,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum PhaseStatus {
     Done,
@@ -99,7 +100,7 @@ struct Defect {
     remediation_hint: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum VerificationStatus {
     Pass,
@@ -145,11 +146,17 @@ impl TryFrom<CanonicalExecutorReport> for ExecutorReport {
         if report.spec.trim().is_empty() {
             return Err("executor report spec must not be empty".into());
         }
+        let mut phase_ids = HashSet::new();
         for phase in &report.phases {
             if phase.id.trim().is_empty() {
                 return Err("executor report phase id must not be empty".into());
             }
-            let _ = &phase.status;
+            if !phase_ids.insert(phase.id.trim()) {
+                return Err(format!(
+                    "executor report phase id is duplicated: {}",
+                    phase.id
+                ));
+            }
         }
         for path in &report.files_modified {
             if path.trim().is_empty() {
@@ -165,7 +172,43 @@ impl TryFrom<CanonicalExecutorReport> for ExecutorReport {
                 return Err("executor report defects require non-empty fields".into());
             }
         }
-        let _ = report.status;
+        for verification in &report.verifications {
+            if verification.cmd.trim().is_empty() {
+                return Err("executor report verification command must not be empty".into());
+            }
+        }
+
+        match report.status {
+            ReportStatus::Complete => {
+                if !report.defects.is_empty() {
+                    return Err("complete executor report must not contain defects".into());
+                }
+                if report
+                    .phases
+                    .iter()
+                    .any(|phase| !matches!(phase.status, PhaseStatus::Done))
+                {
+                    return Err(
+                        "complete executor report requires every phase/step to be done".into(),
+                    );
+                }
+                if report
+                    .verifications
+                    .iter()
+                    .any(|verification| matches!(verification.result, VerificationStatus::Fail))
+                {
+                    return Err(
+                        "complete executor report must not contain failed verifications".into(),
+                    );
+                }
+            }
+            ReportStatus::Partial | ReportStatus::Failed if report.defects.is_empty() => {
+                return Err(
+                    "partial or failed executor report requires at least one defect".into(),
+                );
+            }
+            ReportStatus::Partial | ReportStatus::Failed => {}
+        }
 
         let verify = report
             .verifications
@@ -302,6 +345,44 @@ mod tests {
         assert!(parse_str(&unsupported)
             .unwrap_err()
             .contains("unsupported executor report schema_version 2"));
+    }
+
+    #[test]
+    fn canonical_report_rejects_contradictory_completion_evidence() {
+        let with_defect = canonical_yaml("").replace(
+            "defects: []",
+            "defects:\n  - kind: implementation_defect\n    phase: plan-1\n    details: failed\n    remediation_hint: retry",
+        );
+        assert!(parse_str(&with_defect)
+            .unwrap_err()
+            .contains("complete executor report must not contain defects"));
+
+        let failed_verification = canonical_yaml("").replacen("result: pass", "result: fail", 1);
+        assert!(parse_str(&failed_verification)
+            .unwrap_err()
+            .contains("complete executor report must not contain failed verifications"));
+
+        let pending_step = canonical_yaml("").replacen("status: done", "status: pending", 1);
+        assert!(parse_str(&pending_step)
+            .unwrap_err()
+            .contains("every phase/step to be done"));
+    }
+
+    #[test]
+    fn canonical_report_rejects_unexplained_failure_and_duplicate_steps() {
+        let failed_without_defect =
+            canonical_yaml("").replacen("status: complete", "status: failed", 1);
+        assert!(parse_str(&failed_without_defect)
+            .unwrap_err()
+            .contains("requires at least one defect"));
+
+        let duplicate = canonical_yaml("").replace(
+            "  - id: '1.1'\n    status: done",
+            "  - id: '1.1'\n    status: done\n  - id: '1.1'\n    status: done",
+        );
+        assert!(parse_str(&duplicate)
+            .unwrap_err()
+            .contains("phase id is duplicated"));
     }
 
     #[test]

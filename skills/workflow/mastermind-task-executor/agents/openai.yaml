@@ -1,4 +1,4 @@
 interface:
   display_name: "Mastermind Task Executor"
-  short_description: "Execute an approved spec phase by phase"
+  short_description: "Execute an approved contract and prove its outcomes"
   default_prompt: "Use $mastermind-task-executor to execute this approved Mastermind task spec and emit schema-v1 evidence."

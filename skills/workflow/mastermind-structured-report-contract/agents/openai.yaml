@@ -1,4 +1,4 @@
 interface:
   display_name: "Mastermind Structured Reports"
-  short_description: "Produce strict executor and auditor report tails"
-  default_prompt: "Use $mastermind-structured-report-contract to validate or produce this workflow report."
+  short_description: "Produce the file-backed executor report contract"
+  default_prompt: "Use $mastermind-structured-report-contract to validate or produce this canonical executor report evidence."

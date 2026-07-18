@@ -894,8 +894,10 @@ fn run_post(
 fn run_executor(spec_path: &Path) -> Result<(), String> {
     let prompt = format!(
         "Implement the mastermind spec at `{}` using the mastermind-task-executor workflow. \
-         Apply edits phase-by-phase, run any VERIFY commands, mark each checklist item as you \
-         complete it, and stop on the first failure. Write the canonical report to \
+         Implement its approved outcomes inside Scope, prove the Acceptance Criteria, and run \
+         the Final Verification commands. Repair implementation-caused failures in a bounded \
+         loop, but stop for contract drift, missing prerequisites, or unsafe scope expansion. \
+         Write the canonical report to \
          `<task>/executor-report.md`; do not write lifecycle state. Ensure `mmcg` is available \
          via your MCP configuration so verify/audit gates have the live index.",
         spec_path.display(),

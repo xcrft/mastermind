@@ -1,4 +1,4 @@
 interface:
   display_name: "Mastermind Task Planning"
-  short_description: "Design an evidence-grounded implementation contract"
-  default_prompt: "Use $mastermind-task-planning to research and draft a delegation spec for this change."
+  short_description: "Choose the lightest evidence-grounded workflow"
+  default_prompt: "Use $mastermind-task-planning to choose Direct, Verified, or Strict and draft a delegation spec only when the selected mode requires one."

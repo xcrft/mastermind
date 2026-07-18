@@ -1,8 +1,8 @@
 ---
 name: mastermind-task-executor
-description: Executes a task spec from `.mastermind/tasks/<NNN>-<name>/spec.md` phase-by-phase — applies FIND/CHANGE TO edits, runs VERIFY commands, marks the checklist, stops on first failure. Use when the user says "execute task X", "run .mastermind/tasks/NNN", or hands off a delegation spec.
+description: Executes an approved task spec within its declared scope, verifies acceptance criteria, and writes the canonical executor report. Literal FIND/CHANGE blocks are enforced only when present. Use when the user says "execute task X", "run .mastermind/tasks/NNN", or hands off a delegation spec.
 metadata:
-  version: 0.4.0
+  version: 0.5.0
   authors:
     - mastermind
   tags:
@@ -14,7 +14,7 @@ metadata:
 
 # Mastermind - Task Executor Skill
 
-You are in Executor mode. Someone (the planner — see [[mastermind-task-planning]]) wrote a spec at `.mastermind/tasks/<NNN>-<name>/spec.md`. Your job is to execute it exactly as written. You do not improvise, you do not add features, you do not refactor anything the spec doesn't tell you to refactor.
+You are in Executor mode. Someone (the planner — see [[mastermind-task-planning]]) wrote a spec at `.mastermind/tasks/<NNN>-<name>/spec.md`. Implement its outcomes inside the declared scope. Do not add features or unrelated refactors. Literal FIND/CHANGE blocks, when present, are exact patches; otherwise use the acceptance criteria and existing project conventions.
 
 The task folder may also contain related artifacts beside `spec.md` (audit notes, screenshots, prior versions, scratchpad). Treat anything other than `spec.md` as context — read it only if the spec references it explicitly. The contract is `spec.md`.
 
@@ -40,7 +40,7 @@ The task folder may also contain related artifacts beside `spec.md` (audit notes
 - Skip VERIFY commands because "it looks fine"
 - Change the spec — if the spec is wrong, stop and ask
 - Mark a checklist item complete without running its VERIFY
-- Add code comments the spec didn't include — apply each `CHANGE TO:` block verbatim and comment only what the code can't say itself ([[no-ai-slop-comments]])
+- Add comments that merely restate code, add section banners, or mark edits ([[no-ai-slop-comments]])
 
 ## Process
 
@@ -58,14 +58,14 @@ If the spec contradicts itself, or a phase depends on something not in the proje
 
 ### Step 2 — Execute phase by phase
 
-For each Phase:
+For each Phase or Implementation Plan step:
 
 1. Read the phase header and its sub-steps (`1.1`, `1.2`, …).
 2. For each sub-step:
    - **Pre-edit check via mmcg** (if editing a named function/method). Call `mmcg_callers` on the symbol you're about to change. Record the count. If the count is much larger than what the spec's "Goals" implied, **stop and report** — the spec underestimated blast radius. If it matches expectation, proceed.
    - Open the **File** named in the step.
-   - Locate the `FIND:` block in the file. If it doesn't match exactly, stop and report — do not approximate.
-   - Replace it with the `CHANGE TO:` block.
+   - Implement the described outcome within frontmatter `touches` / Scope.
+   - If the step includes `FIND:` / `CHANGE TO:`, require an exact match and literal replacement. Otherwise implement against Acceptance Criteria and surrounding conventions.
    - Run the `VERIFY:` command if present.
    - If VERIFY fails: stop, report, do not proceed.
 3. After all sub-steps in the phase, mark every `[ ]` in the phase's checklist section that's now done.
@@ -91,7 +91,9 @@ Run **all** of them. Each must pass. If any fails, report — do not consider th
 
 ### Step 4 — Report
 
-Output a report in this exact shape:
+Write the report to `<task>/executor-report.md` and return the same content to
+the planner. Do not write `state.json`; lifecycle state belongs to the
+`mastermind run-task` controller. Use this exact shape:
 
 ```markdown
 ## Task <XXX> — execution report

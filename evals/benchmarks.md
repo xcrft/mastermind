@@ -8,7 +8,7 @@ Last run: 2026-06-22 · `da12de0` · opus. Cases live in `*.jsonl`; run with
 | auditor (9) | 9/9 | 8/9 | one case flakes the sentinel block each run; runner retries once |
 | critic (5) | 5/5 | 5/5 | — |
 | intake (5) | 5/5 | 5/5 | — |
-| workflow (7) | not run | not run | added after this snapshot; do not infer a pass rate |
+| workflow (8) | not run | not run | added after this snapshot; do not infer a pass rate |
 
 **Trust the numbers only if** the mmcg index is present (hard-fail otherwise),
 the verdict is read from the structured YAML tail (not prose), and fixtures

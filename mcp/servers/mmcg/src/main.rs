@@ -280,7 +280,7 @@ enum Cmd {
         explain: bool,
     },
     /// Two-phase orchestrator that wraps the mastermind workflow in mechanical
-    /// gates. Auto-resumes via `.mastermind/run-state/<basename>.json`.
+    /// gates. Canonical tasks resume from their task-local `state.json`.
     ///
     ///   Pre-flight  — `verify-spec` + risk report + state write + hand-off.
     ///   Post-flight — `audit-spec` vs the recorded baseline ref; on Held,
@@ -359,8 +359,8 @@ enum Cmd {
     /// Render an integrity-valid envelope without repository or signer trust.
     /// The output is explicitly marked untrusted and is forbidden in publication.
     PrCommentUntrusted { bundle: PathBuf },
-    /// CI gate: index, verify all specs, run audit for every spec that has an
-    /// executor-report.md, and optionally write bundles. Exit 0 if all pass.
+    /// CI gate: index, verify selected specs, audit executor evidence, and
+    /// optionally write bundles. Exit 0 if all pass.
     Ci {
         /// Git ref to diff against (required for audit phase).
         #[arg(long, default_value = "origin/main")]
@@ -371,16 +371,24 @@ enum Cmd {
         /// Write audit bundle JSONs to this directory (one per spec).
         #[arg(long)]
         bundle_dir: Option<PathBuf>,
+        /// Audit only task folders whose spec or executor report changed
+        /// between `since` and HEAD. Intended for pull-request CI.
+        #[arg(long)]
+        changed_only: bool,
+        /// Fail when a selected task has no canonical executor-report.md.
+        /// Bundle publication implies this requirement even when omitted.
+        #[arg(long)]
+        require_executor_report: bool,
     },
     /// Scaffold a new task spec under `.mastermind/tasks/`. Picks the next
     /// available NNN sequence number automatically.
     NewSpec {
         /// Short description of the task. Used as the spec title and folder slug.
         description: String,
-        /// Template complexity: `lite` (Goal / Scope / Pre-edit snapshot / Verify),
-        /// `standard` (adds Alternatives / Codeflow / Tests / Docs / Observability / Performance),
-        /// or `strict` (adds Risk Register / Evidence Ledger / Rollback / 3-lens critic panel).
-        #[arg(long, default_value = "lite")]
+        /// Workflow contract: `verified` (compact goal/scope/acceptance/tests)
+        /// or `strict` (adds risk, evidence, rollback, and critic review).
+        /// Legacy `lite` and `standard` templates remain accepted.
+        #[arg(long, default_value = "verified")]
         mode: String,
         /// Project root. Defaults to cwd.
         #[arg(long, default_value = ".")]
@@ -997,12 +1005,16 @@ fn run_cli_inner(
             since,
             root,
             bundle_dir,
+            changed_only,
+            require_executor_report,
         } => {
             let ok = commands::ci(
                 commands::ci::CiOpts {
                     since,
                     root,
                     bundle_dir,
+                    changed_only,
+                    require_executor_report,
                 },
                 &index_path,
             )?;

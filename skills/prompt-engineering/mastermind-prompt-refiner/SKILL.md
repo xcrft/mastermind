@@ -2,7 +2,7 @@
 name: mastermind-prompt-refiner
 description: Intake gate that normalizes raw client prompts before the planner sees them. Use as the first stage in any Mastermind workflow when the user's request is rough, vague, client-provided, or bundles multiple intents. Also invoked when the user says "improve this prompt", "rewrite this for an agent", "make this clearer".
 metadata:
-  version: 0.2.1
+  version: 0.3.0
   authors:
     - mastermind
   tags:
@@ -85,8 +85,8 @@ needs_critic: false
 ```
 
 `action` values: `refined` (prompt was rewritten) | `passthrough` (already tight, no changes) | `ask` (goal too ambiguous, questions emitted instead).
-`workflow_mode`: `strict` (auth, billing, schema, public API, rollback complexity) | `lite` (bounded, low-risk, single-file) | `unknown` (not enough context).
-`risk`: `high` (data loss, auth, production schema) | `medium` (multi-file, external API) | `low` (local, reversible, no external deps).
+`workflow_mode`: `direct` (small, reversible, clear) | `verified` (normal multi-file or delegated work) | `strict` (auth, billing, migration, public API, data-loss, supply-chain, or hard rollback) | `unknown` (not enough context).
+`risk`: `high` (data loss, auth, production schema) | `medium` (multi-file, external API) | `low` (local, reversible, no external deps) | `unknown` (insufficient context).
 
 Omit the "Gaps" section entirely if there are none. If asking clarifying questions, emit the questions then the intake block with `action: ask` — no refined prompt section.
 
@@ -138,7 +138,7 @@ Feedback message:
 <!-- mastermind:intake-begin -->
 ```yaml
 action: refined
-workflow_mode: lite
+workflow_mode: direct
 risk: low
 needs_research: false
 needs_critic: false

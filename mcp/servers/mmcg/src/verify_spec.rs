@@ -1,7 +1,7 @@
 //! `mastermind verify-spec` — pre-execution gate.
 //!
 //! **Deterministic, mechanical** version of the planner's pre-handoff
-//! prompt-discipline checks. The LLM auditor still does semantic judgment; this
+//! prompt-discipline checks. The planner still does semantic judgment; this
 //! catches the symbol-missing / file-missing / section-empty / oversized-blast-
 //! radius class of bugs at the contract level.
 //!
@@ -37,6 +37,13 @@ pub const MANDATORY_SECTIONS: &[&str] = &[
 
 /// Sections required only for lite mode (minimal spec).
 pub const LITE_MANDATORY_SECTIONS: &[&str] = &["Goals"];
+pub const VERIFIED_MANDATORY_SECTIONS: &[&str] = &[
+    "Goals",
+    "Scope",
+    "Acceptance Criteria",
+    "Tests Plan",
+    "Final Verification",
+];
 
 /// Mandatory sections to enforce for the spec's declared `mode` (frontmatter).
 /// Falls back to `MANDATORY_SECTIONS` when no mode is declared (back-compat with
@@ -44,6 +51,7 @@ pub const LITE_MANDATORY_SECTIONS: &[&str] = &["Goals"];
 pub fn mandatory_sections_for_mode(mode: Option<&str>) -> &'static [&'static str] {
     match mode {
         Some("lite") => LITE_MANDATORY_SECTIONS,
+        Some("verified") => VERIFIED_MANDATORY_SECTIONS,
         _ => MANDATORY_SECTIONS,
     }
 }
@@ -1114,6 +1122,47 @@ Do the thing
                 "lite mode should not require `{section}`; got {:?}",
                 r.errors
             );
+        }
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn verified_mode_requires_compact_contract_not_strict_ceremony() {
+        let root = tmp();
+        let body = "\
+---
+id: \"1\"
+mode: verified
+---
+
+## Goals
+- Observable outcome
+## Scope
+- Bounded change
+## Acceptance Criteria
+- [ ] Behavior is observable
+## Tests Plan
+- focused test
+## Final Verification
+- repository gate
+";
+        let s = spec::parse_str("t.md", body);
+        let r = run(&s, None, &root);
+        assert!(
+            !r.has_failures(),
+            "verified compact contract should pass without strict sections: {:?}",
+            r.errors
+        );
+        for strict_only in [
+            "Alternatives Considered",
+            "Documentation Plan",
+            "Observability Plan",
+            "Performance Considerations",
+        ] {
+            assert!(!r.errors.iter().any(|error| matches!(
+                error,
+                Finding::EmptyMandatorySection { section } if section == strict_only
+            )));
         }
         fs::remove_dir_all(&root).ok();
     }

@@ -71,6 +71,13 @@ The repository-root `action.yml` defines a Docker Action with these inputs:
 
 It outputs the verified bundle directory and aggregate result JSON path. Inputs are passed as data and never evaluated, sourced, or rendered into shell syntax.
 
+The Action audits only canonical task folders changed between `since` and
+`HEAD`. Every selected task must include `spec.md` and a valid
+`executor-report.md`; missing evidence fails the run. Historical task folders
+that were not changed in the pull request are not re-audited against the new
+baseline. This keeps a PR scoped to the contract it introduces or updates and
+prevents an empty report from producing publishable evidence.
+
 ## Copyable workflows and trusted verifier
 
 Start from `docs/examples/mastermind-audit-pr.yml` and `docs/examples/mastermind-audit-publish.yml`. The unprivileged PR workflow uses the Action from its already checked-out PR tree; this executes untrusted code but receives no secrets, OIDC, or write permission. The privileged workflow contains its strict schema-v3 verifier inline, so the verifier implementation and identity are bound to the independently allowlisted trusted workflow blob. Executable examples contain no unresolved Action or verifier placeholder. External Actions must remain pinned to their audited 40-character commits.

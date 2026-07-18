@@ -854,6 +854,7 @@ def validate_workflow_role_contracts() -> list[Issue]:
     issues: list[Issue] = []
     auditor_path = REPO_ROOT / "agents/subagents/mastermind-auditor.md"
     planner_path = REPO_ROOT / "skills/workflow/mastermind-task-planning/SKILL.md"
+    executor_path = REPO_ROOT / "agents/subagents/mastermind-task-executor.md"
     try:
         auditor = auditor_path.read_text(encoding="utf-8")
     except OSError as error:
@@ -880,6 +881,26 @@ def validate_workflow_role_contracts() -> list[Issue]:
         step_headings = re.findall(r"^### Step (9[a-z])\b", planner, re.MULTILINE)
         if len(step_headings) != len(set(step_headings)):
             issues.append(Issue(planner_path, "error", "planner has duplicate Step 9 sub-step headings"))
+        if len(planner.encode("utf-8")) > 16_000:
+            issues.append(Issue(planner_path, "error", "planner contract exceeds the 16 KB anti-ceremony budget"))
+    try:
+        executor = executor_path.read_text(encoding="utf-8")
+    except OSError as error:
+        issues.append(Issue(executor_path, "error", f"cannot read executor contract: {error}"))
+    else:
+        for token in ("<task>/executor-report.md", "Do not write `state.json`", "lifecycle state belongs"):
+            if token not in executor:
+                issues.append(Issue(executor_path, "error", f"executor ownership contract missing {token!r}"))
+        if "### Write state.json" in executor:
+            issues.append(Issue(executor_path, "error", "executor must not own lifecycle state"))
+    workflow_path = REPO_ROOT / "agents/claude-md/mastermind-workflow.md"
+    try:
+        workflow = workflow_path.read_bytes()
+    except OSError as error:
+        issues.append(Issue(workflow_path, "error", f"cannot read project workflow contract: {error}"))
+    else:
+        if len(workflow) > 10_000:
+            issues.append(Issue(workflow_path, "error", "project workflow exceeds the 10 KB anti-ceremony budget"))
     return issues
 
 
@@ -1108,6 +1129,8 @@ def validate_audit_action_security() -> list[Issue]:
             issues.append(Issue(entrypoint_path, "error", "Action entrypoint must enforce exact repository/baseline/head policy"))
         if "audit prepare-output" not in entrypoint or 'test "$1" = "."' not in entrypoint:
             issues.append(Issue(entrypoint_path, "error", "Action entrypoint must accept root dot and delegate output creation to the Rust no-follow helper"))
+        if "--changed-only" not in entrypoint or "--require-executor-report" not in entrypoint:
+            issues.append(Issue(entrypoint_path, "error", "Action entrypoint must audit only changed tasks and require executor evidence"))
 
     return issues
 

@@ -55,7 +55,8 @@ case "$root_real/" in "$workspace_real/"*) ;; *) fail "root escapes GITHUB_WORKS
 
 bundle_dir=$(/usr/local/bin/mastermind audit prepare-output --root "$root_real" --path "$bundle_input") || fail "cannot prepare contained bundle-dir"
 
-/usr/local/bin/mastermind ci --since "$since" --root "$root_real" --bundle-dir "$bundle_dir"
+/usr/local/bin/mastermind ci --since "$since" --root "$root_real" \
+  --changed-only --require-executor-report --bundle-dir "$bundle_dir"
 
 aggregate="$bundle_dir/result.json"
 tmp="$bundle_dir/.result.tmp"

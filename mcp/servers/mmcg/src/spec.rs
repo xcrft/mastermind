@@ -80,8 +80,8 @@ pub struct Frontmatter {
     /// "low" / "medium" / "high" — informational, surfaced in the risk report.
     #[serde(default)]
     pub risk: Option<String>,
-    /// Complexity mode: "lite" | "standard" | "strict". Controls which sections
-    /// verify-spec requires present and non-empty.
+    /// Workflow contract mode. `verified` and `strict` are current;
+    /// `lite` / `standard` remain accepted for existing task files.
     #[serde(default)]
     pub mode: Option<String>,
     /// Files the executor is authorized to modify, with optional symbol-level

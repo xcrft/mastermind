@@ -127,14 +127,17 @@ mmcg verify-spec .mastermind/tasks/042-feature/spec.md --require-index  # fail (
 # pre-edit snapshot drift, vanished symbols. Exit 1 if verdict is `broken`.
 mmcg audit-spec .mastermind/tasks/042-feature/spec.md --since main
 
-# Two-phase orchestrator: deterministic shell around the executor.
-#   1st invocation → verify-spec + risk report + write state
-#                    (.mastermind/run-state/<spec>.json), captures git HEAD as baseline
-#   2nd invocation (after executor) → audit-spec vs baseline; on Held verdict, emit
-#                    release-notes draft to stdout AND .mastermind/releases/<spec>.md;
-#                    clear state. Drift/Broken keeps state for retry after fixes.
+# Create a compact verified task (default), or a strict high-risk task.
+mmcg new-spec "Add account recovery"
+mmcg new-spec "Rotate signing keys" --mode strict
+
+# Two-phase, client-neutral task controller.
+#   pre  → verify spec, report risk, capture HEAD, write <task>/state.json
+#   handoff → any implementation client writes <task>/executor-report.md
+#   post → require and parse that report, audit against the baseline, write
+#          <task>/audit.md, update state, and draft release notes on Held.
 mmcg run-task .mastermind/tasks/042-feature/spec.md             # hand-off semantics
-mmcg run-task .mastermind/tasks/042-feature/spec.md --exec      # shell out to `claude -p` between phases
+mmcg run-task .mastermind/tasks/042-feature/spec.md --exec      # legacy Claude-only `claude -p` convenience
 mmcg run-task .mastermind/tasks/042-feature/spec.md --reset     # drop state, force pre-flight (counter survives)
 mmcg run-task .mastermind/tasks/042-feature/spec.md --pre-only  # never auto-resume into post
 mmcg run-task .mastermind/tasks/042-feature/spec.md --post-only # requires state
@@ -321,6 +324,20 @@ mmcg serve
 - **C/C++ is best-effort.** The C/C++ extractor uses tree-sitter alone — no preprocessor, no template instantiation, no semantic analysis. Concretely: (a) **macros are invisible** — `TEST(Suite, Name) { ... }` is seen as a call to `TEST`, not as a function definition, so gtest/Catch2 test bodies don't appear in `mmcg_search` and calls inside macro arguments may be lost; (b) **templates** record the template name but not instantiations (`vector<int>` doesn't create a `vector<int>` symbol); (c) **header/source split** produces two symbol rows (`void Foo::bar()` declared in `.h` and defined in `.cpp` = two `bar` hits); (d) **ADL/overload resolution** isn't performed (`swap(a, b)` records `swap` without knowing which namespace it resolves to); (e) **`#include`** records the header as an `imports` edge but doesn't follow its contents. For high-precision C++ structural analysis use `clangd` (semantic, slow, large) or `ctags` (similar tradeoffs to this extractor). mmcg uses one `tree-sitter-cpp` grammar for both `.c` and `.cpp` files — rare C-only code that uses C++ keywords as identifiers (e.g. a variable named `new`) may mis-parse.
 
 ## CI
+
+`mastermind ci` indexes the repository, verifies selected specs, parses their
+executor reports, audits the real diff, and optionally emits sealed bundles.
+For pull requests, scope the gate to changed task folders and require evidence:
+
+```bash
+mastermind ci --since origin/main \
+  --changed-only --require-executor-report \
+  --bundle-dir .mastermind/audit-output
+```
+
+Without `--changed-only`, the command retains its compatibility behavior and
+walks all task specs. Bundle publication always requires a canonical
+`executor-report.md`, even if the explicit requirement flag is omitted.
 
 ### Schema-v3 audit envelopes
 

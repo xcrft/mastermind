@@ -49,6 +49,13 @@ mastermind init
 mastermind doctor
 ```
 
+Small reversible changes can stay direct and use only `map`, `impact`, and
+repository tests. `mastermind new-spec` creates a compact verified contract by
+default; `--mode strict` adds risk, evidence, rollback, and independent review
+for high-risk work. The executor writes `executor-report.md`, and deterministic
+post-flight checks the report against the real diff before marking the task
+complete.
+
 The index is stored per repository in `.mastermind/mmcg.db` and stays local.
 
 ## Project-local installation

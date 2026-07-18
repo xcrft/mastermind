@@ -1,5 +1,5 @@
 name: Mastermind verifiable audit
-description: Produce and independently verify schema-v3 Mastermind audit envelopes
+description: Verify changed task contracts and produce policy-bound schema-v3 audit envelopes
 inputs:
   root:
     description: Repository root below GITHUB_WORKSPACE

@@ -11,5 +11,10 @@ pub fn dispatch(
     let root = root
         .canonicalize()
         .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
-    Ok(mmcg::run_task::run(spec, &root, index_path, opts))
+    let spec = if spec.is_absolute() {
+        spec.to_path_buf()
+    } else {
+        root.join(spec)
+    };
+    Ok(mmcg::run_task::run(&spec, &root, index_path, opts))
 }

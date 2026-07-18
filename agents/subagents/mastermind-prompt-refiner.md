@@ -4,7 +4,7 @@ description: Intake gate that normalizes raw client prompts before the planner s
 tools: Read
 model: sonnet
 metadata:
-  version: 0.2.1
+  version: 0.3.0
   authors:
     - mastermind
   tags:
@@ -90,8 +90,8 @@ needs_critic: false
 ```
 
 `action` values: `refined` | `passthrough` | `ask`
-`workflow_mode` values: `strict` | `lite` | `unknown`
-`risk` values: `high` | `medium` | `low`
+`workflow_mode` values: `direct` | `verified` | `strict` | `unknown`
+`risk` values: `high` | `medium` | `low` | `unknown`
 
 Omit the "Gaps" section if there are none. If you asked clarifying questions instead of refining, output those questions only — then the intake metadata with `action: ask`.
 
@@ -111,7 +111,7 @@ No changes needed — prompt has a clear verb, single deliverable, file scope, a
 <!-- mastermind:intake-begin -->
 ```yaml
 action: passthrough
-workflow_mode: lite
+workflow_mode: direct
 risk: low
 needs_research: false
 needs_critic: false

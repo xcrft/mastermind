@@ -1,4 +1,4 @@
 interface:
   display_name: "Mastermind Prompt Refiner"
-  short_description: "Turn rough requests into bounded implementation briefs"
-  default_prompt: "Use $mastermind-prompt-refiner to make this request planner-ready without inventing requirements."
+  short_description: "Rewrite prompts without losing the source request"
+  default_prompt: "Use $mastermind-prompt-refiner to prepare this explicit cold-agent handoff while preserving the original request verbatim."

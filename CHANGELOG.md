@@ -14,11 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - OpenAI adapter metadata for every shipped skill and eight prompt-level workflow eval cases covering direct/verified planning, executor reports, project map, change/test impact, cross-client setup, and audit attestation.
 
 ### Changed
+- Portable skills now match the real Direct/Verified/Strict lifecycle: read-only validation precedes approval, executor work is acceptance-driven with bounded repair, and `executor-report.md` is the only machine-consumed agent handoff.
+- Codegraph, prompt-refiner, security-review, style, comments, and investigation guidance now state their evidence limits, activation boundaries, and cross-client behavior explicitly.
 - New work now chooses among Direct (no spec), Verified (compact default contract), and Strict (risk-driven review). Planner and project workflow prompts are shorter, outcome-oriented, and no longer force a critic or independent auditor onto normal work.
 - `run-task` now keeps controller-owned lifecycle state beside each canonical task, requires the executor's canonical report before post-flight, persists `audit.md`, and keeps completed runs idempotent. The default handoff is client-neutral; `--exec` remains a Claude-only compatibility path.
 - Pull-request audit execution now selects only changed canonical task folders and requires an executor report before producing evidence, instead of re-auditing every historical spec against the current baseline.
 - The auditor is repository-read-only; planner/controller code now owns audit artifacts, lessons, release eligibility, and task-state transitions.
 - Release workflows pin every third-party Action to a full commit SHA. Manual publish runs are verification-only, and package publication requires a tag push in `xcrft/mastermind`.
+
+### Removed
+- The unused `extras/` artifact tree; installable workflow artifacts now have one canonical home under `agents/` and `skills/`.
 
 ### Security
 - Executor reports are capped at 1 MiB before YAML decoding, workflow eval prompts use an exact artifact allowlist in a tool-free safe-mode subprocess outside the repository, and Action-pin validation covers both `.yml` and `.yaml` workflows.

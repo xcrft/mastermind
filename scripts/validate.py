@@ -260,7 +260,7 @@ def _is_excluded(path: Path) -> bool:
     except ValueError:
         return False
     rel_parts = rel.parts
-    if rel_parts and rel_parts[0] in {"docs", "research", "scripts", "examples", "extras", "evals"}:
+    if rel_parts and rel_parts[0] in {"docs", "research", "scripts", "examples", "evals"}:
         return True
     # CLAUDE.md templates contain intentional links that resolve when copied
     # to a project root, not in the template's own location.
@@ -663,13 +663,8 @@ def validate_workflow_eval_contract() -> list[Issue]:
     path = REPO_ROOT / "evals/workflow.jsonl"
     issues: list[Issue] = []
     required_artifacts = {
-        "skills/workflow/mastermind-task-planning/SKILL.md",
-        "agents/subagents/mastermind-task-executor.md",
-        "skills/workflow/mastermind-project-map/SKILL.md",
-        "skills/workflow/mastermind-change-impact/SKILL.md",
-        "skills/workflow/mastermind-test-impact/SKILL.md",
-        "skills/workflow/mastermind-cross-client-setup/SKILL.md",
-        "skills/workflow/mastermind-audit-attestation/SKILL.md",
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in (REPO_ROOT / "skills").rglob("SKILL.md")
     }
     found_artifacts: set[str] = set()
     found_ids: set[str] = set()
@@ -782,6 +777,8 @@ def validate_executor_report_schema_contract() -> list[Issue]:
             "CanonicalExecutorReport",
             "deny_unknown_fields",
             "MAX_EXECUTOR_REPORT_BYTES",
+            "complete executor report must not contain defects",
+            "partial or failed executor report requires at least one defect",
         ):
             if token not in rust:
                 issues.append(Issue(rust_path, "error", f"strict executor report parser missing {token!r}"))
@@ -874,7 +871,8 @@ def validate_workflow_role_contracts() -> list[Issue]:
         for token in (
             "Persist the reviewed result (planner/controller only)",
             "The auditor is repository-read-only",
-            "planner-persisted auditor verdict",
+            "advisory evidence",
+            "controller's\n`audit.md` and `state.json` remain the persisted machine record",
         ):
             if token not in planner:
                 issues.append(Issue(planner_path, "error", f"planner persistence contract missing {token!r}"))
@@ -888,7 +886,7 @@ def validate_workflow_role_contracts() -> list[Issue]:
     except OSError as error:
         issues.append(Issue(executor_path, "error", f"cannot read executor contract: {error}"))
     else:
-        for token in ("<task>/executor-report.md", "Do not write `state.json`", "lifecycle state belongs"):
+        for token in ("<task>/executor-report.md", "Never write `state.json`", "controller owns lifecycle state"):
             if token not in executor:
                 issues.append(Issue(executor_path, "error", f"executor ownership contract missing {token!r}"))
         if "### Write state.json" in executor:
@@ -901,6 +899,66 @@ def validate_workflow_role_contracts() -> list[Issue]:
     else:
         if len(workflow) > 10_000:
             issues.append(Issue(workflow_path, "error", "project workflow exceeds the 10 KB anti-ceremony budget"))
+        text = workflow.decode("utf-8")
+        ordered = (
+            text.find("mastermind verify-spec"),
+            text.find("The user approves Scope and Acceptance Criteria"),
+            text.find("mastermind run-task .mastermind/tasks/<task>/spec.md --pre-only"),
+        )
+        if min(ordered) < 0 or ordered != tuple(sorted(ordered)):
+            issues.append(Issue(workflow_path, "error", "workflow must validate read-only, obtain approval, then write pre-flight state"))
+    return issues
+
+
+def validate_portable_skill_semantics() -> list[Issue]:
+    """Reject known cross-client and lifecycle claims that the runtime cannot honor."""
+    issues: list[Issue] = []
+    checks = {
+        "skills/workflow/mastermind-task-planning/SKILL.md": {
+            "required": ("mastermind verify-spec <task>/spec.md", "After the user approves Scope and Acceptance Criteria"),
+            "forbidden": ("planner-persisted auditor verdict",),
+        },
+        "skills/workflow/mastermind-task-executor/SKILL.md": {
+            "required": ("bounded repair loop", "Acceptance Criteria define success"),
+            "forbidden": ("Do not retry with modifications", "Execute it anyway"),
+        },
+        "skills/workflow/mastermind-structured-report-contract/SKILL.md": {
+            "required": ("<task>/executor-report.md", "not a Rust-parsed\nlifecycle input"),
+            "forbidden": ("planner extracts it with one regex", "planner applies the taxonomy fix and re-spawns"),
+        },
+        "skills/workflow/mastermind-codegraph-research/SKILL.md": {
+            "required": ("syntactic evidence", "read the\nsource"),
+            "forbidden": ("Do NOT re-verify mmcg results", "always cheaper"),
+        },
+        "skills/prompt-engineering/mastermind-prompt-refiner/SKILL.md": {
+            "required": ("## Original request", "Do not activate just because"),
+            "forbidden": ("The planner sees the refined version, not the user's brain dump", "Mounted as the intake gate"),
+        },
+        "skills/security/mastermind-agent-security-review/SKILL.md": {
+            "required": ("self-contained for Codex", "## Review protocol", "## Output"),
+            "forbidden": ("The review *protocol* lives in that subagent",),
+        },
+    }
+    for relative, contract in checks.items():
+        path = REPO_ROOT / relative
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as error:
+            issues.append(Issue(path, "error", f"cannot read portable skill contract: {error}"))
+            continue
+        for token in contract["required"]:
+            if token not in text:
+                issues.append(Issue(path, "error", f"portable skill contract missing {token!r}"))
+        for token in contract["forbidden"]:
+            if token in text:
+                issues.append(Issue(path, "error", f"portable skill retains stale claim {token!r}"))
+
+    readme_path = REPO_ROOT / "skills/README.md"
+    readme = readme_path.read_text(encoding="utf-8")
+    for skill_path in sorted((REPO_ROOT / "skills").rglob("SKILL.md")):
+        slug = skill_path.parent.name
+        if f"[`{slug}`]" not in readme:
+            issues.append(Issue(readme_path, "error", f"installed skill is missing from index: {slug}"))
     return issues
 
 
@@ -1145,6 +1203,7 @@ def main(argv: list[str]) -> int:
         issues.extend(validate_artifact(a))
     issues.extend(validate_openai_skill_adapters(artifacts))
     issues.extend(validate_workflow_role_contracts())
+    issues.extend(validate_portable_skill_semantics())
 
     links = collect_wikilinks()
     issues.extend(validate_wikilinks(artifacts, links))

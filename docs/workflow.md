@@ -36,6 +36,8 @@ Create the contract:
 
 ```bash
 mastermind new-spec "Add account recovery"        # verified is the default
+mastermind verify-spec .mastermind/tasks/001-add-account-recovery/spec.md
+# review Scope and Acceptance Criteria, then approve the task
 mastermind run-task .mastermind/tasks/001-add-account-recovery/spec.md --pre-only
 ```
 
@@ -48,7 +50,9 @@ The task folder owns four durable artifacts:
 | `audit.md` | Controller | Mechanical comparison of the report, spec, index, and real diff |
 | `state.json` | Controller | One task-local lifecycle record |
 
-After pre-flight, hand `spec.md` to the implementation agent in any coding
+`verify-spec` is read-only. `run-task --pre-only` is intentionally later: it
+records that the contract was approved and captures the git baseline. After
+that transition, hand `spec.md` to the implementation agent in any coding
 client. The executor must write `executor-report.md`; it must not update
 `state.json`. Then run:
 

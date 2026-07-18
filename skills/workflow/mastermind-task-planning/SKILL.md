@@ -46,6 +46,11 @@ precision, stale-index, and truncation notes. For one or two lookups work
 inline; use the researcher for a bounded batch and the investigator only for an
 unknown-cause bug.
 
+When `~/.mastermind/style.md` exists, read only the sections relevant to the
+planned implementation. Treat them as advisory preferences: repository code,
+tool-enforced conventions, product behavior, security, and the approved
+contract take precedence.
+
 ## Design review
 
 - **direct:** no critic.
@@ -84,7 +89,7 @@ For strict work use `--mode strict` and retain the additional risk, evidence,
 rollback, and critic sections. Delete placeholders; never pad a section with
 generic engineering advice.
 
-## Pre-flight
+## Pre-approval validation
 
 Before showing the contract to the user:
 
@@ -95,25 +100,33 @@ Before showing the contract to the user:
    once in Final Verification.
 5. The contract authorizes every intended file and no unrelated file.
 
-Run the deterministic gate:
+Run the read-only deterministic validator:
+
+```bash
+mastermind verify-spec <task>/spec.md
+```
+
+`verify-spec` does not write lifecycle state. Fix failures before requesting
+approval. A verified contract should normally fit on one or two screens;
+strict contracts may be longer because their extra evidence is material.
+
+## Execution handoff
+
+After the user approves Scope and Acceptance Criteria, enter the approved state:
 
 ```bash
 mastermind run-task <task>/spec.md --pre-only
 ```
 
-Fix failures before requesting approval. A verified contract should normally
-fit on one or two screens; strict contracts may be longer because their extra
-evidence is material.
-
-## Execution handoff
-
-After approval, invoke [[mastermind-task-executor]] with the spec path. The
+This is the state-writing pre-flight: it captures the baseline and sets the
+next step to executor. Then invoke [[mastermind-task-executor]] with the spec path. The
 executor writes `<task>/executor-report.md` containing the prose report and the
 canonical schema-v1 tail from [[mastermind-structured-report-contract]]. It
 must not write lifecycle state.
 
-Route malformed or partial reports by their typed defect kind. Stop after three
-failed execution cycles and return to design rather than looping.
+Route malformed or partial reports using their evidence and recommended defect
+kind. Stop after three failed execution cycles for the same blocking condition
+and return to design rather than looping.
 
 ## Post-flight
 
@@ -146,9 +159,9 @@ criteria. Mechanical contract compliance does not answer product judgment.
 ### Step 9c — Persist the reviewed result (planner/controller only)
 
 The auditor is repository-read-only and must not mutate evidence. `run-task`
-owns `state.json`, `audit.md`, lessons, and release-note eligibility. For a
-manual strict audit, persist the planner-persisted auditor verdict only after
-parsing it and completing semantic review.
+owns `state.json`, `audit.md`, lessons, and release-note eligibility. A manual
+strict auditor returns advisory evidence to the planner; the controller's
+`audit.md` and `state.json` remain the persisted machine record.
 
 ### Step 9d — Report
 

@@ -32,6 +32,8 @@ role orchestration.
 The normal task handoff is client-neutral:
 
 ```bash
+mastermind verify-spec .mastermind/tasks/001-example/spec.md
+# approve Scope and Acceptance Criteria
 mastermind run-task .mastermind/tasks/001-example/spec.md --pre-only
 # ask Codex to implement the spec and write executor-report.md
 mastermind run-task .mastermind/tasks/001-example/spec.md --post-only

@@ -82,13 +82,21 @@ SUITES = {
 
 WORKFLOW_ARTIFACTS = frozenset(
     {
-        "skills/workflow/mastermind-task-planning/SKILL.md",
-        "agents/subagents/mastermind-task-executor.md",
-        "skills/workflow/mastermind-project-map/SKILL.md",
-        "skills/workflow/mastermind-change-impact/SKILL.md",
-        "skills/workflow/mastermind-test-impact/SKILL.md",
-        "skills/workflow/mastermind-cross-client-setup/SKILL.md",
+        "skills/coding/no-ai-slop-comments/SKILL.md",
+        "skills/debugging/mastermind-investigation-ledger/SKILL.md",
+        "skills/prompt-engineering/mastermind-prompt-refiner/SKILL.md",
+        "skills/security/mastermind-agent-security-review/SKILL.md",
         "skills/workflow/mastermind-audit-attestation/SKILL.md",
+        "skills/workflow/mastermind-change-impact/SKILL.md",
+        "skills/workflow/mastermind-codegraph-research/SKILL.md",
+        "skills/workflow/mastermind-critical-review/SKILL.md",
+        "skills/workflow/mastermind-cross-client-setup/SKILL.md",
+        "skills/workflow/mastermind-project-map/SKILL.md",
+        "skills/workflow/mastermind-structured-report-contract/SKILL.md",
+        "skills/workflow/mastermind-style-deep/SKILL.md",
+        "skills/workflow/mastermind-task-executor/SKILL.md",
+        "skills/workflow/mastermind-task-planning/SKILL.md",
+        "skills/workflow/mastermind-test-impact/SKILL.md",
     }
 )
 

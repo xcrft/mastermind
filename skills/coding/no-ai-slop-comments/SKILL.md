@@ -11,18 +11,22 @@ metadata:
 
 # No AI-Slop Comments
 
-LLMs over-comment. Left unchecked, they narrate every line, banner every section, and annotate every edit — noise that turns stale the moment the code changes. This skill is the rule for keeping the comments that earn their place and deleting the rest. It applies to any code you write or touch.
+LLMs over-comment. Left unchecked, they narrate every line, banner every section,
+and annotate every edit. Apply this rule to comments added or modified in the
+current change. Do not turn a scoped implementation into a repository-wide
+comment cleanup.
 
 ## When to use
 
 - Writing new code, or editing existing code, in any language.
-- Implementing a spec as an executor — apply the spec's blocks verbatim and add no comments of your own.
+- Implementing a spec as an executor — preserve literal blocks and add comments only when the contract or code needs information the code cannot express.
 - Reviewing a diff that reads like a tutorial: `// loop over users`, `# increment counter`, `// --- Helpers ---`.
 - The user says "stop commenting", "no slop comments", or "you comment too much".
 
 ## The rule
 
-**A comment must say something the code cannot.** If deleting it loses no information that isn't already in the names, types, and structure → delete it.
+**A comment must say something the code cannot.** If a comment you added or
+changed loses no information when deleted, remove it.
 
 Comments explain **why**, not **what**. The code already says what it does.
 
@@ -48,7 +52,10 @@ Comments explain **why**, not **what**. The code already says what it does.
 - **Dense-logic intent:** one line over a gnarly regex / bit-twiddle saying what it matches.
 - **Required ceremony:** public-API docstrings where the project convention demands them; license headers.
 
-If a comment would surprise a competent reader who is looking only at the code, keep it. If it just reads the code back to them, cut it.
+If a comment carries a non-obvious reason, legal requirement, security
+constraint, public contract, invariant, or tool-required documentation, keep
+it. When uncertain about an existing comment outside the current diff, preserve
+it and leave cleanup to an explicitly scoped review.
 
 ## Match the surrounding code
 
@@ -81,4 +88,6 @@ def parse(ts):
 
 ## The one-line test
 
-Read the comment, then read the code. Did the comment tell you something the code didn't? If no → delete. If unsure → delete; the code is the source of truth.
+Read the comment, then read the code. Did the comment tell you something the
+code did not? If no, delete comments introduced by your change. If uncertainty
+involves an existing comment, preserve it unless the user requested cleanup.

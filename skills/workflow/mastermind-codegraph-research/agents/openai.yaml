@@ -1,4 +1,4 @@
 interface:
   display_name: "Mastermind Codegraph Research"
-  short_description: "Ground structural code claims in the live graph"
-  default_prompt: "Use $mastermind-codegraph-research to answer this structural repository question with exact evidence."
+  short_description: "Discover code structure with bounded graph evidence"
+  default_prompt: "Use $mastermind-codegraph-research to investigate this structural repository question and preserve graph precision limits."

@@ -11,16 +11,23 @@ metadata:
     - codegraph
 ---
 
-# Codegraph research — ground structural claims in mmcg
+# Codegraph research — discover structure with mmcg
 
-The shared truth layer for every Mastermind subagent. Any claim about code *structure* — does a symbol exist, who calls it, what it imports, how big a change is — comes from the mmcg codegraph, not from memory.
+The shared structural discovery layer for Mastermind. Claims about symbol
+existence, indexed callers, imports, and bounded blast radius come from a fresh
+mmcg result rather than memory. Exact source contracts and runtime behavior come
+from source reads and tests.
+
+The graph is syntactic evidence: name resolution, dynamic dispatch, reflection,
+generated code, re-exports, and cross-language edges can reduce precision.
 
 **Never name a symbol, file, caller, or blast radius from memory.** "I think `X` exists" is not evidence; `mmcg_search X` returning a hit is. A spec, audit, or critique built on a guessed symbol fails at the first step that touches real code.
 
 ## Structural vs literal
 
-- **Structural** (symbols, callers, callees, imports, dependencies, blast radius) → mmcg. Faster, cheaper, and more accurate than grep for code structure.
+- **Structural discovery** (symbols, indexed callers/callees, imports, bounded blast radius) → mmcg first. It understands syntax better than literal text search, but remains name-based and bounded.
 - **Literal** (string contents, log messages, comments, config values) → `Grep` / `Read`. mmcg doesn't index strings.
+- **Runtime contract** (dynamic dispatch, reflection, generated code, re-exports, cross-language edges, exact branch behavior) → read source and run focused tests.
 
 ## Query decision table
 
@@ -37,11 +44,18 @@ The shared truth layer for every Mastermind subagent. Any claim about code *stru
 | String contents / comments / log lines | `Grep` |
 | File-name / extension globs | `Glob` |
 
-**mmcg-first:** for any who/what/where question about code, try the mmcg tool first. Fall back to `Grep` / `Read` only when mmcg returns nothing or the question is non-structural. Do NOT re-verify mmcg results with grep — that wastes context.
+**mmcg-first:** use the graph to find candidate symbols and impact, then read the
+source needed for the decision. Re-check with literal search or another source
+when collisions/precision warnings are present, a security-sensitive path is at
+stake, a meaningful zero-result could change the decision, or the language
+feature is outside the graph's precision envelope. Do not repeat equivalent
+searches when the indexed result already answers a low-risk discovery question.
 
 ## Stale or unavailable index
 
-- No `mmcg_status` response → mmcg isn't configured. Say so to the user; ask whether to proceed without truth grounding or wait until the index is set up. Don't silently work blind.
+- No `mmcg_status` response → mmcg is unavailable. For a low-risk task, proceed
+  with source inspection and state the limitation. Stop for user/planner review
+  only when the missing structural evidence is load-bearing to scope or safety.
 - `mmcg_status` reports stale files → re-index (`mastermind watch`, or a fresh index) before trusting structural answers. A stale graph is worse than none: it looks authoritative and is wrong.
 
 ## Citations
@@ -50,7 +64,9 @@ Whenever you read code or report a structural fact, carry the `file:line`. Downs
 
 ## Don't guess
 
-Catch yourself guessing a signature, a path, or a caller count → stop and call mmcg. The two-second query is always cheaper than the failed executor cycle a wrong guess causes.
+Catch yourself guessing a signature, a path, or a caller count → query the graph
+or read the source. Preserve `stale`, collision, precision, and truncation
+metadata with any downstream claim.
 
 ## Related skills
 

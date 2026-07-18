@@ -31,7 +31,10 @@ Don't just grep. A portrait needs both numbers and read code:
 
 1. **Counts with their contrast.** Any "prefers X over Y" needs BOTH counted — early-`return`/`let-else` vs nesting depth; iterator chains vs `for` loops; typed errors vs `Box<dyn Error>`; table-driven tests vs one-assertion-per-fn. A bare count of X is not evidence of a preference.
 2. **Read 4–6 real files.** A core module (design), a hot path (optimization), a public API (ergonomics), a test file (test style), a recent diff. Greps can't see *why* or *what they watch for* — reading can.
-3. **Commits.** `git log --author="$(git config user.name)" --no-merges --pretty=%s -100` for voice and granularity; open a few bodies.
+3. **Commits.** Reuse the author identity selected by `mastermind miner profile`
+   when available. Otherwise inspect `git shortlog -sne --all` and confirm the
+   identity from local evidence; do not assume `git config user.name` matches
+   the author being profiled. Read up to 100 matching subjects and a few bodies.
 4. **Enforcing config FIRST.** `rustfmt.toml` / `.eslintrc` / `pyproject` lint config, `#![deny(...)]` / `#![warn(...)]`, `clippy.toml`, CI lint steps. Anything a formatter or linter *forces* is not personal style — exclude it, or mark it "enforced". Do not credit a `///` on every fn as a habit if `#![deny(missing_docs)]` mandates it.
 5. **Optimization signals.** Benchmarks (`criterion` / `#[bench]` / `*.bench.*`), `#[inline]`, `with_capacity`, caching/memoization, `tracing`/profiling spans, comments mentioning perf. Their presence — or absence — tells you whether they optimize and whether it's measured or by feel.
 6. **Observability & safety signals.** Logging/tracing/metrics density, assertions, input validation, `#[must_use]`, where error boundaries sit.
@@ -62,3 +65,11 @@ The portrait is the `## Design patterns & tendencies (interpreted)` section in t
 ## Caveat — managed block is regenerated
 
 This section lives in the managed block, so a plain `mastermind miner profile` re-mine overwrites it. This skill is how it gets rewritten — re-run it after a re-mine, or move the section into the manual block above to pin it.
+
+## Consumption contract
+
+The profile is advisory input for [[mastermind-task-planning]] and
+[[mastermind-task-executor]]. They may use grounded preferences for code shape,
+tests, and commit voice, but repository code and enforced formatter/linter
+configuration take precedence. The profile never overrides Scope, Acceptance
+Criteria, security controls, or public behavior.

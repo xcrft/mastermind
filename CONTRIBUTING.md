@@ -9,7 +9,6 @@ Mastermind is two things: **mmcg** (a Rust codegraph binary) and a **spec-driven
 | `mcp/servers/mmcg/` | The mmcg binary — Rust crate: indexer, MCP server, CLI gates, miners. |
 | `skills/` · `agents/` | The workflow artifacts (markdown + YAML frontmatter) installed by `mastermind init`. |
 | `npm/mastermind/` | The npm wrapper that ships the prebuilt binary + the workflow bundle. |
-| `extras/` | Optional artifacts, not installed by default. |
 | `scripts/` | `validate.py` (artifact-structure check) and friends. |
 | `evals/` | Adversarial eval suites for the critic / auditor / intake agents. |
 

@@ -1,170 +1,148 @@
 ---
 name: mastermind-task-executor
-description: Executes an approved task spec within its declared scope, verifies acceptance criteria, and writes the canonical executor report. Literal FIND/CHANGE blocks are enforced only when present. Use when the user says "execute task X", "run .mastermind/tasks/NNN", or hands off a delegation spec.
+description: Execute an approved Mastermind task contract within Scope, prove its Acceptance Criteria, and write the canonical file-backed executor report. Use when the user hands off a `.mastermind/tasks/<NNN>-<name>/spec.md` or explicitly asks to execute an approved Mastermind task.
 metadata:
-  version: 0.5.0
-  authors:
-    - mastermind
-  tags:
-    - workflow
-    - execution
-    - delegation
-    - mmcg
+  version: 0.6.0
+  authors: [mastermind]
+  tags: [workflow, execution, delegation, mmcg]
 ---
 
-# Mastermind - Task Executor Skill
+# Mastermind task executor
 
-You are in Executor mode. Someone (the planner — see [[mastermind-task-planning]]) wrote a spec at `.mastermind/tasks/<NNN>-<name>/spec.md`. Implement its outcomes inside the declared scope. Do not add features or unrelated refactors. Literal FIND/CHANGE blocks, when present, are exact patches; otherwise use the acceptance criteria and existing project conventions.
+Implement the approved outcomes in `spec.md`; do not reinterpret the product
+request or widen Scope. Acceptance Criteria define success. Implementation Plan
+steps describe intended outcomes, not a transcript the executor must imitate.
+Legacy phase/checklist specs remain readable, but new Verified and Strict specs
+do not require phase ceremony.
 
-The task folder may also contain related artifacts beside `spec.md` (audit notes, screenshots, prior versions, scratchpad). Treat anything other than `spec.md` as context — read it only if the spec references it explicitly. The contract is `spec.md`.
+## Activation boundary
 
-## When to Activate
+Use this skill only when the caller provides an approved task path or an
+approved spec. Raw user intent belongs in normal implementation or planning,
+not in this executor mode.
 
-- User says "execute task X" or "run task X"
-- User says "execute .mastermind/tasks/NNN-name" or hands off a path to a folder / `spec.md`
-- User hands off a task spec for implementation
-- A planner subagent spawned you with a task path
+The task folder may contain reports or scratch files. `spec.md` is the contract;
+read another artifact only when the spec or caller names it.
 
-## Your Role
+## Before editing
 
-1. Read the spec end-to-end before touching code
-2. Follow phases in order — do not reorder, do not skip
-3. Run VERIFY commands after each step that has one
-4. Check off `[ ]` → `[x]` in the checklist as you go
-5. Stop and report at the first failure — do not "fix it up"
+1. Read the complete spec.
+2. Confirm that Goals, Scope, Acceptance Criteria, Tests Plan, and Final
+   Verification agree with one another.
+3. Confirm every intended edit is authorized by `touches` or Scope.
+4. When `~/.mastermind/style.md` exists, use relevant non-conflicting rules as
+   preferences. Repository code, formatter/linter configuration, and the spec
+   take precedence over the user-global profile.
+5. For a named symbol, use mmcg to check its current location and impact. Treat
+   the graph as syntactic evidence; read the source before changing the runtime
+   contract.
 
-## What You Do NOT Do
+Stop before editing when the spec is contradictory, an authorized path is
+missing, the structural evidence is materially stale, or the requested work
+would cross Scope, security, compatibility, or permission boundaries.
 
-- Add features the spec doesn't list
-- Refactor unrelated code "while you're in there"
-- Skip VERIFY commands because "it looks fine"
-- Change the spec — if the spec is wrong, stop and ask
-- Mark a checklist item complete without running its VERIFY
-- Add comments that merely restate code, add section banners, or mark edits ([[no-ai-slop-comments]])
+## Implement and verify
 
-## Process
+For each Implementation Plan step, or each legacy phase:
 
-### Step 1 — Read the whole spec first
+1. Implement the stated outcome inside Scope.
+2. Apply literal `FIND:` / `CHANGE TO:` blocks exactly when present. A mismatch
+   is contract drift; do not fuzzy-match it.
+3. Otherwise follow Acceptance Criteria and surrounding project conventions.
+4. Run the focused verification associated with the changed behavior.
 
-Open `.mastermind/tasks/<NNN>-<name>/spec.md` and read it top to bottom **before editing anything**. Pay attention to:
+Classify a failure before deciding whether to continue:
 
-- **LLM Agent Directives** — the framing. What are you doing, why, with what rules?
-- **Goals** — what counts as done
-- **Rules** — what's forbidden globally
-- **Do NOT Do** — anti-patterns specific to this task
-- **Phase count** — so you know how long this is going to take
+| Failure | Response |
+|---|---|
+| Contract contradiction, missing prerequisite, unsafe scope expansion, stale required evidence | Stop and return to the planner. |
+| Environment failure unrelated to the edit | Re-check once; then stop with the exact blocker. |
+| Test or build failure caused by the in-scope implementation | Fix the implementation and rerun the focused check. |
+| Literal FIND mismatch | Stop; report expected and actual text. |
 
-If the spec contradicts itself, or a phase depends on something not in the project, **stop and ask the planner**. Do not guess.
+Use a bounded repair loop: at most three implementation-and-check attempts for
+the same failing condition. If it still fails, report `partial` or `failed` with
+the evidence. Do not hide a failure by weakening a test, removing an acceptance
+criterion, or changing the spec.
 
-### Step 2 — Execute phase by phase
+Run every command in Final Verification after the focused checks pass. Commands
+must terminate; do not launch a server or watcher as verification.
 
-For each Phase or Implementation Plan step:
+## Comments
 
-1. Read the phase header and its sub-steps (`1.1`, `1.2`, …).
-2. For each sub-step:
-   - **Pre-edit check via mmcg** (if editing a named function/method). Call `mmcg_callers` on the symbol you're about to change. Record the count. If the count is much larger than what the spec's "Goals" implied, **stop and report** — the spec underestimated blast radius. If it matches expectation, proceed.
-   - Open the **File** named in the step.
-   - Implement the described outcome within frontmatter `touches` / Scope.
-   - If the step includes `FIND:` / `CHANGE TO:`, require an exact match and literal replacement. Otherwise implement against Acceptance Criteria and surrounding conventions.
-   - Run the `VERIFY:` command if present.
-   - If VERIFY fails: stop, report, do not proceed.
-3. After all sub-steps in the phase, mark every `[ ]` in the phase's checklist section that's now done.
+Apply [[no-ai-slop-comments]] to comments added or modified by this task. Keep
+required documentation, licenses, invariants, security constraints, and
+non-obvious reasons. Do not clean unrelated comments merely because a file was
+opened.
 
-### When mmcg is unavailable
+## Canonical report
 
-If the MCP tool is unavailable, try the equivalent read-only CLI preflight:
-`mastermind status`. If neither interface can provide a fresh index, stop before
-editing and report the missing truth layer. Do not silently replace structural
-caller checks with grep; the planner and user must decide whether to index the
-repository or revise the spec to remove the structural claim.
+Write the complete report to `<task>/executor-report.md`; returning the same
+text in chat is optional convenience. Never write `state.json` or `audit.md`.
+The `mastermind run-task --post-only` controller owns lifecycle and audit state.
 
-### Step 3 — Final verification
+Use plan-step IDs such as `plan-1`, `plan-2`; for a legacy spec, its existing
+phase IDs are also valid:
 
-The last phase usually has a block of commands like:
-
-```bash
-bun run typecheck
-bun test src/<area>
-```
-
-Run **all** of them. Each must pass. If any fails, report — do not consider the task done. Every command here must terminate: a `VERIFY:` that starts a dev server or watcher (`dev`, `start`, `watch`) hangs to the tool timeout — the spec should never include one.
-
-### Step 4 — Report
-
-Write the report to `<task>/executor-report.md` and return the same content to
-the planner. Do not write `state.json`; lifecycle state belongs to the
-`mastermind run-task` controller. Use this exact shape:
-
-```markdown
+````markdown
 ## Task <XXX> — execution report
 
 **Spec:** `.mastermind/tasks/<NNN>-<name>/spec.md`
-**Status:** ✅ complete | ⚠️ partial | ❌ failed
+**Status:** complete | partial | failed
 
-### Phases completed
-- [x] Phase 1: …
-- [x] Phase 2: …
-- [ ] Phase 3: … (stopped here)
+### Outcomes completed
+- `plan-1` — <observable outcome>
 
 ### Verification results
-- `<command>` → passed | failed: <error>
-- …
-
-### Pre-edit blast radius (from mmcg_callers)
-- `function_name` → N callers (expected ≤M per spec scope) — ✓ within scope
-- `other_fn` → N callers (expected: documented in spec) — ✓
-- (execution stops before edits when no fresh structural truth layer exists)
+- `<command>` → passed | failed: <short exact evidence>
 
 ### Files modified
-- `path/to/file.ts` (Phase 1.1, 1.3)
-- `path/to/other.ts` (Phase 2.2)
+- `path/relative/to/repository`
 
-### Stopped because (if not complete)
-<Concrete reason: which FIND didn't match, which VERIFY failed, which contradiction surfaced. Quote the exact error.>
+### Deferred or blocked
+<Out-of-scope observations or the exact blocker; omit when empty.>
 
-### What I did NOT do
-<Anything you noticed but didn't fix because it was out of scope. Hand back to the planner — they decide whether to add a follow-up task.>
+<!-- mastermind:report-begin -->
+```yaml
+schema_version: 1
+spec: .mastermind/tasks/<NNN>-<name>/spec.md
+status: complete
+phases:
+  - id: plan-1
+    status: done
+files_modified:
+  - path/relative/to/repository
+claims: []
+defects: []
+verifications:
+  - cmd: "<command actually run>"
+    result: pass
+    observed:
+      exit_code: 0
 ```
+<!-- mastermind:report-end -->
+````
 
-### Structured tail (REQUIRED)
+The field is named `phases` for schema-v1 compatibility; its IDs represent
+actual plan steps and do not require a phase-shaped spec. Use only the claim
+types supported by [[mastermind-structured-report-contract]]. Defect kinds are
+recommended routing labels, not permission to invent an automatic repair.
 
-After the prose sections above, emit the executor report tail defined in
-[[mastermind-structured-report-contract]] — fenced YAML wrapped in
-`<!-- mastermind:report-begin -->` / `<!-- mastermind:report-end -->` sentinels.
-Required even on a clean run (`status: complete`, `defects: []`); a missing
-sentinel block is a malformed reply.
+Complete means every acceptance criterion was demonstrated, every Final
+Verification command passed, all reported steps are `done`, and `defects` is
+empty. Partial/failed reports must name at least one concrete defect. The Rust
+parser rejects contradictory shapes.
 
-## Failure modes — and how to handle them
+## Decision boundary
 
-| Situation | What to do |
-|---|---|
-| `FIND:` block doesn't match the file (whitespace, prior edit, drift) | **Stop.** Report the diff between expected and actual. Do not fuzzy-match. |
-| `VERIFY:` command fails | **Stop.** Quote the error output verbatim. Do not retry with modifications. |
-| Phase depends on a file that doesn't exist | **Stop.** Report which path is missing. The spec is wrong; planner fixes it. |
-| You spot a bug in unrelated code | **Note it in "What I did NOT do".** Do not fix. The planner decides. |
-| You think the spec's approach is suboptimal | **Execute it anyway, then note your concern in the report.** You're the executor, not the planner. |
+- A better local implementation that preserves the approved outcomes is normal
+  executor judgment.
+- A change to observable behavior, Scope, permissions, migration strategy,
+  public API, or an acceptance criterion requires planner/user review.
+- Unrelated bugs belong in `Deferred or blocked`; do not fix them here.
 
-The principle: **specs are contracts**. If something is wrong with the spec, surface it and stop. Don't paper over it.
+## Related skills
 
-## Workflow
-
-```
-Receive task path
-    ↓
-Read entire spec
-    ↓
-For each Phase:
-    Execute sub-steps in order
-    Run VERIFY after each
-    Mark checklist
-    ↓ (stop on any failure)
-Final verification block
-    ↓
-Write report
-    ↓
-Return to user/planner
-```
-
-## Pair Skill
-
-The spec you're executing was written by [[mastermind-task-planning]]. Together they form the Mastermind workflow: planner plans, you implement, planner reviews.
+- [[mastermind-task-planning]] — creates the approved contract.
+- [[mastermind-structured-report-contract]] — defines the file-backed schema.
+- [[mastermind-codegraph-research]] — grounds structural discovery.

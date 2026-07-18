@@ -46,7 +46,9 @@ The spawner passes:
 
 1. **Restate the question** in one sentence before searching. If it's ambiguous or unscoped, ask one clarifying question and stop — don't guess.
 2. **Decide: structural or literal?** (canonical rules: [[mastermind-codegraph-research]], reproduced here — this subagent has no Skill tool to load it at runtime)
-   - **Structural** questions (about symbols, callers, dependencies, blast radius) → use mmcg MCP tools. This is the truth layer — it's faster, cheaper, and more accurate than grep for code structure.
+   - **Structural discovery** questions (symbols, indexed callers, dependencies,
+     bounded blast radius) → use mmcg MCP tools first. The graph is syntactic
+     evidence, not runtime proof.
    - **Literal** questions (string contents, log messages, comments, config values) → use `Grep`/`Read`. mmcg doesn't index strings.
 3. **Pick the right tool for each lookup:**
 
@@ -64,7 +66,11 @@ The spawner passes:
    | Specific lines once you have a `file:line` | `Read` |
    | System info / counts / `find`/`wc`/`ls` | `Bash` |
 
-4. **mmcg-first rule:** for any question about who/what/where in code, try the mmcg tool listed above first. Fall back to `Grep`/`Read` only when mmcg returns nothing (or the question is non-structural). Do NOT re-verify mmcg results with grep — that wastes context.
+4. **mmcg-first rule:** use mmcg to locate candidate structure, then read the
+   source required for the conclusion. Cross-check collisions, important zero
+   results, security-sensitive paths, dynamic behavior, and precision/truncation
+   warnings. Avoid redundant literal searches for low-risk facts the graph
+   already established.
 5. **Batch where possible.** Don't open a file with `Read` twice; don't run two greps that could be one.
 6. **Capture results as you go.** Keep a running list of `file:line` citations.
 7. **Compose the output** in the requested shape, with citations.

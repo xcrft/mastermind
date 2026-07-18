@@ -7,8 +7,7 @@
 #   - in the publish workflow (assemble) and the ci-npm smoke, before `npm pack`
 #   - locally, before testing `init`'s global install
 #
-# Skills are allowlisted: only the core skills below ship in the default install.
-# Non-core skills live in extras/ and are not copied here.
+# Every skill under `skills/` ships in the default install.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -20,9 +19,7 @@ mkdir -p "$SHARE/agents" "$SHARE/skills"
 # Subagents — flat `.md` files.
 cp "$REPO_ROOT"/agents/subagents/*.md "$SHARE/agents/"
 
-# Core skills — every skill under `skills/` ships in the default install. Non-core
-# artifacts live in `extras/` (a separate tree), which this never scans, so adding
-# a skill under `skills/` ships it automatically — no allowlist to forget.
+# Every skill under `skills/` ships automatically — no allowlist to forget.
 while IFS= read -r skill_md; do
   src="$(dirname "$skill_md")"
   cp -R "$src" "$SHARE/skills/$(basename "$src")"

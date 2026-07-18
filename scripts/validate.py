@@ -376,10 +376,10 @@ MMCG_TEMPLATE_MIRRORS: list[tuple[str, str]] = [
 # ----- mmcg tool-list drift check ----------------------------------------
 
 # The authoritative list of MCP tools lives in `mcp/servers/mmcg/src/mcp.rs`
-# inside the `tools_list()` JSON. Every doc file that enumerates tools — top
-# READMEs and install-facing docs — must mention every tool by name, or it
-# drifts and lies about the API. This validator extracts the tool names from
-# the Rust source and asserts they all appear in each docfile.
+# inside the `tools_list()` JSON. The exhaustive technical reference must
+# mention every tool by name; landing-page READMEs only carry the derived count
+# and link to that canonical reference. This keeps the API contract checked
+# without forcing the same long inventory into every user-facing README.
 
 MMCG_MCP_SRC = "mcp/servers/mmcg/src/mcp.rs"
 
@@ -388,13 +388,13 @@ MMCG_MCP_SRC = "mcp/servers/mmcg/src/mcp.rs"
 # file's text. False positives possible if a name appears in unrelated prose,
 # but mmcg_xxx names are sufficiently distinctive.)
 MMCG_TOOL_LIST_DOCS: list[str] = [
-    "mcp/servers/mmcg/README.md",
-    "README.md",
+    "docs/reference/mmcg.md",
 ]
 
 # Files that quote a tool *count* like "16 structural query tools" / "15 tools".
 # We extract counts and assert they all match the count derived from mcp.rs.
 MMCG_TOOL_COUNT_DOCS: list[str] = [
+    "docs/reference/mmcg.md",
     "mcp/servers/mmcg/README.md",
     "README.md",
 ]

@@ -1,0 +1,130 @@
+# Getting started
+
+Mastermind has two independent layers:
+
+1. A global CLI, workflow bundle, and MCP registration.
+2. A local codegraph for each repository you choose to index.
+
+You can install and connect Mastermind without initializing a project. `mastermind init` is only the convenience command for enabling the complete repository workflow.
+
+## Requirements
+
+- Node.js 24+ for the npm package
+- Claude Code, Codex, Cursor, Continue, or another MCP stdio client
+- Git for baseline-aware change and audit commands
+
+Rust is not needed for npm installation. Source builds require Rust 1.96+.
+
+## Install the CLI
+
+Global installation is simplest when you use Mastermind across repositories:
+
+```bash
+npm install -g @xcraftmind/mastermind
+mastermind --version
+```
+
+For a version pinned to one repository:
+
+```bash
+npm install -D @xcraftmind/mastermind
+npx mastermind --version
+```
+
+## Connect an AI client
+
+`mastermind setup` previews a redacted plan. Add `--write` to apply it.
+
+| Client | User-scope command | Notes |
+|---|---|---|
+| Claude Code | `mastermind setup claude --scope user --write` | `mastermind install` also installs the Claude workflow bundle and registers MCP |
+| Codex | `mastermind setup codex --scope user --write` | User scope only |
+| Cursor | `mastermind setup cursor --scope user --write` | User and project scopes supported |
+| Continue | `mastermind setup continue --scope user --write` | Owns one `mastermind.yaml` file |
+| Generic | See [generic MCP setup](integrations/generic-mcp.md) | Requires an explicit config path |
+
+Client guides document removal, project scope, backups, and the exact config shape:
+
+- [Claude Code](integrations/claude-code.md)
+- [Codex](integrations/codex.md)
+- [Cursor](integrations/cursor.md)
+- [Continue](integrations/continue.md)
+- [Generic MCP](integrations/generic-mcp.md)
+
+No repository and no `mastermind init` are required for this step.
+
+## Install the Claude workflow
+
+```bash
+mastermind install
+```
+
+This installs Mastermind-owned agents, skills, and commands under `~/.claude/` and registers the MCP server for Claude Code. Run it once; use `mastermind update` after upgrading the npm package.
+
+```bash
+mastermind list
+mastermind update
+```
+
+## Use the codegraph without project initialization
+
+From any supported code repository:
+
+```bash
+cd your-project
+mastermind index .
+mastermind status
+mastermind map .
+```
+
+This creates `.mastermind/mmcg.db`. It does not create task specs, `CONTEXT.md`, or a workflow `CLAUDE.md`.
+
+Refresh the index after edits:
+
+```bash
+mastermind index .       # incremental
+mastermind index . --force
+mastermind watch         # continuous refresh
+```
+
+Analyze the current worktree against a baseline:
+
+```bash
+mastermind impact --since main
+```
+
+## Enable the complete repository workflow
+
+```bash
+mastermind init
+mastermind doctor
+```
+
+`init` scaffolds `.mastermind/`, builds the index, creates project context when missing, and installs the Claude workflow unless disabled. Existing `CONTEXT.md` and `CLAUDE.md` files are preserved unless `--force` is used.
+
+Useful opt-outs:
+
+```bash
+mastermind init --no-claude  # do not draft context through Claude Code
+mastermind init --no-index   # scaffold without indexing
+mastermind init --no-global  # do not update ~/.claude
+```
+
+## State and privacy
+
+| Location | Contains | Commit it? |
+|---|---|---|
+| `~/.claude/` | Installed Claude agents, skills, commands | No |
+| User client config | MCP registration | No |
+| `.mastermind/mmcg.db` | Local codegraph and scratchpad | No |
+| `.mastermind/tasks/` | Optional task specs and lessons | Your choice |
+| `CONTEXT.md`, `CLAUDE.md` | Optional repository guidance | Your choice |
+
+The index is generated from local source files and stays local. Add `.mastermind/` to `.gitignore` when you do not intend to version task artifacts.
+
+## Next steps
+
+- Run `mastermind map .` to learn a repository.
+- Run `mastermind impact --since main` before submitting a change.
+- Read [How the workflow works](workflow.md) to use checked task specs.
+- Add [verifiable audits](github-action.md) to CI.

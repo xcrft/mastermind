@@ -112,7 +112,9 @@ pub fn validate_key_ids(values: &[String]) -> Result<BTreeSet<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use base64::engine::general_purpose::STANDARD as BASE64;
+    #[cfg(unix)]
     use base64::Engine;
     use mmcg::audit_bundle::{
         seal, sha256_hex, DiffBinding, InputBinding, Manifest, RepositoryBinding, ToolBinding,

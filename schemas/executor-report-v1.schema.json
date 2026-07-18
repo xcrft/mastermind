@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/xcrft/mastermind/schemas/executor-report-v1.schema.json",
+  "title": "Mastermind executor report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "spec",
+    "status",
+    "phases",
+    "files_modified",
+    "claims",
+    "defects",
+    "verifications"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "spec": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["complete", "partial", "failed"] },
+    "phases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "status": { "enum": ["done", "pending", "stopped_here", "skipped"] }
+        }
+      }
+    },
+    "files_modified": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "claims": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/claim" }
+    },
+    "defects": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "phase", "details", "remediation_hint"],
+        "properties": {
+          "kind": { "type": "string", "minLength": 1 },
+          "phase": { "type": "string", "minLength": 1 },
+          "details": { "type": "string", "minLength": 1 },
+          "remediation_hint": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "verifications": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["cmd", "result"],
+        "properties": {
+          "cmd": { "type": "string", "minLength": 1 },
+          "result": { "enum": ["pass", "fail"] },
+          "output_excerpt": { "type": "string" },
+          "observed": { "$ref": "#/$defs/observed" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "observed": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "exit_code": { "type": "integer" },
+        "tests_run": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "claim": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "symbol"],
+          "properties": {
+            "kind": { "const": "function_added" },
+            "symbol": { "type": "string", "minLength": 1 },
+            "file": { "type": "string", "minLength": 1 },
+            "signature": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "from", "to"],
+          "properties": {
+            "kind": { "const": "integration" },
+            "from": { "type": "string", "minLength": 1 },
+            "from_file": { "type": "string", "minLength": 1 },
+            "to": { "type": "string", "minLength": 1 },
+            "to_file": { "type": "string", "minLength": 1 },
+            "relation": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    }
+  }
+}

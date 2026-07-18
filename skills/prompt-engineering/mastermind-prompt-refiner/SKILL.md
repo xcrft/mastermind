@@ -2,13 +2,12 @@
 name: mastermind-prompt-refiner
 description: Intake gate that normalizes raw client prompts before the planner sees them. Use as the first stage in any Mastermind workflow when the user's request is rough, vague, client-provided, or bundles multiple intents. Also invoked when the user says "improve this prompt", "rewrite this for an agent", "make this clearer".
 metadata:
-  version: 0.2.0
+  version: 0.2.1
   authors:
     - mastermind
   tags:
     - prompt-engineering
     - workflow
-  model: sonnet
 ---
 
 # Prompt Refiner — Intake Gate

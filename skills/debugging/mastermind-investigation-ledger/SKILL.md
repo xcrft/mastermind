@@ -2,7 +2,7 @@
 name: mastermind-investigation-ledger
 description: Investigate unknown bugs with a hypothesis ledger and one-probe-at-a-time loop before drafting a task spec. Triggers on unexplained failures, ambiguous test failures, regressions, or bug reports without confirmed root cause.
 metadata:
-  version: 0.1.0
+  version: 0.1.1
   authors:
     - mastermind
   tags:

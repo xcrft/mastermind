@@ -37,8 +37,8 @@ npx mastermind --version
 
 | Client | User-scope command | Notes |
 |---|---|---|
-| Claude Code | `mastermind setup claude --scope user --write` | `mastermind install` also installs the Claude workflow bundle and registers MCP |
-| Codex | `mastermind setup codex --scope user --write` | User scope only |
+| Claude Code | `mastermind install` | Installs skills, subagents, and user-scope MCP |
+| Codex | `mastermind install --client codex` | Installs skills and user-scope MCP |
 | Cursor | `mastermind setup cursor --scope user --write` | User and project scopes supported |
 | Continue | `mastermind setup continue --scope user --write` | Owns one `mastermind.yaml` file |
 | Generic | See [generic MCP setup](integrations/generic-mcp.md) | Requires an explicit config path |
@@ -53,17 +53,28 @@ Client guides document removal, project scope, backups, and the exact config sha
 
 No repository and no `mastermind init` are required for this step.
 
-## Install the Claude workflow
+## Install workflow adapters
 
 ```bash
-mastermind install
+mastermind install --client all
 ```
 
-This installs Mastermind-owned agents, skills, and commands under `~/.claude/` and registers the MCP server for Claude Code. Run it once; use `mastermind update` after upgrading the npm package.
+This installs Mastermind-owned skills for Claude and Codex, Claude subagents,
+and both user-scope MCP registrations. Use `mastermind install` or
+`mastermind install --client codex` for one client. Cursor and Continue expose
+the MCP tools through `mastermind setup`; Mastermind does not claim a native
+workflow-extension format for those clients.
+
+The installer owns only artifacts recorded in a per-client manifest. Updates
+replace each owned skill directory atomically, remove retired owned artifacts,
+preserve unrelated user files, and roll back a partial client update.
+Doctor hashes every owned artifact, so a locally modified or truncated skill is
+reported as drift rather than accepted because the path merely exists.
 
 ```bash
 mastermind list
-mastermind update
+mastermind update --client all
+mastermind doctor --workflow --client all
 ```
 
 ## Use the codegraph without project initialization
@@ -114,7 +125,8 @@ mastermind init --no-global  # do not update ~/.claude
 
 | Location | Contains | Commit it? |
 |---|---|---|
-| `~/.claude/` | Installed Claude agents, skills, commands | No |
+| `~/.claude/` | Installed Claude agents, skills, ownership manifest | No |
+| `~/.codex/` | Installed Codex skills and ownership manifest | No |
 | User client config | MCP registration | No |
 | `.mastermind/mmcg.db` | Local codegraph and scratchpad | No |
 | `.mastermind/tasks/` | Optional task specs and lessons | Your choice |

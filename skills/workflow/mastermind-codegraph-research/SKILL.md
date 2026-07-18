@@ -2,7 +2,7 @@
 name: mastermind-codegraph-research
 description: Use mmcg to ground structural code claims before planning, auditing, criticizing, or researching code. Triggers when an agent needs symbol existence, callers, callees, imports, blast radius, file existence, or stale-index handling.
 metadata:
-  version: 0.1.0
+  version: 0.1.1
   authors:
     - mastermind
   tags:

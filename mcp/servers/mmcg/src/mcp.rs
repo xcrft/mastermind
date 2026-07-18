@@ -832,7 +832,8 @@ fn schema_map() -> Value {
             "properties": {
                 "path": { "type": "string", "default": ".", "description": "Repository-relative file or directory scope" },
                 "depth": { "type": "integer", "minimum": 1, "maximum": 6, "default": 2 },
-                "top": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
+                "top": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
+                "production_only": { "type": "boolean", "default": false, "description": "Exclude tests, fixtures, examples, generated code, and vendored dependencies" }
             }
         }
     })
@@ -1120,8 +1121,15 @@ fn handle_map(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
             .filter(|value| (1..=100).contains(value))
             .ok_or_else(|| HandlerError::InvalidArguments("Invalid argument: top".into()))?,
     };
-    let result = queries::project_map(store, path, depth as u8, top as u32)
-        .map_err(|error| HandlerError::internal("project_map_query", error))?;
+    let production_only = match args.get("production_only") {
+        None => false,
+        Some(value) => value.as_bool().ok_or_else(|| {
+            HandlerError::InvalidArguments("Invalid argument: production_only".into())
+        })?,
+    };
+    let result =
+        queries::project_map_with_options(store, path, depth as u8, top as u32, production_only)
+            .map_err(|error| HandlerError::internal("project_map_query", error))?;
     serde_json::to_value(result)
         .map_err(|error| HandlerError::internal("serialize_response", error))
 }
@@ -1712,6 +1720,18 @@ mod tests {
             serde_json::to_value(queries::project_map(&store, ".", 2, 20).unwrap()).unwrap();
         let actual = handle_map(&mut store, &json!({})).unwrap();
         assert_eq!(actual, expected);
+        let production_expected = serde_json::to_value(
+            queries::project_map_with_options(&store, ".", 2, 20, true).unwrap(),
+        )
+        .unwrap();
+        let production_actual =
+            handle_map(&mut store, &json!({ "production_only": true })).unwrap();
+        assert_eq!(production_actual, production_expected);
+        assert!(matches!(
+            handle_map(&mut store, &json!({ "production_only": "yes" })),
+            Err(HandlerError::InvalidArguments(message))
+                if message == "Invalid argument: production_only"
+        ));
         let listed = tools_list(ProtocolVersion::Current);
         let map = listed["tools"]
             .as_array()

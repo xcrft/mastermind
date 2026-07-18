@@ -22,13 +22,14 @@ npm install -g @xcraftmind/mastermind
 Connect the client you use:
 
 ```bash
-mastermind install                              # Claude workflow + skills + MCP
-mastermind setup codex --scope user --write    # Codex MCP
+mastermind install --client all                # Claude + Codex workflow adapters and MCP
 mastermind setup cursor --scope user --write   # Cursor MCP
 mastermind setup continue --scope user --write # Continue MCP
 ```
 
-These commands do not require a project or `mastermind init`. Omit `--write` to preview a redacted setup plan.
+Use `mastermind install` for Claude only or `mastermind install --client codex`
+for Codex only. These commands do not require a project or `mastermind init`.
+Omit `--write` on setup commands to preview a redacted plan.
 
 ## Use it in a repository
 
@@ -70,7 +71,9 @@ Codex supports user scope only. Claude and Cursor support user and project scope
 - SHA-256 and Ed25519 audit attestations
 - GitHub Action integration
 
-Run `mastermind list` to inspect the installed Claude workflow bundle and `mastermind <command> --help` for CLI options.
+Run `mastermind list` to inspect the packaged workflow bundle and
+`mastermind doctor --workflow --client all` to verify manifest and SHA-256
+content parity.
 
 ## Platforms
 

@@ -15,11 +15,15 @@ const pkg = require("../package.json");
 // subagents + skills that `init` installs into ~/.claude/.
 const pkgRoot = path.dirname(require.resolve("../package.json"));
 
-// `mastermind install / update / list` — manage the workflow subagents + skills
-// in Claude Code (~/.claude). No native binary needed; handled in JS (see ./install.js).
-if (["install", "update", "list"].includes(process.argv[2])) {
-  await import("./install.js");
-  process.exit(0);
+// Workflow bundle management is handled in JS; no native binary is needed.
+// `doctor --workflow` checks package↔installed manifest parity without touching
+// the repository-local codegraph doctor.
+if (
+  ["install", "update", "list"].includes(process.argv[2]) ||
+  (process.argv[2] === "doctor" && process.argv.includes("--workflow"))
+) {
+  const installer = await import("./install.js");
+  process.exit(await installer.main(process.argv.slice(2)));
 }
 
 function detectLibc() {
@@ -118,6 +122,8 @@ const env = {
   MASTERMIND_VERSION: pkg.version,
   MASTERMIND_PACKAGE: pkg.name,
   MASTERMIND_SHARE_DIR: path.join(pkgRoot, "share"),
+  MASTERMIND_INSTALLER_JS: path.join(pkgRoot, "bin", "install.js"),
+  MASTERMIND_NODE: process.execPath,
 };
 
 const child = spawn(bin, process.argv.slice(2), {

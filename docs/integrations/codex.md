@@ -13,10 +13,15 @@ Install and index Mastermind, then preview registration:
 
 ```bash
 npm install -g @xcraftmind/mastermind
+mastermind install --client codex
 cd your-project
 mastermind index .
-mastermind setup codex --scope user
 ```
+
+The install command copies the portable skill bundle under `~/.codex/skills`
+and registers the MCP server. It does not require `mastermind init` or a
+repository. To preview MCP registration without installing skills, use
+`mastermind setup codex --scope user`.
 
 Apply the native registration explicitly:
 
@@ -39,6 +44,7 @@ mastermind setup codex --scope user --remove --write
 
 ```bash
 mastermind doctor
+mastermind doctor --workflow --client codex
 ```
 
 Doctor recognizes only the `[mcp_servers.mmcg]` table with a string `command` and ordered string `args` in `~/.codex/config.toml`. It parses the file as TOML, including normal quoting, comments, and multiline arrays, while rejecting malformed types, duplicate keys, and symlinked config ancestry. Doctor never executes Codex or a configured command. The old YAML configuration instructions are not supported.

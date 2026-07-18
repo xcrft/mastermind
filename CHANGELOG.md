@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Transactional, manifest-owned workflow installation for Claude Code and Codex, including SHA-256 content parity checks, rollback, retired-artifact cleanup, `mastermind doctor --workflow`, and native `init` delegation to the same installer.
+- Optional production-only project maps that exclude conventional tests, fixtures, examples, demos, generated/vendor/dependency/build paths before bounded component, boundary, hotspot, and cycle queries run.
+- A canonical strict executor-report schema shared by prompts, JSON Schema, fixtures, and the Rust audit parser, with backward compatibility for legacy report tails.
+- OpenAI adapter metadata for every shipped skill and seven prompt-level workflow eval cases covering planner, executor, project map, change/test impact, cross-client setup, and audit attestation.
+
+### Changed
+- The auditor is repository-read-only; planner/controller code now owns audit artifacts, lessons, release eligibility, and task-state transitions.
+- Release workflows pin every third-party Action to a full commit SHA. Manual publish runs are verification-only, and package publication requires a tag push in `xcrft/mastermind`.
+
+### Security
+- Executor reports are capped at 1 MiB before YAML decoding, workflow eval prompts use an exact artifact allowlist in a tool-free safe-mode subprocess outside the repository, and Action-pin validation covers both `.yml` and `.yaml` workflows.
+
+### Tests
+- CI now validates Action pins, executor-report parity, OpenAI adapters, workflow eval coverage, transactional installer reconciliation/tamper detection, and tarball-installed Claude/Codex workflow parity.
+
 ## [0.37.0] - 2026-07-18
 
 ### Added

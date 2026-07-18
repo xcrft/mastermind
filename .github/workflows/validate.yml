@@ -12,10 +12,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
           cache: pip
@@ -26,6 +26,9 @@ jobs:
 
       - name: Run validator
         run: python scripts/validate.py
+
+      - name: Compile eval harness
+        run: python -m py_compile evals/runner.py
 
       - name: Run audit workflow security fixtures
         run: python scripts/test_audit_workflow_security.py

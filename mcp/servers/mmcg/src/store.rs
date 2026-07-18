@@ -69,6 +69,41 @@ const SYMBOL_COLS: &str =
     "id, name, kind, file_path, line_start, line_end, signature, parent_id, decorators";
 const SYMBOL_COLS_S: &str = "s.id, s.name, s.kind, s.file_path, s.line_start, s.line_end, s.signature, s.parent_id, s.decorators";
 
+fn production_path_filter(column: &str) -> String {
+    const SEGMENTS: &[&str] = &[
+        "test",
+        "tests",
+        "__tests__",
+        "fixture",
+        "fixtures",
+        "example",
+        "examples",
+        "demo",
+        "demos",
+        "benchmark",
+        "benchmarks",
+        "bench",
+        "benches",
+        "generated",
+        "vendor",
+        "node_modules",
+        "target",
+    ];
+    SEGMENTS
+        .iter()
+        .map(|segment| format!("AND instr(lower('/' || {column} || '/'), '/{segment}/') = 0"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn maybe_production_path_filter(enabled: bool, column: &str) -> String {
+    if enabled {
+        production_path_filter(column)
+    } else {
+        String::new()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Edge {
     pub id: i64,
@@ -1110,18 +1145,33 @@ impl Store {
     }
 
     pub fn map_paths(&self, scope: &str, kind: &str, limit: usize) -> SqlResult<Vec<String>> {
-        let mut stmt = self.conn.prepare(
+        self.map_paths_filtered(scope, kind, limit, false)
+    }
+
+    pub fn map_paths_filtered(
+        &self,
+        scope: &str,
+        kind: &str,
+        limit: usize,
+        production_only: bool,
+    ) -> SqlResult<Vec<String>> {
+        let filter = maybe_production_path_filter(production_only, "path");
+        let sql = format!(
             "SELECT path
              FROM files
-             WHERE ?2 = 'root'
+             WHERE (
+                ?2 = 'root'
                 OR (?2 = 'file' AND path = ?1)
                 OR (
                     ?2 = 'directory'
                     AND substr(path, 1, length(?1) + 1) = ?1 || '/'
                 )
+             )
+             {filter}
              ORDER BY path
-             LIMIT ?3",
-        )?;
+             LIMIT ?3"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![scope, kind, limit as i64], |row| row.get(0))?;
         rows.collect()
     }
@@ -1131,6 +1181,16 @@ impl Store {
         components: &[MapBoundaryScope],
         limit_per_component: usize,
         global_limit: usize,
+    ) -> SqlResult<Vec<MapBoundaryRow>> {
+        self.map_boundaries_filtered(components, limit_per_component, global_limit, false)
+    }
+
+    pub fn map_boundaries_filtered(
+        &self,
+        components: &[MapBoundaryScope],
+        limit_per_component: usize,
+        global_limit: usize,
+        production_only: bool,
     ) -> SqlResult<Vec<MapBoundaryRow>> {
         if components.is_empty() || limit_per_component == 0 || global_limit == 0 {
             return Ok(Vec::new());
@@ -1144,6 +1204,8 @@ impl Store {
             .join(", ");
         let per_component_param = components.len() * 3 + 1;
         let global_param = components.len() * 3 + 2;
+        let symbol_filter = maybe_production_path_filter(production_only, "s.file_path");
+        let caller_filter = maybe_production_path_filter(production_only, "caller.file_path");
         let sql = format!(
             "WITH component(component, path, direct_only) AS (VALUES {placeholders}),
              ranked AS (
@@ -1185,12 +1247,14 @@ impl Store {
                    )
                  LEFT JOIN symbols parent ON parent.id = s.parent_id
                  WHERE s.kind != 'module'
+                   {symbol_filter}
                    AND EXISTS (
                        SELECT 1
                        FROM edges e
                        JOIN symbols caller ON caller.id = e.from_id
                        WHERE e.kind = 'calls'
                          AND (e.to_name = s.name OR e.to_type = s.name)
+                         {caller_filter}
                          AND NOT (
                              (
                                  c.direct_only = 1
@@ -1261,6 +1325,18 @@ impl Store {
         kind: &str,
         top_probe: usize,
     ) -> SqlResult<Vec<MapCentralityRow>> {
+        self.map_centrality_filtered(scope, kind, top_probe, false)
+    }
+
+    pub fn map_centrality_filtered(
+        &self,
+        scope: &str,
+        kind: &str,
+        top_probe: usize,
+        production_only: bool,
+    ) -> SqlResult<Vec<MapCentralityRow>> {
+        let definition_filter = maybe_production_path_filter(production_only, "s.file_path");
+        let caller_filter = maybe_production_path_filter(production_only, "caller.file_path");
         let sql = format!(
             "WITH scoped_defs AS (
                  SELECT {SYMBOL_COLS_S},
@@ -1274,6 +1350,7 @@ impl Store {
                  FROM symbols s
                  LEFT JOIN symbols parent ON parent.id = s.parent_id
                  WHERE s.kind != 'module'
+                   {definition_filter}
                    AND (
                        ?2 = 'root'
                        OR (?2 = 'file' AND s.file_path = ?1)
@@ -1289,6 +1366,9 @@ impl Store {
                  JOIN edges e
                    ON e.kind = 'calls'
                   AND (e.to_name = d.name OR e.to_type = d.name)
+                 JOIN symbols caller ON caller.id = e.from_id
+                 WHERE 1 = 1
+                 {caller_filter}
                  GROUP BY d.id
              ),
              scoped_names AS (
@@ -1301,6 +1381,7 @@ impl Store {
                             SELECT COUNT(*)
                             FROM symbols s INDEXED BY idx_symbols_name
                             WHERE s.kind != 'module' AND s.name = n.name
+                            {definition_filter}
                         ) AS name_collision
                  FROM scoped_names n
              )
@@ -1334,13 +1415,27 @@ impl Store {
         kind: &str,
         limit: usize,
     ) -> SqlResult<Vec<(String, String)>> {
-        let mut stmt = self.conn.prepare(
+        self.map_import_edges_filtered(scope, kind, limit, false)
+    }
+
+    pub fn map_import_edges_filtered(
+        &self,
+        scope: &str,
+        kind: &str,
+        limit: usize,
+        production_only: bool,
+    ) -> SqlResult<Vec<(String, String)>> {
+        let source_filter = maybe_production_path_filter(production_only, "source.file_path");
+        let target_filter = maybe_production_path_filter(production_only, "target.file_path");
+        let sql = format!(
             "SELECT DISTINCT source.file_path, target.file_path
              FROM edges e
              JOIN symbols source ON source.id = e.from_id
              JOIN symbols target ON target.name = e.to_name
              WHERE e.kind = 'imports'
                AND source.file_path != target.file_path
+               {source_filter}
+               {target_filter}
                AND (
                    ?2 = 'root'
                    OR (?2 = 'file' AND source.file_path = ?1)
@@ -1358,8 +1453,9 @@ impl Store {
                    )
                )
              ORDER BY source.file_path, target.file_path
-             LIMIT ?3",
-        )?;
+             LIMIT ?3"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![scope, kind, limit as i64], |row| {
             Ok((row.get(0)?, row.get(1)?))
         })?;

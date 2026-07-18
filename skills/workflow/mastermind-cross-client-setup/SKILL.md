@@ -1,8 +1,8 @@
 ---
 name: mastermind-cross-client-setup
-description: Configure, inspect, update, or remove Mastermind MCP registration for Claude Code, Cursor, Codex, Continue, or an explicit generic config. Use when a user asks to install Mastermind in an MCP client, choose project/user scope, preview a safe config change, troubleshoot setup, or verify registration with doctor.
+description: Install portable Mastermind workflow adapters and configure, inspect, update, or remove MCP registration for Claude Code, Cursor, Codex, Continue, or an explicit generic config. Use when a user asks to install Mastermind in an AI coding client, choose project/user scope, preview a safe config change, troubleshoot setup, or verify workflow/MCP parity with doctor.
 metadata:
-  version: 0.1.0
+  version: 0.2.0
   authors: [mastermind]
   tags: [workflow, mcp, setup]
 ---
@@ -14,22 +14,27 @@ adapter reports an unsupported case.
 
 ## Workflow
 
-1. Resolve client and scope from the request. Respect the capability matrix:
+1. Separate the workflow bundle from MCP registration. For Claude or Codex
+   workflow skills, use `mastermind install --client CLIENT`; use `--client
+   all` for both. Claude also receives spawnable subagents. Verify installed
+   ownership and SHA-256 content parity with
+   `mastermind doctor --workflow --client CLIENT`.
+2. Resolve MCP client and scope from the request. Respect the capability matrix:
    Codex is user-scope only; Generic requires an explicit config path; Continue
    owns its standalone Mastermind YAML file.
-2. Run a dry-run first:
+3. Run an MCP dry-run first:
 
    ```bash
    mastermind setup CLIENT --scope SCOPE --root . [--config PATH]
    ```
 
-3. Explain only the redacted action summary. Never print existing config,
+4. Explain only the redacted action summary. Never print existing config,
    environment values, unknown fields, or subprocess output.
-4. If the user authorized installation/update/removal and the preview matches,
+5. If the user authorized installation/update/removal and the preview matches,
    repeat with `--write`. Add `--remove` only for removal.
-5. Use `--force` only after explicitly showing that a customized Mastermind
+6. Use `--force` only after explicitly showing that a customized Mastermind
    entry will be backed up and replaced/removed. Never use force to imply write.
-6. Run `mastermind doctor ROOT`, using the same root passed to setup, and report
+7. Run `mastermind doctor ROOT`, using the same root passed to setup, and report
    structural config status separately from the trusted current-binary MCP
    handshake. On a new project without `.mastermind/mmcg.db`, explain that the
    config can be canonical while the overall doctor exits nonzero and skips the

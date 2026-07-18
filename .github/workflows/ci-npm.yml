@@ -52,9 +52,9 @@ jobs:
     name: wrapper check + linux-x64 install smoke
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 24
 
@@ -63,7 +63,11 @@ jobs:
           set -e
           node --check npm/mastermind/bin/mastermind.js
           node --check npm/mastermind/bin/mmcg.js
+          node --check npm/mastermind/bin/install.js
           echo "✓ wrapper syntax OK"
+
+      - name: Workflow installer contract tests
+        run: npm test --prefix npm/mastermind
 
       - name: Validate root package.json shape
         run: |
@@ -87,10 +91,10 @@ jobs:
             console.log("✓ root package.json shape OK (7 platform deps, versions in lockstep)");
           '
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
       - name: Cache cargo
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -147,3 +151,14 @@ jobs:
             echo "::error::mmcg wrapper should propose an absolute binary path"; cat diff2.txt; exit 1;
           }
           echo "✓ mmcg compat command form correct"
+
+          echo "--- workflow adapters: Claude + Codex manifest/content parity"
+          MASTERMIND_WORKFLOW_HOME=$(mktemp -d)
+          export MASTERMIND_WORKFLOW_HOME
+          ./node_modules/.bin/mastermind update --client all
+          ./node_modules/.bin/mastermind doctor --workflow --client all --json > workflow-doctor.json
+          python3 -c "import json; d = json.load(open('workflow-doctor.json')); assert [c['client'] for c in d['clients']] == ['claude', 'codex']; assert all(c['parity'] for c in d['clients']), d"
+          test -f "$MASTERMIND_WORKFLOW_HOME/.claude/agents/mastermind-auditor.md"
+          test -f "$MASTERMIND_WORKFLOW_HOME/.codex/skills/mastermind-project-map/SKILL.md"
+          test ! -d "$MASTERMIND_WORKFLOW_HOME/.codex/agents"
+          echo "✓ cross-client workflow parity correct"

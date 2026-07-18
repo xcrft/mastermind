@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mastermind Style Deep"
+  short_description: "Mine evidence-backed design and coding tendencies"
+  default_prompt: "Use $mastermind-style-deep to build a deeper evidence-backed style profile for this repository."

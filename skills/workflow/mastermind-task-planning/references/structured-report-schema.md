@@ -18,6 +18,7 @@ What I did NOT do). Format:
 ````markdown
 <!-- mastermind:report-begin -->
 ```yaml
+schema_version: 1
 spec: .mastermind/tasks/<NNN>-<name>/spec.md
 status: complete | partial | failed
 phases:
@@ -30,6 +31,17 @@ phases:
 files_modified:
   - mcp/servers/mmcg/src/store.rs
   - mcp/servers/mmcg/src/fingerprint.rs
+claims:
+  - kind: function_added
+    symbol: change_impact
+    file: mcp/servers/mmcg/src/queries.rs
+    signature: "pub fn change_impact(...) -> Result<ChangeImpactResponse, ImpactError>"
+  - kind: integration
+    from: handle_tools_call
+    from_file: mcp/servers/mmcg/src/mcp.rs
+    to: change_impact
+    to_file: mcp/servers/mmcg/src/queries.rs
+    relation: calls
 defects:
   - kind: envelope_drift
     phase: "2.4"
@@ -43,6 +55,9 @@ defects:
 verifications:
   - cmd: "cd mcp/servers/mmcg && cargo test --locked --lib"
     result: pass
+    observed:
+      exit_code: 0
+      tests_run: 298
   - cmd: "cd mcp/servers/mmcg && cargo test --locked --lib change_class"
     result: fail
     output_excerpt: "thread '...' panicked at ..."
@@ -52,6 +67,11 @@ verifications:
 
 ### Field meanings
 
+- `schema_version`: always `1`. The normative machine-readable contract is
+  `schemas/executor-report-v1.schema.json`. The Rust parser rejects unknown
+  fields, malformed sentinels, unsupported versions, and file-backed reports
+  larger than 1 MiB before YAML decoding instead of treating a mismatched
+  report as empty.
 - `spec`: absolute path to the spec file the executor is implementing.
 - `status`:
   - `complete` — every phase landed, every Final-verification command exited 0
@@ -68,12 +88,19 @@ verifications:
 - `files_modified`: every path the executor's edits touched, relative to repo
   root. Must match `git diff --name-only HEAD` + untracked-new-files; this is
   the auditor's scope-creep anchor.
+- `claims[]`: deterministic assertions about new symbols and new integration
+  edges. Use `function_added` with an exact symbol/file/signature or
+  `integration` with the changed caller and existing callee. Emit an empty
+  array when the work makes neither claim. Do not encode subjective behavior.
 - `defects[]`: zero or more defects. Empty array = clean run. Each entry MUST
   populate `kind` from the closed set in `defect-taxonomy.md` (or
   `unclassified`), `phase` of the failure, verbatim `details`, and a
   `remediation_hint` the planner can apply.
 - `verifications[]`: every VERIFY command run, in execution order. Truncate
-  `output_excerpt` to ~5 lines of the relevant error/diff.
+  `output_excerpt` to ~5 lines of the relevant error/diff. When the command
+  exposes them, record the real exit code and tests-run count under `observed`;
+  those values let the deterministic audit reject contradictory or vacuous
+  pass claims.
 
 ## Auditor tail
 

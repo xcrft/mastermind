@@ -16,6 +16,7 @@ Exit code 0 if clean, 1 if any errors. Warnings do not fail the build.
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from dataclasses import dataclass
@@ -657,6 +658,231 @@ def validate_eval_fixture_clues() -> list[Issue]:
     return issues
 
 
+def validate_workflow_eval_contract() -> list[Issue]:
+    """Keep planner/executor and product-skill regression coverage loadable."""
+    path = REPO_ROOT / "evals/workflow.jsonl"
+    issues: list[Issue] = []
+    required_artifacts = {
+        "skills/workflow/mastermind-task-planning/SKILL.md",
+        "agents/subagents/mastermind-task-executor.md",
+        "skills/workflow/mastermind-project-map/SKILL.md",
+        "skills/workflow/mastermind-change-impact/SKILL.md",
+        "skills/workflow/mastermind-test-impact/SKILL.md",
+        "skills/workflow/mastermind-cross-client-setup/SKILL.md",
+        "skills/workflow/mastermind-audit-attestation/SKILL.md",
+    }
+    found_artifacts: set[str] = set()
+    found_ids: set[str] = set()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as error:
+        return [Issue(path, "error", f"cannot read workflow eval cases: {error}")]
+    for number, line in enumerate(lines, 1):
+        if not line.strip() or line.lstrip().startswith("//"):
+            continue
+        try:
+            case = json.loads(line)
+        except json.JSONDecodeError as error:
+            issues.append(Issue(path, "error", f"workflow eval line {number} is invalid JSON: {error}"))
+            continue
+        case_id = case.get("id")
+        artifact = case.get("artifact")
+        prompt = case.get("input", {}).get("prompt") if isinstance(case.get("input"), dict) else None
+        expect = case.get("expect")
+        if not isinstance(case_id, str) or not case_id.startswith("w-"):
+            issues.append(Issue(path, "error", f"workflow eval line {number} needs a w-* id"))
+        elif case_id in found_ids:
+            issues.append(Issue(path, "error", f"duplicate workflow eval id {case_id}"))
+        else:
+            found_ids.add(case_id)
+        if not isinstance(artifact, str):
+            issues.append(Issue(path, "error", f"workflow eval line {number} needs an artifact"))
+        else:
+            found_artifacts.add(artifact)
+            resolved = (REPO_ROOT / artifact).resolve()
+            if REPO_ROOT.resolve() not in resolved.parents or not resolved.is_file():
+                issues.append(Issue(path, "error", f"workflow eval artifact is missing or escapes the repository: {artifact}"))
+        if not isinstance(prompt, str) or not prompt.strip():
+            issues.append(Issue(path, "error", f"workflow eval line {number} needs a non-empty prompt"))
+        if not isinstance(expect, dict) or not expect.get("contains"):
+            issues.append(Issue(path, "error", f"workflow eval line {number} needs contains assertions"))
+    if found_artifacts != required_artifacts:
+        missing = required_artifacts - found_artifacts
+        extra = found_artifacts - required_artifacts
+        details = []
+        if missing:
+            details.append(f"missing {', '.join(sorted(missing))}")
+        if extra:
+            details.append(f"not allowlisted {', '.join(sorted(extra))}")
+        issues.append(Issue(path, "error", f"workflow eval artifact set drifted: {'; '.join(details)}"))
+    runner_path = REPO_ROOT / "evals/runner.py"
+    try:
+        runner = runner_path.read_text(encoding="utf-8")
+    except OSError as error:
+        issues.append(Issue(runner_path, "error", f"cannot read workflow eval runner: {error}"))
+    else:
+        for token in ("WORKFLOW_ARTIFACTS", '"--safe-mode"', '"--tools", ""', "tempfile.gettempdir()"):
+            if token not in runner:
+                issues.append(Issue(runner_path, "error", f"workflow eval sandbox missing {token!r}"))
+        if '"--permission-mode", "default"' in runner:
+            issues.append(Issue(runner_path, "error", "workflow eval runner uses an invalid permission mode"))
+    return issues
+
+
+# ----- executor report schema parity ------------------------------------
+
+def validate_executor_report_schema_contract() -> list[Issue]:
+    """Keep the agent tail, strict Rust parser, fixture, and JSON schema aligned."""
+    issues: list[Issue] = []
+    schema_path = REPO_ROOT / "schemas/executor-report-v1.schema.json"
+    try:
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        return [Issue(schema_path, "error", f"invalid executor report schema: {error}")]
+
+    expected = {
+        "schema_version",
+        "spec",
+        "status",
+        "phases",
+        "files_modified",
+        "claims",
+        "defects",
+        "verifications",
+    }
+    if set(schema.get("required", [])) != expected:
+        issues.append(Issue(schema_path, "error", "executor report schema required fields drifted"))
+    if schema.get("additionalProperties") is not False:
+        issues.append(Issue(schema_path, "error", "executor report schema must fail closed on unknown fields"))
+
+    contract_paths = [
+        REPO_ROOT / "agents/subagents/mastermind-task-executor.md",
+        REPO_ROOT / "skills/workflow/mastermind-structured-report-contract/SKILL.md",
+        REPO_ROOT / "skills/workflow/mastermind-task-planning/references/structured-report-schema.md",
+        REPO_ROOT / "mcp/servers/mmcg/tests/fixtures/executor-report-v1.md",
+    ]
+    for path in contract_paths:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as error:
+            issues.append(Issue(path, "error", f"cannot read executor report contract: {error}"))
+            continue
+        for token in ("mastermind:report-begin", "schema_version: 1", "claims:", "verifications:"):
+            if token not in text:
+                issues.append(Issue(path, "error", f"executor report contract missing {token!r}"))
+
+    rust_path = REPO_ROOT / "mcp/servers/mmcg/src/executor_report.rs"
+    try:
+        rust = rust_path.read_text(encoding="utf-8")
+    except OSError as error:
+        issues.append(Issue(rust_path, "error", f"cannot read executor report parser: {error}"))
+    else:
+        for token in (
+            "mastermind:report-begin",
+            "CanonicalExecutorReport",
+            "deny_unknown_fields",
+            "MAX_EXECUTOR_REPORT_BYTES",
+        ):
+            if token not in rust:
+                issues.append(Issue(rust_path, "error", f"strict executor report parser missing {token!r}"))
+
+    return issues
+
+
+# ----- repository workflow supply-chain contract -----------------------
+
+def validate_repository_workflow_pins() -> list[Issue]:
+    issues: list[Issue] = []
+    workflow_dir = REPO_ROOT / ".github/workflows"
+    use_re = re.compile(r"^\s*(?:-\s*)?uses:\s*([^\s#]+)", re.MULTILINE)
+    full_sha = re.compile(r"^[0-9a-f]{40}$")
+    workflow_paths = sorted(
+        path
+        for path in workflow_dir.iterdir()
+        if path.is_file() and path.suffix in {".yml", ".yaml"}
+    )
+    for path in workflow_paths:
+        text = path.read_text(encoding="utf-8")
+        for target in use_re.findall(text):
+            if target.startswith("./"):
+                continue
+            if "@" not in target:
+                issues.append(Issue(path, "error", f"Action reference lacks an immutable ref: {target}"))
+                continue
+            action, ref = target.rsplit("@", 1)
+            if not full_sha.fullmatch(ref):
+                issues.append(Issue(path, "error", f"Action {action} must use a full 40-character commit SHA"))
+
+    for name in ("publish-npm.yml", "publish-mmcg.yml"):
+        path = workflow_dir / name
+        text = path.read_text(encoding="utf-8")
+        if "github.event.inputs" in text:
+            issues.append(Issue(path, "error", "manual workflow inputs must never authorize publishing"))
+        if "github.repository == 'xcrft/mastermind' && github.event_name == 'push'" not in text:
+            issues.append(Issue(path, "error", "publish job must require a tag push in the canonical repository"))
+    return issues
+
+
+# ----- cross-client skill adapter contract ------------------------------
+
+def validate_openai_skill_adapters(artifacts: list[Artifact]) -> list[Issue]:
+    issues: list[Issue] = []
+    for artifact in artifacts:
+        if artifact.path.name != "SKILL.md" or "skills" not in artifact.path.parts:
+            continue
+        adapter = artifact.path.parent / "agents/openai.yaml"
+        try:
+            value = yaml.safe_load(adapter.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError) as error:
+            issues.append(Issue(adapter, "error", f"missing or invalid OpenAI skill adapter: {error}"))
+            continue
+        interface = value.get("interface", {}) if isinstance(value, dict) else {}
+        required = ("display_name", "short_description", "default_prompt")
+        if not all(isinstance(interface.get(key), str) and interface[key].strip() for key in required):
+            issues.append(Issue(adapter, "error", "OpenAI adapter requires display_name, short_description, and default_prompt"))
+        elif f"${artifact.slug}" not in interface["default_prompt"]:
+            issues.append(Issue(adapter, "error", f"OpenAI default_prompt must invoke ${artifact.slug}"))
+
+        metadata = artifact.frontmatter.get("metadata", {})
+        if isinstance(metadata, dict) and "model" in metadata:
+            issues.append(Issue(artifact.path, "error", "portable skill metadata must not hard-code a model vendor tier"))
+    return issues
+
+
+def validate_workflow_role_contracts() -> list[Issue]:
+    """Prevent planner/executor/auditor ownership from drifting back together."""
+    issues: list[Issue] = []
+    auditor_path = REPO_ROOT / "agents/subagents/mastermind-auditor.md"
+    planner_path = REPO_ROOT / "skills/workflow/mastermind-task-planning/SKILL.md"
+    try:
+        auditor = auditor_path.read_text(encoding="utf-8")
+    except OSError as error:
+        issues.append(Issue(auditor_path, "error", f"cannot read auditor contract: {error}"))
+    else:
+        for token in ("repository-read-only", "must not mutate", "mastermind:audit-begin"):
+            if token not in auditor:
+                issues.append(Issue(auditor_path, "error", f"auditor read-only contract missing {token!r}"))
+        for forbidden in ("### Write state.json", "### Capture lesson", "auditor appends"):
+            if forbidden in auditor:
+                issues.append(Issue(auditor_path, "error", f"auditor must not own persistence: {forbidden!r}"))
+    try:
+        planner = planner_path.read_text(encoding="utf-8")
+    except OSError as error:
+        issues.append(Issue(planner_path, "error", f"cannot read planner contract: {error}"))
+    else:
+        for token in (
+            "Persist the reviewed result (planner/controller only)",
+            "The auditor is repository-read-only",
+            "planner-persisted auditor verdict",
+        ):
+            if token not in planner:
+                issues.append(Issue(planner_path, "error", f"planner persistence contract missing {token!r}"))
+        step_headings = re.findall(r"^### Step (9[a-z])\b", planner, re.MULTILINE)
+        if len(step_headings) != len(set(step_headings)):
+            issues.append(Issue(planner_path, "error", "planner has duplicate Step 9 sub-step headings"))
+    return issues
+
+
 # ----- verifiable audit Action security contract -----------------------
 
 AUDIT_ACTION_PINS = {
@@ -894,6 +1120,8 @@ def main(argv: list[str]) -> int:
     issues: list[Issue] = []
     for a in artifacts:
         issues.extend(validate_artifact(a))
+    issues.extend(validate_openai_skill_adapters(artifacts))
+    issues.extend(validate_workflow_role_contracts())
 
     links = collect_wikilinks()
     issues.extend(validate_wikilinks(artifacts, links))
@@ -905,6 +1133,9 @@ def main(argv: list[str]) -> int:
     issues.extend(validate_mmcg_template_mirrors())
     issues.extend(validate_mmcg_tool_drift())
     issues.extend(validate_eval_fixture_clues())
+    issues.extend(validate_workflow_eval_contract())
+    issues.extend(validate_executor_report_schema_contract())
+    issues.extend(validate_repository_workflow_pins())
     issues.extend(validate_audit_action_security())
 
     issues.sort(key=lambda i: (str(i.path), 0 if i.level == "error" else 1, i.msg))

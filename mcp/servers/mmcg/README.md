@@ -63,7 +63,10 @@ mmcg map .
 mmcg impact --since main
 ```
 
-`index` is incremental by default and writes `.mastermind/mmcg.db`. Use `mmcg watch` to keep it refreshed while editing.
+`index` is incremental by default and writes `.mastermind/mmcg.db`. Discovery
+honors Git and `.ignore` rules, skips binary-looking and oversized sources, and
+automatically rebuilds when stored extractor semantics are incompatible. Use
+`mmcg watch` to keep it refreshed while editing.
 
 Run the stdio MCP server directly:
 
@@ -131,7 +134,14 @@ The exhaustive technical documentation is intentionally separate from this crate
 cargo test --all --locked
 cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo fmt --all -- --check
+cargo bench --bench indexer
 ```
+
+The index benchmark emits schema-v1 JSON for cold, warm, and 10%-incremental
+runs plus peak process RSS. Defaults are 1,000 synthetic Rust files with 20
+symbols each. Override them with `MMCG_BENCH_FILES`,
+`MMCG_BENCH_SYMBOLS_PER_FILE`, and `MMCG_BENCH_CHANGED_FILES`. Treat results as
+same-machine regression evidence, not a portable performance promise.
 
 See [CONTRIBUTING.md](https://github.com/xcrft/mastermind/blob/main/CONTRIBUTING.md) for the repository-wide contribution guide.
 

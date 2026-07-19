@@ -560,6 +560,13 @@ impl Store {
             .optional()
     }
 
+    pub fn extractor_contract_current(&self) -> SqlResult<bool> {
+        Ok(self
+            .meta_value(crate::indexer::EXTRACTOR_CONTRACT_META_KEY)?
+            .as_deref()
+            == Some(crate::indexer::EXTRACTOR_CONTRACT_VERSION))
+    }
+
     pub fn data_version(&self) -> SqlResult<u64> {
         let value: i64 = self
             .conn

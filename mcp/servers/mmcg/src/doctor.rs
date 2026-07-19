@@ -309,6 +309,14 @@ fn check_index_freshness(root: &Path) -> Check {
             hint: None,
         };
     }
+    if crate::workflow_status::db_extractor_contract_current(&p) != Some(true) {
+        return Check {
+            name: "index freshness",
+            status: Status::Warn,
+            message: "extractor contract changed since this index was built".into(),
+            hint: Some("run `mastermind index .` to rebuild structural data".into()),
+        };
+    }
     let limit = 10usize;
     let Some(stale) = crate::workflow_status::stale_paths(root, &p, limit) else {
         return Check {

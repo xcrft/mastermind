@@ -5,12 +5,13 @@
 //! in parallel via rayon, and serializes writes through one SQLite connection.
 
 use crate::store::{PendingFile, PendingSymbol, Store};
+use ignore::{IncrementalIgnore, WalkBuilder};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tree_sitter::{Parser, Tree};
-use walkdir::WalkDir;
 
 mod cpp;
 mod csharp;
@@ -31,6 +32,21 @@ pub use php::PhpExtractor;
 pub use python::PythonExtractor;
 pub use rust_lang::RustExtractor;
 pub use typescript::TypescriptExtractor;
+
+/// Semantic contract for the extractor output stored in SQLite. Bump this when
+/// an extractor or grammar change can alter symbols, edges, ownership, or paths
+/// without requiring a database schema migration.
+pub const EXTRACTOR_CONTRACT_VERSION: &str = "mmcg-extractors-v1";
+pub const EXTRACTOR_CONTRACT_META_KEY: &str = "extractor_contract_version";
+
+/// Hard bound for source reads. Generated artifacts with a source-looking
+/// extension must not turn indexing into an unbounded allocation.
+pub const MAX_INDEXABLE_FILE_SIZE: u64 = 5 * 1024 * 1024;
+const BINARY_SNIFF_BYTES: u64 = 8 * 1024;
+
+/// Parsed files waiting for the single SQLite writer at once. This bounds peak
+/// memory without changing the existing parallel-parse/single-writer model.
+pub const PARSE_BATCH_SIZE: usize = 64;
 
 /// Per-language symbol/edge extractor.
 ///
@@ -96,6 +112,10 @@ pub struct IndexStats {
     pub files_failed: u32,
     /// Unsupported extensions — skipped before parsing.
     pub files_skipped: u32,
+    /// Supported files rejected because their content appears binary.
+    pub files_skipped_binary: u32,
+    /// Supported files rejected because they exceed [`MAX_INDEXABLE_FILE_SIZE`].
+    pub files_skipped_too_large: u32,
     /// Indexable files whose stored mtime is current — skipped without parsing.
     pub files_unchanged: u32,
     /// In the index but gone from disk — purged.
@@ -106,6 +126,8 @@ pub struct IndexStats {
     /// Count of `.mastermind/tasks/<NNN>-<name>/spec.md` files added to the FTS5
     /// corpus. Zero when the directory doesn't exist (no `mastermind init`).
     pub task_specs_indexed: u32,
+    /// True when this run rebuilt an index made by an older extractor contract.
+    pub extractor_contract_rebuilt: bool,
     pub duration_ms: u128,
 }
 
@@ -125,15 +147,20 @@ impl Indexer {
     /// Files in the index but gone from disk are purged at the end. Writes to `store`.
     pub fn index_all(&self, store: &mut Store, force_full: bool) -> Result<IndexStats, IndexError> {
         let start = SystemTime::now();
+        let stored_extractor_contract = store
+            .meta_value(EXTRACTOR_CONTRACT_META_KEY)
+            .map_err(|error| IndexError::Other(error.to_string()))?;
+        let extractor_contract_current =
+            stored_extractor_contract.as_deref() == Some(EXTRACTOR_CONTRACT_VERSION);
+        let extractor_contract_rebuild_required = !extractor_contract_current
+            && store
+                .file_count()
+                .map_err(|error| IndexError::Other(error.to_string()))?
+                > 0;
+        let force_full = force_full || !extractor_contract_current;
 
         // Phase 1: walk filesystem
-        let candidates: Vec<PathBuf> = WalkDir::new(&self.root)
-            .into_iter()
-            .filter_entry(|e| !is_skipped_dir(e.file_name().to_str().unwrap_or("")))
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-            .map(|e| e.into_path())
-            .collect();
+        let candidates = source_candidates(&self.root);
 
         let mut stats = IndexStats {
             files_scanned: candidates.len() as u32,
@@ -150,6 +177,21 @@ impl Indexer {
             if extractor_for_path(path).is_none() {
                 stats.files_skipped += 1;
                 continue;
+            }
+            match source_admission(path) {
+                Ok(()) => {}
+                Err(IndexError::Skipped(IndexSkipReason::Binary)) => {
+                    stats.files_skipped_binary += 1;
+                    continue;
+                }
+                Err(IndexError::Skipped(IndexSkipReason::TooLarge { .. })) => {
+                    stats.files_skipped_too_large += 1;
+                    continue;
+                }
+                Err(_) => {
+                    stats.files_failed += 1;
+                    continue;
+                }
             }
             let rel = path
                 .strip_prefix(&self.root)
@@ -177,30 +219,39 @@ impl Indexer {
             to_parse.push(path.clone());
         }
 
-        // Phase 3: parse stale files in parallel (extractor lookup is cheap, redo it).
-        let parsed: Vec<Result<PendingFile, IndexError>> = to_parse
-            .par_iter()
-            .filter_map(|p| {
-                let extractor = extractor_for_path(p)?;
-                Some(parse_one(p, &self.root, extractor.as_ref()))
-            })
-            .collect();
+        // Phases 3-4: parse a bounded batch in parallel, then commit it through
+        // SQLite's single writer before parsing the next batch. The old all-at-once
+        // collection retained every PendingFile until parsing the whole repository.
+        for batch in to_parse.chunks(PARSE_BATCH_SIZE) {
+            let parsed: Vec<Result<PendingFile, IndexError>> = batch
+                .par_iter()
+                .filter_map(|path| {
+                    let extractor = extractor_for_path(path)?;
+                    Some(parse_one(path, &self.root, extractor.as_ref()))
+                })
+                .collect();
 
-        // Phase 4: commit serially (SQLite single-writer)
-        for outcome in parsed {
-            match outcome {
-                Ok(pending) => {
-                    stats.symbols_total += pending.symbols.len() as u32;
-                    stats.edges_total += pending.edges.len() as u32;
-                    if let Some(lang) = guess_language_for(&pending.path) {
-                        *stats.by_language.entry(lang.to_string()).or_insert(0) += 1;
+            for outcome in parsed {
+                match outcome {
+                    Ok(pending) => {
+                        stats.symbols_total += pending.symbols.len() as u32;
+                        stats.edges_total += pending.edges.len() as u32;
+                        if let Some(lang) = guess_language_for(&pending.path) {
+                            *stats.by_language.entry(lang.to_string()).or_insert(0) += 1;
+                        }
+                        match store.commit_file(pending) {
+                            Ok(()) => stats.files_indexed += 1,
+                            Err(_) => stats.files_failed += 1,
+                        }
                     }
-                    match store.commit_file(pending) {
-                        Ok(()) => stats.files_indexed += 1,
-                        Err(_) => stats.files_failed += 1,
+                    Err(IndexError::Skipped(IndexSkipReason::Binary)) => {
+                        stats.files_skipped_binary += 1;
                     }
+                    Err(IndexError::Skipped(IndexSkipReason::TooLarge { .. })) => {
+                        stats.files_skipped_too_large += 1;
+                    }
+                    Err(_) => stats.files_failed += 1,
                 }
-                Err(_) => stats.files_failed += 1,
             }
         }
 
@@ -231,6 +282,12 @@ impl Indexer {
         store
             .set_meta("index_root", &canonical_root.to_string_lossy())
             .map_err(|error| IndexError::Other(error.to_string()))?;
+        if stats.files_failed == 0 {
+            store
+                .set_meta(EXTRACTOR_CONTRACT_META_KEY, EXTRACTOR_CONTRACT_VERSION)
+                .map_err(|error| IndexError::Other(error.to_string()))?;
+            stats.extractor_contract_rebuilt = extractor_contract_rebuild_required;
+        }
 
         stats.duration_ms = start.elapsed().map(|d| d.as_millis()).unwrap_or(0);
         Ok(stats)
@@ -304,6 +361,71 @@ pub(crate) fn is_skipped_dir(name: &str) -> bool {
     SKIP_DIRS.contains(&name)
 }
 
+fn source_walk_builder(root: &Path) -> WalkBuilder {
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .parents(true)
+        .require_git(false)
+        .filter_entry(|entry| !is_skipped_dir(entry.file_name().to_str().unwrap_or("")));
+    builder
+}
+
+/// All non-ignored files below `root`, in deterministic path order. Language
+/// filtering and content admission happen separately so stats stay truthful.
+pub(crate) fn source_candidates(root: &Path) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = source_walk_builder(root)
+        .build()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+        .map(|entry| entry.into_path())
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// Stateful ignore matcher for watcher events. It applies the same gitignore
+/// and global-ignore rules as the initial walk, including nested `.gitignore`s.
+pub(crate) struct SourceMatcher {
+    root: PathBuf,
+    matcher: IncrementalIgnore,
+}
+
+impl SourceMatcher {
+    pub(crate) fn new(root: &Path) -> Self {
+        let matcher = source_walk_builder(root)
+            .build_matchers()
+            .into_iter()
+            .next()
+            .expect("one ignore matcher for one source root");
+        Self {
+            root: root.to_path_buf(),
+            matcher,
+        }
+    }
+
+    pub(crate) fn is_ignored(&mut self, path: &Path, is_dir: bool) -> bool {
+        let Some(relative) = path
+            .strip_prefix(&self.root)
+            .ok()
+            .map(Path::to_path_buf)
+            .or_else(|| self.matcher.normalize(path))
+        else {
+            return true;
+        };
+        if relative
+            .components()
+            .any(|component| is_skipped_dir(component.as_os_str().to_str().unwrap_or("")))
+        {
+            return true;
+        }
+        self.matcher.matched(relative, is_dir).is_ignore()
+    }
+}
+
 /// First `# Heading` line of a markdown spec — falls back to the filename
 /// (minus extension) if no heading exists.
 fn extract_spec_title(body: &str, filename: &str) -> String {
@@ -368,7 +490,7 @@ pub(crate) fn parse_one(
     root: &Path,
     extractor: &dyn LanguageExtractor,
 ) -> Result<PendingFile, IndexError> {
-    let source = std::fs::read(path).map_err(|e| IndexError::Io(e.to_string()))?;
+    let source = read_source_bounded(path)?;
     // Milliseconds — second-precision missed edits within the same second as the
     // previous index run. i64 millis covers ~292M years.
     let mtime = std::fs::metadata(path)
@@ -385,6 +507,58 @@ pub(crate) fn parse_one(
         .replace('\\', "/");
 
     parse_blob(&rel, &source, mtime, extractor)
+}
+
+pub(crate) fn source_admission(path: &Path) -> Result<(), IndexError> {
+    let metadata = path
+        .metadata()
+        .map_err(|error| IndexError::Io(error.to_string()))?;
+    if metadata.len() > MAX_INDEXABLE_FILE_SIZE {
+        return Err(IndexError::Skipped(IndexSkipReason::TooLarge {
+            size: metadata.len(),
+        }));
+    }
+    let mut file = std::fs::File::open(path).map_err(|error| IndexError::Io(error.to_string()))?;
+    let mut prefix = Vec::with_capacity(BINARY_SNIFF_BYTES as usize);
+    file.by_ref()
+        .take(BINARY_SNIFF_BYTES)
+        .read_to_end(&mut prefix)
+        .map_err(|error| IndexError::Io(error.to_string()))?;
+    if is_binary_content(&prefix) {
+        return Err(IndexError::Skipped(IndexSkipReason::Binary));
+    }
+    Ok(())
+}
+
+fn read_source_bounded(path: &Path) -> Result<Vec<u8>, IndexError> {
+    let metadata = path
+        .metadata()
+        .map_err(|error| IndexError::Io(error.to_string()))?;
+    if metadata.len() > MAX_INDEXABLE_FILE_SIZE {
+        return Err(IndexError::Skipped(IndexSkipReason::TooLarge {
+            size: metadata.len(),
+        }));
+    }
+
+    let mut file = std::fs::File::open(path).map_err(|error| IndexError::Io(error.to_string()))?;
+    let mut source = Vec::with_capacity(metadata.len() as usize);
+    file.by_ref()
+        .take(MAX_INDEXABLE_FILE_SIZE + 1)
+        .read_to_end(&mut source)
+        .map_err(|error| IndexError::Io(error.to_string()))?;
+    if source.len() as u64 > MAX_INDEXABLE_FILE_SIZE {
+        return Err(IndexError::Skipped(IndexSkipReason::TooLarge {
+            size: source.len() as u64,
+        }));
+    }
+    if is_binary_content(&source[..source.len().min(BINARY_SNIFF_BYTES as usize)]) {
+        return Err(IndexError::Skipped(IndexSkipReason::Binary));
+    }
+    Ok(source)
+}
+
+pub(crate) fn is_binary_content(content: &[u8]) -> bool {
+    content.contains(&0)
 }
 
 /// Parse a file's bytes WITHOUT touching the filesystem. Used by
@@ -441,6 +615,13 @@ pub enum IndexError {
     Io(String),
     Parse(String),
     Other(String),
+    Skipped(IndexSkipReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexSkipReason {
+    Binary,
+    TooLarge { size: u64 },
 }
 
 impl std::fmt::Display for IndexError {
@@ -449,6 +630,11 @@ impl std::fmt::Display for IndexError {
             IndexError::Io(m) => write!(f, "io: {m}"),
             IndexError::Parse(m) => write!(f, "parse: {m}"),
             IndexError::Other(m) => write!(f, "other: {m}"),
+            IndexError::Skipped(IndexSkipReason::Binary) => write!(f, "skipped binary source"),
+            IndexError::Skipped(IndexSkipReason::TooLarge { size }) => write!(
+                f,
+                "skipped source with {size} bytes (limit {MAX_INDEXABLE_FILE_SIZE})"
+            ),
         }
     }
 }
@@ -485,6 +671,7 @@ mod incremental_tests {
         let first = indexer.index_all(&mut store, false).unwrap();
         assert_eq!(first.files_indexed, 2, "first run should index both files");
         assert_eq!(first.files_unchanged, 0);
+        assert!(!first.extractor_contract_rebuilt);
 
         let second = indexer.index_all(&mut store, false).unwrap();
         assert_eq!(second.files_indexed, 0, "no changes → nothing re-indexed");
@@ -676,6 +863,100 @@ mod incremental_tests {
             store.file_content_sha256("app.py").unwrap().as_deref(),
             Some(format!("{:x}", Sha256::digest(bytes)).as_str())
         );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn extractor_contract_mismatch_forces_a_full_reindex() {
+        let (dir, db) = setup("extractor_contract");
+        fs::write(dir.join("app.py"), "def current(): pass\n").unwrap();
+        let mut store = Store::open(&db).unwrap();
+        let indexer = Indexer::new(&dir);
+
+        indexer.index_all(&mut store, false).unwrap();
+        store
+            .set_meta(EXTRACTOR_CONTRACT_META_KEY, "obsolete-contract")
+            .unwrap();
+
+        let stats = indexer.index_all(&mut store, false).unwrap();
+        assert_eq!(stats.files_indexed, 1);
+        assert_eq!(stats.files_unchanged, 0);
+        assert!(stats.extractor_contract_rebuilt);
+        assert!(store.extractor_contract_current().unwrap());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn binary_and_oversized_sources_are_rejected_without_failing_the_run() {
+        let (dir, db) = setup("source_admission");
+        fs::write(dir.join("good.rs"), "pub fn good() {}\n").unwrap();
+        fs::write(dir.join("binary.rs"), b"pub fn hidden() {}\0payload").unwrap();
+        let large = fs::File::create(dir.join("large.rs")).unwrap();
+        large.set_len(MAX_INDEXABLE_FILE_SIZE + 1).unwrap();
+
+        let mut store = Store::open(&db).unwrap();
+        let stats = Indexer::new(&dir).index_all(&mut store, false).unwrap();
+
+        assert_eq!(stats.files_indexed, 1);
+        assert_eq!(stats.files_skipped_binary, 1);
+        assert_eq!(stats.files_skipped_too_large, 1);
+        assert_eq!(stats.files_failed, 0);
+        assert_eq!(store.indexed_paths().unwrap(), vec!["good.rs"]);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn source_walk_and_watcher_matcher_share_gitignore_rules() {
+        let (dir, _db) = setup("gitignore");
+        let generated = dir.join("generated/ignored.rs");
+        let kept = dir.join("src/kept.rs");
+        let nested_ignored = dir.join("nested/ignored.rs");
+        let nested_kept = dir.join("nested/kept.rs");
+        fs::create_dir_all(generated.parent().unwrap()).unwrap();
+        fs::create_dir_all(kept.parent().unwrap()).unwrap();
+        fs::create_dir_all(nested_ignored.parent().unwrap()).unwrap();
+        fs::write(dir.join(".gitignore"), "generated/\n").unwrap();
+        fs::write(dir.join("nested/.gitignore"), "*.rs\n!kept.rs\n").unwrap();
+        fs::write(&generated, "pub fn ignored() {}\n").unwrap();
+        fs::write(&kept, "pub fn kept() {}\n").unwrap();
+        fs::write(&nested_ignored, "pub fn ignored() {}\n").unwrap();
+        fs::write(&nested_kept, "pub fn kept() {}\n").unwrap();
+
+        let candidates = source_candidates(&dir);
+        assert!(!candidates.contains(&generated));
+        assert!(candidates.contains(&kept));
+        assert!(!candidates.contains(&nested_ignored));
+        assert!(candidates.contains(&nested_kept));
+
+        let mut matcher = SourceMatcher::new(&dir);
+        assert!(matcher.is_ignored(&generated, false));
+        assert!(!matcher.is_ignored(&kept, false));
+        assert!(matcher.is_ignored(&nested_ignored, false));
+        assert!(!matcher.is_ignored(&nested_kept, false));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn indexing_more_than_one_parse_batch_commits_every_file() {
+        let (dir, db) = setup("bounded_batches");
+        for index in 0..=PARSE_BATCH_SIZE {
+            fs::write(
+                dir.join(format!("source_{index}.rs")),
+                format!("pub fn source_{index}() {{}}\n"),
+            )
+            .unwrap();
+        }
+
+        let mut store = Store::open(&db).unwrap();
+        let stats = Indexer::new(&dir).index_all(&mut store, false).unwrap();
+
+        assert_eq!(stats.files_indexed as usize, PARSE_BATCH_SIZE + 1);
+        assert_eq!(stats.files_failed, 0);
+        assert_eq!(store.indexed_paths().unwrap().len(), PARSE_BATCH_SIZE + 1);
+
         fs::remove_dir_all(&dir).ok();
     }
 }

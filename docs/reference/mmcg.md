@@ -52,7 +52,11 @@ Honest per-language summary — what the indexer captures and where it stops:
 - **C/C++:** `#include` produces an import edge with the header filename and full path: `#include <vector>` → name=`vector`, path=`vector::*`; `#include "sub/dir/x.h"` → name=`x.h`, path=`sub/dir/x.h::*`. `using std::vector` → name=`vector`, path=`std::vector`. `using namespace ns` → name=`*`, path=`ns::*`.
 - **Calls:** for `obj.foo()`, path is the literal `obj.foo` from source (no type resolution — see Limitations).
 
-**Skipped directories:** `.git`, `.mastermind`, `.venv`, `venv`, `__pycache__`, `node_modules`, `target`, `dist`, `build`, `.tox`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.next`, `.turbo`, `.cache`.
+Source discovery honors repository, parent, global, and `.git/info/exclude`
+Git ignore rules even outside a Git worktree. `.ignore` files are honored too.
+These directories are always skipped: `.git`, `.mastermind`, `.venv`, `venv`,
+`__pycache__`, `node_modules`, `target`, `dist`, `build`, `.tox`, `.pytest_cache`,
+`.mypy_cache`, `.ruff_cache`, `.next`, `.turbo`, `.cache`.
 
 ## Why a custom indexer
 
@@ -67,13 +71,16 @@ mmcg is intentionally narrow:
 
 - **Parsers**: tree-sitter (C, vendored — no system tree-sitter required)
 - **Parallelism**: `rayon` parses files in parallel; writes serialize through a single SQLite connection (WAL mode)
-- **Batching**: one transaction per file via `Store::commit_file` — prepared statements cached
+- **Bounded batching**: at most 64 parsed files are retained before the single SQLite writer commits them; each file uses one transaction via `Store::commit_file`
+- **Source admission**: source-looking files above 5 MiB or containing a NUL byte in the first 8 KiB are skipped before parsing
 - **Storage**: SQLite with indexes on `symbols.name`, `edges.from_id`, and `edges.to_name`
 
 Index time depends on repository size, filesystem, hardware, and whether the run
 is incremental. Use `mmcg index . --force` for a cold parse measurement and
 record the emitted file/symbol/edge counts with the timing; do not compare a
-cold run with an incremental no-op.
+cold run with an incremental no-op. Maintainers can run `just benchmark-index`
+for a reproducible synthetic cold/warm/incremental report including peak process
+RSS. It is an evidence tool, not a machine-independent CI threshold.
 
 ## Build from source
 
@@ -191,19 +198,26 @@ mmcg query api-surface src/runtime/                # symbols under prefix used e
 
 When you run `mmcg index`, mmcg compares each file's filesystem mtime against the mtime stored in the index:
 
+- **ignored by Git or `.ignore` rules** → do not scan; a newly ignored indexed file is purged
 - **mtime newer than stored** → re-parse and commit (counted as `indexed`)
 - **mtime equals stored** → skip without parsing (counted as `unchanged`)
 - **file in index but not on disk** → purge from index (counted as `purged`)
+- **binary-looking or larger than 5 MiB** → skip safely and report separately
 - **unsupported extension** → skip (counted as `skipped`)
+
+The database also stores an extractor-contract version. When parser/extractor
+semantics change, the next ordinary `index` run automatically performs a full
+structural rebuild even when file mtimes are unchanged. `status`, `doctor`, and
+`mmcg_status` expose contract drift so agents do not trust structurally stale data.
 
 Output example:
 
 ```
-indexed 3 (unchanged 124, purged 1, failed 0) / scanned 1247 | 87 symbols | 412 edges | 84 ms
+indexed 3 (unchanged 124, purged 1, skipped binary 2, skipped large 1, failed 0) / scanned 1247 | 87 symbols | 412 edges | 4 task specs | 84 ms
 ```
 
 When to use `--force`:
-- After a schema version change (the index is also dropped+rebuilt automatically on schema mismatch, but `--force` lets you force a rebuild without bumping schema)
+- After a schema version change (schema and extractor-contract mismatches already rebuild automatically, but `--force` lets you request a cold rebuild explicitly)
 - If you suspect the index is stale for reasons mtime can't see (e.g., a file was restored from backup with old mtime)
 - For benchmarking — to see how long a cold index takes
 

@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use rusqlite::OptionalExtension;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskPhase {
     Ready,
@@ -48,6 +50,7 @@ pub struct IndexInfo {
     pub symbol_count: u64,
     pub file_count: u64,
     pub stale_count: usize,
+    pub extractor_contract_current: bool,
 }
 
 pub struct InstallInfo {
@@ -173,9 +176,16 @@ impl WorkflowStatus {
                 "  ✓ .mastermind/mmcg.db — {} symbols, {} files\n",
                 self.index.symbol_count, self.index.file_count
             ));
-            if self.index.stale_count == 0 {
+            if self.index.stale_count == 0 && self.index.extractor_contract_current {
                 out.push_str("  ✓ index up to date\n");
             } else {
+                if !self.index.extractor_contract_current {
+                    out.push_str(
+                        "  ⚠ extractor contract changed — run `mastermind index .` to rebuild structural data\n",
+                    );
+                }
+            }
+            if self.index.stale_count > 0 {
                 let suffix = if self.index.stale_count >= 10 {
                     " or more"
                 } else {
@@ -458,6 +468,7 @@ fn scan_index(root: &Path) -> IndexInfo {
             symbol_count: 0,
             file_count: 0,
             stale_count: 0,
+            extractor_contract_current: false,
         };
     }
 
@@ -466,13 +477,32 @@ fn scan_index(root: &Path) -> IndexInfo {
     let stale_count = stale_paths(root, &db, 10)
         .map(|paths| paths.len())
         .unwrap_or(1);
+    let extractor_contract_current = db_extractor_contract_current(&db).unwrap_or(false);
 
     IndexInfo {
         db_exists: true,
         symbol_count,
         file_count,
         stale_count,
+        extractor_contract_current,
     }
+}
+
+pub(crate) fn db_extractor_contract_current(db: &Path) -> Option<bool> {
+    let conn = rusqlite::Connection::open_with_flags(
+        db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    let stored = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            [crate::indexer::EXTRACTOR_CONTRACT_META_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .ok()?;
+    Some(stored.as_deref() == Some(crate::indexer::EXTRACTOR_CONTRACT_VERSION))
 }
 
 fn db_counts(db: &Path) -> Option<(u64, u64)> {
@@ -504,24 +534,28 @@ pub(crate) fn stale_paths(root: &Path, db: &Path, cap: usize) -> Option<Vec<Stri
     let indexed: HashMap<String, i64> = rows.collect::<rusqlite::Result<_>>().ok()?;
     let mut seen = HashSet::new();
     let mut stale = Vec::new();
-    for entry in walkdir::WalkDir::new(root)
-        .into_iter()
-        .filter_entry(|e| !crate::indexer::is_skipped_dir(e.file_name().to_str().unwrap_or("")))
-        .filter_map(|e| e.ok())
-    {
-        if !entry.file_type().is_file() {
+    for path in crate::indexer::source_candidates(root) {
+        if crate::indexer::extractor_for_path(&path).is_none() {
             continue;
         }
-        if crate::indexer::extractor_for_path(entry.path()).is_none() {
-            continue;
-        }
-        let Ok(relative) = entry.path().strip_prefix(root) else {
+        let admission_failed = match crate::indexer::source_admission(&path) {
+            Ok(()) => false,
+            Err(crate::indexer::IndexError::Skipped(_)) => continue,
+            Err(_) => true,
+        };
+        let Ok(relative) = path.strip_prefix(root) else {
             continue;
         };
         let relative = relative.to_string_lossy().replace('\\', "/");
         seen.insert(relative.clone());
-        let fs_mtime = entry
-            .path()
+        if admission_failed {
+            stale.push(relative);
+            if stale.len() >= cap {
+                return Some(stale);
+            }
+            continue;
+        }
+        let fs_mtime = path
             .metadata()
             .and_then(|m| m.modified())
             .ok()
@@ -828,6 +862,42 @@ mod tests {
 
         assert!(root.join("mmcg.db-wal").is_file());
         assert_eq!(stale_paths(&root, &db, 10), Some(Vec::new()));
+        drop(store);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn workflow_status_reports_extractor_contract_drift() {
+        let root = std::env::temp_dir().join(format!(
+            "mmcg-status-contract-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join(".mastermind")).unwrap();
+        fs::write(root.join("lib.rs"), "pub fn current() {}\n").unwrap();
+        let db = root.join(".mastermind/mmcg.db");
+        let mut store = crate::store::Store::open(&db).unwrap();
+        crate::indexer::Indexer::new(&root)
+            .index_all(&mut store, false)
+            .unwrap();
+
+        let current = WorkflowStatus::scan(&root);
+        assert!(current.index.extractor_contract_current);
+        assert!(current.render_text().contains("index up to date"));
+
+        store
+            .set_meta(
+                crate::indexer::EXTRACTOR_CONTRACT_META_KEY,
+                "obsolete-contract",
+            )
+            .unwrap();
+        let drifted = WorkflowStatus::scan(&root);
+        assert!(!drifted.index.extractor_contract_current);
+        assert!(drifted.render_text().contains("extractor contract changed"));
+
         drop(store);
         fs::remove_dir_all(root).ok();
     }

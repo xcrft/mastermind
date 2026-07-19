@@ -2,7 +2,7 @@
 
 This is the exhaustive technical reference for the mmcg engine. For the shortest path to a working installation, start with [Getting started](../getting-started.md); for the product overview, return to the [Mastermind README](../../README.md).
 
-A small, fast Rust binary that builds a structural index of a codebase (Python, TypeScript/TSX, JavaScript/JSX, Rust, C#, Go, Java, PHP, C/C++). It serves the graph over **MCP** (22 read-only tools plus one additive local scratchpad write), but MCP is one surface — the same binary is the Mastermind workflow's **CLI**: the deterministic spec gates (`verify-spec` / `audit-spec`), project setup (`init` / `doctor`), and miners (`miner profile`, which learns your code-shape style into `~/.mastermind/style.md`) are all subcommands of it. Pair with the workflow so the planner/executor reason from a real graph instead of grep heuristics.
+A small Rust binary that builds a structural index of a codebase (Python, TypeScript/TSX, JavaScript/JSX, Rust, C#, Go, Java, PHP, C/C++). It serves the graph over **MCP** (22 read-only tools plus one additive local scratchpad write), but MCP is only one surface. The same binary provides spec gates (`verify-spec` / `audit-spec`), project setup (`init` / `doctor`), and the user-global style miner.
 
 > Installed via npm (`@xcraftmind/mastermind`)? The command is **`mastermind`** — the same binary. The `mmcg` name used throughout this doc is the cargo-installed alias (`cargo install mmcg`).
 
@@ -63,14 +63,17 @@ mmcg is intentionally narrow:
 - 23 query tools that map directly to the workflow's needs
 - 22 read-only MCP tools plus `mmcg_scratchpad_append`, which makes an additive write to the gitignored local index
 
-## Speed notes
+## Performance model
 
 - **Parsers**: tree-sitter (C, vendored — no system tree-sitter required)
 - **Parallelism**: `rayon` parses files in parallel; writes serialize through a single SQLite connection (WAL mode)
 - **Batching**: one transaction per file via `Store::commit_file` — prepared statements cached
-- **Storage**: SQLite with indexes on `symbols.name`, `edges.from_id`, `edges.to_name`. Sub-millisecond queries on real codebases.
+- **Storage**: SQLite with indexes on `symbols.name`, `edges.from_id`, and `edges.to_name`
 
-On the mmcg crate itself (10 Rust files, 1 Python script): indexing takes **9 ms** for 186 symbols + 1294 edges.
+Index time depends on repository size, filesystem, hardware, and whether the run
+is incremental. Use `mmcg index . --force` for a cold parse measurement and
+record the emitted file/symbol/edge counts with the timing; do not compare a
+cold run with an incremental no-op.
 
 ## Build from source
 
@@ -149,15 +152,13 @@ mmcg run-task .mastermind/tasks/042-feature/spec.md --force-iteration  # bypass 
 # or empty. Gates without a codegraph degrade to file-existence + section checks
 # only — mmcg's value comes from the structural truth layer, not the heuristics.
 
-# Initialize a project: scaffold .mastermind/, build the index, and draft
-# CONTEXT.md from the codebase via `claude -p`. Use --no-index / --no-claude to
-# skip those. --profile pre-seeds a stack-specific CONTEXT.md (conventions,
-# test/lint commands, canonical gotchas).
-mmcg init                              # generic CONTEXT.md (default)
-mmcg init --profile typescript-api    # Node.js HTTP/REST/GraphQL API
-mmcg init --profile react-native      # mobile (Expo or bare)
-mmcg init --profile python-fastapi    # async Python API
-mmcg init --profile rust-cli          # command-line tool
+# Initialize a project. Stack detection selects the context template
+# automatically; no profile flag is required.
+mmcg init
+mmcg init --no-claude      # skip Claude-assisted context drafting
+mmcg init --no-index       # scaffold without building the graph
+mmcg init --no-global      # do not reconcile the npm Claude workflow bundle
+mmcg init --no-seed-style  # do not seed ~/.mastermind/style.md
 
 # Preview or apply one supported MCP client target.
 mmcg setup claude --scope user                            # dry-run via native `claude mcp`
@@ -279,9 +280,10 @@ Run `mmcg watch` in a separate terminal so the index stays current while you wor
 | `mmcg_tasks` | `query`, optional `top` (default 10) | Full-text search past task specs (`.mastermind/tasks/<NNN>-<name>/spec.md`). FTS5 MATCH syntax (bare words AND-joined, `"phrases"`, `OR`/`NOT`). Returns paths, titles, and snippet excerpts with `«match»` highlights ranked by BM25. Use as planner pre-flight: "have we touched this area before?" surfaces past designs and prior verdicts. Top-level files prefixed with `_` (e.g. `_lessons.md`) and bare `.md` files at the top of `tasks/` (legacy 0.6.x layout) are intentionally excluded. |
 | `mmcg_dependency_cycles` | optional `language`, `min_size` (default 2) | Detect circular imports — strongly-connected components in the file-level import graph (Tarjan's algorithm). Each result is a cycle = a list of files. Pre-merge guard ("does this PR introduce a new cycle?") and architectural-hygiene survey. Resolves edges by leaf-name match — over-approximates (two unrelated `Logger` symbols cross-link) so verify before refactoring. Bump `min_size` to hide trivial A↔B and surface only larger structural problems. |
 | `mmcg_symbols_changed_since` | `git_ref`, optional `root` | Symbol-level diff between a git ref and the current index. Returns `{added, removed, signature_changed}` symbol sets for files in `git diff --name-only <ref>..HEAD`. Re-parses old blobs from `git show <ref>:<path>` using the same extractor. Different from `mmcg_recent_changes` (watcher mtime) — this is git-ref-based, answering "what symbols did THIS PR/branch touch?". PR-review pre-flight, auditor verification, "what new public API appeared in v2.3?". |
-| `mmcg_status` | — | Index health (file count, symbol count, db path). |
+| `mmcg_status` | — | Index path, file/symbol counts, and bounded `stale_files`. A non-zero value means re-index before trusting structural answers. |
 
-All responses are JSON with a `count` field for quick scanning before reading detail.
+Tool responses are bounded JSON. Collection responses expose their own count or
+collection metadata; status and workflow responses use named fields.
 
 ## Watcher (`mmcg watch`)
 

@@ -111,7 +111,10 @@ mastermind init
 mastermind doctor
 ```
 
-`init` scaffolds `.mastermind/`, builds the index, creates project context when missing, and installs the Claude workflow unless disabled. Existing `CONTEXT.md` and `CLAUDE.md` files are preserved unless `--force` is used.
+`init` scaffolds `.mastermind/`, builds the index, and creates project context
+when missing. When invoked through the npm package, it also reconciles the
+Claude workflow bundle unless `--no-global` is supplied. Existing `CONTEXT.md`
+and `CLAUDE.md` files are preserved unless `--force` is used.
 
 Useful opt-outs:
 
@@ -167,6 +170,7 @@ The index is generated from local source files and stays local. Add `.mastermind
 ## Next steps
 
 - Run `mastermind map .` to learn a repository.
+- Run `mastermind demo hallucinated-symbol` for a zero-setup audit example.
 - Run `mastermind impact --since main` before submitting a change.
 - Read [How the workflow works](workflow.md) to use checked task specs.
 - Add [verifiable audits](github-action.md) to CI.

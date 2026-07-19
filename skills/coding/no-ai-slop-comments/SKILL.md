@@ -2,7 +2,7 @@
 name: no-ai-slop-comments
 description: Strip AI-slop comments from code — keep only comments that explain a *why* the code can't say itself, delete anything that just restates it. Use when writing or editing code (especially as an executor applying a spec) or reviewing a diff for comment noise. Triggers — "stop adding comments", "no slop comments", "too many comments", code that narrates itself.
 metadata:
-  version: 0.1.1
+  version: 0.2.0
   authors:
     - mastermind
   tags:
@@ -29,6 +29,9 @@ comment cleanup.
 changed loses no information when deleted, remove it.
 
 Comments explain **why**, not **what**. The code already says what it does.
+
+Default to **zero new comments**. A generated function does not need a heading,
+step labels, or a sentence above each branch merely because it is new.
 
 ## Delete these — slop
 
@@ -60,6 +63,21 @@ it and leave cleanup to an explicitly scoped review.
 ## Match the surrounding code
 
 Before adding any comment, look at the file. If the neighbouring functions carry no comments, yours shouldn't either. Mirror the existing density and docstring convention — don't import a heavier commenting style than the codebase already uses.
+
+## Required final pass
+
+Before reporting implementation complete:
+
+1. Inspect comments added or modified by the current change.
+2. Delete narration, section banners, edit markers, signature echoes, dead code,
+   and ownerless TODOs.
+3. For every remaining new comment, state the information that would be lost if
+   it were removed. If the answer is only what the code does, delete it.
+4. Leave pre-existing comments outside the edited lines alone unless the user
+   explicitly requested broader cleanup.
+
+This pass applies even when the user did not invoke the skill by name. In an
+executor workflow, run it before Final Verification and the canonical report.
 
 ## Before / after
 

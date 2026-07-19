@@ -2,7 +2,7 @@
 name: mastermind-task-executor
 description: Execute an approved Mastermind task contract within Scope, prove its Acceptance Criteria, and write the canonical file-backed executor report. Use when the user hands off a `.mastermind/tasks/<NNN>-<name>/spec.md` or explicitly asks to execute an approved Mastermind task.
 metadata:
-  version: 0.6.0
+  version: 0.6.1
   authors: [mastermind]
   tags: [workflow, execution, delegation, mmcg]
 ---
@@ -70,10 +70,13 @@ must terminate; do not launch a server or watcher as verification.
 
 ## Comments
 
-Apply [[no-ai-slop-comments]] to comments added or modified by this task. Keep
-required documentation, licenses, invariants, security constraints, and
-non-obvious reasons. Do not clean unrelated comments merely because a file was
-opened.
+Before Final Verification, inspect comments added or modified by this task.
+Default to zero new comments. Delete narration of code, section banners, step
+labels, edit markers, signature echoes, dead code, and ownerless TODOs. Keep
+only required documentation, licenses, invariants, security constraints, and
+non-obvious reasons that would be lost if the comment were removed. Do not
+clean unrelated comments merely because a file was opened. This is the
+[[no-ai-slop-comments]] gate, not an optional style suggestion.
 
 ## Canonical report
 

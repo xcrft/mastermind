@@ -7,11 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-07-19
+
 ### Added
 - Transactional, manifest-owned workflow installation for Claude Code and Codex, including SHA-256 content parity checks, rollback, retired-artifact cleanup, `mastermind doctor --workflow`, and native `init` delegation to the same installer.
 - Optional production-only project maps that exclude conventional tests, fixtures, examples, demos, generated/vendor/dependency/build paths before bounded component, boundary, hotspot, and cycle queries run.
 - A canonical strict executor-report schema shared by prompts, JSON Schema, fixtures, and the Rust audit parser, with backward compatibility for legacy report tails.
-- OpenAI adapter metadata for every shipped skill and eight prompt-level workflow eval cases covering direct/verified planning, executor reports, project map, change/test impact, cross-client setup, and audit attestation.
+- OpenAI adapter metadata for every shipped skill and 22 prompt-level workflow eval cases covering direct/verified planning, executor reports, project map, change/test impact, cross-client setup, audit attestation, and generated-comment discipline.
 
 ### Changed
 - Portable skills now match the real Direct/Verified/Strict lifecycle: read-only validation precedes approval, executor work is acceptance-driven with bounded repair, and `executor-report.md` is the only machine-consumed agent handoff.
@@ -21,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pull-request audit execution now selects only changed canonical task folders and requires an executor report before producing evidence, instead of re-auditing every historical spec against the current baseline.
 - The auditor is repository-read-only; planner/controller code now owns audit artifacts, lessons, release eligibility, and task-state transitions.
 - Release workflows pin every third-party Action to a full commit SHA. Manual publish runs are verification-only, and package publication requires a tag push in `xcrft/mastermind`.
+- The executor now applies a mandatory zero-by-default comment gate before final verification, preserving only required documentation and non-obvious rationale.
+- Eval results are presented as a dated behavioral scorecard rather than a performance benchmark, with full-suite runs separated from targeted reruns.
 
 ### Removed
 - The unused `extras/` artifact tree; installable workflow artifacts now have one canonical home under `agents/` and `skills/`.
@@ -293,7 +297,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Seven prebuilt platform packages (`@xcraftmind/mmcg-*`) covering macOS (arm64, x64), Linux glibc and musl (x64, arm64), and Windows (x64). npm installs only the package matching the host's `os` / `cpu` / `libc`.
 - Install-mode-aware `setup claude` that writes the correct MCP `command` form for npx, global, project-local, and cargo installs.
 
-[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v0.37.0...HEAD
+[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v0.38.0...HEAD
+[0.38.0]: https://github.com/xcrft/mastermind/compare/npm-v0.37.0...npm-v0.38.0
 [0.37.0]: https://github.com/xcrft/mastermind/compare/npm-v0.36.2...npm-v0.37.0
 [0.28.1]: https://github.com/xcrft/mastermind/compare/npm-v0.28.0...npm-v0.28.1
 [0.28.0]: https://github.com/xcrft/mastermind/compare/npm-v0.27.1...npm-v0.28.0

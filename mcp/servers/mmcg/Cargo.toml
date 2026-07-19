@@ -67,7 +67,7 @@ similar = "2.7"
 # + libyml RUSTSEC-2025-0067). `serde_norway` uses `unsafe-libyaml-norway`, the
 # maintained libyaml fork. Same API surface as serde_yaml.
 serde_norway = "0.9.42"
-toml = "0.8"
+toml = "1.1"
 
 # CLI argument parsing
 clap = { version = "4.5", features = ["derive", "env"] }

@@ -41,12 +41,10 @@ pub fn do_init(root: &Path, opts: InitOpts) -> Result<(), Box<dyn std::error::Er
     let mut warnings: Vec<String> = Vec::new();
     let mut context_fill_prompt: Option<String> = None;
 
-    // Batteries-included: auto-detect the stack for the CONTEXT.md profile.
+    // Stack detection informs the drafting prompt, but CONTEXT stays lean and
+    // stack-agnostic: commands and layout are derivable and belong in CLAUDE.md.
     let stack = detect_stack(root);
-    created.push(format!(
-        "auto-detected stack: {} CONTEXT.md profile",
-        stack.label,
-    ));
+    created.push(format!("auto-detected stack: {}", stack.label));
 
     let mastermind_dir = root.join(".mastermind");
     let tasks_dir = mastermind_dir.join("tasks");
@@ -96,9 +94,19 @@ pub fn do_init(root: &Path, opts: InitOpts) -> Result<(), Box<dyn std::error::Er
 
     let context_path = root.join("CONTEXT.md");
     let context_body = templates::strip_comment(templates::for_profile(stack.template));
+    if force && context_path.is_file() {
+        let backup = backup_existing(&context_path)?;
+        created.push(format!(
+            "preserved existing CONTEXT.md → {}",
+            backup.display()
+        ));
+    }
     let context_created = write_if_absent(&context_path, &context_body, force)?;
     if context_created {
-        created.push(format!("CONTEXT.md (stack: {})", stack.label));
+        created.push(format!(
+            "CONTEXT.md (lean; detected stack: {})",
+            stack.label
+        ));
     } else {
         skipped.push("CONTEXT.md (already exists — pass --force to overwrite)".into());
     }
@@ -430,6 +438,9 @@ fn write_if_absent(
     contents: &str,
     force: bool,
 ) -> Result<bool, Box<dyn std::error::Error>> {
+    if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(format!("refusing to overwrite symlink `{}`", path.display()).into());
+    }
     if path.exists() && !force {
         return Ok(false);
     }
@@ -438,6 +449,29 @@ fn write_if_absent(
     }
     fs::write(path, contents)?;
     Ok(true)
+}
+
+fn backup_existing(path: &Path) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(format!("refusing to back up symlink `{}`", path.display()).into());
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("CONTEXT.md");
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let base = parent.join(format!("{file_name}.mastermind-backup"));
+    let entry_exists = |candidate: &Path| std::fs::symlink_metadata(candidate).is_ok();
+    let backup = if !entry_exists(&base) {
+        base
+    } else {
+        (1_u32..)
+            .map(|suffix| parent.join(format!("{file_name}.mastermind-backup.{suffix}")))
+            .find(|candidate| !entry_exists(candidate))
+            .expect("backup suffix space is unbounded")
+    };
+    fs::copy(path, &backup)?;
+    Ok(backup)
 }
 
 fn collect_flat_specs(tasks_dir: &Path) -> Vec<String> {
@@ -470,9 +504,10 @@ fn draft_prompt(context: Option<&Path>, claude_md: Option<&Path>) -> String {
     );
     if let Some(p) = context {
         s.push_str(&format!(
-            "\n- `{}`: fill ONLY the Identity (what it is / what it is not / primary users) and Active \
-             goals sections. Leave Decision log, Known gotchas, Domain glossary, External dependencies, \
-             and Don't-touch list as the empty templates — those accumulate over time.",
+            "\n- `{}`: verify and fill Identity and Active goals. The detected stack is only a \
+             discovery hint, not durable context. Leave Decision log, \
+             Known gotchas, Domain glossary, External dependencies, and Don't-touch list empty — those \
+             accumulate only after semantic review.",
             p.display()
         ));
     }
@@ -675,5 +710,34 @@ mod tests {
                 .unwrap();
         }
         assert!(matches!(detect_stack(root).template, Profile::Generic));
+    }
+
+    #[test]
+    fn forced_context_overwrite_can_preserve_multiple_backups() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = dir.path().join("CONTEXT.md");
+        fs::write(&context, "first\n").unwrap();
+        let first = backup_existing(&context).unwrap();
+        fs::write(&context, "second\n").unwrap();
+        let second = backup_existing(&context).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(fs::read_to_string(first).unwrap(), "first\n");
+        assert_eq!(fs::read_to_string(second).unwrap(), "second\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn context_writes_and_backups_reject_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside.md");
+        let context = dir.path().join("CONTEXT.md");
+        fs::write(&outside, "do not overwrite\n").unwrap();
+        symlink(&outside, &context).unwrap();
+
+        assert!(write_if_absent(&context, "replacement\n", true).is_err());
+        assert!(backup_existing(&context).is_err());
+        assert_eq!(fs::read_to_string(outside).unwrap(), "do not overwrite\n");
     }
 }

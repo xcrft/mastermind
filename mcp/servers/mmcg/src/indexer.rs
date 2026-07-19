@@ -379,6 +379,17 @@ impl Indexer {
             }
         };
         add_if_present(self.root.join("CONTEXT.md"), "context");
+        if let Ok(entries) = std::fs::read_dir(&self.root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                    continue;
+                };
+                if name.starts_with("CONTEXT-archive-") && name.ends_with(".md") {
+                    add_if_present(path, "context");
+                }
+            }
+        }
 
         let tasks_dir = self.root.join(".mastermind").join("tasks");
         add_if_present(tasks_dir.join("_lessons.md"), "lesson");
@@ -404,10 +415,22 @@ impl Indexer {
                 add_if_present(path.join("spec.md"), "task_spec");
                 add_if_present(path.join("executor-report.md"), "executor_report");
                 add_if_present(path.join("audit.md"), "audit");
+                // Pre-0.39 tasks could keep release notes beside the spec.
                 add_if_present(path.join("release-notes.md"), "release_notes");
             }
         }
+        let releases_dir = self.root.join(".mastermind").join("releases");
+        if let Ok(entries) = std::fs::read_dir(&releases_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let is_markdown = path.extension().and_then(|value| value.to_str()) == Some("md");
+                if is_markdown {
+                    add_if_present(path, "release_notes");
+                }
+            }
+        }
         candidates.sort_by(|left, right| left.0.cmp(&right.0));
+        candidates.dedup_by(|left, right| left.0 == right.0);
         let truncated = candidates.len() > MAX_HISTORY_ENTRIES;
         candidates.truncate(MAX_HISTORY_ENTRIES);
 
@@ -946,6 +969,11 @@ mod incremental_tests {
         )
         .unwrap();
         fs::write(
+            dir.join("CONTEXT-archive-2025.md"),
+            "# Archived context\n\nThe legacy gateway owned token exchange.\n",
+        )
+        .unwrap();
+        fs::write(
             dir.join(".mastermind/tasks/_lessons.md"),
             "# Lessons\n\nA middleware-only guard was bypassed.\n",
         )
@@ -965,6 +993,13 @@ mod incremental_tests {
             "# Audit\n\nVerified the runtime boundary.\n",
         )
         .unwrap();
+        let releases_dir = dir.join(".mastermind/releases");
+        fs::create_dir_all(&releases_dir).unwrap();
+        fs::write(
+            releases_dir.join("001-auth-boundary.md"),
+            "# Release\n\nAdmission authorization is now enforced.\n",
+        )
+        .unwrap();
         fs::write(
             task_dir.join("release-notes.md"),
             vec![b'x'; (MAX_HISTORY_ARTIFACT_SIZE + 1) as usize],
@@ -975,10 +1010,10 @@ mod incremental_tests {
         let mut store = Store::open(&db).unwrap();
         let indexer = Indexer::new(&dir);
         let stats = indexer.index_all(&mut store, false).unwrap();
-        assert_eq!(stats.history_entries_indexed, 5);
+        assert_eq!(stats.history_entries_indexed, 7);
         assert_eq!(stats.history_entries_skipped, 1);
         assert!(!stats.history_entries_truncated);
-        assert_eq!(store.project_history_count().unwrap(), 5);
+        assert_eq!(store.project_history_count().unwrap(), 7);
         let lesson = store
             .search_project_history("middleware bypassed", Some("lesson"), 10)
             .unwrap();
@@ -987,10 +1022,24 @@ mod incremental_tests {
             .search_project_history("private scratch", None, 10)
             .unwrap()
             .is_empty());
+        assert_eq!(
+            store
+                .search_project_history("legacy gateway", Some("context"), 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .search_project_history("Admission authorization", Some("release_notes"), 10)
+                .unwrap()
+                .len(),
+            1
+        );
 
         fs::remove_file(task_dir.join("audit.md")).unwrap();
         let stats = indexer.index_all(&mut store, false).unwrap();
-        assert_eq!(stats.history_entries_indexed, 4);
+        assert_eq!(stats.history_entries_indexed, 6);
         assert!(store
             .search_project_history("runtime boundary", Some("audit"), 10)
             .unwrap()

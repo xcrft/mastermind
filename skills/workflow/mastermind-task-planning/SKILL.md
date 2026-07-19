@@ -2,7 +2,7 @@
 name: mastermind-task-planning
 description: Choose the lightest Mastermind workflow that fits the risk, then create an evidence-grounded verified or strict task contract for delegated implementation. Direct work deliberately uses no task spec.
 metadata:
-  version: 0.16.0
+  version: 0.17.0
   authors: [mastermind]
   tags: [workflow, planning, delegation, mmcg, audit]
 ---
@@ -165,7 +165,8 @@ criteria. Mechanical contract compliance does not answer product judgment.
 ### Step 9c — Persist the reviewed result (planner/controller only)
 
 The auditor is repository-read-only and must not mutate evidence. `run-task`
-owns `state.json`, `audit.md`, lessons, and release-note eligibility. A manual
+owns `state.json`, `audit.md`, lesson candidates, release-note eligibility, and
+the initial task-local `history-review.md`. A manual
 strict auditor returns advisory evidence to the planner; the controller's
 `audit.md` and `state.json` remain the persisted machine record.
 
@@ -178,6 +179,15 @@ project knowledge; never add a ceremonial “nothing changed” entry.
 For a durable decision, record provenance, evidence, status (`active` or
 `superseded`), any `supersedes` link, rejected alternatives, and the reusable
 lesson. Update history only after semantic review, not on every turn.
+
+Resolve `<task>/history-review.md` before reporting the learning pass complete:
+
+- set **Context** to `updated` or `not applicable`;
+- set **Lesson** to `updated` or `not applicable`;
+- replace the generated reason with the reviewed reason and retain evidence paths;
+- if an audit created a `candidate` in `_lessons.md`, replace its pending lesson
+  and set it to `active`, `resolved`, or `superseded`. Finding counts alone are
+  not a reusable lesson.
 
 Commit, push, PR, release, and publication remain separate actions requiring
 explicit user authorization.

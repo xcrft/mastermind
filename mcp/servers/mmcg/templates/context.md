@@ -67,59 +67,35 @@ metadata:
 
 *Most recent first. Append-only: supersede old decisions explicitly instead of rewriting history.*
 
-### <YYYY-MM-DD> — <Short decision name>
-
-- **Decision:** <one sentence>
-- **Why:** <the reason that survives author handoff>
-- **Status:** <`active` or `superseded`>
-- **Supersedes:** <earlier decision heading or `none`>
-- **Provenance:** <who or what authorized/recorded the decision; origin is not proof>
-- **Evidence:** <code, test, runtime observation, audit, or `decision only — not technically verified`>
-- **Alternatives rejected:**
-  - <option A>: <why rejected>
-  - <option B>: <why rejected>
-- **Source:** <`.mastermind/tasks/NNN-name/spec.md` or a discussion link>
-- **Critic verdict** (if applicable): <`ship it` / `ship with caveats` / etc.>
-- **Reusable lesson:** <what future work should preserve or avoid>
-
-### <YYYY-MM-DD> — <Earlier decision>
-
-...
+<!--
+Add an entry only for durable knowledge. Use a dated level-three heading and
+fields: Decision, Why, Status, Supersedes, Provenance, Evidence, Alternatives
+rejected, Source, optional Critic verdict, and Reusable lesson.
+-->
 
 ---
 
 ## Known gotchas
 
-*Surprises discovered during work — one line each. Keeps the next workflow run from re-discovering. Append-only.*
-
-- **<gotcha 1>** — <concrete bite scenario, e.g., "Redis cluster mode silently drops MULTI on key migrations during rebalance">. Discovered in `.mastermind/tasks/<NNN>-<name>/`.
-- **<gotcha 2>** — <bite scenario>.
+*Verified surprises discovered during work. Keep empty until one exists.*
 
 ---
 
 ## Domain glossary
 
-*Terms that mean something specific in this codebase. Skip terms that mean the standard thing. Append-only.*
-
-- **<term 1>** — <local meaning>
-- **<term 2>** — <local meaning, e.g., "Reservation = booking attempt before payment confirmation; not the same as Booking">
+*Terms that mean something specific in this codebase. Keep empty until one exists.*
 
 ---
 
 ## External dependencies
 
-*Services / APIs / vendors this project relies on. Include auth mechanism and (if pinned) version.*
-
-- **<service>** — <what we use it for> — auth: <API key in env `VAR` / OAuth / mTLS> — version `<X.Y or latest>`
+*Non-derivable constraints for services or vendors. Keep empty until one exists.*
 
 ---
 
 ## Don't-touch list
 
-*Code or areas with hidden constraints. The next planner needs to know NOT to "while I'm in there" these.*
-
-- **`<path>`** — <constraint, e.g., "generated from `proto/`, do not hand-edit">
-- **`<path>`** — <constraint, e.g., "stub kept for backwards compat with v0.4 clients; removable after 2026-09-01">
+*Code or areas with verified hidden constraints. Keep empty until one exists.*
 
 ---
 
@@ -135,7 +111,9 @@ The planner (`mastermind-task-planning` skill) appends to this file during post-
 | New external dependency added | External dependencies |
 | Code area found to have hidden constraints | Don't-touch list |
 
-The planner does NOT update this file silently. Every change is logged in the spec's Notes section so the audit trail is preserved.
+After a completed task, resolve its `history-review.md`: mark Context and Lesson
+as `updated` or `not applicable` and record the reason. Never add an entry only
+to make the review green.
 
 Approval proves that an authorized person accepted a decision. It does not prove
 that a runtime, security, performance, or compatibility claim is technically

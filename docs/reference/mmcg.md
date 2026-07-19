@@ -151,7 +151,8 @@ mmcg new-spec "Rotate signing keys" --mode strict
 #   pre  → verify spec, report risk, capture HEAD, write <task>/state.json
 #   handoff → any implementation client writes <task>/executor-report.md
 #   post → require and parse that report, audit against the baseline, write
-#          <task>/audit.md, update state, and draft release notes on Held.
+#          <task>/audit.md, create <task>/history-review.md, update state, and
+#          write .mastermind/releases/<task>.md on Held.
 mmcg run-task .mastermind/tasks/042-feature/spec.md             # hand-off semantics
 mmcg run-task .mastermind/tasks/042-feature/spec.md --exec      # legacy Claude-only `claude -p` convenience
 mmcg run-task .mastermind/tasks/042-feature/spec.md --reset     # drop state, force pre-flight (counter survives)
@@ -160,13 +161,13 @@ mmcg run-task .mastermind/tasks/042-feature/spec.md --post-only # requires state
 mmcg run-task .mastermind/tasks/042-feature/spec.md --allow-no-index  # docs-only / spec-only specs
 mmcg run-task .mastermind/tasks/042-feature/spec.md --strict          # fold strict spec checks into pre-flight
 mmcg run-task .mastermind/tasks/042-feature/spec.md --max-iterations 5 # raise the default budget (default 3)
-mmcg run-task .mastermind/tasks/042-feature/spec.md --force-iteration  # bypass budget for this attempt; auto-lesson still fires
+mmcg run-task .mastermind/tasks/042-feature/spec.md --force-iteration  # bypass budget; deduplicated lesson candidate records the signal
 # NOTE: without --allow-no-index, pre-flight hard-fails when the index is missing
 # or empty. Gates without a codegraph degrade to file-existence + section checks
 # only — mmcg's value comes from the structural truth layer, not the heuristics.
 
-# Initialize a project. Stack detection selects the context template
-# automatically; no profile flag is required.
+# Initialize a project. Stack detection informs drafting, while CONTEXT stays
+# lean and stack-agnostic; commands and layouts belong in CLAUDE.md.
 mmcg init
 mmcg init --no-claude      # skip Claude-assisted context drafting
 mmcg init --no-index       # scaffold without building the graph
@@ -298,7 +299,7 @@ Run `mmcg watch` in a separate terminal so the index stays current while you wor
 | `mmcg_change_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Stable schema-v1 analysis of the resolved baseline against staged, unstaged, and untracked content. Reports added/removed/signature/body-changed symbols, batched transitive callers, component crossings, ranked test candidates, exact collection metadata, caps, and precision notes. Root, SHA-256 index freshness, Git snapshot, and SQLite snapshot checks fail closed with stable codes. |
 | `mmcg_test_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Exact test-focused projection of `mmcg_change_impact`. Changed tests and depth-1 graph tests are direct, deeper graph tests are transitive, and scoped filename candidates are heuristic. Focused candidates never replace the repository's full required gate. |
 | `mmcg_tasks` | `query`, optional `top` (default 10) | Full-text search past task specs (`.mastermind/tasks/<NNN>-<name>/spec.md`). FTS5 MATCH syntax (bare words AND-joined, `"phrases"`, `OR`/`NOT`). Returns paths, titles, and snippet excerpts with `«match»` highlights ranked by BM25. Use as planner pre-flight: "have we touched this area before?" surfaces past designs and prior verdicts. Top-level files prefixed with `_` (e.g. `_lessons.md`) and bare `.md` files at the top of `tasks/` (legacy 0.6.x layout) are intentionally excluded. |
-| `mmcg_history` | `query`, optional `kind`, `top` (default 10) | Searches `CONTEXT.md`, canonical task specs, executor reports, audits, release notes, and shared lessons. Returns observed matches, `skipped_artifacts`, `truncated`, and an explicit retrieval-only epistemic contract. Markdown remains authoritative; freshness is not inferred by the query, so re-index after Markdown changes. Each artifact is capped at 1 MiB and the corpus at 5,000 files. |
+| `mmcg_history` | `query`, optional `kind`, `top` (default 10) | Searches `CONTEXT.md`, `CONTEXT-archive-*.md`, canonical task specs, executor reports, audits, `.mastermind/releases/*.md`, legacy task-local release notes, and lessons. `candidate` lessons are unresolved signals, not active guidance. Returns observed matches, `skipped_artifacts`, `truncated`, and an explicit retrieval-only epistemic contract. Markdown remains authoritative; re-index after Markdown changes. Each artifact is capped at 1 MiB and the corpus at 5,000 files. |
 | `mmcg_dependency_cycles` | optional `language`, `min_size` (default 2) | Detect circular imports — strongly-connected components in the file-level import graph (Tarjan's algorithm). Each result is a cycle = a list of files. Pre-merge guard ("does this PR introduce a new cycle?") and architectural-hygiene survey. Resolves edges by leaf-name match — over-approximates (two unrelated `Logger` symbols cross-link) so verify before refactoring. Bump `min_size` to hide trivial A↔B and surface only larger structural problems. |
 | `mmcg_symbols_changed_since` | `git_ref`, optional `root` | Symbol-level diff between a git ref and the current index. Returns `{added, removed, signature_changed}` symbol sets for files in `git diff --name-only <ref>..HEAD`. Re-parses old blobs from `git show <ref>:<path>` using the same extractor. Different from `mmcg_recent_changes` (watcher mtime) — this is git-ref-based, answering "what symbols did THIS PR/branch touch?". PR-review pre-flight, auditor verification, "what new public API appeared in v2.3?". |
 | `mmcg_status` | — | Index path, file/symbol counts, and bounded `stale_files`. A non-zero value means re-index before trusting structural answers. |

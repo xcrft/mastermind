@@ -811,7 +811,7 @@ fn schema_tasks() -> Value {
 fn schema_history() -> Value {
     json!({
         "name": "mmcg_history",
-        "description": "Search durable project history across CONTEXT.md, canonical task specs, executor reports, audits, release notes, and shared lessons. Returns observed FTS matches plus skipped/truncated signals; ranking and co-occurrence do not establish causality or correctness. The returned Markdown paths remain the source of truth, and callers should re-index after Markdown changes.",
+        "description": "Search durable project history across active and archived CONTEXT files, canonical task specs, executor reports, audits, release notes, and lessons. Candidate lessons are unresolved audit signals, not active guidance. Returns observed FTS matches plus skipped/truncated signals; ranking and co-occurrence do not establish causality or correctness. The returned Markdown paths remain the source of truth, and callers should re-index after Markdown changes.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -912,7 +912,7 @@ fn schema_status() -> Value {
 fn schema_scratchpad_append() -> Value {
     json!({
         "name": "mmcg_scratchpad_append",
-        "description": "Append a one-line intent / note / handoff to the cross-agent scratchpad. Live in-session channel between Mastermind subagents (planner → executor → auditor). Use to hand off context the next agent needs without polluting the chat or the spec. Persists in `.mastermind/mmcg.db` (additive table, gitignored). The cross-session counterpart is `_lessons.md` (auditor-written). Body capped at 8 KiB — scratchpad is for one-liners, not blob dumps.",
+        "description": "Append a one-line intent / note / handoff to the cross-agent scratchpad. Live in-session channel between Mastermind subagents (planner → executor → auditor). Use to hand off context the next agent needs without polluting the chat or the spec. Persists in `.mastermind/mmcg.db` (additive table, gitignored). Reviewed durable knowledge belongs in CONTEXT.md or `_lessons.md`, not the scratchpad. Body capped at 8 KiB — scratchpad is for one-liners, not blob dumps.",
         "inputSchema": {
             "type": "object",
             "properties": {

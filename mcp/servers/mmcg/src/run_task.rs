@@ -190,6 +190,77 @@ pub fn release_file_path(repo_root: &Path, spec_path: &Path) -> PathBuf {
         .join(format!("{}.md", spec_basename(spec_path)))
 }
 
+/// Semantic-history review path. Canonical tasks keep it beside their spec;
+/// legacy flat specs use the local run-state directory.
+pub fn history_review_file_path(repo_root: &Path, spec_path: &Path) -> PathBuf {
+    if spec_path.file_name().and_then(|name| name.to_str()) == Some("spec.md") {
+        let resolved = if spec_path.is_absolute() {
+            spec_path.to_path_buf()
+        } else {
+            repo_root.join(spec_path)
+        };
+        return resolved
+            .parent()
+            .unwrap_or(repo_root)
+            .join("history-review.md");
+    }
+    repo_root
+        .join(".mastermind/run-state")
+        .join(format!("{}-history-review.md", spec_basename(spec_path)))
+}
+
+fn ensure_history_review(
+    repo_root: &Path,
+    spec_path: &Path,
+    release_path: &Path,
+) -> std::io::Result<bool> {
+    let path = history_review_file_path(repo_root, spec_path);
+    if std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "refusing to write history review through a symlink",
+        ));
+    }
+    if path.exists() {
+        return Ok(false);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let spec = display_relative(repo_root, spec_path);
+    let release = display_relative(repo_root, release_path);
+    let audit = spec_path
+        .parent()
+        .map(|parent| parent.join("audit.md"))
+        .unwrap_or_else(|| spec_path.with_file_name("audit.md"));
+    let audit = display_relative(repo_root, &audit);
+    let body = format!(
+        "# History review — {}\n\n\
+Complete this after semantic review. Replace each `pending` with `updated` or\n\
+`not applicable`; do not create ceremonial CONTEXT or lesson entries.\n\n\
+- **Context:** pending\n\
+- **Lesson:** pending\n\
+- **Reason:** semantic review required\n\
+- **Evidence:** `{spec}`; `{audit}`; `{release}`\n",
+        spec_basename(spec_path),
+    );
+    std::fs::write(path, body)?;
+    Ok(true)
+}
+
+fn display_relative(repo_root: &Path, path: &Path) -> String {
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        repo_root.join(path)
+    };
+    resolved
+        .strip_prefix(repo_root)
+        .unwrap_or(&resolved)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
 fn spec_basename(spec_path: &Path) -> String {
     if spec_path.file_name().and_then(|name| name.to_str()) == Some("spec.md") {
         if let Some(task_name) = spec_path
@@ -425,44 +496,6 @@ pub fn render_release_notes(r: &ReleaseNotes) -> String {
     )
 }
 
-/// Append a one-line `iteration_budget_exhausted` lesson to
-/// `.mastermind/tasks/_lessons.md`. Best-effort: swallows IO errors since the
-/// caller already eprintln'd the user-facing reason.
-fn append_iteration_budget_lesson(
-    repo_root: &Path,
-    spec_path: &Path,
-    iteration: u32,
-) -> std::io::Result<()> {
-    use std::io::Write;
-    let lessons_path = repo_root
-        .join(".mastermind")
-        .join("tasks")
-        .join("_lessons.md");
-    if let Some(parent) = lessons_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let needs_header = !lessons_path.exists();
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&lessons_path)?;
-    if needs_header {
-        f.write_all(
-            b"# Lessons learned\n\nOne-line lessons. See `defect-taxonomy.md` for `kind:` vocabulary.\n\n",
-        )?;
-    }
-    let task_id = spec_path
-        .parent()
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str())
-        .unwrap_or("<unknown>");
-    writeln!(
-        f,
-        "- `{task_id}` — kind: iteration_budget_exhausted — pre-flight #{iteration} refused; consider re-designing the spec instead of re-running."
-    )?;
-    Ok(())
-}
-
 /// Top-level dispatcher — picks pre or post from flags + state presence, then
 /// calls that phase function. Pure I/O orchestration; the computational pieces
 /// above are independently testable.
@@ -563,7 +596,7 @@ fn run_pre(
         eprintln!(
             "   See `defect-taxonomy.md` in the mastermind-task-planning skill, kind `iteration_budget_exhausted`."
         );
-        let _ = append_iteration_budget_lesson(repo_root, spec_path, iteration);
+        let _ = crate::lessons::append_iteration_budget_candidate(repo_root, spec_path, iteration);
         return Outcome::PreFailed;
     }
 
@@ -801,11 +834,10 @@ fn run_post(
         return Outcome::PostBroken;
     }
 
-    // Deterministic lesson log on Drift/Broken — no-op on Held. Pairs with the
-    // same call in `mmcg audit-spec`, so `_lessons.md` accumulates whether the
-    // user runs the orchestrator or audit-spec directly.
-    match crate::lessons::append_if_drift_or_broken(repo_root, spec_path, &audit) {
-        Ok(true) => println!("  appended lesson → .mastermind/tasks/_lessons.md"),
+    // Mechanical failures become deduplicated candidates. Only semantic review
+    // can promote one to an active reusable lesson.
+    match crate::lessons::append_audit_candidate(repo_root, spec_path, &audit) {
+        Ok(true) => println!("  appended lesson candidate → .mastermind/tasks/_lessons.md"),
         Err(e) => eprintln!("  warning: lessons append failed: {e}"),
         _ => {}
     }
@@ -841,6 +873,14 @@ fn run_post(
                 "warning: failed to write release notes `{}`: {e}",
                 release_path.display()
             ),
+        }
+        match ensure_history_review(repo_root, spec_path, &release_path) {
+            Ok(true) => println!(
+                "History review saved to {}",
+                history_review_file_path(repo_root, spec_path).display()
+            ),
+            Err(error) => eprintln!("warning: failed to create history review: {error}"),
+            _ => {}
         }
         let mut complete = state.clone();
         complete.status = "learned".into();
@@ -1056,6 +1096,14 @@ verifications: []\n\
         assert_eq!(
             release_file_path(root, second),
             root.join(".mastermind/releases/002-second.md")
+        );
+        assert_eq!(
+            history_review_file_path(root, first),
+            root.join(".mastermind/tasks/001-first/history-review.md")
+        );
+        assert_eq!(
+            history_review_file_path(root, second),
+            root.join(".mastermind/tasks/002-second/history-review.md")
         );
     }
 
@@ -1354,6 +1402,10 @@ verifications: []\n\
         let body = fs::read_to_string(&release_path).unwrap();
         assert!(body.starts_with("# Clean add"));
         assert!(body.contains("Audit: ✅ Held"));
+        let review_path = history_review_file_path(&dir, &spec_path);
+        let review = fs::read_to_string(&review_path).unwrap();
+        assert!(review.contains("**Context:** pending"));
+        assert!(review.contains("**Lesson:** pending"));
 
         // A normal re-run of a completed task is idempotent. Explicit
         // --post-only remains available when the user really wants a re-audit.

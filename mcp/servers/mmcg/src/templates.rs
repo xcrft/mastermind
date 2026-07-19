@@ -10,22 +10,11 @@ pub const CONTEXT_TEMPLATE: &str = include_str!("../templates/context.md");
 /// Mastermind workflow CLAUDE.md template.
 pub const WORKFLOW_TEMPLATE: &str = include_str!("../templates/workflow.md");
 
-const PROFILE_TYPESCRIPT_API: &str = include_str!("../templates/profiles/typescript-api.md");
-const PROFILE_REACT_NATIVE: &str = include_str!("../templates/profiles/react-native.md");
-const PROFILE_PYTHON_FASTAPI: &str = include_str!("../templates/profiles/python-fastapi.md");
-const PROFILE_RUST: &str = include_str!("../templates/profiles/rust.md");
-const PROFILE_MONOREPO: &str = include_str!("../templates/profiles/monorepo.md");
-
-/// Return the raw template text for a given profile.
-pub fn for_profile(profile: crate::Profile) -> &'static str {
-    match profile {
-        crate::Profile::Generic => CONTEXT_TEMPLATE,
-        crate::Profile::TypescriptApi => PROFILE_TYPESCRIPT_API,
-        crate::Profile::ReactNative => PROFILE_REACT_NATIVE,
-        crate::Profile::PythonFastapi => PROFILE_PYTHON_FASTAPI,
-        crate::Profile::Rust => PROFILE_RUST,
-        crate::Profile::Monorepo => PROFILE_MONOREPO,
-    }
+/// CONTEXT is deliberately stack-agnostic. Stack facts and commands are
+/// derivable and belong in CLAUDE.md; duplicating profile templates caused
+/// unverified assumptions and schema drift in durable project memory.
+pub fn for_profile(_profile: crate::Profile) -> &'static str {
+    CONTEXT_TEMPLATE
 }
 
 /// Strip the HTML-comment "instructions to the user" block from a template so
@@ -44,5 +33,43 @@ pub fn strip_comment(text: &str) -> String {
         text[body_start..body_end].trim().to_string() + "\n"
     } else {
         text.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_detected_stack_uses_the_same_lean_context_contract() {
+        for profile in [
+            crate::Profile::Generic,
+            crate::Profile::TypescriptApi,
+            crate::Profile::ReactNative,
+            crate::Profile::PythonFastapi,
+            crate::Profile::Rust,
+            crate::Profile::Monorepo,
+        ] {
+            let template = for_profile(profile);
+            for heading in ["## Identity", "## Active goals", "## Decision log"] {
+                assert!(
+                    template.contains(heading),
+                    "missing {heading} in {profile:?}"
+                );
+            }
+            for field in [
+                "Status",
+                "Supersedes",
+                "Provenance",
+                "Evidence",
+                "Reusable lesson",
+            ] {
+                assert!(template.contains(field), "missing {field} in {profile:?}");
+            }
+            assert!(
+                !template.contains("Pre-seeded with"),
+                "generic gotchas in {profile:?}"
+            );
+        }
     }
 }

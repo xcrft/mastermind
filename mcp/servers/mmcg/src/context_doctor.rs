@@ -1,19 +1,33 @@
-//! `mastermind context doctor` — quality audit of `CONTEXT.md`.
+//! `mastermind context doctor` — semantic quality audit of project memory.
 //!
-//! Checks (in order):
-//!
-//! | # | Name                   | Catches                                                |
-//! |---|------------------------|--------------------------------------------------------|
-//! | 1 | `context.md exists`    | file is missing entirely                               |
-//! | 2 | `no placeholders`      | unfilled `<PLACEHOLDER>` / `<TODO>` / `<FILL>` tokens |
-//! | 3 | `minimum content`      | fail < 50 / warn 50–199 non-whitespace chars           |
-//! | 4 | `stack section`        | no Stack / Tech / Language heading                     |
-//! | 5 | `decision log`         | completed tasks exist but no Decision Log section      |
-//! | 6 | `freshness`            | newest task spec is newer than CONTEXT.md              |
-//! | 7 | `lessons file`         | learned tasks exist but no _lessons.md                 |
+//! The doctor validates the lean CONTEXT contract, explicit post-flight history
+//! review, and structured lesson lifecycle. It deliberately does not require a
+//! decision or lesson per task: durable knowledge is selective, not ceremonial.
 
 use serde::Serialize;
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+
+const MAX_LESSONS_SIZE: u64 = 1024 * 1024;
+const REQUIRED_CONTEXT_SECTIONS: &[&str] = &["identity", "active goals", "decision log"];
+const REQUIRED_DECISION_FIELDS: &[&str] = &[
+    "Decision",
+    "Why",
+    "Status",
+    "Supersedes",
+    "Provenance",
+    "Evidence",
+    "Reusable lesson",
+];
+const REQUIRED_LESSON_FIELDS: &[&str] = &[
+    "Status",
+    "Task",
+    "Kind",
+    "Provenance",
+    "Evidence",
+    "Supersedes",
+    "Reusable lesson",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -49,9 +63,18 @@ pub struct Summary {
 impl Report {
     pub fn from_checks(root: &Path, checks: Vec<Check>) -> Self {
         let summary = Summary {
-            ok: checks.iter().filter(|c| c.status == Status::Ok).count() as u32,
-            warn: checks.iter().filter(|c| c.status == Status::Warn).count() as u32,
-            fail: checks.iter().filter(|c| c.status == Status::Fail).count() as u32,
+            ok: checks
+                .iter()
+                .filter(|check| check.status == Status::Ok)
+                .count() as u32,
+            warn: checks
+                .iter()
+                .filter(|check| check.status == Status::Warn)
+                .count() as u32,
+            fail: checks
+                .iter()
+                .filter(|check| check.status == Status::Fail)
+                .count() as u32,
         };
         Self {
             root: root.display().to_string(),
@@ -63,29 +86,28 @@ impl Report {
     pub fn render_text(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!(
-            "mastermind context doctor — checking CONTEXT.md at {}\n\n",
+            "mastermind context doctor — checking project memory at {}\n\n",
             self.root
         ));
         let name_width = self
             .checks
             .iter()
-            .map(|c| c.name.chars().count())
+            .map(|check| check.name.chars().count())
             .max()
             .unwrap_or(20);
-        for c in &self.checks {
-            let marker = match c.status {
+        for check in &self.checks {
+            let marker = match check.status {
                 Status::Ok => "✅",
                 Status::Warn => "⚠️ ",
                 Status::Fail => "❌",
             };
             out.push_str(&format!(
-                "  {marker} {name:<width$}  {msg}\n",
-                marker = marker,
-                name = c.name,
+                "  {marker} {name:<width$}  {message}\n",
+                name = check.name,
                 width = name_width,
-                msg = c.message,
+                message = check.message,
             ));
-            if let Some(hint) = &c.hint {
+            if let Some(hint) = &check.hint {
                 out.push_str(&format!("       → {hint}\n"));
             }
         }
@@ -97,12 +119,12 @@ impl Report {
             out.push_str("\nCommon fixes:\n");
             out.push_str("  Missing file       run `mastermind init` to scaffold CONTEXT.md\n");
             out.push_str(
-                "  Placeholders left  fill every <PLACEHOLDER> / <TODO> with real project data\n",
+                "  Template residue   replace angle-bracket placeholders with project facts\n",
             );
             out.push_str(
-                "  Stale context      add a Decision Log entry after each completed task\n",
+                "  Pending review     resolve task `history-review.md` after semantic review\n",
             );
-            out.push_str("  No lessons file    create `.mastermind/tasks/_lessons.md` with lessons from audits\n");
+            out.push_str("  Lesson candidate   promote, resolve, or supersede it with evidence\n");
         }
         out
     }
@@ -115,22 +137,22 @@ impl Report {
 pub fn run(root: &Path) -> Report {
     let context_path = root.join("CONTEXT.md");
     let body = std::fs::read_to_string(&context_path).ok();
-
+    let learned_tasks = learned_task_dirs(&root.join(".mastermind/tasks"));
     let checks = vec![
         check_exists(&context_path),
         check_placeholders(body.as_deref()),
         check_minimum_content(body.as_deref()),
-        check_stack_section(body.as_deref()),
-        check_decision_log(root, body.as_deref()),
-        check_freshness(root, &context_path),
-        check_lessons_file(root),
+        check_core_sections(body.as_deref()),
+        check_decision_schema(body.as_deref()),
+        check_history_review(&learned_tasks),
+        check_lessons_file(root, &learned_tasks),
     ];
     Report::from_checks(root, checks)
 }
 
 fn check_exists(path: &Path) -> Check {
     if path.is_file() {
-        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
         Check {
             name: "context.md exists",
             status: Status::Ok,
@@ -142,328 +164,561 @@ fn check_exists(path: &Path) -> Check {
             name: "context.md exists",
             status: Status::Fail,
             message: "CONTEXT.md not found at project root".into(),
-            hint: Some("run `mastermind init` to scaffold CONTEXT.md from the codebase".into()),
+            hint: Some("run `mastermind init` to scaffold a lean CONTEXT.md".into()),
         }
     }
 }
 
 fn check_placeholders(body: Option<&str>) -> Check {
     let Some(text) = body else {
-        return Check {
-            name: "no placeholders",
-            status: Status::Warn,
-            message: "skipped — file not readable".into(),
-            hint: None,
-        };
+        return skipped("no placeholders", "file not readable");
     };
-    let markers = ["<PLACEHOLDER>", "<TODO>", "<FILL>", "<fill>", "<todo>"];
-    let hits: Vec<&str> = markers
-        .iter()
-        .copied()
-        .filter(|m| text.contains(m))
-        .collect();
-    if hits.is_empty() {
+    let tokens = placeholder_tokens(text);
+    if tokens.is_empty() {
         Check {
             name: "no placeholders",
             status: Status::Ok,
-            message: "no unfilled placeholder tokens".into(),
+            message: "no unfilled angle-bracket placeholders".into(),
             hint: None,
         }
     } else {
-        let found = hits.join(", ");
+        let preview = tokens
+            .iter()
+            .take(8)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let suffix = if tokens.len() > 8 { ", …" } else { "" };
         Check {
             name: "no placeholders",
             status: Status::Fail,
-            message: format!("unfilled placeholder(s) found: {found}"),
-            hint: Some("replace every placeholder with real project-specific content".into()),
+            message: format!("unfilled placeholder(s): {preview}{suffix}"),
+            hint: Some(
+                "replace each placeholder with a verified project fact or remove the empty entry"
+                    .into(),
+            ),
         }
     }
+}
+
+fn placeholder_tokens(text: &str) -> Vec<String> {
+    let mut tokens = BTreeSet::new();
+    let mut fenced = false;
+    let mut html_comment = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            continue;
+        }
+        let mut in_inline_code = false;
+        let chars: Vec<char> = line.chars().collect();
+        let mut index = 0;
+        while index < chars.len() {
+            if html_comment {
+                if chars[index..].starts_with(&['-', '-', '>']) {
+                    html_comment = false;
+                    index += 3;
+                } else {
+                    index += 1;
+                }
+                continue;
+            }
+            if !in_inline_code && chars[index..].starts_with(&['<', '!', '-', '-']) {
+                html_comment = true;
+                index += 4;
+                continue;
+            }
+            if chars[index] == '`' {
+                in_inline_code = !in_inline_code;
+                index += 1;
+                continue;
+            }
+            if !in_inline_code && chars[index] == '<' {
+                if let Some(offset) = chars[index + 1..].iter().position(|ch| *ch == '>') {
+                    let end = index + 1 + offset;
+                    let inner: String = chars[index + 1..end].iter().collect();
+                    let trimmed = inner.trim();
+                    if !trimmed.is_empty()
+                        && !trimmed.starts_with('!')
+                        && !trimmed.starts_with('/')
+                        && !matches!(trimmed, "br" | "details" | "summary")
+                    {
+                        tokens.insert(format!("<{trimmed}>"));
+                    }
+                    index = end + 1;
+                    continue;
+                }
+            }
+            index += 1;
+        }
+    }
+    tokens.into_iter().collect()
 }
 
 fn check_minimum_content(body: Option<&str>) -> Check {
     let Some(text) = body else {
-        return Check {
-            name: "minimum content",
-            status: Status::Warn,
-            message: "skipped — file not readable".into(),
-            hint: None,
-        };
+        return skipped("minimum content", "file not readable");
     };
-    let non_whitespace: usize = text.chars().filter(|c| !c.is_whitespace()).count();
-    if non_whitespace >= 200 {
+    let meaningful = text
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("<!--"))
+        .flat_map(str::chars)
+        .filter(|ch| !ch.is_whitespace())
+        .count();
+    if meaningful >= 150 {
         Check {
             name: "minimum content",
             status: Status::Ok,
-            message: format!("{non_whitespace} non-whitespace chars"),
+            message: format!("{meaningful} non-whitespace chars"),
             hint: None,
         }
-    } else if non_whitespace >= 50 {
+    } else if meaningful >= 50 {
         Check {
             name: "minimum content",
             status: Status::Warn,
-            message: format!("only {non_whitespace} non-whitespace chars — likely a template stub"),
+            message: format!("only {meaningful} non-whitespace chars"),
             hint: Some(
-                "populate CONTEXT.md with stack, architecture, conventions, and key decisions"
-                    .into(),
+                "record project identity and current goals; do not pad with generic advice".into(),
             ),
         }
     } else {
         Check {
             name: "minimum content",
             status: Status::Fail,
-            message: format!("{non_whitespace} non-whitespace chars — file is essentially empty"),
-            hint: Some(
-                "run `mastermind init` with `--no-claude` removed to auto-populate CONTEXT.md from the codebase".into(),
-            ),
+            message: format!("{meaningful} non-whitespace chars — effectively empty"),
+            hint: Some("populate project identity and active goals with verified facts".into()),
         }
     }
 }
 
-fn check_stack_section(body: Option<&str>) -> Check {
+fn check_core_sections(body: Option<&str>) -> Check {
     let Some(text) = body else {
-        return Check {
-            name: "stack section",
-            status: Status::Warn,
-            message: "skipped — file not readable".into(),
-            hint: None,
-        };
+        return skipped("core sections", "file not readable");
     };
-    let has_stack = text.lines().any(|l| {
-        let lower = l.to_lowercase();
-        (l.starts_with('#') || l.starts_with("##") || l.starts_with("###"))
-            && (lower.contains("stack")
-                || lower.contains("tech")
-                || lower.contains("language")
-                || lower.contains("runtime")
-                || lower.contains("framework"))
-    });
-    if has_stack {
+    let headings: BTreeSet<String> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("## "))
+        .map(|heading| heading.trim().to_ascii_lowercase())
+        .collect();
+    let missing: Vec<&str> = REQUIRED_CONTEXT_SECTIONS
+        .iter()
+        .copied()
+        .filter(|section| !headings.contains(*section))
+        .collect();
+    if missing.is_empty() {
         Check {
-            name: "stack section",
+            name: "core sections",
             status: Status::Ok,
-            message: "stack / tech section found".into(),
+            message: "Identity, Active goals, and Decision log present".into(),
             hint: None,
         }
     } else {
         Check {
-            name: "stack section",
-            status: Status::Warn,
-            message: "no Stack / Tech / Language / Framework heading found".into(),
-            hint: Some(
-                "add a section describing the language, runtime, and key libraries — the executor uses this to pick tools".into(),
-            ),
+            name: "core sections",
+            status: Status::Fail,
+            message: format!("missing section(s): {}", missing.join(", ")),
+            hint: Some("restore the canonical lean CONTEXT headings".into()),
         }
     }
 }
 
-fn check_decision_log(root: &Path, body: Option<&str>) -> Check {
-    let tasks_dir = root.join(".mastermind").join("tasks");
-    let has_completed_tasks = completed_task_count(&tasks_dir) > 0;
-
-    if !has_completed_tasks {
-        return Check {
-            name: "decision log",
-            status: Status::Ok,
-            message: "no completed tasks yet — decision log not required".into(),
-            hint: None,
-        };
-    }
-
+fn check_decision_schema(body: Option<&str>) -> Check {
     let Some(text) = body else {
+        return skipped("decision schema", "file not readable");
+    };
+    let Some(section) = markdown_section(text, "Decision log") else {
+        return skipped("decision schema", "Decision log section missing");
+    };
+    let entries = level_three_blocks(section);
+    if entries.is_empty() {
         return Check {
-            name: "decision log",
-            status: Status::Warn,
-            message: "skipped — CONTEXT.md not readable".into(),
+            name: "decision schema",
+            status: Status::Ok,
+            message: "no durable decisions recorded yet".into(),
             hint: None,
         };
-    };
-
-    let has_log = text.lines().any(|l| {
-        let lower = l.to_lowercase();
-        (l.starts_with('#'))
-            && (lower.contains("decision")
-                || lower.contains("history")
-                || lower.contains("log")
-                || lower.contains("change"))
-    });
-
-    if has_log {
+    }
+    let mut problems = Vec::new();
+    for (title, block) in entries {
+        let missing: Vec<&str> = REQUIRED_DECISION_FIELDS
+            .iter()
+            .copied()
+            .filter(|field| !has_field(block, field))
+            .collect();
+        if !missing.is_empty() {
+            problems.push(format!("{title}: {}", missing.join(", ")));
+        }
+    }
+    if problems.is_empty() {
         Check {
-            name: "decision log",
+            name: "decision schema",
             status: Status::Ok,
-            message: "decision log section present".into(),
+            message: "all decision entries include provenance, evidence, and lifecycle fields"
+                .into(),
             hint: None,
         }
     } else {
-        let n = completed_task_count(&tasks_dir);
         Check {
-            name: "decision log",
+            name: "decision schema",
             status: Status::Warn,
-            message: format!("{n} completed task(s) but no Decision Log section in CONTEXT.md"),
-            hint: Some(
-                "add a ## Decision Log section and record one line per completed task — future planners use this to avoid repeating rejected approaches".into(),
-            ),
+            message: format!("incomplete decision entries: {}", problems.join("; ")),
+            hint: Some("add the missing fields; use `decision only — not technically verified` when appropriate".into()),
         }
     }
 }
 
-fn check_freshness(root: &Path, context_path: &Path) -> Check {
-    if !context_path.is_file() {
+fn check_history_review(tasks: &[PathBuf]) -> Check {
+    if tasks.is_empty() {
         return Check {
-            name: "freshness",
-            status: Status::Warn,
-            message: "skipped — CONTEXT.md not found".into(),
+            name: "history review",
+            status: Status::Ok,
+            message: "no completed tasks require semantic review".into(),
             hint: None,
         };
     }
-
-    let ctx_mtime = match std::fs::metadata(context_path).and_then(|m| m.modified()) {
-        Ok(t) => t,
-        Err(_) => {
-            return Check {
-                name: "freshness",
-                status: Status::Warn,
-                message: "cannot stat CONTEXT.md mtime".into(),
-                hint: None,
-            };
-        }
-    };
-
-    let tasks_dir = root.join(".mastermind").join("tasks");
-    let newest_spec = newest_spec_mtime(&tasks_dir);
-
-    let Some(spec_mtime) = newest_spec else {
-        return Check {
-            name: "freshness",
-            status: Status::Ok,
-            message: "no task specs found — nothing to compare against".into(),
-            hint: None,
+    let mut unresolved = Vec::new();
+    for task in tasks {
+        let task_name = task
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("unknown");
+        let review_path = task.join("history-review.md");
+        let Ok(body) = std::fs::read_to_string(&review_path) else {
+            unresolved.push(format!("{task_name}: missing"));
+            continue;
         };
-    };
-
-    if spec_mtime <= ctx_mtime {
+        let context = field_value(&body, "Context");
+        let lesson = field_value(&body, "Lesson");
+        let reason = field_value(&body, "Reason");
+        let valid = |value: Option<&str>| {
+            value.is_some_and(|value| {
+                matches!(normalized(value).as_str(), "updated" | "not applicable")
+            })
+        };
+        if !valid(context) || !valid(lesson) {
+            unresolved.push(format!("{task_name}: pending disposition"));
+        } else if reason.is_none_or(|value| {
+            value.trim().is_empty() || normalized(value) == "semantic review required"
+        }) {
+            unresolved.push(format!("{task_name}: reason not reviewed"));
+        }
+    }
+    if unresolved.is_empty() {
         Check {
-            name: "freshness",
+            name: "history review",
             status: Status::Ok,
-            message: "CONTEXT.md is at least as recent as the newest task spec".into(),
+            message: format!(
+                "{} completed task(s) have explicit dispositions",
+                tasks.len()
+            ),
             hint: None,
         }
     } else {
-        let delta_secs = spec_mtime
-            .duration_since(ctx_mtime)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let delta_label = format_duration(delta_secs);
         Check {
-            name: "freshness",
+            name: "history review",
             status: Status::Warn,
-            message: format!("newest task spec is {delta_label} newer than CONTEXT.md"),
+            message: format!("unresolved: {}", unresolved.join(", ")),
             hint: Some(
-                "update CONTEXT.md Decision Log / Architecture section to reflect recent changes"
+                "review durable knowledge, then mark Context and Lesson as `updated` or `not applicable`"
                     .into(),
             ),
         }
     }
 }
 
-fn check_lessons_file(root: &Path) -> Check {
-    let tasks_dir = root.join(".mastermind").join("tasks");
-    let n = completed_task_count(&tasks_dir);
-    if n == 0 {
-        return Check {
-            name: "lessons file",
-            status: Status::Ok,
-            message: "no completed tasks yet — _lessons.md not required".into(),
-            hint: None,
+fn check_lessons_file(root: &Path, tasks: &[PathBuf]) -> Check {
+    let lessons_path = root.join(".mastermind/tasks/_lessons.md");
+    if !lessons_path.is_file() {
+        let expected = tasks.iter().any(|task| {
+            std::fs::read_to_string(task.join("history-review.md"))
+                .ok()
+                .and_then(|body| field_value(&body, "Lesson").map(str::to_owned))
+                .is_some_and(|value| normalized(&value) == "updated")
+        });
+        return if expected {
+            Check {
+                name: "lessons quality",
+                status: Status::Warn,
+                message: "history review says lesson updated, but _lessons.md is missing".into(),
+                hint: Some("record the reviewed lesson with provenance and evidence".into()),
+            }
+        } else {
+            Check {
+                name: "lessons quality",
+                status: Status::Ok,
+                message: "no project lessons recorded".into(),
+                hint: None,
+            }
         };
     }
-
-    let lessons = tasks_dir.join("_lessons.md");
-    if lessons.is_file() {
-        let size = std::fs::metadata(&lessons).map(|m| m.len()).unwrap_or(0);
+    let size = std::fs::metadata(&lessons_path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    if size > MAX_LESSONS_SIZE {
+        return Check {
+            name: "lessons quality",
+            status: Status::Warn,
+            message: format!(
+                "_lessons.md is {} and will be skipped by history indexing",
+                format_bytes(size)
+            ),
+            hint: Some("archive resolved entries before the file reaches 1 MB".into()),
+        };
+    }
+    let body = std::fs::read_to_string(&lessons_path).unwrap_or_default();
+    let entries = level_two_blocks(&body);
+    if entries.is_empty() {
+        return Check {
+            name: "lessons quality",
+            status: Status::Warn,
+            message: "legacy or empty lesson format — no structured entries".into(),
+            hint: Some("migrate lessons to `## lesson-<id>` entries with lifecycle fields".into()),
+        };
+    }
+    let mut candidates = 0;
+    let mut malformed = Vec::new();
+    for (title, block) in &entries {
+        let missing: Vec<&str> = REQUIRED_LESSON_FIELDS
+            .iter()
+            .copied()
+            .filter(|field| !has_field(block, field))
+            .collect();
+        if !missing.is_empty() {
+            malformed.push(format!("{title}: {}", missing.join(", ")));
+        }
+        if field_value(block, "Status").is_some_and(|value| normalized(value) == "candidate") {
+            candidates += 1;
+        }
+    }
+    if !malformed.is_empty() {
         Check {
-            name: "lessons file",
+            name: "lessons quality",
+            status: Status::Warn,
+            message: format!("malformed entries: {}", malformed.join("; ")),
+            hint: Some("add the missing lifecycle and evidence fields".into()),
+        }
+    } else if candidates > 0 {
+        Check {
+            name: "lessons quality",
+            status: Status::Warn,
+            message: format!("{candidates} candidate lesson(s) await semantic review"),
+            hint: Some("replace the pending lesson and set active, resolved, or superseded".into()),
+        }
+    } else {
+        Check {
+            name: "lessons quality",
             status: Status::Ok,
-            message: format!("_lessons.md found ({})", format_bytes(size)),
+            message: format!(
+                "{} structured lesson(s), no pending candidates",
+                entries.len()
+            ),
             hint: None,
         }
-    } else {
-        Check {
-            name: "lessons file",
-            status: Status::Warn,
-            message: format!("{n} completed task(s) but no .mastermind/tasks/_lessons.md"),
-            hint: Some(
-                "create _lessons.md — the auditor appends one-liner lessons after each audit; planners read it before designing".into(),
-            ),
+    }
+}
+
+fn learned_task_dirs(tasks_dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(tasks_dir) else {
+        return Vec::new();
+    };
+    let mut tasks = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Ok(body) = std::fs::read_to_string(path.join("state.json")) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
+            continue;
+        };
+        if value.get("status").and_then(|status| status.as_str()) == Some("learned") {
+            tasks.push(path);
         }
     }
+    tasks.sort();
+    tasks
 }
 
-fn completed_task_count(tasks_dir: &Path) -> usize {
-    if !tasks_dir.is_dir() {
-        return 0;
-    }
-    let mut count = 0usize;
-    if let Ok(entries) = std::fs::read_dir(tasks_dir) {
-        for entry in entries.flatten() {
-            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                continue;
-            }
-            let state_path = entry.path().join("state.json");
-            if state_path.is_file() {
-                if let Ok(body) = std::fs::read_to_string(&state_path) {
-                    if body.contains("\"learned\"") {
-                        count += 1;
-                    }
-                }
-            }
+fn markdown_section<'a>(text: &'a str, heading: &str) -> Option<&'a str> {
+    let marker = format!("## {heading}");
+    let start = text.find(&marker)? + marker.len();
+    let rest = &text[start..];
+    let end = rest
+        .find("\n## ")
+        .map(|index| index + 1)
+        .unwrap_or(rest.len());
+    Some(&rest[..end])
+}
+
+fn level_three_blocks(section: &str) -> Vec<(&str, &str)> {
+    markdown_blocks(section, "### ")
+}
+
+fn level_two_blocks(section: &str) -> Vec<(&str, &str)> {
+    markdown_blocks(section, "## ")
+        .into_iter()
+        .filter(|(title, _)| title.starts_with("lesson-"))
+        .collect()
+}
+
+fn markdown_blocks<'a>(text: &'a str, prefix: &str) -> Vec<(&'a str, &'a str)> {
+    let mut starts = Vec::new();
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        if let Some(title) = line.trim_end().strip_prefix(prefix) {
+            starts.push((offset, title));
         }
+        offset += line.len();
     }
-    count
+    starts
+        .iter()
+        .enumerate()
+        .map(|(index, (start, title))| {
+            let end = starts
+                .get(index + 1)
+                .map(|(next, _)| *next)
+                .unwrap_or(text.len());
+            (*title, &text[*start..end])
+        })
+        .collect()
 }
 
-fn newest_spec_mtime(tasks_dir: &Path) -> Option<std::time::SystemTime> {
-    if !tasks_dir.is_dir() {
-        return None;
-    }
-    let mut newest: Option<std::time::SystemTime> = None;
-    if let Ok(entries) = std::fs::read_dir(tasks_dir) {
-        for entry in entries.flatten() {
-            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                continue;
-            }
-            let spec = entry.path().join("spec.md");
-            if let Ok(meta) = std::fs::metadata(&spec) {
-                if let Ok(mtime) = meta.modified() {
-                    newest = Some(match newest {
-                        None => mtime,
-                        Some(prev) => prev.max(mtime),
-                    });
-                }
-            }
-        }
-    }
-    newest
+fn has_field(block: &str, field: &str) -> bool {
+    field_value(block, field).is_some()
 }
 
-fn format_bytes(n: u64) -> String {
-    if n < 1024 {
-        format!("{n} B")
-    } else if n < 1024 * 1024 {
-        format!("{:.1} KB", n as f64 / 1024.0)
+fn field_value<'a>(body: &'a str, field: &str) -> Option<&'a str> {
+    let marker = format!("- **{field}:**");
+    body.lines()
+        .find_map(|line| line.trim().strip_prefix(&marker).map(str::trim))
+}
+
+fn normalized(value: &str) -> String {
+    value.trim().trim_matches('`').trim().to_ascii_lowercase()
+}
+
+fn skipped(name: &'static str, reason: &str) -> Check {
+    Check {
+        name,
+        status: Status::Warn,
+        message: format!("skipped — {reason}"),
+        hint: None,
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
     } else {
-        format!("{:.1} MB", n as f64 / (1024.0 * 1024.0))
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     }
 }
 
-fn format_duration(secs: u64) -> String {
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m", secs / 60)
-    } else if secs < 86400 {
-        format!("{}h", secs / 3600)
-    } else {
-        format!("{}d", secs / 86400)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn context() -> &'static str {
+        "# Demo — Context\n\n## Identity\n\n**What it is:** A deterministic codegraph and workflow CLI for coding agents.\n\n**What it is not:** A hosted execution platform.\n\n**Primary users:** Open-source maintainers and coding-agent users.\n\n## Active goals\n\n- Preserve evidence-backed workflow state across sessions.\n\n## Decision log\n\n"
+    }
+
+    #[test]
+    fn detects_real_template_placeholders_but_ignores_code() {
+        let tokens = placeholder_tokens(
+            "# <PROJECT_NAME>\n<one or two sentences>\n<!-- <ignored> -->\n`<task>/state.json`\n```ts\nconst x = <T>();\n```\n",
+        );
+        assert_eq!(
+            tokens,
+            vec![
+                "<PROJECT_NAME>".to_string(),
+                "<one or two sentences>".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn lean_context_does_not_require_a_stack_section() {
+        let report = Report::from_checks(
+            Path::new("."),
+            vec![
+                check_core_sections(Some(context())),
+                check_decision_schema(Some(context())),
+            ],
+        );
+        assert_eq!(report.summary.fail, 0);
+        assert_eq!(report.summary.warn, 0);
+    }
+
+    #[test]
+    fn incomplete_decision_warns_on_provenance_and_lifecycle() {
+        let body = format!(
+            "{}### 2026-07-19 — Pick storage\n\n- **Decision:** SQLite\n- **Why:** Local operation\n",
+            context()
+        );
+        let check = check_decision_schema(Some(&body));
+        assert_eq!(check.status, Status::Warn);
+        assert!(check.message.contains("Provenance"));
+        assert!(check.message.contains("Reusable lesson"));
+    }
+
+    #[test]
+    fn completed_task_status_is_parsed_exactly() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks = dir.path().join("tasks");
+        let learned = tasks.join("001-learned");
+        let unrelated = tasks.join("002-unrelated");
+        std::fs::create_dir_all(&learned).unwrap();
+        std::fs::create_dir_all(&unrelated).unwrap();
+        std::fs::write(learned.join("state.json"), r#"{"status":"learned"}"#).unwrap();
+        std::fs::write(
+            unrelated.join("state.json"),
+            r#"{"status":"held","blocking_reason":"not learned yet"}"#,
+        )
+        .unwrap();
+        assert_eq!(learned_task_dirs(&tasks), vec![learned]);
+    }
+
+    #[test]
+    fn history_review_requires_explicit_dispositions_and_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let task = dir.path().join("001-task");
+        std::fs::create_dir_all(&task).unwrap();
+        std::fs::write(
+            task.join("history-review.md"),
+            "- **Context:** pending\n- **Lesson:** pending\n- **Reason:** semantic review required\n",
+        )
+        .unwrap();
+        assert_eq!(
+            check_history_review(std::slice::from_ref(&task)).status,
+            Status::Warn
+        );
+        std::fs::write(
+            task.join("history-review.md"),
+            "- **Context:** not applicable\n- **Lesson:** updated\n- **Reason:** Captured a reusable boundary rule.\n",
+        )
+        .unwrap();
+        assert_eq!(check_history_review(&[task]).status, Status::Ok);
+    }
+
+    #[test]
+    fn candidate_lessons_are_not_reported_as_active_knowledge() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks = dir.path().join(".mastermind/tasks");
+        std::fs::create_dir_all(&tasks).unwrap();
+        std::fs::write(
+            tasks.join("_lessons.md"),
+            "# Project lessons\n\n## lesson-abc\n\n- **Status:** candidate\n- **Task:** `001`\n- **Kind:** `audit_contract_failure`\n- **Provenance:** controller\n- **Evidence:** `audit.md`\n- **Supersedes:** none\n- **Reusable lesson:** pending semantic review\n",
+        )
+        .unwrap();
+        let check = check_lessons_file(dir.path(), &[]);
+        assert_eq!(check.status, Status::Warn);
+        assert!(check.message.contains("candidate"));
     }
 }

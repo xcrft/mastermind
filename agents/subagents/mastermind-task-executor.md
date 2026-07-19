@@ -5,7 +5,7 @@ tools: Read, Edit, Write, Grep, Glob, Bash
 model: sonnet
 mcpServers: [mmcg]
 metadata:
-  version: 0.5.0
+  version: 0.5.1
   authors: [mastermind]
   tags: [workflow, delegation]
 ---
@@ -101,6 +101,9 @@ verifications:
 `partial` or `failed` requires a concrete defect. Claims are limited to
 `function_added` and `integration`; use `claims: []` otherwise.
 
-Apply [[no-ai-slop-comments]] only to comments added or modified by the task.
-Preserve required docs, licenses, invariants, security constraints, and
-non-obvious reasons.
+Before Final Verification, inspect comments added or modified by the task.
+Default to zero new comments. Delete narration, section banners, step/edit
+markers, signature echoes, dead code, and ownerless TODOs. Keep only required
+docs, licenses, invariants, security constraints, and non-obvious reasons that
+would be lost without the comment. Leave unrelated existing comments alone.
+This is the [[no-ai-slop-comments]] gate, not an optional style suggestion.

@@ -41,6 +41,30 @@ action: passthrough
         )
         self.assertFalse(runner.contains_any_phrase("Write a strict spec.", ["no task spec"]))
 
+    def test_code_comment_policy_rejects_slop_and_accepts_zero_comments(self):
+        clean = """```ts
+export const double = (value: number) => value * 2;
+export const docs = "https://example.com/reference";
+```"""
+        noisy = "```ts\n// Double the value\nreturn value * 2; // return result\n```"
+        policy = {"prefixes": ["//"], "max": 0}
+        self.assertEqual(runner.code_comment_policy_reasons(clean, policy), [])
+        reasons = runner.code_comment_policy_reasons(noisy, policy)
+        self.assertTrue(any("expected at most 0" in reason for reason in reasons))
+
+    def test_code_comment_policy_can_require_one_non_obvious_reason(self):
+        output = """```ts
+// Keep the loop constant-time: an early return leaks prefix length.
+for (let index = 0; index < left.length; index += 1) mismatch |= left[index] ^ right[index];
+```"""
+        policy = {
+            "prefixes": ["//"],
+            "min": 1,
+            "max": 1,
+            "contains_any": [["constant-time", "timing"]],
+        }
+        self.assertEqual(runner.code_comment_policy_reasons(output, policy), [])
+
 
 class PromptIsolationTests(unittest.TestCase):
     def test_workflow_allowlist_matches_shipped_skills(self):

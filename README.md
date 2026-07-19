@@ -8,7 +8,7 @@
   <a href="https://www.npmjs.com/package/@xcraftmind/mastermind"><img src="https://img.shields.io/npm/v/@xcraftmind/mastermind.svg" alt="npm version"></a>
   <a href="https://github.com/xcrft/mastermind/actions/workflows/ci-mmcg.yml"><img src="https://github.com/xcrft/mastermind/actions/workflows/ci-mmcg.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
-  <a href="evals/benchmarks.md"><img src="https://img.shields.io/badge/evals-critic%20%2B%20auditor%20%2B%20intake%20%2B%20workflow-yellowgreen" alt="Evals"></a>
+  <a href="evals/scorecard.md"><img src="https://img.shields.io/badge/evals-critic%20%2B%20auditor%20%2B%20intake%20%2B%20workflow-yellowgreen" alt="Evals"></a>
 </p>
 
 **A local codegraph and verifiable workflow for AI coding agents.**

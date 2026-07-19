@@ -14,7 +14,7 @@ user-facing workflow skills.
 - `runner.py` — invokes the subagent via `claude -p`, asserts on verdict/action + key phrases
 - `ablation.py` — vanilla-vs-mastermind catch-rate study over the planted-defect auditor cases (does the codegraph + auditor contract beat plain `claude -p` + grep/read?); see [Ablation](#ablation)
 - `fixtures/` — real-git source trees used by auditor cases; see `fixtures/<name>/README.md`
-- `benchmarks.md` — current pass-rates per suite + trust conditions + ablation pointer
+- `scorecard.md` — dated full-suite pass rates, trust conditions, and ablation status
 
 ## Run
 
@@ -124,10 +124,15 @@ prompt is evaluated as text and cannot operate on the maintainer's checkout.
   "expect": {
     "contains": ["required signal"],
     "contains_any": [["equivalent phrase A", "equivalent phrase B"]],
-    "not_contains": ["forbidden claim"]
+    "not_contains": ["forbidden claim"],
+    "code_comments": {"prefixes": ["//", "/*"], "min": 0, "max": 0}
   }
 }
 ```
+
+`code_comments` is optional. It counts comment markers outside quoted strings
+in fenced code blocks and can also require phrases in retained comments. Use it
+when the behavior under test is generated code, not merely advice about code.
 
 ## Intake suite
 
@@ -157,7 +162,8 @@ with the same phrase signal as the suite:
   head-to-head with `--with-mastermind`; otherwise it compares against the auditor
   suite's own result.
 
-Golden (`held`) cases are excluded — nothing to catch. Record results in `benchmarks.md`.
+Golden (`held`) cases are excluded — nothing to catch. Record results in
+`scorecard.md`; keep full-suite results separate from targeted reruns.
 
 ```bash
 python evals/ablation.py                   # vanilla over all defect cases

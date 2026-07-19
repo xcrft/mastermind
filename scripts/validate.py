@@ -711,6 +711,52 @@ def validate_workflow_eval_contract() -> list[Issue]:
                         f"workflow eval line {number} has invalid contains_any assertions",
                     )
                 )
+        if isinstance(expect, dict) and "code_comments" in expect:
+            policy = expect["code_comments"]
+            valid_policy = isinstance(policy, dict)
+            if valid_policy:
+                prefixes = policy.get("prefixes", ["//", "/*"])
+                minimum = policy.get("min", 0)
+                maximum = policy.get("max")
+                forbidden = policy.get("not_contains", [])
+                required_groups = policy.get("contains_any", [])
+                valid_policy = (
+                    isinstance(prefixes, list)
+                    and bool(prefixes)
+                    and all(isinstance(prefix, str) and prefix for prefix in prefixes)
+                    and isinstance(minimum, int)
+                    and not isinstance(minimum, bool)
+                    and minimum >= 0
+                    and (
+                        maximum is None
+                        or (
+                            isinstance(maximum, int)
+                            and not isinstance(maximum, bool)
+                            and maximum >= minimum
+                        )
+                    )
+                    and isinstance(policy.get("require_fenced_code", True), bool)
+                    and isinstance(forbidden, list)
+                    and all(
+                        isinstance(phrase, str) and phrase
+                        for phrase in forbidden
+                    )
+                    and isinstance(required_groups, list)
+                    and all(
+                        isinstance(group, list)
+                        and len(group) >= 2
+                        and all(isinstance(phrase, str) and phrase for phrase in group)
+                        for group in required_groups
+                    )
+                )
+            if not valid_policy:
+                issues.append(
+                    Issue(
+                        path,
+                        "error",
+                        f"workflow eval line {number} has invalid code_comments policy",
+                    )
+                )
     if found_artifacts != required_artifacts:
         missing = required_artifacts - found_artifacts
         extra = found_artifacts - required_artifacts

@@ -389,6 +389,70 @@ def contains_any_phrase(output: str, phrases: list[str]) -> bool:
     return bool(phrases) and any(phrase.lower() in lowered for phrase in phrases)
 
 
+_FENCED_CODE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
+
+
+def _comment_start(line: str, prefixes: list[str]) -> int | None:
+    """Find a comment marker outside simple quoted strings."""
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(line):
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+            continue
+        if any(line.startswith(prefix, index) for prefix in prefixes):
+            return index
+    return None
+
+
+def extract_code_comments(output: str, prefixes: list[str]) -> tuple[list[str], bool]:
+    """Return comment fragments from fenced code and whether code was fenced."""
+    blocks = _FENCED_CODE_RE.findall(output)
+    if not blocks:
+        return [], False
+    comments: list[str] = []
+    for block in blocks:
+        for line in block.splitlines():
+            position = _comment_start(line, prefixes)
+            if position is not None:
+                comments.append(line[position:].strip())
+    return comments, True
+
+
+def code_comment_policy_reasons(output: str, policy: dict) -> list[str]:
+    """Deterministically score comments in model-generated fenced code."""
+    prefixes = policy.get("prefixes", ["//", "/*"])
+    comments, fenced = extract_code_comments(output, prefixes)
+    reasons: list[str] = []
+    if policy.get("require_fenced_code", True) and not fenced:
+        reasons.append("comment policy requires a fenced code block")
+        return reasons
+    minimum = policy.get("min", 0)
+    maximum = policy.get("max")
+    if len(comments) < minimum:
+        reasons.append(f"found {len(comments)} code comment(s), expected at least {minimum}")
+    if maximum is not None and len(comments) > maximum:
+        reasons.append(
+            f"found {len(comments)} code comment(s), expected at most {maximum}: {comments!r}"
+        )
+    comment_text = "\n".join(comments)
+    for alternatives in policy.get("contains_any", []):
+        if not contains_any_phrase(comment_text, alternatives):
+            reasons.append(f"comments lack required alternatives: {alternatives!r}")
+    for phrase in policy.get("not_contains", []):
+        if phrase.lower() in comment_text.lower():
+            reasons.append(f"forbidden comment phrase present: {phrase!r}")
+    return reasons
+
+
 # ----- per-case evaluator ---------------------------------------------------
 
 
@@ -569,6 +633,13 @@ def evaluate_case(
             if phrase.lower() in output.lower():
                 passed = False
                 reasons.append(f"forbidden phrase present: {phrase!r}")
+
+        comment_policy = expect.get("code_comments")
+        if comment_policy is not None:
+            comment_reasons = code_comment_policy_reasons(output, comment_policy)
+            if comment_reasons:
+                passed = False
+                reasons.extend(comment_reasons)
 
         return Result(
             case_id,

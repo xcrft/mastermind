@@ -131,6 +131,16 @@ pub struct TaskSpecEntry {
     pub body: String,
 }
 
+/// One durable project-history artifact ready for the derived FTS5 corpus.
+/// Markdown files remain authoritative; this row is only a rebuildable search view.
+#[derive(Debug, Clone)]
+pub struct ProjectHistoryEntry {
+    pub path: String,
+    pub kind: String,
+    pub title: String,
+    pub body: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ScratchpadEntry {
     pub id: i64,
@@ -146,6 +156,18 @@ pub struct TaskSpecHit {
     pub path: String,
     pub title: String,
     /// Body excerpt around the matched terms with `«match»` highlights.
+    pub excerpt: String,
+    /// FTS5 BM25 score — lower = better match (negative is normal).
+    pub score: f64,
+}
+
+/// One observed match from the derived project-history corpus.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectHistoryHit {
+    pub path: String,
+    pub kind: String,
+    pub title: String,
+    /// Body excerpt around matched terms with `«match»` highlights.
     pub excerpt: String,
     /// FTS5 BM25 score — lower = better match (negative is normal).
     pub score: f64,
@@ -327,6 +349,16 @@ impl Store {
             -- `path` is UNINDEXED — we don't tokenize file paths.
             CREATE VIRTUAL TABLE IF NOT EXISTS task_specs_fts USING fts5(
                 path UNINDEXED,
+                title,
+                body,
+                tokenize = 'porter unicode61 remove_diacritics 2'
+            );
+
+            -- Rebuildable search view over durable project-history Markdown.
+            -- `kind` is metadata for exact filtering, not tokenized evidence.
+            CREATE VIRTUAL TABLE IF NOT EXISTS project_history_fts USING fts5(
+                path UNINDEXED,
+                kind UNINDEXED,
                 title,
                 body,
                 tokenize = 'porter unicode61 remove_diacritics 2'
@@ -1487,6 +1519,24 @@ impl Store {
         tx.commit()
     }
 
+    /// Atomically replace the derived project-history corpus. The indexer calls
+    /// this after scanning the supported Markdown sources, which also removes
+    /// stale rows after a rename or deletion.
+    pub fn replace_project_history(&mut self, entries: &[ProjectHistoryEntry]) -> SqlResult<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM project_history_fts", [])?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO project_history_fts(path, kind, title, body)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for entry in entries {
+                stmt.execute(params![entry.path, entry.kind, entry.title, entry.body])?;
+            }
+        }
+        tx.commit()
+    }
+
     /// Strongly-connected components of size ≥ `min_size` in the file-level
     /// import graph. A returned SCC = a circular-import group.
     ///
@@ -1574,6 +1624,51 @@ impl Store {
     pub fn task_specs_count(&self) -> SqlResult<u32> {
         self.conn
             .query_row("SELECT COUNT(*) FROM task_specs_fts", [], |r| r.get(0))
+    }
+
+    /// Full-text retrieval over durable project-history artifacts. This method
+    /// returns observed matches only; callers must not treat rank as confidence
+    /// or infer causality from co-occurrence.
+    pub fn search_project_history(
+        &self,
+        query: &str,
+        kind: Option<&str>,
+        top: u32,
+    ) -> SqlResult<Vec<ProjectHistoryHit>> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let kind = kind.map(str::trim).filter(|value| !value.is_empty());
+        let mut stmt = self.conn.prepare(
+            "SELECT path,
+                    kind,
+                    title,
+                    snippet(project_history_fts, 3, '«', '»', '…', 16) AS excerpt,
+                    bm25(project_history_fts) AS score
+             FROM project_history_fts
+             WHERE project_history_fts MATCH ?1
+               AND (?2 IS NULL OR kind = ?2)
+             ORDER BY rank
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![trimmed, kind, top], |row| {
+            Ok(ProjectHistoryHit {
+                path: row.get(0)?,
+                kind: row.get(1)?,
+                title: row.get(2)?,
+                excerpt: row.get(3)?,
+                score: row.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn project_history_count(&self) -> SqlResult<u32> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM project_history_fts", [], |row| {
+                row.get(0)
+            })
     }
 
     /// Files with `indexed_at >= threshold_unix`. Backs `mmcg_recent_changes`
@@ -2288,6 +2383,49 @@ mod tests {
         // Replace is wholesale — a smaller set wipes the old.
         store.replace_task_specs(&entries[..1]).unwrap();
         assert_eq!(store.task_specs_count().unwrap(), 1);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn project_history_search_is_filterable_and_wholesale() {
+        let path = tmp_db("project_history_fts");
+        let mut store = Store::open(&path).unwrap();
+        let entries = vec![
+            ProjectHistoryEntry {
+                path: "CONTEXT.md".into(),
+                kind: "context".into(),
+                title: "Project context".into(),
+                body: "Decision: use an idempotency key at the runtime boundary.".into(),
+            },
+            ProjectHistoryEntry {
+                path: ".mastermind/tasks/_lessons.md".into(),
+                kind: "lesson".into(),
+                title: "Lessons".into(),
+                body: "A prior token bucket attempt failed under clock skew.".into(),
+            },
+        ];
+        store.replace_project_history(&entries).unwrap();
+        assert_eq!(store.project_history_count().unwrap(), 2);
+
+        let all = store.search_project_history("token", None, 10).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].kind, "lesson");
+
+        let filtered = store
+            .search_project_history("token", Some("context"), 10)
+            .unwrap();
+        assert!(filtered.is_empty());
+        assert!(store
+            .search_project_history("   ", None, 10)
+            .unwrap()
+            .is_empty());
+
+        store.replace_project_history(&entries[..1]).unwrap();
+        assert_eq!(store.project_history_count().unwrap(), 1);
+        assert!(store
+            .search_project_history("clock skew", None, 10)
+            .unwrap()
+            .is_empty());
         std::fs::remove_file(&path).ok();
     }
 

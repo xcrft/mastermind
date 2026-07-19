@@ -2,7 +2,7 @@
 name: mastermind-codegraph-research
 description: Use mmcg to ground structural code claims before planning, auditing, criticizing, or researching code. Triggers when an agent needs symbol existence, callers, callees, imports, blast radius, file existence, or stale-index handling.
 metadata:
-  version: 0.1.1
+  version: 0.2.0
   authors:
     - mastermind
   tags:
@@ -67,6 +67,21 @@ Whenever you read code or report a structural fact, carry the `file:line`. Downs
 Catch yourself guessing a signature, a path, or a caller count → query the graph
 or read the source. Preserve `stale`, collision, precision, and truncation
 metadata with any downstream claim.
+
+## Epistemic envelope
+
+For any conclusion that changes scope, risk, or implementation, separate:
+
+- **Observed** — direct graph result, source line, test output, or runtime fact.
+- **Inferred** — the conclusion drawn from those observations and why it follows.
+- **Unknown** — missing evidence that could change the conclusion.
+- **Confidence** — `high`, `medium`, or `low`, plus a concrete reason. Never derive
+  confidence from the number of search hits alone.
+- **Would change this conclusion** — the contradictory source, runtime result,
+  collision resolution, or fresh index result that would falsify it.
+
+Do not hide a speculative leap inside an observed-facts paragraph. A zero result
+means "not found in this index under this query," not "does not exist."
 
 ## Related skills
 

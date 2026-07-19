@@ -2,7 +2,7 @@
 name: mastermind-critical-review
 description: Stress-test a proposed design, task spec, implementation plan, or executor report for false assumptions, broken contracts, scope creep, missing evidence, and high-risk failure modes. Use before drafting sensitive specs, before approving a plan, or when a critic/auditor needs a compact review rubric.
 metadata:
-  version: 0.1.1
+  version: 0.2.0
   authors:
     - mastermind
   tags:
@@ -94,6 +94,12 @@ Exactly one:
 
 ### Not reviewed
 - <anything outside scope or blocked by missing evidence>
+
+### Epistemic envelope
+- **Observed:** <direct evidence used by the verdict>
+- **Inferred:** <bounded conclusion and why it follows>
+- **Confidence:** high | medium | low — <reason>
+- **Would change the verdict:** <specific evidence or failed/passing proof>
 ```
 
 Rules:

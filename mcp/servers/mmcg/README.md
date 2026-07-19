@@ -1,6 +1,6 @@
 ---
 name: mmcg
-description: Mastermind Codegraph — fast multi-language code indexer (Python + TypeScript/TSX + JavaScript/JSX + Rust + C# + Go + Java + PHP + C/C++) exposed over MCP. Indexes symbols, calls, and imports into a local SQLite database and exposes 23 bounded tools for AI coding agents.
+description: Mastermind Codegraph — fast multi-language code indexer (Python + TypeScript/TSX + JavaScript/JSX + Rust + C# + Go + Java + PHP + C/C++) exposed over MCP. Indexes symbols, calls, imports, and durable project history into a local SQLite database and exposes 24 bounded tools for AI coding agents.
 metadata:
   version: 0.38.1
   authors:
@@ -92,9 +92,11 @@ See the [client integration guides](https://github.com/xcrft/mastermind/tree/mai
 | Change analysis | Git-aware symbol changes, blast radius, component crossings |
 | Test selection | Direct, transitive, and heuristic candidates with evidence |
 | Workflow gates | `verify-spec`, `audit-spec`, and `run-task` |
-| Local coordination | Bounded additive scratchpad and indexed task history |
+| Local coordination | Bounded additive scratchpad and indexed project history |
 
-The MCP surface contains 22 read-only tools and one additive local scratchpad write. Results are bounded and return precision or truncation notes when the engine cannot prove completeness.
+The MCP surface contains 23 read-only tools and one additive local scratchpad
+write. Results are bounded and return precision or truncation notes when the
+engine cannot prove completeness.
 
 ## Supported languages
 

@@ -9,7 +9,7 @@
 | transport | stdio |
 | command | `mastermind serve` |
 | protocol | MCP 2025-11-25; legacy 2024-11-05 |
-| tools | 23: 22 read-only, 1 additive local write (see below) |
+| tools | 24: 23 read-only, 1 additive local write (see below) |
 | resources | none |
 | prompts | none |
 
@@ -70,7 +70,7 @@ The `--index` flag is global and must come before `serve`.
   `mmcg_centrality`, `mmcg_dependency_cycles`, `mmcg_unreferenced`, `mmcg_map`.
 - Change analysis: `mmcg_symbols_changed_since`, `mmcg_change_class`,
   `mmcg_change_impact`, `mmcg_test_impact`, `mmcg_recent_changes`.
-- Workflow state: `mmcg_tasks`, `mmcg_status`, `mmcg_scratchpad_read`, and the
+- Workflow state: `mmcg_tasks`, `mmcg_history`, `mmcg_status`, `mmcg_scratchpad_read`, and the
   additive local write `mmcg_scratchpad_append`.
 
 The standard MCP `tools/list` response is the schema source of truth. See the

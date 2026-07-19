@@ -43,6 +43,8 @@ pub const EXTRACTOR_CONTRACT_META_KEY: &str = "extractor_contract_version";
 /// extension must not turn indexing into an unbounded allocation.
 pub const MAX_INDEXABLE_FILE_SIZE: u64 = 5 * 1024 * 1024;
 const BINARY_SNIFF_BYTES: u64 = 8 * 1024;
+const MAX_HISTORY_ARTIFACT_SIZE: u64 = 1024 * 1024;
+const MAX_HISTORY_ENTRIES: usize = 5_000;
 
 /// Parsed files waiting for the single SQLite writer at once. This bounds peak
 /// memory without changing the existing parallel-parse/single-writer model.
@@ -126,9 +128,22 @@ pub struct IndexStats {
     /// Count of `.mastermind/tasks/<NNN>-<name>/spec.md` files added to the FTS5
     /// corpus. Zero when the directory doesn't exist (no `mastermind init`).
     pub task_specs_indexed: u32,
+    /// Durable Markdown artifacts in the rebuildable project-history corpus.
+    pub history_entries_indexed: u32,
+    /// Existing history artifacts rejected by admission checks or unreadable.
+    pub history_entries_skipped: u32,
+    /// True when the 5,000-artifact work limit omitted candidate files.
+    pub history_entries_truncated: bool,
     /// True when this run rebuilt an index made by an older extractor contract.
     pub extractor_contract_rebuilt: bool,
     pub duration_ms: u128,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ProjectHistoryIndexStats {
+    pub indexed: u32,
+    pub skipped: u32,
+    pub truncated: bool,
 }
 
 pub struct Indexer {
@@ -274,6 +289,10 @@ impl Indexer {
         if let Ok(count) = self.index_task_specs(store) {
             stats.task_specs_indexed = count;
         }
+        let history = self.index_project_history(store)?;
+        stats.history_entries_indexed = history.indexed;
+        stats.history_entries_skipped = history.skipped;
+        stats.history_entries_truncated = history.truncated;
 
         let canonical_root = self
             .root
@@ -344,6 +363,107 @@ impl Indexer {
             .replace_task_specs(&entries)
             .map_err(|e| IndexError::Other(e.to_string()))?;
         Ok(count)
+    }
+
+    /// Rebuild the derived search corpus for durable project-history artifacts.
+    /// Only known workflow files are admitted; arbitrary task scratch files and
+    /// symlinks are excluded. The Markdown files remain the source of truth.
+    pub fn index_project_history(
+        &self,
+        store: &mut Store,
+    ) -> Result<ProjectHistoryIndexStats, IndexError> {
+        let mut candidates: Vec<(PathBuf, &'static str)> = Vec::new();
+        let mut add_if_present = |path: PathBuf, kind: &'static str| {
+            if std::fs::symlink_metadata(&path).is_ok() {
+                candidates.push((path, kind));
+            }
+        };
+        add_if_present(self.root.join("CONTEXT.md"), "context");
+
+        let tasks_dir = self.root.join(".mastermind").join("tasks");
+        add_if_present(tasks_dir.join("_lessons.md"), "lesson");
+        if tasks_dir.is_dir() {
+            for dirent in
+                std::fs::read_dir(&tasks_dir).map_err(|error| IndexError::Io(error.to_string()))?
+            {
+                let dirent = dirent.map_err(|error| IndexError::Io(error.to_string()))?;
+                let path = dirent.path();
+                let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                    continue;
+                };
+                let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if !metadata.file_type().is_dir()
+                    || metadata.file_type().is_symlink()
+                    || name.starts_with('_')
+                    || name.starts_with('.')
+                {
+                    continue;
+                }
+                add_if_present(path.join("spec.md"), "task_spec");
+                add_if_present(path.join("executor-report.md"), "executor_report");
+                add_if_present(path.join("audit.md"), "audit");
+                add_if_present(path.join("release-notes.md"), "release_notes");
+            }
+        }
+        candidates.sort_by(|left, right| left.0.cmp(&right.0));
+        let truncated = candidates.len() > MAX_HISTORY_ENTRIES;
+        candidates.truncate(MAX_HISTORY_ENTRIES);
+
+        let mut entries = Vec::new();
+        let mut skipped = 0_u32;
+        for (path, kind) in candidates {
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                skipped += 1;
+                continue;
+            };
+            if !metadata.file_type().is_file()
+                || metadata.file_type().is_symlink()
+                || metadata.len() > MAX_HISTORY_ARTIFACT_SIZE
+            {
+                skipped += 1;
+                continue;
+            }
+            let Ok(body) = std::fs::read_to_string(&path) else {
+                skipped += 1;
+                continue;
+            };
+            let fallback = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or(kind);
+            let title = extract_spec_title(&body, fallback);
+            let rel = path
+                .strip_prefix(&self.root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            entries.push(crate::store::ProjectHistoryEntry {
+                path: rel,
+                kind: kind.to_string(),
+                title,
+                body,
+            });
+        }
+        let count = entries.len() as u32;
+        store
+            .replace_project_history(&entries)
+            .map_err(|error| IndexError::Other(error.to_string()))?;
+        store
+            .set_meta("project_history_skipped", &skipped.to_string())
+            .map_err(|error| IndexError::Other(error.to_string()))?;
+        store
+            .set_meta(
+                "project_history_truncated",
+                if truncated { "true" } else { "false" },
+            )
+            .map_err(|error| IndexError::Other(error.to_string()))?;
+        Ok(ProjectHistoryIndexStats {
+            indexed: count,
+            skipped,
+            truncated,
+        })
     }
 
     /// Re-index a single file. Used by the watcher.
@@ -812,6 +932,69 @@ mod incremental_tests {
         let gone = store.search_task_specs("LRU TTL", 10).unwrap();
         assert!(gone.is_empty());
 
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn project_history_indexes_only_durable_workflow_artifacts() {
+        let (dir, db) = setup("project_history");
+        let task_dir = dir.join(".mastermind/tasks/001-auth-boundary");
+        fs::create_dir_all(&task_dir).unwrap();
+        fs::write(
+            dir.join("CONTEXT.md"),
+            "# Context\n\nDecision: auth is enforced at admission.\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join(".mastermind/tasks/_lessons.md"),
+            "# Lessons\n\nA middleware-only guard was bypassed.\n",
+        )
+        .unwrap();
+        fs::write(
+            task_dir.join("spec.md"),
+            "# Harden admission\n\nEnforce authorization before reads.\n",
+        )
+        .unwrap();
+        fs::write(
+            task_dir.join("executor-report.md"),
+            "# Executor report\n\nAuthorization gate wired to raw admission.\n",
+        )
+        .unwrap();
+        fs::write(
+            task_dir.join("audit.md"),
+            "# Audit\n\nVerified the runtime boundary.\n",
+        )
+        .unwrap();
+        fs::write(
+            task_dir.join("release-notes.md"),
+            vec![b'x'; (MAX_HISTORY_ARTIFACT_SIZE + 1) as usize],
+        )
+        .unwrap();
+        fs::write(task_dir.join("notes.md"), "private scratch phrase\n").unwrap();
+
+        let mut store = Store::open(&db).unwrap();
+        let indexer = Indexer::new(&dir);
+        let stats = indexer.index_all(&mut store, false).unwrap();
+        assert_eq!(stats.history_entries_indexed, 5);
+        assert_eq!(stats.history_entries_skipped, 1);
+        assert!(!stats.history_entries_truncated);
+        assert_eq!(store.project_history_count().unwrap(), 5);
+        let lesson = store
+            .search_project_history("middleware bypassed", Some("lesson"), 10)
+            .unwrap();
+        assert_eq!(lesson.len(), 1);
+        assert!(store
+            .search_project_history("private scratch", None, 10)
+            .unwrap()
+            .is_empty());
+
+        fs::remove_file(task_dir.join("audit.md")).unwrap();
+        let stats = indexer.index_all(&mut store, false).unwrap();
+        assert_eq!(stats.history_entries_indexed, 4);
+        assert!(store
+            .search_project_history("runtime boundary", Some("audit"), 10)
+            .unwrap()
+            .is_empty());
         fs::remove_dir_all(&dir).ok();
     }
 

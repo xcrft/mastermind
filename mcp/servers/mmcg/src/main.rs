@@ -143,6 +143,24 @@ enum Cmd {
         #[arg(default_value = ".")]
         root: PathBuf,
     },
+    /// Search durable project decisions, reports, audits, lessons, and context.
+    /// Results are observed retrieval evidence; Markdown remains authoritative.
+    History {
+        /// FTS5 MATCH query.
+        query: String,
+        /// Limit results to one artifact kind.
+        #[arg(long, value_parser = ["context", "lesson", "task_spec", "executor_report", "audit", "release_notes"])]
+        kind: Option<String>,
+        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=50))]
+        top: u32,
+    },
+    /// Build a grounded evidence packet for "why" questions without inventing
+    /// rationale that is absent from durable project history.
+    Why {
+        query: String,
+        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=50))]
+        top: u32,
+    },
     /// Print only the next recommended action and the ready-to-paste Claude
     /// prompt for the highest-priority pending task.
     Next {
@@ -606,6 +624,14 @@ enum QueryCmd {
         #[arg(long, default_value_t = 10)]
         top: u32,
     },
+    /// Search all durable project-history artifacts, not only task specs.
+    History {
+        query: String,
+        #[arg(long, value_parser = ["context", "lesson", "task_spec", "executor_report", "audit", "release_notes"])]
+        kind: Option<String>,
+        #[arg(long, default_value_t = 10)]
+        top: u32,
+    },
     /// List files whose top-level imports reference the given name or path.
     ImportedBy {
         /// Name or fully-qualified path to look up
@@ -750,7 +776,7 @@ fn run_cli_inner(
             let indexer = mmcg::indexer::Indexer::new(&root);
             let stats = indexer.index_all(&mut store, force)?;
             println!(
-                "indexed {} (unchanged {}, purged {}, skipped binary {}, skipped large {}, failed {}) / scanned {} | {} symbols | {} edges | {} task specs | {} ms",
+                "indexed {} (unchanged {}, purged {}, skipped binary {}, skipped large {}, failed {}) / scanned {} | {} symbols | {} edges | {} task specs | {} history entries (skipped {}, truncated {}) | {} ms",
                 stats.files_indexed,
                 stats.files_unchanged,
                 stats.files_purged,
@@ -761,6 +787,9 @@ fn run_cli_inner(
                 stats.symbols_total,
                 stats.edges_total,
                 stats.task_specs_indexed,
+                stats.history_entries_indexed,
+                stats.history_entries_skipped,
+                stats.history_entries_truncated,
                 stats.duration_ms
             );
             if stats.files_failed > 0 {
@@ -813,6 +842,12 @@ fn run_cli_inner(
                 .unwrap_or_else(|_| std::env::current_dir().unwrap_or(root));
             let ws = mmcg::workflow_status::WorkflowStatus::scan(&root);
             print!("{}", ws.render_text());
+        }
+        Cmd::History { query, kind, top } => {
+            commands::query::dispatch_history(&query, kind.as_deref(), top, &index_path)?;
+        }
+        Cmd::Why { query, top } => {
+            commands::query::dispatch_why(&query, top, &index_path)?;
         }
         Cmd::Next { root } => {
             let root = root
@@ -1242,5 +1277,30 @@ mod tests {
             "audit.pub",
         ])
         .is_err());
+    }
+
+    #[test]
+    fn history_and_why_are_first_class_cli_commands() {
+        let history = Cli::try_parse_from([
+            "mastermind",
+            "history",
+            "webhook dedupe",
+            "--kind",
+            "audit",
+            "--top",
+            "5",
+        ])
+        .unwrap();
+        assert!(matches!(
+            history.cmd,
+            Cmd::History {
+                query,
+                kind: Some(kind),
+                top: 5
+            } if query == "webhook dedupe" && kind == "audit"
+        ));
+
+        let why = Cli::try_parse_from(["mastermind", "why", "idempotency"]).unwrap();
+        assert!(matches!(why.cmd, Cmd::Why { query, top: 10 } if query == "idempotency"));
     }
 }

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mastermind Project History"
+  short_description: "Explain decisions from durable evidence"
+  default_prompt: "Use $mastermind-project-history to answer this project-history question without turning provenance or retrieval rank into technical proof."

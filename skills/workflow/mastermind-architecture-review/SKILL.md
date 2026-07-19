@@ -2,7 +2,7 @@
 name: mastermind-architecture-review
 description: Review a proposed or existing architecture against the real runtime path, source-of-truth ownership, retry and idempotency behavior, and backward-compatibility constraints. Use for service boundaries, async workflows, persistence changes, external integrations, migrations, public APIs, events, schemas, or designs whose component diagram looks plausible but runtime safety is not yet proven.
 metadata:
-  version: 0.1.0
+  version: 0.2.0
   authors: [mastermind]
   tags: [workflow, architecture, review, reliability, contracts]
 ---
@@ -117,6 +117,12 @@ Verdict is exactly one of: `sound`, `sound with constraints`, `revise`, or
 
 ### Unknowns
 - <only decision-changing missing evidence>
+
+### Epistemic envelope
+- **Observed:** <direct source, graph, test, or runtime evidence>
+- **Inferred:** <bounded conclusion and reasoning>
+- **Confidence:** high | medium | low — <reason>
+- **Would change this conclusion:** <specific falsifier or superseding evidence>
 ```
 
 Use at most seven findings. Do not emit generic advice, a technology shopping

@@ -46,8 +46,101 @@ pub fn dispatch_map(
     Ok(())
 }
 
+pub fn dispatch_history(
+    query: &str,
+    kind: Option<&str>,
+    top: u32,
+    index_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let store = Store::open(index_path)?;
+    let response = queries::history(&store, query, kind, top.clamp(1, 50))?;
+    println!("{}", serde_json::to_string_pretty(&response)?);
+    Ok(())
+}
+
+pub fn dispatch_why(
+    query: &str,
+    top: u32,
+    index_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let store = Store::open(index_path)?;
+    let retrieval_query = natural_language_history_query(query);
+    let response = queries::history(&store, &retrieval_query, None, top.clamp(1, 50))?;
+    println!("mastermind why — {}\n", safe_line_text(query));
+    println!("Observed");
+    if response.observed.is_empty() {
+        println!("  No matching durable history was found.");
+    } else {
+        for hit in &response.observed {
+            println!(
+                "  [{}] {} — {}\n    {}",
+                safe_line_text(&hit.kind),
+                safe_line_text(&hit.title),
+                safe_line_text(&hit.path),
+                safe_line_text(&hit.excerpt)
+            );
+        }
+    }
+    println!("\nInferred");
+    println!("  None. Retrieval rank and co-occurrence do not prove rationale or correctness.");
+    println!("\nUnknown");
+    if response.observed.is_empty() {
+        println!(
+            "  Whether the rationale was never recorded, uses different terms, or was added after the last index refresh."
+        );
+    } else {
+        println!(
+            "  Whether these records fully explain the decision; verify the returned Markdown and current runtime path."
+        );
+    }
+    println!("\nWhat would change this conclusion");
+    if response.observed.is_empty() {
+        println!(
+            "  A matching durable record after a broader query or fresh index, Git evidence, or a current runtime fact."
+        );
+    } else {
+        println!(
+            "  Newer active records, a superseding decision, contradictory runtime evidence, or a failed verification."
+        );
+    }
+    Ok(())
+}
+
+fn natural_language_history_query(question: &str) -> String {
+    const STOP_WORDS: &[&str] = &[
+        "a", "an", "are", "did", "do", "does", "how", "is", "of", "our", "project", "the", "this",
+        "to", "was", "were", "what", "why",
+    ];
+    let mut terms = question
+        .split(|character: char| !character.is_alphanumeric() && character != '_')
+        .filter(|term| !term.is_empty())
+        .map(str::to_lowercase)
+        .filter(|term| !STOP_WORDS.contains(&term.as_str()))
+        .take(12)
+        .collect::<Vec<_>>();
+    terms.sort();
+    terms.dedup();
+    terms
+        .into_iter()
+        .map(|term| format!("\"{term}\""))
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
 fn safe_text(value: &str) -> String {
     value.chars().flat_map(char::escape_default).collect()
+}
+
+fn safe_line_text(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character.is_control() {
+            output.extend(character.escape_default());
+        } else {
+            output.push(character);
+        }
+    }
+    output
 }
 
 fn mermaid_label(value: &str) -> String {
@@ -250,6 +343,12 @@ fn execute(store: &Store, q: QueryCmd) -> Result<Value, Box<dyn std::error::Erro
         QueryCmd::Tasks { query, top } => {
             serde_json::to_value(queries::tasks(store, &query, top)?)?
         }
+        QueryCmd::History { query, kind, top } => serde_json::to_value(queries::history(
+            store,
+            &query,
+            kind.as_deref(),
+            top.clamp(1, 50),
+        )?)?,
         QueryCmd::SymbolsChangedSince { git_ref, root } => {
             let root = root
                 .canonicalize()
@@ -287,5 +386,19 @@ mod map_tests {
         assert!(!label.contains("%%"));
         assert!(!label.contains('['));
         assert!(!label.contains('"'));
+    }
+
+    #[test]
+    fn why_questions_become_safe_bounded_fts_queries() {
+        assert_eq!(
+            natural_language_history_query("Why is source-of-truth important?"),
+            "\"important\" OR \"source\" OR \"truth\""
+        );
+        assert_eq!(
+            natural_language_history_query("Почему выбрали Redis?"),
+            "\"redis\" OR \"выбрали\" OR \"почему\""
+        );
+        assert_eq!(natural_language_history_query("why is this?"), "");
+        assert_eq!(safe_line_text("почему\nтак"), "почему\\nтак");
     }
 }

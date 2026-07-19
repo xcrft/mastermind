@@ -2,7 +2,7 @@
 name: mastermind-task-planning
 description: Choose the lightest Mastermind workflow that fits the risk, then create an evidence-grounded verified or strict task contract for delegated implementation. Direct work deliberately uses no task spec.
 metadata:
-  version: 0.15.0
+  version: 0.16.0
   authors: [mastermind]
   tags: [workflow, planning, delegation, mmcg, audit]
 ---
@@ -39,7 +39,13 @@ Use [[mastermind-codegraph-research]] for structural claims:
 1. `mmcg_search` for every existing symbol named by the contract.
 2. `mmcg_callers` / `mmcg_impact` for the symbols being changed.
 3. `mmcg_change_impact` and [[mastermind-test-impact]] when a worktree already exists.
-4. `mmcg_tasks` and `.mastermind/tasks/_lessons.md` only when prior work is relevant.
+4. `mmcg_history` when prior decisions, failed approaches, audits, or lessons can
+   affect the design. Use `mmcg_tasks` only when the task-spec-only view is useful.
+
+History search is retrieval evidence, not proof of rationale or current truth.
+Read the returned Markdown, honor active/superseding records, and let a relevant
+dead end constrain the new plan. User approval records provenance and authority;
+it does not verify a technical claim without code, test, or runtime evidence.
 
 The graph is syntactic evidence, not runtime proof. Preserve collision,
 precision, stale-index, and truncation notes. For one or two lookups work
@@ -168,6 +174,10 @@ strict auditor returns advisory evidence to the planner; the controller's
 Tell the user: outcome, material changes, verification actually run, audit
 verdict, and any unresolved limitation. Update `CONTEXT.md` only for durable
 project knowledge; never add a ceremonial “nothing changed” entry.
+
+For a durable decision, record provenance, evidence, status (`active` or
+`superseded`), any `supersedes` link, rejected alternatives, and the reusable
+lesson. Update history only after semantic review, not on every turn.
 
 Commit, push, PR, release, and publication remain separate actions requiring
 explicit user authorization.

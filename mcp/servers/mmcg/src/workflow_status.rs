@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +54,8 @@ pub struct InstallInfo {
     pub claude_md_present: bool,
     pub agents_count: usize,
     pub skills_count: usize,
+    pub expected_agents_count: Option<usize>,
+    pub expected_skills_count: Option<usize>,
 }
 
 pub struct WorkflowStatus {
@@ -194,26 +197,18 @@ impl WorkflowStatus {
                 "  ○ project workflow not initialized — Direct mode is available; run `mastermind init` for Verified/Strict scaffolding\n",
             );
         }
-        if self.install.agents_count > 0 {
-            out.push_str(&format!(
-                "  ✓ {} subagent(s) in ~/.claude/agents/\n",
-                self.install.agents_count
-            ));
-        } else {
-            out.push_str(
-                "  ○ Claude subagents not installed (optional) — run `mastermind install` for Claude workflow adapters\n",
-            );
-        }
-        if self.install.skills_count > 0 {
-            out.push_str(&format!(
-                "  ✓ {} skill(s) in ~/.claude/skills/\n",
-                self.install.skills_count
-            ));
-        } else {
-            out.push_str(
-                "  ○ Claude skills not installed (optional) — run `mastermind install` for Claude workflow adapters\n",
-            );
-        }
+        out.push_str(&install_count_line(
+            self.install.agents_count,
+            self.install.expected_agents_count,
+            "subagent",
+            "~/.claude/agents/",
+        ));
+        out.push_str(&install_count_line(
+            self.install.skills_count,
+            self.install.expected_skills_count,
+            "skill",
+            "~/.claude/skills/",
+        ));
         out.push('\n');
 
         if self.tasks.is_empty() {
@@ -468,10 +463,9 @@ fn scan_index(root: &Path) -> IndexInfo {
 
     let (symbol_count, file_count) = db_counts(&db).unwrap_or((0, 0));
 
-    let stale_count = std::fs::metadata(&db)
-        .and_then(|m| m.modified())
-        .map(|db_mtime| count_stale(root, db_mtime, 10))
-        .unwrap_or(0);
+    let stale_count = stale_paths(root, &db, 10)
+        .map(|paths| paths.len())
+        .unwrap_or(1);
 
     IndexInfo {
         db_exists: true,
@@ -492,11 +486,27 @@ fn db_counts(db: &Path) -> Option<(u64, u64)> {
     Some((sym.max(0) as u64, fil.max(0) as u64))
 }
 
-pub(crate) fn count_stale(root: &Path, db_mtime: std::time::SystemTime, cap: usize) -> usize {
-    let mut n = 0usize;
+pub(crate) fn stale_paths(root: &Path, db: &Path, cap: usize) -> Option<Vec<String>> {
+    if cap == 0 {
+        return Some(Vec::new());
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    let mut stmt = conn.prepare("SELECT path, indexed_at FROM files").ok()?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .ok()?;
+    let indexed: HashMap<String, i64> = rows.collect::<rusqlite::Result<_>>().ok()?;
+    let mut seen = HashSet::new();
+    let mut stale = Vec::new();
     for entry in walkdir::WalkDir::new(root)
         .into_iter()
-        .filter_entry(|e| !is_skipped(e.file_name().to_str().unwrap_or("")))
+        .filter_entry(|e| !crate::indexer::is_skipped_dir(e.file_name().to_str().unwrap_or("")))
         .filter_map(|e| e.ok())
     {
         if !entry.file_type().is_file() {
@@ -505,36 +515,36 @@ pub(crate) fn count_stale(root: &Path, db_mtime: std::time::SystemTime, cap: usi
         if crate::indexer::extractor_for_path(entry.path()).is_none() {
             continue;
         }
-        if let Ok(fs_mtime) = entry.path().metadata().and_then(|m| m.modified()) {
-            if fs_mtime > db_mtime {
-                n += 1;
-                if n >= cap {
-                    break;
-                }
+        let Ok(relative) = entry.path().strip_prefix(root) else {
+            continue;
+        };
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        seen.insert(relative.clone());
+        let fs_mtime = entry
+            .path()
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|mtime| mtime.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis() as i64);
+        if fs_mtime.is_some_and(|mtime| indexed.get(&relative).is_none_or(|stored| mtime > *stored))
+        {
+            stale.push(relative);
+            if stale.len() >= cap {
+                return Some(stale);
             }
         }
     }
-    n
-}
-
-fn is_skipped(name: &str) -> bool {
-    matches!(
-        name,
-        "node_modules"
-            | ".git"
-            | ".mastermind"
-            | "target"
-            | "__pycache__"
-            | ".venv"
-            | "venv"
-            | "dist"
-            | "build"
-            | ".next"
-            | ".nuxt"
-            | "coverage"
-            | ".nyc_output"
-            | "vendor"
-    )
+    for indexed_path in indexed.keys() {
+        if !seen.contains(indexed_path) && !root.join(indexed_path).exists() {
+            stale.push(indexed_path.clone());
+            if stale.len() >= cap {
+                break;
+            }
+        }
+    }
+    stale.sort();
+    Some(stale)
 }
 
 fn scan_install(root: &Path) -> InstallInfo {
@@ -545,14 +555,44 @@ fn scan_install(root: &Path) -> InstallInfo {
             let agents_dir = home.join(".claude").join("agents");
             let skills_dir = home.join(".claude").join("skills");
             let agents = count_matching_files(&agents_dir, "mastermind-", ".md");
-            let skills = count_matching_dirs(&skills_dir, "mastermind-");
+            let skills = count_workflow_skill_dirs(&skills_dir);
             (agents, skills)
         }
     };
+    let (expected_agents_count, expected_skills_count) = std::env::var_os("MASTERMIND_SHARE_DIR")
+        .map(PathBuf::from)
+        .map(|share| {
+            (
+                Some(count_matching_files(
+                    &share.join("agents"),
+                    "mastermind-",
+                    ".md",
+                )),
+                Some(count_workflow_skill_dirs(&share.join("skills"))),
+            )
+        })
+        .unwrap_or((None, None));
     InstallInfo {
         claude_md_present,
         agents_count,
         skills_count,
+        expected_agents_count,
+        expected_skills_count,
+    }
+}
+
+fn install_count_line(installed: usize, expected: Option<usize>, kind: &str, path: &str) -> String {
+    match expected {
+        Some(expected) if installed != expected => format!(
+            "  ⚠ {installed}/{expected} {kind}(s) in {path} — workflow bundle drift; run `mastermind update --client claude`, then `mastermind doctor --workflow --client claude`\n"
+        ),
+        Some(expected) => {
+            format!("  ✓ {installed}/{expected} {kind}(s) in {path}\n")
+        }
+        None if installed > 0 => format!("  ✓ {installed} {kind}(s) in {path}\n"),
+        None => format!(
+            "  ○ Claude {kind}s not installed (optional) — run `mastermind install` for Claude workflow adapters\n"
+        ),
     }
 }
 
@@ -572,13 +612,15 @@ fn count_matching_files(dir: &Path, prefix: &str, suffix: &str) -> usize {
         .unwrap_or(0)
 }
 
-fn count_matching_dirs(dir: &Path, prefix: &str) -> usize {
+fn count_workflow_skill_dirs(dir: &Path) -> usize {
     std::fs::read_dir(dir)
         .map(|rd| {
             rd.filter_map(|e| e.ok())
                 .filter(|e| {
+                    let name = e.file_name();
+                    let name = name.to_string_lossy();
                     e.file_type().map(|t| t.is_dir()).unwrap_or(false)
-                        && e.file_name().to_string_lossy().starts_with(prefix)
+                        && (name.starts_with("mastermind-") || name == "no-ai-slop-comments")
                 })
                 .count()
         })
@@ -715,6 +757,78 @@ mod tests {
             detect_phase(&spec_path, &None, Some(&state)),
             TaskPhase::AwaitingAudit
         );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn install_count_line_flags_bundle_drift() {
+        let drift = install_count_line(10, Some(15), "skill", "~/.claude/skills/");
+        assert!(drift.contains("⚠ 10/15 skill(s)"));
+        assert!(drift.contains("mastermind update --client claude"));
+
+        let current = install_count_line(15, Some(15), "skill", "~/.claude/skills/");
+        assert!(current.contains("✓ 15/15 skill(s)"));
+        assert!(!current.contains("drift"));
+    }
+
+    #[test]
+    fn stale_paths_compare_each_file_to_its_stored_mtime() {
+        let root = std::env::temp_dir().join(format!(
+            "mmcg-status-wal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let db = root.join("mmcg.db");
+        let source = root.join("src/lib.rs");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"fn current() {}\n").unwrap();
+        let store = crate::store::Store::open(&db).unwrap();
+        store.upsert_file("src/lib.rs", 10, 1).unwrap();
+        drop(store);
+        let newer = std::time::UNIX_EPOCH + std::time::Duration::from_secs(20);
+        fs::File::options()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_modified(newer)
+            .unwrap();
+
+        assert_eq!(stale_paths(&root, &db, 10), Some(vec!["src/lib.rs".into()]));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn stale_paths_reads_current_file_rows_from_wal() {
+        let root = std::env::temp_dir().join(format!(
+            "mmcg-status-live-wal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = root.join("src/lib.rs");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"fn current() {}\n").unwrap();
+        let mtime = source
+            .metadata()
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let db = root.join("mmcg.db");
+        let store = crate::store::Store::open(&db).unwrap();
+        store.upsert_file("src/lib.rs", mtime, 1).unwrap();
+
+        assert!(root.join("mmcg.db-wal").is_file());
+        assert_eq!(stale_paths(&root, &db, 10), Some(Vec::new()));
+        drop(store);
         fs::remove_dir_all(root).ok();
     }
 }

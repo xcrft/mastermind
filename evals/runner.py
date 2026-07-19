@@ -130,6 +130,7 @@ class Result:
     fixture_path: Path | None = None
     retry_used: bool = False
     retry_attempted: bool = False
+    output_excerpt: str = ""
 
 
 def strip_frontmatter(text: str) -> str:
@@ -382,6 +383,12 @@ def extract_intake_action(output: str) -> str | None:
     return None
 
 
+def contains_any_phrase(output: str, phrases: list[str]) -> bool:
+    """Accept one of several semantically equivalent case-insensitive phrases."""
+    lowered = output.lower()
+    return bool(phrases) and any(phrase.lower() in lowered for phrase in phrases)
+
+
 # ----- per-case evaluator ---------------------------------------------------
 
 
@@ -548,12 +555,30 @@ def evaluate_case(
                 passed = False
                 reasons.append(f"missing phrase: {phrase!r}")
 
+        for alternatives in expect.get("contains_any", []):
+            if not isinstance(alternatives, list) or not all(
+                isinstance(phrase, str) for phrase in alternatives
+            ):
+                passed = False
+                reasons.append(f"invalid contains_any group: {alternatives!r}")
+            elif not contains_any_phrase(output, alternatives):
+                passed = False
+                reasons.append(f"none of alternative phrases found: {alternatives!r}")
+
         for phrase in expect.get("not_contains", []):
             if phrase.lower() in output.lower():
                 passed = False
                 reasons.append(f"forbidden phrase present: {phrase!r}")
 
-        return Result(case_id, suite_name, passed, reasons, duration_ms, fixture_path)
+        return Result(
+            case_id,
+            suite_name,
+            passed,
+            reasons,
+            duration_ms,
+            fixture_path,
+            output_excerpt=output[:4000],
+        )
     finally:
         if fixture_path is not None and not keep_fixtures:
             teardown_fixture(fixture_path)
@@ -572,6 +597,10 @@ def main() -> int:
     parser.add_argument(
         "--keep-fixtures", action="store_true",
         help="don't delete fixture tmp dirs after each case (debugging)",
+    )
+    parser.add_argument(
+        "--verbose-failures", action="store_true",
+        help="print up to 4000 characters of model output for failed cases",
     )
     args = parser.parse_args()
 
@@ -633,6 +662,10 @@ def main() -> int:
                     print(f"      fixture: {r.fixture_path}")
                 for reason in r.reasons:
                     print(f"      → {reason}")
+                if args.verbose_failures and not r.passed and r.output_excerpt:
+                    print("      --- model output ---")
+                    for line in r.output_excerpt.splitlines():
+                        print(f"      {line}")
 
     if not results:
         print("\nno cases matched filter")

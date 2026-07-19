@@ -17,7 +17,7 @@
 #   1. Bump version in mcp/servers/mmcg/Cargo.toml AND all 8 npm package.jsons
 #      (root @xcraftmind/mastermind + 7 @xcraftmind/mmcg-* platform packages).
 #      The build helper hard-fails on Cargo↔platform version mismatch.
-#   2. Validate: `python scripts/validate.py && cargo test --lib`
+#   2. Validate: `just check`
 #   3. Commit on main: `git commit -am "mastermind <version>"`
 #   4. Tag: `git tag npm-v<version> && git push origin main npm-v<version>`
 #   5. This workflow: matrix-build → assemble → smoke → (approval) → publish

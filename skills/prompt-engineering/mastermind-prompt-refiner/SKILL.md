@@ -63,7 +63,7 @@ Technique references are optional tools, not a checklist to stack:
 
 ## Output contract
 
-For `refined` and `passthrough`:
+For `refined`:
 
 ````markdown
 ## Original request
@@ -90,7 +90,20 @@ target_consumer: planner
 <!-- mastermind:intake-end -->
 ````
 
-Omit `Unresolved inputs` when empty. For `ask`, use exactly these sections and
+For `passthrough`, use the same sections, keep `Refined prompt` byte-for-byte
+identical to the original, write `No changes needed.`, omit `Unresolved
+inputs`, and emit:
+
+````markdown
+<!-- mastermind:intake-begin -->
+```yaml
+action: passthrough
+target_consumer: planner
+```
+<!-- mastermind:intake-end -->
+````
+
+For `ask`, use exactly these sections and
 do not emit a `Refined prompt` heading or commentary about omitting one:
 
 ````markdown

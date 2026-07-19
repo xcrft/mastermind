@@ -45,7 +45,7 @@ rollback, backup, approval, and recovery inputs when they affect safe planning.
 
 ## Output
 
-For refined or passthrough output:
+For `refined` output:
 
 ````markdown
 ## Original request
@@ -72,7 +72,11 @@ target_consumer: planner
 <!-- mastermind:intake-end -->
 ````
 
-Omit unresolved inputs when empty. For `ask`, emit only `## Original request`,
+For `passthrough`, keep `Refined prompt` byte-for-byte identical to the
+original, write `No changes needed.`, omit `Unresolved inputs`, and emit
+`action: passthrough` in the metadata block.
+
+For `ask`, emit only `## Original request`,
 `## Questions`, and the metadata block with `action: ask`. Do not emit or
 mention a `Refined prompt` section.
 

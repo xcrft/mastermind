@@ -252,9 +252,9 @@ pub struct StatusResponse {
     pub db_path: String,
     pub symbol_count: u32,
     pub file_count: u32,
-    /// Source files modified since the index was last written (capped at 100).
-    /// A non-zero count means the index is stale — re-index before trusting
-    /// structural answers. Best-effort: 0 if freshness can't be computed.
+    /// Indexable source paths that are added, deleted, or newer than the indexed
+    /// snapshot (capped at 100). A non-zero count means structural answers must
+    /// not be trusted before re-indexing.
     pub stale_files: usize,
 }
 
@@ -1563,8 +1563,9 @@ pub fn status(store: &Store) -> rusqlite::Result<StatusResponse> {
     })
 }
 
-/// Best-effort count of source files modified since the index was last written
-/// (capped). Returns 0 on any error — `status` must never fail over freshness.
+/// Best-effort count of source files that differ from their stored index mtime
+/// (capped). Returns 1 when freshness cannot be read so `status` does not claim
+/// that a damaged index is current.
 /// The db path may be relative, so canonicalize before climbing to project root.
 fn stale_count(db_path: &std::path::Path) -> usize {
     let Ok(db_abs) = db_path.canonicalize() else {
@@ -1573,10 +1574,9 @@ fn stale_count(db_path: &std::path::Path) -> usize {
     let Some(root) = db_abs.parent().and_then(|d| d.parent()) else {
         return 0;
     };
-    let Ok(db_mtime) = std::fs::metadata(&db_abs).and_then(|m| m.modified()) else {
-        return 0;
-    };
-    crate::workflow_status::count_stale(root, db_mtime, 100)
+    crate::workflow_status::stale_paths(root, &db_abs, 100)
+        .map(|paths| paths.len())
+        .unwrap_or(1)
 }
 
 #[derive(Debug, Serialize)]
@@ -2479,6 +2479,7 @@ mod tests {
             "src/core/service.rs",
             "tests/fixture/main.rs",
             "examples/demo.rs",
+            "evals/runner.py",
         ] {
             store.upsert_file(file, 1, 1).unwrap();
         }
@@ -2522,6 +2523,7 @@ mod tests {
         let rendered = serde_json::to_string(&value).unwrap();
         assert!(!rendered.contains("tests/fixture"));
         assert!(!rendered.contains("examples/demo"));
+        assert!(!rendered.contains("evals/runner"));
         assert!(rendered.contains("production_target"));
         std::fs::remove_file(&path).ok();
     }

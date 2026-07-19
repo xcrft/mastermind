@@ -42,7 +42,7 @@ updates:
       prefix: "chore(deps)"
       include: scope
 
-  # Python deps used by scripts/validate.py and scripts/build-plugins.py
+  # Python deps used by the validator and audit-workflow fixture tests
   - package-ecosystem: pip
     directory: /scripts
     schedule:

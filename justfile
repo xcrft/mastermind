@@ -4,7 +4,7 @@
 #
 # Recipes are grouped:
 #   - mmcg/Rust (build, test, lint, package, publish-dry)
-#   - repo-wide checks (validate, plugins, sync-templates, check)
+#   - repo-wide checks (validate, npm-test, eval-harness, security, check)
 #   - dev convenience (install, smoke, index, outline)
 
 # Path to the mmcg crate — referenced via `--manifest-path` so recipes can run from anywhere.
@@ -21,7 +21,7 @@ default:
 
 # ---- one-time setup ----
 
-# Create the Python venv used by `validate` and `plugins`.
+# Create the Python venv used by the validator and deterministic Python tests.
 bootstrap:
     python3 -m venv .venv
     {{PY}} -m pip install -q --upgrade pip
@@ -32,19 +32,19 @@ bootstrap:
 
 # Build mmcg debug binary.
 build:
-    cargo build --manifest-path {{MMCG}}/Cargo.toml
+    cargo build --manifest-path {{MMCG}}/Cargo.toml --locked
 
 # Build mmcg release binary (smaller, faster — used for distribution).
 build-release:
-    cargo build --release --manifest-path {{MMCG}}/Cargo.toml
+    cargo build --release --manifest-path {{MMCG}}/Cargo.toml --locked
 
 # Run mmcg unit tests.
 test:
-    cargo test --manifest-path {{MMCG}}/Cargo.toml --lib
+    cargo test --manifest-path {{MMCG}}/Cargo.toml --locked --all
 
 # Run clippy with warnings-as-errors. Matches what CI should enforce.
 lint:
-    cargo clippy --manifest-path {{MMCG}}/Cargo.toml --all-targets -- -D warnings
+    cargo clippy --manifest-path {{MMCG}}/Cargo.toml --locked --all-targets -- -D warnings
 
 # Apply rustfmt.
 fmt:
@@ -60,11 +60,11 @@ install:
 
 # Package the crate — verifies the tarball that would ship to crates.io builds clean.
 package:
-    cargo package --manifest-path {{MMCG}}/Cargo.toml --allow-dirty
+    cargo package --manifest-path {{MMCG}}/Cargo.toml --locked --allow-dirty
 
 # Dry-run publish — connects to crates.io but does not upload.
 publish-dry:
-    cargo publish --manifest-path {{MMCG}}/Cargo.toml --dry-run --allow-dirty
+    cargo publish --manifest-path {{MMCG}}/Cargo.toml --locked --dry-run --allow-dirty
 
 # Clean Rust build artifacts.
 clean:
@@ -76,9 +76,22 @@ clean:
 validate:
     {{PY}} scripts/validate.py
 
-# Rebuild the `plugins/` tree from canonical artifacts.
-plugins:
-    {{PY}} scripts/build-plugins.py
+# Test the cross-client workflow installer and ownership manifest.
+npm-test:
+    npm test --prefix npm/mastermind
+
+# Test audit publication fixtures and the eval harness itself without calling a model.
+eval-harness:
+    {{PY}} scripts/test_audit_workflow_security.py
+    {{PY}} -m unittest evals/test_runner.py
+
+# Enforce RustSec, license, duplicate, wildcard, and source policy.
+security:
+    cargo deny --manifest-path {{MMCG}}/Cargo.toml check
+
+# Run all model-backed behavioral eval suites. Extra args are forwarded to the runner.
+evals *ARGS:
+    bash evals/run-verified.sh {{ARGS}}
 
 # Copy canonical CLAUDE.md / spec template into the mmcg crate mirror.
 # Run after editing the canonical files — otherwise `cargo publish` ships a stale mmcg init.
@@ -87,8 +100,8 @@ sync-templates:
     cp agents/claude-md/mastermind-workflow.md {{MMCG}}/templates/workflow.md
     @echo "Templates synced to {{MMCG}}/templates/. Run `just validate` to confirm parity."
 
-# Everything that should pass before pushing — matches what CI runs.
-check: fmt-check lint test validate
+# Everything deterministic that should pass before pushing.
+check: fmt-check lint test validate npm-test eval-harness security
 
 # ---- dev smoke / one-shot queries ----
 
@@ -107,9 +120,12 @@ recent SINCE="1h":
 
 # End-to-end smoke: scratch dir → mmcg init → mmcg index → outline a file.
 smoke:
-    /bin/rm -rf /tmp/mmcg-smoke && mkdir /tmp/mmcg-smoke
-    {{MMCG}}/target/debug/mmcg init /tmp/mmcg-smoke
-    {{MMCG}}/target/debug/mmcg --index /tmp/mmcg-smoke/.mastermind/mmcg.db index .
-    {{MMCG}}/target/debug/mmcg --index /tmp/mmcg-smoke/.mastermind/mmcg.db query outline {{MMCG}}/src/queries.rs | head -20
-    /bin/rm -rf /tmp/mmcg-smoke
-    @echo "Smoke passed."
+    #!/usr/bin/env bash
+    set -euo pipefail
+    smoke_dir="$(mktemp -d)"
+    trap 'rm -rf "$smoke_dir"' EXIT
+    mkdir -p "$smoke_dir/src"
+    cp {{MMCG}}/src/queries.rs "$smoke_dir/src/queries.rs"
+    {{MMCG}}/target/debug/mmcg init "$smoke_dir" --no-claude --no-global --no-seed-style
+    {{MMCG}}/target/debug/mmcg --index "$smoke_dir/.mastermind/mmcg.db" query outline src/queries.rs | head -20
+    echo "Smoke passed."

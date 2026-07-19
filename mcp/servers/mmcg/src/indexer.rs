@@ -300,7 +300,7 @@ impl Indexer {
     }
 }
 
-fn is_skipped_dir(name: &str) -> bool {
+pub(crate) fn is_skipped_dir(name: &str) -> bool {
     SKIP_DIRS.contains(&name)
 }
 

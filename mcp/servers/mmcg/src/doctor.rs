@@ -297,7 +297,7 @@ fn check_symbols_indexed(root: &Path) -> Check {
     }
 }
 
-/// Walk indexable files; flag any whose mtime is newer than the db mtime.
+/// Compare each indexable path with its stored source mtime.
 /// Stops at 10 hits to keep the doctor fast on large repos.
 fn check_index_freshness(root: &Path) -> Check {
     let p = db_path(root);
@@ -309,53 +309,20 @@ fn check_index_freshness(root: &Path) -> Check {
             hint: None,
         };
     }
-    let db_mtime = match std::fs::metadata(&p).and_then(|m| m.modified()) {
-        Ok(t) => t,
-        Err(_) => {
-            return Check {
-                name: "index freshness",
-                status: Status::Warn,
-                message: "cannot stat db mtime".into(),
-                hint: None,
-            };
-        }
-    };
-
-    let mut stale: Vec<String> = Vec::new();
     let limit = 10usize;
-    'walk: for entry in walkdir::WalkDir::new(root)
-        .into_iter()
-        .filter_entry(|e| !is_skipped_dir(e.file_name().to_str().unwrap_or("")))
-        .filter_map(|e| e.ok())
-    {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if crate::indexer::extractor_for_path(path).is_none() {
-            continue;
-        }
-        let fs_mtime = match path.metadata().and_then(|m| m.modified()) {
-            Ok(t) => t,
-            Err(_) => continue,
+    let Some(stale) = crate::workflow_status::stale_paths(root, &p, limit) else {
+        return Check {
+            name: "index freshness",
+            status: Status::Warn,
+            message: "cannot inspect index freshness".into(),
+            hint: Some("run `mastermind index .` to rebuild the index".into()),
         };
-        if fs_mtime > db_mtime {
-            let rel = path
-                .strip_prefix(root)
-                .unwrap_or(path)
-                .display()
-                .to_string();
-            stale.push(rel);
-            if stale.len() >= limit {
-                break 'walk;
-            }
-        }
-    }
+    };
     if stale.is_empty() {
         Check {
             name: "index freshness",
             status: Status::Ok,
-            message: "no source files newer than the index".into(),
+            message: "indexable source paths match stored mtimes".into(),
             hint: None,
         }
     } else {
@@ -835,28 +802,6 @@ fn perform_handshake(child: &mut std::process::Child) -> Result<usize, String> {
 }
 
 // ----- helpers -------------------------------------------------------------
-
-fn is_skipped_dir(name: &str) -> bool {
-    matches!(
-        name,
-        ".git"
-            | ".mastermind"
-            | ".venv"
-            | "venv"
-            | "__pycache__"
-            | "node_modules"
-            | "target"
-            | "dist"
-            | "build"
-            | ".tox"
-            | ".pytest_cache"
-            | ".mypy_cache"
-            | ".ruff_cache"
-            | ".next"
-            | ".turbo"
-            | ".cache"
-    )
-}
 
 fn format_bytes(n: u64) -> String {
     const KB: u64 = 1024;

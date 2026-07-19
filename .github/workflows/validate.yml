@@ -6,6 +6,13 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   validate:
     name: Frontmatter & cross-references
@@ -27,8 +34,8 @@ jobs:
       - name: Run validator
         run: python scripts/validate.py
 
-      - name: Compile eval harness
-        run: python -m py_compile evals/runner.py
+      - name: Test eval harness
+        run: python -m unittest evals/test_runner.py
 
       - name: Run audit workflow security fixtures
         run: python scripts/test_audit_workflow_security.py

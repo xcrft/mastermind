@@ -27,6 +27,8 @@ Needs `claude` CLI **and** `git` on PATH. Auth uses your Claude Code login (no A
 ./evals/runner.py --case c-001-slop-rethink      # one case
 ./evals/runner.py --model sonnet                 # default: opus
 ./evals/runner.py --keep-fixtures                # don't delete tmp git repos (debug)
+./evals/runner.py --verbose-failures             # show bounded model output on failure
+bash evals/run-verified.sh --model sonnet        # deterministic gates, then all suites
 ```
 
 Each case takes ~30–60s (Opus). Auditor cases are slightly slower because the
@@ -121,6 +123,7 @@ prompt is evaluated as text and cannot operate on the maintainer's checkout.
   "input": {"prompt": "A self-contained scenario"},
   "expect": {
     "contains": ["required signal"],
+    "contains_any": [["equivalent phrase A", "equivalent phrase B"]],
     "not_contains": ["forbidden claim"]
   }
 }
@@ -169,6 +172,9 @@ python evals/ablation.py --with-mastermind # both conditions, head-to-head
 - After adding a fixture variant (smoke `--keep-fixtures` to inspect tmp repo)
 
 Not on every PR. Not in CI. Hand-run by the maintainer.
+
+The runner's parsing, allowlist, and input-isolation contract is deterministic
+and does run in CI via `python -m unittest evals/test_runner.py`.
 
 ## Why no LLM-judge
 

@@ -8,10 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Derived project-history search across durable Markdown artifacts, exposed as
+  `mastermind history`, `mastermind why`, and the read-only `mmcg_history` tool.
+- `mastermind-project-history` plus epistemic-envelope evals for speculative
+  leaps, superseded decisions, negative history, approval-vs-proof, and
+  test-evidence mismatch.
 - `mastermind-architecture-review` with focused runtime-boundary, source-of-truth, idempotency, and backward-compatibility references plus model-backed regression cases for each risk.
 - A reproducible mmcg index benchmark that reports cold, warm, and incremental timing with peak process RSS as schema-v1 JSON.
 
 ### Changed
+- Project decision records now distinguish provenance, technical evidence,
+  active/superseded status, supersession links, and reusable lessons.
 - mmcg indexing now honors Git and `.ignore` rules without requiring a Git worktree, bounds parallel parse retention to 64 files, and rejects binary-looking or oversized source files before parsing.
 - Index databases carry an extractor-contract version. Incompatible extractor semantics force a full rebuild, while CLI status, MCP status, and doctor expose drift instead of trusting unchanged mtimes.
 

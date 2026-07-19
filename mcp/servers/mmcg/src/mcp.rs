@@ -187,6 +187,7 @@ static TOOLS: &[ToolDef] = &[
         handle_dependency_cycles,
     ),
     read_only_tool("mmcg_tasks", schema_tasks, handle_tasks),
+    read_only_tool("mmcg_history", schema_history, handle_history),
     read_only_tool("mmcg_centrality", schema_centrality, handle_centrality),
     read_only_tool("mmcg_map", schema_map, handle_map),
     read_only_tool(
@@ -807,6 +808,22 @@ fn schema_tasks() -> Value {
     })
 }
 
+fn schema_history() -> Value {
+    json!({
+        "name": "mmcg_history",
+        "description": "Search durable project history across CONTEXT.md, canonical task specs, executor reports, audits, release notes, and shared lessons. Returns observed FTS matches plus skipped/truncated signals; ranking and co-occurrence do not establish causality or correctness. The returned Markdown paths remain the source of truth, and callers should re-index after Markdown changes.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "FTS5 MATCH query (e.g. 'rate limit', 'auth OR session', '\"token bucket\"')" },
+                "kind": { "type": "string", "enum": ["context", "lesson", "task_spec", "executor_report", "audit", "release_notes"], "description": "Optional exact artifact-kind filter" },
+                "top": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10, "description": "How many observed matches to return" }
+            },
+            "required": ["query"]
+        }
+    })
+}
+
 fn schema_centrality() -> Value {
     json!({
         "name": "mmcg_centrality",
@@ -1081,6 +1098,21 @@ fn handle_tasks(store: &mut Store, args: &Value) -> Result<Value, HandlerError> 
     let r = queries::tasks(store, query, top)
         .map_err(|error| HandlerError::internal("tasks_query", error))?;
     serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
+}
+
+fn handle_history(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
+    let query = str_arg(args, "query")?;
+    let kind = opt_str_arg(args, "kind");
+    let top = args
+        .get("top")
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(10)
+        .clamp(1, 50);
+    let response = queries::history(store, query, kind, top)
+        .map_err(|error| HandlerError::internal("history_query", error))?;
+    serde_json::to_value(response)
+        .map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
 fn handle_centrality(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
@@ -1618,7 +1650,7 @@ mod tests {
     #[test]
     fn tool_annotations_match_behavior_table() {
         let legacy = tools_list(ProtocolVersion::Legacy);
-        assert_eq!(legacy["tools"].as_array().unwrap().len(), 23);
+        assert_eq!(legacy["tools"].as_array().unwrap().len(), 24);
         assert!(legacy["tools"]
             .as_array()
             .unwrap()
@@ -1627,7 +1659,7 @@ mod tests {
 
         let current = tools_list(ProtocolVersion::Current);
         let tools = current["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 23);
+        assert_eq!(tools.len(), 24);
         let mut readers = 0;
         for tool in tools {
             let annotations = &tool["annotations"];
@@ -1646,7 +1678,47 @@ mod tests {
                 readers += 1;
             }
         }
-        assert_eq!(readers, 22);
+        assert_eq!(readers, 23);
+    }
+
+    #[test]
+    fn history_tool_returns_observed_retrieval_with_epistemic_contract() {
+        let path = std::env::temp_dir().join("mmcg_mcp_history.db");
+        let _ = std::fs::remove_file(&path);
+        let mut store = crate::store::Store::open(&path).unwrap();
+        store
+            .replace_project_history(&[crate::store::ProjectHistoryEntry {
+                path: "CONTEXT.md".into(),
+                kind: "context".into(),
+                title: "Webhook decision".into(),
+                body: "Use a durable idempotency key for webhook retries.".into(),
+            }])
+            .unwrap();
+
+        let envelope = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({
+                "name": "mmcg_history",
+                "arguments": { "query": "idempotency", "kind": "context" }
+            }),
+        )
+        .unwrap();
+        let result = unwrap_content(&envelope);
+        assert_eq!(result["count"], 1);
+        assert_eq!(result["observed"][0]["path"], "CONTEXT.md");
+        assert!(result["inference"].as_str().unwrap().contains("none"));
+        assert!(result["source_of_truth"]
+            .as_str()
+            .unwrap()
+            .contains("Markdown"));
+        assert_eq!(result["skipped_artifacts"], 0);
+        assert_eq!(result["truncated"], false);
+        assert!(result["freshness"]
+            .as_str()
+            .unwrap()
+            .contains("not checked"));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -2145,7 +2217,7 @@ mod tests {
     #[test]
     fn tools_list_covers_every_handler() {
         let listed: Vec<&str> = TOOLS.iter().map(|t| t.name).collect();
-        assert_eq!(listed.len(), 23, "expected 23 tools, got {}", listed.len());
+        assert_eq!(listed.len(), 24, "expected 24 tools, got {}", listed.len());
         for name in &listed {
             assert!(
                 TOOLS.iter().any(|t| &t.name == name),

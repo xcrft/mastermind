@@ -72,6 +72,20 @@ fn handle_event(
     pending: &mut HashMap<PathBuf, Instant>,
     store: &mut Store,
 ) {
+    if event
+        .paths
+        .iter()
+        .any(|path| is_project_history_path(path, root))
+    {
+        match indexer.index_project_history(store) {
+            Ok(stats) => eprintln!(
+                "[mastermind watch] refreshed {} history entries (skipped {}, truncated {})",
+                stats.indexed, stats.skipped, stats.truncated
+            ),
+            Err(error) => eprintln!("[mastermind watch] history refresh failed: {error}"),
+        }
+    }
+
     if event.paths.iter().any(|path| is_ignore_config(path, root)) {
         *source_matcher = SourceMatcher::new(root);
         pending.clear();
@@ -153,6 +167,10 @@ fn is_ignore_config(path: &Path, root: &Path) -> bool {
     path == root.join(".git/info/exclude")
 }
 
+fn is_project_history_path(path: &Path, root: &Path) -> bool {
+    path == root.join("CONTEXT.md") || path.starts_with(root.join(".mastermind").join("tasks"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,5 +206,38 @@ mod tests {
         assert!(pending.is_empty());
         assert!(matcher.is_ignored(&source, false));
         assert!(store.indexed_paths().unwrap().is_empty());
+    }
+
+    #[test]
+    fn history_markdown_events_refresh_the_derived_corpus() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join(".mastermind/tasks")).unwrap();
+        let context = root.join("CONTEXT.md");
+        std::fs::write(&context, "# Context\n\nInitial decision.\n").unwrap();
+        let mut store = Store::open(root.join(".mastermind/mmcg.db")).unwrap();
+        let indexer = Indexer::new(&root);
+        indexer.index_all(&mut store, false).unwrap();
+
+        std::fs::write(&context, "# Context\n\nUse durable idempotency keys.\n").unwrap();
+        let event = notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(context);
+        let mut matcher = SourceMatcher::new(&root);
+        let mut pending = HashMap::new();
+        handle_event(
+            event,
+            &root,
+            &indexer,
+            &mut matcher,
+            &mut pending,
+            &mut store,
+        );
+
+        assert_eq!(
+            store
+                .search_project_history("idempotency", Some("context"), 10)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

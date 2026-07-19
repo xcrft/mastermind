@@ -3,7 +3,9 @@
 //! Wraps raw store methods with name-based lookup, structured response types,
 //! and JSON serialization for the MCP layer.
 
-use crate::store::{FileEntry, MapBoundaryMatch, MapBoundaryScope, Store, Symbol, TaskSpecHit};
+use crate::store::{
+    FileEntry, MapBoundaryMatch, MapBoundaryScope, ProjectHistoryHit, Store, Symbol, TaskSpecHit,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 #[cfg(test)]
@@ -378,6 +380,52 @@ pub fn tasks(store: &Store, query: &str, top: u32) -> rusqlite::Result<TaskSearc
         query: query.to_string(),
         count: results.len() as u32,
         results,
+    })
+}
+
+#[derive(Debug, Serialize)]
+pub struct HistorySearchResponse {
+    pub query: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    pub count: u32,
+    /// Direct FTS matches from the indexed Markdown artifacts.
+    pub observed: Vec<ProjectHistoryHit>,
+    /// Static epistemic contract: the query engine performs retrieval, not reasoning.
+    pub inference: &'static str,
+    pub source_of_truth: &'static str,
+    /// Candidate files omitted because of admission errors or size limits.
+    pub skipped_artifacts: u32,
+    /// True when the 5,000-artifact work limit omitted candidates.
+    pub truncated: bool,
+    /// History freshness is deliberately not inferred from structural status.
+    pub freshness: &'static str,
+}
+
+pub fn history(
+    store: &Store,
+    query: &str,
+    kind: Option<&str>,
+    top: u32,
+) -> rusqlite::Result<HistorySearchResponse> {
+    let observed = store.search_project_history(query, kind, top)?;
+    let skipped_artifacts = store
+        .meta_value("project_history_skipped")?
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let truncated = store
+        .meta_value("project_history_truncated")?
+        .is_some_and(|value| value == "true");
+    Ok(HistorySearchResponse {
+        query: query.to_string(),
+        kind: kind.map(str::to_string),
+        count: observed.len() as u32,
+        observed,
+        inference: "none; rank and co-occurrence do not establish causality or correctness",
+        source_of_truth: "Markdown artifacts at the returned paths; this FTS index is derived",
+        skipped_artifacts,
+        truncated,
+        freshness: "not checked by this query; run mastermind index after Markdown changes",
     })
 }
 

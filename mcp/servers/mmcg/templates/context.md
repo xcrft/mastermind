@@ -2,7 +2,7 @@
 name: mastermind-context
 description: Project-level CONTEXT.md template — accumulated institutional memory for the Mastermind workflow (identity, active goals, decision log, gotchas, glossary, external dependencies, don't-touch list). Lives at the project root alongside CLAUDE.md. Updated by the planner during post-flight semantic review when work surfaces something worth preserving across sessions.
 metadata:
-  version: 0.1.0
+  version: 0.2.0
   authors:
     - mastermind
   tags:
@@ -65,17 +65,22 @@ metadata:
 
 ## Decision log
 
-*Most recent first. Each entry: date, decision, why, alternatives rejected. Append-only.*
+*Most recent first. Append-only: supersede old decisions explicitly instead of rewriting history.*
 
 ### <YYYY-MM-DD> — <Short decision name>
 
 - **Decision:** <one sentence>
 - **Why:** <the reason that survives author handoff>
+- **Status:** <`active` or `superseded`>
+- **Supersedes:** <earlier decision heading or `none`>
+- **Provenance:** <who or what authorized/recorded the decision; origin is not proof>
+- **Evidence:** <code, test, runtime observation, audit, or `decision only — not technically verified`>
 - **Alternatives rejected:**
   - <option A>: <why rejected>
   - <option B>: <why rejected>
 - **Source:** <`.mastermind/tasks/NNN-name/spec.md` or a discussion link>
 - **Critic verdict** (if applicable): <`ship it` / `ship with caveats` / etc.>
+- **Reusable lesson:** <what future work should preserve or avoid>
 
 ### <YYYY-MM-DD> — <Earlier decision>
 
@@ -131,5 +136,9 @@ The planner (`mastermind-task-planning` skill) appends to this file during post-
 | Code area found to have hidden constraints | Don't-touch list |
 
 The planner does NOT update this file silently. Every change is logged in the spec's Notes section so the audit trail is preserved.
+
+Approval proves that an authorized person accepted a decision. It does not prove
+that a runtime, security, performance, or compatibility claim is technically
+true; those claims need their own evidence.
 
 <!-- ─── COPY TO HERE ─── -->

@@ -97,9 +97,23 @@ state, retry, migration, or public-contract boundaries. It reconstructs the
 real runtime path and tests source-of-truth ownership, idempotency, and
 backward compatibility against concrete failure sequences.
 
+### Ask why the project works this way
+
+```bash
+mastermind history "webhook dedupe"
+mastermind why "why is webhook dedupe durable?"
+```
+
+History searches `CONTEXT.md`, canonical task specs, executor reports, audits,
+release notes, and shared lessons. The index is only a retrieval layer: returned
+Markdown remains authoritative, and the answer separates observed records from
+inference and missing proof.
+
 ### Query the graph from an agent
 
-The MCP server exposes 23 bounded tools for symbol search, callers/callees, imports, architecture maps, change impact, test impact, cycles, API surface, and task history. The same engine is available through the CLI.
+The MCP server exposes 24 bounded tools for symbol search, callers/callees,
+imports, architecture maps, change impact, test impact, cycles, API surface, and
+project history. The same engine is available through the CLI.
 
 ```text
 "Does parseConfig exist?"

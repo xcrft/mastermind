@@ -13,6 +13,7 @@ the installable workflow bundle.
 | [`mastermind-codegraph-research`](workflow/mastermind-codegraph-research/SKILL.md) | Uses mmcg for structural discovery while preserving syntactic, collision, precision, stale-index, and runtime-proof limits. |
 | [`mastermind-structured-report-contract`](workflow/mastermind-structured-report-contract/SKILL.md) | Defines the file-backed executor report consumed by post-flight and the advisory Strict auditor tail. |
 | [`mastermind-critical-review`](workflow/mastermind-critical-review/SKILL.md) | Stress-test a design, spec, plan, or report for false assumptions, broken contracts, scope creep, missing evidence, and high-risk failure modes. |
+| [`mastermind-architecture-review`](workflow/mastermind-architecture-review/SKILL.md) | Reviews runtime paths, state ownership, retry behavior, and compatibility against concrete system invariants. |
 | [`mastermind-project-map`](workflow/mastermind-project-map/SKILL.md) | Builds a bounded architecture map from the live codegraph, including collision and truncation evidence. |
 | [`mastermind-change-impact`](workflow/mastermind-change-impact/SKILL.md) | Reports changed files, symbols, structural impact, and risk from a live diff. |
 | [`mastermind-test-impact`](workflow/mastermind-test-impact/SKILL.md) | Selects tests from changed symbols and graph evidence without claiming runtime certainty. |

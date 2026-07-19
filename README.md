@@ -90,6 +90,13 @@ mastermind impact --since HEAD~1 --format json
 
 Impact analysis compares a Git baseline with committed, staged, unstaged, and untracked work. It reports symbol-level changes, affected callers, component crossings, and candidate tests. Focused candidates are evidence for prioritization, not a replacement for the repository's required test suite.
 
+### Review architecture invariants
+
+Use `/mastermind-architecture-review` for changes that cross service, queue,
+state, retry, migration, or public-contract boundaries. It reconstructs the
+real runtime path and tests source-of-truth ownership, idempotency, and
+backward compatibility against concrete failure sequences.
+
 ### Query the graph from an agent
 
 The MCP server exposes 23 bounded tools for symbol search, callers/callees, imports, architecture maps, change impact, test impact, cycles, API surface, and task history. The same engine is available through the CLI.

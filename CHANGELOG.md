@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `mastermind-architecture-review` with focused runtime-boundary, source-of-truth, idempotency, and backward-compatibility references plus model-backed regression cases for each risk.
+
 ## [0.38.1] - 2026-07-19
 
 ### Changed

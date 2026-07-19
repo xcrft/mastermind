@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mastermind Architecture Review"
+  short_description: "Verify runtime, state, retry, and compatibility boundaries"
+  default_prompt: "Use $mastermind-architecture-review to test this design against its real runtime path and system invariants."

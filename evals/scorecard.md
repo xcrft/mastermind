@@ -11,12 +11,17 @@ Latest complete runs: 2026-07-19, uncommitted working tree.
 | auditor | opus | 9/9 | 9/9 | 1,286.4 s | Real Git fixtures and live mmcg; no sentinel retry |
 | critic | opus | 5/5 | 5/5 | 316.6 s | Full suite |
 | intake | sonnet | 5/5 | 5/5 | 63.9 s | Full suite |
-| workflow | sonnet | 22/22 | 22/22 | 235.0 s | Full suite; includes four comment-policy cases |
+| workflow | sonnet | 26/26 | 26/26 | 372.3 s | Full suite; includes comment-policy and architecture-risk cases |
 
 The workflow suite includes four comment-discipline regressions: zero comments
 for straightforward code, removal of narrating comments, preservation of one
 non-obvious security rationale, and enforcement through the executor workflow
 without explicitly invoking the standalone skill.
+
+The workflow suite also includes four architecture-review regressions: context
+loss across a runtime boundary, mutation of derived state instead of the source
+of truth, non-durable idempotency under concurrent retries, and a breaking
+event change across mixed-version and replay windows.
 
 ## Reading the result
 

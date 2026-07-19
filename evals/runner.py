@@ -87,6 +87,7 @@ WORKFLOW_ARTIFACTS = frozenset(
         "skills/prompt-engineering/mastermind-prompt-refiner/SKILL.md",
         "skills/security/mastermind-agent-security-review/SKILL.md",
         "skills/workflow/mastermind-audit-attestation/SKILL.md",
+        "skills/workflow/mastermind-architecture-review/SKILL.md",
         "skills/workflow/mastermind-change-impact/SKILL.md",
         "skills/workflow/mastermind-codegraph-research/SKILL.md",
         "skills/workflow/mastermind-critical-review/SKILL.md",

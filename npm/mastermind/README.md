@@ -44,7 +44,8 @@ Small changes can use the codegraph directly without creating a task spec.
 
 ## What it provides
 
-- Architecture maps, symbol search, callers, imports, cycles, and API surface
+- Architecture maps plus runtime, state, retry, and compatibility reviews
+- Symbol search, callers, imports, cycles, and API surface
 - Changed symbols, affected callers, component crossings, and candidate tests
 - Direct, verified, and strict task workflows based on change risk
 - Executor reports checked against the real Git diff and codegraph

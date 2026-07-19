@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.38.1] - 2026-07-19
+
+### Changed
+- The npm package page now uses a concise package description and a shorter, task-focused README.
+
+### Fixed
+- The npm version badge now uses a release-bound value instead of the broken scoped-package lookup; validation keeps it aligned with `package.json`.
+
 ## [0.38.0] - 2026-07-19
 
 ### Added
@@ -297,7 +305,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Seven prebuilt platform packages (`@xcraftmind/mmcg-*`) covering macOS (arm64, x64), Linux glibc and musl (x64, arm64), and Windows (x64). npm installs only the package matching the host's `os` / `cpu` / `libc`.
 - Install-mode-aware `setup claude` that writes the correct MCP `command` form for npx, global, project-local, and cargo installs.
 
-[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v0.38.0...HEAD
+[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v0.38.1...HEAD
+[0.38.1]: https://github.com/xcrft/mastermind/compare/npm-v0.38.0...npm-v0.38.1
 [0.38.0]: https://github.com/xcrft/mastermind/compare/npm-v0.37.0...npm-v0.38.0
 [0.37.0]: https://github.com/xcrft/mastermind/compare/npm-v0.36.2...npm-v0.37.0
 [0.28.1]: https://github.com/xcrft/mastermind/compare/npm-v0.28.0...npm-v0.28.1

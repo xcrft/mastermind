@@ -14,7 +14,7 @@ npm, or model-backed test suites. CI executes it on every change.
 - portable skill adapters and one behavioral eval case per shipped skill;
 - planner/executor/auditor ownership and structured-report schema parity;
 - GitHub Action SHA pins and the audit publication security contract;
-- npm package/version/platform shape and workflow-bundle staging parity;
+- npm package/version/platform shape, README badge alignment, and workflow-bundle staging parity;
 - answer-leak clues in adversarial eval fixture source trees.
 
 ### Run locally

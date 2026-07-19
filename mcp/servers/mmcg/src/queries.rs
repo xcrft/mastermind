@@ -256,6 +256,8 @@ pub struct StatusResponse {
     /// snapshot (capped at 100). A non-zero count means structural answers must
     /// not be trusted before re-indexing.
     pub stale_files: usize,
+    /// False when extractor semantics changed after the stored index was built.
+    pub extractor_contract_current: bool,
 }
 
 pub fn search(
@@ -1560,6 +1562,7 @@ pub fn status(store: &Store) -> rusqlite::Result<StatusResponse> {
         symbol_count: store.symbol_count()?,
         file_count: store.file_count()?,
         stale_files: stale_count(db_path),
+        extractor_contract_current: store.extractor_contract_current()?,
     })
 }
 
@@ -1569,10 +1572,10 @@ pub fn status(store: &Store) -> rusqlite::Result<StatusResponse> {
 /// The db path may be relative, so canonicalize before climbing to project root.
 fn stale_count(db_path: &std::path::Path) -> usize {
     let Ok(db_abs) = db_path.canonicalize() else {
-        return 0;
+        return 1;
     };
     let Some(root) = db_abs.parent().and_then(|d| d.parent()) else {
-        return 0;
+        return 1;
     };
     crate::workflow_status::stale_paths(root, &db_abs, 100)
         .map(|paths| paths.len())

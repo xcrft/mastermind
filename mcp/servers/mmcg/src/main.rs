@@ -750,10 +750,12 @@ fn run_cli_inner(
             let indexer = mmcg::indexer::Indexer::new(&root);
             let stats = indexer.index_all(&mut store, force)?;
             println!(
-                "indexed {} (unchanged {}, purged {}, failed {}) / scanned {} | {} symbols | {} edges | {} task specs | {} ms",
+                "indexed {} (unchanged {}, purged {}, skipped binary {}, skipped large {}, failed {}) / scanned {} | {} symbols | {} edges | {} task specs | {} ms",
                 stats.files_indexed,
                 stats.files_unchanged,
                 stats.files_purged,
+                stats.files_skipped_binary,
+                stats.files_skipped_too_large,
                 stats.files_failed,
                 stats.files_scanned,
                 stats.symbols_total,
@@ -763,6 +765,9 @@ fn run_cli_inner(
             );
             if stats.files_failed > 0 {
                 eprintln!("warning: {} files failed to parse", stats.files_failed);
+            }
+            if stats.extractor_contract_rebuilt {
+                eprintln!("extractor contract changed: rebuilt all structural data");
             }
         }
         Cmd::Map {

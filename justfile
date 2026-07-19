@@ -66,6 +66,10 @@ package:
 publish-dry:
     cargo publish --manifest-path {{MMCG}}/Cargo.toml --locked --dry-run --allow-dirty
 
+# Measure cold, warm, and incremental indexing with peak process RSS.
+benchmark-index:
+    cargo bench --manifest-path {{MMCG}}/Cargo.toml --locked --bench indexer
+
 # Clean Rust build artifacts.
 clean:
     cargo clean --manifest-path {{MMCG}}/Cargo.toml

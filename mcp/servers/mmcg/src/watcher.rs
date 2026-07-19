@@ -8,7 +8,7 @@
 //!
 //! Runs in the foreground until stdin closes or Ctrl-C.
 
-use crate::indexer::{extractor_for_path, Indexer};
+use crate::indexer::{extractor_for_path, IndexError, Indexer, SourceMatcher};
 use crate::store::Store;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
@@ -22,6 +22,7 @@ const RX_TIMEOUT: Duration = Duration::from_millis(100);
 pub fn run(root: PathBuf, mut store: Store) -> Result<(), Box<dyn std::error::Error>> {
     let root = root.canonicalize()?;
     let indexer = Indexer::new(&root);
+    let mut source_matcher = SourceMatcher::new(&root);
 
     // Initial pass — bring the index current before watching. Incremental:
     // only re-parses files whose mtime is newer than the stored index.
@@ -41,7 +42,14 @@ pub fn run(root: PathBuf, mut store: Store) -> Result<(), Box<dyn std::error::Er
     loop {
         // Short timeout so we can also flush pending changes between events.
         match rx.recv_timeout(RX_TIMEOUT) {
-            Ok(Ok(event)) => handle_event(event, &root, &mut pending_changes, &mut store),
+            Ok(Ok(event)) => handle_event(
+                event,
+                &root,
+                &indexer,
+                &mut source_matcher,
+                &mut pending_changes,
+                &mut store,
+            ),
             Ok(Err(e)) => eprintln!("[mastermind watch] notify error: {e}"),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -59,13 +67,30 @@ pub fn run(root: PathBuf, mut store: Store) -> Result<(), Box<dyn std::error::Er
 fn handle_event(
     event: notify::Event,
     root: &Path,
+    indexer: &Indexer,
+    source_matcher: &mut SourceMatcher,
     pending: &mut HashMap<PathBuf, Instant>,
     store: &mut Store,
 ) {
+    if event.paths.iter().any(|path| is_ignore_config(path, root)) {
+        *source_matcher = SourceMatcher::new(root);
+        pending.clear();
+        match indexer.index_all(store, false) {
+            Ok(stats) => eprintln!(
+                "[mastermind watch] ignore rules changed: indexed {} (unchanged {}, purged {})",
+                stats.files_indexed, stats.files_unchanged, stats.files_purged
+            ),
+            Err(error) => eprintln!("[mastermind watch] ignore-rule refresh failed: {error}"),
+        }
+        return;
+    }
+
     match event.kind {
         EventKind::Modify(_) | EventKind::Create(_) => {
             for path in event.paths {
-                if path.is_file() && extractor_for_path(&path).is_some() && !is_ignored(&path, root)
+                if path.is_file()
+                    && extractor_for_path(&path).is_some()
+                    && !source_matcher.is_ignored(&path, false)
                 {
                     pending.insert(path, Instant::now());
                 }
@@ -103,6 +128,9 @@ fn flush_settled(indexer: &Indexer, store: &mut Store, pending: &mut HashMap<Pat
         }
         match indexer.index_one(store, &path) {
             Ok(()) => eprintln!("[mastermind watch] reindexed {}", path.display()),
+            Err(IndexError::Skipped(reason)) => {
+                eprintln!("[mastermind watch] skipped {}: {reason:?}", path.display())
+            }
             Err(e) => eprintln!("[mastermind watch] failed {}: {e}", path.display()),
         }
     }
@@ -115,13 +143,50 @@ fn relative_path(absolute: &Path, root: &Path) -> Option<String> {
         .map(|p| p.to_string_lossy().replace('\\', "/"))
 }
 
-/// Skip events for the index file itself and anything under skipped dirs.
-fn is_ignored(path: &Path, root: &Path) -> bool {
-    if path.components().any(|c| {
-        c.as_os_str() == ".mastermind" || c.as_os_str() == ".git" || c.as_os_str() == "target"
-    }) {
-        return true;
+fn is_ignore_config(path: &Path, root: &Path) -> bool {
+    if path
+        .file_name()
+        .is_some_and(|name| name == ".gitignore" || name == ".ignore")
+    {
+        return path.starts_with(root);
     }
-    // Skip if the relative prefix is missing (event somehow outside root).
-    path.strip_prefix(root).is_err()
+    path == root.join(".git/info/exclude")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify::event::ModifyKind;
+
+    #[test]
+    fn changing_ignore_rules_rebuilds_matcher_and_purges_newly_ignored_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let source = root.join("ignored.rs");
+        std::fs::write(&source, "pub fn indexed() {}\n").unwrap();
+        std::fs::create_dir_all(root.join(".mastermind")).unwrap();
+        let mut store = Store::open(root.join(".mastermind/mmcg.db")).unwrap();
+        let indexer = Indexer::new(&root);
+        indexer.index_all(&mut store, false).unwrap();
+        assert_eq!(store.indexed_paths().unwrap(), vec!["ignored.rs"]);
+
+        let mut matcher = SourceMatcher::new(&root);
+        let mut pending = HashMap::new();
+        let ignore_file = root.join(".gitignore");
+        std::fs::write(&ignore_file, "ignored.rs\n").unwrap();
+        let event = notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(ignore_file);
+
+        handle_event(
+            event,
+            &root,
+            &indexer,
+            &mut matcher,
+            &mut pending,
+            &mut store,
+        );
+
+        assert!(pending.is_empty());
+        assert!(matcher.is_ignored(&source, false));
+        assert!(store.indexed_paths().unwrap().is_empty());
+    }
 }

@@ -4,14 +4,14 @@ This file records behavioral regression runs. It is not a model benchmark or a
 coverage percentage: case sets differ by suite, and elapsed time depends on the
 model, machine, and fixture setup.
 
-Latest complete runs: 2026-07-19, uncommitted working tree.
+Latest complete runs: 2026-07-19, 1.0.0 release candidate.
 
 | suite | model | result | first pass | elapsed | evidence |
 |---|---|---:|---:|---:|---|
 | auditor | opus | 9/9 | 9/9 | 1,286.4 s | Real Git fixtures and live mmcg; no sentinel retry |
 | critic | opus | 5/5 | 5/5 | 316.6 s | Full suite |
 | intake | sonnet | 5/5 | 5/5 | 63.9 s | Full suite |
-| workflow | sonnet | 26/26 | 26/26 | 372.3 s | Full suite; includes comment-policy and architecture-risk cases |
+| workflow | sonnet | 36/36 | 36/36 | 525.6 s | Full suite; includes comment-policy, architecture-risk, history, context, and style-lifecycle cases |
 
 The workflow suite includes four comment-discipline regressions: zero comments
 for straightforward code, removal of narrating comments, preservation of one
@@ -22,6 +22,11 @@ The workflow suite also includes four architecture-review regressions: context
 loss across a runtime boundary, mutation of derived state instead of the source
 of truth, non-durable idempotency under concurrent retries, and a breaking
 event change across mixed-version and replay windows.
+
+The lifecycle regressions keep codegraph misses inside an epistemic envelope,
+honor superseded decisions and failed approaches, separate approval from proof,
+require explicit lesson-candidate review, and prevent style evidence from
+crossing author, language, repository, or authority boundaries.
 
 ## Reading the result
 

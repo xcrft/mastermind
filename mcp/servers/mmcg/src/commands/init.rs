@@ -22,8 +22,8 @@ pub struct InitOpts {
     pub claude: bool,
     /// Reconcile the npm workflow bundle into `~/.claude/`.
     pub global: bool,
-    /// Seed `~/.mastermind/style.md` from the author's git history, only if
-    /// absent (never clobbers a hand-edited profile).
+    /// Enrich `~/.mastermind/style.md` from this repository's authored history.
+    /// Re-mining is idempotent and preserves manual and interpreted sections.
     pub seed_style: bool,
 }
 

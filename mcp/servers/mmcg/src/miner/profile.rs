@@ -4,17 +4,18 @@
 //!
 //! Constraints that aren't obvious from the code:
 //!
-//! - Code-shape idioms (indentation, quotes, line length, comment density) and
-//!   commit conventions (prefix, subject length, body usage) — choices a language
-//!   or workflow leaves open. Not naming case (language convention).
+//! - Corpus-level code-shape observations (indentation, quotes, line length,
+//!   comment density) plus commit conventions. Code-shape observations are
+//!   diagnostic evidence because repository tooling may explain them; they are
+//!   not direct implementation preferences or allowed to override local code.
 //! - Deterministic: git + line heuristics, no LLM, so output is reproducible and
 //!   unit-testable.
 //! - A rule is emitted only with a dominant pattern over enough samples, and
 //!   names the counter-pattern it rejects. No signal → no rule, never filler.
 //! - Each mine enriches a user-global cross-repo store (`~/.mastermind/style.db`)
 //!   and regenerates `style.md` from the aggregate, preserving the hand-edited
-//!   manual block. `--force` rebuilds the store from this repo alone. Re-mining is
-//!   user-invoked — there is no silent online update.
+//!   manual and interpreted blocks. `--force` rebuilds the store from this repo
+//!   alone. Re-mining is user-invoked — there is no silent online update.
 
 use super::store::{self, Counts};
 use std::path::{Path, PathBuf};
@@ -28,6 +29,7 @@ const RETENTION_DAYS: i64 = 365;
 const COMMIT_SAMPLE_CAP: usize = 400;
 
 const MIN_SAMPLES: usize = 20;
+const PROFILE_SCHEMA_MARKER: &str = "<!-- mastermind-style:schema:2 -->";
 
 /// `doctor` nudges to re-mine once the author has this many new commits since.
 const STALE_COMMITS: usize = 25;
@@ -89,6 +91,7 @@ pub fn mine(
         db.reset()?;
     }
     let pruned = prune_stale(&mut db)?;
+    ensure_owner_compatible(&db, &author, &prov.identities)?;
     let repo_key = repo_root.to_string_lossy().to_string();
     db.upsert_repo(
         &repo_key,
@@ -110,7 +113,7 @@ pub fn mine(
 
     // Stage 2 (opt-in): an LLM writes the "design patterns" section regex can't,
     // from this repo's samples + the measured rules. Best-effort.
-    let synthesis = if deep {
+    let generated_interpreted = if deep {
         eprintln!("Deep mode sends sampled added lines and commit messages to `claude -p`.");
         match synthesize(repo_root, &rules, &commit_msgs, &lines) {
             Ok(s) => Some(s),
@@ -124,14 +127,18 @@ pub fn mine(
     };
 
     let path = profile_path()?;
-    let manual = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|t| extract_manual(&t));
+    // `--force` is a full owner/profile replacement, so carrying manual or
+    // interpreted prose from the previous owner would be cross-person leakage.
+    let existing = read_existing_profile(&path, force);
+    let manual = existing.as_deref().and_then(extract_manual);
+    let synthesized = generated_interpreted.is_some();
+    let interpreted =
+        generated_interpreted.or_else(|| existing.as_deref().and_then(extract_interpreted));
     let markdown = render_profile(
         &author,
         &agg,
         &rules,
-        synthesis.as_deref(),
+        interpreted.as_deref(),
         manual.as_deref(),
     );
     if let Some(parent) = path.parent() {
@@ -146,7 +153,7 @@ pub fn mine(
         rules: rules.len(),
         commits: agg.commits_total,
         pruned: pruned.len(),
-        synthesized: synthesis.is_some(),
+        synthesized,
         empty: rules.is_empty(),
     })
 }
@@ -176,6 +183,41 @@ fn prune_stale(db: &mut store::ProfileStore) -> Result<Vec<String>, Box<dyn std:
         db.prune_repos(&drop)?;
     }
     Ok(drop)
+}
+
+/// `style.db` is one person's cross-repository profile. A matching author label
+/// or email is sufficient to connect identities used in different repositories;
+/// no overlap means the caller is about to mix two people and must opt into a
+/// destructive reset explicitly.
+fn ensure_owner_compatible(
+    db: &store::ProfileStore,
+    author: &str,
+    identities: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (stored_authors, stored_identities) = db.owner_signals()?;
+    if stored_authors.is_empty() {
+        return Ok(());
+    }
+
+    let normalized_author = author.trim().to_ascii_lowercase();
+    let author_matches = stored_authors
+        .iter()
+        .any(|stored| stored.trim().eq_ignore_ascii_case(&normalized_author));
+    let identity_matches = identities.iter().any(|identity| {
+        stored_identities
+            .iter()
+            .any(|stored| stored.trim().eq_ignore_ascii_case(identity.trim()))
+    });
+    if author_matches || identity_matches {
+        return Ok(());
+    }
+
+    Err(format!(
+        "style profile already contains a different author ({}) — refusing to mix people; \
+         pass the matching --author value, or use --force to intentionally replace the profile",
+        stored_authors.join(", ")
+    )
+    .into())
 }
 
 /// CLI entry: mine and print a human summary.
@@ -238,6 +280,8 @@ fn profile_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
 pub enum Staleness {
     /// No profile yet, or its provenance marker is unreadable.
     Absent,
+    /// A profile from before the privacy/persistence contract is still present.
+    Legacy,
     /// Present and recent enough.
     Fresh { mined_through: String },
     /// Author has accrued enough new commits since the mine to warrant a re-mine.
@@ -250,6 +294,13 @@ pub enum Staleness {
 /// Per-repo freshness from the store: count the author's commits in `root` since
 /// the SHA it was last mined at. `doctor` uses this to nudge a re-mine — read-only.
 pub fn staleness(root: &Path) -> Staleness {
+    if profile_path()
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .is_some_and(|text| !text.contains(PROFILE_SCHEMA_MARKER))
+    {
+        return Staleness::Legacy;
+    }
     let db = match store::ProfileStore::db_path() {
         Some(p) if p.exists() => p,
         _ => return Staleness::Absent,
@@ -714,7 +765,7 @@ fn derive_indentation(c: &Counts) -> Option<StyleRule> {
         };
         Some(StyleRule {
             id: "indent",
-            statement: format!("Indents with {unit_txt} indentation"),
+            statement: format!("Observed {unit_txt} indentation across the mined corpus"),
             evidence: format!("{space}/{total} indented added lines lead with spaces"),
             counter: "tabs",
             confidence,
@@ -723,7 +774,7 @@ fn derive_indentation(c: &Counts) -> Option<StyleRule> {
     } else {
         Some(StyleRule {
             id: "indent",
-            statement: "Indents with tabs".to_string(),
+            statement: "Observed tab indentation across the mined corpus".to_string(),
             evidence: format!("{tab}/{total} indented added lines lead with a tab"),
             counter: "spaces",
             confidence,
@@ -760,7 +811,7 @@ fn derive_quotes(c: &Counts) -> Option<StyleRule> {
     Some(StyleRule {
         id: "quotes",
         statement: format!(
-            "Prefers {} quotes for strings",
+            "Observed {} quotes across mined TS/JS/Python",
             if single_wins { "single" } else { "double" }
         ),
         evidence: format!("{dominant}/{total} quote chars in TS/JS/Py added lines"),
@@ -793,7 +844,7 @@ fn derive_line_length(c: &Counts) -> Option<StyleRule> {
     let confidence = gate(under, total)?;
     Some(StyleRule {
         id: "line_length",
-        statement: "Keeps lines short (≤ ~100 chars)".to_string(),
+        statement: "Observed predominantly short lines (≤ ~100 chars)".to_string(),
         evidence: format!("{under}/{total} added lines ≤ 100 chars"),
         counter: "routinely long lines (>120)",
         confidence,
@@ -826,12 +877,12 @@ fn derive_comment_density(c: &Counts) -> Option<StyleRule> {
     let pct = comment as f64 / total as f64;
     let (statement, counter) = if pct < 0.08 {
         (
-            "Comments sparingly — lets the code carry the meaning",
+            "Observed sparse comments across the mined corpus",
             "heavy line-by-line commenting",
         )
     } else if pct > 0.22 {
         (
-            "Comments liberally — narrates intent in prose",
+            "Observed frequent comments across the mined corpus",
             "near-zero comments",
         )
     } else {
@@ -882,9 +933,9 @@ fn derive_brace_style(c: &Counts) -> Option<StyleRule> {
     Some(StyleRule {
         id: "brace_style",
         statement: if kr {
-            "Opens blocks with the brace on the same line (K&R)".to_string()
+            "Observed same-line opening braces (K&R) across the mined corpus".to_string()
         } else {
-            "Opens blocks with the brace on its own line (Allman)".to_string()
+            "Observed own-line opening braces (Allman) across the mined corpus".to_string()
         },
         evidence: format!("{dominant}/{total} opening braces"),
         counter: if kr {
@@ -925,7 +976,7 @@ fn derive_declaration(c: &Counts) -> Option<StyleRule> {
     Some(StyleRule {
         id: "declaration",
         statement: format!(
-            "Prefers `{}` for declarations",
+            "Observed `{}` declarations across mined TS/JS",
             if is_const { "const" } else { "let" }
         ),
         evidence: format!("{dominant}/{total} TS/JS declarations"),
@@ -968,9 +1019,9 @@ fn derive_string_build(c: &Counts) -> Option<StyleRule> {
     Some(StyleRule {
         id: "string_build",
         statement: if tpl {
-            "Builds strings with template literals".to_string()
+            "Observed template-literal string building across mined TS/JS".to_string()
         } else {
-            "Builds strings by `+` concatenation".to_string()
+            "Observed `+` string concatenation across mined TS/JS".to_string()
         },
         evidence: format!("{dominant}/{total} string-building lines"),
         counter: if tpl {
@@ -1219,17 +1270,39 @@ fn extract_manual(text: &str) -> Option<String> {
     Some(text[start..end].trim_matches('\n').to_string())
 }
 
+fn read_existing_profile(path: &Path, replace: bool) -> Option<String> {
+    (!replace)
+        .then(|| std::fs::read_to_string(path).ok())
+        .flatten()
+}
+
+/// Preserve the qualitative portrait across deterministic re-mines. Both the
+/// `--deep` compatibility path and `mastermind-style-deep` own this exact
+/// section; ordinary mining must not erase it.
+fn extract_interpreted(text: &str) -> Option<String> {
+    const HEADING: &str = "## Design patterns & tendencies (interpreted)";
+    let managed_start = text.find(MANAGED_START)? + MANAGED_START.len();
+    let managed = &text[managed_start..];
+    let start = managed.find(HEADING)?;
+    let tail = &managed[start..];
+    let end = tail.find("\n---\n").unwrap_or(tail.len());
+    let section = tail[..end].trim();
+    (!section.is_empty()).then(|| section.to_string())
+}
+
 /// Render `style.md` from the cross-repo aggregate: a preserved manual section
 /// (hand edits win, never regenerated) + a managed section regenerated each mine.
 fn render_profile(
-    author: &str,
+    _author: &str,
     agg: &store::Aggregate,
     rules: &[StyleRule],
-    synthesis: Option<&str>,
+    interpreted: Option<&str>,
     manual: Option<&str>,
 ) -> String {
     let mut out = String::new();
-    out.push_str(&format!("# Author style — {author}\n\n"));
+    out.push_str("# Author style\n\n");
+    out.push_str(PROFILE_SCHEMA_MARKER);
+    out.push_str("\n\n");
 
     out.push_str(MANUAL_START);
     out.push('\n');
@@ -1249,18 +1322,20 @@ fn render_profile(
     out.push_str(MANAGED_START);
     out.push('\n');
     out.push_str(
-        "<!-- Generated by `mastermind miner profile` from git. Regenerated each mine — \
-         do not hand-edit; use the manual section above. -->\n\n",
+        "<!-- Measurements are regenerated by `mastermind miner profile`; the interpreted \
+         section is preserved. Do not hand-edit measurements; use the manual section above \
+         or the mastermind-style-deep skill. -->\n\n",
     );
-    if !agg.identities.is_empty() {
-        out.push_str(&format!("**Identities:** {}\n", agg.identities.join(", ")));
-    }
     out.push_str(&format!(
         "**Mined from:** {} repo(s), {} commit(s) ({} sampled), {} added source lines\n\n",
         agg.repos, agg.commits_total, agg.commits_sampled, agg.added_lines_sampled
     ));
 
-    out.push_str("## Code-shape rules\n\n");
+    out.push_str("## Observed code-shape conventions\n\n");
+    out.push_str(
+        "_Diagnostic corpus evidence only. These patterns may come from project tooling or \
+         language mix; do not turn them directly into implementation requirements._\n\n",
+    );
     let mut any_code = false;
     for r in rules
         .iter()
@@ -1288,16 +1363,17 @@ fn render_profile(
         out.push_str(&commit_lines);
     }
 
-    if let Some(s) = synthesis {
+    if let Some(s) = interpreted {
         out.push('\n');
         out.push_str(s.trim());
         out.push('\n');
     }
 
     out.push_str(
-        "\n---\nThe planner reads this when drafting `CHANGE TO` blocks. Precedence: a task's \
-         explicit instructions win, then repo tooling (formatter, linter), then your manual \
-         overrides, then these mined rules.\n",
+        "\n---\nThe planner and executor read relevant parts as advisory input. Precedence: a \
+         task's explicit instructions win, then repository code and tooling, then manual and \
+         interpreted preferences. Commit voice is a fallback when repository policy is silent; \
+         code-shape corpus observations are diagnostic evidence only.\n",
     );
     out.push_str(MANAGED_END);
     out.push('\n');
@@ -1426,14 +1502,14 @@ diff --git a/app/bar.ts b/app/bar.ts
             text: "// one comment".to_string(),
         });
         let rule = from_lines(&lines, derive_comment_density).expect("should detect");
-        assert!(rule.statement.contains("sparingly"), "{}", rule.statement);
+        assert!(rule.statement.contains("sparse"), "{}", rule.statement);
     }
 
     #[test]
     fn detect_brace_style_same_line() {
         let lines = spaces(Lang::Rust, 0, "if cond {", 30);
         let rule = from_lines(&lines, derive_brace_style).expect("should detect");
-        assert!(rule.statement.contains("same line"), "{}", rule.statement);
+        assert!(rule.statement.contains("same-line"), "{}", rule.statement);
     }
 
     #[test]
@@ -1469,12 +1545,13 @@ diff --git a/app/bar.ts b/app/bar.ts
         let a = render_profile("me@example.com", &agg, &rules, None, None);
         let b = render_profile("me@example.com", &agg, &rules, None, None);
         assert_eq!(a, b);
-        assert!(a.contains("# Author style — me@example.com"));
-        assert!(a.contains("## Code-shape rules"));
+        assert!(a.contains("# Author style"));
+        assert!(a.contains(PROFILE_SCHEMA_MARKER));
+        assert!(a.contains("## Observed code-shape conventions"));
         assert!(a.contains("2-space"));
         assert!(a.contains("_Not: tabs._"));
         assert!(a.contains("1 repo(s), 42 commit(s) (42 sampled), 320 added source lines"));
-        assert!(a.contains("**Identities:** me@example.com"));
+        assert!(!a.contains("me@example.com"));
     }
 
     #[test]
@@ -1514,6 +1591,65 @@ diff --git a/app/bar.ts b/app/bar.ts
         assert!(p.contains("Indents with 4-space indentation"));
         assert!(p.contains("feat: do thing"));
         assert!(p.contains("let x = compute();"));
+    }
+
+    #[test]
+    fn deterministic_remine_preserves_interpreted_portrait() {
+        let previous = "# Author style\n\n\
+<!-- mastermind-style:managed:start -->\n\
+## Design patterns & tendencies (interpreted)\n\n\
+- Uses typed boundaries (3 public parsers).\n\n\
+---\nThe planner reads this.\n\
+<!-- mastermind-style:managed:end -->\n";
+        let interpreted = extract_interpreted(previous).expect("portrait");
+        let agg = store::Aggregate {
+            repos: 1,
+            commits_total: 1,
+            commits_sampled: 1,
+            added_lines_sampled: 1,
+            identities: vec!["private@example.com".into()],
+            counts: Counts::new(),
+        };
+        let rendered = render_profile("private@example.com", &agg, &[], Some(&interpreted), None);
+        assert!(rendered.contains("Uses typed boundaries"));
+        assert!(!rendered.contains("private@example.com"));
+    }
+
+    #[test]
+    fn force_replacement_does_not_carry_previous_owner_prose() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("style.md");
+        std::fs::write(&path, "previous owner's portrait").unwrap();
+        assert!(read_existing_profile(&path, false).is_some());
+        assert!(read_existing_profile(&path, true).is_none());
+    }
+
+    #[test]
+    fn owner_guard_rejects_a_different_person() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = store::ProfileStore::open(&dir.path().join("style.db")).unwrap();
+        db.upsert_repo(
+            "/alice/repo",
+            &store::RepoProvenance {
+                author: "Alice".into(),
+                commits_total: 1,
+                commits_sampled: 1,
+                added_lines_sampled: 1,
+                latest_sha: None,
+                latest_date: None,
+                mined_at_epoch: 1,
+            },
+            &["alice@example.com".into()],
+            &Counts::new(),
+        )
+        .unwrap();
+
+        ensure_owner_compatible(&db, "ALICE", &[]).expect("same author label");
+        ensure_owner_compatible(&db, "A. Example", &["alice@example.com".into()])
+            .expect("shared identity");
+        let err = ensure_owner_compatible(&db, "Bob", &["bob@example.com".into()])
+            .expect_err("different person must be rejected");
+        assert!(err.to_string().contains("refusing to mix people"));
     }
 
     #[test]
@@ -1619,11 +1755,11 @@ diff --git a/app/bar.ts b/app/bar.ts
             counts: c,
         };
         let md = render_profile("fixture@example.com", &agg, &rules, None, None);
-        assert!(md.contains("Indents with 4-space indentation"));
-        assert!(md.contains("Prefers double quotes for strings"));
-        assert!(md.contains("Opens blocks with the brace on the same line"));
-        assert!(md.contains("Prefers `const` for declarations"));
-        assert!(md.contains("## Code-shape rules"));
+        assert!(md.contains("Observed 4-space indentation"));
+        assert!(md.contains("Observed double quotes"));
+        assert!(md.contains("Observed same-line opening braces"));
+        assert!(md.contains("Observed `const` declarations"));
+        assert!(md.contains("## Observed code-shape conventions"));
         assert!(md.contains("## Commit voice rules"));
         assert!(md.contains("Conventional-Commits prefix"));
         assert!(md.contains("subject-only commits"));

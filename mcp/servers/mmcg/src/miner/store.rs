@@ -16,6 +16,10 @@ pub type Counts = BTreeMap<String, i64>;
 /// `(author, latest_sha, latest_date)` for a stored repo — what staleness needs.
 pub type RepoMeta = (String, Option<String>, Option<String>);
 
+/// Distinct author labels and emails already contributing to the one user-global
+/// profile. The miner uses this to prevent accidentally combining two people.
+pub type OwnerSignals = (Vec<String>, Vec<String>);
+
 /// Per-repo provenance persisted next to its counts.
 pub struct RepoProvenance {
     pub author: String,
@@ -173,6 +177,29 @@ impl ProfileStore {
         })
     }
 
+    /// Author labels and identities already represented in the store.
+    ///
+    /// `style.db` intentionally models one person across repositories. Callers
+    /// must reject a new contribution when neither its author label nor any of
+    /// its identities overlap these signals.
+    pub fn owner_signals(&self) -> SqlResult<OwnerSignals> {
+        let mut authors_stmt = self
+            .conn
+            .prepare("SELECT DISTINCT author FROM repo ORDER BY author")?;
+        let authors = authors_stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<SqlResult<Vec<_>>>()?;
+
+        let mut identities_stmt = self
+            .conn
+            .prepare("SELECT DISTINCT email FROM identity ORDER BY email")?;
+        let identities = identities_stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<SqlResult<Vec<_>>>()?;
+
+        Ok((authors, identities))
+    }
+
     /// The stored mine point (SHA) for a repo — `doctor` checks `<sha>..HEAD`.
     pub fn repo_latest_sha(&self, repo_key: &str) -> SqlResult<Option<String>> {
         self.conn
@@ -270,6 +297,13 @@ mod tests {
         assert_eq!(agg.identities, vec!["a@x".to_string(), "b@x".to_string()]);
         assert_eq!(s.repo_latest_sha("/a").unwrap().as_deref(), Some("aaa"));
         assert_eq!(s.repo_latest_sha("/missing").unwrap(), None);
+        assert_eq!(
+            s.owner_signals().unwrap(),
+            (
+                vec!["me".to_string()],
+                vec!["a@x".to_string(), "b@x".to_string()]
+            )
+        );
     }
 
     #[test]

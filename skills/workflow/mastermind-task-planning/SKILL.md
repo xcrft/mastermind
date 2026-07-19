@@ -2,7 +2,7 @@
 name: mastermind-task-planning
 description: Choose the lightest Mastermind workflow that fits the risk, then create an evidence-grounded verified or strict task contract for delegated implementation. Direct work deliberately uses no task spec.
 metadata:
-  version: 0.17.0
+  version: 0.17.1
   authors: [mastermind]
   tags: [workflow, planning, delegation, mmcg, audit]
 ---
@@ -55,7 +55,11 @@ unknown-cause bug.
 When `~/.mastermind/style.md` exists, read only the sections relevant to the
 planned implementation. Treat them as advisory preferences: repository code,
 tool-enforced conventions, product behavior, security, and the approved
-contract take precedence.
+contract take precedence. Manual and interpreted preferences may guide a real
+choice. Deterministic code-shape observations are diagnostic evidence, not
+implementation instructions, and a language-specific observation never crosses
+into a different language. Commit voice is fallback-only when repository policy
+is silent.
 
 ## Design review
 

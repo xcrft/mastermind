@@ -26,6 +26,9 @@ are not required for Verified or Strict tasks.
 
 If `~/.mastermind/style.md` exists, apply relevant preferences only when they
 do not conflict with repository code, tool-enforced conventions, or the spec.
+Treat deterministic code-shape observations as diagnostic evidence rather than
+implementation instructions, and never transfer a language-specific observation
+across languages. Commit voice is fallback-only when repository policy is silent.
 
 ## Process
 

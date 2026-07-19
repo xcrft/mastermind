@@ -574,7 +574,8 @@ VERIFY: `<command>`
 
 - [ ] **CHANGELOG** — new entry under `[Unreleased]`
 - [ ] **API docs** — `<file:line>` for `<symbol>`
-- [ ] **`CONTEXT.md`** — decision log entry
+- [ ] **Project history** — update `CONTEXT.md` only for durable knowledge;
+      otherwise resolve `history-review.md` as `not applicable`
 
 ---
 

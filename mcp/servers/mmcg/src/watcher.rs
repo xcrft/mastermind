@@ -168,7 +168,15 @@ fn is_ignore_config(path: &Path, root: &Path) -> bool {
 }
 
 fn is_project_history_path(path: &Path, root: &Path) -> bool {
-    path == root.join("CONTEXT.md") || path.starts_with(root.join(".mastermind").join("tasks"))
+    let is_context = path == root.join("CONTEXT.md")
+        || (path.parent() == Some(root)
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("CONTEXT-archive-") && name.ends_with(".md")));
+    is_context
+        || path.starts_with(root.join(".mastermind").join("tasks"))
+        || path.starts_with(root.join(".mastermind").join("releases"))
 }
 
 #[cfg(test)]
@@ -239,5 +247,22 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn release_and_context_archive_are_history_paths() {
+        let root = Path::new("/repo");
+        assert!(is_project_history_path(
+            Path::new("/repo/CONTEXT-archive-2025.md"),
+            root
+        ));
+        assert!(is_project_history_path(
+            Path::new("/repo/.mastermind/releases/001-task.md"),
+            root
+        ));
+        assert!(!is_project_history_path(
+            Path::new("/repo/notes/CONTEXT-archive-2025.md"),
+            root
+        ));
     }
 }

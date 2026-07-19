@@ -151,8 +151,11 @@ with old task files but are not recommended for new work.
 
 `run-task` stores lifecycle state beside each canonical spec as
 `<task>/state.json`. The executor owns only `<task>/executor-report.md`; the
-controller owns state, `audit.md`, and release-note eligibility. The default
-handoff is client-neutral. `--exec` is a legacy Claude CLI convenience.
+controller owns state, `audit.md`, lesson candidates, release-note eligibility,
+and the initial `<task>/history-review.md`. After semantic review, mark Context
+and Lesson there as `updated` or `not applicable` and replace the generated
+reason. The default handoff is client-neutral. `--exec` is a legacy Claude CLI
+convenience.
 
 ## State and privacy
 
@@ -162,10 +165,14 @@ handoff is client-neutral. `--exec` is a legacy Claude CLI convenience.
 | `~/.codex/` | Installed Codex skills and ownership manifest | No |
 | User client config | MCP registration | No |
 | `.mastermind/mmcg.db` | Local codegraph and scratchpad | No |
-| `.mastermind/tasks/` | Optional specs, executor reports, audits, task state, and lessons | Your choice |
+| `.mastermind/tasks/` | Optional specs, reports, audits, history reviews, state, and lessons | Local by default; opt in explicitly |
 | `CONTEXT.md`, `CLAUDE.md` | Optional repository guidance | Your choice |
 
-The index is generated from local source files and stays local. Add `.mastermind/` to `.gitignore` when you do not intend to version task artifacts.
+The index is generated from local source files and stays local. `mastermind init`
+creates ignore rules for `.mastermind/`; to share selected history, explicitly
+negate those paths after the generated `*` rule and remove any broader root
+`.mastermind/` ignore, or version the desired artifacts elsewhere. `CONTEXT.md`
+is outside `.mastermind/` and can be shared normally.
 
 ## Next steps
 

@@ -60,6 +60,7 @@ base64 = "0.22"
 ed25519-dalek = { version = "3", features = ["rand_core"] }
 libc = "0.2"
 similar = "2.7"
+fs2 = "0.4"
 
 # YAML frontmatter in spec files. `serde_norway` is the maintained fork of
 # `serde_yaml` (archived upstream Sept 2024) — switched to it from `serde_yml`

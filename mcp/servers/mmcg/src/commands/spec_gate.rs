@@ -86,8 +86,10 @@ pub fn audit(
         }
     }
 
-    match mmcg::lessons::append_if_drift_or_broken(&root, spec, &report) {
-        Ok(true) if !json => eprintln!("  appended lesson → .mastermind/tasks/_lessons.md"),
+    match mmcg::lessons::append_audit_candidate(&root, spec, &report) {
+        Ok(true) if !json => {
+            eprintln!("  appended lesson candidate → .mastermind/tasks/_lessons.md")
+        }
         Err(e) if !json => eprintln!("  warning: lessons append failed: {e}"),
         _ => {}
     }

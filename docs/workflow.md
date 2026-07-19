@@ -41,7 +41,7 @@ mastermind verify-spec .mastermind/tasks/001-add-account-recovery/spec.md
 mastermind run-task .mastermind/tasks/001-add-account-recovery/spec.md --pre-only
 ```
 
-The task folder owns four durable artifacts:
+The task folder owns five workflow artifacts:
 
 | Artifact | Owner | Purpose |
 |---|---|---|
@@ -49,6 +49,7 @@ The task folder owns four durable artifacts:
 | `executor-report.md` | Executor | Files changed, claims, defects, and observed command results |
 | `audit.md` | Controller | Mechanical comparison of the report, spec, index, and real diff |
 | `state.json` | Controller | One task-local lifecycle record |
+| `history-review.md` | Controller, then planner | Explicit Context/Lesson disposition after semantic review |
 
 `verify-spec` is read-only. `run-task --pre-only` is intentionally later: it
 records that the contract was approved and captures the git baseline. After
@@ -61,9 +62,17 @@ mastermind run-task .mastermind/tasks/001-add-account-recovery/spec.md --post-on
 ```
 
 Post-flight fails closed when the report is missing or malformed. A `held`
-verdict writes `audit.md`, marks the task complete, and drafts release notes.
+verdict writes `audit.md`, marks the task complete, writes release notes under
+`.mastermind/releases/`, and creates a pending `history-review.md` without
+inventing a decision or lesson.
 `drift` or `broken` keeps the task blocked for planner review. A completed task
 is idempotent unless `--post-only` explicitly requests another audit.
+
+Mechanical `drift` and `broken` findings create a deduplicated lesson
+`candidate` with provenance and evidence. It becomes reusable guidance only
+after semantic review supplies the actual lesson and changes its status to
+`active`, `resolved`, or `superseded`. A successful task may still produce a
+durable lesson; a failed audit does not automatically prove one.
 
 `run-task --exec` is a legacy convenience that shells out to `claude -p`.
 Normal handoff plus `--post-only` is client-neutral and works with Claude Code,

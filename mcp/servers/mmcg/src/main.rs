@@ -16,10 +16,9 @@ use mmcg::store::Store;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-/// CONTEXT.md template variants (the lean set we ship). `detect_stack` produces
-/// the rich runtime+framework label; this picks which template to scaffold.
-/// Adding one: add a file under `templates/profiles/`, a const in `templates.rs`,
-/// an arm in `templates::for_profile`, and a variant here.
+/// Stack classifications used to inform drafting and diagnostics. CONTEXT.md
+/// itself stays stack-agnostic so derivable commands and layouts do not become
+/// duplicated project memory.
 #[derive(Copy, Clone, Debug, ValueEnum)]
 #[clap(rename_all = "kebab-case")]
 pub enum Profile {
@@ -183,7 +182,7 @@ enum Cmd {
     /// Scaffold a project for the Mastermind workflow: create .mastermind/tasks/,
     /// CONTEXT.md (only if missing) and the index, then build the index and
     /// (unless --no-claude) populate CONTEXT.md from the codebase via `claude -p`.
-    /// Auto-detects the stack profile and always drops the workflow CLAUDE.md
+    /// Auto-detects the stack as a drafting hint and always drops the workflow CLAUDE.md
     /// (an existing CLAUDE.md is left alone unless --force).
     Init {
         /// Project root. Defaults to cwd.
@@ -423,9 +422,8 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum ContextCmd {
-    /// Audit CONTEXT.md quality: placeholder residue, minimum content,
-    /// stack section presence, decision log, freshness vs task specs,
-    /// and _lessons.md existence. Exit code 1 if any check fails.
+    /// Audit project memory: CONTEXT placeholders and decision schema,
+    /// completed-task history reviews, and lesson lifecycle quality.
     Doctor {
         /// Project root. Defaults to cwd.
         #[arg(default_value = ".")]

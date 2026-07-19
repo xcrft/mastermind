@@ -2,7 +2,7 @@
 name: mastermind-project-history
 description: Retrieve and reason from durable project decisions, failed approaches, audits, reports, and lessons without treating provenance, search rank, or user approval as technical proof. Use when asking why a design exists, whether an approach was tried, what supersedes an older decision, or what prior evidence should constrain a new plan.
 metadata:
-  version: 0.1.0
+  version: 0.2.0
   authors: [mastermind]
   tags: [workflow, history, decisions, provenance, evidence]
 ---
@@ -17,10 +17,12 @@ artifacts are authoritative; `mmcg_history` is a rebuildable retrieval index.
 The history corpus admits only:
 
 - `CONTEXT.md`
+- `CONTEXT-archive-<YYYY>.md`
 - `.mastermind/tasks/<task>/spec.md`
 - `.mastermind/tasks/<task>/executor-report.md`
 - `.mastermind/tasks/<task>/audit.md`
-- `.mastermind/tasks/<task>/release-notes.md`
+- `.mastermind/releases/<task>.md`
+- legacy `.mastermind/tasks/<task>/release-notes.md`
 - `.mastermind/tasks/_lessons.md`
 
 Arbitrary scratch files are not history. Git history and current runtime code
@@ -34,6 +36,8 @@ load-bearing.
    confidence, and co-occurrence is not causality.
 3. Resolve status and chronology. Prefer an `active` decision over a
    `superseded` one and follow `Supersedes` links. If status is absent, say so.
+   A lesson with status `candidate` is an audit signal awaiting semantic review,
+   not active guidance and not proof of a reusable root cause.
 4. Preserve negative history: a relevant rejected alternative, failed attempt,
    audit defect, or gotcha must constrain the new plan unless new evidence
    directly addresses its failure mode.

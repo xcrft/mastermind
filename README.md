@@ -104,10 +104,11 @@ mastermind history "webhook dedupe"
 mastermind why "why is webhook dedupe durable?"
 ```
 
-History searches `CONTEXT.md`, canonical task specs, executor reports, audits,
-release notes, and shared lessons. The index is only a retrieval layer: returned
-Markdown remains authoritative, and the answer separates observed records from
-inference and missing proof.
+History searches active and archived `CONTEXT` files, canonical task specs,
+executor reports, audits, `.mastermind/releases/`, and reviewed lessons. A
+`candidate` lesson is only an audit signal until semantic review. The index is
+only a retrieval layer: Markdown remains authoritative, and the answer separates
+observed records from inference and missing proof.
 
 ### Query the graph from an agent
 

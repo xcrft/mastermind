@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-07-19
+
 ### Added
 - Derived project-history search across durable Markdown artifacts, exposed as
   `mastermind history`, `mastermind why`, and the read-only `mmcg_history` tool.
@@ -15,12 +17,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   test-evidence mismatch.
 - `mastermind-architecture-review` with focused runtime-boundary, source-of-truth, idempotency, and backward-compatibility references plus model-backed regression cases for each risk.
 - A reproducible mmcg index benchmark that reports cold, warm, and incremental timing with peak process RSS as schema-v1 JSON.
+- Lean, stack-agnostic context scaffolding and structured lesson candidates with
+  explicit evidence, confidence, provenance, and review state.
+- Style-profile ownership and consumption evals covering planner/executor use,
+  author identity, stale evidence, and manual-section preservation.
 
 ### Changed
 - Project decision records now distinguish provenance, technical evidence,
   active/superseded status, supersession links, and reusable lessons.
 - mmcg indexing now honors Git and `.ignore` rules without requiring a Git worktree, bounds parallel parse retention to 64 files, and rejects binary-looking or oversized source files before parsing.
 - Index databases carry an extractor-contract version. Incompatible extractor semantics force a full rebuild, while CLI status, MCP status, and doctor expose drift instead of trusting unchanged mtimes.
+- Context generation now indexes architecture, release, and decision artifacts
+  without freezing framework-specific templates into new projects.
+- Style mining keeps deterministic code-shape signals separate from qualitative
+  design tendencies and applies user-global rules only to the matching author.
+
+### Fixed
+- Cross-platform CI now validates the MCP handshake without coupling the smoke
+  test to an independently unit-tested tool count.
+- Style refreshes preserve manually curated content and no longer force a
+  destructive re-mine from `doctor` guidance.
+
+### Security
+- Lesson writes use locked, symlink-safe, repository-bounded paths; style
+  profiles avoid email persistence and cross-author leakage.
 
 ## [0.38.1] - 2026-07-19
 
@@ -320,7 +340,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Seven prebuilt platform packages (`@xcraftmind/mmcg-*`) covering macOS (arm64, x64), Linux glibc and musl (x64, arm64), and Windows (x64). npm installs only the package matching the host's `os` / `cpu` / `libc`.
 - Install-mode-aware `setup claude` that writes the correct MCP `command` form for npx, global, project-local, and cargo installs.
 
-[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v0.38.1...HEAD
+[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v1.0.0...HEAD
+[1.0.0]: https://github.com/xcrft/mastermind/compare/npm-v0.38.1...npm-v1.0.0
 [0.38.1]: https://github.com/xcrft/mastermind/compare/npm-v0.38.0...npm-v0.38.1
 [0.38.0]: https://github.com/xcrft/mastermind/compare/npm-v0.37.0...npm-v0.38.0
 [0.37.0]: https://github.com/xcrft/mastermind/compare/npm-v0.36.2...npm-v0.37.0

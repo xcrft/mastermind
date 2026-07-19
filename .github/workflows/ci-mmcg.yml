@@ -178,7 +178,7 @@ jobs:
           # but NOT string literals inside the Python source. Reading stdin
           # sidesteps the issue: bash handles the file open in its native
           # path semantics.
-          "$PY" -c "import json, sys; d = json.load(sys.stdin); h = next(c for c in d['checks'] if c['name'] == 'MCP handshake'); assert h['status'] == 'ok', h; assert '(23 tools)' in h['message'], h" < "$PROBE/doctor.json"
+          "$PY" -c "import json, re, sys; d = json.load(sys.stdin); h = next(c for c in d['checks'] if c['name'] == 'MCP handshake'); assert h['status'] == 'ok', h; m = re.search(r'\\((\\d+) tools\\)', h['message']); assert m and int(m.group(1)) > 0, h" < "$PROBE/doctor.json"
           rm -rf "$PROBE"
 
       - name: smoke — verify-spec + audit-spec on tests/ci-fixture

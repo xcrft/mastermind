@@ -1,39 +1,36 @@
 # @xcraftmind/mastermind
 
-[![npm](https://img.shields.io/npm/v/@xcraftmind/mastermind.svg)](https://www.npmjs.com/package/@xcraftmind/mastermind)
-[![downloads](https://img.shields.io/npm/dm/@xcraftmind/mastermind.svg)](https://www.npmjs.com/package/@xcraftmind/mastermind)
-[![node](https://img.shields.io/node/v/@xcraftmind/mastermind.svg)](https://nodejs.org)
-[![license: MIT](https://img.shields.io/npm/l/@xcraftmind/mastermind.svg)](https://github.com/xcrft/mastermind/blob/main/LICENSE)
+[![npm](https://img.shields.io/badge/npm-v0.38.1-CB3837?logo=npm)](https://www.npmjs.com/package/@xcraftmind/mastermind)
+[![CI](https://github.com/xcrft/mastermind/actions/workflows/ci-mmcg.yml/badge.svg)](https://github.com/xcrft/mastermind/actions/workflows/ci-mmcg.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/xcrft/mastermind/blob/main/LICENSE)
 
 **A local codegraph and verifiable workflow for AI coding agents.**
 
-Mastermind helps Claude Code, Codex, Cursor, and Continue understand repository structure, estimate change and test impact, and verify implementation claims against the real diff. The npm package ships prebuilt native binaries; no Rust toolchain or postinstall download is required.
+Mastermind gives Claude Code, Codex, Cursor, and Continue structural project
+maps, change and test impact, MCP code queries, and diff-backed implementation
+audits. Source code and the SQLite index stay local.
 
-**Languages:** Python, TypeScript/TSX, JavaScript/JSX, Rust, C#, Go, Java, PHP, and C/C++.
+## Install
 
-## Install once
-
-Requires Node.js 24+.
+Requires Node.js 24+. Prebuilt binaries are included for macOS, Linux, and
+Windows.
 
 ```bash
 npm install -g @xcraftmind/mastermind
 ```
 
-Connect the client you use:
+Connect your clients once:
 
 ```bash
-mastermind install --client all                # Claude + Codex workflow adapters and MCP
-mastermind setup cursor --scope user --write   # Cursor MCP
-mastermind setup continue --scope user --write # Continue MCP
+mastermind install --client all
+mastermind setup cursor --scope user --write
+mastermind setup continue --scope user --write
 ```
 
-Use `mastermind install` for Claude only or `mastermind install --client codex`
-for Codex only. These commands do not require a project or `mastermind init`.
-Omit `--write` on setup commands to preview a redacted plan.
+Global installation and client setup do not require a project or
+`mastermind init`.
 
 ## Use it in a repository
-
-Indexing alone enables codegraph, map, and impact features:
 
 ```bash
 cd your-project
@@ -42,59 +39,25 @@ mastermind map .
 mastermind impact --since main
 ```
 
-Enable the complete spec-driven workflow only when you need it:
+Run `mastermind init` only when you want the complete spec-driven workflow.
+Small changes can use the codegraph directly without creating a task spec.
 
-```bash
-mastermind init
-mastermind doctor
-```
+## What it provides
 
-Small reversible changes can stay direct and use only `map`, `impact`, and
-repository tests. `mastermind new-spec` creates a compact verified contract by
-default; `--mode strict` adds risk, evidence, rollback, and independent review
-for high-risk work. The executor writes `executor-report.md`, and deterministic
-post-flight checks the report against the real diff before marking the task
-complete.
+- Architecture maps, symbol search, callers, imports, cycles, and API surface
+- Changed symbols, affected callers, component crossings, and candidate tests
+- Direct, verified, and strict task workflows based on change risk
+- Executor reports checked against the real Git diff and codegraph
+- SHA-256 and Ed25519 audit evidence with a pinned GitHub Action
 
-The index is stored per repository in `.mastermind/mmcg.db` and stays local.
-
-## Project-local installation
-
-Pin Mastermind to a repository:
-
-```bash
-npm install -D @xcraftmind/mastermind
-npx mastermind setup claude --scope project --root . --write
-```
-
-Codex supports user scope only. Claude and Cursor support user and project scopes; Continue uses a Mastermind-owned YAML file. Generic MCP clients require an explicit config path.
-
-## Included workflows
-
-- Architecture maps and structural MCP queries
-- Change impact and evidence-ranked test candidates
-- Plan → execute → audit task contracts
-- Cross-client MCP setup
-- SHA-256 and Ed25519 audit attestations
-- GitHub Action integration
-
-Run `mastermind list` to inspect the packaged workflow bundle and
-`mastermind doctor --workflow --client all` to verify manifest and SHA-256
-content parity.
-
-## Platforms
-
-Prebuilt packages are published for macOS arm64/x64, Linux glibc and musl arm64/x64, and Windows x64. Other targets can build `mmcg` from source with Rust 1.96+.
+Supported languages: Python, TypeScript/TSX, JavaScript/JSX, Rust, C#, Go,
+Java, PHP, and C/C++.
 
 ## Documentation
 
-- [Product overview](https://github.com/xcrft/mastermind)
-- [Getting started](https://github.com/xcrft/mastermind/blob/main/docs/getting-started.md)
-- [Client integrations](https://github.com/xcrft/mastermind/tree/main/docs/integrations)
-- [Workflow](https://github.com/xcrft/mastermind/blob/main/docs/workflow.md)
-- [mmcg reference](https://github.com/xcrft/mastermind/blob/main/docs/reference/mmcg.md)
-- [Changelog](https://github.com/xcrft/mastermind/blob/main/CHANGELOG.md)
+[Getting started](https://github.com/xcrft/mastermind/blob/main/docs/getting-started.md) ·
+[Client setup](https://github.com/xcrft/mastermind/tree/main/docs/integrations) ·
+[Workflow](https://github.com/xcrft/mastermind/blob/main/docs/workflow.md) ·
+[Technical reference](https://github.com/xcrft/mastermind/blob/main/docs/reference/mmcg.md)
 
-## License
-
-MIT — see [LICENSE](https://github.com/xcrft/mastermind/blob/main/LICENSE).
+MIT — [source and license](https://github.com/xcrft/mastermind)

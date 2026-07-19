@@ -347,6 +347,30 @@ def validate_relative_links(links: dict[Path, set[str]]) -> list[Issue]:
     return issues
 
 
+def validate_release_badges() -> list[Issue]:
+    """Keep release-bound badges aligned with the packaged npm version."""
+    issues: list[Issue] = []
+    package_path = REPO_ROOT / "npm/mastermind/package.json"
+    try:
+        package = json.loads(package_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        return [Issue(package_path, "error", f"cannot read npm package metadata: {error}")]
+    version = package.get("version")
+    if not isinstance(version, str) or not SEMVER_RE.match(version):
+        return [Issue(package_path, "error", "npm package version is not valid semver")]
+    badge = f"https://img.shields.io/badge/npm-v{version}-CB3837?logo=npm"
+    for relative in ("README.md", "npm/mastermind/README.md"):
+        path = REPO_ROOT / relative
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as error:
+            issues.append(Issue(path, "error", f"cannot read README badge: {error}"))
+            continue
+        if badge not in text:
+            issues.append(Issue(path, "error", f"npm badge must match package version {version}"))
+    return issues
+
+
 # ----- mmcg template-mirror sync ---------------------------------------
 
 # The mmcg crate embeds two templates at build time via `include_str!` (CONTEXT.md
@@ -1267,6 +1291,7 @@ def main(argv: list[str]) -> int:
     rel_links = collect_relative_links()
     issues.extend(validate_relative_links(rel_links))
     issues.extend(validate_installable_link_escape(rel_links))
+    issues.extend(validate_release_badges())
 
     issues.extend(validate_mmcg_template_mirrors())
     issues.extend(validate_mmcg_tool_drift())

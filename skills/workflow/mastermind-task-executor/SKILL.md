@@ -2,7 +2,7 @@
 name: mastermind-task-executor
 description: Execute an approved Mastermind task contract within Scope, prove its Acceptance Criteria, and write the canonical file-backed executor report. Use when the user hands off a `.mastermind/tasks/<NNN>-<name>/spec.md` or explicitly asks to execute an approved Mastermind task.
 metadata:
-  version: 0.6.1
+  version: 0.6.2
   authors: [mastermind]
   tags: [workflow, execution, delegation, mmcg]
 ---
@@ -32,7 +32,10 @@ read another artifact only when the spec or caller names it.
 3. Confirm every intended edit is authorized by `touches` or Scope.
 4. When `~/.mastermind/style.md` exists, use relevant non-conflicting rules as
    preferences. Repository code, formatter/linter configuration, and the spec
-   take precedence over the user-global profile.
+   take precedence over the user-global profile. Deterministic code-shape
+   observations are diagnostic evidence, not implementation instructions; do
+   not apply a language-specific observation to another language. Commit voice
+   is fallback-only when repository policy is silent.
 5. For a named symbol, use mmcg to check its current location and impact. Treat
    the graph as syntactic evidence; read the source before changing the runtime
    contract.

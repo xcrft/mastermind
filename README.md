@@ -24,7 +24,10 @@ Mastermind gives Claude Code, Codex, Cursor, and Continue a structural view of y
 | Choose focused tests | Direct, transitive, and heuristic test candidates with evidence |
 | Verify agent work | Pre-execution spec checks, post-execution diff audits, and signed evidence |
 
-The codegraph stays on your machine in a local SQLite database. No source code is uploaded by Mastermind.
+The codegraph and deterministic style miner stay on your machine in local SQLite
+databases. Agent-assisted modes are explicit: `init` without `--no-claude` may
+send repository content through the configured Claude CLI, while
+`miner profile --deep` sends bounded samples for synthesis.
 
 ## Try it in two minutes
 
@@ -110,6 +113,20 @@ executor reports, audits, `.mastermind/releases/`, and reviewed lessons. A
 only a retrieval layer: Markdown remains authoritative, and the answer separates
 observed records from inference and missing proof.
 
+### Carry personal style across repositories
+
+```bash
+mastermind miner profile .
+```
+
+The deterministic miner writes a user-global `~/.mastermind/style.md` and
+`style.db`; it works without `mastermind init`. Planner and executor treat the
+profile as advisory. Repository code, formatter/linter policy, the approved
+contract, product behavior, and security always win. Corpus-level code-shape
+observations are diagnostic rather than coding instructions;
+`/mastermind-style-deep` adds a qualitative, evidence-backed portrait that normal
+re-mining preserves.
+
 ### Query the graph from an agent
 
 The MCP server exposes 24 bounded tools for symbol search, callers/callees,
@@ -164,6 +181,7 @@ See [Verifiable audits and GitHub Action](docs/github-action.md).
 | Claude workflow agents and skills | Global | `mastermind install` |
 | Codex workflow skills | Global | `mastermind install --client codex` |
 | MCP client registration | User or project, depending on client | `mastermind setup …` |
+| Personal style profile | User-global, optional | `mastermind miner profile` or `mastermind init` |
 | `.mastermind/mmcg.db` codegraph | Per repository | `mastermind index .` or `mastermind init` |
 | Task specs and project context | Per repository, optional | `mastermind init` |
 
@@ -172,7 +190,7 @@ See [Verifiable audits and GitHub Action](docs/github-action.md).
 - **Clients:** Claude Code, Codex, Cursor, Continue, and generic MCP stdio clients
 - **Languages:** Python, TypeScript/TSX, JavaScript/JSX, Rust, C#, Go, Java, PHP, and C/C++
 - **Platforms:** macOS arm64/x64, Linux glibc and musl arm64/x64, Windows x64
-- **Privacy:** local parsing and local SQLite storage; no daemon and no postinstall download
+- **Privacy:** deterministic parsing and storage are local; explicit agent-assisted modes disclose when repository samples are sent to the configured AI client
 
 The graph is syntactic rather than compiler-semantic. Dynamic dispatch, reflection, re-exports, overload resolution, and cross-language calls can reduce precision. Mastermind reports bounded results and precision notes instead of presenting incomplete analysis as certain.
 

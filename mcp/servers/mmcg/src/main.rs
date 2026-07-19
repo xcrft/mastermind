@@ -203,8 +203,9 @@ enum Cmd {
         /// recorded in Mastermind's ownership manifest are retired on later updates.
         #[arg(long)]
         no_global: bool,
-        /// Skip seeding `~/.mastermind/style.md` (the author's code-shape "write like me"
-        /// profile, mined from git history). On by default; seeds only if the file is absent.
+        /// Skip enriching `~/.mastermind/style.md` with this repository's authored history.
+        /// Enabled by default and idempotent per repository; manual and interpreted sections
+        /// are preserved.
         #[arg(long)]
         no_seed_style: bool,
     },
@@ -482,11 +483,9 @@ enum AuditCmd {
 #[derive(Subcommand)]
 enum MinerCmd {
     /// Mine an author's style ("write like me") from their git history into
-    /// `~/.mastermind/style.md`: code-shape idioms (indentation, quotes, line
-    /// length, comment density, brace style, declarations) plus commit conventions
-    /// (prefix, subject length, body usage). Deterministic by default. Each run
-    /// enriches a user-global cross-repo store; hand edits in the manual block are
-    /// preserved across re-mines.
+    /// `~/.mastermind/style.md`: advisory corpus observations plus commit
+    /// conventions. Deterministic by default. Each run enriches a user-global
+    /// cross-repo store; manual and interpreted sections survive normal re-mines.
     Profile {
         /// Repository to mine. Defaults to cwd.
         #[arg(default_value = ".")]
@@ -495,13 +494,14 @@ enum MinerCmd {
         /// `git config user.name` (matches all the person's emails).
         #[arg(long)]
         author: Option<String>,
-        /// Rebuild the cross-repo store from scratch (drop every other repo's
-        /// contribution), then re-mine this one. Without it, mining enriches.
+        /// Replace the profile from scratch: drop every repository contribution
+        /// and preserved manual/interpreted sections, then mine this repository.
+        /// Without it, mining enriches safely.
         #[arg(long)]
         force: bool,
-        /// Also run a deep LLM analysis (design patterns, tendencies) via `claude -p`.
-        /// Sends sampled added lines + commit messages to the CLI. Slower and
-        /// non-deterministic; not part of the deterministic core.
+        /// Compatibility path for a deep LLM analysis via `claude -p`. Sends bounded sampled
+        /// added lines + commit messages and replaces the preserved interpreted section.
+        /// Prefer the `mastermind-style-deep` skill when qualitative accuracy matters.
         #[arg(long)]
         deep: bool,
     },

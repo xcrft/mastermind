@@ -8,7 +8,9 @@
 
 Mastermind gives Claude Code, Codex, Cursor, and Continue structural project
 maps, change and test impact, MCP code queries, and diff-backed implementation
-audits. Source code and the SQLite index stay local.
+audits. Deterministic indexing and style mining stay local. Explicit
+agent-assisted modes disclose when they invoke the configured AI client with
+repository content or bounded samples.
 
 ## Install
 
@@ -37,6 +39,7 @@ cd your-project
 mastermind index .
 mastermind map .
 mastermind impact --since main
+mastermind miner profile .  # optional personal profile; no init required
 ```
 
 Run `mastermind init` only when you want the complete spec-driven workflow.
@@ -50,6 +53,7 @@ Small changes can use the codegraph directly without creating a task spec.
 - Direct, verified, and strict task workflows based on change risk
 - Executor reports checked against the real Git diff and codegraph
 - SHA-256 and Ed25519 audit evidence with a pinned GitHub Action
+- An optional user-global style portrait used only as advisory planner/executor input
 
 Supported languages: Python, TypeScript/TSX, JavaScript/JSX, Rust, C#, Go,
 Java, PHP, and C/C++.

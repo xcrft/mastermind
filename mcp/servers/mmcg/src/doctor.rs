@@ -195,6 +195,8 @@ pub fn run(root: &Path, mmcg_binary: &Path) -> Report {
 
 /// Nudge a re-mine when the author's style profile has fallen behind their
 /// commits. An absent profile is fine — the feature is opt-in — so it's Ok.
+const STYLE_REFRESH_HINT: &str = "refresh with `mastermind miner profile`";
+
 fn check_style_profile(root: &Path) -> Check {
     use crate::miner::profile::Staleness;
     match crate::miner::profile::staleness(root) {
@@ -203,6 +205,12 @@ fn check_style_profile(root: &Path) -> Check {
             status: Status::Ok,
             message: "none — `mastermind miner profile` to seed (optional)".into(),
             hint: None,
+        },
+        Staleness::Legacy => Check {
+            name: "style profile",
+            status: Status::Warn,
+            message: "legacy format — refresh removes identity metadata and preserves the new profile contract".into(),
+            hint: Some(STYLE_REFRESH_HINT.into()),
         },
         Staleness::Fresh { mined_through } => Check {
             name: "style profile",
@@ -217,7 +225,7 @@ fn check_style_profile(root: &Path) -> Check {
             name: "style profile",
             status: Status::Warn,
             message: format!("{new_commits} new commits since last mined ({mined_through})"),
-            hint: Some("refresh with `mastermind miner profile --force`".into()),
+            hint: Some(STYLE_REFRESH_HINT.into()),
         },
     }
 }
@@ -1061,6 +1069,12 @@ mod tests {
         .unwrap();
         assert_eq!(check_claude_md(&root).status, Status::Ok);
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn style_refresh_preserves_other_repo_contributions() {
+        assert!(STYLE_REFRESH_HINT.contains("miner profile"));
+        assert!(!STYLE_REFRESH_HINT.contains("--force"));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 Mastermind has two independent layers:
 
-1. A global CLI, workflow bundle, and MCP registration.
+1. A global CLI, workflow bundle, MCP registration, and optional personal style profile.
 2. A local codegraph for each repository you choose to index.
 
 You can install and connect Mastermind without initializing a project. `mastermind init` is only the convenience command for enabling the complete repository workflow.
@@ -104,6 +104,25 @@ Analyze the current worktree against a baseline:
 mastermind impact --since main
 ```
 
+## Build a personal style profile without project initialization
+
+```bash
+mastermind miner profile .
+```
+
+This idempotently adds the current repository to the user-global
+`~/.mastermind/style.db` and regenerates `~/.mastermind/style.md`. It does not
+require `mastermind init`. The profile is advisory: target-repository code and
+formatter/linter policy, the approved task, product behavior, and security take
+precedence. A normal re-mine preserves manual overrides and the qualitative
+`Design patterns & tendencies` section. Deterministic code-shape observations
+are diagnostic evidence, not direct instructions for generated code.
+
+Use `/mastermind-style-deep` in a supported workflow client for an
+evidence-backed qualitative portrait. `mastermind miner profile --deep` remains
+a compatibility path that explicitly sends bounded added-line and commit
+samples to `claude -p` and replaces that interpreted section.
+
 ## Enable the complete repository workflow
 
 ```bash
@@ -122,6 +141,7 @@ Useful opt-outs:
 mastermind init --no-claude  # do not draft context through Claude Code
 mastermind init --no-index   # scaffold without indexing
 mastermind init --no-global  # do not update ~/.claude
+mastermind init --no-seed-style # do not enrich the user-global style profile
 ```
 
 ## Choose a workflow depth

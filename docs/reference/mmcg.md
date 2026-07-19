@@ -172,7 +172,14 @@ mmcg init
 mmcg init --no-claude      # skip Claude-assisted context drafting
 mmcg init --no-index       # scaffold without building the graph
 mmcg init --no-global      # do not reconcile the npm Claude workflow bundle
-mmcg init --no-seed-style  # do not seed ~/.mastermind/style.md
+mmcg init --no-seed-style  # do not enrich ~/.mastermind/style.md
+
+# Build or refresh the user-global personal style profile. No init required.
+mmcg miner profile .
+mmcg miner profile . --author "Ada Lovelace"  # explicit git author filter
+mmcg miner profile . --deep                    # explicit claude -p compatibility path
+# --force intentionally replaces the whole profile, including preserved prose;
+# it is not refresh.
 
 # Preview or apply one supported MCP client target.
 mmcg setup claude --scope user                            # dry-run via native `claude mcp`

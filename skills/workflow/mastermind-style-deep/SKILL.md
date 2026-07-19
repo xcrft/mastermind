@@ -2,7 +2,7 @@
 name: mastermind-style-deep
 description: Write a grounded portrait of how the author actually develops — design approach, code shape, comments, tests, optimization habits, what they pay attention to, and commit voice — into the "Design patterns & tendencies" section of ~/.mastermind/style.md. The structural signature the deterministic miner can't measure. Use when the user wants a real "write like me" profile, says "deep style", "design patterns", "qualitative profile", or notices `mastermind miner profile` only produced formatter-level rules.
 metadata:
-  version: 0.2.1
+  version: 0.3.0
   authors:
     - mastermind
   tags:
@@ -13,7 +13,13 @@ metadata:
 
 # Mastermind — deep style portrait
 
-`mastermind miner profile` measures only lexical idioms (indentation, quotes, braces, line length) — what a formatter already normalizes, so it's near-zero signal for "write like me". This skill writes the part that matters: a grounded **portrait of how the author develops**. The binary gathers evidence; you (the agent, already running a model) read code and write the portrait. No `claude -p`, no separate auth.
+`mastermind miner profile` records corpus-level lexical observations (indentation,
+quotes, braces, line length). Those are diagnostic evidence because formatter,
+language mix, and repository policy often explain them better than personal
+taste; do not apply them directly as coding rules. This skill
+writes the part that matters: a grounded **portrait of how the author develops**.
+The binary gathers evidence; you (the agent, already running a model) read code
+and write the portrait. No separate `claude -p` process or authentication.
 
 ## When to use
 
@@ -62,14 +68,21 @@ Don't just grep. A portrait needs both numbers and read code:
 
 The portrait is the `## Design patterns & tendencies (interpreted)` section in the managed block, right before the `\n---\nThe planner reads this …` footer. Replace it if present; otherwise insert before the footer.
 
-## Caveat — managed block is regenerated
+## Persistence contract
 
-This section lives in the managed block, so a plain `mastermind miner profile` re-mine overwrites it. This skill is how it gets rewritten — re-run it after a re-mine, or move the section into the manual block above to pin it.
+The interpreted section lives inside the managed block, but a normal
+`mastermind miner profile` re-mine preserves it verbatim. Re-running this skill
+replaces the section intentionally. The compatibility command
+`mastermind miner profile --deep` may also replace it with a bounded automated
+synthesis; prefer this skill when qualitative accuracy matters.
 
 ## Consumption contract
 
 The profile is advisory input for [[mastermind-task-planning]] and
-[[mastermind-task-executor]]. They may use grounded preferences for code shape,
-tests, and commit voice, but repository code and enforced formatter/linter
-configuration take precedence. The profile never overrides Scope, Acceptance
-Criteria, security controls, or public behavior.
+[[mastermind-task-executor]]. Use the interpreted portrait and manual overrides
+when relevant. Deterministic code-shape observations are evidence for the
+portrait, not direct implementation preferences. Never transfer a
+language-specific observation into another language. Commit voice may be a
+fallback only when repository policy is silent. Repository code and
+enforced formatter/linter configuration take precedence. The profile never
+overrides Scope, Acceptance Criteria, security controls, or public behavior.

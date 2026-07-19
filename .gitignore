@@ -1,12 +1,14 @@
-# IDE / editor
+# IDE / editor and local agent-client state
 .idea/
 .vscode/
+.zencoder/
+.ai/
 *.iml
 
 # macOS
 .DS_Store
 
-# Python — validator deps (scripts/validate.py, build-plugins.py)
+# Python — validator and eval-harness dependencies
 __pycache__/
 *.py[cod]
 *.egg-info/

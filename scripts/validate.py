@@ -1,17 +1,8 @@
 #!/usr/bin/env python3
-"""
-Validate Mastermind repo artifacts against docs/conventions.md.
+"""Validate repository artifact, workflow, packaging, and CI contracts.
 
-Runs in CI on every PR. Catches:
-  - Missing or malformed frontmatter
-  - `name:` field not matching the file/folder slug (§1.2)
-  - Non-kebab-case slugs (§1.1)
-  - Missing `description:`
-  - Missing or non-SemVer `metadata.version` (§6)
-  - Domain folder not in the conventions.md whitelist (§1.3)
-  - `[[slug]]` cross-references that don't resolve to any artifact
-
-Exit code 0 if clean, 1 if any errors. Warnings do not fail the build.
+The detailed check inventory and boundaries live in scripts/README.md. Exit
+code 0 means clean; errors return 1, while warnings remain non-blocking.
 """
 
 from __future__ import annotations
@@ -32,7 +23,7 @@ except ImportError:
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Allowed domain folders for skills/ and prompts/, per docs/conventions.md §1.3
+# Canonical top-level categories for portable skills.
 ALLOWED_DOMAINS = {
     "code-review",
     "coding",
@@ -173,7 +164,7 @@ def validate_artifact(a: Artifact) -> list[Issue]:
         issues.append(Issue(a.path, "error", "missing or empty 'description'"))
     elif len(desc) < 40:
         issues.append(
-            Issue(a.path, "warning", f"'description' is very short ({len(desc)} chars). See conventions §2.2 — leads with a verb, states triggers.")
+            Issue(a.path, "warning", f"'description' is very short ({len(desc)} chars); state the action and its trigger.")
         )
 
     metadata = a.frontmatter.get("metadata", {})
@@ -195,18 +186,18 @@ def validate_artifact(a: Artifact) -> list[Issue]:
             issues.append(Issue(a.path, "error", "'metadata.tags' must be a list"))
         elif a.domain and isinstance(tags, list) and tags and tags[0] != a.domain:
             issues.append(
-                Issue(a.path, "warning", f"first tag ({tags[0]!r}) does not match domain folder ({a.domain!r}). See conventions §2.3.")
+                Issue(a.path, "warning", f"first tag ({tags[0]!r}) does not match domain folder ({a.domain!r}).")
             )
 
     if a.domain is not None and a.domain not in ALLOWED_DOMAINS:
         issues.append(
-            Issue(a.path, "error", f"unknown domain {a.domain!r}. Allowed: {sorted(ALLOWED_DOMAINS)}. Update docs/conventions.md if adding.")
+            Issue(a.path, "error", f"unknown domain {a.domain!r}. Allowed: {sorted(ALLOWED_DOMAINS)}. Update ALLOWED_DOMAINS if adding a category.")
         )
 
     # Subagents are loaded by the Claude Code runtime, which reads `tools`, `model`,
     # `mcpServers`, and `disallowedTools` as TOP-LEVEL frontmatter keys. Nesting them
     # under `metadata` makes Claude Code silently ignore them — the subagent then
-    # inherits every tool and the parent's model (conventions §2.4). Catch the
+    # inherits every tool and the parent's model. Catch the
     # regression at lint time so it can't ship again.
     if a.path.parent.name == "subagents" and isinstance(metadata, dict):
         for field in ("tools", "model", "mcpServers", "disallowedTools"):
@@ -216,7 +207,7 @@ def validate_artifact(a: Artifact) -> list[Issue]:
                         a.path,
                         "error",
                         f"subagent runtime field {field!r} is nested under 'metadata' — "
-                        "Claude Code reads it only at the top level (conventions §2.4); move it up",
+                        "Claude Code reads it only at the top level; move it up",
                     )
                 )
 
@@ -536,10 +527,10 @@ def validate_mmcg_template_mirrors() -> list[Issue]:
 
 # ----- installable-file link-escape check --------------------------------
 
-# Files that get *copied* into ~/.claude/ (or a project root) by install.sh /
-# mmcg init must not have relative links that escape their package — those
-# links resolve fine in the repo but break after install. Use absolute
-# https://github.com/xcrft/mastermind/blob/main/... URLs instead.
+# Files that get *copied* into a client workflow home (or a project root) by
+# the npm installer / mastermind init must not have relative links that escape
+# their package — those links resolve fine in the repo but break after install.
+# Use absolute https://github.com/xcrft/mastermind/blob/main/... URLs instead.
 #
 # Map: regex matching repo-relative path → max `../` levels permitted in any
 # relative markdown link from that file.
@@ -701,6 +692,25 @@ def validate_workflow_eval_contract() -> list[Issue]:
             issues.append(Issue(path, "error", f"workflow eval line {number} needs a non-empty prompt"))
         if not isinstance(expect, dict) or not expect.get("contains"):
             issues.append(Issue(path, "error", f"workflow eval line {number} needs contains assertions"))
+        elif "contains_any" in expect:
+            groups = expect["contains_any"]
+            valid_groups = (
+                isinstance(groups, list)
+                and all(
+                    isinstance(group, list)
+                    and len(group) >= 2
+                    and all(isinstance(phrase, str) and phrase for phrase in group)
+                    for group in groups
+                )
+            )
+            if not valid_groups:
+                issues.append(
+                    Issue(
+                        path,
+                        "error",
+                        f"workflow eval line {number} has invalid contains_any assertions",
+                    )
+                )
     if found_artifacts != required_artifacts:
         missing = required_artifacts - found_artifacts
         extra = found_artifacts - required_artifacts

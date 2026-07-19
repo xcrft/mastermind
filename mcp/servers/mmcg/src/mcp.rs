@@ -887,7 +887,7 @@ fn schema_recent_changes() -> Value {
 fn schema_status() -> Value {
     json!({
         "name": "mmcg_status",
-        "description": "Show index health — file count, symbol count, db path, and `stale_files`: the number of source files modified since the last index (capped at 100). `stale_files` > 0 means the index is behind the working tree — re-index (`mmcg index .`) before trusting structural answers.",
+        "description": "Show index health — file count, symbol count, db path, and `stale_files`: the number of added, deleted, or newer indexable source paths relative to their stored snapshot (capped at 100). `stale_files` > 0 means the index is behind the working tree — re-index (`mmcg index .`) before trusting structural answers.",
         "inputSchema": { "type": "object", "properties": {} }
     })
 }

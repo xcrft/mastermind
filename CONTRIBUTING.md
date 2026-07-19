@@ -10,7 +10,7 @@ Mastermind is two things: **mmcg** (a Rust codegraph binary) and a **spec-driven
 | `skills/` · `agents/` | The workflow artifacts (markdown + YAML frontmatter) installed by `mastermind init`. |
 | `npm/mastermind/` | The npm wrapper that ships the prebuilt binary + the workflow bundle. |
 | `scripts/` | `validate.py` (artifact-structure check) and friends. |
-| `evals/` | Adversarial eval suites for the critic / auditor / intake agents. |
+| `evals/` | Adversarial eval suites for critic, auditor, intake, and all portable workflow skills. |
 
 ## Dev setup & checks
 
@@ -21,6 +21,7 @@ cd mcp/servers/mmcg
 cargo test
 cargo clippy --all-targets -- -D warnings
 cargo fmt -- --check
+cargo deny check
 ```
 
 **Workflow artifacts (`skills/`, `agents/`)** — markdown with frontmatter; CI runs the structure validator, run it locally too:
@@ -33,7 +34,11 @@ python3 -m venv .venv
 
 Exit code 0 means clean. See [`scripts/README.md`](scripts/README.md) for what it checks.
 
-**Agent behavior** — if you change a subagent/skill prompt, run the evals: `python evals/runner.py --suite critic|auditor|intake` (needs the `claude` CLI on PATH). `validate.py` checks structure, not behavior.
+**Agent behavior** — if you change a subagent/skill prompt, run the relevant
+suite (`critic`, `auditor`, `intake`, or `workflow`). Before merging a broad
+workflow change, run `bash evals/run-verified.sh`; it executes deterministic
+gates and then every model-backed suite. The evals need the `claude` CLI on
+PATH. `validate.py` checks structure, not behavior.
 
 ## Pull requests
 

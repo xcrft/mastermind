@@ -84,6 +84,8 @@ fn production_path_filter(column: &str) -> String {
         "benchmarks",
         "bench",
         "benches",
+        "eval",
+        "evals",
         "generated",
         "vendor",
         "node_modules",

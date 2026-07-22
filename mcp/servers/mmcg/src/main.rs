@@ -828,6 +828,9 @@ fn run_cli_inner(
         }
         Cmd::Serve => {
             let store = Store::open(&index_path)?;
+            store.set_default_work_budget_ms(mmcg::store::query_budget_ms_from_env(
+                mmcg::store::DEFAULT_SERVE_BUDGET_MS,
+            ));
             mmcg::mcp::serve(store)?;
         }
         Cmd::Watch { root } => {

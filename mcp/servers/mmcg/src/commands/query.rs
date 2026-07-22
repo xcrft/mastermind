@@ -1,7 +1,21 @@
 use crate::QueryCmd;
-use mmcg::{queries, store::Store};
+use mmcg::{
+    queries,
+    store::{query_budget_ms_from_env, Store, WorkBudget, DEFAULT_CLI_BUDGET_MS},
+};
 use serde_json::Value;
 use std::path::Path;
+
+/// Pops the work-budget frame `execute` installs, even on an early `?`
+/// return — `Store::with_work_budget` can't be used directly here since
+/// `execute` returns `Result<Value, Box<dyn Error>>`, not a `SqlResult`.
+struct WorkBudgetScope<'a>(&'a Store);
+
+impl Drop for WorkBudgetScope<'_> {
+    fn drop(&mut self) {
+        self.0.pop_work_budget();
+    }
+}
 
 pub fn dispatch(q: QueryCmd, index_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let store = Store::open(index_path)?;
@@ -267,6 +281,9 @@ pub fn render_change_impact(
 }
 
 fn execute(store: &Store, q: QueryCmd) -> Result<Value, Box<dyn std::error::Error>> {
+    let budget_ms = query_budget_ms_from_env(DEFAULT_CLI_BUDGET_MS);
+    store.push_work_budget(WorkBudget::from_millis(budget_ms));
+    let _budget_scope = WorkBudgetScope(store);
     Ok(match q {
         QueryCmd::Search {
             name,

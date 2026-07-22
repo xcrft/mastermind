@@ -239,6 +239,11 @@ pub struct ImpactResponse {
     /// `CallersResponse`): > 1 means the blast radius pools across same-named
     /// symbols and over-approximates real reach.
     pub name_collision: u32,
+    /// `true` when the underlying walk hit `row_limit` rows — the result is a
+    /// prefix of the true blast radius, not the whole thing.
+    pub truncated: bool,
+    /// The row cap applied to this walk (see `IMPACT_WORK_LIMIT`).
+    pub row_limit: u32,
     pub impact: Vec<ImpactEntry>,
 }
 
@@ -435,6 +440,11 @@ pub struct DependencyCyclesResponse {
     pub min_size: u32,
     /// Each entry is one cycle (SCC) — file paths in lex order.
     pub cycles: Vec<Vec<String>>,
+    /// `true` when the file-pair import graph exceeded the work cap —
+    /// Tarjan was **not** run, so `cycles` is empty and the true cycle set is
+    /// incomplete and possibly inaccurate, not merely "more available".
+    /// Narrow the scope (`language` filter) and retry.
+    pub truncated: bool,
 }
 
 pub fn symbols_changed_since(
@@ -915,7 +925,7 @@ pub fn change_impact(
     let graph_rows = if seed_names.is_empty() || graph_seed_overflow {
         Vec::new()
     } else {
-        match store.impact_of_many(&seed_names, max_depth, IMPACT_WORK_LIMIT) {
+        match store.impact_of_many(&seed_names, max_depth, IMPACT_WORK_LIMIT, None) {
             Ok(rows) => rows,
             Err(rusqlite::Error::SqliteFailure(error, _))
                 if error.code == rusqlite::ErrorCode::OperationInterrupted =>
@@ -1290,11 +1300,12 @@ pub fn dependency_cycles(
     language: Option<&str>,
     min_size: u32,
 ) -> rusqlite::Result<DependencyCyclesResponse> {
-    let cycles = store.dependency_cycles(language, min_size as usize)?;
+    let (cycles, truncated) = store.dependency_cycles(language, min_size as usize)?;
     Ok(DependencyCyclesResponse {
         count: cycles.len() as u32,
         min_size,
         cycles,
+        truncated,
     })
 }
 
@@ -1445,6 +1456,11 @@ pub fn explain(
     })
 }
 
+/// Served by the same guarded, visited-set walk as `change_impact`'s
+/// many-seed call (`Store::impact_of_many`) — single-seed here. Terminates on
+/// cyclic call graphs (the visited set prevents revisiting a symbol id within
+/// a path) and is bounded by `IMPACT_WORK_LIMIT` rows — part of the tool's
+/// documented contract, surfaced through the `truncated`/`row_limit` fields.
 pub fn impact(
     store: &Store,
     name: &str,
@@ -1452,12 +1468,13 @@ pub fn impact(
     language: Option<&str>,
 ) -> rusqlite::Result<ImpactResponse> {
     let depth = max_depth.clamp(1, 10);
-    let impact: Vec<ImpactEntry> = store
-        .impact_of(name, depth, language)?
+    let rows = store.impact_of_many(&[name.to_string()], depth, IMPACT_WORK_LIMIT, language)?;
+    let truncated = rows.len() >= IMPACT_WORK_LIMIT;
+    let impact: Vec<ImpactEntry> = rows
         .into_iter()
-        .map(|(s, d)| ImpactEntry {
-            symbol: SymbolHit::from(s),
-            depth: d,
+        .map(|row| ImpactEntry {
+            symbol: SymbolHit::from(row.symbol),
+            depth: row.depth,
         })
         .collect();
     Ok(ImpactResponse {
@@ -1465,6 +1482,8 @@ pub fn impact(
         max_depth: depth,
         count: impact.len() as u32,
         name_collision: store.definition_count(name)?,
+        truncated,
+        row_limit: IMPACT_WORK_LIMIT as u32,
         impact,
     })
 }
@@ -2429,6 +2448,64 @@ mod tests {
         p.push(format!("mmcg-queries-{}-{}.db", std::process::id(), name));
         let _ = std::fs::remove_file(&p);
         p
+    }
+
+    #[test]
+    fn impact_terminates_on_cycles_and_reports_truncation() {
+        let path = tmp_db("impact_cycle_termination");
+        let store = Store::open(&path).unwrap();
+        let a = store
+            .insert_symbol("a", "function", "x.py", 1, 2, None, None)
+            .unwrap();
+        let b = store
+            .insert_symbol("b", "function", "x.py", 3, 4, None, None)
+            .unwrap();
+        store.insert_edge(a, Some(b), "b", "calls", 1).unwrap();
+        store.insert_edge(b, Some(a), "a", "calls", 3).unwrap();
+
+        let response = impact(&store, "a", 10, None).unwrap();
+        assert!(!response.truncated);
+        assert_eq!(response.row_limit, IMPACT_WORK_LIMIT as u32);
+        let names: Vec<&str> = response
+            .impact
+            .iter()
+            .map(|entry| entry.symbol.name.as_str())
+            .collect();
+        assert!(names.contains(&"b"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn impact_max_depth_8_matches_advertised_contract() {
+        let path = tmp_db("impact_depth_8");
+        let store = Store::open(&path).unwrap();
+        // Chain: h1 calls seed, h2 calls h1, ..., h9 calls h8 — depth k
+        // reaches exactly h1..=hk.
+        let mut prev = "seed".to_string();
+        for index in 1..=9u32 {
+            let name = format!("h{index}");
+            let id = store
+                .insert_symbol(&name, "function", "x.py", index, index + 1, None, None)
+                .unwrap();
+            store.insert_edge(id, None, &prev, "calls", 1).unwrap();
+            prev = name;
+        }
+
+        let response = impact(&store, "seed", 8, None).unwrap();
+        let names: Vec<&str> = response
+            .impact
+            .iter()
+            .map(|entry| entry.symbol.name.as_str())
+            .collect();
+        assert!(
+            names.contains(&"h8"),
+            "max_depth=8 must reach h8: {names:?}"
+        );
+        assert!(
+            !names.contains(&"h9"),
+            "h9 is 9 hops away, beyond max_depth=8: {names:?}"
+        );
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

@@ -254,6 +254,7 @@ mmcg serve
 - Tool execution and input errors use `isError: true`; malformed protocol requests and internal failures use JSON-RPC errors.
 - Input frames are limited to 1 MiB and an oversized frame closes the connection. Serialized result payloads are limited to 8 MiB and ask the caller to narrow the query.
 - Tool annotations are advisory metadata, and returned tool content is untrusted. Neither grants permission or bypasses confirmation.
+- Every tool dispatch runs under a work budget and can be interrupted by a client cancel notification — see [Work budgets, timeouts, and cancellation](#work-budgets-timeouts-and-cancellation).
 
 Use the dry-run-first setup surface instead of editing supported client configs by hand:
 
@@ -289,7 +290,7 @@ Run `mmcg watch` in a separate terminal so the index stays current while you wor
 | `mmcg_search` | `name`, optional `kind`, `language`, `collapse_partials` (default `true`) | Symbols matching exactly. Pre-flight "does X exist?" check. Returns location, kind, signature, and any decorators/attributes. C# `partial class` declarations across N files collapse into one hit with a `locations` array of all N declarations; pass `collapse_partials: false` to see every declaration separately. |
 | `mmcg_callers` | `name`, optional `language`, `edge_kind` (default `calls`) | **Containing functions** that reference `name` by the given edge kind. Count = distinct containing units, not distinct call sites (a function with 3 calls to `name` counts once). Use before editing for blast radius. Pass `edge_kind: imports` to find importers via the same tool. |
 | `mmcg_callees` | `name`, optional `language`, `edge_kind` (default `calls`) | Names the symbol references via the given edge kind. |
-| `mmcg_impact` | `name`, optional `max_depth` (1-10, default 2), `language` | Transitive callers via `calls` edges. Full blast radius. |
+| `mmcg_impact` | `name`, optional `max_depth` (1-10, default 2), `language` | Transitive callers via `calls` edges. Full blast radius. Bounded at 5,001 rows: above that, `truncated: true` is returned alongside `row_limit` and the (partial) `impact` list — narrow `max_depth` or add a `language` filter to see the rest. |
 | `mmcg_imports` | `file` | Names imported by this file's top-level imports — each entry has `name`, `path` (fully-qualified), `line`. |
 | `mmcg_imported_by` | `query`, optional `match: name`(default)/`path`, `language` | Files whose imports reference the given name OR fully-qualified path. Use `match: path` when the leaf name is ambiguous across modules. |
 | `mmcg_symbols_in_file` | `file` | All symbols defined in a file, source order. Flat list. |
@@ -307,8 +308,8 @@ Run `mmcg watch` in a separate terminal so the index stays current while you wor
 | `mmcg_test_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Exact test-focused projection of `mmcg_change_impact`. Changed tests and depth-1 graph tests are direct, deeper graph tests are transitive, and scoped filename candidates are heuristic. Focused candidates never replace the repository's full required gate. |
 | `mmcg_tasks` | `query`, optional `top` (default 10) | Full-text search past task specs (`.mastermind/tasks/<NNN>-<name>/spec.md`). FTS5 MATCH syntax (bare words AND-joined, `"phrases"`, `OR`/`NOT`). Returns paths, titles, and snippet excerpts with `«match»` highlights ranked by BM25. Use as planner pre-flight: "have we touched this area before?" surfaces past designs and prior verdicts. Top-level files prefixed with `_` (e.g. `_lessons.md`) and bare `.md` files at the top of `tasks/` (legacy 0.6.x layout) are intentionally excluded. |
 | `mmcg_history` | `query`, optional `kind`, `top` (default 10) | Searches `CONTEXT.md`, `CONTEXT-archive-*.md`, canonical task specs, executor reports, audits, `.mastermind/releases/*.md`, legacy task-local release notes, and lessons. `candidate` lessons are unresolved signals, not active guidance. Returns observed matches, `skipped_artifacts`, `truncated`, and an explicit retrieval-only epistemic contract. Markdown remains authoritative; re-index after Markdown changes. Each artifact is capped at 1 MiB and the corpus at 5,000 files. |
-| `mmcg_dependency_cycles` | optional `language`, `min_size` (default 2) | Detect circular imports — strongly-connected components in the file-level import graph (Tarjan's algorithm). Each result is a cycle = a list of files. Pre-merge guard ("does this PR introduce a new cycle?") and architectural-hygiene survey. Resolves edges by leaf-name match — over-approximates (two unrelated `Logger` symbols cross-link) so verify before refactoring. Bump `min_size` to hide trivial A↔B and surface only larger structural problems. |
-| `mmcg_symbols_changed_since` | `git_ref`, optional `root` | Symbol-level diff between a git ref and the current index. Returns `{added, removed, signature_changed}` symbol sets for files in `git diff --name-only <ref>..HEAD`. Re-parses old blobs from `git show <ref>:<path>` using the same extractor. Different from `mmcg_recent_changes` (watcher mtime) — this is git-ref-based, answering "what symbols did THIS PR/branch touch?". PR-review pre-flight, auditor verification, "what new public API appeared in v2.3?". |
+| `mmcg_dependency_cycles` | optional `language`, `min_size` (default 2) | Detect circular imports — strongly-connected components in the file-level import graph (Tarjan's algorithm). Each result is a cycle = a list of files. Pre-merge guard ("does this PR introduce a new cycle?") and architectural-hygiene survey. Resolves edges by leaf-name match — over-approximates (two unrelated `Logger` symbols cross-link) so verify before refactoring. Bump `min_size` to hide trivial A↔B and surface only larger structural problems. Work-capped at 50,000 file-pair edges: above that, `truncated: true` with an empty `cycles` list — incomplete and possibly inaccurate, not "more available"; narrow with `language` and retry. |
+| `mmcg_symbols_changed_since` | `git_ref`, optional `root` | Symbol-level diff between a git ref and the current index. Returns `{added, removed, signature_changed}` symbol sets for files in `git diff --name-only <ref>..HEAD`. Re-parses old blobs from `git show <ref>:<path>` using the same extractor. Different from `mmcg_recent_changes` (watcher mtime) — this is git-ref-based, answering "what symbols did THIS PR/branch touch?". PR-review pre-flight, auditor verification, "what new public API appeared in v2.3?". Git subprocesses are killed after `MMCG_GIT_TIMEOUT_MS`; the per-file loop is capped at 10,000 files with `truncated: true` marking a partial diff. |
 | `mmcg_status` | — | Index path, file/symbol counts, and bounded `stale_files`. A non-zero value means re-index before trusting structural answers. |
 
 Tool responses are bounded JSON. Collection responses expose their own count or
@@ -337,6 +338,61 @@ mmcg serve
 | Var | Required | Default | What it does |
 |---|---|---|---|
 | `MMCG_INDEX_PATH` | no | `.mastermind/mmcg.db` (relative to cwd) | Where the SQLite index lives. |
+| `MMCG_QUERY_BUDGET_MS` | no | `10000` for `mmcg serve`; `60000` for `mmcg query`/`mmcg impact` | Wall-clock work budget for a single MCP tool call or CLI query. `0` = unlimited. See [Work budgets, timeouts, and cancellation](#work-budgets-timeouts-and-cancellation). |
+| `MMCG_GIT_TIMEOUT_MS` | no | `30000` | Deadline for the `git` subprocesses behind `mmcg_symbols_changed_since` / `mmcg query symbols-changed-since`. A stuck `git` is killed and the call fails with a timeout error. |
+
+## Work budgets, timeouts, and cancellation
+
+A single pathological query — a dense name-collision graph, a huge scoped
+`mmcg_map`, a stuck `git` subprocess — used to be able to run for hours and
+wedge every subsequent call in the session. Every query path is now covered by
+a work budget:
+
+- **MCP serve** installs `MMCG_QUERY_BUDGET_MS` (default 10,000 ms; `0` =
+  unlimited) around every `tools/call` dispatch, before the handler runs.
+- **CLI queries** (`mmcg query <kind>`) use the same env var with a 60,000 ms
+  default — one-shot invocations can afford to wait longer than an
+  interactive session.
+- Nested internal budgets (e.g. `mmcg_change_impact`'s own tighter 2 s /
+  250k-operation cap on its graph walk) compose with the outer budget by
+  **minimum** — an inner budget can only tighten the effective deadline,
+  never extend it.
+- On expiry, MCP tool calls return a structured, typed error instead of
+  hanging:
+  ```json
+  {
+    "code": "work_limit_exceeded",
+    "budget_ms": 10000,
+    "guidance": "narrow scope (subdirectory path, smaller depth, language filter) or raise MMCG_QUERY_BUDGET_MS"
+  }
+  ```
+  `change_impact`'s existing degrade-to-skip behavior for its internal graph
+  budget is unchanged — that specific interrupt is caught and reported as a
+  `graph_work_limit` precision note, not a hard failure of the whole call.
+- **Cancellation.** An MCP cancel notification (`notifications/cancelled`,
+  and legacy `$/cancelRequest`) for the in-flight request id interrupts the
+  running query and frees the server for the next request. A cancel is
+  reported as `{"code": "cancelled", ...}` — distinct from
+  `work_limit_exceeded`, and a cancel that arrives after its request already
+  completed never aborts the next one. Known limitation: the serve loop is
+  still serial, so an unrelated request (even `ping`) sent while a query is
+  running still waits — bounded by the work budget, not eliminated by
+  cancellation.
+- **Git subprocesses** (`run_git`, `git_show_blob` behind
+  `mmcg_symbols_changed_since`) are killed if they exceed
+  `MMCG_GIT_TIMEOUT_MS` (default 30,000 ms). The per-file diff loop is
+  additionally capped at 10,000 files; beyond that, `truncated: true` marks
+  the response as a prefix, not the full diff.
+- **Connection defaults.** Every index open sets `busy_timeout = 5000` and
+  `cache_size = -65536` (64 MiB), sane defaults for multi-hundred-MB
+  databases under concurrent `serve`/`watch` access.
+- **`mmcg_dependency_cycles`** additionally caps the import graph it feeds to
+  Tarjan's algorithm at 50,000 distinct file-pair edges. Above the cap, the
+  response reports `truncated: true` with an empty `cycles` list — SCC
+  analysis is skipped entirely rather than run on a partial graph, because a
+  capped cycle detector can split or hide real cycles. This is "incomplete
+  and possibly inaccurate", never just "more available"; narrow with
+  `language` and retry.
 
 ## Limitations (honest)
 

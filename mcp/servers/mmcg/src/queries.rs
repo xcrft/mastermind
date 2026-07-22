@@ -850,7 +850,7 @@ pub fn change_impact(
         }
         let bytes = std::fs::read(repository_root.join(&file.path))
             .map_err(|_| ChangeImpactError::SnapshotChanged)?;
-        let digest = format!("{:x}", Sha256::digest(bytes));
+        let digest = crate::hex::encode(&Sha256::digest(bytes));
         let stored = store
             .file_content_sha256(&file.path)
             .map_err(|_| ChangeImpactError::IndexStale)?;

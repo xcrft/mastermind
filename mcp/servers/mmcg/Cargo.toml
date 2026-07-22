@@ -55,7 +55,7 @@ notify = "8.2"
 # JSON for MCP protocol
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 base64 = "0.22"
 ed25519-dalek = { version = "3", features = ["rand_core"] }
 libc = "0.2"

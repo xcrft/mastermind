@@ -208,7 +208,7 @@ pub fn canonical_json(value: &Value) -> Result<Vec<u8>, BundleError> {
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    crate::hex::encode(&Sha256::digest(bytes))
 }
 
 pub fn seal(mut manifest: Manifest) -> Result<Envelope, BundleError> {

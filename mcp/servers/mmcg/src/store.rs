@@ -10,9 +10,135 @@ use rusqlite::{
     params, types::Value as SqlValue, Connection, OptionalExtension, Result as SqlResult,
 };
 use serde::{Deserialize, Serialize};
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 const SCHEMA_VERSION: &str = "6";
+
+/// A per-request work-budget: a wall-clock deadline and/or a cap on SQLite
+/// progress-handler ticks (each tick fires every 1,000 VM instructions).
+/// `None` in either field means that dimension is unbounded. Read via
+/// [`query_budget_ms_from_env`] for the env-var-driven defaults; construct
+/// directly for tests that need an exact, deterministic budget.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WorkBudget {
+    pub deadline: Option<Duration>,
+    pub op_ticks: Option<u64>,
+}
+
+impl WorkBudget {
+    pub const UNLIMITED: Self = Self {
+        deadline: None,
+        op_ticks: None,
+    };
+
+    /// `0` means unlimited (matches the `MMCG_QUERY_BUDGET_MS` / CLI contract:
+    /// "0 = unlimited"). Any other value is a wall-clock deadline only.
+    pub fn from_millis(budget_ms: u64) -> Self {
+        if budget_ms == 0 {
+            Self::UNLIMITED
+        } else {
+            Self {
+                deadline: Some(Duration::from_millis(budget_ms)),
+                op_ticks: None,
+            }
+        }
+    }
+}
+
+/// Which mechanism raised a `SQLITE_INTERRUPT`-shaped error on the connection:
+/// the work-budget guard itself, or an out-of-band client cancel notification
+/// (`Connection::get_interrupt_handle().interrupt()`). Recorded on [`Store`]
+/// immediately before each mechanism fires so callers can map budget expiry to
+/// `work_limit_exceeded` and client cancel to `cancelled` without conflating
+/// the two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterruptSource {
+    Budget,
+    Cancel,
+}
+
+const INTERRUPT_NONE: u8 = 0;
+const INTERRUPT_BUDGET: u8 = 1;
+const INTERRUPT_CANCEL: u8 = 2;
+
+/// One frame of the work-budget guard stack. Holds the *effective* (already
+/// min-composed with the parent, if any) absolute deadline and op-tick cap, so
+/// checking a frame never needs to re-walk its ancestors.
+#[derive(Debug, Clone, Copy)]
+struct GuardFrame {
+    deadline: Option<Instant>,
+    op_cap: Option<u64>,
+    /// Snapshot of the shared ops counter when this frame was pushed — lets us
+    /// compute "ticks consumed since this frame started" without a per-frame
+    /// counter, so ticks consumed by a nested child frame still count against
+    /// this frame's cap once the child pops back.
+    ops_baseline: u64,
+}
+
+impl GuardFrame {
+    fn expired(&self, ops_counter: &AtomicU64) -> bool {
+        if let Some(deadline) = self.deadline {
+            if Instant::now() >= deadline {
+                return true;
+            }
+        }
+        if let Some(cap) = self.op_cap {
+            let used = ops_counter
+                .load(Ordering::Relaxed)
+                .saturating_sub(self.ops_baseline);
+            if used >= cap {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Read a millisecond budget from `MMCG_QUERY_BUDGET_MS`, falling back to
+/// `default_ms` when unset, empty, or unparsable. `default_ms` differs by
+/// context (MCP serve vs one-shot CLI queries) even though the env var is
+/// shared.
+pub fn query_budget_ms_from_env(default_ms: u64) -> u64 {
+    std::env::var("MMCG_QUERY_BUDGET_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(default_ms)
+}
+
+/// A cloneable, `Send + Sync` handle that lets another thread (the `serve_io`
+/// reader thread) abort whatever query is currently running on this `Store`'s
+/// connection — the cross-thread mechanism; the in-thread progress handler
+/// cannot be fired externally. Records the interrupt source as `Cancel`
+/// *before* calling into SQLite, so the source is never ambiguous with a
+/// budget expiry.
+#[derive(Clone)]
+pub struct CancelHandle {
+    interrupt_source: Arc<AtomicU8>,
+    sqlite: Arc<rusqlite::InterruptHandle>,
+}
+
+impl CancelHandle {
+    pub fn cancel(&self) {
+        self.interrupt_source
+            .store(INTERRUPT_CANCEL, Ordering::SeqCst);
+        self.sqlite.interrupt();
+    }
+}
+
+/// Default MCP-serve budget when `MMCG_QUERY_BUDGET_MS` is unset.
+pub const DEFAULT_SERVE_BUDGET_MS: u64 = 10_000;
+/// Default one-shot CLI-query budget when `MMCG_QUERY_BUDGET_MS` is unset.
+pub const DEFAULT_CLI_BUDGET_MS: u64 = 60_000;
+
+/// Work cap for `Store::dependency_cycles`: the largest number of distinct
+/// file-pair import edges it will feed to Tarjan. Above this, the result is
+/// reported as truncated ("incomplete and possibly inaccurate") without
+/// computing SCCs at all.
+pub const DEPENDENCY_CYCLE_PAIR_LIMIT: usize = 50_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Symbol {
@@ -224,6 +350,10 @@ pub struct PendingEdge {
 pub struct Store {
     conn: Connection,
     db_path: PathBuf,
+    guard_stack: RefCell<Vec<GuardFrame>>,
+    ops_counter: Arc<AtomicU64>,
+    interrupt_source: Arc<AtomicU8>,
+    default_budget: Cell<WorkBudget>,
 }
 
 impl Store {
@@ -243,11 +373,177 @@ impl Store {
             PRAGMA foreign_keys = ON;
             PRAGMA journal_mode = WAL;
             PRAGMA synchronous = NORMAL;
+            PRAGMA busy_timeout = 5000;
+            PRAGMA cache_size = -65536;
             "#,
         )?;
-        let store = Self { conn, db_path };
+        let store = Self {
+            conn,
+            db_path,
+            guard_stack: RefCell::new(Vec::new()),
+            ops_counter: Arc::new(AtomicU64::new(0)),
+            interrupt_source: Arc::new(AtomicU8::new(INTERRUPT_NONE)),
+            default_budget: Cell::new(WorkBudget::from_millis(DEFAULT_SERVE_BUDGET_MS)),
+        };
         store.init_schema()?;
         Ok(store)
+    }
+
+    /// The work budget applied at MCP tool dispatch / CLI query boundaries
+    /// unless a call site installs a tighter one. Defaults to
+    /// [`DEFAULT_SERVE_BUDGET_MS`]; callers (`main.rs`, `commands/query.rs`)
+    /// override it once at startup from `MMCG_QUERY_BUDGET_MS`.
+    pub fn default_work_budget(&self) -> WorkBudget {
+        self.default_budget.get()
+    }
+
+    /// Override the default work budget directly — used by tests that need an
+    /// exact, non-env-driven budget (e.g. a budget that is already expired at
+    /// install time).
+    pub fn set_default_work_budget(&self, budget: WorkBudget) {
+        self.default_budget.set(budget);
+    }
+
+    /// Override the default work budget from a millisecond value, applying
+    /// the "0 = unlimited" convention.
+    pub fn set_default_work_budget_ms(&self, budget_ms: u64) {
+        self.set_default_work_budget(WorkBudget::from_millis(budget_ms));
+    }
+
+    /// Push a new guard frame whose effective deadline/op cap are the min of
+    /// its own values and whatever remains of the parent frame (if any), then
+    /// installs the connection's progress handler from the new top frame —
+    /// the stack is the progress handler's single owner; nothing else may
+    /// call `Connection::progress_handler` on this connection. Returns `true`
+    /// when the newly pushed frame is *already* exhausted (e.g. a zero
+    /// budget) — callers must not run the guarded work in that case.
+    pub fn push_work_budget(&self, budget: WorkBudget) -> bool {
+        let mut stack = self.guard_stack.borrow_mut();
+        let now = Instant::now();
+        let own_deadline = budget.deadline.map(|d| now + d);
+        let frame = match stack.last() {
+            Some(parent) => {
+                let parent_remaining_ops = parent.op_cap.map(|cap| {
+                    let used = self
+                        .ops_counter
+                        .load(Ordering::Relaxed)
+                        .saturating_sub(parent.ops_baseline);
+                    cap.saturating_sub(used)
+                });
+                let deadline = match (own_deadline, parent.deadline) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (Some(a), None) => Some(a),
+                    (None, other) => other,
+                };
+                let op_cap = match (budget.op_ticks, parent_remaining_ops) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (Some(a), None) => Some(a),
+                    (None, other) => other,
+                };
+                GuardFrame {
+                    deadline,
+                    op_cap,
+                    ops_baseline: self.ops_counter.load(Ordering::Relaxed),
+                }
+            }
+            None => GuardFrame {
+                deadline: own_deadline,
+                op_cap: budget.op_ticks,
+                ops_baseline: self.ops_counter.load(Ordering::Relaxed),
+            },
+        };
+        let expired = frame.expired(&self.ops_counter);
+        stack.push(frame);
+        drop(stack);
+        self.install_progress_handler();
+        if expired {
+            self.interrupt_source
+                .store(INTERRUPT_BUDGET, Ordering::SeqCst);
+        }
+        expired
+    }
+
+    /// Pop the innermost guard frame and reinstall the parent's progress
+    /// handler (or clear it entirely when the stack is empty).
+    pub fn pop_work_budget(&self) {
+        {
+            let mut stack = self.guard_stack.borrow_mut();
+            stack.pop();
+        }
+        self.install_progress_handler();
+    }
+
+    fn install_progress_handler(&self) {
+        let top = self.guard_stack.borrow().last().copied();
+        let Some(frame) = top else {
+            let _ = self.conn.progress_handler(0, None::<fn() -> bool>);
+            return;
+        };
+        let ops_counter = self.ops_counter.clone();
+        let interrupt_source = self.interrupt_source.clone();
+        let _ = self.conn.progress_handler(
+            1_000,
+            Some(move || {
+                ops_counter.fetch_add(1, Ordering::Relaxed);
+                if frame.expired(&ops_counter) {
+                    interrupt_source.store(INTERRUPT_BUDGET, Ordering::SeqCst);
+                    true
+                } else {
+                    false
+                }
+            }),
+        );
+    }
+
+    /// Run `f` under `budget`, composed via min with whatever guard is
+    /// already installed (if any). This is the single owner of the
+    /// connection's progress handler — no code path may install one outside
+    /// this stack. On budget expiry (own or inherited), `f` is not run at all
+    /// if the effective budget is already exhausted at push time; otherwise
+    /// SQLite raises `SQLITE_INTERRUPT`, surfaced here as a matchable
+    /// `rusqlite::Error::SqliteFailure` with `ErrorCode::OperationInterrupted`.
+    pub fn with_work_budget<T>(
+        &self,
+        budget: WorkBudget,
+        f: impl FnOnce() -> SqlResult<T>,
+    ) -> SqlResult<T> {
+        if self.push_work_budget(budget) {
+            self.pop_work_budget();
+            return Err(Self::interrupted_error());
+        }
+        let result = f();
+        self.pop_work_budget();
+        result
+    }
+
+    fn interrupted_error() -> rusqlite::Error {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_INTERRUPT),
+            Some("query interrupted: work budget exceeded".to_string()),
+        )
+    }
+
+    /// Read and clear which mechanism raised the most recent interrupt (if
+    /// any) — single-shot so a stale value from an earlier, internally
+    /// recovered interrupt (e.g. `change_impact`'s graph-portion degrade)
+    /// never leaks into the next check.
+    pub fn take_interrupt_source(&self) -> Option<InterruptSource> {
+        match self.interrupt_source.swap(INTERRUPT_NONE, Ordering::SeqCst) {
+            INTERRUPT_BUDGET => Some(InterruptSource::Budget),
+            INTERRUPT_CANCEL => Some(InterruptSource::Cancel),
+            _ => None,
+        }
+    }
+
+    /// A cloneable, cross-thread handle that marks the interrupt source as
+    /// `Cancel` and aborts whatever statement is currently running on this
+    /// connection. Used by `serve_io`'s reader thread to implement client
+    /// cancel notifications.
+    pub fn cancel_handle(&self) -> CancelHandle {
+        CancelHandle {
+            interrupt_source: self.interrupt_source.clone(),
+            sqlite: Arc::new(self.conn.get_interrupt_handle()),
+        }
     }
 
     pub fn db_path(&self) -> &Path {
@@ -533,6 +829,26 @@ impl Store {
         Ok(())
     }
 
+    /// Same as [`Store::insert_edge`] but with an explicit `to_type` —
+    /// `insert_edge` always inserts `to_type = NULL`, so tests that need a
+    /// `Type::method()`-shaped edge (e.g. the equivalence property tests)
+    /// need this instead of hand-building a `PendingFile`.
+    #[cfg(test)]
+    pub fn insert_edge_with_type(
+        &self,
+        from_id: i64,
+        to_name: &str,
+        to_type: Option<&str>,
+        kind: &str,
+        line: u32,
+    ) -> SqlResult<()> {
+        self.conn.execute(
+            "INSERT INTO edges(from_id, to_id, to_name, to_path, to_type, kind, line) VALUES (?1, NULL, ?2, NULL, ?3, ?4, ?5)",
+            params![from_id, to_name, to_type, kind, line],
+        )?;
+        Ok(())
+    }
+
     pub fn upsert_file(&self, path: &str, mtime: i64, symbol_count: u32) -> SqlResult<()> {
         self.conn.execute(
             "INSERT INTO files(path, indexed_at, symbol_count) VALUES (?1, ?2, ?3)
@@ -697,64 +1013,32 @@ impl Store {
         rows.collect()
     }
 
-    /// Transitive callers up to `max_depth`, as (symbol, depth) pairs. Matches
-    /// `to_name OR to_type` to catch type-method calls like `SessionStore::new()`.
-    /// Optional `language` filter.
-    pub fn impact_of(
-        &self,
-        name: &str,
-        max_depth: u32,
-        language: Option<&str>,
-    ) -> SqlResult<Vec<(Symbol, u32)>> {
-        // `d` must come AFTER SYMBOL_COLS_S so its index lines up with
-        // `row_to_symbol`'s column count. Adjust the depth `r.get(N)` if you
-        // change SYMBOL_COLS.
-        let sql = format!(
-            "WITH RECURSIVE impact(sym_id, name, depth) AS (
-                 SELECT s.id, s.name, 1
-                 FROM symbols s
-                 JOIN edges e ON e.from_id = s.id
-                 WHERE e.kind = 'calls'
-                   AND (e.to_name = ?1 OR e.to_type = ?1)
-                   AND (?3 IS NULL OR s.language = ?3)
-               UNION
-                 SELECT s.id, s.name, i.depth + 1
-                 FROM symbols s
-                 JOIN edges e ON e.from_id = s.id
-                 JOIN impact i ON (e.to_name = i.name OR e.to_type = i.name)
-                 WHERE i.depth < ?2
-                   AND e.kind = 'calls'
-                   AND (?3 IS NULL OR s.language = ?3)
-             )
-             SELECT {SYMBOL_COLS_S},
-                    MIN(i.depth) AS d
-             FROM impact i
-             JOIN symbols s ON s.id = i.sym_id
-             GROUP BY s.id
-             ORDER BY d, s.file_path"
-        );
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![name, max_depth, language], |r| {
-            let sym = Self::row_to_symbol(r)?;
-            // Depth is the column after the 9 SYMBOL_COLS_S columns.
-            let depth: u32 = r.get(9)?;
-            Ok((sym, depth))
-        })?;
-        rows.collect()
-    }
-
+    /// Transitive callers up to `max_depth` for one or more seed names — the
+    /// guarded visited-set walk backing both `mmcg_impact` (single seed) and
+    /// `change_impact` (many seeds). Matches `to_name OR to_type` to catch
+    /// type-method calls like `SessionStore::new()`. Bounded on three axes:
+    /// seed count (≤ 200), `max_depth` (1..=10 — mirrors the `mmcg_impact`
+    /// tool's advertised cap), and `row_limit` (≤ 5001, the caller's row cap).
+    /// Optional `language` restricts every step of the walk (not just the
+    /// final rows) to that language, matching `mmcg_impact`'s documented
+    /// filter — `change_impact` always passes `None`. Additionally wrapped in
+    /// its own tight `with_work_budget` (2s / 250k ticks) so a dense
+    /// name-collision graph can't run away even under a generous outer guard
+    /// — nested budgets compose by min, so an outer guard installed by the
+    /// MCP/CLI dispatch boundary only ever *tightens* this, never loosens it.
     pub fn impact_of_many(
         &self,
         names: &[String],
         max_depth: u32,
         row_limit: usize,
+        language: Option<&str>,
     ) -> SqlResult<Vec<SeedImpact>> {
         if names.is_empty() || names.len() > 200 {
             return Err(rusqlite::Error::InvalidParameterName(
                 "seed_count".to_string(),
             ));
         }
-        if !(1..=5).contains(&max_depth) {
+        if !(1..=10).contains(&max_depth) {
             return Err(rusqlite::Error::InvalidParameterName(
                 "max_depth".to_string(),
             ));
@@ -771,6 +1055,7 @@ impl Store {
             .join(",");
         let depth_param = names.len() + 1;
         let limit_param = names.len() + 2;
+        let lang_param = names.len() + 3;
         let sql = format!(
             "WITH RECURSIVE seed(seed) AS (VALUES {placeholders}),
              walk(seed, sym_id, name, depth, visited) AS (
@@ -779,6 +1064,7 @@ impl Store {
                  JOIN edges e ON e.kind = 'calls'
                               AND (e.to_name = seed.seed OR e.to_type = seed.seed)
                  JOIN symbols s ON s.id = e.from_id
+                 WHERE (?{lang_param} IS NULL OR s.language = ?{lang_param})
                UNION ALL
                  SELECT walk.seed, s.id, s.name, walk.depth + 1,
                         walk.visited || s.id || ','
@@ -788,6 +1074,7 @@ impl Store {
                  JOIN symbols s ON s.id = e.from_id
                  WHERE walk.depth < ?{depth_param}
                    AND instr(walk.visited, ',' || s.id || ',') = 0
+                   AND (?{lang_param} IS NULL OR s.language = ?{lang_param})
              ), minimum AS (
                  SELECT seed, sym_id, MIN(depth) AS depth
                  FROM walk
@@ -803,18 +1090,16 @@ impl Store {
         let mut values: Vec<SqlValue> = names.iter().cloned().map(SqlValue::Text).collect();
         values.push(SqlValue::Integer(max_depth as i64));
         values.push(SqlValue::Integer(row_limit as i64));
+        values.push(match language {
+            Some(lang) => SqlValue::Text(lang.to_string()),
+            None => SqlValue::Null,
+        });
 
-        let started = std::time::Instant::now();
-        let operations = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let handler_operations = operations.clone();
-        self.conn.progress_handler(
-            1_000,
-            Some(move || {
-                handler_operations.fetch_add(1, std::sync::atomic::Ordering::Relaxed) > 250_000
-                    || started.elapsed() > std::time::Duration::from_secs(2)
-            }),
-        )?;
-        let result = (|| {
+        let budget = WorkBudget {
+            deadline: Some(Duration::from_secs(2)),
+            op_ticks: Some(250_000),
+        };
+        self.with_work_budget(budget, || {
             let mut statement = self.conn.prepare(&sql)?;
             let rows = statement.query_map(rusqlite::params_from_iter(values), |row| {
                 Ok(SeedImpact {
@@ -834,9 +1119,7 @@ impl Store {
                 })
             })?;
             rows.collect()
-        })();
-        self.conn.progress_handler(0, None::<fn() -> bool>)?;
-        result
+        })
     }
 
     pub fn scoped_paths_in_components(
@@ -961,9 +1244,17 @@ impl Store {
         language: Option<&str>,
     ) -> SqlResult<Vec<Symbol>> {
         let sql = format!(
-            "SELECT {SYMBOL_COLS_S}
+            "WITH referenced_names AS (
+                 SELECT DISTINCT to_name AS nm FROM edges
+                 UNION
+                 SELECT DISTINCT to_type AS nm FROM edges
+                   WHERE to_type IS NOT NULL AND to_type <> ''
+             )
+             SELECT {SYMBOL_COLS_S}
              FROM symbols s
-             WHERE (?1 IS NULL OR s.kind = ?1)
+             LEFT JOIN referenced_names r ON r.nm = s.name
+             WHERE r.nm IS NULL
+               AND (?1 IS NULL OR s.kind = ?1)
                AND (?2 IS NULL OR s.language = ?2)
                AND s.kind != 'module'
                -- Module-level constants are referenced by VALUE-READ, not
@@ -971,10 +1262,6 @@ impl Store {
                -- false positives. Exclude unless caller asked for `kind=constant`
                -- (then the kind filter controls the slice).
                AND (?1 IS NOT NULL OR s.kind != 'constant')
-               AND NOT EXISTS (
-                   SELECT 1 FROM edges e
-                   WHERE e.to_name = s.name OR e.to_type = s.name
-               )
                -- pytest test functions by convention (test_* in *test*/*spec* files)
                AND NOT (
                    s.name LIKE 'test_%'
@@ -1102,17 +1389,24 @@ impl Store {
             format!("{path_prefix}%")
         };
         let sql = format!(
-            "SELECT DISTINCT {SYMBOL_COLS_S}
+            "WITH external_refs AS (
+                 SELECT DISTINCT e.to_name AS nm
+                 FROM edges e
+                 JOIN symbols caller ON caller.id = e.from_id
+                 WHERE caller.file_path NOT LIKE ?1
+                 UNION
+                 SELECT DISTINCT e.to_type AS nm
+                 FROM edges e
+                 JOIN symbols caller ON caller.id = e.from_id
+                 WHERE caller.file_path NOT LIKE ?1
+                   AND e.to_type IS NOT NULL AND e.to_type <> ''
+             )
+             SELECT DISTINCT {SYMBOL_COLS_S}
              FROM symbols s
+             JOIN external_refs r ON r.nm = s.name
              WHERE s.file_path LIKE ?1
                AND (?2 IS NULL OR s.language = ?2)
                AND s.kind != 'module'
-               AND EXISTS (
-                   SELECT 1 FROM edges e
-                   JOIN symbols caller ON caller.id = e.from_id
-                   WHERE (e.to_name = s.name OR e.to_type = s.name)
-                     AND caller.file_path NOT LIKE ?1
-               )
              ORDER BY s.file_path, s.line_start"
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -1401,16 +1695,27 @@ impl Store {
                        )
                    )
              ),
-             degrees AS (
-                 SELECT d.id, COUNT(DISTINCT e.from_id) AS in_degree
-                 FROM scoped_defs d
-                 JOIN edges e
-                   ON e.kind = 'calls'
-                  AND (e.to_name = d.name OR e.to_type = d.name)
-                 JOIN symbols caller ON caller.id = e.from_id
-                 WHERE 1 = 1
-                 {caller_filter}
-                 GROUP BY d.id
+             -- In-degree depends only on a definition's *name* (plus the
+             -- uniform caller-side production_only filter), never on which
+             -- specific def row it is — so aggregate once over the UNION ALL
+             -- of the to_name and to_type edge branches (grouping by to_name
+             -- alone would drop `Type::method()` callers) and join scoped
+             -- defs to it by name, instead of joining every def to every
+             -- same-named edge.
+             name_degrees AS (
+                 SELECT nm, COUNT(DISTINCT from_id) AS in_degree FROM (
+                     SELECT e.to_name AS nm, e.from_id
+                     FROM edges e
+                     JOIN symbols caller ON caller.id = e.from_id
+                     WHERE e.kind = 'calls'
+                     {caller_filter}
+                     UNION ALL
+                     SELECT e.to_type AS nm, e.from_id
+                     FROM edges e
+                     JOIN symbols caller ON caller.id = e.from_id
+                     WHERE e.kind = 'calls' AND e.to_type IS NOT NULL AND e.to_type <> ''
+                     {caller_filter}
+                 ) GROUP BY nm
              ),
              scoped_names AS (
                  SELECT DISTINCT name
@@ -1430,7 +1735,7 @@ impl Store {
                     d.signature, d.parent_id, d.decorators,
                     degrees.in_degree, collisions.name_collision
              FROM scoped_defs d
-             JOIN degrees ON degrees.id = d.id
+             JOIN name_degrees degrees ON degrees.nm = d.name
              JOIN collisions ON collisions.name = d.name
              ORDER BY degrees.in_degree DESC, d.file_path, d.line_start, d.name,
                       d.kind, d.line_end, COALESCE(d.signature, ''),
@@ -1469,14 +1774,24 @@ impl Store {
         let source_filter = maybe_production_path_filter(production_only, "source.file_path");
         let target_filter = maybe_production_path_filter(production_only, "target.file_path");
         let sql = format!(
-            "SELECT DISTINCT source.file_path, target.file_path
+            "WITH target_files AS (
+                 -- Pre-dedup (name, file_path) before joining import edges:
+                 -- output is DISTINCT file pairs, so collapsing same-named
+                 -- symbols within a file is identical to the previous
+                 -- per-edge fanout join, one pass over `symbols` instead of
+                 -- joining every edge to every same-named symbol.
+                 SELECT DISTINCT target.name, target.file_path
+                 FROM symbols target
+                 WHERE 1 = 1
+                 {target_filter}
+             )
+             SELECT DISTINCT source.file_path, target.file_path
              FROM edges e
              JOIN symbols source ON source.id = e.from_id
-             JOIN symbols target ON target.name = e.to_name
+             JOIN target_files target ON target.name = e.to_name
              WHERE e.kind = 'imports'
                AND source.file_path != target.file_path
                {source_filter}
-               {target_filter}
                AND (
                    ?2 = 'root'
                    OR (?2 = 'file' AND source.file_path = ?1)
@@ -1550,35 +1865,55 @@ impl Store {
     ///
     /// `min_size` defaults to 2 (smallest cycle). Higher surfaces only larger
     /// problems (min_size=3 hides trivial A→B→A).
+    ///
+    /// Work-capped: fetches at most [`DEPENDENCY_CYCLE_PAIR_LIMIT`] + 1
+    /// distinct file pairs under a deterministic `ORDER BY` (so truncation is
+    /// reproducible). Above the cap, Tarjan is **not** run — capping a graph
+    /// algorithm's input can split or hide real cycles, so the second tuple
+    /// element (`true`) marks the result "incomplete and possibly inaccurate",
+    /// not merely "more available".
     pub fn dependency_cycles(
         &self,
         language: Option<&str>,
         min_size: usize,
-    ) -> SqlResult<Vec<Vec<String>>> {
-        // File-level adjacency: from_file → set of to_files.
+    ) -> SqlResult<(Vec<Vec<String>>, bool)> {
+        // Pre-dedup (name, file_path, language) over symbols before joining
+        // import edges: output is DISTINCT file pairs, so collapsing
+        // same-named symbols within a file is identical to the previous
+        // per-edge fanout join, one pass over `symbols` instead of joining
+        // every edge to every same-named symbol.
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT
+            "WITH to_files AS (
+                 SELECT DISTINCT name, file_path, language
+                 FROM symbols
+                 WHERE (?1 IS NULL OR language = ?1)
+             )
+             SELECT DISTINCT
                 s_from.file_path AS from_file,
-                s_to.file_path   AS to_file
+                t.file_path      AS to_file
              FROM edges e
              JOIN symbols s_from ON s_from.id = e.from_id
-             JOIN symbols s_to   ON s_to.name = e.to_name
+             JOIN to_files t     ON t.name = e.to_name
              WHERE e.kind = 'imports'
-               AND s_from.file_path != s_to.file_path
+               AND s_from.file_path != t.file_path
                AND (?1 IS NULL OR s_from.language = ?1)
-               AND (?1 IS NULL OR s_to.language = ?1)
-             ORDER BY from_file, to_file",
+             ORDER BY from_file, to_file
+             LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![language], |r| {
+        let cap = DEPENDENCY_CYCLE_PAIR_LIMIT;
+        let rows = stmt.query_map(params![language, (cap + 1) as i64], |r| {
             let from: String = r.get(0)?;
             let to: String = r.get(1)?;
             Ok((from, to))
         })?;
+        let pairs: Vec<(String, String)> = rows.collect::<SqlResult<_>>()?;
+        if pairs.len() > cap {
+            return Ok((Vec::new(), true));
+        }
 
         let mut adj: std::collections::BTreeMap<String, Vec<String>> =
             std::collections::BTreeMap::new();
-        for row in rows {
-            let (from, to) = row?;
+        for (from, to) in pairs {
             adj.entry(from).or_default().push(to);
         }
 
@@ -1587,7 +1922,7 @@ impl Store {
             cycles.into_iter().filter(|c| c.len() >= min_size).collect();
         // Stable order: largest cycles first, lex within.
         out.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
-        Ok(out)
+        Ok((out, false))
     }
 
     /// Full-text search over the task-spec corpus. `query` is an FTS5 MATCH
@@ -1994,6 +2329,7 @@ fn tarjan_scc(adj: &std::collections::BTreeMap<String, Vec<String>>) -> Vec<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::env;
 
     /// Unique path per test — parallel tests can't share the file.
@@ -2267,9 +2603,11 @@ mod tests {
         store.insert_edge(a, Some(b), "b", "calls", 3).unwrap();
         store.insert_edge(b, Some(c), "c", "calls", 12).unwrap();
 
-        // impact of c should include b (depth 1) and a (depth 2)
-        let imp = store.impact_of("c", 5, None).unwrap();
-        let names: Vec<&str> = imp.iter().map(|(s, _)| s.name.as_str()).collect();
+        // impact of c should include b (depth 1) and a (depth 2).
+        let imp = store
+            .impact_of_many(&["c".to_string()], 5, 5001, None)
+            .unwrap();
+        let names: Vec<&str> = imp.iter().map(|row| row.symbol.name.as_str()).collect();
         assert!(names.contains(&"b"));
         assert!(names.contains(&"a"));
         std::fs::remove_file(&path).ok();
@@ -2501,12 +2839,14 @@ mod tests {
         store.insert_edge(b_mod, None, "foo", "imports", 1).unwrap();
         store.insert_edge(c_mod, None, "bar", "imports", 1).unwrap();
 
-        let cycles = store.dependency_cycles(None, 2).unwrap();
+        let (cycles, truncated) = store.dependency_cycles(None, 2).unwrap();
+        assert!(!truncated);
         assert_eq!(cycles.len(), 1, "exactly one cycle expected");
         assert_eq!(cycles[0], vec!["a.py".to_string(), "b.py".to_string()]);
 
         // min_size=3 hides the 2-node cycle entirely.
-        let bigger = store.dependency_cycles(None, 3).unwrap();
+        let (bigger, bigger_truncated) = store.dependency_cycles(None, 3).unwrap();
+        assert!(!bigger_truncated);
         assert!(bigger.is_empty());
 
         std::fs::remove_file(&path).ok();
@@ -2973,7 +3313,7 @@ mod tests {
             .unwrap();
 
         let rows = store
-            .impact_of_many(&["beta".to_string(), "alpha".to_string()], 3, 5001)
+            .impact_of_many(&["beta".to_string(), "alpha".to_string()], 3, 5001, None)
             .unwrap();
         assert!(rows
             .iter()
@@ -2988,14 +3328,34 @@ mod tests {
     fn impact_of_many_enforces_seed_and_row_limits() {
         let path = tmp_db("impact_many_limits");
         let store = Store::open(&path).unwrap();
-        assert!(store.impact_of_many(&[], 1, 1).is_err());
+        assert!(store.impact_of_many(&[], 1, 1, None).is_err());
         assert!(store
-            .impact_of_many(&vec!["seed".to_string(); 201], 1, 1)
+            .impact_of_many(&vec!["seed".to_string(); 201], 1, 1, None)
             .is_err());
-        assert!(store.impact_of_many(&["seed".to_string()], 0, 1).is_err());
         assert!(store
-            .impact_of_many(&["seed".to_string()], 1, 5002)
+            .impact_of_many(&["seed".to_string()], 0, 1, None)
             .is_err());
+        assert!(store
+            .impact_of_many(&["seed".to_string()], 11, 1, None)
+            .is_err());
+        assert!(store
+            .impact_of_many(&["seed".to_string()], 1, 5002, None)
+            .is_err());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn impact_of_many_accepts_widened_depth_up_to_ten() {
+        let path = tmp_db("impact_many_depth_ten");
+        let store = Store::open(&path).unwrap();
+        store
+            .insert_symbol("seed", "function", "src/a.rs", 1, 2, None, None)
+            .unwrap();
+        // max_depth=10 must be accepted — it is the `mmcg_impact` tool's
+        // advertised cap.
+        assert!(store
+            .impact_of_many(&["seed".to_string()], 10, 5001, None)
+            .is_ok());
         std::fs::remove_file(&path).ok();
     }
 
@@ -3022,8 +3382,739 @@ mod tests {
                     .unwrap();
             }
         }
-        let result = store.impact_of_many(&["node0".to_string()], 5, 5001);
+        let result = store.impact_of_many(&["node0".to_string()], 5, 5001, None);
         assert!(result.is_err() || result.as_ref().is_ok_and(|rows| rows.len() <= 5001));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn open_sets_busy_timeout_and_cache_size() {
+        let path = tmp_db("pragmas");
+        let store = Store::open(&path).unwrap();
+        let busy_timeout: i64 = store
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(busy_timeout, 5000);
+        let cache_size: i64 = store
+            .conn
+            .query_row("PRAGMA cache_size", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cache_size, -65536);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn default_budgets_match_documented_contract() {
+        // Default budget for MCP serve: 10,000ms; CLI queries: 60,000ms;
+        // 0 = unlimited (both contexts share the same env var, only the
+        // fallback default differs).
+        assert_eq!(DEFAULT_SERVE_BUDGET_MS, 10_000);
+        assert_eq!(DEFAULT_CLI_BUDGET_MS, 60_000);
+        assert!(WorkBudget::from_millis(0).deadline.is_none());
+        assert_eq!(
+            WorkBudget::from_millis(5).deadline,
+            Some(Duration::from_millis(5))
+        );
+        let path = tmp_db("default_budget_wiring");
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.default_work_budget().deadline,
+            Some(Duration::from_millis(DEFAULT_SERVE_BUDGET_MS))
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn work_budget_interrupts_pathological_query() {
+        let path = tmp_db("work_budget_watchdog");
+        let store = Store::open(&path).unwrap();
+        let budget_ms = 50u64;
+        let started = Instant::now();
+        // A deterministically slow query, independent of any particular
+        // fixture's combinatorics — proves the generic guard mechanism, not
+        // just `impact_of_many`'s own fixed inner budget.
+        let result: SqlResult<i64> =
+            store.with_work_budget(WorkBudget::from_millis(budget_ms), || {
+                store
+                    .conn
+                    .prepare(
+                        "WITH RECURSIVE cnt(x) AS (
+                         SELECT 1
+                         UNION ALL
+                         SELECT x + 1 FROM cnt WHERE x < 100000000
+                     )
+                     SELECT count(*) FROM cnt",
+                    )?
+                    .query_row([], |r| r.get(0))
+            });
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(
+                &result,
+                Err(rusqlite::Error::SqliteFailure(e, _))
+                    if e.code == rusqlite::ErrorCode::OperationInterrupted
+            ),
+            "expected a work-budget interrupt, got {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(budget_ms * 2),
+            "elapsed {elapsed:?} exceeded 2x the {budget_ms}ms budget"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn work_budget_nesting_takes_min() {
+        let path = tmp_db("work_budget_nesting");
+        let store = Store::open(&path).unwrap();
+
+        // A budget composes with an already-installed parent via min — a
+        // generous inner budget can never outlive a tighter outer one.
+        let outer = WorkBudget {
+            deadline: Some(Duration::from_millis(1)),
+            op_ticks: None,
+        };
+        assert!(!store.push_work_budget(outer));
+        std::thread::sleep(Duration::from_millis(5));
+        let generous_inner = WorkBudget {
+            deadline: Some(Duration::from_secs(5)),
+            op_ticks: None,
+        };
+        assert!(
+            store.push_work_budget(generous_inner),
+            "inner budget must not extend past the already-expired outer one"
+        );
+        store.pop_work_budget();
+        store.pop_work_budget();
+
+        // Same for op ticks: an inner cap higher than the outer's *remaining*
+        // ticks is clamped down, not honored at face value.
+        let outer_ticks = WorkBudget {
+            deadline: None,
+            op_ticks: Some(10),
+        };
+        assert!(!store.push_work_budget(outer_ticks));
+        store.ops_counter.fetch_add(10, Ordering::Relaxed);
+        let generous_inner_ticks = WorkBudget {
+            deadline: None,
+            op_ticks: Some(1_000_000),
+        };
+        assert!(
+            store.push_work_budget(generous_inner_ticks),
+            "inner op-tick cap must be bounded by the outer's already-consumed ticks"
+        );
+        store.pop_work_budget();
+        store.pop_work_budget();
+        std::fs::remove_file(&path).ok();
+    }
+
+    struct XorShift64(u64);
+    impl XorShift64 {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    #[derive(Clone)]
+    struct GenSymbol {
+        name: String,
+        kind: String,
+        file_path: String,
+        line_start: u32,
+        language: String,
+    }
+
+    #[derive(Clone)]
+    struct GenEdge {
+        from: usize,
+        to_name: String,
+        to_type: Option<String>,
+    }
+
+    const GEN_NAMES: &[&str] = &["Alpha", "Beta", "Gamma", "Delta"];
+    const GEN_KINDS: &[&str] = &["function", "method", "class"];
+    const GEN_FILES: &[&str] = &["src/a.rs", "src/sub/b.rs", "tests/t.rs"];
+    const GEN_LANGUAGES: &[&str] = &["python", "rust"];
+
+    /// Randomized calls-graph: few distinct names (forces same-name
+    /// collisions across kinds), a mix of production and non-production
+    /// files, a mix of languages, and edges that include `to_type`-only
+    /// shapes (`Type::method()` — `to_name` resolves to no definition, only
+    /// `to_type` matches a real name) — the case the degree pre-aggregation
+    /// must union the `to_name` and `to_type` branches to get right.
+    fn gen_calls_graph(
+        seed: u64,
+        symbol_count: usize,
+        edge_count: usize,
+    ) -> (Vec<GenSymbol>, Vec<GenEdge>) {
+        let mut rng = XorShift64(seed.wrapping_mul(2).wrapping_add(1) | 1);
+        let symbols: Vec<GenSymbol> = (0..symbol_count)
+            .map(|index| GenSymbol {
+                name: GEN_NAMES[rng.below(GEN_NAMES.len())].to_string(),
+                kind: GEN_KINDS[rng.below(GEN_KINDS.len())].to_string(),
+                file_path: GEN_FILES[rng.below(GEN_FILES.len())].to_string(),
+                line_start: index as u32 + 1,
+                language: GEN_LANGUAGES[rng.below(GEN_LANGUAGES.len())].to_string(),
+            })
+            .collect();
+        let edges: Vec<GenEdge> = (0..edge_count)
+            .map(|index| {
+                let from = rng.below(symbol_count);
+                match rng.below(3) {
+                    0 => GenEdge {
+                        from,
+                        to_name: GEN_NAMES[rng.below(GEN_NAMES.len())].to_string(),
+                        to_type: None,
+                    },
+                    1 => GenEdge {
+                        from,
+                        to_name: format!("__no_such_definition_{index}"),
+                        to_type: Some(GEN_NAMES[rng.below(GEN_NAMES.len())].to_string()),
+                    },
+                    _ => GenEdge {
+                        from,
+                        to_name: GEN_NAMES[rng.below(GEN_NAMES.len())].to_string(),
+                        to_type: Some(GEN_NAMES[rng.below(GEN_NAMES.len())].to_string()),
+                    },
+                }
+            })
+            .collect();
+        (symbols, edges)
+    }
+
+    fn seed_calls_graph(store: &Store, symbols: &[GenSymbol], edges: &[GenEdge]) -> Vec<i64> {
+        let ids: Vec<i64> = symbols
+            .iter()
+            .map(|s| {
+                let id = store
+                    .insert_symbol(
+                        &s.name,
+                        &s.kind,
+                        &s.file_path,
+                        s.line_start,
+                        s.line_start + 1,
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                // `insert_symbol` doesn't take a `language` column — set it
+                // directly so the equivalence tests can exercise the
+                // `language` filter too.
+                store
+                    .conn
+                    .execute(
+                        "UPDATE symbols SET language = ?1 WHERE id = ?2",
+                        params![s.language, id],
+                    )
+                    .unwrap();
+                id
+            })
+            .collect();
+        for edge in edges {
+            store
+                .insert_edge_with_type(
+                    ids[edge.from],
+                    &edge.to_name,
+                    edge.to_type.as_deref(),
+                    "calls",
+                    1,
+                )
+                .unwrap();
+        }
+        ids
+    }
+
+    /// Mirrors `production_path_filter`'s segment-based exclusion in Rust.
+    fn production_excluded(file_path: &str) -> bool {
+        const SEGMENTS: &[&str] = &[
+            "test",
+            "tests",
+            "__tests__",
+            "fixture",
+            "fixtures",
+            "example",
+            "examples",
+            "demo",
+            "demos",
+            "benchmark",
+            "benchmarks",
+            "bench",
+            "benches",
+            "eval",
+            "evals",
+            "generated",
+            "vendor",
+            "node_modules",
+            "target",
+        ];
+        let wrapped = format!("/{}/", file_path.to_lowercase());
+        SEGMENTS
+            .iter()
+            .any(|segment| wrapped.contains(&format!("/{segment}/")))
+    }
+
+    fn bruteforce_in_degree(
+        symbols: &[GenSymbol],
+        edges: &[GenEdge],
+        name: &str,
+        production_only: bool,
+    ) -> u32 {
+        edges
+            .iter()
+            .filter(|edge| edge.to_name == name || edge.to_type.as_deref() == Some(name))
+            .filter(|edge| !production_only || !production_excluded(&symbols[edge.from].file_path))
+            .map(|edge| edge.from)
+            .collect::<BTreeSet<_>>()
+            .len() as u32
+    }
+
+    fn bruteforce_name_collision(symbols: &[GenSymbol], name: &str, production_only: bool) -> u32 {
+        symbols
+            .iter()
+            .filter(|s| s.name == name)
+            .filter(|s| !production_only || !production_excluded(&s.file_path))
+            .count() as u32
+    }
+
+    #[test]
+    fn centrality_equivalence_property() {
+        for seed in 0..12u64 {
+            let path = tmp_db(&format!("centrality_equiv_{seed}"));
+            let store = Store::open(&path).unwrap();
+            let (symbols, edges) = gen_calls_graph(seed, 24, 40);
+            seed_calls_graph(&store, &symbols, &edges);
+
+            for production_only in [false, true] {
+                // `centrality` (no production_only param — always the
+                // whole index) is only compared at production_only=false.
+                if !production_only {
+                    let actual = store.centrality(None, None, None, 1000).unwrap();
+                    let mut expected: Vec<(String, String, String, u32, u32, u32)> = symbols
+                        .iter()
+                        .filter(|s| s.kind != "module")
+                        .map(|s| {
+                            let in_degree = bruteforce_in_degree(&symbols, &edges, &s.name, false);
+                            let collisions = bruteforce_name_collision(&symbols, &s.name, false);
+                            (
+                                s.name.clone(),
+                                s.kind.clone(),
+                                s.file_path.clone(),
+                                s.line_start,
+                                in_degree,
+                                collisions,
+                            )
+                        })
+                        .filter(|(_, _, _, _, in_degree, _)| *in_degree > 0)
+                        .collect();
+                    expected.sort_by(|a, b| {
+                        b.4.cmp(&a.4)
+                            .then_with(|| a.2.cmp(&b.2))
+                            .then_with(|| a.3.cmp(&b.3))
+                    });
+                    let actual_tuples: Vec<_> = actual
+                        .iter()
+                        .map(|(s, in_degree, collisions)| {
+                            (
+                                s.name.clone(),
+                                s.kind.clone(),
+                                s.file_path.clone(),
+                                s.line_start,
+                                *in_degree,
+                                *collisions,
+                            )
+                        })
+                        .collect();
+                    assert_eq!(actual_tuples, expected, "seed {seed} centrality");
+
+                    // `language` filters the result symbols only — in-degree
+                    // itself is computed across all edges regardless of the
+                    // caller's language.
+                    for language in GEN_LANGUAGES {
+                        let actual = store.centrality(None, Some(language), None, 1000).unwrap();
+                        let mut expected: Vec<(String, String, String, u32, u32, u32)> = symbols
+                            .iter()
+                            .filter(|s| s.kind != "module" && s.language == *language)
+                            .map(|s| {
+                                let in_degree =
+                                    bruteforce_in_degree(&symbols, &edges, &s.name, false);
+                                let collisions =
+                                    bruteforce_name_collision(&symbols, &s.name, false);
+                                (
+                                    s.name.clone(),
+                                    s.kind.clone(),
+                                    s.file_path.clone(),
+                                    s.line_start,
+                                    in_degree,
+                                    collisions,
+                                )
+                            })
+                            .filter(|(_, _, _, _, in_degree, _)| *in_degree > 0)
+                            .collect();
+                        expected.sort_by(|a, b| {
+                            b.4.cmp(&a.4)
+                                .then_with(|| a.2.cmp(&b.2))
+                                .then_with(|| a.3.cmp(&b.3))
+                        });
+                        let actual_tuples: Vec<_> = actual
+                            .iter()
+                            .map(|(s, in_degree, collisions)| {
+                                (
+                                    s.name.clone(),
+                                    s.kind.clone(),
+                                    s.file_path.clone(),
+                                    s.line_start,
+                                    *in_degree,
+                                    *collisions,
+                                )
+                            })
+                            .collect();
+                        assert_eq!(
+                            actual_tuples, expected,
+                            "seed {seed} centrality language={language}"
+                        );
+                    }
+                }
+
+                // `map_centrality_filtered` at scope="root" (the whole
+                // index) exercises the rewritten `name_degrees` CTE across
+                // production_only on/off.
+                let actual = store
+                    .map_centrality_filtered(".", "root", 1000, production_only)
+                    .unwrap();
+                let mut expected: Vec<(String, String, String, u32, u32, u32)> = symbols
+                    .iter()
+                    .filter(|s| s.kind != "module")
+                    .filter(|s| !production_only || !production_excluded(&s.file_path))
+                    .map(|s| {
+                        let in_degree =
+                            bruteforce_in_degree(&symbols, &edges, &s.name, production_only);
+                        let collisions =
+                            bruteforce_name_collision(&symbols, &s.name, production_only);
+                        (
+                            s.name.clone(),
+                            s.kind.clone(),
+                            s.file_path.clone(),
+                            s.line_start,
+                            in_degree,
+                            collisions,
+                        )
+                    })
+                    .filter(|(_, _, _, _, in_degree, _)| *in_degree > 0)
+                    .collect();
+                expected.sort_by(|a, b| {
+                    b.4.cmp(&a.4)
+                        .then_with(|| a.2.cmp(&b.2))
+                        .then_with(|| a.3.cmp(&b.3))
+                });
+                let actual_tuples: Vec<_> = actual
+                    .iter()
+                    .map(|row| {
+                        (
+                            row.symbol.name.clone(),
+                            row.symbol.kind.clone(),
+                            row.symbol.file_path.clone(),
+                            row.symbol.line_start,
+                            row.in_degree,
+                            row.name_collision,
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    actual_tuples, expected,
+                    "seed {seed} map_centrality_filtered production_only={production_only}"
+                );
+            }
+            std::fs::remove_file(&path).ok();
+        }
+    }
+
+    #[test]
+    fn unreferenced_equivalence_property() {
+        for seed in 0..12u64 {
+            let path = tmp_db(&format!("unreferenced_equiv_{seed}"));
+            let store = Store::open(&path).unwrap();
+            let (symbols, edges) = gen_calls_graph(seed, 24, 30);
+            seed_calls_graph(&store, &symbols, &edges);
+
+            let referenced: BTreeSet<&str> = edges
+                .iter()
+                .flat_map(|edge| {
+                    std::iter::once(edge.to_name.as_str()).chain(edge.to_type.as_deref())
+                })
+                .collect();
+            for kind in [None, Some("function"), Some("method")] {
+                for language in [None, Some("python"), Some("rust")] {
+                    let actual = store.unreferenced(kind, language).unwrap();
+                    let mut expected: Vec<(String, String, String, u32)> = symbols
+                        .iter()
+                        .filter(|s| s.kind != "module")
+                        .filter(|s| kind.is_none_or(|k| s.kind == k))
+                        .filter(|s| language.is_none_or(|l| s.language == l))
+                        .filter(|s| !referenced.contains(s.name.as_str()))
+                        .map(|s| {
+                            (
+                                s.name.clone(),
+                                s.kind.clone(),
+                                s.file_path.clone(),
+                                s.line_start,
+                            )
+                        })
+                        .collect();
+                    expected.sort_by(|a, b| (&a.2, a.3).cmp(&(&b.2, b.3)));
+                    let actual_tuples: Vec<_> = actual
+                        .iter()
+                        .map(|s| {
+                            (
+                                s.name.clone(),
+                                s.kind.clone(),
+                                s.file_path.clone(),
+                                s.line_start,
+                            )
+                        })
+                        .collect();
+                    assert_eq!(
+                        actual_tuples, expected,
+                        "seed {seed} kind {kind:?} language {language:?}"
+                    );
+                }
+            }
+            std::fs::remove_file(&path).ok();
+        }
+    }
+
+    #[test]
+    fn api_surface_equivalence_property() {
+        for seed in 0..12u64 {
+            let path = tmp_db(&format!("api_surface_equiv_{seed}"));
+            let store = Store::open(&path).unwrap();
+            let (symbols, edges) = gen_calls_graph(seed, 24, 40);
+            seed_calls_graph(&store, &symbols, &edges);
+
+            let prefix = "src/";
+            let externally_referenced: BTreeSet<&str> = edges
+                .iter()
+                .filter(|edge| !symbols[edge.from].file_path.starts_with(prefix))
+                .flat_map(|edge| {
+                    std::iter::once(edge.to_name.as_str()).chain(edge.to_type.as_deref())
+                })
+                .collect();
+            for language in [None, Some("python"), Some("rust")] {
+                let actual = store.api_surface(prefix, language).unwrap();
+                let expected: BTreeSet<(String, String, String, u32)> = symbols
+                    .iter()
+                    .filter(|s| s.kind != "module")
+                    .filter(|s| s.file_path.starts_with(prefix))
+                    .filter(|s| language.is_none_or(|l| s.language == l))
+                    .filter(|s| externally_referenced.contains(s.name.as_str()))
+                    .map(|s| {
+                        (
+                            s.name.clone(),
+                            s.kind.clone(),
+                            s.file_path.clone(),
+                            s.line_start,
+                        )
+                    })
+                    .collect();
+                let actual_set: BTreeSet<(String, String, String, u32)> = actual
+                    .iter()
+                    .map(|s| {
+                        (
+                            s.name.clone(),
+                            s.kind.clone(),
+                            s.file_path.clone(),
+                            s.line_start,
+                        )
+                    })
+                    .collect();
+                assert_eq!(actual_set, expected, "seed {seed} language {language:?}");
+            }
+            std::fs::remove_file(&path).ok();
+        }
+    }
+
+    #[derive(Clone)]
+    struct GenImportEdge {
+        from_file: usize,
+        to_name: String,
+    }
+
+    const GEN_IMPORT_FILES: &[&str] = &["src/a.py", "src/b.py", "src/c.py", "tests/t.py"];
+
+    fn gen_import_graph(seed: u64, edge_count: usize) -> (Vec<GenSymbol>, Vec<GenImportEdge>) {
+        let mut rng = XorShift64(seed.wrapping_mul(3).wrapping_add(1) | 1);
+        // One `<module>` symbol per file plus a handful of real definitions,
+        // several sharing a name across files (the collision case
+        // `map_import_edges_filtered`'s pre-dedup must still resolve to the
+        // same DISTINCT file pairs as the old per-edge join).
+        let mut symbols = Vec::new();
+        for (index, file) in GEN_IMPORT_FILES.iter().enumerate() {
+            symbols.push(GenSymbol {
+                name: "<module>".to_string(),
+                kind: "module".to_string(),
+                file_path: file.to_string(),
+                line_start: (index as u32) * 100 + 1,
+                language: "python".to_string(),
+            });
+        }
+        for index in 0..8 {
+            symbols.push(GenSymbol {
+                name: GEN_NAMES[index % GEN_NAMES.len()].to_string(),
+                kind: "function".to_string(),
+                file_path: GEN_IMPORT_FILES[index % GEN_IMPORT_FILES.len()].to_string(),
+                line_start: 1000 + index as u32,
+                language: "python".to_string(),
+            });
+        }
+        let edges: Vec<GenImportEdge> = (0..edge_count)
+            .map(|_| GenImportEdge {
+                from_file: rng.below(GEN_IMPORT_FILES.len()),
+                to_name: GEN_NAMES[rng.below(GEN_NAMES.len())].to_string(),
+            })
+            .collect();
+        (symbols, edges)
+    }
+
+    fn seed_import_graph(
+        store: &Store,
+        symbols: &[GenSymbol],
+        edges: &[GenImportEdge],
+    ) -> Vec<i64> {
+        let ids: Vec<i64> = symbols
+            .iter()
+            .map(|s| {
+                store
+                    .insert_symbol(
+                        &s.name,
+                        &s.kind,
+                        &s.file_path,
+                        s.line_start,
+                        s.line_start + 1,
+                        None,
+                        None,
+                    )
+                    .unwrap()
+            })
+            .collect();
+        // Module symbols come first, one per `GEN_IMPORT_FILES` entry.
+        for edge in edges {
+            store
+                .insert_edge(ids[edge.from_file], None, &edge.to_name, "imports", 1)
+                .unwrap();
+        }
+        ids
+    }
+
+    #[test]
+    fn import_edges_equivalence_property() {
+        for seed in 0..12u64 {
+            let path = tmp_db(&format!("import_edges_equiv_{seed}"));
+            let store = Store::open(&path).unwrap();
+            let (symbols, edges) = gen_import_graph(seed, 24);
+            seed_import_graph(&store, &symbols, &edges);
+
+            for production_only in [false, true] {
+                let actual = store
+                    .map_import_edges_filtered(".", "root", 10_000, production_only)
+                    .unwrap();
+                let mut expected: BTreeSet<(String, String)> = BTreeSet::new();
+                for edge in &edges {
+                    let from_file = GEN_IMPORT_FILES[edge.from_file];
+                    for target in symbols.iter().filter(|s| s.name == edge.to_name) {
+                        if from_file == target.file_path {
+                            continue;
+                        }
+                        if production_only
+                            && (production_excluded(from_file)
+                                || production_excluded(&target.file_path))
+                        {
+                            continue;
+                        }
+                        expected.insert((from_file.to_string(), target.file_path.clone()));
+                    }
+                }
+                let actual_set: BTreeSet<(String, String)> = actual.into_iter().collect();
+                assert_eq!(
+                    actual_set, expected,
+                    "seed {seed} production_only={production_only}"
+                );
+            }
+            std::fs::remove_file(&path).ok();
+        }
+    }
+
+    fn bruteforce_dependency_pairs(
+        symbols: &[GenSymbol],
+        edges: &[GenImportEdge],
+    ) -> BTreeSet<(String, String)> {
+        let mut pairs = BTreeSet::new();
+        for edge in edges {
+            let from_file = GEN_IMPORT_FILES[edge.from_file];
+            for target in symbols.iter().filter(|s| s.name == edge.to_name) {
+                if from_file == target.file_path {
+                    continue;
+                }
+                pairs.insert((from_file.to_string(), target.file_path.clone()));
+            }
+        }
+        pairs
+    }
+
+    #[test]
+    fn dependency_cycles_equivalence_and_cap() {
+        for seed in 0..12u64 {
+            let path = tmp_db(&format!("dep_cycles_equiv_{seed}"));
+            let store = Store::open(&path).unwrap();
+            let (symbols, edges) = gen_import_graph(seed, 24);
+            seed_import_graph(&store, &symbols, &edges);
+
+            let (actual, truncated) = store.dependency_cycles(None, 2).unwrap();
+            assert!(!truncated);
+            let pairs = bruteforce_dependency_pairs(&symbols, &edges);
+            let mut adj: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+            for (from, to) in &pairs {
+                adj.entry(from.clone()).or_default().push(to.clone());
+            }
+            let mut expected: Vec<Vec<String>> = tarjan_scc(&adj)
+                .into_iter()
+                .filter(|c| c.len() >= 2)
+                .collect();
+            expected.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+            assert_eq!(actual, expected, "seed {seed}");
+            std::fs::remove_file(&path).ok();
+        }
+
+        // Above the pair cap, the truncation marker fires and Tarjan is
+        // never run — capping a graph algorithm's input can split or hide
+        // real cycles, so this must never look like "just more available".
+        let path = tmp_db("dep_cycles_cap");
+        let store = Store::open(&path).unwrap();
+        store.conn.execute_batch("BEGIN").unwrap();
+        store
+            .insert_symbol("Shared", "function", "shared.py", 1, 2, None, None)
+            .unwrap();
+        let over_cap = DEPENDENCY_CYCLE_PAIR_LIMIT + 1;
+        for index in 0..over_cap {
+            let file = format!("src/mod_{index}.py");
+            let module = store
+                .insert_symbol("<module>", "module", &file, 1, 2, None, None)
+                .unwrap();
+            store
+                .insert_edge(module, None, "Shared", "imports", 1)
+                .unwrap();
+        }
+        store.conn.execute_batch("COMMIT").unwrap();
+        let (cycles, truncated) = store.dependency_cycles(None, 2).unwrap();
+        assert!(truncated);
+        assert!(cycles.is_empty());
         std::fs::remove_file(&path).ok();
     }
 }

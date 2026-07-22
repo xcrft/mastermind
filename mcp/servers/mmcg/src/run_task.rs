@@ -400,7 +400,7 @@ pub fn compute_risk_report(spec: &ParsedSpec, store: &Store) -> RiskReport {
     // Cycle membership: walk all SCCs of size ≥ 2 in any language; collect
     // mentioned files appearing inside.
     let mentioned: HashSet<&str> = spec.mentioned_files.iter().map(String::as_str).collect();
-    let cycles = store.dependency_cycles(None, 2).unwrap_or_default();
+    let (cycles, _cycles_truncated) = store.dependency_cycles(None, 2).unwrap_or_default();
     let mut files_in_cycles: Vec<String> = Vec::new();
     for cycle in cycles {
         for f in cycle {

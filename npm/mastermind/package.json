@@ -1,6 +1,6 @@
 {
   "name": "@xcraftmind/mastermind",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Local codegraph and verifiable workflow for AI coding agents — project maps, change and test impact, MCP queries, and diff-backed implementation audits. Prebuilt binaries for macOS, Linux, and Windows.",
   "license": "MIT",
   "author": "xcraftmind",
@@ -41,12 +41,12 @@
     "mastermind"
   ],
   "optionalDependencies": {
-    "@xcraftmind/mmcg-darwin-arm64": "1.0.0",
-    "@xcraftmind/mmcg-darwin-x64": "1.0.0",
-    "@xcraftmind/mmcg-linux-x64-gnu": "1.0.0",
-    "@xcraftmind/mmcg-linux-arm64-gnu": "1.0.0",
-    "@xcraftmind/mmcg-linux-x64-musl": "1.0.0",
-    "@xcraftmind/mmcg-linux-arm64-musl": "1.0.0",
-    "@xcraftmind/mmcg-win32-x64-msvc": "1.0.0"
+    "@xcraftmind/mmcg-darwin-arm64": "1.1.0",
+    "@xcraftmind/mmcg-darwin-x64": "1.1.0",
+    "@xcraftmind/mmcg-linux-x64-gnu": "1.1.0",
+    "@xcraftmind/mmcg-linux-arm64-gnu": "1.1.0",
+    "@xcraftmind/mmcg-linux-x64-musl": "1.1.0",
+    "@xcraftmind/mmcg-linux-arm64-musl": "1.1.0",
+    "@xcraftmind/mmcg-win32-x64-msvc": "1.1.0"
   }
 }

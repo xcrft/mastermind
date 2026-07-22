@@ -139,8 +139,11 @@ mmcg verify-spec .mastermind/tasks/042-feature/spec.md --strict         # contra
 mmcg verify-spec .mastermind/tasks/042-feature/spec.md --require-index  # fail (don't skip live checks) when no index
 
 # Post-execution audit — compare spec contract against actual repo state.
-# Diffs against <git-ref> (typically `main` or merge-base). Flags scope creep,
-# pre-edit snapshot drift, vanished symbols. Exit 1 if verdict is `broken`.
+# Diffs <git-ref> (typically `main` or merge-base) against the WORKING TREE, so
+# uncommitted and untracked work counts — the audit runs before the commit step.
+# Flags scope creep, pre-edit snapshot drift, vanished symbols. Exit 1 if
+# verdict is `broken`. (`--bundle` seals a commit-range diff instead and still
+# requires baseline != HEAD.)
 mmcg audit-spec .mastermind/tasks/042-feature/spec.md --since main
 
 # Create a compact verified task (default), or a strict high-risk task.

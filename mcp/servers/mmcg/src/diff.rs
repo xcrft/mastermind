@@ -11,6 +11,11 @@
 //! 3. Parse the old blob through the same extractor (see [`parse_blob`])
 //! 4. Compare old (path, name, kind) set against `Store::symbols_in_file`
 //!
+//! [`symbols_changed_since_worktree`] runs steps 2–4 over a `<ref>` → **working
+//! tree** file scope instead (uncommitted and untracked changes included).
+//! `audit-spec` uses it: post-flight runs before the commit step, so a
+//! commit-range scope is empty by construction there.
+//!
 //! Files absent at `<ref>` produce only "added" entries. Files deleted in HEAD
 //! produce only "removed" (the index has no current symbols for them).
 //!
@@ -234,6 +239,67 @@ pub fn symbols_changed_since(
     validate_ref(repo_root, git_ref)?;
 
     let files_in_diff = git_diff_name_only(repo_root, git_ref)?;
+    Ok(symbol_diff_over_files(
+        store,
+        repo_root,
+        git_ref,
+        git_ref,
+        files_in_diff,
+    ))
+}
+
+/// Same symbol comparison as [`symbols_changed_since`], but the file scope is
+/// `git_ref` → **working tree**: staged, unstaged, and untracked changes count,
+/// not just what has been committed.
+///
+/// Callers that audit work *before* it is committed must use this. The
+/// commit-range scope of [`symbols_changed_since`] is empty by construction
+/// while `HEAD` is still the baseline, which reads as "the spec named these
+/// files but nothing changed" rather than "nothing is committed yet".
+///
+/// The file set matches [`symbols_changed_in_worktree`] (and therefore
+/// `mastermind impact`); the symbol comparison is `git_ref`'s blobs against the
+/// live index, so a stale index under-reports symbol changes — it does not
+/// invent them.
+pub fn symbols_changed_since_worktree(
+    store: &Store,
+    repo_root: &Path,
+    git_ref: &str,
+) -> Result<SymbolDiff, DiffError> {
+    let baseline_oid =
+        resolve_commit(repo_root, git_ref).map_err(|e| worktree_scope_error(git_ref, e))?;
+    let (files, _files_total, _truncated, _skipped_non_utf8) =
+        collect_worktree_paths(repo_root, &baseline_oid)
+            .map_err(|e| worktree_scope_error(git_ref, e))?;
+
+    // Blobs come from the resolved oid so the old side can't drift if the ref
+    // moves mid-audit; `git_ref` stays the caller-facing label.
+    let files_in_diff = files.into_iter().map(|file| file.path).collect();
+    Ok(symbol_diff_over_files(
+        store,
+        repo_root,
+        &baseline_oid,
+        git_ref,
+        files_in_diff,
+    ))
+}
+
+fn worktree_scope_error(git_ref: &str, error: WorkingTreeDiffError) -> DiffError {
+    match error {
+        WorkingTreeDiffError::InvalidRef => DiffError::GitRefMissing(git_ref.to_string()),
+        other => DiffError::GitFailed(format!("worktree file scope: {other}")),
+    }
+}
+
+/// `blob_ref` resolves the old side (`git show <blob_ref>:<path>`); `label` is
+/// what the caller asked for and is echoed back in [`SymbolDiff::git_ref`].
+fn symbol_diff_over_files(
+    store: &Store,
+    repo_root: &Path,
+    blob_ref: &str,
+    label: &str,
+    files_in_diff: Vec<String>,
+) -> SymbolDiff {
     let truncated = files_in_diff.len() > CHANGE_FILE_LIMIT;
     let mut added: Vec<SymbolRef> = Vec::new();
     let mut removed: Vec<SymbolRef> = Vec::new();
@@ -241,7 +307,7 @@ pub fn symbols_changed_since(
     let mut errors: Vec<String> = Vec::new();
 
     for rel in files_in_diff.iter().take(CHANGE_FILE_LIMIT) {
-        match diff_file(store, repo_root, git_ref, rel) {
+        match diff_file(store, repo_root, blob_ref, rel) {
             Ok(per_file) => {
                 added.extend(per_file.added);
                 removed.extend(per_file.removed);
@@ -256,15 +322,15 @@ pub fn symbols_changed_since(
     removed.sort_by(|a, b| (a.file.as_str(), a.line).cmp(&(b.file.as_str(), b.line)));
     signature_changed.sort_by(|a, b| (a.file.as_str(), &a.name).cmp(&(b.file.as_str(), &b.name)));
 
-    Ok(SymbolDiff {
-        git_ref: git_ref.to_string(),
+    SymbolDiff {
+        git_ref: label.to_string(),
         files_in_diff,
         added,
         removed,
         signature_changed,
         errors,
         truncated,
-    })
+    }
 }
 
 pub fn symbols_changed_in_worktree(
@@ -681,9 +747,19 @@ fn collect_worktree_paths(
         };
         changed.insert(path.to_vec(), status);
     }
+    // `--full-name` keeps untracked paths repository-relative like the diff
+    // side. Without it `ls-files` reports paths relative to `repo`, so a caller
+    // passing a subdirectory would mix two path namespaces in one result.
     let untracked = run_bounded_git(
         repo,
-        &["ls-files", "--others", "--exclude-standard", "-z", "--"],
+        &[
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "--full-name",
+            "-z",
+            "--",
+        ],
         None,
     )?;
     if !untracked.success {
@@ -1215,6 +1291,77 @@ mod tests {
             .collect();
         assert_eq!(paths, vec!["staged.py", "unstaged.py", "untracked.py"]);
         assert_eq!(changed.files[2].status, "untracked");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn worktree_paths_stay_repository_relative_from_a_subdirectory() {
+        // `git diff` reports repository-relative paths whatever the cwd is;
+        // `ls-files` reports cwd-relative ones unless asked otherwise. Mixing
+        // the two namespaces would make a subdirectory root emit paths that
+        // match neither the spec nor the index.
+        let dir = init_repo("worktree_subdir_paths");
+        write(&dir, "sub/tracked.py", "def tracked():\n    return 1\n");
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+        write(&dir, "sub/tracked.py", "def tracked():\n    return 2\n");
+        write(&dir, "sub/untracked.py", "def untracked():\n    return 3\n");
+
+        let baseline = resolve_commit(&dir, "HEAD").unwrap();
+        let (files, ..) = collect_worktree_paths(&dir.join("sub"), &baseline).unwrap();
+        let paths: Vec<_> = files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(paths, vec!["sub/tracked.py", "sub/untracked.py"]);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn worktree_scope_sees_work_the_commit_range_cannot() {
+        let dir = init_repo("worktree_scope_vs_range");
+        write(&dir, "src/a.py", "def keep_same():\n    return 1\n");
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+        run(&dir, &["tag", "baseline"]);
+
+        // Executor's work, none of it committed: `a.py` edited, `b.py` staged,
+        // `c.py` untracked. HEAD is still the baseline commit.
+        write(
+            &dir,
+            "src/a.py",
+            "def keep_same():\n    return 1\n\ndef added_later():\n    return 2\n",
+        );
+        write(&dir, "src/b.py", "def staged_only():\n    return 3\n");
+        run(&dir, &["add", "src/b.py"]);
+        write(&dir, "src/c.py", "def untracked_only():\n    return 4\n");
+        let store = indexed_worktree(&dir);
+
+        // The commit range is empty by construction — the trap this exists for.
+        let committed = symbols_changed_since(store.store(), &dir, "baseline").unwrap();
+        assert!(
+            committed.files_in_diff.is_empty(),
+            "baseline..HEAD must be empty here: {:?}",
+            committed.files_in_diff
+        );
+
+        let diff = symbols_changed_since_worktree(store.store(), &dir, "baseline").unwrap();
+        assert_eq!(
+            diff.git_ref, "baseline",
+            "label is the caller's ref, not an oid"
+        );
+        assert_eq!(diff.files_in_diff, vec!["src/a.py", "src/b.py", "src/c.py"]);
+        let added: Vec<&str> = diff.added.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            added.contains(&"added_later"),
+            "unstaged edit missed: {added:?}"
+        );
+        assert!(
+            added.contains(&"staged_only"),
+            "staged file missed: {added:?}"
+        );
+        assert!(
+            added.contains(&"untracked_only"),
+            "untracked file missed: {added:?}"
+        );
+        assert!(!added.contains(&"keep_same"));
         fs::remove_dir_all(&dir).ok();
     }
 

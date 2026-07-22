@@ -10,6 +10,12 @@
 //! Inputs: parsed spec + git ref to compare against (typically `main` or the
 //! merge-base) + indexed `Store` for live symbol counts.
 //!
+//! The comparison runs `<ref>` → **working tree**, not `<ref>..HEAD`: the
+//! documented handoff is pre-flight → executor → post-flight, with the commit
+//! as a separate authorized step afterwards, so on the normal path HEAD is
+//! still the baseline and the executor's work is uncommitted. Staged, unstaged,
+//! and untracked changes all count as "changed" here.
+//!
 //! Outputs structured findings:
 //! - `unexpected_file` — file changed in git but not mentioned in spec
 //! - `missing_expected_file` — file mentioned in spec, not changed in git
@@ -42,9 +48,11 @@ pub enum Verdict {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Finding {
-    /// File appears in `git diff` but the spec didn't mention it.
+    /// File differs from the baseline (committed or not) but the spec didn't
+    /// mention it.
     UnexpectedFile { file: String },
-    /// File was mentioned in the spec but `git diff` doesn't show changes.
+    /// File was mentioned in the spec but is identical to the baseline —
+    /// nothing was written to it, staged or otherwise.
     MissingExpectedFile { file: String },
     /// Pre-edit snapshot count != current `mmcg_callers` count.
     SnapshotCallerDrift {
@@ -116,8 +124,8 @@ pub struct Report {
     pub git_ref: String,
     pub verdict: Verdict,
     pub findings: Vec<Finding>,
-    /// Raw symbol-level diff from `mmcg_symbols_changed_since` — pasted in so
-    /// the LLM auditor has full context for semantic judgment.
+    /// Raw symbol-level diff of baseline → working tree — pasted in so the LLM
+    /// auditor has full context for semantic judgment.
     pub symbol_diff: Option<SymbolDiff>,
 }
 
@@ -267,11 +275,13 @@ pub fn run(
     repo_root: &Path,
     git_ref: &str,
 ) -> Result<Report, DiffError> {
-    let symbol_diff = diff::symbols_changed_since(store, repo_root, git_ref)?;
+    // Worktree-scoped, not `<ref>..HEAD` — post-flight audits work that has not
+    // been committed yet. See the module header.
+    let symbol_diff = diff::symbols_changed_since_worktree(store, repo_root, git_ref)?;
     let mut findings: Vec<Finding> = Vec::new();
 
-    // 1. File scope check — symmetric difference of declared files vs
-    //    git diff --name-only.
+    // 1. File scope check — symmetric difference of declared files vs the files
+    //    that differ from the baseline on disk.
     //
     //    Frontmatter authoritative when present: `touches[].file` +
     //    `expected_docs[]` are the declared set. Heuristic mentioned_files
@@ -1383,6 +1393,9 @@ mod tests {
                 .unwrap();
             assert!(out.status.success(), "git {:?} failed", args);
         }
+        // Tests keep the index DB inside the repo; real projects gitignore it.
+        // Without this it lands in the audit's file scope as an untracked file.
+        fs::write(dir.join(".gitignore"), "idx.db*\n").unwrap();
         dir
     }
 
@@ -1888,6 +1901,97 @@ breaking_changes:
             |f| matches!(f, Finding::SnapshotSymbolGone { symbol } if symbol == "will_be_removed")
         ));
         assert_eq!(r.verdict, Verdict::Broken);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn audits_complete_but_uncommitted_work() {
+        // Regression: post-flight runs before the commit step, so HEAD is still
+        // the baseline. With a `<baseline>..HEAD` file scope the diff was empty
+        // by construction — finished work produced one `missing_expected_file`
+        // per scoped file, a `+0 -0 ~0` symbol diff, and a Drift verdict.
+        let dir = init_repo("uncommitted_work");
+        write(&dir, "src/lib.py", "def helper(): pass\n");
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "baseline"]);
+        git(&dir, &["tag", "baseline"]);
+
+        // Executor's work: a tracked file edited, a new file created. Nothing
+        // committed — exactly what `git status` shows at hand-off.
+        write(
+            &dir,
+            "src/lib.py",
+            "def helper(): pass\ndef added_by_executor(): pass\n",
+        );
+        write(&dir, "src/new_module.py", "def brand_new(): pass\n");
+
+        let head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let baseline = Command::new("git")
+            .args(["rev-parse", "baseline"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert_eq!(
+            head.stdout, baseline.stdout,
+            "the regression only reproduces while HEAD is still the baseline"
+        );
+
+        let db = dir.join("idx.db");
+        let mut store = Store::open(&db).unwrap();
+        Indexer::new(&dir).index_all(&mut store, false).unwrap();
+
+        let spec_body = "---
+id: \"1\"
+touches:
+  - file: src/lib.py
+  - file: src/new_module.py
+---
+
+## Goals
+- Add `added_by_executor` and `src/new_module.py`
+## Alternatives Considered
+- A
+## Tests Plan
+- n/a
+## Documentation Plan
+- n/a
+## Observability Plan
+- n/a
+## Performance Considerations
+- O(1)
+";
+        let s = spec::parse_str("spec.md", spec_body);
+        let r = run(&s, &store, &dir, "baseline").unwrap();
+
+        let missing: Vec<&str> = r
+            .findings
+            .iter()
+            .filter_map(|f| match f {
+                Finding::MissingExpectedFile { file } => Some(file.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "both scoped files were written; nothing is missing: {missing:?}"
+        );
+        assert_eq!(r.verdict, Verdict::Held, "findings: {:?}", r.findings);
+
+        // ... and the symbol diff reflects the work rather than reporting +0 -0 ~0.
+        let added: Vec<&str> = r
+            .symbol_diff
+            .as_ref()
+            .expect("symbol diff")
+            .added
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(added.contains(&"added_by_executor"), "added: {added:?}");
+        assert!(added.contains(&"brand_new"), "added: {added:?}");
         fs::remove_dir_all(&dir).ok();
     }
 }

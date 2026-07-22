@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-22
+
+### Added
+- Every mmcg MCP tool call and CLI query now runs under a work budget. A
+  `Store`-side guard stack owns the connection's SQLite progress handler
+  (nested budgets compose by min), so no query can run unbounded: on expiry the
+  tool returns a structured `work_limit_exceeded` payload carrying `budget_ms`
+  and guidance to narrow the scope. Tunable via `MMCG_QUERY_BUDGET_MS`
+  (default 10,000 ms for `mcp serve`, 60,000 ms for one-shot CLI queries;
+  `0` = unlimited).
+- Client cancellation. `serve_io` reads frames on a dedicated thread that
+  intercepts `notifications/cancelled` (and legacy `$/cancelRequest`) out of
+  band and interrupts the running statement, so a cancel lands while the main
+  thread is still inside a query. A cancelled call reports `cancelled`, never
+  `work_limit_exceeded`; a single mutex over the in-flight request id keeps a
+  late cancel from aborting the next request.
+- `git` subprocesses in the symbol-diff path (`run_git`, `git_show_blob`) now
+  run under a deadline (`MMCG_GIT_TIMEOUT_MS`, default 30,000 ms) with
+  background output draining, and `symbols_changed_since` reports `truncated`
+  when the changed-file set exceeds `CHANGE_FILE_LIMIT`.
+
+### Changed
+- The dominant graph aggregations no longer scale with name-collision fan-out.
+  `centrality` / `map_centrality` pre-aggregate in-degree per name over the
+  union of the `to_name` and `to_type` edge branches; `map_import_edges` and
+  `dependency_cycles` pre-deduplicate `(name, file_path)` before joining import
+  edges; `unreferenced` and `api_surface` replace per-row `EXISTS` name probes
+  with joins against pre-aggregated name sets. Results are unchanged —
+  property tests compare each rewrite against a brute-force reference over
+  randomized graphs including `to_type`-only edges. On a 1M-symbol index this
+  is the difference between a `mmcg_map` at root scope taking hours and taking
+  seconds.
+- `mmcg_impact` is served by the same guarded, visited-set walk as
+  `change_impact` (`Store::impact_of_many`, now accepting `max_depth` up to 10
+  and an optional `language` filter applied at every step). It terminates on
+  cyclic call graphs and is bounded by a row cap, surfaced through the new
+  additive `truncated` / `row_limit` response fields. The unguarded
+  `Store::impact_of` recursive CTE is removed.
+- `mmcg_dependency_cycles` is work-capped at 50,000 distinct file-pair edges
+  under a deterministic ordering. Above the cap it returns `truncated: true`
+  with an empty `cycles` list and does not run Tarjan — capping a graph
+  algorithm's input can split or hide real cycles, so the result is reported as
+  incomplete **and possibly inaccurate**, not merely "more available".
+- SQLite connections now set `busy_timeout = 5000` and a 64 MB page cache,
+  sized for multi-hundred-megabyte indexes.
+- The `cargo test` vacuity scan honors `--manifest-path`, so a crate that does
+  not sit at the repository root is no longer reported as having no tests.
+
+### Fixed
+- `audit-spec` (and the `run-task` post-flight that wraps it) now diffs the
+  baseline against the working tree instead of `<baseline>..HEAD`. The
+  documented hand-off audits work before it is committed, so the commit-range
+  scope was empty by construction there: finished, uncommitted work reported one
+  `missing_expected_file` per scoped file, a `+0 -0 ~0` symbol diff, and a Drift
+  verdict. Staged, unstaged, and untracked changes now all count. The
+  `mmcg_symbols_changed_since` tool and `--bundle` attestations keep their
+  commit-range semantics.
+- Working-tree file collection now asks `git ls-files` for repository-relative
+  untracked paths, so a root below the repository root no longer mixes them with
+  the repository-relative paths the diff side already returned.
+
 ## [1.0.0] - 2026-07-19
 
 ### Added

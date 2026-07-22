@@ -5,10 +5,11 @@
 //! entry in [`TOOLS`] with a `schema` fn and a `handler` fn.
 
 use crate::queries;
-use crate::store::Store;
+use crate::store::{InterruptSource, Store, WorkBudget};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
+use std::sync::{mpsc, Arc, Mutex};
 
 const CURRENT_PROTOCOL_VERSION: &str = "2025-11-25";
 const LEGACY_PROTOCOL_VERSION: &str = "2024-11-05";
@@ -219,26 +220,114 @@ static TOOLS: &[ToolDef] = &[
     ),
 ];
 
-/// Run as an MCP stdio server. Blocks until stdin closes.
-pub fn serve(mut store: Store) -> io::Result<()> {
-    let stdin = io::stdin();
-    let stdout = io::stdout();
-    serve_io(&mut store, stdin.lock(), stdout.lock())
+/// `Stdin` itself is `Send + 'static` (unlike its lock guard) — wrapping it
+/// this way lets the `serve_io` reader thread own an input source without
+/// holding a non-`Send` lock guard across the thread boundary. Each `read`
+/// re-locks momentarily; the underlying buffered reader is process-global, so
+/// this is equivalent to holding the lock for the whole call.
+struct StdinSource(io::Stdin);
+
+impl Read for StdinSource {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.lock().read(buf)
+    }
 }
 
-fn serve_io<R: BufRead, W: Write>(
-    store: &mut Store,
-    mut input: R,
-    mut output: W,
-) -> io::Result<()> {
+/// Run as an MCP stdio server. Blocks until stdin closes.
+pub fn serve(mut store: Store) -> io::Result<()> {
+    let input = io::BufReader::new(StdinSource(io::stdin()));
+    let stdout = io::stdout();
+    serve_io(&mut store, input, stdout.lock())
+}
+
+/// Frames read from `input` on a dedicated background thread and delivered to
+/// the main loop over an `mpsc` channel — the reader thread intercepts MCP
+/// cancel notifications (`notifications/cancelled`, and legacy
+/// `$/cancelRequest`) out of band, so a cancel arriving while the main thread
+/// is blocked inside a running query still takes effect promptly. The main
+/// loop still consumes frames and answers requests one at a time — the
+/// concurrency model is otherwise unchanged; a `ping` sent while a query runs
+/// still waits, bounded by the query's work budget rather than fixed here.
+fn serve_io<R, W>(store: &mut Store, input: R, mut output: W) -> io::Result<()>
+where
+    R: BufRead + Send + 'static,
+    W: Write,
+{
+    enum ReaderMsg {
+        Frame(Frame),
+        Eof,
+        Err(io::Error),
+    }
+
+    // One mutex owns the in-flight request id: set on request start, cleared
+    // on finish, and the reader's cancel-id equality check runs under the
+    // same lock — closing the race where `cancel(N)` lands after N finished
+    // and would otherwise abort N+1.
+    let in_flight: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+    let cancel_handle = store.cancel_handle();
+    let (frame_tx, frame_rx) = mpsc::channel::<ReaderMsg>();
+
+    let reader_in_flight = Arc::clone(&in_flight);
+    let reader = std::thread::spawn(move || {
+        let mut input = input;
+        loop {
+            let outcome = read_frame(&mut input);
+            let msg = match outcome {
+                Ok(Some(Frame::Line(line))) => {
+                    if let Some(target_id) = parse_cancel_target(&line) {
+                        let guard = reader_in_flight
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if guard.as_ref() == Some(&target_id) {
+                            cancel_handle.cancel();
+                        }
+                        drop(guard);
+                        continue;
+                    }
+                    ReaderMsg::Frame(Frame::Line(line))
+                }
+                Ok(Some(other)) => ReaderMsg::Frame(other),
+                Ok(None) => ReaderMsg::Eof,
+                Err(e) => ReaderMsg::Err(e),
+            };
+            let stop = matches!(msg, ReaderMsg::Eof | ReaderMsg::Err(_));
+            if frame_tx.send(msg).is_err() || stop {
+                return;
+            }
+        }
+    });
+
     let mut state = SessionState::Cold;
-    loop {
-        let Some(frame) = read_frame(&mut input)? else {
-            return Ok(());
+    while let Ok(msg) = frame_rx.recv() {
+        let frame = match msg {
+            ReaderMsg::Eof => break,
+            ReaderMsg::Err(e) => {
+                let _ = reader.join();
+                return Err(e);
+            }
+            ReaderMsg::Frame(frame) => frame,
         };
         let response = match frame {
             Frame::Line(line) if line.trim().is_empty() => continue,
-            Frame::Line(line) => handle_line(&mut state, store, line.trim()),
+            Frame::Line(line) => {
+                let trimmed = line.trim();
+                // SQLite's documented no-op-when-idle semantics mean a cancel
+                // that races ahead of `in_flight` being set is harmless — the
+                // reader will simply see no matching in-flight id and skip.
+                let request_id = peek_request_id(trimmed);
+                if let Some(id) = &request_id {
+                    *in_flight
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(id.clone());
+                }
+                let response = handle_line(&mut state, store, trimmed);
+                if request_id.is_some() {
+                    *in_flight
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                }
+                response
+            }
             Frame::InvalidUtf8 => {
                 eprintln!("[mmcg] parse error class=invalid_utf8");
                 Some(err(Value::Null, -32700, "Parse error".into()))
@@ -255,6 +344,35 @@ fn serve_io<R: BufRead, W: Write>(
         if let Some(response) = response {
             write_response(&mut output, &response)?;
         }
+    }
+    Ok(())
+}
+
+/// Cheap, best-effort extraction of a request's `id` for in-flight tracking —
+/// separate from `handle_line`'s own full validation, which still runs and
+/// produces the authoritative error response for malformed input.
+fn peek_request_id(line: &str) -> Option<Value> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    let id = value.get("id")?.clone();
+    valid_request_id(&id).then_some(id)
+}
+
+/// Extract the target request id from an MCP cancel notification
+/// (`notifications/cancelled`, `params.requestId`) or the legacy LSP-style
+/// `$/cancelRequest` (`params.id`). Any other line — including ordinary
+/// requests, which always carry a top-level `id` and are therefore never
+/// cancel notifications themselves — returns `None`.
+fn parse_cancel_target(line: &str) -> Option<Value> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    if value.get("id").is_some() {
+        return None;
+    }
+    let method = value.get("method")?.as_str()?;
+    let params = value.get("params")?;
+    match method {
+        "notifications/cancelled" => params.get("requestId").cloned(),
+        "$/cancelRequest" => params.get("id").cloned(),
+        _ => None,
     }
 }
 
@@ -504,22 +622,64 @@ fn handle_tools_call_inner(
         .iter()
         .find(|tool| tool.name == tool_name)
         .ok_or_else(|| ToolCallError::InvalidParams("Unknown tool".into()))?;
-    let handled = match (tool_name, impact_engine) {
-        ("mmcg_change_impact", Some(engine)) => {
-            handle_change_impact_with_engine(store, &arguments, engine)
-        }
-        ("mmcg_test_impact", Some(engine)) => {
-            handle_test_impact_with_engine(store, &arguments, engine)
-        }
-        _ => (tool.handler)(store, &arguments),
+
+    // Every tool dispatch runs inside the work-budget guard — the single
+    // owner of the connection's progress handler. A pre-expired budget (e.g.
+    // a zero budget installed by a test) short-circuits before the handler
+    // ever runs, so coverage doesn't depend on a query being slow enough to
+    // trip the in-flight progress-handler check.
+    let budget = store.default_work_budget();
+    let already_expired = store.push_work_budget(budget);
+    let handled = if already_expired {
+        None
+    } else {
+        Some(match (tool_name, impact_engine) {
+            ("mmcg_change_impact", Some(engine)) => {
+                handle_change_impact_with_engine(store, &arguments, engine)
+            }
+            ("mmcg_test_impact", Some(engine)) => {
+                handle_test_impact_with_engine(store, &arguments, engine)
+            }
+            _ => (tool.handler)(store, &arguments),
+        })
     };
+    let interrupt = store.take_interrupt_source();
+    store.pop_work_budget();
+
     match handled {
-        Ok(payload) => tool_result(version, payload, false),
-        Err(HandlerError::InvalidArguments(message)) => {
-            tool_result(version, json!({ "error": message }), true)
-        }
-        Err(HandlerError::Internal { class }) => Err(ToolCallError::Internal { class }),
+        Some(Ok(payload)) => tool_result(version, payload, false),
+        Some(Err(handler_error)) => match interrupt {
+            Some(InterruptSource::Cancel) => tool_result(version, cancelled_payload(), true),
+            Some(InterruptSource::Budget) => tool_result(version, work_limit_payload(budget), true),
+            None => match handler_error {
+                HandlerError::InvalidArguments(message) => {
+                    tool_result(version, json!({ "error": message }), true)
+                }
+                HandlerError::Internal { class } => Err(ToolCallError::Internal { class }),
+            },
+        },
+        None => tool_result(version, work_limit_payload(budget), true),
     }
+}
+
+/// Structured `work_limit_exceeded` tool error — mirrors the `change_impact`
+/// work-limit metadata precedent (queries.rs `precision_notes` /
+/// `work_limited_collection`).
+fn work_limit_payload(budget: WorkBudget) -> Value {
+    json!({
+        "code": "work_limit_exceeded",
+        "budget_ms": budget.deadline.map(|d| d.as_millis() as u64),
+        "guidance": "narrow scope (subdirectory path, smaller depth, language filter) or raise MMCG_QUERY_BUDGET_MS"
+    })
+}
+
+/// Structured `cancelled` tool error — distinct from `work_limit_exceeded` so
+/// a client cancel is never conflated with a budget expiry.
+fn cancelled_payload() -> Value {
+    json!({
+        "code": "cancelled",
+        "guidance": "the request was cancelled by the client before it completed"
+    })
 }
 
 #[cfg(test)]
@@ -650,7 +810,7 @@ fn schema_callees() -> Value {
 fn schema_impact() -> Value {
     json!({
         "name": "mmcg_impact",
-        "description": "Transitive callers of the symbol up to max_depth. Use for blast-radius analysis on widely-called functions. Matches by name OR type prefix (like mmcg_callers). Result carries `name_collision`: a value > 1 means the blast radius is pooled across same-named definitions and over-approximates the real reach — verify before acting on the number.",
+        "description": "Transitive callers of the symbol up to max_depth. Use for blast-radius analysis on widely-called functions. Matches by name OR type prefix (like mmcg_callers). Result carries `name_collision`: a value > 1 means the blast radius is pooled across same-named definitions and over-approximates the real reach — verify before acting on the number. Bounded at 5,001 rows: above that, `truncated: true` is returned alongside the (partial) `impact` list — narrow `max_depth` or add a `language` filter to see the rest.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -782,7 +942,7 @@ fn schema_symbols_changed_since() -> Value {
 fn schema_dependency_cycles() -> Value {
     json!({
         "name": "mmcg_dependency_cycles",
-        "description": "Detect circular imports — strongly-connected components in the file-level import graph. Returns each cycle as a list of files. Pre-merge guard: 'does this PR introduce a new cycle?'. Architectural hygiene: 'what cycles already exist?'. Edges are resolved by leaf-name match (over-approximating — two unrelated symbols sharing a name produce a cross-edge; verify before acting). Set `min_size` higher to hide trivial A↔B and surface only larger structural issues.",
+        "description": "Detect circular imports — strongly-connected components in the file-level import graph. Returns each cycle as a list of files. Pre-merge guard: 'does this PR introduce a new cycle?'. Architectural hygiene: 'what cycles already exist?'. Edges are resolved by leaf-name match (over-approximating — two unrelated symbols sharing a name produce a cross-edge; verify before acting). Set `min_size` higher to hide trivial A↔B and surface only larger structural issues. Work-capped: above a large import-graph size, `truncated: true` is returned with an empty `cycles` list — the true cycle set is incomplete and possibly inaccurate, not merely 'more available'; narrow with `language` and retry.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1757,24 +1917,32 @@ mod tests {
 
     #[test]
     fn oversized_buffer_is_rejected_before_copy_or_consume() {
-        let path = std::env::temp_dir().join("mmcg_mcp_counting_reader.db");
-        let _ = std::fs::remove_file(&path);
-        let mut store = crate::store::Store::open(&path).unwrap();
+        // `read_frame` itself (unaffected by `serve_io`'s reader-thread
+        // ownership transfer) must reject an oversized frame from its very
+        // first `fill_buf` peek, without ever calling `consume` or `read`.
         let mut bytes = vec![b'x'; MCP_FRAME_MAX + 1];
         bytes.push(b'\n');
         bytes.extend_from_slice(br#"{"jsonrpc":"2.0","id":3,"method":"ping"}\n"#);
         let mut input = CountingBufRead {
-            bytes,
+            bytes: bytes.clone(),
             position: 0,
             fill_buf_calls: 0,
             consume_calls: 0,
             read_calls: 0,
         };
-        let mut output = CountingWriter::default();
-        serve_io(&mut store, &mut input, &mut output).unwrap();
+        let frame = read_frame(&mut input).unwrap().unwrap();
+        assert!(matches!(frame, Frame::TooLarge(_)));
         assert_eq!(input.fill_buf_calls, 1);
         assert_eq!(input.consume_calls, 0);
         assert_eq!(input.read_calls, 0);
+
+        // End to end through `serve_io` (owned, `Send + 'static` source, as
+        // the reader thread requires): exactly one flushed error response.
+        let path = std::env::temp_dir().join("mmcg_mcp_counting_reader.db");
+        let _ = std::fs::remove_file(&path);
+        let mut store = crate::store::Store::open(&path).unwrap();
+        let mut output = CountingWriter::default();
+        serve_io(&mut store, Cursor::new(bytes), &mut output).unwrap();
         assert_eq!(output.flushes, 1);
         assert_eq!(output.bytes.split(|byte| *byte == b'\n').count() - 1, 1);
 
@@ -2228,5 +2396,270 @@ mod tests {
         for t in TOOLS {
             assert!(seen.insert(t.name), "duplicate tool name: {}", t.name);
         }
+    }
+
+    #[test]
+    fn work_budget_zero_covers_every_graph_tool() {
+        let path = std::env::temp_dir().join("mmcg_mcp_zero_budget_coverage.db");
+        let _ = std::fs::remove_file(&path);
+        let mut store = crate::store::Store::open(&path).unwrap();
+        // A budget that is already exhausted at install time — short-circuits
+        // before the handler runs at all, so this doesn't depend on any
+        // particular tool's query being slow enough to trip mid-flight.
+        store.set_default_work_budget(WorkBudget {
+            deadline: Some(std::time::Duration::ZERO),
+            op_ticks: Some(0),
+        });
+        for tool in TOOLS {
+            let params = json!({ "name": tool.name, "arguments": {} });
+            let result = handle_tools_call(ProtocolVersion::Current, &mut store, &params)
+                .unwrap_or_else(|e| panic!("tool {} must not hang or panic: {e:?}", tool.name));
+            assert_eq!(
+                result["isError"], true,
+                "tool {} did not report an error under a zero budget",
+                tool.name
+            );
+            let content = unwrap_content(&result);
+            assert_eq!(
+                content.get("code").and_then(Value::as_str),
+                Some("work_limit_exceeded"),
+                "tool {} did not report work_limit_exceeded",
+                tool.name
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A `BufRead` that serves a fixed byte buffer and, once past `delay_at`,
+    /// sleeps once for `delay` before yielding the rest — used to guarantee a
+    /// later line (e.g. a cancel notification) is only observed by the
+    /// reader thread after the main thread has had ample time to start
+    /// processing an earlier request.
+    struct DelayedCursor {
+        bytes: Vec<u8>,
+        pos: usize,
+        delay_at: usize,
+        delay: std::time::Duration,
+        slept: bool,
+    }
+
+    impl std::io::Read for DelayedCursor {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let chunk = self.fill_buf()?;
+            let n = chunk.len().min(buf.len());
+            buf[..n].copy_from_slice(&chunk[..n]);
+            self.consume(n);
+            Ok(n)
+        }
+    }
+
+    impl std::io::BufRead for DelayedCursor {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            if self.pos >= self.delay_at && !self.slept {
+                self.slept = true;
+                std::thread::sleep(self.delay);
+            }
+            Ok(&self.bytes[self.pos..])
+        }
+
+        fn consume(&mut self, amount: usize) {
+            self.pos += amount;
+        }
+    }
+
+    /// A dense name-collision graph — every one of a handful of names has
+    /// many same-named definitions, all cross-connected — so a `max_depth =
+    /// 10` transitive-callers walk (`mmcg_impact`) does enough real SQL work
+    /// to still be running tens of milliseconds in, without depending on
+    /// exact timing to complete or hit its own internal 2s/250k-tick cap.
+    fn seed_dense_collision_fixture(store: &crate::store::Store) {
+        for index in 0..80 {
+            let name = format!("node{}", index % 8);
+            let id = store
+                .insert_symbol(
+                    &name,
+                    "function",
+                    &format!("src/{index}.rs"),
+                    1,
+                    2,
+                    None,
+                    None,
+                )
+                .unwrap();
+            for target in 0..8 {
+                store
+                    .insert_edge(id, None, &format!("node{target}"), "calls", 1)
+                    .unwrap();
+            }
+        }
+    }
+
+    const INITIALIZE_LINE: &str = r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#;
+    const INITIALIZED_LINE: &str =
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#;
+
+    #[test]
+    fn serve_io_cancel_interrupts_inflight_request() {
+        let path = std::env::temp_dir().join("mmcg_mcp_cancel_inflight.db");
+        let _ = std::fs::remove_file(&path);
+        let mut store = crate::store::Store::open(&path).unwrap();
+        // Unlimited outer budget: only the client cancel — not a budget —
+        // may interrupt this call.
+        store.set_default_work_budget(WorkBudget::UNLIMITED);
+        seed_dense_collision_fixture(&store);
+
+        let slow_call = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mmcg_impact","arguments":{"name":"node0","max_depth":10}}}"#;
+        let cancel =
+            r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#;
+        let ping = r#"{"jsonrpc":"2.0","id":2,"method":"ping","params":{}}"#;
+
+        let mut bytes =
+            format!("{INITIALIZE_LINE}\n{INITIALIZED_LINE}\n{slow_call}\n").into_bytes();
+        let delay_at = bytes.len();
+        bytes.extend_from_slice(format!("{cancel}\n{ping}\n").as_bytes());
+
+        let input = DelayedCursor {
+            bytes,
+            pos: 0,
+            delay_at,
+            delay: std::time::Duration::from_millis(150),
+            slept: false,
+        };
+        let mut output = CountingWriter::default();
+        let started = std::time::Instant::now();
+        serve_io(&mut store, input, &mut output).unwrap();
+        let elapsed = started.elapsed();
+
+        let text = String::from_utf8(output.bytes).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3, "initialize + tools/call + ping responses");
+
+        let call_response: Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(call_response["id"], 1);
+        assert_eq!(call_response["result"]["isError"], true);
+        let content = unwrap_content(&call_response["result"]);
+        assert_eq!(
+            content.get("code").and_then(Value::as_str),
+            Some("cancelled")
+        );
+
+        let ping_response: Value = serde_json::from_str(lines[2]).unwrap();
+        assert_eq!(ping_response["id"], 2);
+        assert!(ping_response.get("error").is_none());
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "cancel should interrupt well before the walk's own internal 2s cap: {elapsed:?}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn serve_io_late_cancel_does_not_abort_next_request() {
+        let path = std::env::temp_dir().join("mmcg_mcp_late_cancel.db");
+        let _ = std::fs::remove_file(&path);
+        let mut store = crate::store::Store::open(&path).unwrap();
+        store
+            .insert_symbol("solo", "function", "src/solo.rs", 1, 2, None, None)
+            .unwrap();
+
+        // `ping` (id 1) finishes near-instantly; a cancel notification for id
+        // 1 arrives only after a delay, by which point request 1 has long
+        // finished — it must not abort request 2.
+        let ping = r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}"#;
+        let stale_cancel =
+            r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#;
+        let next_call = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"mmcg_impact","arguments":{"name":"solo"}}}"#;
+
+        let mut bytes = format!("{INITIALIZE_LINE}\n{INITIALIZED_LINE}\n{ping}\n").into_bytes();
+        let delay_at = bytes.len();
+        bytes.extend_from_slice(format!("{stale_cancel}\n{next_call}\n").as_bytes());
+
+        let input = DelayedCursor {
+            bytes,
+            pos: 0,
+            delay_at,
+            delay: std::time::Duration::from_millis(80),
+            slept: false,
+        };
+        let mut output = CountingWriter::default();
+        serve_io(&mut store, input, &mut output).unwrap();
+
+        let text = String::from_utf8(output.bytes).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3);
+
+        let ping_response: Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(ping_response["id"], 1);
+        assert!(ping_response.get("error").is_none());
+
+        let call_response: Value = serde_json::from_str(lines[2]).unwrap();
+        assert_eq!(call_response["id"], 2);
+        assert_eq!(call_response["result"]["isError"], false);
+        let content = unwrap_content(&call_response["result"]);
+        assert_ne!(
+            content.get("code").and_then(Value::as_str),
+            Some("cancelled")
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn cancel_maps_to_cancelled_not_work_limit() {
+        // Budget-expiry path: a pre-expired budget yields work_limit_exceeded.
+        let path = std::env::temp_dir().join("mmcg_mcp_cancel_vs_work_limit.db");
+        let _ = std::fs::remove_file(&path);
+        let mut store = crate::store::Store::open(&path).unwrap();
+        store.set_default_work_budget(WorkBudget {
+            deadline: Some(std::time::Duration::ZERO),
+            op_ticks: Some(0),
+        });
+        let budget_result = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({ "name": "mmcg_search", "arguments": { "name": "anything" } }),
+        )
+        .unwrap();
+        let budget_content = unwrap_content(&budget_result);
+        assert_eq!(
+            budget_content.get("code").and_then(Value::as_str),
+            Some("work_limit_exceeded")
+        );
+
+        // Cancel path, on a fresh store with an unlimited budget: the same
+        // interrupt machinery reports `cancelled`, never `work_limit_exceeded`.
+        let cancel_path = std::env::temp_dir().join("mmcg_mcp_cancel_vs_work_limit_cancel.db");
+        let _ = std::fs::remove_file(&cancel_path);
+        let mut cancel_store = crate::store::Store::open(&cancel_path).unwrap();
+        cancel_store.set_default_work_budget(WorkBudget::UNLIMITED);
+        seed_dense_collision_fixture(&cancel_store);
+
+        let slow_call = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mmcg_impact","arguments":{"name":"node0","max_depth":10}}}"#;
+        let cancel =
+            r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#;
+        let mut bytes =
+            format!("{INITIALIZE_LINE}\n{INITIALIZED_LINE}\n{slow_call}\n").into_bytes();
+        let delay_at = bytes.len();
+        bytes.extend_from_slice(format!("{cancel}\n").as_bytes());
+        let input = DelayedCursor {
+            bytes,
+            pos: 0,
+            delay_at,
+            delay: std::time::Duration::from_millis(150),
+            slept: false,
+        };
+        let mut output = CountingWriter::default();
+        serve_io(&mut cancel_store, input, &mut output).unwrap();
+        let text = String::from_utf8(output.bytes).unwrap();
+        let call_response: Value = serde_json::from_str(text.lines().nth(1).unwrap()).unwrap();
+        let cancel_content = unwrap_content(&call_response["result"]);
+        assert_eq!(
+            cancel_content.get("code").and_then(Value::as_str),
+            Some("cancelled")
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&cancel_path);
     }
 }

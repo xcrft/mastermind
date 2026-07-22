@@ -252,10 +252,11 @@ enum Cmd {
         strict: bool,
     },
     /// Post-execution gate: mechanical audit comparing spec contract against
-    /// the actual repo state. Diffs against `<git-ref>` (typically `main` or
-    /// merge-base): claimed files vs `git diff --name-only`, pre-edit
-    /// snapshot vs live `mmcg_callers` counts, snapshot symbols still exist.
-    /// Exit code 0 unless verdict is `broken`.
+    /// the actual repo state. Diffs `<git-ref>` (typically `main` or
+    /// merge-base) against the working tree — uncommitted and untracked work
+    /// counts, since the audit runs before the commit step: claimed files vs
+    /// what actually differs, pre-edit snapshot vs live `mmcg_callers` counts,
+    /// snapshot symbols still exist. Exit code 0 unless verdict is `broken`.
     AuditSpec {
         /// Path to the spec.
         spec: PathBuf,
@@ -828,6 +829,9 @@ fn run_cli_inner(
         }
         Cmd::Serve => {
             let store = Store::open(&index_path)?;
+            store.set_default_work_budget_ms(mmcg::store::query_budget_ms_from_env(
+                mmcg::store::DEFAULT_SERVE_BUDGET_MS,
+            ));
             mmcg::mcp::serve(store)?;
         }
         Cmd::Watch { root } => {

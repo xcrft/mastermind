@@ -11,6 +11,11 @@
 //! 3. Parse the old blob through the same extractor (see [`parse_blob`])
 //! 4. Compare old (path, name, kind) set against `Store::symbols_in_file`
 //!
+//! [`symbols_changed_since_worktree`] runs steps 2–4 over a `<ref>` → **working
+//! tree** file scope instead (uncommitted and untracked changes included).
+//! `audit-spec` uses it: post-flight runs before the commit step, so a
+//! commit-range scope is empty by construction there.
+//!
 //! Files absent at `<ref>` produce only "added" entries. Files deleted in HEAD
 //! produce only "removed" (the index has no current symbols for them).
 //!
@@ -42,6 +47,10 @@ use std::time::{Duration, Instant};
 pub const CHANGE_FILE_LIMIT: usize = 10_000;
 pub const GIT_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Default `run_git` / `git_show_blob` subprocess deadline when
+/// `MMCG_GIT_TIMEOUT_MS` is unset — distinct from `GIT_TIMEOUT` above, which
+/// bounds the separate `run_bounded_git` worktree-diff path.
+const DEFAULT_RUN_GIT_TIMEOUT_MS: u64 = 30_000;
 
 type SymbolKey = (String, String);
 type SelectedSymbolKeys = (BTreeSet<SymbolKey>, BTreeSet<SymbolKey>);
@@ -50,6 +59,7 @@ type SelectedSymbolKeys = (BTreeSet<SymbolKey>, BTreeSet<SymbolKey>);
 thread_local! {
     static TEST_GIT_INVOCATION: RefCell<Option<(std::path::PathBuf, Vec<OsString>)>> = const { RefCell::new(None) };
     static TEST_GIT_TIMEOUT: RefCell<Option<Duration>> = const { RefCell::new(None) };
+    static TEST_RUN_GIT_TIMEOUT: RefCell<Option<Duration>> = const { RefCell::new(None) };
 }
 
 fn git_timeout() -> Duration {
@@ -58,6 +68,22 @@ fn git_timeout() -> Duration {
         return timeout;
     }
     GIT_TIMEOUT
+}
+
+/// Deadline for `run_git` / `git_show_blob` — read from `MMCG_GIT_TIMEOUT_MS`
+/// (default 30,000ms) on every call so it can't go stale within a long-lived
+/// process; test-overridable via the same pattern as `git_timeout`.
+fn run_git_timeout() -> Duration {
+    #[cfg(test)]
+    if let Some(timeout) = TEST_RUN_GIT_TIMEOUT.with(|value| *value.borrow()) {
+        return timeout;
+    }
+    let ms = std::env::var("MMCG_GIT_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(DEFAULT_RUN_GIT_TIMEOUT_MS);
+    Duration::from_millis(ms)
 }
 
 fn git_command(args: &[&str]) -> Command {
@@ -117,6 +143,10 @@ pub struct SymbolDiff {
     /// Per-file errors (parse / blob-fetch failure). Non-fatal — other files
     /// still produce results. Aids caller debugging.
     pub errors: Vec<String>,
+    /// `true` when `files_in_diff` exceeded `CHANGE_FILE_LIMIT` — only the
+    /// first `CHANGE_FILE_LIMIT` files were diffed; `added`/`removed`/
+    /// `signature_changed` are a prefix, not the full picture.
+    pub truncated: bool,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
@@ -179,6 +209,8 @@ pub enum DiffError {
     GitNotFound,
     GitRefMissing(String),
     GitFailed(String),
+    /// A `git` subprocess ran past `MMCG_GIT_TIMEOUT_MS` and was killed.
+    GitTimeout,
 }
 
 impl std::fmt::Display for DiffError {
@@ -187,6 +219,7 @@ impl std::fmt::Display for DiffError {
             DiffError::GitNotFound => write!(f, "`git` not found on PATH"),
             DiffError::GitRefMissing(r) => write!(f, "git ref not resolvable: {r}"),
             DiffError::GitFailed(m) => write!(f, "git command failed: {m}"),
+            DiffError::GitTimeout => write!(f, "git command timed out"),
         }
     }
 }
@@ -206,13 +239,75 @@ pub fn symbols_changed_since(
     validate_ref(repo_root, git_ref)?;
 
     let files_in_diff = git_diff_name_only(repo_root, git_ref)?;
+    Ok(symbol_diff_over_files(
+        store,
+        repo_root,
+        git_ref,
+        git_ref,
+        files_in_diff,
+    ))
+}
+
+/// Same symbol comparison as [`symbols_changed_since`], but the file scope is
+/// `git_ref` → **working tree**: staged, unstaged, and untracked changes count,
+/// not just what has been committed.
+///
+/// Callers that audit work *before* it is committed must use this. The
+/// commit-range scope of [`symbols_changed_since`] is empty by construction
+/// while `HEAD` is still the baseline, which reads as "the spec named these
+/// files but nothing changed" rather than "nothing is committed yet".
+///
+/// The file set matches [`symbols_changed_in_worktree`] (and therefore
+/// `mastermind impact`); the symbol comparison is `git_ref`'s blobs against the
+/// live index, so a stale index under-reports symbol changes — it does not
+/// invent them.
+pub fn symbols_changed_since_worktree(
+    store: &Store,
+    repo_root: &Path,
+    git_ref: &str,
+) -> Result<SymbolDiff, DiffError> {
+    let baseline_oid =
+        resolve_commit(repo_root, git_ref).map_err(|e| worktree_scope_error(git_ref, e))?;
+    let (files, _files_total, _truncated, _skipped_non_utf8) =
+        collect_worktree_paths(repo_root, &baseline_oid)
+            .map_err(|e| worktree_scope_error(git_ref, e))?;
+
+    // Blobs come from the resolved oid so the old side can't drift if the ref
+    // moves mid-audit; `git_ref` stays the caller-facing label.
+    let files_in_diff = files.into_iter().map(|file| file.path).collect();
+    Ok(symbol_diff_over_files(
+        store,
+        repo_root,
+        &baseline_oid,
+        git_ref,
+        files_in_diff,
+    ))
+}
+
+fn worktree_scope_error(git_ref: &str, error: WorkingTreeDiffError) -> DiffError {
+    match error {
+        WorkingTreeDiffError::InvalidRef => DiffError::GitRefMissing(git_ref.to_string()),
+        other => DiffError::GitFailed(format!("worktree file scope: {other}")),
+    }
+}
+
+/// `blob_ref` resolves the old side (`git show <blob_ref>:<path>`); `label` is
+/// what the caller asked for and is echoed back in [`SymbolDiff::git_ref`].
+fn symbol_diff_over_files(
+    store: &Store,
+    repo_root: &Path,
+    blob_ref: &str,
+    label: &str,
+    files_in_diff: Vec<String>,
+) -> SymbolDiff {
+    let truncated = files_in_diff.len() > CHANGE_FILE_LIMIT;
     let mut added: Vec<SymbolRef> = Vec::new();
     let mut removed: Vec<SymbolRef> = Vec::new();
     let mut signature_changed: Vec<SignatureChange> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
 
-    for rel in &files_in_diff {
-        match diff_file(store, repo_root, git_ref, rel) {
+    for rel in files_in_diff.iter().take(CHANGE_FILE_LIMIT) {
+        match diff_file(store, repo_root, blob_ref, rel) {
             Ok(per_file) => {
                 added.extend(per_file.added);
                 removed.extend(per_file.removed);
@@ -227,14 +322,15 @@ pub fn symbols_changed_since(
     removed.sort_by(|a, b| (a.file.as_str(), a.line).cmp(&(b.file.as_str(), b.line)));
     signature_changed.sort_by(|a, b| (a.file.as_str(), &a.name).cmp(&(b.file.as_str(), &b.name)));
 
-    Ok(SymbolDiff {
-        git_ref: git_ref.to_string(),
+    SymbolDiff {
+        git_ref: label.to_string(),
         files_in_diff,
         added,
         removed,
         signature_changed,
         errors,
-    })
+        truncated,
+    }
 }
 
 pub fn symbols_changed_in_worktree(
@@ -371,6 +467,7 @@ pub fn symbols_changed_in_worktree(
             removed,
             signature_changed,
             errors,
+            truncated: files_truncated,
         },
         body_changed,
         snapshot_token,
@@ -650,9 +747,19 @@ fn collect_worktree_paths(
         };
         changed.insert(path.to_vec(), status);
     }
+    // `--full-name` keeps untracked paths repository-relative like the diff
+    // side. Without it `ls-files` reports paths relative to `repo`, so a caller
+    // passing a subdirectory would mix two path namespaces in one result.
     let untracked = run_bounded_git(
         repo,
-        &["ls-files", "--others", "--exclude-standard", "-z", "--"],
+        &[
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "--full-name",
+            "-z",
+            "--",
+        ],
         None,
     )?;
     if !untracked.success {
@@ -875,18 +982,69 @@ fn diff_file(
 
 // ----- git plumbing -------------------------------------------------------
 
-fn run_git(repo: &Path, args: &[&str]) -> Result<std::process::Output, DiffError> {
-    Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .output()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                DiffError::GitNotFound
-            } else {
-                DiffError::GitFailed(e.to_string())
+/// Spawn `command`, poll it with `try_wait` while draining stdout/stderr on
+/// background threads (so a full pipe can't masquerade as a hang), and kill
+/// it if it hasn't exited by `deadline`.
+fn run_with_deadline(
+    mut command: Command,
+    deadline: Duration,
+) -> Result<std::process::Output, DiffError> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let start = Instant::now();
+    let mut child = command.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            DiffError::GitNotFound
+        } else {
+            DiffError::GitFailed(e.to_string())
+        }
+    })?;
+    let stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| DiffError::GitFailed("no stdout pipe".to_string()))?;
+    let stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| DiffError::GitFailed("no stderr pipe".to_string()))?;
+    let stdout_rx = spawn_drain(stdout_pipe);
+    let stderr_rx = spawn_drain(stderr_pipe);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if start.elapsed() < deadline => {
+                std::thread::park_timeout(Duration::from_millis(5));
             }
-        })
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(DiffError::GitTimeout);
+            }
+            Err(e) => return Err(DiffError::GitFailed(e.to_string())),
+        }
+    };
+    let stdout = stdout_rx.recv().unwrap_or_default();
+    let stderr = stderr_rx.recv().unwrap_or_default();
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn spawn_drain<R: Read + Send + 'static>(mut reader: R) -> mpsc::Receiver<Vec<u8>> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = reader.read_to_end(&mut buffer);
+        let _ = sender.send(buffer);
+    });
+    receiver
+}
+
+fn run_git(repo: &Path, args: &[&str]) -> Result<std::process::Output, DiffError> {
+    let mut command = git_command(args);
+    command.current_dir(repo);
+    run_with_deadline(command, run_git_timeout())
 }
 
 fn validate_ref(repo: &Path, git_ref: &str) -> Result<(), DiffError> {
@@ -920,11 +1078,9 @@ fn git_diff_name_only(repo: &Path, git_ref: &str) -> Result<Vec<String>, DiffErr
 /// HEAD"). `Ok(Some(bytes))` is the raw blob content.
 fn git_show_blob(repo: &Path, git_ref: &str, rel_path: &str) -> Result<Option<Vec<u8>>, String> {
     let spec = format!("{git_ref}:{rel_path}");
-    let out = Command::new("git")
-        .args(["show", &spec])
-        .current_dir(repo)
-        .output()
-        .map_err(|e| format!("spawn git show: {e}"))?;
+    let mut command = git_command(&["show", &spec]);
+    command.current_dir(repo);
+    let out = run_with_deadline(command, run_git_timeout()).map_err(|e| e.to_string())?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
         // git returns "fatal: path '...' does not exist in '<ref>'" for a new
@@ -952,6 +1108,7 @@ mod tests {
         fn drop(&mut self) {
             TEST_GIT_INVOCATION.with(|value| value.borrow_mut().take());
             TEST_GIT_TIMEOUT.with(|value| value.borrow_mut().take());
+            TEST_RUN_GIT_TIMEOUT.with(|value| value.borrow_mut().take());
         }
     }
 
@@ -964,6 +1121,7 @@ mod tests {
             ));
         });
         TEST_GIT_TIMEOUT.with(|value| *value.borrow_mut() = Some(timeout));
+        TEST_RUN_GIT_TIMEOUT.with(|value| *value.borrow_mut() = Some(timeout));
         GitInvocationGuard
     }
 
@@ -1136,6 +1294,77 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn worktree_paths_stay_repository_relative_from_a_subdirectory() {
+        // `git diff` reports repository-relative paths whatever the cwd is;
+        // `ls-files` reports cwd-relative ones unless asked otherwise. Mixing
+        // the two namespaces would make a subdirectory root emit paths that
+        // match neither the spec nor the index.
+        let dir = init_repo("worktree_subdir_paths");
+        write(&dir, "sub/tracked.py", "def tracked():\n    return 1\n");
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+        write(&dir, "sub/tracked.py", "def tracked():\n    return 2\n");
+        write(&dir, "sub/untracked.py", "def untracked():\n    return 3\n");
+
+        let baseline = resolve_commit(&dir, "HEAD").unwrap();
+        let (files, ..) = collect_worktree_paths(&dir.join("sub"), &baseline).unwrap();
+        let paths: Vec<_> = files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(paths, vec!["sub/tracked.py", "sub/untracked.py"]);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn worktree_scope_sees_work_the_commit_range_cannot() {
+        let dir = init_repo("worktree_scope_vs_range");
+        write(&dir, "src/a.py", "def keep_same():\n    return 1\n");
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+        run(&dir, &["tag", "baseline"]);
+
+        // Executor's work, none of it committed: `a.py` edited, `b.py` staged,
+        // `c.py` untracked. HEAD is still the baseline commit.
+        write(
+            &dir,
+            "src/a.py",
+            "def keep_same():\n    return 1\n\ndef added_later():\n    return 2\n",
+        );
+        write(&dir, "src/b.py", "def staged_only():\n    return 3\n");
+        run(&dir, &["add", "src/b.py"]);
+        write(&dir, "src/c.py", "def untracked_only():\n    return 4\n");
+        let store = indexed_worktree(&dir);
+
+        // The commit range is empty by construction — the trap this exists for.
+        let committed = symbols_changed_since(store.store(), &dir, "baseline").unwrap();
+        assert!(
+            committed.files_in_diff.is_empty(),
+            "baseline..HEAD must be empty here: {:?}",
+            committed.files_in_diff
+        );
+
+        let diff = symbols_changed_since_worktree(store.store(), &dir, "baseline").unwrap();
+        assert_eq!(
+            diff.git_ref, "baseline",
+            "label is the caller's ref, not an oid"
+        );
+        assert_eq!(diff.files_in_diff, vec!["src/a.py", "src/b.py", "src/c.py"]);
+        let added: Vec<&str> = diff.added.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            added.contains(&"added_later"),
+            "unstaged edit missed: {added:?}"
+        );
+        assert!(
+            added.contains(&"staged_only"),
+            "staged file missed: {added:?}"
+        );
+        assert!(
+            added.contains(&"untracked_only"),
+            "untracked file missed: {added:?}"
+        );
+        assert!(!added.contains(&"keep_same"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
     #[cfg(unix)]
     #[test]
     fn working_tree_diff_is_nul_safe_and_deterministic() {
@@ -1245,6 +1474,65 @@ mod tests {
             let _ = Command::new("kill").args(["-TERM", pid.trim()]).status();
         }
         let _ = fs::remove_file(pid_file);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_timeout_kills_stuck_subprocess() {
+        // The fake `git` is a PATH shim that sleeps past the deadline.
+        let repo = env::temp_dir();
+        let _guard = override_git(
+            "python3",
+            &["-c", "import signal; signal.pause()"],
+            Duration::from_millis(50),
+        );
+
+        let started = Instant::now();
+        let result = run_git(&repo, &["ignored"]);
+        assert!(matches!(result, Err(DiffError::GitTimeout)));
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let started = Instant::now();
+        let result = git_show_blob(&repo, "HEAD", "ignored.py");
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn symbols_changed_since_caps_file_loop() {
+        let dir = init_repo("change_file_limit");
+        write(&dir, "base.py", "def base():\n    pass\n");
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+        run(&dir, &["tag", "baseline"]);
+
+        // More changed files than CHANGE_FILE_LIMIT would be slow to seed
+        // through git — exercise the truncation math directly, mirroring the
+        // worktree-diff cap/cap+1 test above.
+        let build = |count: usize| -> Vec<String> {
+            (0..count)
+                .map(|index| format!("src/{index:05}.py"))
+                .collect()
+        };
+        let exact = build(CHANGE_FILE_LIMIT);
+        assert!(exact.len() <= CHANGE_FILE_LIMIT);
+        let overflow = build(CHANGE_FILE_LIMIT + 1);
+        assert!(overflow.len() > CHANGE_FILE_LIMIT);
+        assert_eq!(
+            overflow.iter().take(CHANGE_FILE_LIMIT).count(),
+            CHANGE_FILE_LIMIT
+        );
+
+        write(&dir, "base.py", "def base():\n    return 1\n");
+        let db = dir.join(".mmcg.db");
+        let mut store = Store::open(&db).unwrap();
+        crate::indexer::Indexer::new(&dir)
+            .index_all(&mut store, false)
+            .unwrap();
+        let diff = symbols_changed_since(&store, &dir, "baseline").unwrap();
+        assert!(!diff.truncated);
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

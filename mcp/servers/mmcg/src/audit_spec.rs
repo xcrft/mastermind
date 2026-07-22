@@ -10,6 +10,12 @@
 //! Inputs: parsed spec + git ref to compare against (typically `main` or the
 //! merge-base) + indexed `Store` for live symbol counts.
 //!
+//! The comparison runs `<ref>` → **working tree**, not `<ref>..HEAD`: the
+//! documented handoff is pre-flight → executor → post-flight, with the commit
+//! as a separate authorized step afterwards, so on the normal path HEAD is
+//! still the baseline and the executor's work is uncommitted. Staged, unstaged,
+//! and untracked changes all count as "changed" here.
+//!
 //! Outputs structured findings:
 //! - `unexpected_file` — file changed in git but not mentioned in spec
 //! - `missing_expected_file` — file mentioned in spec, not changed in git
@@ -42,9 +48,11 @@ pub enum Verdict {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Finding {
-    /// File appears in `git diff` but the spec didn't mention it.
+    /// File differs from the baseline (committed or not) but the spec didn't
+    /// mention it.
     UnexpectedFile { file: String },
-    /// File was mentioned in the spec but `git diff` doesn't show changes.
+    /// File was mentioned in the spec but is identical to the baseline —
+    /// nothing was written to it, staged or otherwise.
     MissingExpectedFile { file: String },
     /// Pre-edit snapshot count != current `mmcg_callers` count.
     SnapshotCallerDrift {
@@ -116,8 +124,8 @@ pub struct Report {
     pub git_ref: String,
     pub verdict: Verdict,
     pub findings: Vec<Finding>,
-    /// Raw symbol-level diff from `mmcg_symbols_changed_since` — pasted in so
-    /// the LLM auditor has full context for semantic judgment.
+    /// Raw symbol-level diff of baseline → working tree — pasted in so the LLM
+    /// auditor has full context for semantic judgment.
     pub symbol_diff: Option<SymbolDiff>,
 }
 
@@ -267,11 +275,13 @@ pub fn run(
     repo_root: &Path,
     git_ref: &str,
 ) -> Result<Report, DiffError> {
-    let symbol_diff = diff::symbols_changed_since(store, repo_root, git_ref)?;
+    // Worktree-scoped, not `<ref>..HEAD` — post-flight audits work that has not
+    // been committed yet. See the module header.
+    let symbol_diff = diff::symbols_changed_since_worktree(store, repo_root, git_ref)?;
     let mut findings: Vec<Finding> = Vec::new();
 
-    // 1. File scope check — symmetric difference of declared files vs
-    //    git diff --name-only.
+    // 1. File scope check — symmetric difference of declared files vs the files
+    //    that differ from the baseline on disk.
     //
     //    Frontmatter authoritative when present: `touches[].file` +
     //    `expected_docs[]` are the declared set. Heuristic mentioned_files
@@ -600,21 +610,37 @@ fn vacuous_test_reason(cmd: &str, repo_root: &Path) -> Option<String> {
         // only when NEITHER carries a test attribute — a crate tested entirely
         // integration-style (`tests/*.rs`, no `#[test]` in `src/`) is valid and
         // must not be flagged.
+        //
+        // `--manifest-path` puts the crate somewhere other than the repo root
+        // (workspaces, monorepos). Scanning the root there reads a *sibling*
+        // `tests/` — often CI fixtures in another language — and reports a
+        // fully tested crate as vacuous.
+        let (crate_root, scope) = match extract_cargo_manifest_dir(cmd) {
+            Some(rel) => {
+                let d = repo_root.join(&rel);
+                if !d.is_dir() {
+                    // Manifest points outside the tree we can see: undeterminable.
+                    return None;
+                }
+                (d, format!("{rel}/"))
+            }
+            None => (repo_root.to_path_buf(), String::new()),
+        };
         let mut dirs: Vec<std::path::PathBuf> = Vec::new();
         for sub in ["src", "tests"] {
-            let d = repo_root.join(sub);
+            let d = crate_root.join(sub);
             if d.is_dir() {
                 dirs.push(d);
             }
         }
         if dirs.is_empty() {
-            dirs.push(repo_root.to_path_buf());
+            dirs.push(crate_root);
         }
         if !dirs.iter().any(|d| has_test_attr_in_dir(d)) {
-            return Some(
-                "no test attribute (#[test], #[tokio::test], #[rstest], …) in src/ or tests/"
-                    .to_string(),
-            );
+            return Some(format!(
+                "no test attribute (#[test], #[tokio::test], #[rstest], …) in \
+                 {scope}src/ or {scope}tests/"
+            ));
         }
     } else if (cmd_lower.contains("jest")
         || cmd_lower.contains("vitest")
@@ -637,6 +663,37 @@ fn extract_go_package_dir(cmd: &str, _root: &Path) -> String {
         }
     }
     ".".to_string()
+}
+
+/// Crate directory named by `--manifest-path <dir>/Cargo.toml` (and the
+/// `--manifest-path=…` spelling), relative to the repo root and slash-normalised.
+/// `None` when the flag is absent or the manifest sits at the root — both mean
+/// "the crate is the repo root", so the caller keeps its default scan.
+fn extract_cargo_manifest_dir(cmd: &str) -> Option<String> {
+    let tokens: Vec<&str> = cmd.split_whitespace().collect();
+    let mut raw: Option<&str> = None;
+    for (i, t) in tokens.iter().enumerate() {
+        if let Some(v) = t.strip_prefix("--manifest-path=") {
+            raw = Some(v);
+            break;
+        }
+        if *t == "--manifest-path" {
+            raw = tokens.get(i + 1).copied().filter(|n| !n.starts_with('-'));
+            break;
+        }
+    }
+    let path = norm_path(raw?.trim_matches(|c| c == '"' || c == '\''));
+    // Cargo wants the manifest file itself; tolerate a bare directory too.
+    let dir = match path.rsplit_once('/') {
+        Some((parent, last)) if last.eq_ignore_ascii_case("cargo.toml") => parent,
+        None if path.eq_ignore_ascii_case("cargo.toml") => "",
+        _ => path.as_str(),
+    };
+    let dir = dir.trim_end_matches('/');
+    if dir.is_empty() || dir == "." {
+        return None;
+    }
+    Some(dir.to_string())
 }
 
 fn extract_pytest_scope(cmd: &str, _root: &Path) -> String {
@@ -1383,6 +1440,9 @@ mod tests {
                 .unwrap();
             assert!(out.status.success(), "git {:?} failed", args);
         }
+        // Tests keep the index DB inside the repo; real projects gitignore it.
+        // Without this it lands in the audit's file scope as an untracked file.
+        fs::write(dir.join(".gitignore"), "idx.db*\n").unwrap();
         dir
     }
 
@@ -1813,6 +1873,96 @@ breaking_changes:
     }
 
     #[test]
+    fn cargo_test_manifest_path_scopes_scan_to_the_crate() {
+        // Regression: `cargo test --manifest-path <sub>/Cargo.toml` used to be
+        // scanned at the repo root, so a monorepo whose root `tests/` holds
+        // non-Rust fixtures reported a fully tested nested crate as vacuous.
+        let dir = init_repo("cargo_manifest_path");
+        write(
+            &dir,
+            "tests/ci_fixture.py",
+            "def test_nothing():\n    pass\n",
+        );
+        write(
+            &dir,
+            "mcp/servers/mmcg/Cargo.toml",
+            "[package]\nname = \"c\"\n",
+        );
+        write(
+            &dir,
+            "mcp/servers/mmcg/src/store.rs",
+            "pub fn budget() {}\n#[test]\nfn work_budget() {}\n",
+        );
+        assert!(
+            vacuous_test_reason(
+                "cargo test --manifest-path mcp/servers/mmcg/Cargo.toml --locked work_budget",
+                dir.as_path()
+            )
+            .is_none(),
+            "tests in the crate named by --manifest-path must not be flagged vacuous"
+        );
+        // Without the flag the crate really is the repo root, and there the
+        // only `tests/` carries no Rust test attribute.
+        assert!(vacuous_test_reason("cargo test", dir.as_path()).is_some());
+        // An unresolvable manifest is undeterminable, not vacuous.
+        assert!(vacuous_test_reason(
+            "cargo test --manifest-path absent/Cargo.toml",
+            dir.as_path()
+        )
+        .is_none());
+
+        // A nested crate genuinely without tests is still flagged — a decoy
+        // `tests/` at the root must not vouch for it.
+        let bare = init_repo("cargo_manifest_path_bare");
+        write(&bare, "tests/it.rs", "#[test]\nfn decoy() {}\n");
+        write(
+            &bare,
+            "crates/thing/Cargo.toml",
+            "[package]\nname = \"t\"\n",
+        );
+        write(&bare, "crates/thing/src/lib.rs", "pub fn add() {}\n");
+        let reason = vacuous_test_reason(
+            "cargo test --manifest-path=crates/thing/Cargo.toml",
+            bare.as_path(),
+        )
+        .expect("untested nested crate must still be flagged");
+        assert!(
+            reason.contains("crates/thing/src/"),
+            "reason should name the scanned crate, got: {reason}"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&bare).ok();
+    }
+
+    #[test]
+    fn extract_cargo_manifest_dir_handles_flag_spellings() {
+        let d = |cmd: &str| extract_cargo_manifest_dir(cmd);
+        assert_eq!(
+            d("cargo test --manifest-path mcp/servers/mmcg/Cargo.toml --locked"),
+            Some("mcp/servers/mmcg".to_string())
+        );
+        assert_eq!(
+            d("cargo test --manifest-path=./crates/a/Cargo.toml"),
+            Some("crates/a".to_string())
+        );
+        assert_eq!(
+            d(r#"cargo test --manifest-path "crates/a/Cargo.toml""#),
+            Some("crates/a".to_string())
+        );
+        // Bare directory instead of the manifest file.
+        assert_eq!(
+            d("cargo test --manifest-path crates/a/"),
+            Some("crates/a".to_string())
+        );
+        // No relocation: absent flag, root manifest, or a missing value.
+        assert_eq!(d("cargo test --locked --all"), None);
+        assert_eq!(d("cargo test --manifest-path Cargo.toml"), None);
+        assert_eq!(d("cargo test --manifest-path ./Cargo.toml"), None);
+        assert_eq!(d("cargo test --manifest-path --locked"), None);
+    }
+
+    #[test]
     fn file_scoped_claim_dotslash_prefix_matches() {
         let dir = init_repo("claim_norm_path");
         write(
@@ -1888,6 +2038,97 @@ breaking_changes:
             |f| matches!(f, Finding::SnapshotSymbolGone { symbol } if symbol == "will_be_removed")
         ));
         assert_eq!(r.verdict, Verdict::Broken);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn audits_complete_but_uncommitted_work() {
+        // Regression: post-flight runs before the commit step, so HEAD is still
+        // the baseline. With a `<baseline>..HEAD` file scope the diff was empty
+        // by construction — finished work produced one `missing_expected_file`
+        // per scoped file, a `+0 -0 ~0` symbol diff, and a Drift verdict.
+        let dir = init_repo("uncommitted_work");
+        write(&dir, "src/lib.py", "def helper(): pass\n");
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "baseline"]);
+        git(&dir, &["tag", "baseline"]);
+
+        // Executor's work: a tracked file edited, a new file created. Nothing
+        // committed — exactly what `git status` shows at hand-off.
+        write(
+            &dir,
+            "src/lib.py",
+            "def helper(): pass\ndef added_by_executor(): pass\n",
+        );
+        write(&dir, "src/new_module.py", "def brand_new(): pass\n");
+
+        let head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let baseline = Command::new("git")
+            .args(["rev-parse", "baseline"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert_eq!(
+            head.stdout, baseline.stdout,
+            "the regression only reproduces while HEAD is still the baseline"
+        );
+
+        let db = dir.join("idx.db");
+        let mut store = Store::open(&db).unwrap();
+        Indexer::new(&dir).index_all(&mut store, false).unwrap();
+
+        let spec_body = "---
+id: \"1\"
+touches:
+  - file: src/lib.py
+  - file: src/new_module.py
+---
+
+## Goals
+- Add `added_by_executor` and `src/new_module.py`
+## Alternatives Considered
+- A
+## Tests Plan
+- n/a
+## Documentation Plan
+- n/a
+## Observability Plan
+- n/a
+## Performance Considerations
+- O(1)
+";
+        let s = spec::parse_str("spec.md", spec_body);
+        let r = run(&s, &store, &dir, "baseline").unwrap();
+
+        let missing: Vec<&str> = r
+            .findings
+            .iter()
+            .filter_map(|f| match f {
+                Finding::MissingExpectedFile { file } => Some(file.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "both scoped files were written; nothing is missing: {missing:?}"
+        );
+        assert_eq!(r.verdict, Verdict::Held, "findings: {:?}", r.findings);
+
+        // ... and the symbol diff reflects the work rather than reporting +0 -0 ~0.
+        let added: Vec<&str> = r
+            .symbol_diff
+            .as_ref()
+            .expect("symbol diff")
+            .added
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(added.contains(&"added_by_executor"), "added: {added:?}");
+        assert!(added.contains(&"brand_new"), "added: {added:?}");
         fs::remove_dir_all(&dir).ok();
     }
 }

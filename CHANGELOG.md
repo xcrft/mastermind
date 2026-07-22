@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `audit-spec` (and the `run-task` post-flight that wraps it) now diffs the
+  baseline against the working tree instead of `<baseline>..HEAD`. The
+  documented hand-off audits work before it is committed, so the commit-range
+  scope was empty by construction there: finished, uncommitted work reported one
+  `missing_expected_file` per scoped file, a `+0 -0 ~0` symbol diff, and a Drift
+  verdict. Staged, unstaged, and untracked changes now all count. The
+  `mmcg_symbols_changed_since` tool and `--bundle` attestations keep their
+  commit-range semantics.
+- Working-tree file collection now asks `git ls-files` for repository-relative
+  untracked paths, so a root below the repository root no longer mixes them with
+  the repository-relative paths the diff side already returned.
+
 ## [1.0.0] - 2026-07-19
 
 ### Added

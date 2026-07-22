@@ -252,10 +252,11 @@ enum Cmd {
         strict: bool,
     },
     /// Post-execution gate: mechanical audit comparing spec contract against
-    /// the actual repo state. Diffs against `<git-ref>` (typically `main` or
-    /// merge-base): claimed files vs `git diff --name-only`, pre-edit
-    /// snapshot vs live `mmcg_callers` counts, snapshot symbols still exist.
-    /// Exit code 0 unless verdict is `broken`.
+    /// the actual repo state. Diffs `<git-ref>` (typically `main` or
+    /// merge-base) against the working tree — uncommitted and untracked work
+    /// counts, since the audit runs before the commit step: claimed files vs
+    /// what actually differs, pre-edit snapshot vs live `mmcg_callers` counts,
+    /// snapshot symbols still exist. Exit code 0 unless verdict is `broken`.
     AuditSpec {
         /// Path to the spec.
         spec: PathBuf,

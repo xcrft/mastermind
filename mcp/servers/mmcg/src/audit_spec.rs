@@ -600,21 +600,37 @@ fn vacuous_test_reason(cmd: &str, repo_root: &Path) -> Option<String> {
         // only when NEITHER carries a test attribute — a crate tested entirely
         // integration-style (`tests/*.rs`, no `#[test]` in `src/`) is valid and
         // must not be flagged.
+        //
+        // `--manifest-path` puts the crate somewhere other than the repo root
+        // (workspaces, monorepos). Scanning the root there reads a *sibling*
+        // `tests/` — often CI fixtures in another language — and reports a
+        // fully tested crate as vacuous.
+        let (crate_root, scope) = match extract_cargo_manifest_dir(cmd) {
+            Some(rel) => {
+                let d = repo_root.join(&rel);
+                if !d.is_dir() {
+                    // Manifest points outside the tree we can see: undeterminable.
+                    return None;
+                }
+                (d, format!("{rel}/"))
+            }
+            None => (repo_root.to_path_buf(), String::new()),
+        };
         let mut dirs: Vec<std::path::PathBuf> = Vec::new();
         for sub in ["src", "tests"] {
-            let d = repo_root.join(sub);
+            let d = crate_root.join(sub);
             if d.is_dir() {
                 dirs.push(d);
             }
         }
         if dirs.is_empty() {
-            dirs.push(repo_root.to_path_buf());
+            dirs.push(crate_root);
         }
         if !dirs.iter().any(|d| has_test_attr_in_dir(d)) {
-            return Some(
-                "no test attribute (#[test], #[tokio::test], #[rstest], …) in src/ or tests/"
-                    .to_string(),
-            );
+            return Some(format!(
+                "no test attribute (#[test], #[tokio::test], #[rstest], …) in \
+                 {scope}src/ or {scope}tests/"
+            ));
         }
     } else if (cmd_lower.contains("jest")
         || cmd_lower.contains("vitest")
@@ -637,6 +653,37 @@ fn extract_go_package_dir(cmd: &str, _root: &Path) -> String {
         }
     }
     ".".to_string()
+}
+
+/// Crate directory named by `--manifest-path <dir>/Cargo.toml` (and the
+/// `--manifest-path=…` spelling), relative to the repo root and slash-normalised.
+/// `None` when the flag is absent or the manifest sits at the root — both mean
+/// "the crate is the repo root", so the caller keeps its default scan.
+fn extract_cargo_manifest_dir(cmd: &str) -> Option<String> {
+    let tokens: Vec<&str> = cmd.split_whitespace().collect();
+    let mut raw: Option<&str> = None;
+    for (i, t) in tokens.iter().enumerate() {
+        if let Some(v) = t.strip_prefix("--manifest-path=") {
+            raw = Some(v);
+            break;
+        }
+        if *t == "--manifest-path" {
+            raw = tokens.get(i + 1).copied().filter(|n| !n.starts_with('-'));
+            break;
+        }
+    }
+    let path = norm_path(raw?.trim_matches(|c| c == '"' || c == '\''));
+    // Cargo wants the manifest file itself; tolerate a bare directory too.
+    let dir = match path.rsplit_once('/') {
+        Some((parent, last)) if last.eq_ignore_ascii_case("cargo.toml") => parent,
+        None if path.eq_ignore_ascii_case("cargo.toml") => "",
+        _ => path.as_str(),
+    };
+    let dir = dir.trim_end_matches('/');
+    if dir.is_empty() || dir == "." {
+        return None;
+    }
+    Some(dir.to_string())
 }
 
 fn extract_pytest_scope(cmd: &str, _root: &Path) -> String {
@@ -1810,6 +1857,96 @@ breaking_changes:
 
         fs::remove_dir_all(&dir).ok();
         fs::remove_dir_all(&bare).ok();
+    }
+
+    #[test]
+    fn cargo_test_manifest_path_scopes_scan_to_the_crate() {
+        // Regression: `cargo test --manifest-path <sub>/Cargo.toml` used to be
+        // scanned at the repo root, so a monorepo whose root `tests/` holds
+        // non-Rust fixtures reported a fully tested nested crate as vacuous.
+        let dir = init_repo("cargo_manifest_path");
+        write(
+            &dir,
+            "tests/ci_fixture.py",
+            "def test_nothing():\n    pass\n",
+        );
+        write(
+            &dir,
+            "mcp/servers/mmcg/Cargo.toml",
+            "[package]\nname = \"c\"\n",
+        );
+        write(
+            &dir,
+            "mcp/servers/mmcg/src/store.rs",
+            "pub fn budget() {}\n#[test]\nfn work_budget() {}\n",
+        );
+        assert!(
+            vacuous_test_reason(
+                "cargo test --manifest-path mcp/servers/mmcg/Cargo.toml --locked work_budget",
+                dir.as_path()
+            )
+            .is_none(),
+            "tests in the crate named by --manifest-path must not be flagged vacuous"
+        );
+        // Without the flag the crate really is the repo root, and there the
+        // only `tests/` carries no Rust test attribute.
+        assert!(vacuous_test_reason("cargo test", dir.as_path()).is_some());
+        // An unresolvable manifest is undeterminable, not vacuous.
+        assert!(vacuous_test_reason(
+            "cargo test --manifest-path absent/Cargo.toml",
+            dir.as_path()
+        )
+        .is_none());
+
+        // A nested crate genuinely without tests is still flagged — a decoy
+        // `tests/` at the root must not vouch for it.
+        let bare = init_repo("cargo_manifest_path_bare");
+        write(&bare, "tests/it.rs", "#[test]\nfn decoy() {}\n");
+        write(
+            &bare,
+            "crates/thing/Cargo.toml",
+            "[package]\nname = \"t\"\n",
+        );
+        write(&bare, "crates/thing/src/lib.rs", "pub fn add() {}\n");
+        let reason = vacuous_test_reason(
+            "cargo test --manifest-path=crates/thing/Cargo.toml",
+            bare.as_path(),
+        )
+        .expect("untested nested crate must still be flagged");
+        assert!(
+            reason.contains("crates/thing/src/"),
+            "reason should name the scanned crate, got: {reason}"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&bare).ok();
+    }
+
+    #[test]
+    fn extract_cargo_manifest_dir_handles_flag_spellings() {
+        let d = |cmd: &str| extract_cargo_manifest_dir(cmd);
+        assert_eq!(
+            d("cargo test --manifest-path mcp/servers/mmcg/Cargo.toml --locked"),
+            Some("mcp/servers/mmcg".to_string())
+        );
+        assert_eq!(
+            d("cargo test --manifest-path=./crates/a/Cargo.toml"),
+            Some("crates/a".to_string())
+        );
+        assert_eq!(
+            d(r#"cargo test --manifest-path "crates/a/Cargo.toml""#),
+            Some("crates/a".to_string())
+        );
+        // Bare directory instead of the manifest file.
+        assert_eq!(
+            d("cargo test --manifest-path crates/a/"),
+            Some("crates/a".to_string())
+        );
+        // No relocation: absent flag, root manifest, or a missing value.
+        assert_eq!(d("cargo test --locked --all"), None);
+        assert_eq!(d("cargo test --manifest-path Cargo.toml"), None);
+        assert_eq!(d("cargo test --manifest-path ./Cargo.toml"), None);
+        assert_eq!(d("cargo test --manifest-path --locked"), None);
     }
 
     #[test]

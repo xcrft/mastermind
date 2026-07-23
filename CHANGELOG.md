@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-07-23
+
 ### Fixed
 - `mmcg serve` could burn a CPU core indefinitely on a wedged request. The
   1.1.0 work budget is a SQLite progress handler, so it only bounds work
@@ -420,7 +422,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Seven prebuilt platform packages (`@xcraftmind/mmcg-*`) covering macOS (arm64, x64), Linux glibc and musl (x64, arm64), and Windows (x64). npm installs only the package matching the host's `os` / `cpu` / `libc`.
 - Install-mode-aware `setup claude` that writes the correct MCP `command` form for npx, global, project-local, and cargo installs.
 
-[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v1.0.0...HEAD
+[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v1.1.1...HEAD
+[1.1.1]: https://github.com/xcrft/mastermind/compare/npm-v1.1.0...npm-v1.1.1
+[1.1.0]: https://github.com/xcrft/mastermind/compare/npm-v1.0.0...npm-v1.1.0
 [1.0.0]: https://github.com/xcrft/mastermind/compare/npm-v0.38.1...npm-v1.0.0
 [0.38.1]: https://github.com/xcrft/mastermind/compare/npm-v0.38.0...npm-v0.38.1
 [0.38.0]: https://github.com/xcrft/mastermind/compare/npm-v0.37.0...npm-v0.38.0

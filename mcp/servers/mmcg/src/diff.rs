@@ -51,6 +51,11 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 /// `MMCG_GIT_TIMEOUT_MS` is unset — distinct from `GIT_TIMEOUT` above, which
 /// bounds the separate `run_bounded_git` worktree-diff path.
 const DEFAULT_RUN_GIT_TIMEOUT_MS: u64 = 30_000;
+/// Must stay a real `sleep`. `park_timeout` returns instantly when the thread
+/// holds an unpark token, and the sibling drain threads talk over `mpsc`, which
+/// parks and unparks this very thread — a stray token turns the wait into a
+/// spin that burns a core until the git deadline expires.
+const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 type SymbolKey = (String, String);
 type SelectedSymbolKeys = (BTreeSet<SymbolKey>, BTreeSet<SymbolKey>);
@@ -638,7 +643,7 @@ pub(crate) fn run_bounded_git_with_limit(
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if start.elapsed() < timeout => {
-                std::thread::park_timeout(Duration::from_millis(5));
+                std::thread::sleep(CHILD_POLL_INTERVAL);
             }
             Ok(None) => {
                 let _ = child.kill();
@@ -1012,7 +1017,7 @@ fn run_with_deadline(
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if start.elapsed() < deadline => {
-                std::thread::park_timeout(Duration::from_millis(5));
+                std::thread::sleep(CHILD_POLL_INTERVAL);
             }
             Ok(None) => {
                 let _ = child.kill();

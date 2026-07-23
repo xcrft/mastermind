@@ -5,11 +5,12 @@
 //! entry in [`TOOLS`] with a `schema` fn and a `handler` fn.
 
 use crate::queries;
-use crate::store::{InterruptSource, Store, WorkBudget};
+use crate::store::{CancelHandle, InterruptSource, Store, WorkBudget};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Read, Write};
 use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
 
 const CURRENT_PROTOCOL_VERSION: &str = "2025-11-25";
 const LEGACY_PROTOCOL_VERSION: &str = "2024-11-05";
@@ -233,11 +234,187 @@ impl Read for StdinSource {
     }
 }
 
+/// `id` is matched by the reader thread against incoming cancels; `started` is
+/// what the watchdog thread measures.
+#[derive(Clone, Debug)]
+struct InFlight {
+    id: Value,
+    started: Instant,
+}
+
+/// Wall-clock bound on a single request.
+///
+/// The per-request work budget ([`crate::store::DEFAULT_SERVE_BUDGET_MS`]) is a
+/// SQLite progress handler, so it only interrupts work executing *inside*
+/// SQLite. A request stuck in a Rust graph walk or waiting on `git` never
+/// reaches it, and nothing else bounded those paths.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Watchdog {
+    /// Aborts SQLite work; no effect anywhere else, which is why `hard` exists.
+    soft: Option<Duration>,
+    /// Last resort: MCP clients respawn stdio servers, and a clean respawn
+    /// beats an orphan spinning for hours.
+    hard: Option<Duration>,
+    /// `bin/mmcg.js` spawns this binary with `stdio: "inherit"`, so stdin
+    /// belongs to the MCP client, not the node wrapper — the wrapper dying
+    /// never closes it and EOF never arrives on its own.
+    exit_when_reparented: bool,
+}
+
+const WATCHDOG_TICK: Duration = Duration::from_millis(250);
+const DEFAULT_REQUEST_SOFT_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_REQUEST_HARD_TIMEOUT_MS: u64 = 300_000;
+
+impl Watchdog {
+    fn from_env() -> Self {
+        if std::env::var("MMCG_WATCHDOG").is_ok_and(|value| value == "0") {
+            return Self::disabled();
+        }
+        Self {
+            soft: timeout_from_env(
+                "MMCG_REQUEST_SOFT_TIMEOUT_MS",
+                DEFAULT_REQUEST_SOFT_TIMEOUT_MS,
+            ),
+            hard: timeout_from_env(
+                "MMCG_REQUEST_HARD_TIMEOUT_MS",
+                DEFAULT_REQUEST_HARD_TIMEOUT_MS,
+            ),
+            exit_when_reparented: true,
+        }
+    }
+
+    const fn disabled() -> Self {
+        Self {
+            soft: None,
+            hard: None,
+            exit_when_reparented: false,
+        }
+    }
+
+    const fn is_disabled(&self) -> bool {
+        self.soft.is_none() && self.hard.is_none() && !self.exit_when_reparented
+    }
+
+    /// A fixed 250ms tick would overshoot a tighter ceiling by more than the
+    /// ceiling itself.
+    fn tick(&self) -> Duration {
+        let mut tick = WATCHDOG_TICK;
+        for ceiling in [self.soft, self.hard].into_iter().flatten() {
+            tick = tick.min(ceiling / 2);
+        }
+        tick.max(Duration::from_millis(1))
+    }
+
+    /// Split out from the polling thread so the boundaries are testable without
+    /// wall-clock waits or a live `process::exit`.
+    fn action(&self, elapsed: Duration, already_cancelled: bool) -> WatchdogAction {
+        if self.hard.is_some_and(|hard| elapsed >= hard) {
+            return WatchdogAction::Exit;
+        }
+        if !already_cancelled && self.soft.is_some_and(|soft| elapsed >= soft) {
+            return WatchdogAction::Cancel;
+        }
+        WatchdogAction::Wait
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WatchdogAction {
+    Wait,
+    Cancel,
+    Exit,
+}
+
+/// `0` disables the ceiling, matching `MMCG_QUERY_BUDGET_MS` semantics.
+fn timeout_from_env(var: &str, default_ms: u64) -> Option<Duration> {
+    let ms = std::env::var(var)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(default_ms);
+    (ms > 0).then(|| Duration::from_millis(ms))
+}
+
+#[cfg(unix)]
+fn parent_pid() -> u32 {
+    std::os::unix::process::parent_id()
+}
+
+#[cfg(not(unix))]
+fn parent_pid() -> u32 {
+    0
+}
+
+/// Off-thread so it still fires while the main thread is wedged inside a
+/// handler, which is the only case that matters.
+fn spawn_watchdog(
+    watchdog: Watchdog,
+    in_flight: Arc<Mutex<Option<InFlight>>>,
+    cancel: CancelHandle,
+) {
+    if watchdog.is_disabled() {
+        return;
+    }
+    // Compared against, rather than tested for PID 1, so a server legitimately
+    // started as a container's or launchd's direct child isn't shot on sight.
+    let original_parent = parent_pid();
+    let tick = watchdog.tick();
+    std::thread::spawn(move || {
+        let mut cancelled: Option<Instant> = None;
+        loop {
+            std::thread::sleep(tick);
+            if watchdog.exit_when_reparented && parent_pid() != original_parent {
+                eprintln!("[mmcg] watchdog: parent {original_parent} is gone, exiting");
+                std::process::exit(0);
+            }
+            let current = in_flight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let Some(current) = current else {
+                cancelled = None;
+                continue;
+            };
+            let elapsed = current.started.elapsed();
+            match watchdog.action(elapsed, cancelled == Some(current.started)) {
+                WatchdogAction::Wait => {}
+                WatchdogAction::Cancel => {
+                    eprintln!(
+                        "[mmcg] watchdog: cancelling request {} after {}ms",
+                        current.id,
+                        elapsed.as_millis()
+                    );
+                    cancel.cancel();
+                    cancelled = Some(current.started);
+                }
+                WatchdogAction::Exit => {
+                    eprintln!(
+                        "[mmcg] watchdog: request {} wedged {}s past every budget, exiting",
+                        current.id,
+                        elapsed.as_secs()
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+    });
+}
+
 /// Run as an MCP stdio server. Blocks until stdin closes.
 pub fn serve(mut store: Store) -> io::Result<()> {
     let input = io::BufReader::new(StdinSource(io::stdin()));
     let stdout = io::stdout();
-    serve_io(&mut store, input, stdout.lock())
+    serve_io_watched(&mut store, input, stdout.lock(), Watchdog::from_env())
+}
+
+/// Unwatched: a watchdog that can call `process::exit` has no business running
+/// inside the test binary.
+#[cfg(test)]
+fn serve_io<R, W>(store: &mut Store, input: R, output: W) -> io::Result<()>
+where
+    R: BufRead + Send + 'static,
+    W: Write,
+{
+    serve_io_watched(store, input, output, Watchdog::disabled())
 }
 
 /// Frames read from `input` on a dedicated background thread and delivered to
@@ -248,7 +425,12 @@ pub fn serve(mut store: Store) -> io::Result<()> {
 /// loop still consumes frames and answers requests one at a time — the
 /// concurrency model is otherwise unchanged; a `ping` sent while a query runs
 /// still waits, bounded by the query's work budget rather than fixed here.
-fn serve_io<R, W>(store: &mut Store, input: R, mut output: W) -> io::Result<()>
+fn serve_io_watched<R, W>(
+    store: &mut Store,
+    input: R,
+    mut output: W,
+    watchdog: Watchdog,
+) -> io::Result<()>
 where
     R: BufRead + Send + 'static,
     W: Write,
@@ -263,9 +445,11 @@ where
     // on finish, and the reader's cancel-id equality check runs under the
     // same lock — closing the race where `cancel(N)` lands after N finished
     // and would otherwise abort N+1.
-    let in_flight: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+    let in_flight: Arc<Mutex<Option<InFlight>>> = Arc::new(Mutex::new(None));
     let cancel_handle = store.cancel_handle();
     let (frame_tx, frame_rx) = mpsc::channel::<ReaderMsg>();
+
+    spawn_watchdog(watchdog, Arc::clone(&in_flight), cancel_handle.clone());
 
     let reader_in_flight = Arc::clone(&in_flight);
     let reader = std::thread::spawn(move || {
@@ -278,7 +462,7 @@ where
                         let guard = reader_in_flight
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        if guard.as_ref() == Some(&target_id) {
+                        if guard.as_ref().map(|current| &current.id) == Some(&target_id) {
                             cancel_handle.cancel();
                         }
                         drop(guard);
@@ -318,7 +502,10 @@ where
                 if let Some(id) = &request_id {
                     *in_flight
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(id.clone());
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(InFlight {
+                        id: id.clone(),
+                        started: Instant::now(),
+                    });
                 }
                 let response = handle_line(&mut state, store, trimmed);
                 if request_id.is_some() {
@@ -2550,6 +2737,119 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_secs(2),
             "cancel should interrupt well before the walk's own internal 2s cap: {elapsed:?}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn watchdog_escalates_from_wait_through_cancel_to_exit() {
+        let watchdog = Watchdog {
+            soft: Some(Duration::from_millis(100)),
+            hard: Some(Duration::from_millis(500)),
+            exit_when_reparented: false,
+        };
+
+        assert_eq!(
+            watchdog.action(Duration::from_millis(99), false),
+            WatchdogAction::Wait
+        );
+        assert_eq!(
+            watchdog.action(Duration::from_millis(100), false),
+            WatchdogAction::Cancel
+        );
+        // Already cancelled: don't re-fire every tick for the same request.
+        assert_eq!(
+            watchdog.action(Duration::from_millis(400), true),
+            WatchdogAction::Wait
+        );
+        // The hard ceiling ignores that: a cancel that didn't land is exactly
+        // what it exists for.
+        assert_eq!(
+            watchdog.action(Duration::from_millis(500), true),
+            WatchdogAction::Exit
+        );
+    }
+
+    #[test]
+    fn watchdog_without_ceilings_never_acts() {
+        let watchdog = Watchdog::disabled();
+        assert!(watchdog.is_disabled());
+        assert_eq!(
+            watchdog.action(Duration::from_secs(86_400), false),
+            WatchdogAction::Wait
+        );
+    }
+
+    #[test]
+    fn watchdog_ceilings_read_zero_as_disabled_and_garbage_as_default() {
+        let zero = "MMCG_TEST_WATCHDOG_ZERO";
+        std::env::set_var(zero, "0");
+        assert_eq!(timeout_from_env(zero, 1_000), None);
+        std::env::remove_var(zero);
+
+        let garbage = "MMCG_TEST_WATCHDOG_GARBAGE";
+        std::env::set_var(garbage, "soon");
+        assert_eq!(
+            timeout_from_env(garbage, 1_234),
+            Some(Duration::from_millis(1_234))
+        );
+        std::env::remove_var(garbage);
+
+        assert_eq!(
+            timeout_from_env("MMCG_TEST_WATCHDOG_UNSET", 1_234),
+            Some(Duration::from_millis(1_234))
+        );
+    }
+
+    #[test]
+    fn watchdog_tick_stays_under_the_tightest_ceiling() {
+        let tight = Watchdog {
+            soft: Some(Duration::from_millis(20)),
+            hard: Some(Duration::from_secs(300)),
+            exit_when_reparented: false,
+        };
+        assert_eq!(tight.tick(), Duration::from_millis(10));
+        assert_eq!(Watchdog::from_env().tick(), WATCHDOG_TICK);
+    }
+
+    /// An unlimited work budget means SQLite's progress handler never
+    /// interrupts this walk — without the watchdog it runs to its own internal
+    /// cap with nothing else able to stop it.
+    #[test]
+    fn watchdog_soft_ceiling_interrupts_a_request_the_work_budget_would_not() {
+        let path = std::env::temp_dir().join("mmcg_mcp_watchdog_soft.db");
+        let _ = std::fs::remove_file(&path);
+        let mut store = crate::store::Store::open(&path).unwrap();
+        store.set_default_work_budget(WorkBudget::UNLIMITED);
+        seed_dense_collision_fixture(&store);
+
+        let slow_call = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mmcg_impact","arguments":{"name":"node0","max_depth":10}}}"#;
+        let input = format!("{INITIALIZE_LINE}\n{INITIALIZED_LINE}\n{slow_call}\n");
+        let watchdog = Watchdog {
+            soft: Some(Duration::from_millis(10)),
+            hard: None,
+            exit_when_reparented: false,
+        };
+
+        let mut output = CountingWriter::default();
+        serve_io_watched(
+            &mut store,
+            Cursor::new(input.into_bytes()),
+            &mut output,
+            watchdog,
+        )
+        .unwrap();
+
+        let text = String::from_utf8(output.bytes).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        let call_response: Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(call_response["id"], 1);
+        assert_eq!(call_response["result"]["isError"], true);
+        assert_eq!(
+            unwrap_content(&call_response["result"])
+                .get("code")
+                .and_then(Value::as_str),
+            Some("cancelled")
         );
         let _ = std::fs::remove_file(&path);
     }

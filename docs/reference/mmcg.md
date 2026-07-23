@@ -343,13 +343,22 @@ mmcg serve
 | `MMCG_INDEX_PATH` | no | `.mastermind/mmcg.db` (relative to cwd) | Where the SQLite index lives. |
 | `MMCG_QUERY_BUDGET_MS` | no | `10000` for `mmcg serve`; `60000` for `mmcg query`/`mmcg impact` | Wall-clock work budget for a single MCP tool call or CLI query. `0` = unlimited. See [Work budgets, timeouts, and cancellation](#work-budgets-timeouts-and-cancellation). |
 | `MMCG_GIT_TIMEOUT_MS` | no | `30000` | Deadline for the `git` subprocesses behind `mmcg_symbols_changed_since` / `mmcg query symbols-changed-since`. A stuck `git` is killed and the call fails with a timeout error. |
+| `MMCG_REQUEST_SOFT_TIMEOUT_MS` | no | `30000` | `mmcg serve` only. Wall-clock ceiling after which the watchdog cancels the in-flight request. `0` = no soft ceiling. See [Work budgets, timeouts, and cancellation](#work-budgets-timeouts-and-cancellation). |
+| `MMCG_REQUEST_HARD_TIMEOUT_MS` | no | `300000` | `mmcg serve` only. Wall-clock ceiling after which the watchdog exits the process rather than let it keep burning CPU. `0` = no hard ceiling. |
+| `MMCG_WATCHDOG` | no | unset | Set to `0` to disable the serve watchdog entirely — both ceilings and the reparent check. |
 
 ## Work budgets, timeouts, and cancellation
 
 A single pathological query — a dense name-collision graph, a huge scoped
 `mmcg_map`, a stuck `git` subprocess — used to be able to run for hours and
-wedge every subsequent call in the session. Every query path is now covered by
-a work budget:
+wedge every subsequent call in the session. Two independent mechanisms bound
+that now: a **work budget** enforced inside SQLite, and a **watchdog** that
+bounds the request as a whole.
+
+The distinction matters. The work budget is a SQLite progress handler, so it
+can only interrupt work that is executing *inside* SQLite. A handler that
+spends its time in a Rust graph walk, an indexing pass, or waiting on a `git`
+subprocess never reaches it. The watchdog is what covers those paths.
 
 - **MCP serve** installs `MMCG_QUERY_BUDGET_MS` (default 10,000 ms; `0` =
   unlimited) around every `tools/call` dispatch, before the handler runs.
@@ -386,6 +395,19 @@ a work budget:
   `MMCG_GIT_TIMEOUT_MS` (default 30,000 ms). The per-file diff loop is
   additionally capped at 10,000 files; beyond that, `truncated: true` marks
   the response as a prefix, not the full diff.
+- **Serve watchdog.** `mmcg serve` runs a polling thread that measures each
+  in-flight request on the wall clock, independent of where the time is being
+  spent. It escalates: at `MMCG_REQUEST_SOFT_TIMEOUT_MS` (default 30,000 ms) it
+  cancels the request exactly as a client cancel would; at
+  `MMCG_REQUEST_HARD_TIMEOUT_MS` (default 300,000 ms) it exits the process. The
+  hard ceiling exists because a cancel only lands on SQLite work — if a request
+  is wedged somewhere else, exiting is the only bound left, and MCP clients
+  respawn stdio servers cleanly. Set `MMCG_WATCHDOG=0` to disable both.
+- **Reparent check.** The same thread exits when the server's parent process
+  changes. `bin/mmcg.js` spawns the binary with `stdio: "inherit"`, so stdin
+  belongs to the MCP client rather than to the node wrapper — if the wrapper
+  dies, EOF never arrives on its own and the server would otherwise linger
+  indefinitely.
 - **Connection defaults.** Every index open sets `busy_timeout = 5000` and
   `cache_size = -65536` (64 MiB), sane defaults for multi-hundred-MB
   databases under concurrent `serve`/`watch` access.

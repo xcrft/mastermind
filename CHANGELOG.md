@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `mmcg serve` could burn a CPU core indefinitely on a wedged request. The
+  1.1.0 work budget is a SQLite progress handler, so it only bounds work
+  executing *inside* SQLite — a request stuck in a Rust graph walk, an indexing
+  pass, or a `git` wait was never interrupted by it. A watchdog thread now
+  measures each in-flight request on the wall clock and escalates: cancel at
+  `MMCG_REQUEST_SOFT_TIMEOUT_MS` (default 30,000 ms), exit the process at
+  `MMCG_REQUEST_HARD_TIMEOUT_MS` (default 300,000 ms). `MMCG_WATCHDOG=0`
+  disables it.
+- The two subprocess-wait loops in `diff.rs` used `thread::park_timeout` as a
+  sleep. It returns immediately when the thread holds an unpark token, and the
+  sibling output-drain threads communicate over `mpsc`, which parks and unparks
+  that same thread — a stray token turned the wait into a spin that burned a
+  full core until the git deadline expired. Both now use `thread::sleep`.
+- `mmcg serve` now exits when its parent process changes. The npm wrapper
+  spawns the binary with `stdio: "inherit"`, so stdin belongs to the MCP client
+  rather than to the wrapper; if the wrapper died, EOF never arrived and the
+  server lingered indefinitely.
+
 ## [1.1.0] - 2026-07-22
 
 ### Added

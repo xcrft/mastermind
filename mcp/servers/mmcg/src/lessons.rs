@@ -202,7 +202,7 @@ fn stable_id(task_id: &str, kind: &str, observation: &str) -> String {
     hash.update(kind.as_bytes());
     hash.update([0]);
     hash.update(observation.as_bytes());
-    let digest = format!("{:x}", hash.finalize());
+    let digest = crate::hex::encode(&hash.finalize());
     format!("lesson-{}", &digest[..16])
 }
 

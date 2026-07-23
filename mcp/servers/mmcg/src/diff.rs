@@ -876,7 +876,7 @@ pub(crate) fn working_tree_snapshot_token(
             digest.update(Sha256::digest(bytes));
         }
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(crate::hex::encode(&digest.finalize()))
 }
 
 struct PerFileDiff {

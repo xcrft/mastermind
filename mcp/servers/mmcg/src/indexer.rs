@@ -731,7 +731,7 @@ pub(crate) fn parse_blob(
     let mut pending = PendingFile {
         path: rel_path.to_string(),
         mtime,
-        content_sha256: format!("{:x}", Sha256::digest(source)),
+        content_sha256: crate::hex::encode(&Sha256::digest(source)),
         language,
         symbols: Vec::new(),
         edges: Vec::new(),
@@ -1093,7 +1093,7 @@ mod incremental_tests {
         );
         assert_eq!(
             store.file_content_sha256("app.py").unwrap().as_deref(),
-            Some(format!("{:x}", Sha256::digest(bytes)).as_str())
+            Some(crate::hex::encode(&Sha256::digest(bytes)).as_str())
         );
         fs::remove_dir_all(&dir).ok();
     }

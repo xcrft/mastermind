@@ -85,6 +85,24 @@ and truncation caveats; source reads and tests remain authoritative for runtime 
 The controller is the only owner of `state.json`, `audit.md`, lessons, and
 release eligibility. A missing or malformed executor report fails post-flight.
 
+### Discipline routing
+
+`mmcg_change_impact` reports a `disciplines` block derived from the changed
+paths. Read it instead of classifying the request yourself, and load at most one
+research skill and one audit skill per detected discipline:
+
+| discipline | before the change | after the change |
+|---|---|---|
+| `frontend` | [[mastermind-component-research]] | [[mastermind-frontend-audit]] |
+| `qa` | [[mastermind-test-impact]] | — |
+
+`unclassified` paths are not "no discipline" — they are paths whose discipline a
+path cannot establish. A queue consumer in a plain `.ts` file lands there, and
+deciding it needs [[mastermind-architecture-review]] is your judgement, not the
+classifier's. The block proposes an evidence set; it never locks one.
+
+Pre-flight, before a diff exists, route on the paths named in the spec's Scope.
+
 ### Role routing
 
 - Researcher: bounded batches of repository facts.

@@ -29,7 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   append-only predecessor could not lose. The merge now writes through
   `audit_bundle::write_atomic` (unique temp file, `sync_all`, rename). The
   exclusive lock moved to a dedicated `_lessons.md.lock`, because a lock held on
-  a path that rename replaces stops serializing the next writer.
+  a path that rename replaces stops serializing the next writer. The lock path
+  gets the same symlink refusal as the lessons file.
 - `CI — mmcg` now reports an aggregate `cargo test + clippy + fmt` status.
   Branch protection cannot name a matrix job, and each target had been reporting
   only under its own name since the matrix landed, so the required check waited

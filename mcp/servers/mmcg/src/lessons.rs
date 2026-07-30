@@ -101,11 +101,14 @@ struct Candidate {
 
 fn append_candidate(repo_root: &Path, candidate: Candidate) -> std::io::Result<bool> {
     let lessons_path = repo_root.join(".mastermind/tasks/_lessons.md");
-    if fs::symlink_metadata(&lessons_path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "refusing to write lessons through a symlink",
-        ));
+    let lock_path = lessons_path.with_file_name(SEPARATE_LOCK_SURVIVING_RENAME);
+    for path in [&lessons_path, &lock_path] {
+        if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "refusing to write lessons through a symlink",
+            ));
+        }
     }
     if let Some(parent) = lessons_path.parent() {
         fs::create_dir_all(parent)?;
@@ -114,7 +117,7 @@ fn append_candidate(repo_root: &Path, candidate: Candidate) -> std::io::Result<b
         .create(true)
         .write(true)
         .truncate(false)
-        .open(lessons_path.with_file_name(SEPARATE_LOCK_SURVIVING_RENAME))?;
+        .open(&lock_path)?;
     lock.lock_exclusive()?;
 
     let result = (|| {
@@ -593,5 +596,22 @@ mod tests {
         let spec = PathBuf::from(".mastermind/tasks/007-retry/spec.md");
         assert!(append_iteration_budget_candidate(dir.path(), &spec, 4).is_err());
         assert_eq!(fs::read_to_string(outside).unwrap(), "unchanged\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lesson_writer_rejects_symlink_lock_path() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let tasks = dir.path().join(".mastermind/tasks");
+        fs::create_dir_all(&tasks).unwrap();
+        let outside = dir.path().join("outside.lock");
+        symlink(&outside, tasks.join(SEPARATE_LOCK_SURVIVING_RENAME)).unwrap();
+
+        let spec = PathBuf::from(".mastermind/tasks/007-retry/spec.md");
+        assert!(append_iteration_budget_candidate(dir.path(), &spec, 4).is_err());
+        assert!(!outside.exists());
+        assert!(!tasks.join("_lessons.md").exists());
     }
 }

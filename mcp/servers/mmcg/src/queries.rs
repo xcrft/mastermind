@@ -787,7 +787,7 @@ fn classify_disciplines(files: &[ChangedFile]) -> ImpactDisciplines {
     ];
 
     let mut detected = Vec::new();
-    let mut classified: Vec<&str> = Vec::new();
+    let mut classified = std::collections::HashSet::<&str>::new();
     for rule in rules {
         let hits: Vec<&str> = files
             .iter()

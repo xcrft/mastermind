@@ -32,6 +32,7 @@ the installable workflow bundle.
 | Skill | Description |
 |---|---|
 | [`mastermind-comment-audit`](code-review/mastermind-comment-audit/SKILL.md) | Reviews the comment delta of a finished change with quoted evidence, names what it kept, and reports deleted rationale. |
+| [`mastermind-test-audit`](code-review/mastermind-test-audit/SKILL.md) | Checks whether a change's tests prove its behaviour: uncovered symbols, a test on the wrong path, an assertion moved with the code, and non-asserting tests. |
 | [`mastermind-frontend-audit`](code-review/mastermind-frontend-audit/SKILL.md) | Checks a finished UI change against the codegraph: unrendered components, props contracts changed without their callers, duplicates, and raw values shadowing tokens. |
 
 ### design/

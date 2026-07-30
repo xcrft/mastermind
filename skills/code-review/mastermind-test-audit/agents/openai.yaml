@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mastermind Test Audit"
+  short_description: "Check whether the tests prove the change, not just pass"
+  default_prompt: "Use $mastermind-test-audit to review whether this change's tests actually cover what it changed."

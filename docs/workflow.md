@@ -156,6 +156,30 @@ requests are mechanical failures. Viewports and colour scheme are a recorded
 checklist, and an item that was not checked is written as not checked — an
 omitted line reads as a pass.
 
+## Review whether the tests prove the change
+
+A green suite proves the assertions present passed. It does not prove the change
+is covered, and it does not prove those assertions were checking what changed —
+different claims, and only the first runs automatically.
+
+The controller already establishes part of this: `vacuous_test_claim` means a
+verification command provably ran zero tests, and `missing_test` means a planned
+test is absent. `mastermind-test-audit` (skill) and `mastermind-test-auditor`
+(Claude subagent) cover what it cannot. `mmcg_test_impact` classifies candidates
+as `direct`, `transitive`, or `heuristic`, and the classification is the point:
+a `heuristic` candidate is a filename that matched, not evidence the code ran.
+A changed symbol with no `direct` candidate is uncovered behaviour.
+
+Two findings need reading rather than a query. A test can be green, on-topic,
+and still exercise a wrapper or a retired entry point the real caller no longer
+uses — that is a pass about a path nobody runs. And an assertion edited in the
+same diff as the implementation it checks has stopped being an independent check;
+sometimes the contract genuinely moved, sometimes that is how a regression ships
+green, and the review reports the pair rather than deciding silently.
+
+Coverage is still not correctness. A `direct` test proves the code ran, not that
+the expected value is right, and flakiness and ordering are invisible here.
+
 ## What the checks prove
 
 Pre-flight checks required sections, referenced paths, indexed symbols,

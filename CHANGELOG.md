@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The QA discipline gets its audit half. `mastermind-test-audit` (skill) and
+  `mastermind-test-auditor` (Claude subagent) review whether a change's tests
+  prove its behaviour, building on findings the controller already establishes
+  rather than re-deriving them. `mmcg_test_impact`'s `direct` / `transitive` /
+  `heuristic` classification carries the weight: a changed symbol with no
+  `direct` candidate is uncovered, and a `heuristic` candidate is a filename
+  match rather than evidence the code ran. Two findings have no tool behind them
+  and come from reading both sides of the diff — a test that exercises a wrapper
+  or retired entry point the real caller no longer uses, and an assertion edited
+  in the same diff as the implementation it checks. Coverage is still not
+  correctness, and the skill says so.
 - `mmcg_change_impact` now reports a `disciplines` block that routes a change to
   an evidence set from its changed paths, so an agent reads which review applies
   instead of classifying the request from the prompt. `frontend` comes from

@@ -84,6 +84,7 @@ WORKFLOW_ARTIFACTS = frozenset(
     {
         "skills/code-review/mastermind-comment-audit/SKILL.md",
         "skills/code-review/mastermind-frontend-audit/SKILL.md",
+        "skills/code-review/mastermind-test-audit/SKILL.md",
         "skills/coding/no-ai-slop-comments/SKILL.md",
         "skills/design/mastermind-design-intake/SKILL.md",
         "skills/testing/mastermind-browser-verification/SKILL.md",

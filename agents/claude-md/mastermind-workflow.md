@@ -97,8 +97,10 @@ research skill and one audit skill per detected discipline:
 | `qa` | [[mastermind-test-impact]] | [[mastermind-test-audit]] |
 
 `unclassified` paths are not "no discipline" — they are paths whose discipline a
-path cannot establish. A queue consumer in a plain `.ts` file lands there, and
-deciding it needs [[mastermind-architecture-review]] is your judgement, not the
+path cannot establish. A queue consumer, a migration, or an auth boundary in a
+plain `.ts` file lands there. When you judge one to be service or state work, the
+pair is [[mastermind-runtime-research]] before and
+[[mastermind-architecture-review]] after; that call is yours, not the
 classifier's. The block proposes an evidence set; it never locks one.
 
 Pre-flight, before a diff exists, route on the paths named in the spec's Scope.
@@ -113,6 +115,9 @@ Pre-flight, before a diff exists, route on the paths named in the spec's Scope.
 - Executor: implementation within approved scope.
 - Auditor: independent read-only review for Strict work.
 - Comment auditor: comment delta of a finished change, in every mode.
+- Runtime research: who already consumes a service, who writes the state, which
+  boundaries the change crosses — and which invocations the graph cannot see at
+  all. Zero static callers on a handler is a gap, not an absence.
 - Test auditor: does the change's behaviour have a `direct` test that reaches
   the production path — a `heuristic` candidate is a filename match, not
   coverage.

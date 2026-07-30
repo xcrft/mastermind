@@ -180,6 +180,26 @@ green, and the review reports the pair rather than deciding silently.
 Coverage is still not correctness. A `direct` test proves the code ran, not that
 the expected value is right, and flakiness and ordering are invisible here.
 
+## Research a service change before designing it
+
+`mastermind-architecture-review` reconstructs the runtime path and judges the
+design. `mastermind-runtime-research` runs first and answers something narrower:
+who already depends on what is about to change, who writes the state it touches,
+and which boundaries it crosses.
+
+Its most important output is the gap list. The graph is syntactic, so a queue
+producer and its consumer are two static islands with no edge between them, a
+framework-registered handler has no caller, and a DI-resolved implementation is
+reached by a name the source never spells. `mmcg_callers` returning nothing on a
+handler means no static caller was found — not that nothing calls it. An
+architecture review built on "the graph showed no other callers", without the
+list of what the graph could not see, is confident about a question nobody asked.
+
+`mmcg_api_surface` carries the other half: it reports the symbols under a prefix
+that the rest of the codebase actually reaches, independent of what is declared
+public. A module can export twenty symbols and have three real consumers. Those
+three are the contract a change has to keep working.
+
 ## What the checks prove
 
 Pre-flight checks required sections, referenced paths, indexed symbols,

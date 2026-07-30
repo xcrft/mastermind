@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The backend discipline gets its research half. `mastermind-runtime-research`
+  gathers consumers, state writers, and boundary crossings before a service
+  change and feeds `mastermind-architecture-review` rather than duplicating it.
+  It leads with the gap the graph cannot span: a queue producer and its consumer
+  are two static islands, a framework-registered handler has no caller, and a
+  DI-resolved implementation is reached by a name the source never spells — so
+  `mmcg_callers` returning nothing means no static caller was found, not that
+  nothing calls it. `mmcg_api_surface` supplies the empirical contract: the
+  symbols the rest of the codebase actually reaches, which is usually a small
+  subset of what a module exports.
 - The QA discipline gets its audit half. `mastermind-test-audit` (skill) and
   `mastermind-test-auditor` (Claude subagent) review whether a change's tests
   prove its behaviour, building on findings the controller already establishes

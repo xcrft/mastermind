@@ -18,8 +18,11 @@ const HEADER: &str = "# Project lessons\n\n\
 Reusable project knowledge, newest at the bottom. Mechanical audit events enter\n\
 as `candidate`; they are not active guidance until semantic review replaces the\n\
 pending lesson and changes the status to `active`, `resolved`, or `superseded`.\n\n\
-Required fields: Status, Task, Kind, Provenance, Evidence, Supersedes, and\n\
-Reusable lesson.\n\n";
+A repeat of an already-recorded event refreshes that entry — newer evidence, a\n\
+higher occurrence count — instead of adding a sibling. Reviewed entries are\n\
+never rewritten.\n\n\
+Required fields: Status, Task, Kind, Provenance, Evidence, Supersedes,\n\
+Occurrences, Last seen, and Reusable lesson.\n\n";
 
 /// Record a deduplicated lesson candidate for a `Drift`/`Broken` audit.
 /// A held contract is not evidence that a reusable lesson exists.
@@ -34,13 +37,11 @@ pub fn append_audit_candidate(
     let task_id = derive_task_id(spec_path);
     let verdict = verdict_label(report.verdict);
     let observation = summarize_findings(&report.findings);
-    let evidence_fingerprint =
-        serde_json::to_string(&report.findings).unwrap_or_else(|_| observation.clone());
-    let id = stable_id(
-        &task_id,
-        "audit_contract_failure",
-        &format!("{verdict}:{evidence_fingerprint}"),
-    );
+    // Keyed on task + kind alone. Keying on the findings themselves gave every
+    // audit round its own entry, because an iterate-until-green loop shifts the
+    // finding set by an item or two each pass — one task could accumulate a
+    // dozen near-identical candidates, none of them reviewed.
+    let id = stable_id(&task_id, "audit_contract_failure", "");
     let spec = relative_display(repo_root, spec_path);
     let audit = spec_path
         .parent()
@@ -119,31 +120,95 @@ fn append_candidate(repo_root: &Path, candidate: Candidate) -> std::io::Result<b
     let result = (|| {
         let mut body = String::new();
         file.read_to_string(&mut body)?;
-        let heading = format!("## {}", candidate.id);
-        if body.lines().any(|line| line.trim() == heading) {
+        let Some(merged) = merge_candidate(&body, &candidate) else {
             return Ok(false);
-        }
-
-        file.seek(SeekFrom::End(0))?;
-        if body.is_empty() {
-            file.write_all(HEADER.as_bytes())?;
-        } else if !body.ends_with('\n') {
-            file.write_all(b"\n")?;
-        }
-        writeln!(
-            file,
-            "\n{heading}\n\n- **Created:** {}\n- **Status:** candidate\n- **Task:** `{}`\n- **Kind:** `{}`\n- **Observed:** {}\n- **Provenance:** mastermind controller\n- **Evidence:** {}\n- **Supersedes:** none\n- **Reusable lesson:** pending semantic review\n",
-            today_ymd(),
-            candidate.task_id,
-            candidate.kind,
-            candidate.observed,
-            candidate.evidence,
-        )?;
+        };
+        file.set_len(0)?;
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(merged.as_bytes())?;
         file.sync_data()?;
         Ok(true)
     })();
     FileExt::unlock(&file)?;
     result
+}
+
+/// Fold `candidate` into `body`, returning the new file contents or `None` when
+/// nothing should change.
+///
+/// A re-occurrence refreshes the existing entry rather than appending a sibling:
+/// same lesson, newer evidence, one more occurrence. An entry that semantic
+/// review has already moved off `candidate` is left exactly as it is — the
+/// reviewer's text is the durable artifact, and later mechanical noise must not
+/// reopen or overwrite it.
+fn merge_candidate(body: &str, candidate: &Candidate) -> Option<String> {
+    let heading = format!("## {}", candidate.id);
+    let lines: Vec<&str> = body.lines().collect();
+    let Some(start) = lines.iter().position(|line| line.trim() == heading) else {
+        let mut merged = if body.is_empty() {
+            HEADER.to_string()
+        } else {
+            let mut existing = body.to_string();
+            if !existing.ends_with('\n') {
+                existing.push('\n');
+            }
+            existing
+        };
+        merged.push_str(&render_entry(candidate, &today_ymd(), 1));
+        return Some(merged);
+    };
+
+    let end = lines[start + 1..]
+        .iter()
+        .position(|line| line.starts_with("## "))
+        .map_or(lines.len(), |offset| start + 1 + offset);
+    let section = &lines[start..end];
+    if field(section, "Status") != Some("candidate") {
+        return None;
+    }
+    let today = today_ymd();
+    let created = field(section, "Created").unwrap_or(&today).to_string();
+    let occurrences = field(section, "Occurrences")
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(1)
+        .saturating_add(1);
+
+    let mut merged = String::new();
+    for line in &lines[..start] {
+        merged.push_str(line);
+        merged.push('\n');
+    }
+    // `render_entry` opens with a blank line, so drop the one already sitting
+    // between the previous entry and this heading to avoid doubling it.
+    while merged.ends_with("\n\n") {
+        merged.pop();
+    }
+    merged.push_str(&render_entry(candidate, &created, occurrences));
+    for line in &lines[end..] {
+        merged.push_str(line);
+        merged.push('\n');
+    }
+    Some(merged)
+}
+
+fn render_entry(candidate: &Candidate, created: &str, occurrences: u32) -> String {
+    format!(
+        "\n## {}\n\n- **Created:** {created}\n- **Last seen:** {}\n- **Occurrences:** {occurrences}\n- **Status:** candidate\n- **Task:** `{}`\n- **Kind:** `{}`\n- **Observed:** {}\n- **Provenance:** mastermind controller\n- **Evidence:** {}\n- **Supersedes:** none\n- **Reusable lesson:** pending semantic review\n",
+        candidate.id,
+        today_ymd(),
+        candidate.task_id,
+        candidate.kind,
+        candidate.observed,
+        candidate.evidence,
+    )
+}
+
+fn field<'a>(section: &[&'a str], name: &str) -> Option<&'a str> {
+    let prefix = format!("- **{name}:** ");
+    section
+        .iter()
+        .find_map(|line| line.strip_prefix(prefix.as_str()))
+        .map(str::trim)
 }
 
 fn verdict_label(verdict: Verdict) -> &'static str {
@@ -343,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn drift_verdict_creates_structured_candidate_and_deduplicates() {
+    fn every_audit_failure_for_a_task_folds_into_one_candidate() {
         let dir = std::env::temp_dir().join("mmcg_lessons_drift");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -369,20 +434,20 @@ mod tests {
         assert!(body.contains("not persisted"));
         assert!(body.contains("1× scope creep"));
 
-        assert!(!append_audit_candidate(&dir, &spec, &r).unwrap());
-        let deduplicated = fs::read_to_string(&lessons).unwrap();
-        assert_eq!(deduplicated.matches("**Status:** candidate").count(), 1);
+        assert!(body.contains("**Occurrences:** 1"));
 
-        let same_category_different_evidence = report(
+        // Different evidence, then a different verdict entirely: the audit loop
+        // reshapes its finding set every pass, and each pass used to mint its
+        // own candidate. All of it now folds into the one entry for this task.
+        let different_evidence = report(
             Verdict::Drift,
             vec![Finding::UnexpectedFile {
                 file: "src/other.rs".into(),
             }],
         );
-        assert!(append_audit_candidate(&dir, &spec, &same_category_different_evidence).unwrap());
+        assert!(append_audit_candidate(&dir, &spec, &different_evidence).unwrap());
 
-        // A materially different verdict gets its own candidate.
-        let r2 = report(
+        let broken = report(
             Verdict::Broken,
             vec![
                 Finding::SnapshotSymbolGone {
@@ -393,25 +458,64 @@ mod tests {
                 },
             ],
         );
-        append_audit_candidate(&dir, &spec, &r2).unwrap();
+        assert!(append_audit_candidate(&dir, &spec, &broken).unwrap());
+
         let body2 = fs::read_to_string(&lessons).unwrap();
         assert_eq!(body2.matches("# Project lessons").count(), 1);
-        assert_eq!(body2.matches("**Status:** candidate").count(), 3);
+        assert_eq!(body2.matches("**Status:** candidate").count(), 1);
+        assert_eq!(body2.matches("## lesson-").count(), 1);
+        assert!(body2.contains("**Occurrences:** 3"));
+        // Refreshed to the newest observation, not frozen at the first.
         assert!(body2.contains("contract broken"));
         assert!(body2.contains("2× snapshot symbol gone"));
+        assert!(!body2.contains("1× scope creep"));
 
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn iteration_budget_candidate_is_idempotent() {
+    fn semantic_review_survives_later_mechanical_noise() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = PathBuf::from(".mastermind/tasks/042-name/spec.md");
+        let first = report(
+            Verdict::Drift,
+            vec![Finding::UnexpectedFile {
+                file: "src/extra.rs".into(),
+            }],
+        );
+        assert!(append_audit_candidate(dir.path(), &spec, &first).unwrap());
+
+        let lessons = dir.path().join(".mastermind/tasks/_lessons.md");
+        let reviewed = fs::read_to_string(&lessons)
+            .unwrap()
+            .replace("**Status:** candidate", "**Status:** active")
+            .replace(
+                "**Reusable lesson:** pending semantic review",
+                "**Reusable lesson:** scope the spec before handing off.",
+            );
+        fs::write(&lessons, &reviewed).unwrap();
+
+        let later = report(
+            Verdict::Broken,
+            vec![Finding::SnapshotSymbolGone {
+                symbol: "foo".into(),
+            }],
+        );
+        assert!(!append_audit_candidate(dir.path(), &spec, &later).unwrap());
+        assert_eq!(fs::read_to_string(&lessons).unwrap(), reviewed);
+    }
+
+    #[test]
+    fn iteration_budget_candidate_stays_a_single_entry() {
         let dir = tempfile::tempdir().unwrap();
         let spec = PathBuf::from(".mastermind/tasks/007-retry/spec.md");
         assert!(append_iteration_budget_candidate(dir.path(), &spec, 4).unwrap());
-        assert!(!append_iteration_budget_candidate(dir.path(), &spec, 5).unwrap());
+        assert!(append_iteration_budget_candidate(dir.path(), &spec, 5).unwrap());
         let body = fs::read_to_string(dir.path().join(".mastermind/tasks/_lessons.md")).unwrap();
-        assert!(body.contains("iteration_budget_exhausted"));
         assert_eq!(body.matches("iteration_budget_exhausted").count(), 1);
+        assert_eq!(body.matches("## lesson-").count(), 1);
+        assert!(body.contains("**Occurrences:** 2"));
+        assert!(body.contains("iteration 5"));
     }
 
     #[test]
@@ -433,14 +537,16 @@ mod tests {
                 .unwrap()
             }));
         }
-        let writes = threads
-            .into_iter()
-            .map(|thread| thread.join().unwrap())
-            .filter(|wrote| *wrote)
-            .count();
-        assert_eq!(writes, 1);
+        for thread in threads {
+            assert!(thread.join().unwrap());
+        }
+        // The lock has to serialize a full read-modify-write now, not just an
+        // append: eight racing writers must still leave one entry, and the
+        // occurrence count must not have lost an update.
         let body = fs::read_to_string(root.join(".mastermind/tasks/_lessons.md")).unwrap();
         assert_eq!(body.matches("iteration_budget_exhausted").count(), 1);
+        assert_eq!(body.matches("## lesson-").count(), 1);
+        assert!(body.contains("**Occurrences:** 8"));
     }
 
     #[test]

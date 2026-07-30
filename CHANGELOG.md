@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Comment discipline is now verified by a reader instead of trusted to the
+  writer. `mastermind-comment-audit` (portable skill) and
+  `mastermind-comment-auditor` (Claude subagent) review only the comments a
+  finished change added, modified, or deleted. A finding must carry the comment
+  verbatim plus the code line that already says it, the report names what it
+  kept so that flagging nothing is a complete result, and deleted rationale is
+  reported as `removed_rationale` — a regression no write-time rule catches.
+  Read-only, and no `held` / `drift` / `broken` verdict. Two entry points: after
+  `run-task --post-only` for verified and strict tasks, and directly against the
+  branch point for Direct work, which has no controller. `run-task` post-flight
+  prints the reminder with the recorded baseline on `held` and `drift`, and
+  withholds it on `broken`, where the executor has yet to iterate. The write-time
+  `no-ai-slop-comments` rule and the executor's gate are unchanged.
+
 ## [1.1.1] - 2026-07-23
 
 ### Fixed

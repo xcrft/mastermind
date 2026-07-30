@@ -82,6 +82,7 @@ SUITES = {
 
 WORKFLOW_ARTIFACTS = frozenset(
     {
+        "skills/code-review/mastermind-comment-audit/SKILL.md",
         "skills/coding/no-ai-slop-comments/SKILL.md",
         "skills/debugging/mastermind-investigation-ledger/SKILL.md",
         "skills/prompt-engineering/mastermind-prompt-refiner/SKILL.md",

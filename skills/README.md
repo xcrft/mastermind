@@ -27,6 +27,11 @@ the installable workflow bundle.
 |---|---|
 | [`no-ai-slop-comments`](coding/no-ai-slop-comments/SKILL.md) | Keeps useful comments and removes narration introduced by the current change without widening scope. |
 
+### code-review/
+| Skill | Description |
+|---|---|
+| [`mastermind-comment-audit`](code-review/mastermind-comment-audit/SKILL.md) | Reviews the comment delta of a finished change with quoted evidence, names what it kept, and reports deleted rationale. |
+
 ### debugging/
 | Skill | Description |
 |---|---|

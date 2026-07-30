@@ -837,7 +837,7 @@ fn run_post(
     // Mechanical failures become deduplicated candidates. Only semantic review
     // can promote one to an active reusable lesson.
     match crate::lessons::append_audit_candidate(repo_root, spec_path, &audit) {
-        Ok(true) => println!("  appended lesson candidate → .mastermind/tasks/_lessons.md"),
+        Ok(true) => println!("  recorded lesson candidate → .mastermind/tasks/_lessons.md"),
         Err(e) => eprintln!("  warning: lessons append failed: {e}"),
         _ => {}
     }
@@ -852,6 +852,10 @@ fn run_post(
         audit_spec::Verdict::Drift => Outcome::PostDrift,
         audit_spec::Verdict::Broken => Outcome::PostBroken,
     };
+
+    if let Some(hint) = comment_audit_hint(outcome, &state.baseline_ref) {
+        println!("{hint}");
+    }
 
     if matches!(outcome, Outcome::PostHeld) {
         let notes = compute_release_notes(
@@ -928,6 +932,12 @@ fn run_post(
     outcome
 }
 
+fn comment_audit_hint(outcome: Outcome, baseline_ref: &str) -> Option<String> {
+    matches!(outcome, Outcome::PostHeld | Outcome::PostDrift).then(|| {
+        format!("  next: review the comment delta vs `{baseline_ref}` — `mastermind-comment-audit`")
+    })
+}
+
 /// Invoke `claude -p` synchronously on this spec, streaming stdout/stderr to the
 /// user's terminal. Err on spawn failure or non-zero exit so the caller keeps
 /// state for retry.
@@ -963,6 +973,18 @@ mod tests {
     use std::env;
     use std::fs;
     use std::process::Command;
+
+    #[test]
+    fn comment_audit_hint_is_withheld_while_the_executor_still_iterates() {
+        assert!(comment_audit_hint(Outcome::PostBroken, "main").is_none());
+
+        for outcome in [Outcome::PostHeld, Outcome::PostDrift] {
+            let hint = comment_audit_hint(outcome, "main")
+                .unwrap_or_else(|| panic!("expected a hint for {outcome:?}"));
+            assert!(hint.contains("mastermind-comment-audit"), "{hint}");
+            assert!(hint.contains("main"), "{hint}");
+        }
+    }
 
     fn tmp(name: &str) -> PathBuf {
         let p = env::temp_dir().join(format!(

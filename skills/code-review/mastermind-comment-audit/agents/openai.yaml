@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mastermind Comment Audit"
+  short_description: "Review the comments a finished change added or deleted"
+  default_prompt: "Use $mastermind-comment-audit to review the comment delta of this change against the baseline."

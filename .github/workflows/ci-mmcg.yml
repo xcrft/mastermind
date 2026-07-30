@@ -213,3 +213,17 @@ jobs:
           # `test_smoke_passes`, documented as warning-only) — exit 0 expected.
           "$BIN" audit-spec spec.md --since baseline
           rm -rf "$SMOKE"
+
+  # Branch protection cannot name a matrix job — each entry reports under its own
+  # target. This aggregate reports the single required context, and `always()`
+  # keeps it reporting when a target fails or is cancelled.
+  required:
+    name: cargo test + clippy + fmt
+    needs: matrix
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every matrix target to succeed
+        run: |
+          echo "matrix result: ${{ needs.matrix.result }}"
+          test "${{ needs.matrix.result }}" = "success"

@@ -100,6 +100,16 @@ state, retry, migration, or public-contract boundaries. It reconstructs the
 real runtime path and tests source-of-truth ownership, idempotency, and
 backward compatibility against concrete failure sequences.
 
+### Review the comments a change left behind
+
+Use `/mastermind-comment-audit` (or the `mastermind-comment-auditor` subagent)
+once an implementation is finished. It reviews only the comments that change
+added, modified, or deleted: narration is flagged with the code line that already
+says it, load-bearing comments are named as kept, and rationale the change
+deleted is reported. Write-time comment rules are the first thing an
+implementation agent drops, and the mechanical contract cannot see them — so a
+reader verifies them, in every mode.
+
 ### Ask why the project works this way
 
 ```bash

@@ -34,11 +34,15 @@ Use the lightest mode that fits the risk:
 
 | Mode | Use | Flow |
 |---|---|---|
-| **Direct** | Small, reversible, clear work | inspect → impact if useful → implement → tests |
+| **Direct** | Small, reversible, clear work | inspect → impact if useful → implement → tests → comment audit |
 | **Verified** | Normal multi-file or delegated work | compact task contract → deterministic pre/post gates → semantic review |
 | **Strict** | Auth, billing, migration, public API, data loss, supply chain | verified flow + critic/security/rollback evidence + independent auditor |
 
 Do not create a spec for Direct work.
+
+Direct work has no controller and no post-flight, so the only review it gets is
+the one you run. Use `mastermind-comment-auditor` on the branch point once the
+change is finished.
 
 ### Grounding
 
@@ -71,7 +75,9 @@ and truncation caveats; source reads and tests remain authoritative for runtime 
    mastermind run-task .mastermind/tasks/<task>/spec.md --post-only
    ```
 
-7. Perform semantic review. Strict work additionally requires the read-only
+7. Spawn `mastermind-comment-auditor` on the post-flight baseline. Its findings
+   are input to your semantic review, not a verdict.
+8. Perform semantic review. Strict work additionally requires the read-only
    `mastermind-auditor`.
 
 The controller is the only owner of `state.json`, `audit.md`, lessons, and
@@ -86,6 +92,7 @@ release eligibility. A missing or malformed executor report fails post-flight.
   supply chain, or audit policy.
 - Executor: implementation within approved scope.
 - Auditor: independent read-only review for Strict work.
+- Comment auditor: comment delta of a finished change, in every mode.
 
 Skip roles that add no new evidence.
 

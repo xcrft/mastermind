@@ -17,6 +17,7 @@ Configurations that shape **how an agent behaves** in a project or session — d
 | [`mastermind-researcher`](subagents/mastermind-researcher.md) | Haiku-tier fact-gatherer. Runs grep/read/glob and returns structured citations, never decides. |
 | [`mastermind-task-executor`](subagents/mastermind-task-executor.md) | Executes an approved task by acceptance criteria, uses bounded in-scope repair, and writes the canonical report. |
 | [`mastermind-auditor`](subagents/mastermind-auditor.md) | Post-flight auditor. Verifies executor report claims against `git diff` and mmcg. |
+| [`mastermind-comment-auditor`](subagents/mastermind-comment-auditor.md) | Post-implementation comment reviewer. Flags added narration with quoted evidence and reports deleted rationale. |
 | [`mastermind-security-auditor`](subagents/mastermind-security-auditor.md) | Independent security reviewer. Spawned only on security-sensitive scope (auth, tools, secrets, delegation, supply chain, prompt injection); optional OWASP ASI mode. |
 
 ### claude-md/

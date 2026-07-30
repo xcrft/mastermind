@@ -25,6 +25,7 @@ mastermind impact --since main
 # implement the change
 mastermind impact --since main
 # run focused tests and the repository-required gate
+# review the comment delta with `mastermind-comment-audit`
 ```
 
 This is the normal path for a small fix. Mastermind supplies structural facts;
@@ -68,10 +69,14 @@ inventing a decision or lesson.
 `drift` or `broken` keeps the task blocked for planner review. A completed task
 is idempotent unless `--post-only` explicitly requests another audit.
 
-Mechanical `drift` and `broken` findings create a deduplicated lesson
-`candidate` with provenance and evidence. It becomes reusable guidance only
-after semantic review supplies the actual lesson and changes its status to
-`active`, `resolved`, or `superseded`. A successful task may still produce a
+Mechanical `drift` and `broken` findings create a lesson `candidate` with
+provenance and evidence — **one per task**, keyed on the task alone. A later
+failure on the same task refreshes that entry to the newest observation and
+raises its `Occurrences` count rather than filing a sibling, so an
+iterate-until-green loop leaves one reviewable record instead of a pile of
+near-identical ones. It becomes reusable guidance only after semantic review
+supplies the actual lesson and changes its status to `active`, `resolved`, or
+`superseded`; once reviewed, later mechanical noise never rewrites it. A successful task may still produce a
 durable lesson; a failed audit does not automatically prove one.
 
 `run-task --exec` is a legacy convenience that shells out to `claude -p`.
@@ -89,6 +94,33 @@ risk controls: alternatives, evidence ledger, rollback/migration, a design
 critic, and a read-only independent auditor. Security review is required when
 the change crosses auth, secrets, permissions, agent/tool boundaries, or the
 supply chain.
+
+## Review the comment delta
+
+Comment discipline is asked of the implementation agent, but an agent optimizing
+for acceptance criteria drops it first, and the mechanical contract cannot see
+it: post-flight proves that a file changed, not that the change stopped
+narrating itself. So the rule is verified by a reader.
+
+`mastermind-comment-audit` (skill, portable) and `mastermind-comment-auditor`
+(Claude subagent) review only the comments a change added, modified, or deleted.
+They are read-only: findings carry the comment verbatim, the code line that
+already says it, and what would be lost — and the report names what it kept, so
+a reviewer that flags nothing is reporting a clean result rather than failing.
+Deleted rationale is reported too; a rename that takes a non-obvious `why` with
+it is a regression no write-time rule catches.
+
+Two entry points, because Direct work has no controller:
+
+- **Verified and strict:** after `run-task --post-only`, as input to semantic
+  review. Post-flight prints the reminder with the recorded baseline on `held`
+  and `drift`, and withholds it on `broken` — the executor still has to iterate,
+  so that comment delta is not the one a reviewer would judge.
+- **Direct:** invoke it against the branch point once the change is finished.
+  This is the only review Direct work gets.
+
+A comment audit produces no `held` / `drift` / `broken` verdict and never
+substitutes for the contract audit.
 
 ## What the checks prove
 

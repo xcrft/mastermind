@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Comment discipline is now verified by a reader instead of trusted to the
+  writer. `mastermind-comment-audit` (portable skill) and
+  `mastermind-comment-auditor` (Claude subagent) review only the comments a
+  finished change added, modified, or deleted. A finding must carry the comment
+  verbatim plus the code line that already says it, the report names what it
+  kept so that flagging nothing is a complete result, and deleted rationale is
+  reported as `removed_rationale` — a regression no write-time rule catches.
+  Read-only, and no `held` / `drift` / `broken` verdict. Two entry points: after
+  `run-task --post-only` for verified and strict tasks, and directly against the
+  branch point for Direct work, which has no controller. `run-task` post-flight
+  prints the reminder with the recorded baseline on `held` and `drift`, and
+  withholds it on `broken`, where the executor has yet to iterate. The write-time
+  `no-ai-slop-comments` rule and the executor's gate are unchanged.
+
+### Fixed
+- Folding a repeat audit event into an existing lesson candidate truncated
+  `.mastermind/tasks/_lessons.md` in place, so a crash between the truncation
+  and the rewrite could leave the file empty — losing reviewed guidance that the
+  append-only predecessor could not lose. The merge now writes through
+  `audit_bundle::write_atomic` (unique temp file, `sync_all`, rename). The
+  exclusive lock moved to a dedicated `_lessons.md.lock`, because a lock held on
+  a path that rename replaces stops serializing the next writer. The lock path
+  gets the same symlink refusal as the lessons file.
+- `CI — mmcg` now reports an aggregate `cargo test + clippy + fmt` status.
+  Branch protection cannot name a matrix job, and each target had been reporting
+  only under its own name since the matrix landed, so the required check waited
+  forever on a context nothing produced.
+
 ## [1.1.1] - 2026-07-23
 
 ### Fixed

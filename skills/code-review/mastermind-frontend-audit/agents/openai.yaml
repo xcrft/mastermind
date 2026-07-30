@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mastermind Frontend Audit"
+  short_description: "Check a finished UI change against the codegraph"
+  default_prompt: "Use $mastermind-frontend-audit to review this UI change against the baseline."

@@ -97,6 +97,29 @@ pub(super) fn walk(
                     walk(body, source, pending, Some(idx), module_index);
                 }
             }
+            "variable_declarator" => {
+                match declare_function_value(&child, source, pending, parent_index) {
+                    Some(idx) => {
+                        if let Some(value) = child.child_by_field_name("value") {
+                            walk(value, source, pending, Some(idx), module_index);
+                        }
+                    }
+                    None => walk(child, source, pending, parent_index, module_index),
+                }
+            }
+            "jsx_opening_element" | "jsx_self_closing_element" => {
+                if let Some((name, path, to_type)) = jsx_component_target(&child, source) {
+                    push_call_with_type(
+                        pending,
+                        parent_index.unwrap_or(module_index),
+                        name,
+                        path,
+                        to_type,
+                        line_of(&child),
+                    );
+                }
+                walk(child, source, pending, parent_index, module_index);
+            }
             "call_expression" => {
                 if let Some((name, path, to_type)) = call_target_with_type(&child, source) {
                     push_call_with_type(
@@ -144,6 +167,69 @@ fn call_target_with_type(
 ) -> Option<(String, Option<String>, Option<String>)> {
     let fn_node = call_node.child_by_field_name("function")?;
     leaf_and_path(&fn_node, source)
+}
+
+fn jsx_component_target(
+    element: &Node,
+    source: &[u8],
+) -> Option<(String, Option<String>, Option<String>)> {
+    let name_node = element.child_by_field_name("name")?;
+    let (name, path, to_type) = leaf_and_path(&name_node, source)?;
+    if starts_uppercase(&name) {
+        Some((name, path, to_type))
+    } else {
+        None
+    }
+}
+
+fn declare_function_value(
+    declarator: &Node,
+    source: &[u8],
+    pending: &mut PendingFile,
+    parent_index: Option<usize>,
+) -> Option<usize> {
+    let name_node = declarator.child_by_field_name("name")?;
+    let name = node_text(&name_node, source)?.to_string();
+    let value = declarator.child_by_field_name("value")?;
+    let body_owner = function_body_owner(&value)?;
+    let signature = declarator_signature(&name_node, &body_owner, source);
+    Some(push_def(
+        pending,
+        name,
+        "function",
+        declarator,
+        signature,
+        parent_index,
+    ))
+}
+
+fn function_body_owner<'tree>(value: &Node<'tree>) -> Option<Node<'tree>> {
+    match value.kind() {
+        "arrow_function" | "function_expression" | "function" => Some(*value),
+        "call_expression" => {
+            let args = value.child_by_field_name("arguments")?;
+            let mut cursor = args.walk();
+            for arg in args.children(&mut cursor) {
+                if matches!(
+                    arg.kind(),
+                    "arrow_function" | "function_expression" | "function"
+                ) {
+                    return Some(arg);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn declarator_signature(name_node: &Node, body_owner: &Node, source: &[u8]) -> Option<String> {
+    let name = node_text(name_node, source)?;
+    let params = body_owner
+        .child_by_field_name("parameters")
+        .and_then(|n| node_text(&n, source))
+        .unwrap_or("()");
+    Some(format!("{name}{params}"))
 }
 
 /// Returns (leaf_name, full_path_in_source, to_type).
@@ -347,6 +433,49 @@ mod tests {
         assert!(imports.contains(&"bar"));
         assert!(imports.contains(&"qux"));
         assert!(imports.contains(&"ns"));
+    }
+
+    #[test]
+    fn extracts_variable_declared_functions_with_parameter_signatures() {
+        let path = write_tmp(
+            "declared.tsx",
+            "export const Card = ({ title }: Props) => <div />;\n\
+             const Plain = function (a: number) { return a; };\n\
+             export const Wrapped = memo((props: Props) => <div />);\n",
+        );
+        let root = path.parent().unwrap();
+        let pending = parse_one(&path, root, &TypescriptExtractor::new(true)).unwrap();
+        let found: Vec<(&str, Option<&str>)> = pending
+            .symbols
+            .iter()
+            .map(|s| (s.name.as_str(), s.signature.as_deref()))
+            .collect();
+        assert!(found.contains(&("Card", Some("Card({ title }: Props)"))));
+        assert!(found.contains(&("Plain", Some("Plain(a: number)"))));
+        assert!(found.contains(&("Wrapped", Some("Wrapped(props: Props)"))));
+    }
+
+    #[test]
+    fn jsx_usage_becomes_a_call_edge_and_host_elements_do_not() {
+        let path = write_tmp(
+            "usage.tsx",
+            "export function Screen() {\n\
+                return <section><Button /><Select.Option /><div /></section>;\n\
+             }\n",
+        );
+        let root = path.parent().unwrap();
+        let pending = parse_one(&path, root, &TypescriptExtractor::new(true)).unwrap();
+        let calls: Vec<&str> = pending
+            .edges
+            .iter()
+            .filter(|e| e.kind == "calls")
+            .map(|e| e.to_name.as_str())
+            .collect();
+        assert!(calls.contains(&"Button"));
+        assert!(calls.contains(&"Option"));
+        assert!(!calls.contains(&"section"));
+        assert!(!calls.contains(&"div"));
+        assert_eq!(calls.iter().filter(|n| **n == "Button").count(), 1);
     }
 
     #[test]

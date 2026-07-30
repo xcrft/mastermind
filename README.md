@@ -198,7 +198,7 @@ See [Verifiable audits and GitHub Action](docs/github-action.md).
 ## Support
 
 - **Clients:** Claude Code, Codex, Cursor, Continue, and generic MCP stdio clients
-- **Languages:** Python, TypeScript/TSX, JavaScript/JSX, Rust, C#, Go, Java, PHP, and C/C++
+- **Languages:** Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, and C/C++
 - **Platforms:** macOS arm64/x64, Linux glibc and musl arm64/x64, Windows x64
 - **Privacy:** deterministic parsing and storage are local; explicit agent-assisted modes disclose when repository samples are sent to the configured AI client
 

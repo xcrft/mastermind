@@ -110,6 +110,9 @@ Pre-flight, before a diff exists, route on the paths named in the spec's Scope.
 - Researcher: bounded batches of repository facts.
 - Investigator: bugs whose cause is not known.
 - Critic: real design forks; mandatory for Strict.
+- Security research: what reaches the privileged operation, what statically
+  applies the guard, who reads secrets. The graph is wrong in both directions —
+  a missing edge is not absence of access, a present edge is not enforcement.
 - Security auditor: permissions, secrets, tools, untrusted input, delegation,
   supply chain, or audit policy.
 - Executor: implementation within approved scope.

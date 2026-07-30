@@ -54,6 +54,7 @@ the installable workflow bundle.
 ### security/
 | Skill | Description |
 |---|---|
+| [`mastermind-security-research`](security/mastermind-security-research/SKILL.md) | Enumerates reachable privileged operations, the sites that statically apply a guard, and secret readers — reporting the difference as unestablished rather than as a verdict. |
 | [`mastermind-agent-security-review`](security/mastermind-agent-security-review/SKILL.md) | Portable security review protocol for agent/tool trust boundaries, with optional evidence-based OWASP mapping. |
 
 ### prompt-engineering/

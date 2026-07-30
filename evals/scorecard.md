@@ -153,6 +153,9 @@ crossing author, language, repository, or authority boundaries.
   inside a finding label (`Test proves the wrong path`), failing answers that
   are exactly right. It must also appear in neither the prompt nor the
   artifact's own required output shape.
+- A count is not a phrase. Requiring `four` fails a model that writes `4`, and
+  the number is almost never the proposition under test — assert the structure
+  the artifact mandates instead.
 - Required-phrase assertions bind a behavior to one vocabulary. A model that
   reasons correctly and words it differently fails, so a drop in the pass rate
   is not by itself evidence of a behavioral regression. Separate the two before

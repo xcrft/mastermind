@@ -9,7 +9,6 @@
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use crate::audit_spec::{Finding, Report, Verdict};
@@ -23,6 +22,8 @@ higher occurrence count — instead of adding a sibling. Reviewed entries are\n\
 never rewritten.\n\n\
 Required fields: Status, Task, Kind, Provenance, Evidence, Supersedes,\n\
 Occurrences, Last seen, and Reusable lesson.\n\n";
+
+const SEPARATE_LOCK_SURVIVING_RENAME: &str = "_lessons.md.lock";
 
 /// Record a deduplicated lesson candidate for a `Drift`/`Broken` audit.
 /// A held contract is not evidence that a reusable lesson exists.
@@ -109,27 +110,27 @@ fn append_candidate(repo_root: &Path, candidate: Candidate) -> std::io::Result<b
     if let Some(parent) = lessons_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut file = fs::OpenOptions::new()
+    let lock = fs::OpenOptions::new()
         .create(true)
-        .read(true)
         .write(true)
         .truncate(false)
-        .open(&lessons_path)?;
-    file.lock_exclusive()?;
+        .open(lessons_path.with_file_name(SEPARATE_LOCK_SURVIVING_RENAME))?;
+    lock.lock_exclusive()?;
 
     let result = (|| {
-        let mut body = String::new();
-        file.read_to_string(&mut body)?;
+        let body = match fs::read_to_string(&lessons_path) {
+            Ok(body) => body,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(error),
+        };
         let Some(merged) = merge_candidate(&body, &candidate) else {
             return Ok(false);
         };
-        file.set_len(0)?;
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(merged.as_bytes())?;
-        file.sync_data()?;
+        crate::audit_bundle::write_atomic(&lessons_path, merged.as_bytes(), false)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
         Ok(true)
     })();
-    FileExt::unlock(&file)?;
+    FileExt::unlock(&lock)?;
     result
 }
 
@@ -519,7 +520,29 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_candidate_writes_produce_one_entry() {
+    fn merge_replaces_the_file_atomically_and_leaves_no_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = PathBuf::from(".mastermind/tasks/007-retry/spec.md");
+        for iteration in 4..8 {
+            assert!(append_iteration_budget_candidate(dir.path(), &spec, iteration).unwrap());
+        }
+
+        let tasks = dir.path().join(".mastermind/tasks");
+        let mut names: Vec<String> = fs::read_dir(&tasks)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["_lessons.md", SEPARATE_LOCK_SURVIVING_RENAME]);
+
+        let body = fs::read_to_string(tasks.join("_lessons.md")).unwrap();
+        assert_eq!(body.matches("# Project lessons").count(), 1);
+        assert_eq!(body.matches("## lesson-").count(), 1);
+        assert!(body.contains("**Occurrences:** 4"));
+    }
+
+    #[test]
+    fn lock_survives_the_rename_so_concurrent_writers_do_not_lose_an_update() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::sync::Arc::new(dir.path().to_path_buf());
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));

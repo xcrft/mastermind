@@ -22,6 +22,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   withholds it on `broken`, where the executor has yet to iterate. The write-time
   `no-ai-slop-comments` rule and the executor's gate are unchanged.
 
+### Added
+- Vue single-file components are indexed. `MyCard.vue` defines a `MyCard`
+  symbol of kind `component` that owns every symbol from its `<script>` block —
+  the block is re-parsed with the real TypeScript or JavaScript grammar chosen
+  by `lang`, on a position-preserving buffer, so line numbers point at the
+  `.vue` file rather than at an offset inside the block. Template usage emits
+  `calls` edges, with `<my-widget />` and `<MyWidget />` normalized to the same
+  PascalCase name the way Vue itself resolves them. Adds one dependency, the
+  tree-sitter organization's `tree-sitter-html`, which parses the SFC shell; the
+  available `tree-sitter-vue` crates are a stale 0.0.3 and third-party forks.
+
 ### Fixed
 - The codegraph was effectively blind to React. Of six common component shapes
   only `function C() {}` and `class C extends React.Component` produced a

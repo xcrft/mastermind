@@ -564,3 +564,42 @@ export function List() {
     assert!(has_call(&store, "List", "Row"));
     assert!(!has_call(&store, "List", "ul"));
 }
+
+#[test]
+fn golden_vue_single_file_component() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = setup_store(
+        &tmp,
+        "MyCard.vue",
+        r#"<template>
+  <div class="card">
+    <BaseButton label="ok" @click="bump" />
+    <my-widget />
+    <span>{{ count }}</span>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref } from 'vue';
+
+function bump(step: number): void {
+  void step;
+}
+</script>
+
+<style scoped>.card { color: red }</style>
+"#,
+    );
+
+    // The file is the component.
+    assert!(has_symbol_kind(&store, "MyCard", "component"));
+    // Script symbols belong to it, with real `.vue` line numbers.
+    assert!(has_symbol_kind(&store, "bump", "function"));
+    // Both template conventions resolve to the same PascalCase name.
+    assert!(has_call(&store, "MyCard", "BaseButton"));
+    assert!(has_call(&store, "MyCard", "MyWidget"));
+    // Host tags and style rules are not components.
+    assert!(!has_call(&store, "MyCard", "div"));
+    assert!(!has_call(&store, "MyCard", "span"));
+    assert!(has_import(&store, "MyCard.vue", "ref"));
+}

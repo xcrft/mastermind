@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `mmcg_change_impact` now reports a `disciplines` block that routes a change to
+  an evidence set from its changed paths, so an agent reads which review applies
+  instead of classifying the request from the prompt. `frontend` comes from
+  component and stylesheet file types, `qa` reuses the existing test-file
+  convention, and a file can be both. Everything else is returned as
+  `unclassified` rather than guessed: a queue consumer or a migration in a plain
+  `.ts` file has no path-level signal, and the block says so instead of
+  inventing one. The workflow router consumes it to load at most one research
+  and one audit skill per detected discipline.
 - Comment discipline is now verified by a reader instead of trusted to the
   writer. `mastermind-comment-audit` (portable skill) and
   `mastermind-comment-auditor` (Claude subagent) review only the comments a
@@ -21,8 +30,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prints the reminder with the recorded baseline on `held` and `drift`, and
   withholds it on `broken`, where the executor has yet to iterate. The write-time
   `no-ai-slop-comments` rule and the executor's gate are unchanged.
-
-### Added
 - The two halves of a UI change that were never checkable now have contracts.
   `mastermind-design-intake` converts a design handoff into a task contract that
   can fail: the source is recorded, mapped components are confirmed against the

@@ -295,6 +295,22 @@
       }
     ]
   },
+  "disciplines": {
+    "detected": [
+      {
+        "name": "qa",
+        "basis": "test-file naming convention",
+        "file_count": 1,
+        "files": [
+          "core/test_core.py"
+        ]
+      }
+    ],
+    "unclassified": [
+      "core/app.py"
+    ],
+    "note": "Path-based classification proposes an evidence set; it does not replace reading the change. Only what a path can establish is classified — component file types and test-file naming. Anything else is listed unclassified rather than guessed, so a queue consumer in a plain `.ts` file will not be labelled."
+  },
   "limits": {
     "changed_files": 10000,
     "changed_seeds": 200,

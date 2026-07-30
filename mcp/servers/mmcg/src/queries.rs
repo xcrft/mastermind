@@ -487,6 +487,7 @@ pub struct ChangeImpactResponse {
     pub impact: Collection<ImpactedSymbol>,
     pub api_crossings: Collection<ApiCrossing>,
     pub tests: Collection<TestCandidate>,
+    pub disciplines: ImpactDisciplines,
     pub limits: ImpactLimits,
     pub precision_notes: Vec<String>,
 }
@@ -509,6 +510,22 @@ pub struct ImpactScope {
 pub struct ImpactChanges {
     pub files: Collection<ChangedFile>,
     pub symbols: Collection<ChangedSymbol>,
+}
+
+/// Which evidence set a change calls for, derived from the changed paths.
+#[derive(Debug, Clone, Serialize)]
+pub struct ImpactDisciplines {
+    pub detected: Vec<DisciplineSignal>,
+    pub unclassified: Vec<String>,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DisciplineSignal {
+    pub name: String,
+    pub basis: String,
+    pub file_count: u32,
+    pub files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -728,6 +745,84 @@ fn visible_precision(path: &str) -> Vec<String> {
     values.sort();
     values.dedup();
     values
+}
+
+const DISCIPLINE_SAMPLE: usize = 20;
+
+const DISCIPLINE_NOTE: &str = "Path-based classification proposes an evidence set; \
+it does not replace reading the change. Only what a path can establish is classified — \
+component file types and test-file naming. Anything else is listed unclassified rather \
+than guessed, so a queue consumer in a plain `.ts` file will not be labelled.";
+
+fn frontend_like_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let ext = match lower.rsplit_once('.') {
+        Some((_, ext)) => ext,
+        None => return false,
+    };
+    matches!(
+        ext,
+        "tsx" | "jsx" | "vue" | "css" | "scss" | "sass" | "less"
+    )
+}
+
+struct DisciplineRule {
+    name: &'static str,
+    basis: &'static str,
+    matches: fn(&str) -> bool,
+}
+
+fn classify_disciplines(files: &[ChangedFile]) -> ImpactDisciplines {
+    let rules = [
+        DisciplineRule {
+            name: "frontend",
+            basis: "component or stylesheet file type",
+            matches: frontend_like_path,
+        },
+        DisciplineRule {
+            name: "qa",
+            basis: "test-file naming convention",
+            matches: test_like_path,
+        },
+    ];
+
+    let mut detected = Vec::new();
+    let mut classified: Vec<&str> = Vec::new();
+    for rule in rules {
+        let hits: Vec<&str> = files
+            .iter()
+            .map(|file| file.path.as_str())
+            .filter(|path| (rule.matches)(path))
+            .collect();
+        if hits.is_empty() {
+            continue;
+        }
+        classified.extend(hits.iter().copied());
+        detected.push(DisciplineSignal {
+            name: rule.name.to_string(),
+            basis: rule.basis.to_string(),
+            file_count: hits.len() as u32,
+            files: hits
+                .iter()
+                .take(DISCIPLINE_SAMPLE)
+                .map(|path| path.to_string())
+                .collect(),
+        });
+    }
+
+    let unclassified: Vec<String> = files
+        .iter()
+        .map(|file| file.path.as_str())
+        .filter(|path| !classified.contains(path))
+        .take(DISCIPLINE_SAMPLE)
+        .map(|path| path.to_string())
+        .collect();
+
+    ImpactDisciplines {
+        detected,
+        unclassified,
+        note: DISCIPLINE_NOTE.to_string(),
+    }
 }
 
 fn test_like_path(path: &str) -> bool {
@@ -1247,6 +1342,7 @@ pub fn change_impact(
             status: file.status.clone(),
         })
         .collect::<Vec<_>>();
+    let disciplines = classify_disciplines(&files);
     let files_collection = Collection {
         total: working.files_total,
         returned: files.len() as u32,
@@ -1291,6 +1387,7 @@ pub fn change_impact(
         impact: impact_collection,
         api_crossings: crossing_collection,
         tests: tests_collection,
+        disciplines,
         limits: ImpactLimits {
             changed_files: crate::diff::CHANGE_FILE_LIMIT as u32,
             changed_seeds: CHANGE_SEED_LIMIT as u32,
@@ -3992,5 +4089,65 @@ mod tests {
                 "{ext} is indexed but carries the unsupported-language note"
             );
         }
+    }
+
+    #[test]
+    fn disciplines_classify_only_what_a_path_can_establish() {
+        let files: Vec<ChangedFile> = [
+            "src/ui/Button.tsx",
+            "src/ui/Card.vue",
+            "src/ui/theme.scss",
+            "src/ui/Button.test.tsx",
+            "tests/checkout_spec.py",
+            "src/server/queue_consumer.ts",
+            "migrations/0007_add_index.sql",
+        ]
+        .into_iter()
+        .map(|path| ChangedFile {
+            path: path.to_string(),
+            status: "M".to_string(),
+        })
+        .collect();
+
+        let result = classify_disciplines(&files);
+        let by_name = |name: &str| {
+            result
+                .detected
+                .iter()
+                .find(|signal| signal.name == name)
+                .unwrap_or_else(|| panic!("{name} not detected"))
+        };
+
+        let frontend = by_name("frontend");
+        assert_eq!(frontend.file_count, 4);
+        assert!(frontend.files.contains(&"src/ui/Card.vue".to_string()));
+        assert!(frontend.files.contains(&"src/ui/theme.scss".to_string()));
+
+        // A test-named component file belongs to both sets, not to one.
+        let qa = by_name("qa");
+        assert!(qa.files.contains(&"src/ui/Button.test.tsx".to_string()));
+        assert!(frontend
+            .files
+            .contains(&"src/ui/Button.test.tsx".to_string()));
+
+        // A queue consumer and a migration are backend work that no path proves.
+        assert_eq!(
+            result.unclassified,
+            vec![
+                "src/server/queue_consumer.ts".to_string(),
+                "migrations/0007_add_index.sql".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn disciplines_are_absent_rather_than_empty_when_nothing_matches() {
+        let files = vec![ChangedFile {
+            path: "README.md".to_string(),
+            status: "M".to_string(),
+        }];
+        let result = classify_disciplines(&files);
+        assert!(result.detected.is_empty());
+        assert_eq!(result.unclassified, vec!["README.md".to_string()]);
     }
 }

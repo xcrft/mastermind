@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The `disciplines` block now detects `migration` from a `.sql` file or a path
+  component named `migrations`, `migration`, or `migrate` — the Django, Rails,
+  Prisma, and Flyway layouts, without guessing at repositories that keep them
+  elsewhere. Because the mode table already lists migrations as Strict work,
+  this makes the mode a path-established trigger rather than a judgement call.
+  It says nothing about what the migration does: destructive, backfilling, or
+  additive stays a question for the review. A repository module that talks to
+  the database is still unclassified.
+
+### Added
 - The security discipline gets its research half. `mastermind-security-research`
   enumerates what reaches a privileged operation, which sites statically apply
   the guard, and which modules read secrets, then reports the difference as

@@ -22,7 +22,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   withholds it on `broken`, where the executor has yet to iterate. The write-time
   `no-ai-slop-comments` rule and the executor's gate are unchanged.
 
+### Added
+- The two halves of a UI change that were never checkable now have contracts.
+  `mastermind-design-intake` converts a design handoff into a task contract that
+  can fail: the source is recorded, mapped components are confirmed against the
+  repository, criteria carry token names instead of resolved values, and an
+  element absent from a design tool's code mapping is explicitly not evidence
+  that the component is absent from the codebase. `mastermind-browser-verification`
+  decides what a browser check leaves behind: the accessibility tree is evidence
+  because it can be quoted and compared, a screenshot is not, console and network
+  errors are mechanical failures, and an unchecked viewport is recorded as
+  unchecked rather than omitted.
+- Two frontend workflow artifacts, now that the graph can answer structural
+  questions about components. `mastermind-component-research` runs before a UI
+  change: does this component already exist, who renders it, what is its props
+  contract — reinvention is the most expensive frontend mistake and it is
+  invisible in a diff. `mastermind-frontend-audit` (skill) and
+  `mastermind-frontend-auditor` (Claude subagent) review the finished change for
+  a component nothing renders, a required prop added while callers stay on the
+  old contract, a duplicate of an existing component, and a raw value shadowing
+  a design token. Both are read-only, both require a query result behind every
+  finding, and neither judges visual fidelity — that needs the running
+  application and is recorded as a browser observation, not a structural claim.
+- `.vue` is registered across the query layer, not only in the indexer. Vue
+  results previously carried `confidence: unknown` with the note "unsupported or
+  unrecognized language" for a file type that had just been indexed, and the
+  `language` filter in ten MCP tool schemas rejected `vue` outright. A test now
+  asserts that every extension `extractor_for_path` accepts also resolves to a
+  known language and precision, so a language cannot be half-registered again.
+- Vue single-file components are indexed. `MyCard.vue` defines a `MyCard`
+  symbol of kind `component` that owns every symbol from its `<script>` block —
+  the block is re-parsed with the real TypeScript or JavaScript grammar chosen
+  by `lang`, on a position-preserving buffer, so line numbers point at the
+  `.vue` file rather than at an offset inside the block. Template usage emits
+  `calls` edges, with `<my-widget />` and `<MyWidget />` normalized to the same
+  PascalCase name the way Vue itself resolves them. Adds one dependency, the
+  tree-sitter organization's `tree-sitter-html`, which parses the SFC shell; the
+  available `tree-sitter-vue` crates are a stale 0.0.3 and third-party forks.
+
 ### Fixed
+- The codegraph was effectively blind to React. Of six common component shapes
+  only `function C() {}` and `class C extends React.Component` produced a
+  symbol, so `search` answered nothing for the majority of a modern codebase,
+  and JSX usage produced no edge at all — `callers` and `impact` on a component
+  returned empty while the change that broke its consumers looked risk-free.
+  `const C = () => …`, `const C = function () {…}`, and one level of wrapper
+  call (`memo`, `forwardRef`, `styled`) are now `function` symbols carrying the
+  inner parameters as their signature, so a changed props contract reports as
+  `signature_changed`. `<Component />` and `<Ns.Component />` emit `calls` edges
+  from the containing component; lowercase host elements do not. Applies to
+  `.tsx`, `.jsx`, and JSX in `.js`. The extractor contract version bumped to
+  `mmcg-extractors-v2`, so the next ordinary `index` run rebuilds automatically.
 - Folding a repeat audit event into an existing lesson candidate truncated
   `.mastermind/tasks/_lessons.md` in place, so a crash between the truncation
   and the rewrite could leave the file empty — losing reviewed guidance that the

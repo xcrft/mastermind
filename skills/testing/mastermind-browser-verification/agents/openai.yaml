@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mastermind Browser Verification"
+  short_description: "Record browser checks as evidence instead of claims"
+  default_prompt: "Use $mastermind-browser-verification to check this UI change in the browser and record what you observed."

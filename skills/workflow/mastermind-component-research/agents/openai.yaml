@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mastermind Component Research"
+  short_description: "Check the codegraph before writing or changing a component"
+  default_prompt: "Use $mastermind-component-research to find whether this component already exists and who renders it."

@@ -139,6 +139,15 @@ pub fn lang_precision(file_path: &str) -> EdgePrecision {
             resolution: "heuristic",
             limitations: vec!["no type resolution", "dynamic calls not tracked"],
         },
+        "vue" => EdgePrecision {
+            confidence: "medium",
+            resolution: "syntactic",
+            limitations: vec![
+                "template attribute expressions not parsed",
+                "auto-imported components produce no edge",
+                "no type-based dispatch resolution",
+            ],
+        },
         "php" | "phtml" => EdgePrecision {
             confidence: "medium",
             resolution: "syntactic",
@@ -170,6 +179,7 @@ fn lang_from_ext(ext: &str) -> &'static str {
         "py" => "python",
         "ts" | "tsx" => "typescript",
         "js" | "jsx" | "mjs" | "cjs" => "javascript",
+        "vue" => "vue",
         "php" | "phtml" => "php",
         "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh" | "hxx" | "ipp" | "tpp" => "cpp",
         _ => "unknown",
@@ -3951,5 +3961,36 @@ mod tests {
             ]
         );
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn every_indexable_extension_reports_a_known_language_and_precision() {
+        let extensions = [
+            "py", "ts", "tsx", "js", "jsx", "mjs", "cjs", "vue", "rs", "cs", "go", "java", "php",
+            "phtml", "c", "cc", "cpp", "cxx", "h", "hpp", "hh", "hxx", "ipp", "tpp",
+        ];
+        for ext in extensions {
+            let path = format!("src/file.{ext}");
+            assert!(
+                crate::indexer::extractor_for_path(std::path::Path::new(&path)).is_some(),
+                "{ext}: no extractor, drop it from this list"
+            );
+            assert_ne!(
+                lang_from_ext(ext),
+                "unknown",
+                "{ext} is indexed but lang_from_ext reports unknown"
+            );
+            let precision = lang_precision(&path);
+            assert_ne!(
+                precision.confidence, "unknown",
+                "{ext} is indexed but lang_precision reports unknown"
+            );
+            assert!(
+                !precision
+                    .limitations
+                    .contains(&"unsupported or unrecognized language"),
+                "{ext} is indexed but carries the unsupported-language note"
+            );
+        }
     }
 }

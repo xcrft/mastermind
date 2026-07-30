@@ -22,6 +22,7 @@ mod php;
 mod python;
 mod rust_lang;
 mod typescript;
+mod vue;
 
 pub use cpp::CppExtractor;
 pub use csharp::CsharpExtractor;
@@ -32,11 +33,12 @@ pub use php::PhpExtractor;
 pub use python::PythonExtractor;
 pub use rust_lang::RustExtractor;
 pub use typescript::TypescriptExtractor;
+pub use vue::VueExtractor;
 
 /// Semantic contract for the extractor output stored in SQLite. Bump this when
 /// an extractor or grammar change can alter symbols, edges, ownership, or paths
 /// without requiring a database schema migration.
-pub const EXTRACTOR_CONTRACT_VERSION: &str = "mmcg-extractors-v1";
+pub const EXTRACTOR_CONTRACT_VERSION: &str = "mmcg-extractors-v2";
 pub const EXTRACTOR_CONTRACT_META_KEY: &str = "extractor_contract_version";
 
 /// Hard bound for source reads. Generated artifacts with a source-looking
@@ -74,6 +76,7 @@ pub fn extractor_for_path(path: &Path) -> Option<Box<dyn LanguageExtractor>> {
         "go" => Some(Box::new(GoExtractor)),
         "java" => Some(Box::new(JavaExtractor)),
         "php" | "phtml" => Some(Box::new(PhpExtractor)),
+        "vue" => Some(Box::new(VueExtractor)),
         // C / C++ share one tree-sitter-cpp grammar — OK since C is mostly a C++
         // subset; rare C-only keyword identifiers (e.g. `new` as a var) may
         // mis-parse — see cpp.rs precision disclaimer.
@@ -587,6 +590,8 @@ fn extract_spec_title(body: &str, filename: &str) -> String {
 fn guess_language_for(rel_path: &str) -> Option<&'static str> {
     if rel_path.ends_with(".py") {
         Some("python")
+    } else if rel_path.ends_with(".vue") {
+        Some("vue")
     } else if rel_path.ends_with(".tsx") {
         Some("tsx")
     } else if rel_path.ends_with(".ts") {

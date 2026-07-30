@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mastermind Design Intake"
+  short_description: "Turn a design handoff into checkable acceptance criteria"
+  default_prompt: "Use $mastermind-design-intake to convert this design handoff into a verifiable task contract."

@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `mastermind-product-intake` converts a PRD or ticket into a task contract by
+  sorting every statement into behaviour, constraint, and outcome. Only
+  behaviour becomes acceptance criteria; a constraint qualifies once its
+  measurement is named; an outcome never does, because a success metric cannot
+  fail on the day the change lands and leaving it in the contract makes a
+  mechanical gate mark it satisfied while nothing was measured. It resolves
+  product nouns to symbols before assuming they are new, and surfaces the cases
+  the document never mentions rather than letting the executor invent them. It
+  does not write the PRD or validate the product assumption — there is no
+  repository fact behind "users want this".
 - The `disciplines` block now detects `migration` from a `.sql` file or a path
   component named `migrations`, `migration`, or `migrate` — the Django, Rails,
   Prisma, and Flyway layouts, without guessing at repositories that keep them

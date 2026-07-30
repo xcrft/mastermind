@@ -156,6 +156,50 @@ requests are mechanical failures. Viewports and colour scheme are a recorded
 checklist, and an item that was not checked is written as not checked — an
 omitted line reads as a pass.
 
+## Review whether the tests prove the change
+
+A green suite proves the assertions present passed. It does not prove the change
+is covered, and it does not prove those assertions were checking what changed —
+different claims, and only the first runs automatically.
+
+The controller already establishes part of this: `vacuous_test_claim` means a
+verification command provably ran zero tests, and `missing_test` means a planned
+test is absent. `mastermind-test-audit` (skill) and `mastermind-test-auditor`
+(Claude subagent) cover what it cannot. `mmcg_test_impact` classifies candidates
+as `direct`, `transitive`, or `heuristic`, and the classification is the point:
+a `heuristic` candidate is a filename that matched, not evidence the code ran.
+A changed symbol with no `direct` candidate is uncovered behaviour.
+
+Two findings need reading rather than a query. A test can be green, on-topic,
+and still exercise a wrapper or a retired entry point the real caller no longer
+uses — that is a pass about a path nobody runs. And an assertion edited in the
+same diff as the implementation it checks has stopped being an independent check;
+sometimes the contract genuinely moved, sometimes that is how a regression ships
+green, and the review reports the pair rather than deciding silently.
+
+Coverage is still not correctness. A `direct` test proves the code ran, not that
+the expected value is right, and flakiness and ordering are invisible here.
+
+## Research a service change before designing it
+
+`mastermind-architecture-review` reconstructs the runtime path and judges the
+design. `mastermind-runtime-research` runs first and answers something narrower:
+who already depends on what is about to change, who writes the state it touches,
+and which boundaries it crosses.
+
+Its most important output is the gap list. The graph is syntactic, so a queue
+producer and its consumer are two static islands with no edge between them, a
+framework-registered handler has no caller, and a DI-resolved implementation is
+reached by a name the source never spells. `mmcg_callers` returning nothing on a
+handler means no static caller was found — not that nothing calls it. An
+architecture review built on "the graph showed no other callers", without the
+list of what the graph could not see, is confident about a question nobody asked.
+
+`mmcg_api_surface` carries the other half: it reports the symbols under a prefix
+that the rest of the codebase actually reaches, independent of what is declared
+public. A module can export twenty symbols and have three real consumers. Those
+three are the contract a change has to keep working.
+
 ## What the checks prove
 
 Pre-flight checks required sections, referenced paths, indexed symbols,

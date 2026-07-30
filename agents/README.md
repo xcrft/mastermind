@@ -19,6 +19,7 @@ Configurations that shape **how an agent behaves** in a project or session — d
 | [`mastermind-auditor`](subagents/mastermind-auditor.md) | Post-flight auditor. Verifies executor report claims against `git diff` and mmcg. |
 | [`mastermind-comment-auditor`](subagents/mastermind-comment-auditor.md) | Post-implementation comment reviewer. Flags added narration with quoted evidence and reports deleted rationale. |
 | [`mastermind-frontend-auditor`](subagents/mastermind-frontend-auditor.md) | Post-implementation UI reviewer. Uses the codegraph for unrendered components, props-contract breaks, duplicates, and raw values. |
+| [`mastermind-test-auditor`](subagents/mastermind-test-auditor.md) | Post-implementation test reviewer. Uses `mmcg_test_impact` classifications to separate real coverage from a filename match. |
 | [`mastermind-security-auditor`](subagents/mastermind-security-auditor.md) | Independent security reviewer. Spawned only on security-sensitive scope (auth, tools, secrets, delegation, supply chain, prompt injection); optional OWASP ASI mode. |
 
 ### claude-md/

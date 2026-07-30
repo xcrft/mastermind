@@ -14,6 +14,7 @@ the installable workflow bundle.
 | [`mastermind-component-research`](workflow/mastermind-component-research/SKILL.md) | Answers whether a React or Vue component already exists, who renders it, and what its props contract is, before the change is written. |
 | [`mastermind-structured-report-contract`](workflow/mastermind-structured-report-contract/SKILL.md) | Defines the file-backed executor report consumed by post-flight and the advisory Strict auditor tail. |
 | [`mastermind-critical-review`](workflow/mastermind-critical-review/SKILL.md) | Stress-test a design, spec, plan, or report for false assumptions, broken contracts, scope creep, missing evidence, and high-risk failure modes. |
+| [`mastermind-runtime-research`](workflow/mastermind-runtime-research/SKILL.md) | Gathers consumers, state writers, and boundary crossings before a service change, and names the runtime gaps the graph cannot span. |
 | [`mastermind-architecture-review`](workflow/mastermind-architecture-review/SKILL.md) | Reviews runtime paths, state ownership, retry behavior, and compatibility against concrete system invariants. |
 | [`mastermind-project-history`](workflow/mastermind-project-history/SKILL.md) | Explains prior decisions from durable evidence while separating observation, inference, provenance, and technical proof. |
 | [`mastermind-project-map`](workflow/mastermind-project-map/SKILL.md) | Builds a bounded architecture map from the live codegraph, including collision and truncation evidence. |
@@ -32,6 +33,7 @@ the installable workflow bundle.
 | Skill | Description |
 |---|---|
 | [`mastermind-comment-audit`](code-review/mastermind-comment-audit/SKILL.md) | Reviews the comment delta of a finished change with quoted evidence, names what it kept, and reports deleted rationale. |
+| [`mastermind-test-audit`](code-review/mastermind-test-audit/SKILL.md) | Checks whether a change's tests prove its behaviour: uncovered symbols, a test on the wrong path, an assertion moved with the code, and non-asserting tests. |
 | [`mastermind-frontend-audit`](code-review/mastermind-frontend-audit/SKILL.md) | Checks a finished UI change against the codegraph: unrendered components, props contracts changed without their callers, duplicates, and raw values shadowing tokens. |
 
 ### design/

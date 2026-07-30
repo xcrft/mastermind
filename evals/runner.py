@@ -84,6 +84,7 @@ WORKFLOW_ARTIFACTS = frozenset(
     {
         "skills/code-review/mastermind-comment-audit/SKILL.md",
         "skills/code-review/mastermind-frontend-audit/SKILL.md",
+        "skills/code-review/mastermind-test-audit/SKILL.md",
         "skills/coding/no-ai-slop-comments/SKILL.md",
         "skills/design/mastermind-design-intake/SKILL.md",
         "skills/testing/mastermind-browser-verification/SKILL.md",
@@ -99,6 +100,7 @@ WORKFLOW_ARTIFACTS = frozenset(
         "skills/workflow/mastermind-cross-client-setup/SKILL.md",
         "skills/workflow/mastermind-project-history/SKILL.md",
         "skills/workflow/mastermind-project-map/SKILL.md",
+        "skills/workflow/mastermind-runtime-research/SKILL.md",
         "skills/workflow/mastermind-structured-report-contract/SKILL.md",
         "skills/workflow/mastermind-style-deep/SKILL.md",
         "skills/workflow/mastermind-task-executor/SKILL.md",

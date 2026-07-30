@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mastermind Runtime Research"
+  short_description: "Find who depends on a service before changing it"
+  default_prompt: "Use $mastermind-runtime-research to gather consumers, state writers, and runtime gaps before designing this change."

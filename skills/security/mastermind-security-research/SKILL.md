@@ -54,7 +54,7 @@ mmcg_api_surface src/admin/         # what outside code actually reaches
 Start from the operation that matters — the deletion, the payment, the role
 change, the token mint — not from the endpoint. The reachable set is the
 population you must account for; every member is either shown to be enforced or
-listed as unread.
+listed as unestablished.
 
 `mmcg_api_surface` is the empirical attack surface: symbols under a prefix that
 code outside it reaches, independent of what is declared public. A module can

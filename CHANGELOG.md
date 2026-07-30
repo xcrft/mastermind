@@ -44,6 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a design token. Both are read-only, both require a query result behind every
   finding, and neither judges visual fidelity — that needs the running
   application and is recorded as a browser observation, not a structural claim.
+- `.vue` is registered across the query layer, not only in the indexer. Vue
+  results previously carried `confidence: unknown` with the note "unsupported or
+  unrecognized language" for a file type that had just been indexed, and the
+  `language` filter in ten MCP tool schemas rejected `vue` outright. A test now
+  asserts that every extension `extractor_for_path` accepts also resolves to a
+  known language and precision, so a language cannot be half-registered again.
 - Vue single-file components are indexed. `MyCard.vue` defines a `MyCard`
   symbol of kind `component` that owns every symbol from its `<script>` block —
   the block is re-parsed with the real TypeScript or JavaScript grammar chosen

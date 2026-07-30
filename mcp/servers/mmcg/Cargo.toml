@@ -45,7 +45,6 @@ tree-sitter-go = "0.25"
 tree-sitter-java = "0.23"
 tree-sitter-php = "0.24"
 tree-sitter-cpp = "0.23"
-# HTML grammar parses the Vue SFC shell; its script block is re-parsed with TS/JS.
 tree-sitter-html = "0.23"
 
 # Data-parallel iterator — used to parse multiple files concurrently.

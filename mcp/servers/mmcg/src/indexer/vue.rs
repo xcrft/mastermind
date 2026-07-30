@@ -1,11 +1,4 @@
-//! Vue single-file components — the file is the component.
-//!
-//! A `.vue` file is structurally HTML, so the SFC shell is parsed with the
-//! tree-sitter HTML grammar: `<template>` becomes an element tree and
-//! `<script>` becomes one `raw_text` node. The script is then re-parsed with
-//! the real TypeScript or JavaScript grammar and handed to the shared TS walker,
-//! so a Vue component gets the same symbols and call edges as a `.ts` file
-//! rather than a weaker approximation of them.
+//! Vue SFC extractor — the file is the component; its script re-parses as TS/JS.
 
 use super::common::{node_text, push_call_with_type};
 use super::LanguageExtractor;
@@ -31,9 +24,6 @@ impl LanguageExtractor for VueExtractor {
     }
 }
 
-/// Vue resolves `<my-widget />`, `<MyWidget />`, and `my-widget.vue` to the same
-/// component. The graph matches by name, so both the defining symbol and every
-/// template usage are normalized to the PascalCase form or they would never meet.
 pub(super) fn pascal_case(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut capitalize = true;
@@ -78,9 +68,6 @@ fn push_component_symbol(pending: &mut PendingFile, module_index: usize) -> usiz
     pending.symbols.len() - 1
 }
 
-/// Re-parse the `<script>` body with its real grammar. The script text is copied
-/// back into a blanked buffer of the same length so every reported line still
-/// points at the `.vue` file rather than at an offset inside the block.
 fn extract_script(
     root: &Node,
     source: &[u8],
@@ -186,8 +173,6 @@ fn collect_component_tags(
     }
 }
 
-/// A custom element always contains a hyphen and a native HTML tag never does,
-/// so kebab-case usage is unambiguous. PascalCase covers the other convention.
 fn is_component_tag(tag: &str) -> bool {
     if tag.contains('-') {
         return true;
@@ -264,7 +249,6 @@ mod tests {
             .iter()
             .find(|s| s.name == "bump")
             .expect("script symbol");
-        // Line 7 of the .vue file, not line 3 of the script block.
         assert_eq!(bump.line_start, 7);
         assert_eq!(
             bump.signature.as_deref(),

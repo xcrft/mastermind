@@ -525,20 +525,16 @@ export function Screen() {
 "#,
     );
 
-    // Arrow and wrapper-call components are symbols, not just `function` declarations.
     assert!(has_symbol_kind(&store, "Card", "function"));
     assert!(has_symbol_kind(&store, "Wrapped", "function"));
     assert!(has_symbol_kind(&store, "Screen", "function"));
 
-    // JSX usage is a call edge from the containing component.
     assert!(has_call(&store, "Screen", "Button"));
     assert!(has_call(&store, "Screen", "Wrapped"));
     assert!(has_call(&store, "Wrapped", "Card"));
 
-    // `<Select.Option />` resolves to the member leaf.
     assert!(has_call(&store, "Screen", "Option"));
 
-    // Host elements are not components and must not become edges.
     assert!(!has_call(&store, "Screen", "section"));
     assert!(!has_call(&store, "Card", "article"));
 
@@ -591,14 +587,10 @@ function bump(step: number): void {
 "#,
     );
 
-    // The file is the component.
     assert!(has_symbol_kind(&store, "MyCard", "component"));
-    // Script symbols belong to it, with real `.vue` line numbers.
     assert!(has_symbol_kind(&store, "bump", "function"));
-    // Both template conventions resolve to the same PascalCase name.
     assert!(has_call(&store, "MyCard", "BaseButton"));
     assert!(has_call(&store, "MyCard", "MyWidget"));
-    // Host tags and style rules are not components.
     assert!(!has_call(&store, "MyCard", "div"));
     assert!(!has_call(&store, "MyCard", "span"));
     assert!(has_import(&store, "MyCard.vue", "ref"));

@@ -169,9 +169,6 @@ fn call_target_with_type(
     leaf_and_path(&fn_node, source)
 }
 
-/// `<Button />` and `<Select.Option>` are calls; `<div>` is not. Lowercase tag
-/// names are host elements, and the uppercase convention is the only signal a
-/// syntactic parser has — the same heuristic `to_type` already relies on.
 fn jsx_component_target(
     element: &Node,
     source: &[u8],
@@ -185,10 +182,6 @@ fn jsx_component_target(
     }
 }
 
-/// `const Card = () => …`, `const Card = function () {…}`, and one level of
-/// wrapper call (`memo`, `forwardRef`, `observer`, `styled`) become named
-/// function symbols. Without this the majority of a React codebase has no
-/// symbol at all, so `search`, `callers`, and `impact` answer nothing for it.
 fn declare_function_value(
     declarator: &Node,
     source: &[u8],
@@ -210,8 +203,6 @@ fn declare_function_value(
     ))
 }
 
-/// The node whose `body` starts the implementation, or `None` when the value is
-/// not a function. Recurses one level through a wrapper call's arguments.
 fn function_body_owner<'tree>(value: &Node<'tree>) -> Option<Node<'tree>> {
     match value.kind() {
         "arrow_function" | "function_expression" | "function" => Some(*value),
@@ -232,10 +223,6 @@ fn function_body_owner<'tree>(value: &Node<'tree>) -> Option<Node<'tree>> {
     }
 }
 
-/// `Card({ variant }: Props)` — parameters carry the props contract, so a
-/// changed component API still reports as a signature change. Reconstructed
-/// rather than sliced from source: a wrapper call would otherwise leave the
-/// signature cut mid-expression.
 fn declarator_signature(name_node: &Node, body_owner: &Node, source: &[u8]) -> Option<String> {
     let name = node_text(name_node, source)?;
     let params = body_owner
@@ -488,7 +475,6 @@ mod tests {
         assert!(calls.contains(&"Option"));
         assert!(!calls.contains(&"section"));
         assert!(!calls.contains(&"div"));
-        // One edge per element — the closing tag must not double-count.
         assert_eq!(calls.iter().filter(|n| **n == "Button").count(), 1);
     }
 

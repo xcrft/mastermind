@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mastermind Security Research"
+  short_description: "Enumerate reachable privileged operations and their enforcement"
+  default_prompt: "Use $mastermind-security-research to enumerate what this change can reach and what enforces it."

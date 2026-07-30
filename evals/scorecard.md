@@ -4,22 +4,59 @@ This file records behavioral regression runs. It is not a model benchmark or a
 coverage percentage: case sets differ by suite, and elapsed time depends on the
 model, machine, and fixture setup.
 
-Latest complete runs: 2026-07-19, 1.0.0 release candidate — except `workflow`,
-rerun on 2026-07-30 and recorded below.
+Latest complete runs: 2026-07-30 for `workflow`, `critic`, and `intake`.
+`auditor` remains the 2026-07-19 record — it was not rerun.
 
-| suite | model | result | first pass | elapsed | evidence |
-|---|---|---:|---:|---:|---|
-| auditor | opus | 9/9 | 9/9 | 1,286.4 s | Real Git fixtures and live mmcg; no sentinel retry |
-| critic | opus | 5/5 | 5/5 | 316.6 s | Full suite |
-| intake | sonnet | 5/5 | 5/5 | 63.9 s | Full suite |
-| workflow (2026-07-19) | sonnet | 36/36 | 36/36 | 525.6 s | Full suite; includes comment-policy, architecture-risk, history, context, and style-lifecycle cases |
-| workflow (2026-07-30) | sonnet | 34/39 | 34/39 | 683.1 s | Full suite; adds the three comment-audit cases. Five pre-existing cases regressed on phrase matching — see below |
+| suite | model | date | result | first pass | elapsed | evidence |
+|---|---|---|---:|---:|---:|---|
+| auditor | opus | 2026-07-19 | 9/9 | 9/9 | 1,286.4 s | Real Git fixtures and live mmcg; no sentinel retry |
+| critic | opus | 2026-07-30 | 4/5 | 4/5 | 294.7 s | Full suite; `c-002` exposed an eval design flaw — see below |
+| intake | sonnet | 2026-07-30 | 5/5 | 5/5 | 104.9 s | Full suite |
+| workflow | sonnet | 2026-07-30 | 45/47 | 45/47 | 778.9 s | Full suite; the eight frontend, design, and browser cases all passed on first attempt |
+| workflow | sonnet | 2026-07-19 | 36/36 | 36/36 | 525.6 s | Superseded snapshot, kept for comparison |
 
-**The 36/36 result is not currently reproducible.** The 2026-07-30 rerun of the
-same suite failed `w-008`, `w-029`, `w-031`, `w-032`, and `w-034`. Every one of
-the five is a *missing required phrase*; not one is a `not_contains` violation,
-and the three cases added in between all passed. Read that shape before reading
-the number: the suite lost vocabulary matches, not behaviors.
+**The five repaired assertions held.** `w-008`, `w-029`, `w-031`, `w-032`, and
+`w-034` all passed, and the eight cases added since (`w-040`–`w-047`) passed on
+first attempt. Two *different* pre-existing cases failed, both on a forbidden
+phrase that appeared inside a denial or a finding label rather than in a claim:
+
+- `w-018` forbade `--client cursor`. The model wrote *"there's no
+  `mastermind install --client cursor` step — we go straight to MCP setup"*,
+  which is the exact behaviour the case tests.
+- `w-030` forbade `test proves`. The model titled a finding *"Test proves the
+  wrong path"*, describing the very mismatch under review.
+
+Both were repaired by deleting the over-broad fragment and keeping the
+affirmative claims already in the same list (`Cursor receives workflow skills`,
+`authorization is covered`), then verified by targeted rerun. **No complete run
+has been recorded since those two repairs**, so 45/47 stands as the reportable
+number.
+
+### `c-002` is an eval design flaw, not a critic regression
+
+The critic suite runs with full tools — only the workflow suite is invoked with
+`--safe-mode --tools ""`. The `c-002` fixture describes a design targeting
+`sdk/edge-ai-core/src/runtime/session.rs:302` and supplies an `mmcg_snapshot`
+for a codebase that is not this repository. The critic inspected the filesystem,
+found no `sdk/` directory and no such `SessionStore`, and returned `rethink` on
+Correctness — which is dimension 6 of its own contract, hallucinated targets,
+working exactly as specified.
+
+The case assumes the model takes the supplied snapshot at face value; it passed
+before because earlier runs did. Relaxing `not_contains: ["rethink"]` would hide
+a correct behaviour, so nothing was changed. The real options are a fixture that
+cites a path which exists, or running the critic suite without filesystem
+access the way the workflow suite already does — both are methodology decisions
+for the maintainer.
+
+### The 34/39 intermediate run, 2026-07-30
+
+Kept because its failure shape is the more instructive half of the record. An
+earlier run the same day scored 34/39 and failed `w-008`, `w-029`, `w-031`,
+`w-032`, and `w-034`. Every one of the five was a *missing required phrase*; not
+one was a `not_contains` violation. The suite had lost vocabulary matches, not
+behaviors — and the 36/36 snapshot from 2026-07-19 had stopped being
+reproducible without a single behavior changing.
 
 Two of the five are morphological near-misses against a model that answered
 correctly:
@@ -51,9 +88,9 @@ authoring for the same reason the pre-existing cases did: `w-040` forbade a
 phrase the prompt itself contains, `w-042` forbade `duplicate` while the skill
 mandates a `Duplicates` heading, and `w-041` demanded a third specific example
 of an invisible render path after the proposition had already been established.
-All three were assertion defects, not behaviours; repaired and passing. The
-lesson generalizes — a `not_contains` phrase must appear in neither the prompt
-nor the artifact's own required output shape.
+All three were assertion defects, not behaviours; repaired, and passing in the
+45/47 complete run. The four design and browser cases (`w-044`–`w-047`) needed
+no repair and passed on first authoring.
 
 ### Assertion repairs, 2026-07-30
 
@@ -68,12 +105,11 @@ against the output that failed:
 | `w-032` | synonym gap | added `not been validated` to the prove/establish family |
 | `w-034` | full-phrase enumeration in both groups | added `precedent`; replaced group 2's four spellings with the stems `silent` / `no neighbor` / `no convention` |
 
-Verified by per-case rerun: `w-008`, `w-029`, `w-031`, `w-032` pass. `w-034`
-needed two passes — the first repair exposed brittleness in its second assertion
-group, which the same run had satisfied by chance, so that case was flaky rather
-than merely mis-worded; it passed 3/3 after the stem repair. **No complete suite
-run has been recorded since these repairs**, so 34/39 remains the last
-reportable number and 39/39 is not claimed.
+Verified by per-case rerun, then confirmed by the 45/47 complete run above,
+where all five passed. `w-034` needed two passes — the first repair exposed
+brittleness in its second assertion group, which the same run had satisfied by
+chance, so that case was flaky rather than merely mis-worded; it passed 3/3
+after the stem repair.
 
 The workflow suite includes four comment-discipline regressions: zero comments
 for straightforward code, removal of narrating comments, preservation of one
@@ -90,9 +126,8 @@ exists because of that gap — the rule is now also checked by a reader after th
 fact, which is verification the write-time cases cannot provide.
 
 The three `mastermind-comment-audit` cases (`w-037`–`w-039`) cover added
-narration, restraint on load-bearing comments, and deleted rationale. They
-passed 3/3 first-pass in the 2026-07-30 complete run and in a targeted run
-before it.
+narration, restraint on load-bearing comments, and deleted rationale. They have
+passed 3/3 first-pass in every run since they were added.
 
 The workflow suite also includes four architecture-review regressions: context
 loss across a runtime boundary, mutation of derived state instead of the source
@@ -113,6 +148,11 @@ crossing author, language, repository, or authority boundaries.
   instruction is stated clearly enough to be followed", not "the behavior holds
   in practice" — nothing in this suite reproduces a long implementation whose
   primary goal competes with the instruction under test.
+- A `not_contains` entry must be an affirmative claim, not a fragment. A
+  fragment matches inside an explicit denial (`there is no --client cursor`) and
+  inside a finding label (`Test proves the wrong path`), failing answers that
+  are exactly right. It must also appear in neither the prompt nor the
+  artifact's own required output shape.
 - Required-phrase assertions bind a behavior to one vocabulary. A model that
   reasons correctly and words it differently fails, so a drop in the pass rate
   is not by itself evidence of a behavioral regression. Separate the two before

@@ -309,7 +309,7 @@
     "unclassified": [
       "core/app.py"
     ],
-    "note": "Path-based classification proposes an evidence set; it does not replace reading the change. Only what a path can establish is classified — component file types and test-file naming. Anything else is listed unclassified rather than guessed, so a queue consumer in a plain `.ts` file will not be labelled."
+    "note": "Path-based classification proposes an evidence set; it does not replace reading the change. Only what a path can establish is classified — component file types, test-file naming, and a SQL file or migrations directory. Anything else is listed unclassified rather than guessed, so a queue consumer in a plain `.ts` file will not be labelled. A detected `migration` is a strict-mode trigger, not a verdict about what the migration does."
   },
   "limits": {
     "changed_files": 10000,

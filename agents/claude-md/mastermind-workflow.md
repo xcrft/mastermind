@@ -95,6 +95,7 @@ research skill and one audit skill per detected discipline:
 |---|---|---|
 | `frontend` | [[mastermind-component-research]] | [[mastermind-frontend-audit]] |
 | `qa` | [[mastermind-test-impact]] | [[mastermind-test-audit]] |
+| `migration` | [[mastermind-runtime-research]] | [[mastermind-architecture-review]] |
 
 `unclassified` paths are not "no discipline" — they are paths whose discipline a
 path cannot establish. A queue consumer, a migration, or an auth boundary in a
@@ -102,6 +103,12 @@ plain `.ts` file lands there. When you judge one to be service or state work, th
 pair is [[mastermind-runtime-research]] before and
 [[mastermind-architecture-review]] after; that call is yours, not the
 classifier's. The block proposes an evidence set; it never locks one.
+
+A detected `migration` also raises the mode: the table above already lists
+migrations as Strict work, so a SQL file or a migrations directory in the diff
+is a mode trigger the paths establish rather than a judgement call. It says
+nothing about what the migration does — destructive, backfilling, or additive is
+a question for the review.
 
 Pre-flight, before a diff exists, route on the paths named in the spec's Scope.
 

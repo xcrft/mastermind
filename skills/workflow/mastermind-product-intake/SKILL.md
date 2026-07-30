@@ -102,6 +102,29 @@ If a metric has no measurement in place, say so. "We will track it" without an
 instrument is the same as not tracking it, and the contract should record which
 one is true.
 
+## Output
+
+```markdown
+### Source
+<PRD or ticket ID / URL>
+
+### Nouns resolved
+- `<product word>` → `<symbol>` at `<file>`, or **new**
+
+### Acceptance criteria
+- <behaviour, and constraints whose measurement is named>
+
+### Open questions
+- <each unspecified case that would change the delivered behaviour>
+
+### Outcome (not acceptance criteria)
+- <metric> — measured by `<instrument>`, read <when>, by <who>; or **no instrument in place**
+```
+
+`Outcome (not acceptance criteria)` carries the label in its heading on purpose.
+A metric listed anywhere else eventually gets read as something the merge gate
+checked.
+
 ## What this does not do
 
 It does not write the PRD, prioritise, or validate the product assumption —

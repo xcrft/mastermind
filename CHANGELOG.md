@@ -23,6 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `no-ai-slop-comments` rule and the executor's gate are unchanged.
 
 ### Fixed
+- The codegraph was effectively blind to React. Of six common component shapes
+  only `function C() {}` and `class C extends React.Component` produced a
+  symbol, so `search` answered nothing for the majority of a modern codebase,
+  and JSX usage produced no edge at all — `callers` and `impact` on a component
+  returned empty while the change that broke its consumers looked risk-free.
+  `const C = () => …`, `const C = function () {…}`, and one level of wrapper
+  call (`memo`, `forwardRef`, `styled`) are now `function` symbols carrying the
+  inner parameters as their signature, so a changed props contract reports as
+  `signature_changed`. `<Component />` and `<Ns.Component />` emit `calls` edges
+  from the containing component; lowercase host elements do not. Applies to
+  `.tsx`, `.jsx`, and JSX in `.js`. The extractor contract version bumped to
+  `mmcg-extractors-v2`, so the next ordinary `index` run rebuilds automatically.
 - Folding a repeat audit event into an existing lesson candidate truncated
   `.mastermind/tasks/_lessons.md` in place, so a crash between the truncation
   and the rewrite could leave the file empty — losing reviewed guidance that the

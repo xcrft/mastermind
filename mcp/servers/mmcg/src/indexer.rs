@@ -36,7 +36,7 @@ pub use typescript::TypescriptExtractor;
 /// Semantic contract for the extractor output stored in SQLite. Bump this when
 /// an extractor or grammar change can alter symbols, edges, ownership, or paths
 /// without requiring a database schema migration.
-pub const EXTRACTOR_CONTRACT_VERSION: &str = "mmcg-extractors-v1";
+pub const EXTRACTOR_CONTRACT_VERSION: &str = "mmcg-extractors-v2";
 pub const EXTRACTOR_CONTRACT_META_KEY: &str = "extractor_contract_version";
 
 /// Hard bound for source reads. Generated artifacts with a source-looking

@@ -498,3 +498,69 @@ fn edge_precision_labels() {
     assert_eq!(go.confidence, "high");
     assert!(go.limitations.is_empty());
 }
+
+#[test]
+fn golden_tsx_components_and_jsx_usage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = setup_store(
+        &tmp,
+        "App.tsx",
+        r#"
+import { Button } from './Button';
+import { Select } from './Select';
+
+export const Card = ({ title }: { title: string }) => <article>{title}</article>;
+
+export const Wrapped = memo(({ id }: { id: string }) => <Card title={id} />);
+
+export function Screen() {
+    return (
+        <section>
+            <Button variant="primary" />
+            <Select.Option value="a" />
+            <Wrapped id="x" />
+        </section>
+    );
+}
+"#,
+    );
+
+    // Arrow and wrapper-call components are symbols, not just `function` declarations.
+    assert!(has_symbol_kind(&store, "Card", "function"));
+    assert!(has_symbol_kind(&store, "Wrapped", "function"));
+    assert!(has_symbol_kind(&store, "Screen", "function"));
+
+    // JSX usage is a call edge from the containing component.
+    assert!(has_call(&store, "Screen", "Button"));
+    assert!(has_call(&store, "Screen", "Wrapped"));
+    assert!(has_call(&store, "Wrapped", "Card"));
+
+    // `<Select.Option />` resolves to the member leaf.
+    assert!(has_call(&store, "Screen", "Option"));
+
+    // Host elements are not components and must not become edges.
+    assert!(!has_call(&store, "Screen", "section"));
+    assert!(!has_call(&store, "Card", "article"));
+
+    assert!(has_import(&store, "App.tsx", "Button"));
+}
+
+#[test]
+fn golden_jsx_in_plain_javascript() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = setup_store(
+        &tmp,
+        "app.jsx",
+        r#"
+export const Row = () => <li />;
+
+export function List() {
+    return <ul><Row /></ul>;
+}
+"#,
+    );
+
+    assert!(has_symbol_kind(&store, "Row", "function"));
+    assert!(has_call(&store, "List", "Row"));
+    assert!(!has_call(&store, "List", "ul"));
+}

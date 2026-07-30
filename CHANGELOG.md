@@ -23,6 +23,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `no-ai-slop-comments` rule and the executor's gate are unchanged.
 
 ### Added
+- Two frontend workflow artifacts, now that the graph can answer structural
+  questions about components. `mastermind-component-research` runs before a UI
+  change: does this component already exist, who renders it, what is its props
+  contract — reinvention is the most expensive frontend mistake and it is
+  invisible in a diff. `mastermind-frontend-audit` (skill) and
+  `mastermind-frontend-auditor` (Claude subagent) review the finished change for
+  a component nothing renders, a required prop added while callers stay on the
+  old contract, a duplicate of an existing component, and a raw value shadowing
+  a design token. Both are read-only, both require a query result behind every
+  finding, and neither judges visual fidelity — that needs the running
+  application and is recorded as a browser observation, not a structural claim.
 - Vue single-file components are indexed. `MyCard.vue` defines a `MyCard`
   symbol of kind `component` that owns every symbol from its `<script>` block —
   the block is re-parsed with the real TypeScript or JavaScript grammar chosen

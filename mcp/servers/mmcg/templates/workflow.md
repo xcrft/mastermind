@@ -51,7 +51,9 @@ Use the mmcg MCP tools before making structural claims:
 - `mmcg_search` for symbol existence;
 - `mmcg_callers` / `mmcg_impact` for blast radius;
 - `mmcg_change_impact` and `mmcg_test_impact` for an existing diff;
-- `mmcg_map` for unfamiliar architecture.
+- `mmcg_map` for unfamiliar architecture;
+- `mmcg_callers` on a component for who renders it — JSX and Vue template usage
+  are call edges.
 
 The graph is syntactic and bounded. Preserve stale-index, collision, precision,
 and truncation caveats; source reads and tests remain authoritative for runtime behavior.
@@ -93,6 +95,9 @@ release eligibility. A missing or malformed executor report fails post-flight.
 - Executor: implementation within approved scope.
 - Auditor: independent read-only review for Strict work.
 - Comment auditor: comment delta of a finished change, in every mode.
+- Frontend auditor: React or Vue change — unrendered components, props-contract
+  breaks, duplicates, raw values. Research the component graph before writing
+  UI, not after.
 
 Skip roles that add no new evidence.
 

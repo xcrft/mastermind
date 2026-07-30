@@ -45,6 +45,16 @@ critical-review envelope correctly and in full; the case had been passing only
 because earlier outputs happened to use the word "unknown" in prose. An
 assertion copied across two artifacts' contracts can only ever pass by luck.
 
+The four frontend cases (`w-040`–`w-043`) cover component research before a
+change and the frontend audit after it. Three of the four failed on first
+authoring for the same reason the pre-existing cases did: `w-040` forbade a
+phrase the prompt itself contains, `w-042` forbade `duplicate` while the skill
+mandates a `Duplicates` heading, and `w-041` demanded a third specific example
+of an invisible render path after the proposition had already been established.
+All three were assertion defects, not behaviours; repaired and passing. The
+lesson generalizes — a `not_contains` phrase must appear in neither the prompt
+nor the artifact's own required output shape.
+
 ### Assertion repairs, 2026-07-30
 
 All five were repaired on the eval side, each against a stated rule rather than

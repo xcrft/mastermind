@@ -122,6 +122,26 @@ Two entry points, because Direct work has no controller:
 A comment audit produces no `held` / `drift` / `broken` verdict and never
 substitutes for the contract audit.
 
+## Review a UI change
+
+The codegraph indexes React components (including arrow and `memo`/`forwardRef`
+forms) and Vue single-file components, and treats `<Button />` and
+`<base-button />` as call edges. That makes two frontend questions structural
+rather than a matter of opinion: does this component already exist and who
+renders it, and did a props contract change without its callers.
+
+`mastermind-component-research` answers them before the change is written —
+reinvention is the most expensive frontend mistake, and it is invisible in a
+diff. `mastermind-frontend-audit` (skill) and `mastermind-frontend-auditor`
+(Claude subagent) check the finished change: a component nothing renders, a
+required prop added while callers stay on the old contract, a duplicate of an
+existing component, and a raw value shadowing a design token.
+
+Neither judges whether the result looks right. Visual fidelity, spacing, and
+interaction quality need the running application, and a `clean` frontend audit
+says nothing about them — record those separately as browser observations, marked
+as checked or not checked, never as structural claims.
+
 ## What the checks prove
 
 Pre-flight checks required sections, referenced paths, indexed symbols,

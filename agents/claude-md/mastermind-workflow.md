@@ -98,6 +98,12 @@ release eligibility. A missing or malformed executor report fails post-flight.
 - Frontend auditor: React or Vue change — unrendered components, props-contract
   breaks, duplicates, raw values. Research the component graph before writing
   UI, not after.
+- Design intake: a design handoff becomes named components, token names, and
+  criteria that can fail. Visual fidelity is parked explicitly, never smuggled
+  into acceptance criteria.
+- Browser verification: record what was observed and at which viewport. The
+  accessibility tree and the console are evidence; a screenshot is not, and an
+  unchecked item is marked unchecked.
 
 Skip roles that add no new evidence.
 

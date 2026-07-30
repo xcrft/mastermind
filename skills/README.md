@@ -34,6 +34,16 @@ the installable workflow bundle.
 | [`mastermind-comment-audit`](code-review/mastermind-comment-audit/SKILL.md) | Reviews the comment delta of a finished change with quoted evidence, names what it kept, and reports deleted rationale. |
 | [`mastermind-frontend-audit`](code-review/mastermind-frontend-audit/SKILL.md) | Checks a finished UI change against the codegraph: unrendered components, props contracts changed without their callers, duplicates, and raw values shadowing tokens. |
 
+### design/
+| Skill | Description |
+|---|---|
+| [`mastermind-design-intake`](design/mastermind-design-intake/SKILL.md) | Converts a design handoff into named components, token names, and criteria that can fail, parking visual fidelity explicitly. |
+
+### testing/
+| Skill | Description |
+|---|---|
+| [`mastermind-browser-verification`](testing/mastermind-browser-verification/SKILL.md) | Records browser checks as evidence — accessibility tree over screenshot, console and network errors, viewports as a checklist, unchecked marked unchecked. |
+
 ### debugging/
 | Skill | Description |
 |---|---|

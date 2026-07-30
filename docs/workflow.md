@@ -137,10 +137,24 @@ diff. `mastermind-frontend-audit` (skill) and `mastermind-frontend-auditor`
 required prop added while callers stay on the old contract, a duplicate of an
 existing component, and a raw value shadowing a design token.
 
-Neither judges whether the result looks right. Visual fidelity, spacing, and
-interaction quality need the running application, and a `clean` frontend audit
-says nothing about them — record those separately as browser observations, marked
-as checked or not checked, never as structural claims.
+Neither judges whether the result looks right. That half is handled by naming
+it instead of pretending to check it.
+
+`mastermind-design-intake` converts a handoff into a contract that can fail:
+the design source is recorded, mapped components are confirmed against the
+repository, and acceptance criteria carry token names rather than resolved
+values. An element missing from a design tool's code mapping is not evidence the
+component is missing from the codebase — coverage is partial, and assuming
+otherwise is how a fourth `Button` gets written. Whatever stays a visual
+judgement is parked in its own section rather than smuggled into criteria a
+mechanical gate would wave through.
+
+`mastermind-browser-verification` decides what a browser check leaves behind.
+The accessibility tree is evidence because it is text that can be quoted and
+compared; a screenshot is for a human to look at. Console errors and failed
+requests are mechanical failures. Viewports and colour scheme are a recorded
+checklist, and an item that was not checked is written as not checked — an
+omitted line reads as a pass.
 
 ## What the checks prove
 

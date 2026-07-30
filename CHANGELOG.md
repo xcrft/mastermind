@@ -23,6 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `no-ai-slop-comments` rule and the executor's gate are unchanged.
 
 ### Added
+- The two halves of a UI change that were never checkable now have contracts.
+  `mastermind-design-intake` converts a design handoff into a task contract that
+  can fail: the source is recorded, mapped components are confirmed against the
+  repository, criteria carry token names instead of resolved values, and an
+  element absent from a design tool's code mapping is explicitly not evidence
+  that the component is absent from the codebase. `mastermind-browser-verification`
+  decides what a browser check leaves behind: the accessibility tree is evidence
+  because it can be quoted and compared, a screenshot is not, console and network
+  errors are mechanical failures, and an unchecked viewport is recorded as
+  unchecked rather than omitted.
 - Two frontend workflow artifacts, now that the graph can answer structural
   questions about components. `mastermind-component-research` runs before a UI
   change: does this component already exist, who renders it, what is its props

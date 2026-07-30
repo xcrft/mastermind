@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The security discipline gets its research half. `mastermind-security-research`
+  enumerates what reaches a privileged operation, which sites statically apply
+  the guard, and which modules read secrets, then reports the difference as
+  unestablished. It exists because the graph is wrong in both directions here:
+  a missing edge is not absence of access — global middleware, route tables, DI,
+  and proxies invoke code it never links — and a present edge is not enforcement,
+  since order, control flow, and fail-closed behaviour are invisible to a call
+  edge. The packet is a population and a gap list; it produces no verdict, does
+  not clear a change, and does not lower the mode.
 - The backend discipline gets its research half. `mastermind-runtime-research`
   gathers consumers, state writers, and boundary crossings before a service
   change and feeds `mastermind-architecture-review` rather than duplicating it.

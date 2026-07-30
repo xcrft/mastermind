@@ -751,8 +751,20 @@ const DISCIPLINE_SAMPLE: usize = 20;
 
 const DISCIPLINE_NOTE: &str = "Path-based classification proposes an evidence set; \
 it does not replace reading the change. Only what a path can establish is classified — \
-component file types and test-file naming. Anything else is listed unclassified rather \
-than guessed, so a queue consumer in a plain `.ts` file will not be labelled.";
+component file types, test-file naming, and a SQL file or migrations directory. \
+Anything else is listed unclassified rather than guessed, so a queue consumer in a \
+plain `.ts` file will not be labelled. A detected `migration` is a strict-mode trigger, \
+not a verdict about what the migration does.";
+
+fn migration_like_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".sql") {
+        return true;
+    }
+    lower
+        .split('/')
+        .any(|part| matches!(part, "migrations" | "migration" | "migrate"))
+}
 
 fn frontend_like_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
@@ -783,6 +795,11 @@ fn classify_disciplines(files: &[ChangedFile]) -> ImpactDisciplines {
             name: "qa",
             basis: "test-file naming convention",
             matches: test_like_path,
+        },
+        DisciplineRule {
+            name: "migration",
+            basis: "SQL file type or a migrations directory",
+            matches: migration_like_path,
         },
     ];
 
@@ -4130,13 +4147,47 @@ mod tests {
             .files
             .contains(&"src/ui/Button.test.tsx".to_string()));
 
-        // A queue consumer and a migration are backend work that no path proves.
+        // A SQL file and a migrations directory are both unambiguous.
+        let migration = by_name("migration");
+        assert_eq!(migration.file_count, 1);
+        assert!(migration
+            .files
+            .contains(&"migrations/0007_add_index.sql".to_string()));
+
+        // A queue consumer is backend work that no path proves.
         assert_eq!(
             result.unclassified,
-            vec![
-                "src/server/queue_consumer.ts".to_string(),
-                "migrations/0007_add_index.sql".to_string(),
-            ]
+            vec!["src/server/queue_consumer.ts".to_string()]
+        );
+    }
+
+    #[test]
+    fn migration_covers_the_common_layouts_without_guessing() {
+        let files: Vec<ChangedFile> = [
+            "db/migrate/20240101_add_orders.rb",
+            "prisma/migrations/0001_init/migration.sql",
+            "app/db/migration/V3__add_index.sql",
+            "src/orders/repository.ts",
+        ]
+        .into_iter()
+        .map(|path| ChangedFile {
+            path: path.to_string(),
+            status: "M".to_string(),
+        })
+        .collect();
+
+        let result = classify_disciplines(&files);
+        let migration = result
+            .detected
+            .iter()
+            .find(|signal| signal.name == "migration")
+            .expect("migration not detected");
+        assert_eq!(migration.file_count, 3);
+
+        // A repository that talks to the database is not a migration.
+        assert_eq!(
+            result.unclassified,
+            vec!["src/orders/repository.ts".to_string()]
         );
     }
 

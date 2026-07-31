@@ -1,6 +1,6 @@
 {
   "name": "@xcraftmind/mmcg-linux-x64-musl",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Prebuilt mmcg binary for Linux x86_64 musl (Alpine, distroless). Internal — installed automatically as an optional dependency of @xcraftmind/mastermind.",
   "license": "MIT",
   "author": "xcraftmind",

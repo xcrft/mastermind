@@ -1,6 +1,6 @@
 # @xcraftmind/mastermind
 
-[![npm](https://img.shields.io/badge/npm-v1.1.1-CB3837?logo=npm)](https://www.npmjs.com/package/@xcraftmind/mastermind)
+[![npm](https://img.shields.io/badge/npm-v1.2.0-CB3837?logo=npm)](https://www.npmjs.com/package/@xcraftmind/mastermind)
 [![CI](https://github.com/xcrft/mastermind/actions/workflows/ci-mmcg.yml/badge.svg)](https://github.com/xcrft/mastermind/actions/workflows/ci-mmcg.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/xcrft/mastermind/blob/main/LICENSE)
 

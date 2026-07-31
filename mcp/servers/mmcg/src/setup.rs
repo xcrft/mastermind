@@ -1331,6 +1331,44 @@ impl Drop for TestHomeDirGuard {
     }
 }
 
+/// Name every non-absolute `PATH` entry, or `None` when all of them are safe.
+///
+/// An empty entry is the dangerous case and the common one: POSIX reads it as
+/// the current directory, so the resolved binary would depend on where the
+/// command was run from.
+pub(crate) fn describe_unsafe_path_entries(path: &std::ffi::OsStr) -> Option<String> {
+    let mut offenders = Vec::new();
+    for (index, entry) in std::env::split_paths(path).enumerate() {
+        if entry.is_absolute() {
+            continue;
+        }
+        offenders.push(if entry.as_os_str().is_empty() {
+            format!("#{index} is empty, which POSIX reads as the current directory")
+        } else {
+            format!("#{index} is relative: {}", entry.display())
+        });
+    }
+    if offenders.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "PATH entry {}. A binary resolved through it depends on the working directory, \
+so setup refuses to record the command. An empty entry is usually a stray colon in a \
+shell profile — fix PATH and retry.",
+        offenders.join("; ")
+    ))
+}
+
+fn error_hint(class: &str) -> Option<String> {
+    match class {
+        "unsafe_path_entry" => {
+            describe_unsafe_path_entries(&std::env::var_os("PATH").unwrap_or_default())
+        }
+        "path_unavailable" => Some("PATH is not set in this environment".to_string()),
+        _ => None,
+    }
+}
+
 fn resolve_native(name: &str, root: &Path) -> Result<PathBuf, String> {
     let root = root
         .canonicalize()
@@ -1581,6 +1619,9 @@ fn finish_error(
 ) -> Outcome {
     print_plan_summary(request, target, action, entry, Outcome::Error);
     eprintln!("setup error: {class}");
+    if let Some(hint) = error_hint(class) {
+        eprintln!("  {hint}");
+    }
     Outcome::Error
 }
 
@@ -1665,6 +1706,79 @@ fn render_line_diff(before: &str, after: &str) -> String {
 #[allow(dead_code)]
 fn write_atomic(path: &Path, body: &str) -> std::io::Result<()> {
     safe_replace(path, None, body.as_bytes()).map_err(std::io::Error::other)
+}
+
+#[cfg(test)]
+mod path_entry_tests {
+    use super::describe_unsafe_path_entries;
+    use std::ffi::OsString;
+
+    // `split_paths` and `is_absolute` are both platform-defined, so the fixtures
+    // have to be too: `;` and a drive letter on Windows, `:` and a leading slash
+    // elsewhere. Hard-coding POSIX syntax passes locally and fails the matrix.
+    #[cfg(not(windows))]
+    const SEP: &str = ":";
+    #[cfg(windows)]
+    const SEP: &str = ";";
+
+    #[cfg(not(windows))]
+    const ABS_A: &str = "/usr/bin";
+    #[cfg(windows)]
+    const ABS_A: &str = r"C:\Windows";
+
+    #[cfg(not(windows))]
+    const ABS_B: &str = "/bin";
+    #[cfg(windows)]
+    const ABS_B: &str = r"C:\Windows\System32";
+
+    #[cfg(not(windows))]
+    const REL: &str = "node_modules/.bin";
+    #[cfg(windows)]
+    const REL: &str = r"node_modules\.bin";
+
+    fn describe(entries: &[&str]) -> Option<String> {
+        describe_unsafe_path_entries(&OsString::from(entries.join(SEP)))
+    }
+
+    #[test]
+    fn absolute_entries_are_safe() {
+        assert!(describe(&[ABS_A, ABS_B]).is_none());
+    }
+
+    #[test]
+    fn an_empty_entry_is_named_as_the_current_directory() {
+        let detail = describe(&[ABS_A, "", ABS_B]).expect("empty entry must be reported");
+        assert!(detail.contains("#1"), "{detail}");
+        assert!(detail.contains("current directory"), "{detail}");
+
+        // A trailing separator is the same defect and the most common spelling of it.
+        let trailing = describe(&[ABS_A, ""]).expect("trailing separator must be reported");
+        assert!(trailing.contains("current directory"), "{trailing}");
+    }
+
+    #[test]
+    fn a_relative_entry_is_named_with_its_value() {
+        let detail = describe(&[ABS_A, REL]).expect("relative entry must be reported");
+        assert!(detail.contains("#1"), "{detail}");
+        assert!(detail.contains(REL), "{detail}");
+        assert!(!detail.contains("current directory"), "{detail}");
+    }
+
+    #[test]
+    fn every_offender_is_listed_not_just_the_first() {
+        let detail = describe(&[ABS_A, REL, "", ABS_B]).expect("multiple offenders");
+        assert!(detail.contains("#1"), "{detail}");
+        assert!(detail.contains("#2"), "{detail}");
+    }
+
+    #[test]
+    fn an_unset_path_reads_as_a_single_current_directory_entry() {
+        // `split_paths("")` yields one empty entry rather than none, so an unset
+        // PATH is the current-directory case and not a separate one.
+        let detail = describe(&[""]).expect("an empty PATH must still be reported");
+        assert!(detail.contains("#0"), "{detail}");
+        assert!(detail.contains("current directory"), "{detail}");
+    }
 }
 
 #[cfg(test)]

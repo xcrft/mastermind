@@ -180,6 +180,7 @@ impl Report {
 pub fn run(root: &Path, mmcg_binary: &Path) -> Report {
     let checks = vec![
         check_binary(),
+        check_path_entries(),
         check_index_db(root),
         check_symbols_indexed(root),
         check_index_freshness(root),
@@ -238,6 +239,35 @@ fn check_binary() -> Check {
         status: Status::Ok,
         message: format!("v{}", env!("CARGO_PKG_VERSION")),
         hint: None,
+    }
+}
+
+fn check_path_entries() -> Check {
+    let path = std::env::var_os("PATH");
+    let Some(path) = path else {
+        return Check {
+            name: "PATH entries",
+            status: Status::Fail,
+            message: "PATH is not set".into(),
+            hint: Some("native client setup cannot resolve a binary without PATH".into()),
+        };
+    };
+    match crate::setup::describe_unsafe_path_entries(&path) {
+        None => Check {
+            name: "PATH entries",
+            status: Status::Ok,
+            message: format!("{} absolute entries", std::env::split_paths(&path).count()),
+            hint: None,
+        },
+        Some(detail) => Check {
+            name: "PATH entries",
+            status: Status::Fail,
+            message: detail,
+            hint: Some(
+                "`mastermind setup <client> --scope user` fails closed with `unsafe_path_entry` until every PATH entry is absolute"
+                    .into(),
+            ),
+        },
     }
 }
 

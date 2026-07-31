@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-07-31
+
+### Fixed
+- `mastermind setup <client> --scope user` failed with a bare
+  `setup error: unsafe_path_entry` and no way to tell an environment problem
+  from a bug. The check itself is right and stays: a non-absolute `PATH` entry —
+  most often an empty one from a stray colon, which POSIX reads as the current
+  directory — would let the resolved binary depend on where the command was run,
+  and that command is written into an MCP config that gets executed later. The
+  outcome class is unchanged for anything parsing it; the error now also names
+  every offending entry by position and says whether it is empty or relative.
+  `mastermind doctor` gained a `PATH entries` check so the same problem surfaces
+  before setup rather than after it.
+
 ## [1.2.0] - 2026-07-31
 
 ### Added

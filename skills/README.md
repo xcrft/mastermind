@@ -14,6 +14,7 @@ the installable workflow bundle.
 | [`mastermind-component-research`](workflow/mastermind-component-research/SKILL.md) | Answers whether a React or Vue component already exists, who renders it, and what its props contract is, before the change is written. |
 | [`mastermind-structured-report-contract`](workflow/mastermind-structured-report-contract/SKILL.md) | Defines the file-backed executor report consumed by post-flight and the advisory Strict auditor tail. |
 | [`mastermind-critical-review`](workflow/mastermind-critical-review/SKILL.md) | Stress-test a design, spec, plan, or report for false assumptions, broken contracts, scope creep, missing evidence, and high-risk failure modes. |
+| [`mastermind-product-intake`](workflow/mastermind-product-intake/SKILL.md) | Converts a PRD or ticket into criteria that can fail, resolves product nouns to symbols, surfaces unspecified cases, and parks outcome metrics. |
 | [`mastermind-runtime-research`](workflow/mastermind-runtime-research/SKILL.md) | Gathers consumers, state writers, and boundary crossings before a service change, and names the runtime gaps the graph cannot span. |
 | [`mastermind-architecture-review`](workflow/mastermind-architecture-review/SKILL.md) | Reviews runtime paths, state ownership, retry behavior, and compatibility against concrete system invariants. |
 | [`mastermind-project-history`](workflow/mastermind-project-history/SKILL.md) | Explains prior decisions from durable evidence while separating observation, inference, provenance, and technical proof. |

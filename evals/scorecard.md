@@ -4,18 +4,52 @@ This file records behavioral regression runs. It is not a model benchmark or a
 coverage percentage: case sets differ by suite, and elapsed time depends on the
 model, machine, and fixture setup.
 
-Latest complete runs: 2026-07-30 for `workflow`, `critic`, and `intake`.
-`auditor` remains the 2026-07-19 record — it was not rerun.
+Latest complete runs: 2026-07-31, all four suites.
 
 | suite | model | date | result | first pass | elapsed | evidence |
 |---|---|---|---:|---:|---:|---|
-| auditor | opus | 2026-07-19 | 9/9 | 9/9 | 1,286.4 s | Real Git fixtures and live mmcg; no sentinel retry |
-| critic | opus | 2026-07-30 | 4/5 | 4/5 | 294.7 s | Full suite; `c-002` exposed an eval design flaw — see below |
-| intake | sonnet | 2026-07-30 | 5/5 | 5/5 | 104.9 s | Full suite |
-| workflow | sonnet | 2026-07-30 | 45/47 | 45/47 | 778.9 s | Full suite; the eight frontend, design, and browser cases all passed on first attempt |
+| auditor | opus | 2026-07-31 | 9/9 | 8/9 | 2,097.0 s | Real Git fixtures and live mmcg against a release build of this branch; `a-007` needed one sentinel retry |
+| critic | opus | 2026-07-31 | 5/5 | 5/5 | 283.0 s | Full suite; `c-002` passed this time — see below |
+| intake | sonnet | 2026-07-31 | 5/5 | 5/5 | 98.4 s | Full suite |
+| workflow | sonnet | 2026-07-31 | 51/56 | 51/56 | 1,005.4 s | Full suite; the nine QA, backend, security, and product cases all passed on first attempt |
+| workflow | sonnet | 2026-07-30 | 45/47 | 45/47 | 778.9 s | Superseded snapshot |
 | workflow | sonnet | 2026-07-19 | 36/36 | 36/36 | 525.6 s | Superseded snapshot, kept for comparison |
 
-**The five repaired assertions held.** `w-008`, `w-029`, `w-031`, `w-032`, and
+**Every failure was an assertion defect; none was a behaviour.** All nine cases
+added since the previous run passed on first attempt, and the five workflow
+failures were all pre-existing cases in three now-familiar classes:
+
+- **A proposition quoted in order to reject it.** `w-027` assigned *low
+  confidence* to the proposition `"BillingRouter does not exist"` and `w-029`
+  wrote `must not be collapsed into a confident "coverage is proven" narrative`
+  — both forbade exactly what the case forbids, and both tripped the
+  `not_contains` that names it. `w-036` did the same on a third repair round.
+  The better an answer is at naming what it rejects, the more reliably it fails
+  this kind of assertion, so `not_contains` on a proposition is the wrong tool
+  for a skill whose job is rejecting propositions.
+- **A stem written differently.** `w-036` wrote `tool-enforced` against a list
+  requiring `tooling`; `w-045` wrote `aren't checkable` against `not checkable`.
+- **An incidental token.** `w-019` used `parseInt` where the case required
+  `Number.parseInt`, while the behaviour under test was comment discipline and
+  the `code_comments` policy — which passed.
+
+`w-036` and `w-045` were measured rather than assumed: three runs each showed
+1-in-3 and 2-in-3 failure. `w-045`'s root cause was in the artifact, not the
+case — `mastermind-design-intake` told the agent to park unverifiable items in
+"an explicit section" without naming one, so there was no stable token to
+assert. Both intake skills now mandate an output shape with a `Not verifiable` /
+`Outcome (not acceptance criteria)` heading, the way every audit skill already
+does. All repaired cases passed 3/3 afterwards.
+
+### `c-002` is flaky, which supports the earlier reading
+
+The case failed on 2026-07-30 and passed on 2026-07-31 with no change to the
+fixture or the critic. That is the diagnosis holding: the critic suite runs with
+full tools, the fixture describes a repository that is not this one, and whether
+the case passes depends on whether the model happens to inspect the filesystem.
+A case whose result turns on that is not measuring the critic.
+
+From the 2026-07-30 run: **the five repaired assertions held.** `w-008`, `w-029`, `w-031`, `w-032`, and
 `w-034` all passed, and the eight cases added since (`w-040`–`w-047`) passed on
 first attempt. Two *different* pre-existing cases failed, both on a forbidden
 phrase that appeared inside a denial or a finding label rather than in a claim:
@@ -32,7 +66,7 @@ affirmative claims already in the same list (`Cursor receives workflow skills`,
 has been recorded since those two repairs**, so 45/47 stands as the reportable
 number.
 
-### `c-002` is an eval design flaw, not a critic regression
+### `c-002`, as diagnosed on 2026-07-30
 
 The critic suite runs with full tools — only the workflow suite is invoked with
 `--safe-mode --tools ""`. The `c-002` fixture describes a design targeting
@@ -153,6 +187,12 @@ crossing author, language, repository, or authority boundaries.
   inside a finding label (`Test proves the wrong path`), failing answers that
   are exactly right. It must also appear in neither the prompt nor the
   artifact's own required output shape.
+- `not_contains` on a proposition is unreliable for a skill whose job is to
+  reject propositions. A good answer names what it rejects, in quotes, and trips
+  the assertion. Require the mandated output shape instead.
+- A skill with no mandated output shape cannot be asserted robustly. Every
+  spelling of the same idea is a coin flip; name the section the artifact must
+  produce and assert on that.
 - A count is not a phrase. Requiring `four` fails a model that writes `4`, and
   the number is almost never the proposition under test — assert the structure
   the artifact mandates instead.

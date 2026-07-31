@@ -200,6 +200,30 @@ that the rest of the codebase actually reaches, independent of what is declared
 public. A module can export twenty symbols and have three real consumers. Those
 three are the contract a change has to keep working.
 
+## Convert product writing into a contract
+
+A PRD is written to decide whether to build something; a task contract is
+written to check whether it was built. `mastermind-product-intake` converts the
+first into the second by sorting every statement into behaviour, constraint, and
+outcome.
+
+Only behaviour becomes acceptance criteria. A constraint qualifies once its
+measurement is named — unmeasured, it reads like rigour and checks nothing. An
+outcome never qualifies: "reduce support tickets by 30%" cannot fail on the day
+the change lands, and leaving it in the contract means a mechanical gate marks
+it satisfied while nobody has measured anything. Outcomes get their own section
+with the metric, the instrument, and who reads it.
+
+The intake also resolves product nouns to symbols — a feature that reads as new
+is usually mostly existing surface — and surfaces the cases the document never
+mentions: in-flight items, the empty state, partial failure, who is allowed.
+Answering those silently is how an executor's invention ships under a held
+audit.
+
+It does not write the PRD or validate the product assumption. There is no
+repository fact against which "users want this" can be checked, and this
+workflow does not pretend otherwise.
+
 ## What the checks prove
 
 Pre-flight checks required sections, referenced paths, indexed symbols,

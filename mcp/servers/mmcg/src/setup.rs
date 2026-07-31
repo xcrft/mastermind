@@ -1713,37 +1713,60 @@ mod path_entry_tests {
     use super::describe_unsafe_path_entries;
     use std::ffi::OsString;
 
-    fn describe(raw: &str) -> Option<String> {
-        describe_unsafe_path_entries(&OsString::from(raw))
+    // `split_paths` and `is_absolute` are both platform-defined, so the fixtures
+    // have to be too: `;` and a drive letter on Windows, `:` and a leading slash
+    // elsewhere. Hard-coding POSIX syntax passes locally and fails the matrix.
+    #[cfg(not(windows))]
+    const SEP: &str = ":";
+    #[cfg(windows)]
+    const SEP: &str = ";";
+
+    #[cfg(not(windows))]
+    const ABS_A: &str = "/usr/bin";
+    #[cfg(windows)]
+    const ABS_A: &str = r"C:\Windows";
+
+    #[cfg(not(windows))]
+    const ABS_B: &str = "/bin";
+    #[cfg(windows)]
+    const ABS_B: &str = r"C:\Windows\System32";
+
+    #[cfg(not(windows))]
+    const REL: &str = "node_modules/.bin";
+    #[cfg(windows)]
+    const REL: &str = r"node_modules\.bin";
+
+    fn describe(entries: &[&str]) -> Option<String> {
+        describe_unsafe_path_entries(&OsString::from(entries.join(SEP)))
     }
 
     #[test]
     fn absolute_entries_are_safe() {
-        assert!(describe("/usr/local/bin:/usr/bin:/bin").is_none());
+        assert!(describe(&[ABS_A, ABS_B]).is_none());
     }
 
     #[test]
     fn an_empty_entry_is_named_as_the_current_directory() {
-        let detail = describe("/usr/bin::/bin").expect("empty entry must be reported");
+        let detail = describe(&[ABS_A, "", ABS_B]).expect("empty entry must be reported");
         assert!(detail.contains("#1"), "{detail}");
         assert!(detail.contains("current directory"), "{detail}");
 
-        // A trailing colon is the same defect and the most common spelling of it.
-        let trailing = describe("/usr/bin:").expect("trailing colon must be reported");
+        // A trailing separator is the same defect and the most common spelling of it.
+        let trailing = describe(&[ABS_A, ""]).expect("trailing separator must be reported");
         assert!(trailing.contains("current directory"), "{trailing}");
     }
 
     #[test]
     fn a_relative_entry_is_named_with_its_value() {
-        let detail = describe("/usr/bin:~/bin").expect("relative entry must be reported");
+        let detail = describe(&[ABS_A, REL]).expect("relative entry must be reported");
         assert!(detail.contains("#1"), "{detail}");
-        assert!(detail.contains("~/bin"), "{detail}");
+        assert!(detail.contains(REL), "{detail}");
         assert!(!detail.contains("current directory"), "{detail}");
     }
 
     #[test]
     fn every_offender_is_listed_not_just_the_first() {
-        let detail = describe("/usr/bin:.::/bin").expect("multiple offenders");
+        let detail = describe(&[ABS_A, REL, "", ABS_B]).expect("multiple offenders");
         assert!(detail.contains("#1"), "{detail}");
         assert!(detail.contains("#2"), "{detail}");
     }
@@ -1752,7 +1775,7 @@ mod path_entry_tests {
     fn an_unset_path_reads_as_a_single_current_directory_entry() {
         // `split_paths("")` yields one empty entry rather than none, so an unset
         // PATH is the current-directory case and not a separate one.
-        let detail = describe("").expect("an empty PATH must still be reported");
+        let detail = describe(&[""]).expect("an empty PATH must still be reported");
         assert!(detail.contains("#0"), "{detail}");
         assert!(detail.contains("current directory"), "{detail}");
     }

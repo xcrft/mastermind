@@ -100,6 +100,7 @@ WORKFLOW_ARTIFACTS = frozenset(
         "skills/workflow/mastermind-critical-review/SKILL.md",
         "skills/workflow/mastermind-cross-client-setup/SKILL.md",
         "skills/workflow/mastermind-project-history/SKILL.md",
+        "skills/workflow/mastermind-product-intake/SKILL.md",
         "skills/workflow/mastermind-project-map/SKILL.md",
         "skills/workflow/mastermind-runtime-research/SKILL.md",
         "skills/workflow/mastermind-structured-report-contract/SKILL.md",

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mastermind Product Intake"
+  short_description: "Turn a PRD or ticket into a contract that can fail"
+  default_prompt: "Use $mastermind-product-intake to convert this PRD into acceptance criteria and a parked outcome section."

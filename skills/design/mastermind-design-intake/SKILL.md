@@ -79,6 +79,30 @@ instead of smuggling it into criteria that a mechanical gate will wave through.
 The same applies to motion, easing, and anything whose correctness is a
 judgement call.
 
+## Output
+
+Use these headings so a reviewer can find each part, especially the last one:
+
+```markdown
+### Source
+<file key + node id, or frame URL>
+
+### Components
+- `<Name>` — confirmed present / unmapped, searched as `<queries>`
+
+### Tokens
+- `<--token-name>` — for `<what it covers>`
+
+### Acceptance criteria
+- <each one able to fail on the day the change lands>
+
+### Not verifiable
+- <what a human must look at, at which viewports, against which frame>
+```
+
+`Not verifiable` is never empty on a real design handoff. An intake that omits
+it has smuggled a visual judgement into criteria a mechanical gate will pass.
+
 ## What this step does not do
 
 It does not implement, and it does not promise the result will match. A contract

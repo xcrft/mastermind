@@ -71,7 +71,7 @@ jobs:
           set -e
           test "$exit_code" -ne 0
           test "$exit_code" -ne 126
-          grep -q "GITHUB_WORKSPACE is required" <<<"$output"
+          grep -q "expected seven Action input arguments" <<<"$output"
 
       - name: Create a clean two-commit audit fixture
         id: fixture

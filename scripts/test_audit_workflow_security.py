@@ -562,6 +562,7 @@ class RepositoryDeliveryContractTests(unittest.TestCase):
         self.assertIn("test \"$(id -u)\" = 0", workflow)
         self.assertIn("test -x /usr/local/bin/audit-action-entrypoint", workflow)
         self.assertIn("touch /github/workspace/.mastermind-action-write-smoke", workflow)
+        self.assertIn('grep -q "expected seven Action input arguments"', workflow)
 
     def test_action_outputs_are_repository_relative_and_consumed_by_a_real_job(self):
         action = yaml.safe_load((ROOT / "action.yml").read_text(encoding="utf-8"))

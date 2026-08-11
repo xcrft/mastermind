@@ -8,12 +8,15 @@ use mmcg::indexer::Indexer;
 use mmcg::store::Store;
 use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 
 use crate::{templates, Profile};
 
 /// Options for [`do_init`].
 pub struct InitOpts {
+    /// Explicit index location from the global `--index` option.
+    pub index_path: Option<PathBuf>,
     /// Overwrite an existing CONTEXT.md / CLAUDE.md.
     pub force: bool,
     /// Run `mastermind index .` immediately after scaffolding.
@@ -30,6 +33,7 @@ pub struct InitOpts {
 /// Scaffold a Mastermind project at `root`.
 pub fn do_init(root: &Path, opts: InitOpts) -> Result<(), Box<dyn std::error::Error>> {
     let InitOpts {
+        index_path,
         force,
         index,
         claude,
@@ -135,7 +139,7 @@ pub fn do_init(root: &Path, opts: InitOpts) -> Result<(), Box<dyn std::error::Er
         );
     }
 
-    let db_path = mastermind_dir.join("mmcg.db");
+    let db_path = index_path.unwrap_or_else(|| mastermind_dir.join("mmcg.db"));
     if !db_path.exists() {
         let _ = Store::open(&db_path)?;
         created.push(".mastermind/mmcg.db".into());
@@ -143,11 +147,13 @@ pub fn do_init(root: &Path, opts: InitOpts) -> Result<(), Box<dyn std::error::Er
         skipped.push(".mastermind/mmcg.db (already exists)".into());
     }
 
+    let mut index_ready = false;
     if index {
         let mut store = Store::open(&db_path)?;
         let indexer = Indexer::new(root);
         match indexer.index_all(&mut store, false) {
             Ok(stats) => {
+                index_ready = true;
                 // Report the index's *totals* (from the db), not just this run's
                 // delta — an incremental no-op indexes 0 files but the index is
                 // still fully populated, and "indexed 0 files" reads as empty.
@@ -188,6 +194,16 @@ pub fn do_init(root: &Path, opts: InitOpts) -> Result<(), Box<dyn std::error::Er
                 }
                 if fill_claude_md {
                     created.push("CLAUDE.md placeholders filled via `claude -p`".into());
+                }
+                if index_ready {
+                    match refresh_project_history(root, &db_path) {
+                        Ok(indexed) => created.push(format!(
+                            "refreshed {indexed} durable history artifact(s) after scaffold drafting"
+                        )),
+                        Err(error) => warnings.push(format!(
+                            "post-draft history refresh failed: {error} — run `mastermind index .`"
+                        )),
+                    }
                 }
             }
             Err(e) => {
@@ -265,6 +281,14 @@ pub fn do_init(root: &Path, opts: InitOpts) -> Result<(), Box<dyn std::error::Er
     }
 
     Ok(())
+}
+
+fn refresh_project_history(root: &Path, db_path: &Path) -> Result<u32, String> {
+    let mut store = Store::open(db_path).map_err(|error| error.to_string())?;
+    Indexer::new(root)
+        .index_project_history(&mut store)
+        .map(|stats| stats.indexed)
+        .map_err(|error| error.to_string())
 }
 
 /// A detected stack: a rich human label (`node (react)`, `python (django)`,
@@ -723,6 +747,77 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(fs::read_to_string(first).unwrap(), "first\n");
         assert_eq!(fs::read_to_string(second).unwrap(), "second\n");
+    }
+
+    #[test]
+    fn post_draft_history_refresh_replaces_the_pre_draft_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let db = root.join(".mastermind/mmcg.db");
+        fs::write(root.join("CONTEXT.md"), "initial scaffold wording\n").unwrap();
+        refresh_project_history(root, &db).unwrap();
+
+        fs::write(
+            root.join("CONTEXT.md"),
+            "authoritative post draft architecture\n",
+        )
+        .unwrap();
+        refresh_project_history(root, &db).unwrap();
+
+        let store = Store::open(&db).unwrap();
+        assert!(store
+            .search_project_history("authoritative", Some("context"), 10)
+            .unwrap()
+            .iter()
+            .any(|entry| entry.path == "CONTEXT.md"));
+        assert!(store
+            .search_project_history("initial", Some("context"), 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn post_draft_history_refresh_rejects_an_index_from_another_repository() {
+        let indexed = tempfile::tempdir().unwrap();
+        let indexed_root = indexed.path();
+        fs::write(
+            indexed_root.join("CONTEXT.md"),
+            "foreign source history marker\n",
+        )
+        .unwrap();
+        let db = indexed_root.join("mmcg.db");
+        let mut store = Store::open(&db).unwrap();
+        Indexer::new(indexed_root)
+            .index_all(&mut store, false)
+            .unwrap();
+        drop(store);
+
+        let target = tempfile::tempdir().unwrap();
+        fs::write(
+            target.path().join("CONTEXT.md"),
+            "target replacement history marker\n",
+        )
+        .unwrap();
+
+        let error = refresh_project_history(target.path(), &db).unwrap_err();
+        assert!(
+            error.contains("index belongs to"),
+            "unexpected error: {error}"
+        );
+
+        let store = Store::open(&db).unwrap();
+        assert_eq!(
+            store
+                .search_project_history("foreign source", Some("context"), 10)
+                .unwrap()
+                .len(),
+            1,
+            "a rejected refresh must preserve the source repository history"
+        );
+        assert!(store
+            .search_project_history("target replacement", Some("context"), 10)
+            .unwrap()
+            .is_empty());
     }
 
     #[cfg(unix)]

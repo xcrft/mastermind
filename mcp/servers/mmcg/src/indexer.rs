@@ -41,6 +41,33 @@ pub use vue::VueExtractor;
 pub const EXTRACTOR_CONTRACT_VERSION: &str = "mmcg-extractors-v2";
 pub const EXTRACTOR_CONTRACT_META_KEY: &str = "extractor_contract_version";
 
+/// Bind a persisted codegraph to the repository it was built from.
+///
+/// Every indexer run records `index_root`; consumers that combine a `Store`
+/// with filesystem or Git state must validate that identity before trusting
+/// symbol, caller, or history results. Without this check a perfectly healthy
+/// database from another repository can satisfy verification claims.
+pub fn validate_index_root(store: &Store, requested_root: &Path) -> Result<(), String> {
+    let requested = requested_root
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve repository root: {error}"))?;
+    let stored = store
+        .meta_value("index_root")
+        .map_err(|error| format!("cannot read index root: {error}"))?
+        .ok_or_else(|| "index has no repository identity; run `mastermind index .`".to_string())?;
+    let stored = PathBuf::from(stored)
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve stored index root: {error}"))?;
+    if stored != requested {
+        return Err(format!(
+            "index belongs to `{}`, not `{}`; rebuild it for this repository or pass the correct --index",
+            stored.display(),
+            requested.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Hard bound for source reads. Generated artifacts with a source-looking
 /// extension must not turn indexing into an unbounded allocation.
 pub const MAX_INDEXABLE_FILE_SIZE: u64 = 5 * 1024 * 1024;
@@ -158,6 +185,46 @@ impl Indexer {
         Self { root: root.into() }
     }
 
+    fn bind_or_validate_index_root(&self, store: &Store) -> Result<(), IndexError> {
+        let existing_root = store
+            .meta_value("index_root")
+            .map_err(|error| IndexError::Other(error.to_string()))?;
+        if existing_root.is_some() {
+            return validate_index_root(store, &self.root).map_err(IndexError::Other);
+        }
+
+        let has_unbound_data = store
+            .file_count()
+            .map_err(|error| IndexError::Other(error.to_string()))?
+            > 0
+            || store
+                .task_specs_count()
+                .map_err(|error| IndexError::Other(error.to_string()))?
+                > 0
+            || store
+                .project_history_count()
+                .map_err(|error| IndexError::Other(error.to_string()))?
+                > 0
+            || !store
+                .scratchpad_read(None, None, None, 1)
+                .map_err(|error| IndexError::Other(error.to_string()))?
+                .is_empty();
+        if has_unbound_data {
+            return Err(IndexError::Other(
+                "existing index has no repository identity; rebuild it in a new database"
+                    .to_string(),
+            ));
+        }
+
+        let canonical_root = self
+            .root
+            .canonicalize()
+            .map_err(|error| IndexError::Io(error.to_string()))?;
+        store
+            .set_meta("index_root", &canonical_root.to_string_lossy())
+            .map_err(|error| IndexError::Other(error.to_string()))
+    }
+
     /// Index everything reachable from `root`. Incremental by default — files whose
     /// filesystem mtime is `<=` stored mtime are skipped. `force_full=true` re-indexes
     /// regardless of mtime (e.g. after a schema change or to recover a corrupted index).
@@ -165,6 +232,7 @@ impl Indexer {
     /// Files in the index but gone from disk are purged at the end. Writes to `store`.
     pub fn index_all(&self, store: &mut Store, force_full: bool) -> Result<IndexStats, IndexError> {
         let start = SystemTime::now();
+        self.bind_or_validate_index_root(store)?;
         let stored_extractor_contract = store
             .meta_value(EXTRACTOR_CONTRACT_META_KEY)
             .map_err(|error| IndexError::Other(error.to_string()))?;
@@ -297,13 +365,6 @@ impl Indexer {
         stats.history_entries_skipped = history.skipped;
         stats.history_entries_truncated = history.truncated;
 
-        let canonical_root = self
-            .root
-            .canonicalize()
-            .map_err(|error| IndexError::Io(error.to_string()))?;
-        store
-            .set_meta("index_root", &canonical_root.to_string_lossy())
-            .map_err(|error| IndexError::Other(error.to_string()))?;
         if stats.files_failed == 0 {
             store
                 .set_meta(EXTRACTOR_CONTRACT_META_KEY, EXTRACTOR_CONTRACT_VERSION)
@@ -375,6 +436,7 @@ impl Indexer {
         &self,
         store: &mut Store,
     ) -> Result<ProjectHistoryIndexStats, IndexError> {
+        self.bind_or_validate_index_root(store)?;
         let mut candidates: Vec<(PathBuf, &'static str)> = Vec::new();
         let mut add_if_present = |path: PathBuf, kind: &'static str| {
             if std::fs::symlink_metadata(&path).is_ok() {
@@ -1101,6 +1163,65 @@ mod incremental_tests {
             Some(crate::hex::encode(&Sha256::digest(bytes)).as_str())
         );
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn index_all_refuses_to_retarget_an_existing_database() {
+        let (indexed_root, db) = setup("root_identity_source");
+        fs::write(indexed_root.join("app.py"), "def source(): pass\n").unwrap();
+        let mut store = Store::open(&db).unwrap();
+        Indexer::new(&indexed_root)
+            .index_all(&mut store, false)
+            .unwrap();
+
+        let (requested_root, _) = setup("root_identity_target");
+        fs::write(requested_root.join("app.py"), "def target(): pass\n").unwrap();
+        let error = Indexer::new(&requested_root)
+            .index_all(&mut store, false)
+            .unwrap_err();
+        assert!(error.to_string().contains("index belongs to"));
+        assert_eq!(
+            store.meta_value("index_root").unwrap().as_deref(),
+            Some(
+                indexed_root
+                    .canonicalize()
+                    .unwrap()
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+
+        fs::remove_dir_all(indexed_root).ok();
+        fs::remove_dir_all(requested_root).ok();
+    }
+
+    #[test]
+    fn history_index_refuses_to_bind_an_unbound_scratchpad_database() {
+        let (original_root, db) = setup("scratchpad_root_identity_source");
+        let mut store = Store::open(&db).unwrap();
+        store
+            .scratchpad_append("planner", "handoff", "belongs to original repo")
+            .unwrap();
+
+        let (requested_root, _) = setup("scratchpad_root_identity_target");
+        let error = Indexer::new(&requested_root)
+            .index_project_history(&mut store)
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("existing index has no repository identity"));
+        assert!(store.meta_value("index_root").unwrap().is_none());
+        assert_eq!(
+            store
+                .scratchpad_read(None, None, None, 10)
+                .unwrap()
+                .first()
+                .map(|entry| entry.body.as_str()),
+            Some("belongs to original repo")
+        );
+
+        fs::remove_dir_all(original_root).ok();
+        fs::remove_dir_all(requested_root).ok();
     }
 
     #[test]

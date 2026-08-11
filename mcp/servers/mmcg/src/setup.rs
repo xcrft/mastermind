@@ -152,6 +152,46 @@ fn mmcg_entry(mmcg_binary: &Path) -> Value {
     if let Some(entry) = TEST_CANONICAL_ENTRY.with(|slot| slot.borrow().clone()) {
         return entry;
     }
+    mmcg_entry_for_platform(mmcg_binary, NpmLauncherPlatform::current())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NpmLauncherPlatform {
+    Other,
+    Windows,
+}
+
+impl NpmLauncherPlatform {
+    const fn current() -> Self {
+        if cfg!(windows) {
+            Self::Windows
+        } else {
+            Self::Other
+        }
+    }
+}
+
+fn npm_launcher_entry(platform: NpmLauncherPlatform, command: &str, args: Vec<String>) -> Value {
+    match platform {
+        NpmLauncherPlatform::Other => json!({
+            "command": command,
+            "args": args,
+        }),
+        NpmLauncherPlatform::Windows => {
+            // npm executables are command shims on Windows, which cannot be
+            // launched directly by every MCP client. Disable cmd AutoRun hooks
+            // and use its stable /s /c parsing path for the shim.
+            let mut shell_args = vec!["/d".into(), "/s".into(), "/c".into(), command.into()];
+            shell_args.extend(args);
+            json!({
+                "command": "cmd.exe",
+                "args": shell_args,
+            })
+        }
+    }
+}
+
+fn mmcg_entry_for_platform(mmcg_binary: &Path, platform: NpmLauncherPlatform) -> Value {
     let install_mode = std::env::var("MASTERMIND_INSTALL_MODE").ok();
     let version = std::env::var("MASTERMIND_VERSION").ok();
     let package = std::env::var("MASTERMIND_PACKAGE")
@@ -167,30 +207,28 @@ fn mmcg_entry(mmcg_binary: &Path) -> Value {
                 Some(v) => format!("{package}@{v}"),
                 None => package,
             };
-            json!({
-                "command": "npx",
-                "args": ["-y", pinned, "serve"],
-            })
+            let command = match platform {
+                NpmLauncherPlatform::Other => "npx",
+                NpmLauncherPlatform::Windows => "npx.cmd",
+            };
+            npm_launcher_entry(platform, command, vec!["-y".into(), pinned, "serve".into()])
         }
         Some("project") => {
             // Project-local install. Path relative to the project root (where
             // `.mcp.json` lives), so it survives `cd` into subdirs.
-            let bin = if cfg!(windows) {
-                "./node_modules/.bin/mastermind.cmd"
-            } else {
-                "./node_modules/.bin/mastermind"
+            let bin = match platform {
+                NpmLauncherPlatform::Other => "./node_modules/.bin/mastermind",
+                NpmLauncherPlatform::Windows => r".\node_modules\.bin\mastermind.cmd",
             };
-            json!({
-                "command": bin,
-                "args": ["serve"],
-            })
+            npm_launcher_entry(platform, bin, vec!["serve".into()])
         }
         Some("global") | Some("unknown") => {
             // `mastermind` is on PATH via npm's global bin directory.
-            json!({
-                "command": "mastermind",
-                "args": ["serve"],
-            })
+            let command = match platform {
+                NpmLauncherPlatform::Other => "mastermind",
+                NpmLauncherPlatform::Windows => "mastermind.cmd",
+            };
+            npm_launcher_entry(platform, command, vec!["serve".into()])
         }
         _ => {
             // No env var → invoked directly (cargo install, manual build, etc.).
@@ -490,13 +528,16 @@ fn run_json(request: &Request, target: &Target, entry: &Value) -> Outcome {
     }
 }
 
-fn continue_entry(entry: &Value) -> Value {
+pub(crate) fn continue_entry(entry: &Value) -> Value {
     json!({
-        "schema": 1,
-        "owner": "mastermind",
-        "name": "mmcg",
-        "command": entry.get("command").cloned().unwrap_or(Value::Null),
-        "args": entry.get("args").cloned().unwrap_or_else(|| json!([])),
+        "name": "Mastermind MCP",
+        "version": "1.0.0",
+        "schema": "v1",
+        "mcpServers": [{
+            "name": "mmcg",
+            "command": entry.get("command").cloned().unwrap_or(Value::Null),
+            "args": entry.get("args").cloned().unwrap_or_else(|| json!([])),
+        }],
     })
 }
 
@@ -2047,13 +2088,14 @@ mod tests {
     }
 
     #[test]
-    fn mmcg_entry_global_mode_uses_mastermind_on_path() {
+    fn mmcg_entry_global_mode_uses_mastermind_on_non_windows_path() {
         let _guard = EnvGuard::set(&[
             ("MASTERMIND_INSTALL_MODE", "global"),
             ("MASTERMIND_VERSION", "0.22.0"),
             ("MASTERMIND_PACKAGE", "@xcraftmind/mastermind"),
         ]);
-        let entry = mmcg_entry(Path::new("/ignored/path/mmcg"));
+        let entry =
+            mmcg_entry_for_platform(Path::new("/ignored/path/mmcg"), NpmLauncherPlatform::Other);
         assert_eq!(
             entry.get("command").and_then(|v| v.as_str()),
             Some("mastermind"),
@@ -2066,14 +2108,21 @@ mod tests {
         let _guard = EnvGuard::set(&[("MASTERMIND_INSTALL_MODE", "project")]);
         let entry = mmcg_entry(Path::new("/ignored"));
         let cmd = entry.get("command").and_then(|v| v.as_str()).unwrap();
-        // Unix path on non-Windows; .cmd on Windows.
         if cfg!(windows) {
-            assert!(
-                cmd.ends_with("node_modules/.bin/mastermind.cmd")
-                    || cmd.ends_with(r"node_modules\.bin\mastermind.cmd")
+            assert_eq!(cmd, "cmd.exe");
+            assert_eq!(
+                entry.get("args"),
+                Some(&json!([
+                    "/d",
+                    "/s",
+                    "/c",
+                    r".\node_modules\.bin\mastermind.cmd",
+                    "serve",
+                ]))
             );
         } else {
             assert_eq!(cmd, "./node_modules/.bin/mastermind");
+            assert_eq!(entry.get("args"), Some(&json!(["serve"])));
         }
     }
 
@@ -2085,7 +2134,10 @@ mod tests {
             ("MASTERMIND_PACKAGE", "@xcraftmind/mastermind"),
         ]);
         let entry = mmcg_entry(Path::new("/ignored"));
-        assert_eq!(entry.get("command").and_then(|v| v.as_str()), Some("npx"));
+        assert_eq!(
+            entry.get("command").and_then(|v| v.as_str()),
+            Some(if cfg!(windows) { "cmd.exe" } else { "npx" })
+        );
         let args = entry.get("args").and_then(|v| v.as_array()).unwrap();
         // Version pinned in the package spec arg.
         assert!(
@@ -2109,6 +2161,93 @@ mod tests {
                 .any(|a| a.as_str() == Some("@xcraftmind/mastermind")),
             "expected unpinned package arg when MASTERMIND_VERSION absent"
         );
+    }
+
+    #[test]
+    fn windows_npx_mode_runs_the_cmd_shim_through_cmd_exe() {
+        let _guard = EnvGuard::set(&[
+            ("MASTERMIND_INSTALL_MODE", "npx"),
+            ("MASTERMIND_VERSION", "0.22.0"),
+            ("MASTERMIND_PACKAGE", "@xcraftmind/mastermind"),
+        ]);
+
+        assert_eq!(
+            mmcg_entry_for_platform(Path::new("/ignored"), NpmLauncherPlatform::Windows),
+            json!({
+                "command": "cmd.exe",
+                "args": [
+                    "/d",
+                    "/s",
+                    "/c",
+                    "npx.cmd",
+                    "-y",
+                    "@xcraftmind/mastermind@0.22.0",
+                    "serve",
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn windows_project_mode_runs_the_local_cmd_shim_through_cmd_exe() {
+        let _guard = EnvGuard::set(&[("MASTERMIND_INSTALL_MODE", "project")]);
+
+        assert_eq!(
+            mmcg_entry_for_platform(Path::new("/ignored"), NpmLauncherPlatform::Windows),
+            json!({
+                "command": "cmd.exe",
+                "args": [
+                    "/d",
+                    "/s",
+                    "/c",
+                    r".\node_modules\.bin\mastermind.cmd",
+                    "serve",
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn windows_global_and_unknown_modes_run_the_cmd_shim_through_cmd_exe() {
+        for mode in ["global", "unknown"] {
+            let _guard = EnvGuard::set(&[("MASTERMIND_INSTALL_MODE", mode)]);
+            assert_eq!(
+                mmcg_entry_for_platform(Path::new("/ignored"), NpmLauncherPlatform::Windows),
+                json!({
+                    "command": "cmd.exe",
+                    "args": ["/d", "/s", "/c", "mastermind.cmd", "serve"],
+                }),
+                "install mode {mode} must launch npm's Windows command shim",
+            );
+        }
+    }
+
+    #[test]
+    fn non_windows_npm_launchers_keep_the_existing_direct_forms() {
+        {
+            let _guard = EnvGuard::set(&[
+                ("MASTERMIND_INSTALL_MODE", "npx"),
+                ("MASTERMIND_VERSION", "0.22.0"),
+                ("MASTERMIND_PACKAGE", "@xcraftmind/mastermind"),
+            ]);
+            assert_eq!(
+                mmcg_entry_for_platform(Path::new("/ignored"), NpmLauncherPlatform::Other),
+                json!({
+                    "command": "npx",
+                    "args": ["-y", "@xcraftmind/mastermind@0.22.0", "serve"],
+                })
+            );
+        }
+        {
+            let _guard = EnvGuard::set(&[("MASTERMIND_INSTALL_MODE", "project")]);
+            assert_eq!(
+                mmcg_entry_for_platform(Path::new("/ignored"), NpmLauncherPlatform::Other),
+                json!({
+                    "command": "./node_modules/.bin/mastermind",
+                    "args": ["serve"],
+                })
+            );
+        }
     }
 
     /// RAII helper that sets/unsets env vars for a test scope and restores prior
@@ -2305,6 +2444,28 @@ mod tests {
             assert!(summary.contains("<redacted>"));
             assert!(!summary.contains(secret));
         }
+    }
+
+    #[test]
+    fn continue_entry_uses_the_official_standalone_schema() {
+        let entry = json!({
+            "command": "/trusted/mmcg",
+            "args": ["serve"],
+        });
+
+        assert_eq!(
+            continue_entry(&entry),
+            json!({
+                "name": "Mastermind MCP",
+                "version": "1.0.0",
+                "schema": "v1",
+                "mcpServers": [{
+                    "name": "mmcg",
+                    "command": "/trusted/mmcg",
+                    "args": ["serve"],
+                }],
+            })
+        );
     }
 
     #[test]

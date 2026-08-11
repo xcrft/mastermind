@@ -3,7 +3,7 @@ name = "mmcg"
 version = "1.2.1"
 edition = "2021"
 rust-version = "1.96"
-description = "Mastermind Codegraph — fast multi-language code indexer (Python, TypeScript, JavaScript, Rust, C#, Go, Java, PHP, C/C++) with MCP interface. Truth layer for AI coding agents."
+description = "Mastermind Codegraph — fast multi-language code indexer (Python, TypeScript, JavaScript, Vue SFC, Rust, C#, Go, Java, PHP, C/C++) with MCP interface. Truth layer for AI coding agents."
 authors = ["mastermind"]
 license = "MIT"
 repository = "https://github.com/xcrft/mastermind"
@@ -12,6 +12,7 @@ documentation = "https://github.com/xcrft/mastermind/blob/main/mcp/servers/mmcg/
 readme = "README.md"
 keywords = ["mcp", "codegraph", "indexer", "tree-sitter", "ai-agents"]
 categories = ["development-tools", "command-line-utilities", "parser-implementations"]
+publish = ["crates-io"]
 # Keep the published tarball small — exclude build output, smoke fixtures, etc.
 exclude = [
     "target/*",

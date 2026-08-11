@@ -35,8 +35,12 @@ If an input is missing, report `could_not_verify`; do not infer it.
 3. For each reported behavior, inspect the actual changed code. File presence
    alone is not evidence. Literal FIND/CHANGE blocks are checked literally;
    otherwise judge the Acceptance Criteria.
-4. Re-run cheap, deterministic verification commands. Mark expensive or
-   environment-dependent commands `not_rerun`; never describe them as verified.
+4. Re-run cheap, deterministic verification commands. Run each reported
+   `VERIFY` command exactly as written, as its own Bash call from the repository
+   root: do not prepend `cd` or environment variables, and do not append pipes,
+   redirections, wrappers, or other compound commands. Mark expensive,
+   environment-dependent, or non-allowlisted commands `not_rerun`; never
+   describe them as verified.
 5. For changed symbols, use `mmcg_search`, `mmcg_callers`, and `mmcg_impact`.
    Preserve stale-index, collision, truncation, and syntactic-graph caveats.
 6. Check claimed integrations in three parts: target symbol exists, changed code

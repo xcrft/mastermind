@@ -1,8 +1,9 @@
 //! MCP server — JSON-RPC over stdio.
 //!
-//! Implements `initialize`, `tools/list`, `tools/call` of the Model Context
-//! Protocol (https://modelcontextprotocol.io). To add a tool: one [`ToolDef`]
-//! entry in [`TOOLS`] with a `schema` fn and a `handler` fn.
+//! Implements the stateless `server/discover` lifecycle introduced in
+//! 2026-07-28 alongside the 2025-11-25/2024-11-05 initialization lifecycle,
+//! plus `tools/list` and `tools/call`. To add a tool: one [`ToolDef`] entry in
+//! [`TOOLS`] with a `schema` fn and a `handler` fn.
 
 use crate::queries;
 use crate::store::{CancelHandle, InterruptSource, Store, WorkBudget};
@@ -12,11 +13,17 @@ use std::io::{self, BufRead, Read, Write};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const CURRENT_PROTOCOL_VERSION: &str = "2025-11-25";
+const CURRENT_STATEFUL_PROTOCOL_VERSION: &str = "2025-11-25";
 const LEGACY_PROTOCOL_VERSION: &str = "2024-11-05";
+const STATELESS_PROTOCOL_VERSION: &str = "2026-07-28";
+const PROTOCOL_VERSION_META_KEY: &str = "io.modelcontextprotocol/protocolVersion";
+const CLIENT_INFO_META_KEY: &str = "io.modelcontextprotocol/clientInfo";
+const CLIENT_CAPABILITIES_META_KEY: &str = "io.modelcontextprotocol/clientCapabilities";
+const SERVER_INFO_META_KEY: &str = "io.modelcontextprotocol/serverInfo";
 const MCP_FRAME_MAX: usize = 1024 * 1024;
 const MCP_RESULT_MAX: usize = 8 * 1024 * 1024;
 const SERVER_NOT_INITIALIZED: i32 = -32002;
+const UNSUPPORTED_PROTOCOL_VERSION: i32 = -32022;
 const SCRATCHPAD_BODY_MAX: usize = 8 * 1024;
 
 #[derive(Debug, Deserialize)]
@@ -30,7 +37,10 @@ struct JsonRpcRequest {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProtocolVersion {
     Legacy,
+    /// Latest initialization-based revision.
     Current,
+    /// Current per-request metadata revision.
+    Stateless,
 }
 
 impl ProtocolVersion {
@@ -45,12 +55,17 @@ impl ProtocolVersion {
     fn as_str(self) -> &'static str {
         match self {
             Self::Legacy => LEGACY_PROTOCOL_VERSION,
-            Self::Current => CURRENT_PROTOCOL_VERSION,
+            Self::Current => CURRENT_STATEFUL_PROTOCOL_VERSION,
+            Self::Stateless => STATELESS_PROTOCOL_VERSION,
         }
     }
 
     fn is_current(self) -> bool {
-        self == Self::Current
+        matches!(self, Self::Current | Self::Stateless)
+    }
+
+    fn is_stateless(self) -> bool {
+        self == Self::Stateless
     }
 }
 
@@ -113,6 +128,14 @@ struct JsonRpcResponse {
 struct JsonRpcError {
     code: i32,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<Value>,
+}
+
+#[derive(Debug)]
+enum RequestMetaError {
+    Invalid,
+    Unsupported(String),
 }
 
 /// One MCP tool. `schema` returns the `tools/list` JSON entry; `handler` runs
@@ -671,6 +694,35 @@ fn handle_request(
     params: &Value,
     id: Value,
 ) -> JsonRpcResponse {
+    // The 2026 protocol is self-describing and must not inherit lifecycle or
+    // capability state from another request on this stdio connection. A
+    // discovery call is unambiguously modern; for other methods, the reserved
+    // protocol-version key selects the modern path. In cold state, a present
+    // but incomplete `_meta` is also treated as a malformed modern request so
+    // it receives Invalid params instead of a misleading lifecycle error.
+    let has_meta = params.get("_meta").is_some();
+    let declares_protocol = params
+        .get("_meta")
+        .and_then(Value::as_object)
+        .is_some_and(|meta| meta.contains_key(PROTOCOL_VERSION_META_KEY));
+    let stateless_request = method == "server/discover"
+        || declares_protocol
+        || (*state == SessionState::Cold && method != "initialize" && has_meta);
+    if stateless_request {
+        return match validate_stateless_request_meta(params) {
+            Ok(()) => handle_stateless_request(store, method, params, id),
+            Err(RequestMetaError::Invalid) => err(id, -32602, "Invalid request metadata".into()),
+            Err(RequestMetaError::Unsupported(requested)) => err_with_data(
+                id,
+                UNSUPPORTED_PROTOCOL_VERSION,
+                "Unsupported protocol version".into(),
+                json!({
+                    "supported": [STATELESS_PROTOCOL_VERSION],
+                    "requested": requested
+                }),
+            ),
+        };
+    }
     if method == "initialize" {
         return match initialize_result(state, params) {
             Ok(result) => ok(id, result),
@@ -699,6 +751,58 @@ fn handle_request(
     }
 }
 
+fn validate_stateless_request_meta(params: &Value) -> Result<(), RequestMetaError> {
+    let meta = params
+        .as_object()
+        .and_then(|params| params.get("_meta"))
+        .and_then(Value::as_object)
+        .ok_or(RequestMetaError::Invalid)?;
+    let requested = meta
+        .get(PROTOCOL_VERSION_META_KEY)
+        .and_then(Value::as_str)
+        .ok_or(RequestMetaError::Invalid)?;
+    if requested != STATELESS_PROTOCOL_VERSION {
+        return Err(RequestMetaError::Unsupported(requested.to_string()));
+    }
+    if !meta
+        .get(CLIENT_CAPABILITIES_META_KEY)
+        .is_some_and(Value::is_object)
+    {
+        return Err(RequestMetaError::Invalid);
+    }
+    if let Some(client_info) = meta.get(CLIENT_INFO_META_KEY) {
+        let valid = client_info.as_object().is_some_and(|client_info| {
+            client_info.get("name").is_some_and(Value::is_string)
+                && client_info.get("version").is_some_and(Value::is_string)
+        });
+        if !valid {
+            return Err(RequestMetaError::Invalid);
+        }
+    }
+    Ok(())
+}
+
+fn handle_stateless_request(
+    store: &mut Store,
+    method: &str,
+    params: &Value,
+    id: Value,
+) -> JsonRpcResponse {
+    match method {
+        "server/discover" => ok(id, server_discovery()),
+        "tools/list" => ok(id, tools_list(ProtocolVersion::Stateless)),
+        "tools/call" => match handle_tools_call(ProtocolVersion::Stateless, store, params) {
+            Ok(result) => ok(id, result),
+            Err(ToolCallError::InvalidParams(message)) => err(id, -32602, message),
+            Err(ToolCallError::Internal { class }) => {
+                eprintln!("[mmcg] tool error class={class}");
+                err(id, -32603, "Internal tool error".into())
+            }
+        },
+        _ => err(id, -32601, "Method not found".into()),
+    }
+}
+
 fn ok(id: Value, result: Value) -> JsonRpcResponse {
     JsonRpcResponse {
         jsonrpc: "2.0",
@@ -713,7 +817,24 @@ fn err(id: Value, code: i32, message: String) -> JsonRpcResponse {
         jsonrpc: "2.0",
         id,
         result: None,
-        error: Some(JsonRpcError { code, message }),
+        error: Some(JsonRpcError {
+            code,
+            message,
+            data: None,
+        }),
+    }
+}
+
+fn err_with_data(id: Value, code: i32, message: String, data: Value) -> JsonRpcResponse {
+    JsonRpcResponse {
+        jsonrpc: "2.0",
+        id,
+        result: None,
+        error: Some(JsonRpcError {
+            code,
+            message,
+            data: Some(data),
+        }),
     }
 }
 
@@ -750,6 +871,37 @@ fn initialize_result(state: &mut SessionState, params: &Value) -> Result<Value, 
     }))
 }
 
+fn server_info() -> Value {
+    json!({ "name": "mmcg", "version": env!("CARGO_PKG_VERSION") })
+}
+
+/// Add the result fields required by the stateless 2026 protocol. Cacheable
+/// results use the conservative no-reuse default while still declaring the
+/// public scope required by the wire schema.
+fn finish_stateless_result(result: &mut Value, cacheable: bool) {
+    let result = result.as_object_mut().expect("MCP result object");
+    result.insert("resultType".into(), json!("complete"));
+    result.insert(
+        "_meta".into(),
+        json!({ SERVER_INFO_META_KEY: server_info() }),
+    );
+    if cacheable {
+        result.insert("ttlMs".into(), json!(0));
+        result.insert("cacheScope".into(), json!("public"));
+    }
+}
+
+fn server_discovery() -> Value {
+    let mut result = json!({
+        // Discovery advertises only versions that use per-request metadata.
+        // Stateful 2025/2024 clients retain their initialize fallback path.
+        "supportedVersions": [STATELESS_PROTOCOL_VERSION],
+        "capabilities": { "tools": { "listChanged": false } }
+    });
+    finish_stateless_result(&mut result, true);
+    result
+}
+
 fn tools_list(version: ProtocolVersion) -> Value {
     let tools = TOOLS
         .iter()
@@ -772,7 +924,11 @@ fn tools_list(version: ProtocolVersion) -> Value {
             schema
         })
         .collect::<Vec<_>>();
-    json!({ "tools": tools })
+    let mut result = json!({ "tools": tools });
+    if version.is_stateless() {
+        finish_stateless_result(&mut result, true);
+    }
+    result
 }
 
 fn handle_tools_call(
@@ -909,6 +1065,9 @@ fn tool_result(
             .expect("tool result object")
             .insert("structuredContent".into(), structured);
     }
+    if version.is_stateless() {
+        finish_stateless_result(&mut result, false);
+    }
     Ok(result)
 }
 
@@ -927,6 +1086,9 @@ fn small_tool_error(
             .as_object_mut()
             .expect("tool result object")
             .insert("structuredContent".into(), payload);
+    }
+    if version.is_stateless() {
+        finish_stateless_result(&mut result, false);
     }
     Ok(result)
 }
@@ -1769,13 +1931,18 @@ mod tests {
                 ProtocolVersion::Legacy,
             ),
             (
-                CURRENT_PROTOCOL_VERSION,
-                CURRENT_PROTOCOL_VERSION,
+                CURRENT_STATEFUL_PROTOCOL_VERSION,
+                CURRENT_STATEFUL_PROTOCOL_VERSION,
                 ProtocolVersion::Current,
             ),
             (
                 "2099-01-01",
-                CURRENT_PROTOCOL_VERSION,
+                CURRENT_STATEFUL_PROTOCOL_VERSION,
+                ProtocolVersion::Current,
+            ),
+            (
+                STATELESS_PROTOCOL_VERSION,
+                CURRENT_STATEFUL_PROTOCOL_VERSION,
                 ProtocolVersion::Current,
             ),
         ] {
@@ -1793,6 +1960,206 @@ mod tests {
             handle_notification(&mut state, "notifications/initialized");
             assert_eq!(state, SessionState::Ready(version));
         }
+    }
+
+    #[test]
+    fn stateless_discovery_matches_the_2026_contract() {
+        const MODERN: &str = "2026-07-28";
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = crate::store::Store::open(tmp.path().join("mmcg.db")).unwrap();
+        let mut state = SessionState::Cold;
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": "discover-1",
+            "method": "server/discover",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": MODERN,
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            }
+        });
+
+        let response = handle_line(&mut state, &mut store, &request.to_string()).unwrap();
+        assert!(
+            response.error.is_none(),
+            "valid stateless discovery failed: {:?}",
+            response.error
+        );
+        let result = response.result.unwrap();
+        assert_eq!(result["resultType"], "complete");
+        assert_eq!(result["supportedVersions"], json!([MODERN]));
+        assert_eq!(
+            result["capabilities"]["tools"],
+            json!({ "listChanged": false })
+        );
+        assert_eq!(result["ttlMs"], 0);
+        assert_eq!(result["cacheScope"], "public");
+        assert_eq!(
+            result["_meta"]["io.modelcontextprotocol/serverInfo"],
+            json!({ "name": "mmcg", "version": env!("CARGO_PKG_VERSION") })
+        );
+        assert!(result.get("serverInfo").is_none());
+        assert_eq!(state, SessionState::Cold, "discovery must remain stateless");
+    }
+
+    #[test]
+    fn stateless_tools_list_and_call_work_without_initialize() {
+        const MODERN: &str = "2026-07-28";
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = crate::store::Store::open(tmp.path().join("mmcg.db")).unwrap();
+        let mut state = SessionState::Cold;
+
+        let list_request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": MODERN,
+                    "io.modelcontextprotocol/clientInfo": {
+                        "name": "test-client",
+                        "version": "1.0.0"
+                    },
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            }
+        });
+        let list_response = handle_line(&mut state, &mut store, &list_request.to_string()).unwrap();
+        assert!(list_response.error.is_none());
+        let list_result = list_response.result.unwrap();
+        assert_eq!(list_result["resultType"], "complete");
+        assert_eq!(list_result["tools"].as_array().unwrap().len(), TOOLS.len());
+        assert_eq!(list_result["ttlMs"], 0);
+        assert_eq!(list_result["cacheScope"], "public");
+        assert_eq!(
+            list_result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            "mmcg"
+        );
+        assert_eq!(state, SessionState::Cold);
+
+        // Client identity is optional, but the two required fields must be
+        // repeated on this request rather than inherited from the list call.
+        let call_request = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": MODERN,
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                },
+                "name": "mmcg_files",
+                "arguments": {}
+            }
+        });
+        let call_response = handle_line(&mut state, &mut store, &call_request.to_string()).unwrap();
+        assert!(call_response.error.is_none());
+        let call_result = call_response.result.unwrap();
+        assert_eq!(call_result["resultType"], "complete");
+        assert_eq!(call_result["isError"], false);
+        assert!(call_result.get("structuredContent").is_some());
+        assert_eq!(
+            call_result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            "mmcg"
+        );
+        assert_eq!(state, SessionState::Cold);
+    }
+
+    #[test]
+    fn stateless_metadata_is_validated_per_request() {
+        const MODERN: &str = "2026-07-28";
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = crate::store::Store::open(tmp.path().join("mmcg.db")).unwrap();
+        let mut state = SessionState::Cold;
+
+        let valid = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": MODERN,
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            }
+        });
+        assert!(handle_line(&mut state, &mut store, &valid.to_string())
+            .unwrap()
+            .error
+            .is_none());
+
+        let missing_capabilities = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": MODERN
+                }
+            }
+        });
+        let missing =
+            handle_line(&mut state, &mut store, &missing_capabilities.to_string()).unwrap();
+        assert_eq!(missing.error.unwrap().code, -32602);
+
+        let invalid_client_info = json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/list",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": MODERN,
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                    "io.modelcontextprotocol/clientInfo": { "name": "missing-version" }
+                }
+            }
+        });
+        let invalid =
+            handle_line(&mut state, &mut store, &invalid_client_info.to_string()).unwrap();
+        assert_eq!(invalid.error.unwrap().code, -32602);
+
+        let unsupported = json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/list",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2099-01-01",
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            }
+        });
+        let unsupported = handle_line(&mut state, &mut store, &unsupported.to_string()).unwrap();
+        let encoded = serde_json::to_value(unsupported).unwrap();
+        assert_eq!(encoded["error"]["code"], -32022);
+        assert_eq!(encoded["error"]["data"]["supported"], json!([MODERN]));
+        assert_eq!(encoded["error"]["data"]["requested"], "2099-01-01");
+
+        let discover_without_meta = json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "server/discover",
+            "params": {}
+        });
+        let missing =
+            handle_line(&mut state, &mut store, &discover_without_meta.to_string()).unwrap();
+        assert_eq!(missing.error.unwrap().code, -32602);
+
+        let removed_ping = json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "ping",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": MODERN,
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            }
+        });
+        let removed = handle_line(&mut state, &mut store, &removed_ping.to_string()).unwrap();
+        assert_eq!(removed.error.unwrap().code, -32601);
+        assert_eq!(state, SessionState::Cold);
     }
 
     #[test]
@@ -1875,7 +2242,7 @@ mod tests {
         initialize_result(
             &mut state,
             &json!({
-                "protocolVersion": CURRENT_PROTOCOL_VERSION,
+                "protocolVersion": CURRENT_STATEFUL_PROTOCOL_VERSION,
                 "capabilities": {},
                 "clientInfo": { "name": "test", "version": "1" }
             }),
@@ -1969,12 +2336,16 @@ mod tests {
         let legacy = tool_result(ProtocolVersion::Legacy, object.clone(), false).unwrap();
         assert_eq!(unwrap_content(&legacy), object);
         assert!(legacy.get("structuredContent").is_none());
+        assert!(legacy.get("resultType").is_none());
+        assert!(legacy.get("_meta").is_none());
         assert_eq!(legacy["isError"], false);
 
         let current = tool_result(ProtocolVersion::Current, object.clone(), false).unwrap();
         assert_eq!(unwrap_content(&current), object);
         assert_eq!(current["structuredContent"], object);
         assert_eq!(current["content"][0]["text"], r#"{"value":1}"#);
+        assert!(current.get("resultType").is_none());
+        assert!(current.get("_meta").is_none());
 
         let array = json!([{ "body": "handoff" }]);
         let scratchpad = tool_result(ProtocolVersion::Current, array.clone(), false).unwrap();
@@ -2831,46 +3202,48 @@ mod tests {
         assert_eq!(Watchdog::from_env().tick(), WATCHDOG_TICK);
     }
 
-    /// An unlimited work budget means SQLite's progress handler never
-    /// interrupts this walk — without the watchdog it runs to its own internal
-    /// cap with nothing else able to stop it.
     #[test]
-    fn watchdog_soft_ceiling_interrupts_a_request_the_work_budget_would_not() {
-        let path = std::env::temp_dir().join("mmcg_mcp_watchdog_soft.db");
-        let _ = std::fs::remove_file(&path);
-        let mut store = crate::store::Store::open(&path).unwrap();
-        store.set_default_work_budget(WorkBudget::UNLIMITED);
-        seed_dense_collision_fixture(&store);
+    fn watchdog_soft_ceiling_interrupts_unbudgeted_sqlite_work() {
+        const SOFT_TIMEOUT: Duration = Duration::from_millis(50);
+        const SCHEDULER_TOLERANCE: Duration = Duration::from_secs(1);
 
-        let slow_call = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mmcg_impact","arguments":{"name":"node0","max_depth":10}}}"#;
-        let input = format!("{INITIALIZE_LINE}\n{INITIALIZED_LINE}\n{slow_call}\n");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("mmcg.db");
+        let store = crate::store::Store::open(&path).unwrap();
+        let started = Instant::now();
+        let in_flight = Arc::new(Mutex::new(Some(InFlight {
+            id: json!(1),
+            started,
+        })));
         let watchdog = Watchdog {
-            soft: Some(Duration::from_millis(10)),
+            soft: Some(SOFT_TIMEOUT),
             hard: None,
             exit_when_reparented: false,
         };
+        spawn_watchdog(watchdog, Arc::clone(&in_flight), store.cancel_handle());
 
-        let mut output = CountingWriter::default();
-        serve_io_watched(
-            &mut store,
-            Cursor::new(input.into_bytes()),
-            &mut output,
-            watchdog,
-        )
-        .unwrap();
+        // No deadline or op cap can produce this interrupt; it must come from
+        // the watchdog's cross-thread SQLite interrupt handle.
+        let result = store.run_interrupt_probe(WorkBudget::UNLIMITED);
+        let elapsed = started.elapsed();
+        *in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
 
-        let text = String::from_utf8(output.bytes).unwrap();
-        let lines: Vec<&str> = text.lines().collect();
-        let call_response: Value = serde_json::from_str(lines[1]).unwrap();
-        assert_eq!(call_response["id"], 1);
-        assert_eq!(call_response["result"]["isError"], true);
-        assert_eq!(
-            unwrap_content(&call_response["result"])
-                .get("code")
-                .and_then(Value::as_str),
-            Some("cancelled")
+        assert!(
+            matches!(
+                &result,
+                Err(rusqlite::Error::SqliteFailure(error, _))
+                    if error.code == rusqlite::ErrorCode::OperationInterrupted
+            ),
+            "watchdog did not interrupt SQLite: {result:?}"
         );
-        let _ = std::fs::remove_file(&path);
+        assert_eq!(store.take_interrupt_source(), Some(InterruptSource::Cancel));
+        assert!(elapsed >= SOFT_TIMEOUT, "watchdog fired early: {elapsed:?}");
+        assert!(
+            elapsed < SOFT_TIMEOUT + SCHEDULER_TOLERANCE,
+            "50ms watchdog exceeded the 1s scheduler allowance: {elapsed:?}"
+        );
     }
 
     #[test]

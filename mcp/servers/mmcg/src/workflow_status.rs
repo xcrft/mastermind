@@ -8,6 +8,7 @@ pub enum TaskPhase {
     Ready,
     AwaitingExecutor,
     AwaitingAudit,
+    AwaitingHistoryReview,
     Held,
     Complete,
 }
@@ -18,6 +19,7 @@ impl TaskPhase {
             Self::Ready => "ready",
             Self::AwaitingExecutor => "awaiting executor",
             Self::AwaitingAudit => "awaiting audit",
+            Self::AwaitingHistoryReview => "awaiting history review",
             Self::Held => "held",
             Self::Complete => "complete",
         }
@@ -46,19 +48,19 @@ pub struct TaskInfo {
 }
 
 pub struct IndexInfo {
+    pub index_path: PathBuf,
     pub db_exists: bool,
     pub symbol_count: u64,
     pub file_count: u64,
     pub stale_count: usize,
     pub extractor_contract_current: bool,
+    pub root_error: Option<String>,
 }
 
 pub struct InstallInfo {
     pub claude_md_present: bool,
     pub agents_count: usize,
     pub skills_count: usize,
-    pub expected_agents_count: Option<usize>,
-    pub expected_skills_count: Option<usize>,
 }
 
 pub struct WorkflowStatus {
@@ -76,15 +78,33 @@ pub struct NextAction {
 
 impl WorkflowStatus {
     pub fn scan(root: &Path) -> Self {
+        Self::scan_with_index(root, &root.join(".mastermind/mmcg.db"))
+    }
+
+    pub fn scan_with_index(root: &Path, index_path: &Path) -> Self {
         Self {
             root: root.to_path_buf(),
-            index: scan_index(root),
+            index: scan_index(root, index_path),
             install: scan_install(root),
             tasks: scan_tasks(root),
         }
     }
 
     pub fn next_action(&self) -> Option<NextAction> {
+        if let Some(error) = &self.index.root_error {
+            return Some(NextAction {
+                description: format!("Selected index cannot be used for this repository: {error}"),
+                command: None,
+                claude_prompt: Some(format!(
+                    "Repair the Mastermind index selection for {}. Pass the index that belongs to this repository, \
+                     or build its default index with `mastermind index {}`. Do not resume a graph-backed task \
+                     against the mismatched database at {}.",
+                    self.root.display(),
+                    self.root.display(),
+                    self.index.index_path.display()
+                )),
+            });
+        }
         if let Some(task) = self
             .tasks
             .iter()
@@ -104,6 +124,31 @@ impl WorkflowStatus {
                      The canonical executor report is in {}. \
                      Run `mastermind run-task {spec} --post-only`, then perform semantic review.",
                     task_dir.display()
+                )),
+            });
+        }
+        if let Some(task) = self
+            .tasks
+            .iter()
+            .find(|task| task.phase == TaskPhase::AwaitingHistoryReview)
+        {
+            let task_dir = task.spec_path.parent().unwrap_or(task.spec_path.as_path());
+            let review = task_dir.join("history-review.md");
+            return Some(NextAction {
+                description: format!(
+                    "Task {} — deterministic audit passed; complete semantic history review",
+                    task.folder
+                ),
+                command: Some(format!("mastermind run-task {}", task.spec_path.display())),
+                claude_prompt: Some(format!(
+                    "Review the completed Mastermind task at {}.\n\n\
+                     Read audit.md and history-review.md. Decide whether CONTEXT.md and a durable lesson need updates. \
+                     In {}, replace Context and Lesson `pending` with `updated` or `not applicable`, \
+                     and replace the generated Reason with the concrete rationale. Then run \
+                     `mastermind run-task {}` to persist completion.",
+                    task_dir.display(),
+                    review.display(),
+                    task.spec_path.display()
                 )),
             });
         }
@@ -170,13 +215,20 @@ impl WorkflowStatus {
 
         out.push_str("Index\n");
         if !self.index.db_exists {
-            out.push_str("  ✗ no index — run `mastermind index .` or `mastermind init`\n");
+            out.push_str(&format!(
+                "  ✗ no index at {} — run `mastermind index .` or `mastermind init`\n",
+                self.index.index_path.display()
+            ));
         } else {
             out.push_str(&format!(
-                "  ✓ .mastermind/mmcg.db — {} symbols, {} files\n",
-                self.index.symbol_count, self.index.file_count
+                "  ✓ {} — {} symbols, {} files\n",
+                self.index.index_path.display(),
+                self.index.symbol_count,
+                self.index.file_count
             ));
-            if self.index.stale_count == 0 && self.index.extractor_contract_current {
+            if let Some(error) = &self.index.root_error {
+                out.push_str(&format!("  ✗ index repository mismatch — {error}\n"));
+            } else if self.index.stale_count == 0 && self.index.extractor_contract_current {
                 out.push_str("  ✓ index up to date\n");
             } else {
                 if !self.index.extractor_contract_current {
@@ -209,16 +261,17 @@ impl WorkflowStatus {
         }
         out.push_str(&install_count_line(
             self.install.agents_count,
-            self.install.expected_agents_count,
             "subagent",
             "~/.claude/agents/",
         ));
         out.push_str(&install_count_line(
             self.install.skills_count,
-            self.install.expected_skills_count,
             "skill",
             "~/.claude/skills/",
         ));
+        out.push_str(
+            "  Verify owned workflow files and digests: `mastermind doctor --workflow --client all`\n",
+        );
         out.push('\n');
 
         if self.tasks.is_empty() {
@@ -237,7 +290,9 @@ impl WorkflowStatus {
                 let marker = match task.phase {
                     TaskPhase::Complete => "✓",
                     TaskPhase::Ready => "○",
-                    TaskPhase::AwaitingExecutor | TaskPhase::AwaitingAudit => "⚡",
+                    TaskPhase::AwaitingExecutor
+                    | TaskPhase::AwaitingAudit
+                    | TaskPhase::AwaitingHistoryReview => "⚡",
                     TaskPhase::Held => "⛔",
                 };
                 let mut line = format!(
@@ -309,12 +364,24 @@ impl WorkflowStatus {
     }
 
     pub fn render_resume_text(&self, task_name: Option<&str>) -> String {
+        if let Some(error) = &self.index.root_error {
+            return format!(
+                "Cannot resume safely: selected index repository mismatch — {error}\n\n\
+                 Pass the correct `--index` or run `mastermind index {}` to build this repository's default index.\n",
+                self.root.display()
+            );
+        }
         let task = match task_name {
             Some(name) => self.tasks.iter().find(|t| t.folder == name),
             None => self
                 .tasks
                 .iter()
                 .find(|t| t.phase == TaskPhase::AwaitingAudit)
+                .or_else(|| {
+                    self.tasks
+                        .iter()
+                        .find(|t| t.phase == TaskPhase::AwaitingHistoryReview)
+                })
                 .or_else(|| {
                     self.tasks
                         .iter()
@@ -407,6 +474,14 @@ impl WorkflowStatus {
                 spec = task.spec_path.display(),
                 dir = task_dir.display()
             ),
+            TaskPhase::AwaitingHistoryReview => format!(
+                "Complete semantic history review for:\n{spec}\n\n\
+                 Read {dir}/audit.md and {dir}/history-review.md. Replace both pending dispositions \
+                 with `updated` or `not applicable`, replace the generated Reason with the concrete rationale, \
+                 then run `mastermind run-task {spec}` to persist completion.",
+                spec = task.spec_path.display(),
+                dir = task_dir.display()
+            ),
             TaskPhase::Held => {
                 let blocking = task
                     .state
@@ -460,31 +535,38 @@ fn extract_section(text: &str, heading: &str) -> String {
     lines.join("\n")
 }
 
-fn scan_index(root: &Path) -> IndexInfo {
-    let db = root.join(".mastermind").join("mmcg.db");
+fn scan_index(root: &Path, db: &Path) -> IndexInfo {
     if !db.is_file() {
         return IndexInfo {
+            index_path: db.to_path_buf(),
             db_exists: false,
             symbol_count: 0,
             file_count: 0,
             stale_count: 0,
             extractor_contract_current: false,
+            root_error: None,
         };
     }
 
-    let (symbol_count, file_count) = db_counts(&db).unwrap_or((0, 0));
+    let (symbol_count, file_count) = db_counts(db).unwrap_or((0, 0));
 
-    let stale_count = stale_paths(root, &db, 10)
+    let stale_count = stale_paths(root, db, 10)
         .map(|paths| paths.len())
         .unwrap_or(1);
-    let extractor_contract_current = db_extractor_contract_current(&db).unwrap_or(false);
+    let extractor_contract_current = db_extractor_contract_current(db).unwrap_or(false);
+    let root_error = crate::store::Store::open(db)
+        .map_err(|error| format!("cannot open {}: {error}", db.display()))
+        .and_then(|store| crate::indexer::validate_index_root(&store, root))
+        .err();
 
     IndexInfo {
+        index_path: db.to_path_buf(),
         db_exists: true,
         symbol_count,
         file_count,
         stale_count,
         extractor_contract_current,
+        root_error,
     }
 }
 
@@ -593,40 +675,19 @@ fn scan_install(root: &Path) -> InstallInfo {
             (agents, skills)
         }
     };
-    let (expected_agents_count, expected_skills_count) = std::env::var_os("MASTERMIND_SHARE_DIR")
-        .map(PathBuf::from)
-        .map(|share| {
-            (
-                Some(count_matching_files(
-                    &share.join("agents"),
-                    "mastermind-",
-                    ".md",
-                )),
-                Some(count_workflow_skill_dirs(&share.join("skills"))),
-            )
-        })
-        .unwrap_or((None, None));
     InstallInfo {
         claude_md_present,
         agents_count,
         skills_count,
-        expected_agents_count,
-        expected_skills_count,
     }
 }
 
-fn install_count_line(installed: usize, expected: Option<usize>, kind: &str, path: &str) -> String {
-    match expected {
-        Some(expected) if installed != expected => format!(
-            "  ⚠ {installed}/{expected} {kind}(s) in {path} — workflow bundle drift; run `mastermind update --client claude`, then `mastermind doctor --workflow --client claude`\n"
-        ),
-        Some(expected) => {
-            format!("  ✓ {installed}/{expected} {kind}(s) in {path}\n")
-        }
-        None if installed > 0 => format!("  ✓ {installed} {kind}(s) in {path}\n"),
-        None => format!(
+fn install_count_line(installed: usize, kind: &str, path: &str) -> String {
+    match installed {
+        0 => format!(
             "  ○ Claude {kind}s not installed (optional) — run `mastermind install` for Claude workflow adapters\n"
         ),
+        _ => format!("  ○ {installed} {kind}(s) found in {path} (inventory only)\n"),
     }
 }
 
@@ -728,6 +789,15 @@ fn detect_phase(
             return TaskPhase::AwaitingAudit;
         }
         return match s.status.as_str() {
+            "history_review_required" => TaskPhase::AwaitingHistoryReview,
+            "learned"
+                if task_dir.join("history-review.md").is_file()
+                    && !crate::run_task::history_review_complete(
+                        &task_dir.join("history-review.md"),
+                    ) =>
+            {
+                TaskPhase::AwaitingHistoryReview
+            }
             "learned" => TaskPhase::Complete,
             "audit_required" => TaskPhase::AwaitingAudit,
             "approved" | "executing" => TaskPhase::AwaitingExecutor,
@@ -737,7 +807,13 @@ fn detect_phase(
     }
 
     if task_dir.join("audit.md").is_file() {
-        return TaskPhase::Complete;
+        return if task_dir.join("history-review.md").is_file()
+            && !crate::run_task::history_review_complete(&task_dir.join("history-review.md"))
+        {
+            TaskPhase::AwaitingHistoryReview
+        } else {
+            TaskPhase::Complete
+        };
     }
 
     let is_inflight = inflight_spec.as_deref().is_some_and(|inflight| {
@@ -795,14 +871,133 @@ mod tests {
     }
 
     #[test]
-    fn install_count_line_flags_bundle_drift() {
-        let drift = install_count_line(10, Some(15), "skill", "~/.claude/skills/");
-        assert!(drift.contains("⚠ 10/15 skill(s)"));
-        assert!(drift.contains("mastermind update --client claude"));
+    fn learned_task_with_pending_history_review_is_not_complete() {
+        let root = std::env::temp_dir().join(format!(
+            "mmcg-status-history-review-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let task_dir = root.join(".mastermind/tasks/002-review");
+        fs::create_dir_all(&task_dir).unwrap();
+        let spec_path = task_dir.join("spec.md");
+        fs::write(&spec_path, "# Review\n").unwrap();
+        fs::write(
+            task_dir.join("history-review.md"),
+            "- **Context:** pending\n- **Lesson:** pending\n- **Reason:** semantic review required\n",
+        )
+        .unwrap();
+        let state = TaskState {
+            status: "learned".into(),
+            risk: Some("low".into()),
+            next_step: Some("close".into()),
+            blocking_reason: None,
+            last_artifact: Some("audit.md".into()),
+        };
 
-        let current = install_count_line(15, Some(15), "skill", "~/.claude/skills/");
-        assert!(current.contains("✓ 15/15 skill(s)"));
-        assert!(!current.contains("drift"));
+        assert_eq!(
+            detect_phase(&spec_path, &None, Some(&state)),
+            TaskPhase::AwaitingHistoryReview
+        );
+
+        fs::write(
+            task_dir.join("history-review.md"),
+            "- **Context:** not applicable\n- **Lesson:** updated\n- **Reason:** captured the retry invariant\n",
+        )
+        .unwrap();
+        assert_eq!(
+            detect_phase(&spec_path, &None, Some(&state)),
+            TaskPhase::Complete
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn next_and_resume_share_audit_before_history_review_priority() {
+        let root = tempfile::tempdir().unwrap();
+        let history_spec = root.path().join(".mastermind/tasks/001-history/spec.md");
+        let audit_spec = root.path().join(".mastermind/tasks/002-audit/spec.md");
+        fs::create_dir_all(history_spec.parent().unwrap()).unwrap();
+        fs::create_dir_all(audit_spec.parent().unwrap()).unwrap();
+        fs::write(&history_spec, "# History\n").unwrap();
+        fs::write(&audit_spec, "# Audit\n").unwrap();
+
+        let status = WorkflowStatus {
+            root: root.path().to_path_buf(),
+            index: IndexInfo {
+                index_path: root.path().join("mmcg.db"),
+                db_exists: false,
+                symbol_count: 0,
+                file_count: 0,
+                stale_count: 0,
+                extractor_contract_current: true,
+                root_error: None,
+            },
+            install: InstallInfo {
+                claude_md_present: false,
+                agents_count: 0,
+                skills_count: 0,
+            },
+            tasks: vec![
+                TaskInfo {
+                    folder: "001-history".into(),
+                    spec_path: history_spec,
+                    phase: TaskPhase::AwaitingHistoryReview,
+                    state: None,
+                },
+                TaskInfo {
+                    folder: "002-audit".into(),
+                    spec_path: audit_spec,
+                    phase: TaskPhase::AwaitingAudit,
+                    state: None,
+                },
+            ],
+        };
+
+        assert!(status.render_next_text().contains("Task 002-audit"));
+        assert!(status
+            .render_resume_text(None)
+            .contains("Resume: 002-audit"));
+    }
+
+    #[test]
+    fn install_count_line_reports_inventory_without_claiming_bundle_parity() {
+        let inventory = install_count_line(10, "skill", "~/.claude/skills/");
+        assert!(inventory.contains("10 skill(s)"));
+        assert!(inventory.contains("inventory only"));
+        assert!(!inventory.contains("drift"));
+        assert!(!inventory.contains("up to date"));
+    }
+
+    #[test]
+    fn explicit_index_path_reports_repository_identity_mismatch() {
+        let requested = tempfile::tempdir().unwrap();
+        let indexed = tempfile::tempdir().unwrap();
+        let requested_root = requested.path().canonicalize().unwrap();
+        let indexed_root = indexed.path().canonicalize().unwrap();
+        let db = indexed_root.join("explicit.db");
+        let store = crate::store::Store::open(&db).unwrap();
+        store
+            .set_meta("index_root", &indexed_root.to_string_lossy())
+            .unwrap();
+        drop(store);
+
+        let status = WorkflowStatus::scan_with_index(&requested_root, &db);
+        assert_eq!(status.index.index_path, db);
+        assert!(status
+            .index
+            .root_error
+            .as_deref()
+            .is_some_and(|error| error.contains("index belongs to")));
+        assert!(status.render_text().contains("index repository mismatch"));
+        assert!(status
+            .render_next_text()
+            .contains("Selected index cannot be used"));
+        assert!(status
+            .render_resume_text(None)
+            .contains("Cannot resume safely"));
     }
 
     #[test]

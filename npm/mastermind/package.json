@@ -1,7 +1,7 @@
 {
   "name": "@xcraftmind/mastermind",
   "version": "1.2.1",
-  "description": "Local codegraph and verifiable workflow for AI coding agents — project maps, change and test impact, MCP queries, and diff-backed implementation audits. Prebuilt binaries for macOS, Linux, and Windows.",
+  "description": "Local codegraph and verifiable workflow for AI coding agents — project maps, change and test impact, MCP queries, Vue SFC indexing, and diff-backed implementation audits. Prebuilt binaries for macOS, Linux, and Windows.",
   "license": "MIT",
   "author": "xcraftmind",
   "type": "module",
@@ -35,6 +35,7 @@
     "ai",
     "claude",
     "tree-sitter",
+    "vue",
     "indexer",
     "rust",
     "cli",

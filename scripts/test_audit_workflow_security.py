@@ -442,6 +442,35 @@ class RepositoryDeliveryContractTests(unittest.TestCase):
             "GitHub Docker Actions must use the default root user for GITHUB_WORKSPACE",
         )
 
+    def test_docker_from_detector_fails_closed_on_every_stage_form(self):
+        dockerfile = (ROOT / "Dockerfile.audit-action").read_text(encoding="utf-8")
+        approved = validator.dockerfile_from_images(dockerfile)
+        self.assertEqual(len(approved), 2)
+        self.assertEqual(
+            validator.dockerfile_from_images(dockerfile.replace("FROM ", "from ", 1)),
+            approved,
+            "Docker instruction names are case-insensitive",
+        )
+
+        unapproved = "debian:bookworm@sha256:" + "0" * 64
+        changed_digest = approved[1][:-1] + ("0" if approved[1][-1] != "0" else "1")
+        missing_digest = approved[1].split("@", 1)[0]
+        mutations = {
+            "changed digest": dockerfile.replace(approved[1], changed_digest, 1),
+            "missing digest": dockerfile.replace(approved[1], missing_digest, 1),
+            "third lowercase stage": dockerfile + f"\nfrom {unapproved} AS escape\n",
+            "third mixed-case indented stage": dockerfile + f"\n  FrOm {unapproved} AS escape\n",
+            "third platform stage": dockerfile
+            + f"\n\tFROM --platform=linux/amd64 {unapproved} AS escape\n",
+            "duplicate approved stage": dockerfile + f"\nFROM {approved[0]} AS duplicate\n",
+            "bare stage": dockerfile + "\nFROM\n",
+            "bare mixed-case indented stage": dockerfile + "\n  FrOm\n",
+            "incomplete platform stage": dockerfile + "\nFROM --platform=linux/amd64\n",
+        }
+        for name, mutated in mutations.items():
+            with self.subTest(mutation=name):
+                self.assertNotEqual(validator.dockerfile_from_images(mutated), approved)
+
     def test_required_workflows_are_not_suppressed_by_path_filters(self):
         workflows = [
             ROOT / ".github/workflows/ci-mmcg.yml",

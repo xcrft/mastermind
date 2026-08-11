@@ -151,6 +151,72 @@ fn walk(
                     walk(body, source, pending, Some(idx), module_index);
                 }
             }
+            // Header declarations use `declaration` at file scope and
+            // `field_declaration` inside a class body. Only accept declarators
+            // that actually contain a function declarator so ordinary fields
+            // and variables do not become callable symbols.
+            "declaration" | "field_declaration" => {
+                let declaration_scope = parent_index
+                    .and_then(|index| pending.symbols.get(index))
+                    .map(|symbol| symbol.kind.as_str());
+                if parent_index != Some(module_index)
+                    && !matches!(declaration_scope, Some("class" | "struct" | "union"))
+                {
+                    // A direct initializer such as `Iterator end, it(path)`
+                    // can look like a function declarator without semantic
+                    // type information. Declarations inside function bodies
+                    // are therefore traversed for calls, but never promoted
+                    // to header symbols.
+                    walk(child, source, pending, parent_index, module_index);
+                    continue;
+                }
+
+                let mut cursor = child.walk();
+                let declarators: Vec<_> = child
+                    .children_by_field_name("declarator", &mut cursor)
+                    .collect();
+                if declarators.is_empty() {
+                    walk(child, source, pending, parent_index, module_index);
+                    continue;
+                }
+
+                let mut emitted = false;
+                for declarator in declarators {
+                    if !contains_kind(declarator, "function_declarator") {
+                        continue;
+                    }
+
+                    let (name, receiver) = extract_declarator_name(&declarator, source);
+                    if name == "<anon>" {
+                        continue;
+                    }
+                    let kind = if receiver.is_some()
+                        || matches!(
+                            parent_index
+                                .and_then(|p| pending.symbols.get(p))
+                                .map(|s| s.kind.as_str()),
+                            Some("class" | "struct" | "union")
+                        ) {
+                        "method"
+                    } else {
+                        "function"
+                    };
+                    push_def_with_decorators(
+                        pending,
+                        name,
+                        kind,
+                        &child,
+                        declaration_signature(&child, source),
+                        parent_index,
+                        None,
+                    );
+                    emitted = true;
+                }
+
+                if !emitted {
+                    walk(child, source, pending, parent_index, module_index);
+                }
+            }
             "preproc_include" => {
                 emit_include(&child, source, pending, module_index);
             }
@@ -271,6 +337,17 @@ fn extract_declarator_name(node: &Node, source: &[u8]) -> (String, Option<String
     }
 }
 
+fn contains_kind(node: Node<'_>, expected: &str) -> bool {
+    if node.kind() == expected {
+        return true;
+    }
+    let mut cursor = node.walk();
+    let found = node
+        .named_children(&mut cursor)
+        .any(|child| contains_kind(child, expected));
+    found
+}
+
 fn leaf_and_path(node: &Node, source: &[u8]) -> Option<(String, Option<String>, Option<String>)> {
     let full = node_text(node, source).map(String::from);
     match node.kind() {
@@ -384,6 +461,12 @@ fn signature_until_body(node: &Node, source: &[u8]) -> Option<String> {
     }
 }
 
+fn declaration_signature(node: &Node, source: &[u8]) -> Option<String> {
+    let text = node_text(node, source)?;
+    let trimmed = text.trim().trim_end_matches(';').trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,6 +506,77 @@ mod tests {
         assert_eq!(by_name["bar"], "method");
         // Out-of-class `app::Foo::baz` recognized as method via receiver.
         assert_eq!(by_name["baz"], "method");
+    }
+
+    #[test]
+    fn extracts_function_and_method_declarations_from_headers() {
+        let path = write_tmp(
+            "Provider.h",
+            "class Provider {\n\
+             public:\n\
+                 virtual void DoWork(int value) = 0;\n\
+                 int Ready() const;\n\
+             };\n\
+             void FreeFunction(int value);\n",
+        );
+        let root = path.parent().unwrap();
+        let pending = parse_one(&path, root, &CppExtractor).unwrap();
+        let by_name: std::collections::HashMap<&str, &str> = pending
+            .symbols
+            .iter()
+            .map(|symbol| (symbol.name.as_str(), symbol.kind.as_str()))
+            .collect();
+
+        assert_eq!(by_name["DoWork"], "method");
+        assert_eq!(by_name["Ready"], "method");
+        assert_eq!(by_name["FreeFunction"], "function");
+    }
+
+    #[test]
+    fn extracts_every_function_declarator_from_a_single_declaration() {
+        let path = write_tmp(
+            "MultipleDeclarators.h",
+            "class Provider {\n\
+             public:\n\
+                 void Alpha(), Beta();\n\
+             };\n\
+             void First(), Second();\n",
+        );
+        let root = path.parent().unwrap();
+        let pending = parse_one(&path, root, &CppExtractor).unwrap();
+        let by_name: std::collections::HashMap<&str, &str> = pending
+            .symbols
+            .iter()
+            .map(|symbol| (symbol.name.as_str(), symbol.kind.as_str()))
+            .collect();
+
+        assert_eq!(by_name["Alpha"], "method");
+        assert_eq!(by_name["Beta"], "method");
+        assert_eq!(by_name["First"], "function");
+        assert_eq!(by_name["Second"], "function");
+    }
+
+    #[test]
+    fn does_not_treat_local_direct_initializers_as_function_declarations() {
+        let path = write_tmp(
+            "LocalInitializers.cpp",
+            "void Run(Path run_dir, Pointer pin) {\n\
+                 for (DirectoryIterator end, it(run_dir); it != end; ++it) {}\n\
+                 Byte *first(pin), *last(pin + 1);\n\
+             }\n",
+        );
+        let root = path.parent().unwrap();
+        let pending = parse_one(&path, root, &CppExtractor).unwrap();
+        let names: Vec<&str> = pending
+            .symbols
+            .iter()
+            .map(|symbol| symbol.name.as_str())
+            .collect();
+
+        assert!(names.contains(&"Run"));
+        assert!(!names.contains(&"it"));
+        assert!(!names.contains(&"first"));
+        assert!(!names.contains(&"last"));
     }
 
     #[test]

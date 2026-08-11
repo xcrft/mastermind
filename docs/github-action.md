@@ -82,7 +82,7 @@ prevents an empty report from producing publishable evidence.
 
 Start from `docs/examples/mastermind-audit-pr.yml` and `docs/examples/mastermind-audit-publish.yml`. The unprivileged PR workflow uses the Action from its already checked-out PR tree; this executes untrusted code but receives no secrets, OIDC, or write permission. The privileged workflow contains its strict schema-v3 verifier inline, so the verifier implementation and identity are bound to the independently allowlisted trusted workflow blob. Executable examples contain no unresolved Action or verifier placeholder. External Actions must remain pinned to their audited 40-character commits.
 
-The PR workflow triggers only on `pull_request`, checks out the exact head with credentials disabled, and has only `contents: read`. It uploads exactly one fixed-name artifact. Uploaded PR numbers, SHAs, workflow strings, and digests remain hostile claims.
+The PR workflow triggers only on `pull_request`, checks out the exact head with credentials disabled, and has only `contents: read`. It uploads exactly one attempt-specific artifact. Uploaded PR numbers, SHAs, workflow strings, and digests remain hostile claims.
 
 The publication workflow has no checkout. Its read-only verify job keys API lookups to the source run ID and attempt, checks repository ID/name, event, conclusion, workflow path/blob, independent PR/base/head association, and exactly one server-owned artifact ID/digest/size. It caps extraction at 64 MiB total, 16 MiB per regular file, 256 files, and 240-byte relative paths; links, devices, traversal, nested archives, and extra names are rejected. It then runs only the trusted verify-only implementation and creates a deterministic statement/archive.
 

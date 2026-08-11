@@ -4,7 +4,9 @@
 # workflow covers the JS wrappers + the npm packaging integration — so a
 # broken wrapper or a packaging mistake surfaces at PR time, not at release.
 #
-# Single Linux job (npm wrapper logic is platform-agnostic; the cross-platform
+# This job reports a required context, so it runs on every PR rather than using
+# path filters that can leave branch protection Pending. Single Linux job (the
+# cross-platform
 # binary resolution is covered by the release workflow's per-target builds):
 #   1. `node --check` both wrappers (fast syntax gate)
 #   2. build mmcg for the host (linux-x64-gnu, native)
@@ -20,24 +22,8 @@ name: CI — npm
 
 on:
   pull_request:
-    paths:
-      - "npm/**"
-      - "mcp/servers/mmcg/**"
-      - "scripts/build-npm-packages.sh"
-      - "scripts/stage-npm-share.sh"
-      - "agents/subagents/**"
-      - "skills/**"
-      - ".github/workflows/ci-npm.yml"
   push:
     branches: [main]
-    paths:
-      - "npm/**"
-      - "mcp/servers/mmcg/**"
-      - "scripts/build-npm-packages.sh"
-      - "scripts/stage-npm-share.sh"
-      - "agents/subagents/**"
-      - "skills/**"
-      - ".github/workflows/ci-npm.yml"
   workflow_dispatch:
 
 concurrency:

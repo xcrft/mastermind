@@ -13,7 +13,8 @@ npm, or model-backed test suites. CI executes it on every change.
 - exact MCP tool count plus read/write annotations;
 - portable skill adapters and one behavioral eval case per shipped skill;
 - planner/executor/auditor ownership and structured-report schema parity;
-- GitHub Action SHA pins and the audit publication security contract;
+- GitHub Action SHA pins, required-check routing, Docker runtime packaging, and
+  the audit publication security contract;
 - npm package/version/platform shape, README badge alignment, and workflow-bundle staging parity;
 - answer-leak clues in adversarial eval fixture source trees.
 
@@ -22,7 +23,7 @@ npm, or model-backed test suites. CI executes it on every change.
 ```bash
 # One-time setup
 python3 -m venv .venv
-.venv/bin/pip install -r scripts/requirements.txt
+.venv/bin/pip install --require-hashes -r scripts/requirements.txt
 
 # Run
 .venv/bin/python scripts/validate.py
@@ -35,7 +36,8 @@ Exit code is `0` on clean, `1` if any errors. Warnings don't fail the run.
 - It does not compile Rust, execute npm, or call a model.
 - It cannot prove that a prompt behaves correctly; `evals/runner.py` covers
   selected adversarial behaviors.
-- It validates configured workflow structure, not GitHub-hosted runtime state.
+- It validates configured workflow structure and Docker packaging invariants;
+  the CI image smoke supplies the hosted container proof.
 
 ### Excluded paths
 
@@ -59,3 +61,17 @@ def validate_artifact(a: Artifact) -> list[Issue]:
 ```
 
 When you add a check that flags many existing artifacts, **fix them in the same PR** so CI stays green.
+
+## `configure-github-protections.sh` — live release controls
+
+Prints the required `main`, `npm-v*`, and `npm-prod` settings by default. An
+admin-authenticated maintainer can apply them explicitly:
+
+```bash
+scripts/configure-github-protections.sh
+scripts/configure-github-protections.sh --apply
+```
+
+The script never reads or replaces environment secrets. It configures the npm
+reviewer/tag boundary and ensures every unfiltered required workflow is present
+in the active `main` ruleset.

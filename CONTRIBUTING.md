@@ -28,7 +28,7 @@ cargo deny check
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -r scripts/requirements.txt
+.venv/bin/pip install --require-hashes -r scripts/requirements.txt
 .venv/bin/python scripts/validate.py
 ```
 

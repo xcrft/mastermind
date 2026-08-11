@@ -715,7 +715,7 @@ fn run_pre(
     // 4. executor: --exec (synchronous shell-out) or hand-off message.
     if opts.exec && !opts.pre_only {
         println!("\nInvoking executor (`claude -p`)...\n");
-        match run_executor(spec_path) {
+        match run_executor(spec_path, repo_root) {
             Ok(()) => {
                 println!("\nExecutor returned 0. Continuing into post-flight.\n");
                 return run_post(spec_path, repo_root, index_path, &state, state_path);
@@ -941,7 +941,7 @@ fn comment_audit_hint(outcome: Outcome, baseline_ref: &str) -> Option<String> {
 /// Invoke `claude -p` synchronously on this spec, streaming stdout/stderr to the
 /// user's terminal. Err on spawn failure or non-zero exit so the caller keeps
 /// state for retry.
-fn run_executor(spec_path: &Path) -> Result<(), String> {
+fn run_executor(spec_path: &Path, repo_root: &Path) -> Result<(), String> {
     let prompt = format!(
         "Implement the mastermind spec at `{}` using the mastermind-task-executor workflow. \
          Implement its approved outcomes inside Scope, prove the Acceptance Criteria, and run \
@@ -956,6 +956,7 @@ fn run_executor(spec_path: &Path) -> Result<(), String> {
         .arg("-p")
         .arg(&prompt)
         .stdin(std::process::Stdio::null())
+        .current_dir(repo_root)
         .status()
         .map_err(|e| {
             format!("spawn claude: {e} — is the Claude Code CLI installed and on PATH?")
@@ -1037,6 +1038,88 @@ mod tests {
             args,
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exec_uses_repo_root_as_child_working_directory() {
+        const CHILD_ROOT: &str = "MMCG_RUN_TASK_CWD_TEST_ROOT";
+        const CWD_CAPTURE: &str = "MMCG_RUN_TASK_CWD_TEST_CAPTURE";
+
+        if let Some(root) = env::var_os(CHILD_ROOT) {
+            let root = PathBuf::from(root);
+            let spec_path = root.join(".mastermind/tasks/001-cwd/spec.md");
+            let outcome = run(
+                &spec_path,
+                &root,
+                &root.join("idx.db"),
+                RunOpts {
+                    exec: true,
+                    allow_no_index: true,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(outcome, Outcome::ExecFailed);
+            return;
+        }
+
+        use std::os::unix::fs::PermissionsExt;
+
+        let sandbox = tmp("executor_cwd");
+        let root = sandbox.join("repo");
+        let bin = sandbox.join("bin");
+        let capture = sandbox.join("claude-cwd.txt");
+        fs::create_dir_all(root.join(".mastermind/tasks/001-cwd")).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        init_repo(&root);
+        let spec_path = root.join(".mastermind/tasks/001-cwd/spec.md");
+        fs::write(
+            &spec_path,
+            "# Executor cwd\n\n\
+## Goals\n- Run the executor from the repository root.\n\
+## Alternatives Considered\n- Keep the caller's cwd — rejected.\n\
+## Tests Plan\n- Capture the child cwd.\n\
+## Documentation Plan\n- n/a\n\
+## Observability Plan\n- n/a\n\
+## Performance Considerations\n- O(1)\n",
+        )
+        .unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "baseline"]);
+
+        let fake_claude = bin.join("claude");
+        fs::write(
+            &fake_claude,
+            "#!/bin/sh\npwd > \"$MMCG_RUN_TASK_CWD_TEST_CAPTURE\"\nexit 1\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_claude).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_claude, permissions).unwrap();
+
+        let mut path_entries = vec![bin];
+        path_entries.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
+        let output = Command::new(env::current_exe().unwrap())
+            .arg("exec_uses_repo_root_as_child_working_directory")
+            .env(CHILD_ROOT, &root)
+            .env(CWD_CAPTURE, &capture)
+            .env("PATH", env::join_paths(path_entries).unwrap())
+            .current_dir(&sandbox)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child test failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let actual = fs::read_to_string(&capture).unwrap();
+        assert_eq!(
+            Path::new(actual.trim()).canonicalize().unwrap(),
+            root.canonicalize().unwrap()
+        );
+        fs::remove_dir_all(&sandbox).ok();
     }
 
     fn write_executor_report(spec_path: &Path, files: &[&str]) {

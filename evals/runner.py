@@ -290,6 +290,18 @@ def render_critic_input(inp: dict) -> str:
     )
 
 
+def isolated_cli_args(suite_name: str) -> list[str]:
+    """Deny repository tools to suites whose fixtures exist only in prompts."""
+    if suite_name in {"critic", "intake", "workflow"}:
+        return ["--safe-mode", "--tools", ""]
+    return []
+
+
+def requires_prompt_sandbox(suite_name: str) -> bool:
+    """Return whether a prompt-only suite needs a fresh, empty working tree."""
+    return suite_name in {"critic", "intake", "workflow"}
+
+
 def render_workflow_input(inp: dict) -> str:
     return str(inp.get("prompt", ""))
 
@@ -484,6 +496,7 @@ def evaluate_case(
     system_prompt = strip_frontmatter(prompt_path.read_text())
 
     fixture_path: Path | None = None
+    prompt_sandbox: tempfile.TemporaryDirectory[str] | None = None
     extra_cmd: list[str] = []
     try:
         if suite_cfg["uses_fixture"]:
@@ -532,9 +545,10 @@ def evaluate_case(
         # collides with `--add-dir <directories...>` (variadic), which would
         # swallow the message as another directory.
         prompt_flag = "--system-prompt" if suite_name == "workflow" else "--append-system-prompt"
-        workflow_safety = (
-            ["--safe-mode", "--tools", ""] if suite_name == "workflow" else []
-        )
+        workflow_safety = isolated_cli_args(suite_name)
+        if requires_prompt_sandbox(suite_name):
+            prompt_sandbox = tempfile.TemporaryDirectory(prefix="mastermind-eval-")
+        evaluation_cwd = Path(prompt_sandbox.name) if prompt_sandbox is not None else None
         cmd = [
             "claude",
             "-p",
@@ -554,7 +568,7 @@ def evaluate_case(
             proc = subprocess.run(
                 cmd, input=user_message, capture_output=True, text=True,
                 env=_PROC_ENV,
-                cwd=tempfile.gettempdir() if suite_name == "workflow" else None,
+                cwd=evaluation_cwd,
                 timeout=480,
             )
         except subprocess.TimeoutExpired:
@@ -662,6 +676,8 @@ def evaluate_case(
             output_excerpt=output[:4000],
         )
     finally:
+        if prompt_sandbox is not None:
+            prompt_sandbox.cleanup()
         if fixture_path is not None and not keep_fixtures:
             teardown_fixture(fixture_path)
 

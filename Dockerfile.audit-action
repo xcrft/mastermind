@@ -3,12 +3,12 @@ WORKDIR /source
 COPY mcp/servers/mmcg/Cargo.toml mcp/servers/mmcg/Cargo.lock ./mcp/servers/mmcg/
 COPY mcp/servers/mmcg/src ./mcp/servers/mmcg/src
 COPY mcp/servers/mmcg/templates ./mcp/servers/mmcg/templates
+COPY mcp/servers/mmcg/benches ./mcp/servers/mmcg/benches
 RUN cargo +1.96.0 build --manifest-path mcp/servers/mmcg/Cargo.toml --release --locked
 
 FROM buildpack-deps:bookworm-scm@sha256:877e9e4d949edfbcbedabc3a2d7ab593955fee5d6d0777adf3a991eb30c750d8
 RUN git --version
 COPY --from=builder /source/mcp/servers/mmcg/target/release/mmcg /usr/local/bin/mastermind
-COPY scripts/audit-action-entrypoint.sh /usr/local/bin/audit-action-entrypoint
+COPY --chmod=0755 scripts/audit-action-entrypoint.sh /usr/local/bin/audit-action-entrypoint
 ENV HOME=/tmp/mastermind
-USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/audit-action-entrypoint"]

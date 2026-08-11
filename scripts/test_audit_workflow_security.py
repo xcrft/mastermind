@@ -15,6 +15,7 @@ import zipfile
 import yaml
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import validate as validator
 from validate import audit_pr_contract_errors, audit_publication_contract_errors
 
 
@@ -425,6 +426,90 @@ class EntrypointPathGrammarTests(unittest.TestCase):
             if value != ".":
                 with self.subTest(root=repr(value)):
                     self.assertFalse(self.check("root_path", value))
+
+
+class RepositoryDeliveryContractTests(unittest.TestCase):
+    def test_docker_action_entrypoint_is_executable(self):
+        entrypoint = ROOT / "scripts/audit-action-entrypoint.sh"
+        mode = stat.S_IMODE(entrypoint.stat().st_mode)
+        self.assertNotEqual(mode & stat.S_IXUSR, 0, f"entrypoint mode is {mode:o}")
+
+    def test_docker_action_uses_default_root_user_for_workspace_access(self):
+        dockerfile = (ROOT / "Dockerfile.audit-action").read_text(encoding="utf-8")
+        self.assertIn("COPY mcp/servers/mmcg/benches ./mcp/servers/mmcg/benches", dockerfile)
+        self.assertIsNone(
+            re.search(r"^USER\s+", dockerfile, flags=re.MULTILINE),
+            "GitHub Docker Actions must use the default root user for GITHUB_WORKSPACE",
+        )
+
+    def test_required_workflows_are_not_suppressed_by_path_filters(self):
+        workflows = [
+            ROOT / ".github/workflows/ci-mmcg.yml",
+            ROOT / ".github/workflows/ci-npm.yml",
+            ROOT / ".github/workflows/supply-chain.yml",
+            ROOT / ".github/workflows/validate.yml",
+        ]
+        for path in workflows:
+            with self.subTest(path=path.name):
+                workflow = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+                self.assertFalse(
+                    validator.required_workflow_has_path_filter(workflow),
+                    f"{path.name} can strand a required status by filtering pull_request paths",
+                )
+
+    def test_validator_workflow_smokes_the_docker_action_image(self):
+        workflow = (ROOT / ".github/workflows/validate.yml").read_text(encoding="utf-8")
+        self.assertIn("docker build", workflow)
+        self.assertIn("test \"$(id -u)\" = 0", workflow)
+        self.assertIn("test -x /usr/local/bin/audit-action-entrypoint", workflow)
+        self.assertIn("touch /github/workspace/.mastermind-action-write-smoke", workflow)
+
+    def test_required_workflow_filter_detector_rejects_both_filter_forms(self):
+        detector = getattr(validator, "required_workflow_has_path_filter", None)
+        self.assertIsNotNone(detector, "validator needs a semantic required-workflow filter guard")
+        for key in ("paths", "paths-ignore"):
+            with self.subTest(filter=key):
+                workflow = {"on": {"pull_request": {key: ["docs/**"]}}}
+                self.assertTrue(detector(workflow))
+
+    def test_release_workflows_require_tag_commit_on_main(self):
+        for name in ["publish-mmcg.yml", "publish-npm.yml"]:
+            with self.subTest(workflow=name):
+                text = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
+                self.assertIn("fetch-depth: 0", text)
+                self.assertIn("merge-base --is-ancestor", text)
+
+    def test_validator_dependency_is_hash_locked_everywhere(self):
+        requirements = (ROOT / "scripts/requirements.txt").read_text(encoding="utf-8")
+        self.assertRegex(requirements, r"(?m)^PyYAML==[0-9]+\.[0-9]+\.[0-9]+")
+        self.assertIn("--hash=sha256:", requirements)
+        installers = [
+            ROOT / "justfile",
+            ROOT / ".github/workflows/validate.yml",
+            ROOT / ".github/workflows/publish-mmcg.yml",
+        ]
+        for path in installers:
+            with self.subTest(path=path.name):
+                self.assertIn(
+                    "--require-hashes -r scripts/requirements.txt",
+                    path.read_text(encoding="utf-8"),
+                )
+
+    def test_admin_protection_script_covers_live_release_controls(self):
+        path = ROOT / "scripts/configure-github-protections.sh"
+        self.assertTrue(path.is_file(), "missing reproducible GitHub protection setup")
+        text = path.read_text(encoding="utf-8")
+        for token in (
+            "npm-prod",
+            "npm-v*",
+            "required_reviewers",
+            "wrapper check + linux-x64 install smoke",
+            "advisories, licenses, bans, sources",
+            "viewerPermission",
+            "--apply",
+        ):
+            self.assertIn(token, text)
+        self.assertNotEqual(stat.S_IMODE(path.stat().st_mode) & stat.S_IXUSR, 0)
 
 
 if __name__ == "__main__":

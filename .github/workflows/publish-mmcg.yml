@@ -50,6 +50,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -75,11 +77,20 @@ jobs:
             exit 1
           fi
 
+      - name: Verify release commit is reachable from main
+        if: github.event_name == 'push'
+        working-directory: .
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main || {
+            echo "::error::release tag must point to a commit reachable from main" >&2
+            exit 1
+          }
+
       - name: Run repo validator (template mirrors must be in sync)
         working-directory: .
         run: |
           python -m pip install --upgrade pip
-          pip install -r scripts/requirements.txt
+          pip install --require-hashes -r scripts/requirements.txt
           python scripts/validate.py
 
       - name: cargo test --all --release --locked
@@ -114,6 +125,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable

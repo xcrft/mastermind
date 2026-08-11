@@ -122,11 +122,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
+
+      - name: Verify release commit is reachable from main
+        if: github.event_name == 'push'
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main || {
+            echo "::error::release tag must point to a commit reachable from main" >&2
+            exit 1
+          }
 
       - name: Download all build artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -258,11 +268,28 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           TAG_VERSION="${TAG#npm-v}"
           ROOT_VERSION=$(node -e "console.log(require('./npm/mastermind/package.json').version)")
-          echo "tag=$TAG_VERSION  root pkg=$ROOT_VERSION"
-          if [ "$TAG_VERSION" != "$ROOT_VERSION" ]; then
-            echo "::error::tag version ($TAG_VERSION) does not match @xcraftmind/mastermind package.json ($ROOT_VERSION). Bump or retag."
+          CARGO_VERSION=$(awk -F'"' '/^version *=/ {print $2; exit}' mcp/servers/mmcg/Cargo.toml)
+          echo "tag=$TAG_VERSION  root pkg=$ROOT_VERSION  cargo=$CARGO_VERSION"
+          if [ "$TAG_VERSION" != "$ROOT_VERSION" ] || [ "$ROOT_VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::tag, root package, and Cargo versions must match. Bump all manifests or retag."
             exit 1
           fi
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const root = require('./npm/mastermind/package.json');
+          for (const [name, version] of Object.entries(root.optionalDependencies || {})) {
+            if (version !== root.version) {
+              throw new Error(`${name} is ${version}; expected ${root.version}`);
+            }
+          }
+          for (const entry of fs.readdirSync('./npm/platforms')) {
+            const manifest = require(path.resolve('./npm/platforms', entry, 'package.json'));
+            if (manifest.version !== root.version) {
+              throw new Error(`${manifest.name} is ${manifest.version}; expected ${root.version}`);
+            }
+          }
+          NODE
 
   publish:
     name: Publish to npm
@@ -283,6 +310,8 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:

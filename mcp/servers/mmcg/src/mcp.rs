@@ -2486,10 +2486,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    #[test]
-    fn change_class_round_trip_via_tools_call() {
-        let tmp = std::env::temp_dir().join("mmcg_change_class_rt");
-        let _ = std::fs::remove_dir_all(&tmp);
+    fn exercise_change_class_round_trip(tmp: &std::path::Path) {
         std::fs::create_dir_all(tmp.join("src")).unwrap();
         let db_path = tmp.join("mmcg.db");
         let mut store = crate::store::Store::open(&db_path).unwrap();
@@ -2497,8 +2494,6 @@ mod tests {
         let foo_path = tmp.join("src/foo.rs");
         let rel = "src/foo.rs";
         std::fs::write(&foo_path, "// header\nfn foo() {}\nfn bar() { foo(); }\n").unwrap();
-
-        let _ = std::env::set_current_dir(&tmp);
 
         let first_env = handle_tools_call(
             ProtocolVersion::Current,
@@ -2520,7 +2515,7 @@ mod tests {
         let extractor =
             crate::indexer::extractor_for_path(&foo_path).expect("rust extractor available");
         let pending =
-            crate::indexer::parse_one(&foo_path, &tmp, extractor.as_ref()).expect("parse foo.rs");
+            crate::indexer::parse_one(&foo_path, tmp, extractor.as_ref()).expect("parse foo.rs");
         let stored_fp = crate::fingerprint::compute_structural_fingerprint(&pending);
         store.commit_file(pending).unwrap();
         assert_eq!(
@@ -2565,8 +2560,32 @@ mod tests {
         .unwrap();
         let structural = unwrap_content(&structural_env);
         assert_eq!(structural["class"], "structural");
+    }
 
-        let _ = std::fs::remove_dir_all(&tmp);
+    #[test]
+    fn change_class_round_trip_via_tools_call() {
+        const CHILD_ROOT: &str = "MMCG_CHANGE_CLASS_TEST_CHILD_ROOT";
+
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            exercise_change_class_round_trip(std::path::Path::new(&root));
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let original_cwd = std::env::current_dir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("change_class_round_trip_via_tools_call")
+            .env(CHILD_ROOT, tmp.path())
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child test failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(std::env::current_dir().unwrap(), original_cwd);
     }
 
     #[test]

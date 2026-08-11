@@ -42,6 +42,22 @@ updates:
       prefix: "chore(deps)"
       include: scope
 
+  # Digest-pinned base images for the Docker Action.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: UTC
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - docker
+    commit-message:
+      prefix: "chore(deps)"
+      include: scope
+
   # Python deps used by the validator and audit-workflow fixture tests
   - package-ecosystem: pip
     directory: /scripts

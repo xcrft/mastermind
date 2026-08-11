@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Populate an npm/platforms/<variant>/bin/ directory with a freshly-built mmcg
-# binary, set the executable bit, and bump the package.json version to match
-# the Rust crate. Used by both:
+# binary, set the executable bit, and verify its version matches the Rust crate
+# and package manifest. Used by both:
 #   - local smoke (one platform — your host's triple)
 #   - the GitHub Actions publish workflow (all 7 platforms, one job per target)
 #
@@ -88,7 +88,17 @@ if [ "$CRATE_VERSION" != "$PKG_VERSION" ]; then
     exit 1
 fi
 
-# Sanity-check the binary runs (skip on cross-compiled targets — best-effort).
+# mmcg intentionally retains this build marker in every target binary. Unlike
+# executing `--version`, inspecting it also works for artifacts cross-compiled
+# for another OS or architecture, as happens in the publish assembly job.
+VERSION_MARKER="MMCG_BUILD_VERSION=[${CRATE_VERSION}]"
+if ! LC_ALL=C grep -aFq -- "$VERSION_MARKER" "$PLATFORM_BIN/$EXE"; then
+    echo "error: embedded binary version mismatch — $PLATFORM_BIN/$EXE does not contain v$CRATE_VERSION metadata" >&2
+    exit 1
+fi
+
+# Native artifacts get a second, runtime check. Fail closed if the binary
+# cannot run or reports anything other than the exact Cargo package version.
 HOST_OS="$(uname -s)"
 HOST_ARCH="$(uname -m)"
 case "$TARGET" in
@@ -102,10 +112,15 @@ case "$TARGET" in
         [ "$HOST_OS" = "Linux" ] && [ "$HOST_ARCH" = "aarch64" ] && CAN_RUN=1 ;;
 esac
 if [ "${CAN_RUN:-0}" = "1" ]; then
-    VERSION_OUT=$("$PLATFORM_BIN/$EXE" --version 2>&1 || true)
-    if ! echo "$VERSION_OUT" | grep -q "$CRATE_VERSION"; then
-        echo "warning: $PLATFORM_BIN/$EXE --version did not report v$CRATE_VERSION:" >&2
+    if ! VERSION_OUT=$("$PLATFORM_BIN/$EXE" --version 2>&1); then
+        echo "error: unable to verify native binary version — $PLATFORM_BIN/$EXE --version failed:" >&2
         echo "  $VERSION_OUT" >&2
+        exit 1
+    fi
+    if [ "$VERSION_OUT" != "mastermind $CRATE_VERSION" ]; then
+        echo "error: binary version mismatch — expected 'mastermind $CRATE_VERSION', got:" >&2
+        echo "  $VERSION_OUT" >&2
+        exit 1
     fi
 fi
 

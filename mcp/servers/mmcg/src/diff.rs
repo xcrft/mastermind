@@ -778,8 +778,9 @@ fn collect_worktree_paths(
 }
 
 fn finalize_changed_paths(
-    changed: BTreeMap<Vec<u8>, &'static str>,
+    mut changed: BTreeMap<Vec<u8>, &'static str>,
 ) -> (Vec<WorkingTreeChangedFile>, Option<u32>, bool, u32) {
+    changed.retain(|path, _| !is_mastermind_index_artifact(path));
     let full_count = changed.len();
     let truncated = full_count > CHANGE_FILE_LIMIT;
     let mut skipped_non_utf8_paths = 0u32;
@@ -799,6 +800,13 @@ fn finalize_changed_paths(
         (!truncated).then_some(full_count as u32),
         truncated,
         skipped_non_utf8_paths,
+    )
+}
+
+fn is_mastermind_index_artifact(path: &[u8]) -> bool {
+    matches!(
+        path,
+        b".mastermind/mmcg.db" | b".mastermind/mmcg.db-shm" | b".mastermind/mmcg.db-wal"
     )
 }
 
@@ -1404,6 +1412,25 @@ mod tests {
         assert_eq!(overflow.len(), CHANGE_FILE_LIMIT);
         assert_eq!(overflow_total, None);
         assert!(overflow_truncated);
+    }
+
+    #[test]
+    fn worktree_paths_exclude_mastermind_index_artifacts_only() {
+        let changed = [
+            (b".mastermind/mmcg.db".to_vec(), "untracked"),
+            (b".mastermind/mmcg.db-shm".to_vec(), "untracked"),
+            (b".mastermind/mmcg.db-wal".to_vec(), "untracked"),
+            (b".mastermind/tasks/001/spec.md".to_vec(), "untracked"),
+            (b"src/app.py".to_vec(), "modified"),
+        ]
+        .into_iter()
+        .collect();
+        let (files, total, truncated, skipped) = finalize_changed_paths(changed);
+        let paths: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(paths, vec![".mastermind/tasks/001/spec.md", "src/app.py"]);
+        assert_eq!(total, Some(2));
+        assert!(!truncated);
+        assert_eq!(skipped, 0);
     }
 
     #[test]

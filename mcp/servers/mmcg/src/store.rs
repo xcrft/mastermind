@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const SCHEMA_VERSION: &str = "6";
+const SCHEMA_VERSION: &str = "7";
 
 /// A per-request work-budget: a wall-clock deadline and/or a cap on SQLite
 /// progress-handler ticks (each tick fires every 1,000 VM instructions).
@@ -195,7 +195,7 @@ const SYMBOL_COLS: &str =
     "id, name, kind, file_path, line_start, line_end, signature, parent_id, decorators";
 const SYMBOL_COLS_S: &str = "s.id, s.name, s.kind, s.file_path, s.line_start, s.line_end, s.signature, s.parent_id, s.decorators";
 
-fn production_path_filter(column: &str) -> String {
+fn is_production_path(path: &str) -> bool {
     const SEGMENTS: &[&str] = &[
         "test",
         "tests",
@@ -217,19 +217,44 @@ fn production_path_filter(column: &str) -> String {
         "node_modules",
         "target",
     ];
-    SEGMENTS
+    let wrapped = format!("/{}/", path.to_ascii_lowercase());
+    if SEGMENTS
         .iter()
-        .map(|segment| format!("AND instr(lower('/' || {column} || '/'), '/{segment}/') = 0"))
-        .collect::<Vec<_>>()
-        .join("\n")
+        .any(|segment| wrapped.contains(&format!("/{segment}/")))
+    {
+        return false;
+    }
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let lower = name.to_ascii_lowercase();
+    !(lower.starts_with("test_")
+        || lower.contains("_test.")
+        || lower.contains(".test.")
+        || lower.contains(".spec.")
+        || name
+            .rsplit_once('.')
+            .is_some_and(|(stem, _)| stem.ends_with("Test") || stem.ends_with("Tests")))
 }
 
-fn maybe_production_path_filter(enabled: bool, column: &str) -> String {
+fn maybe_production_symbol_filter(enabled: bool, alias: &str) -> String {
     if enabled {
-        production_path_filter(column)
+        format!("AND {alias}.production = 1")
     } else {
         String::new()
     }
+}
+
+fn normalize_repo_relative(path: &str) -> Option<String> {
+    let mut components: Vec<&str> = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop()?;
+            }
+            value => components.push(value),
+        }
+    }
+    (!components.is_empty()).then(|| components.join("/"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -570,8 +595,11 @@ impl Store {
     }
 
     fn init_schema(&self) -> SqlResult<()> {
-        // If a stored schema version exists and doesn't match, drop everything
-        // and rebuild — we don't ship migrations.
+        // If the derived graph schema changes, drop the rebuildable graph while
+        // preserving repository identity and the durable auxiliary channels.
+        // Keeping `index_root` is essential: otherwise retained history or
+        // scratchpad rows make the next in-place index run look like unsafe,
+        // unbound data and it correctly refuses to guess a repository.
         let meta_exists: bool = self
             .conn
             .query_row(
@@ -603,7 +631,6 @@ impl Store {
                     DROP TABLE IF EXISTS files;
                     DROP TABLE IF EXISTS task_specs;
                     DROP TABLE IF EXISTS task_specs_fts;
-                    DROP TABLE IF EXISTS meta;
                     "#,
                 )?;
             }
@@ -621,12 +648,17 @@ impl Store {
                 signature    TEXT,
                 parent_id    INTEGER REFERENCES symbols(id) ON DELETE CASCADE,
                 language     TEXT,
-                decorators   TEXT
+                decorators   TEXT,
+                production   INTEGER NOT NULL DEFAULT 1
             );
             CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
             CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_path);
             CREATE INDEX IF NOT EXISTS idx_symbols_parent ON symbols(parent_id);
             CREATE INDEX IF NOT EXISTS idx_symbols_language ON symbols(language);
+            CREATE INDEX IF NOT EXISTS idx_symbols_production_file
+                ON symbols(production, file_path);
+            CREATE INDEX IF NOT EXISTS idx_symbols_production_name
+                ON symbols(production, name);
 
             CREATE TABLE IF NOT EXISTS edges (
                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -644,14 +676,22 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_edges_to_path ON edges(to_path);
             CREATE INDEX IF NOT EXISTS idx_edges_to_type ON edges(to_type);
             CREATE INDEX IF NOT EXISTS idx_edges_kind ON edges(kind);
+            CREATE INDEX IF NOT EXISTS idx_edges_calls_to_name
+                ON edges(to_name, from_id) WHERE kind = 'calls';
+            CREATE INDEX IF NOT EXISTS idx_edges_calls_to_type
+                ON edges(to_type, from_id)
+                WHERE kind = 'calls' AND to_type IS NOT NULL AND to_type <> '';
 
             CREATE TABLE IF NOT EXISTS files (
                 path                    TEXT PRIMARY KEY,
                 indexed_at              INTEGER NOT NULL,
                 symbol_count            INTEGER NOT NULL,
                 structural_fingerprint  TEXT NOT NULL DEFAULT '',
-                content_sha256          TEXT NOT NULL DEFAULT ''
+                content_sha256          TEXT NOT NULL DEFAULT '',
+                production              INTEGER NOT NULL DEFAULT 1
             );
+            CREATE INDEX IF NOT EXISTS idx_files_production_path
+                ON files(production, path);
 
             CREATE TABLE IF NOT EXISTS meta (
                 key   TEXT PRIMARY KEY,
@@ -708,9 +748,11 @@ impl Store {
             [],
         );
 
-        // Stamp schema version on first init.
+        // Stamp the active version on first init and after a derived-schema
+        // rebuild. Other metadata — especially index_root — remains intact.
         self.conn.execute(
-            "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?1)",
+            "INSERT INTO meta(key, value) VALUES ('schema_version', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![SCHEMA_VERSION],
         )?;
         Ok(())
@@ -747,11 +789,12 @@ impl Store {
         } else {
             Some(pending.language.as_str())
         };
+        let production = is_production_path(&pending.path);
         let mut symbol_ids: Vec<i64> = Vec::with_capacity(pending.symbols.len());
         {
             let mut stmt = tx.prepare_cached(
-                "INSERT INTO symbols(name, kind, file_path, line_start, line_end, signature, parent_id, language, decorators)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO symbols(name, kind, file_path, line_start, line_end, signature, parent_id, language, decorators, production)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             )?;
             for s in &pending.symbols {
                 let parent_id = s.parent_index.map(|i| symbol_ids[i]);
@@ -764,7 +807,8 @@ impl Store {
                     s.signature,
                     parent_id,
                     language,
-                    s.decorators
+                    s.decorators,
+                    production
                 ])?;
                 symbol_ids.push(tx.last_insert_rowid());
             }
@@ -787,14 +831,15 @@ impl Store {
         // Stamp the file.
         let fingerprint = crate::fingerprint::compute_structural_fingerprint(&pending);
         tx.execute(
-            "INSERT INTO files(path, indexed_at, symbol_count, structural_fingerprint, content_sha256) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO files(path, indexed_at, symbol_count, structural_fingerprint, content_sha256, production) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 &pending.path,
                 pending.mtime,
                 pending.symbols.len() as u32,
                 &fingerprint,
-                &pending.content_sha256
+                &pending.content_sha256,
+                production
             ],
         )?;
 
@@ -826,9 +871,18 @@ impl Store {
         parent_id: Option<i64>,
     ) -> SqlResult<i64> {
         self.conn.execute(
-            "INSERT INTO symbols(name, kind, file_path, line_start, line_end, signature, parent_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![name, kind, file_path, line_start, line_end, signature, parent_id],
+            "INSERT INTO symbols(name, kind, file_path, line_start, line_end, signature, parent_id, production)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                name,
+                kind,
+                file_path,
+                line_start,
+                line_end,
+                signature,
+                parent_id,
+                is_production_path(file_path)
+            ],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -870,9 +924,9 @@ impl Store {
 
     pub fn upsert_file(&self, path: &str, mtime: i64, symbol_count: u32) -> SqlResult<()> {
         self.conn.execute(
-            "INSERT INTO files(path, indexed_at, symbol_count) VALUES (?1, ?2, ?3)
-             ON CONFLICT(path) DO UPDATE SET indexed_at=?2, symbol_count=?3",
-            params![path, mtime, symbol_count],
+            "INSERT INTO files(path, indexed_at, symbol_count, production) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(path) DO UPDATE SET indexed_at=?2, symbol_count=?3, production=?4",
+            params![path, mtime, symbol_count, is_production_path(path)],
         )?;
         Ok(())
     }
@@ -984,6 +1038,34 @@ impl Store {
         rows.collect()
     }
 
+    /// Fully-qualified namespace ancestor chain for a symbol. Extractors record
+    /// nested namespaces as ordinary parent symbols, so `AppA.Common` must not
+    /// collapse with `AppB.Common` merely because the nearest node is named
+    /// `Common` in both files.
+    pub fn enclosing_namespace(&self, symbol_id: i64) -> SqlResult<Option<String>> {
+        self.conn.query_row(
+            "WITH RECURSIVE ancestors(id, name, kind, parent_id, depth) AS (
+                     SELECT id, name, kind, parent_id, 0
+                     FROM symbols
+                     WHERE id = ?1
+                   UNION ALL
+                     SELECT parent.id, parent.name, parent.kind, parent.parent_id,
+                            ancestors.depth + 1
+                     FROM ancestors
+                     JOIN symbols parent ON parent.id = ancestors.parent_id
+                 )
+                 SELECT group_concat(name, '.')
+                 FROM (
+                     SELECT name
+                     FROM ancestors
+                     WHERE kind = 'namespace'
+                     ORDER BY depth DESC
+                 )",
+            params![symbol_id],
+            |row| row.get(0),
+        )
+    }
+
     /// Callers of a symbol — symbols joined to it via an edge matching `to_name`
     /// OR `to_type`. The `to_type` match catches Rust constructor /
     /// associated-function calls like `SessionStore::new()` that would otherwise
@@ -1080,16 +1162,39 @@ impl Store {
              walk(seed, sym_id, name, depth, visited) AS (
                  SELECT seed.seed, s.id, s.name, 1, ',' || s.id || ','
                  FROM seed
-                 JOIN edges e ON e.kind = 'calls'
-                              AND (e.to_name = seed.seed OR e.to_type = seed.seed)
+                 JOIN edges e INDEXED BY idx_edges_calls_to_name
+                   ON e.to_name = seed.seed AND e.kind = 'calls'
+                 JOIN symbols s ON s.id = e.from_id
+                 WHERE (?{lang_param} IS NULL OR s.language = ?{lang_param})
+               UNION ALL
+                 SELECT seed.seed, s.id, s.name, 1, ',' || s.id || ','
+                 FROM seed
+                 JOIN edges e INDEXED BY idx_edges_calls_to_type
+                   ON e.to_type = seed.seed
+                  AND e.kind = 'calls'
+                  AND e.to_type IS NOT NULL
+                  AND e.to_type <> ''
                  JOIN symbols s ON s.id = e.from_id
                  WHERE (?{lang_param} IS NULL OR s.language = ?{lang_param})
                UNION ALL
                  SELECT walk.seed, s.id, s.name, walk.depth + 1,
                         walk.visited || s.id || ','
                  FROM walk
-                 JOIN edges e ON e.kind = 'calls'
-                              AND (e.to_name = walk.name OR e.to_type = walk.name)
+                 JOIN edges e INDEXED BY idx_edges_calls_to_name
+                   ON e.to_name = walk.name AND e.kind = 'calls'
+                 JOIN symbols s ON s.id = e.from_id
+                 WHERE walk.depth < ?{depth_param}
+                   AND instr(walk.visited, ',' || s.id || ',') = 0
+                   AND (?{lang_param} IS NULL OR s.language = ?{lang_param})
+               UNION ALL
+                 SELECT walk.seed, s.id, s.name, walk.depth + 1,
+                        walk.visited || s.id || ','
+                 FROM walk
+                 JOIN edges e INDEXED BY idx_edges_calls_to_type
+                   ON e.to_type = walk.name
+                  AND e.kind = 'calls'
+                  AND e.to_type IS NOT NULL
+                  AND e.to_type <> ''
                  JOIN symbols s ON s.id = e.from_id
                  WHERE walk.depth < ?{depth_param}
                    AND instr(walk.visited, ',' || s.id || ',') = 0
@@ -1509,9 +1614,7 @@ impl Store {
         limit: usize,
         production_only: bool,
     ) -> SqlResult<Vec<String>> {
-        let filter = maybe_production_path_filter(production_only, "path");
-        let sql = format!(
-            "SELECT path
+        let sql = "SELECT path
              FROM files
              WHERE (
                 ?2 = 'root'
@@ -1521,12 +1624,13 @@ impl Store {
                     AND substr(path, 1, length(?1) + 1) = ?1 || '/'
                 )
              )
-             {filter}
+             AND (?4 = 0 OR production = 1)
              ORDER BY path
-             LIMIT ?3"
-        );
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![scope, kind, limit as i64], |row| row.get(0))?;
+             LIMIT ?3";
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map(params![scope, kind, limit as i64, production_only], |row| {
+            row.get(0)
+        })?;
         rows.collect()
     }
 
@@ -1549,128 +1653,105 @@ impl Store {
         if components.is_empty() || limit_per_component == 0 || global_limit == 0 {
             return Ok(Vec::new());
         }
-        let placeholders = (0..components.len())
-            .map(|index| {
-                let first = index * 3 + 1;
-                format!("(?{first}, ?{}, ?{})", first + 1, first + 2)
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let per_component_param = components.len() * 3 + 1;
-        let global_param = components.len() * 3 + 2;
-        let symbol_filter = maybe_production_path_filter(production_only, "s.file_path");
-        let caller_filter = maybe_production_path_filter(production_only, "caller.file_path");
+        let symbol_filter = maybe_production_symbol_filter(production_only, "s");
+        let caller_filter = maybe_production_symbol_filter(production_only, "caller");
+        // Prefix range predicates keep recursive scopes on idx_symbols_file.
+        // Repository paths are normalized, and every string beginning with
+        // `path || '/'` sorts before the exclusive `path || '0'` bound.
+        let in_component = |column: &str| {
+            format!(
+                "(
+                    (?2 = 1 AND (
+                        (?1 = '' AND instr({column}, '/') = 0)
+                        OR (
+                            ?1 != ''
+                            AND {column} >= ?1 || '/'
+                            AND {column} < ?1 || '0'
+                            AND instr(substr({column}, length(?1) + 2), '/') = 0
+                        )
+                    ))
+                    OR (
+                        ?2 = 0
+                        AND {column} >= ?1 || '/'
+                        AND {column} < ?1 || '0'
+                    )
+                )"
+            )
+        };
+        let symbol_scope = in_component("s.file_path");
+        let caller_scope = in_component("caller.file_path");
         let sql = format!(
-            "WITH component(component, path, direct_only) AS (VALUES {placeholders}),
-             ranked AS (
-                 SELECT c.component,
-                        {SYMBOL_COLS_S},
-                        COALESCE(parent.file_path, '') AS parent_file_path,
-                        COALESCE(parent.line_start, -1) AS parent_line_start,
-                        COALESCE(parent.name, '') AS parent_name,
-                        COALESCE(parent.kind, '') AS parent_kind,
-                        COALESCE(parent.line_end, -1) AS parent_line_end,
-                        COALESCE(parent.signature, '') AS parent_signature,
-                        COALESCE(parent.decorators, '') AS parent_decorators,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY c.component
-                            ORDER BY s.file_path, s.line_start, s.name, s.kind, s.line_end,
-                                     COALESCE(s.signature, ''), COALESCE(s.decorators, ''),
-                                     COALESCE(parent.file_path, ''),
-                                     COALESCE(parent.line_start, -1),
-                                     COALESCE(parent.name, ''), COALESCE(parent.kind, ''),
-                                     COALESCE(parent.line_end, -1),
-                                     COALESCE(parent.signature, ''),
-                                     COALESCE(parent.decorators, '')
-                        ) AS position
-                 FROM component c
-                 JOIN symbols s
-                   ON (
-                       c.direct_only = 1
-                       AND (
-                           (c.path = '' AND instr(s.file_path, '/') = 0)
-                           OR (
-                               c.path != ''
-                               AND substr(s.file_path, 1, length(c.path) + 1) = c.path || '/'
-                               AND instr(substr(s.file_path, length(c.path) + 2), '/') = 0
-                           )
-                       )
-                   ) OR (
-                       c.direct_only = 0
-                       AND substr(s.file_path, 1, length(c.path) + 1) = c.path || '/'
-                   )
-                 LEFT JOIN symbols parent ON parent.id = s.parent_id
-                 WHERE s.kind != 'module'
+            "WITH scoped_names(name) AS MATERIALIZED (
+                 SELECT DISTINCT s.name
+                 FROM symbols s INDEXED BY idx_symbols_file
+                 WHERE {symbol_scope}
+                   AND s.kind != 'module'
                    {symbol_filter}
-                   AND EXISTS (
-                       SELECT 1
-                       FROM edges e
-                       JOIN symbols caller ON caller.id = e.from_id
-                       WHERE e.kind = 'calls'
-                         AND (e.to_name = s.name OR e.to_type = s.name)
-                         {caller_filter}
-                         AND NOT (
-                             (
-                                 c.direct_only = 1
-                                 AND (
-                                     (c.path = '' AND instr(caller.file_path, '/') = 0)
-                                     OR (
-                                         c.path != ''
-                                         AND substr(caller.file_path, 1, length(c.path) + 1)
-                                             = c.path || '/'
-                                         AND instr(
-                                             substr(caller.file_path, length(c.path) + 2),
-                                             '/'
-                                         ) = 0
-                                     )
-                                 )
-                             ) OR (
-                                 c.direct_only = 0
-                                 AND substr(caller.file_path, 1, length(c.path) + 1)
-                                     = c.path || '/'
-                             )
-                         )
-                   )
+             ),
+             boundary_names(name) AS MATERIALIZED (
+                 SELECT n.name
+                 FROM scoped_names n
+                 CROSS JOIN edges e INDEXED BY idx_edges_calls_to_name
+                 JOIN symbols caller ON caller.id = e.from_id
+                 WHERE e.to_name = n.name
+                   AND e.kind = 'calls'
+                   AND NOT {caller_scope}
+                   {caller_filter}
+                 UNION
+                 SELECT n.name
+                 FROM scoped_names n
+                 CROSS JOIN edges e INDEXED BY idx_edges_calls_to_type
+                 JOIN symbols caller ON caller.id = e.from_id
+                 WHERE e.to_type = n.name
+                   AND e.kind = 'calls'
+                   AND e.to_type IS NOT NULL
+                   AND e.to_type <> ''
+                   AND NOT {caller_scope}
+                   {caller_filter}
              )
-             SELECT component,
-                    id, name, kind, file_path, line_start, line_end, signature, parent_id, decorators
-             FROM ranked
-             WHERE position <= ?{per_component_param}
-             ORDER BY component, file_path, line_start, name, kind, line_end,
-                      COALESCE(signature, ''), COALESCE(decorators, ''),
+             SELECT {SYMBOL_COLS_S},
+                    COALESCE(parent.file_path, '') AS parent_file_path,
+                    COALESCE(parent.line_start, -1) AS parent_line_start,
+                    COALESCE(parent.name, '') AS parent_name,
+                    COALESCE(parent.kind, '') AS parent_kind,
+                    COALESCE(parent.line_end, -1) AS parent_line_end,
+                    COALESCE(parent.signature, '') AS parent_signature,
+                    COALESCE(parent.decorators, '') AS parent_decorators
+             FROM symbols s INDEXED BY idx_symbols_file
+             LEFT JOIN symbols parent ON parent.id = s.parent_id
+             WHERE {symbol_scope}
+               AND s.kind != 'module'
+               AND s.name IN (SELECT name FROM boundary_names)
+               {symbol_filter}
+             ORDER BY s.file_path, s.line_start, s.name, s.kind, s.line_end,
+                      COALESCE(s.signature, ''), COALESCE(s.decorators, ''),
                       parent_file_path, parent_line_start, parent_name, parent_kind,
                       parent_line_end, parent_signature, parent_decorators
-             LIMIT ?{global_param}"
+             LIMIT ?3"
         );
-        let mut values = Vec::with_capacity(components.len() * 3 + 2);
-        for component in components {
-            values.push(SqlValue::Text(component.label.clone()));
-            values.push(SqlValue::Text(component.path.clone()));
-            values.push(SqlValue::Integer(match component.match_mode {
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut ordered = components.iter().collect::<Vec<_>>();
+        ordered.sort_by(|left, right| left.label.cmp(&right.label));
+        let mut result = Vec::new();
+        for component in ordered {
+            let remaining = global_limit.saturating_sub(result.len());
+            if remaining == 0 {
+                break;
+            }
+            let direct_only = match component.match_mode {
                 MapBoundaryMatch::Direct => 1,
                 MapBoundaryMatch::Recursive => 0,
-            }));
+            };
+            let row_limit = limit_per_component.min(remaining) as i64;
+            let rows = stmt.query_map(params![component.path, direct_only, row_limit], |row| {
+                Ok(MapBoundaryRow {
+                    component: component.label.clone(),
+                    symbol: Self::row_to_symbol(row)?,
+                })
+            })?;
+            result.extend(rows.collect::<SqlResult<Vec<_>>>()?);
         }
-        values.push(SqlValue::Integer(limit_per_component as i64));
-        values.push(SqlValue::Integer(global_limit as i64));
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(values), |row| {
-            Ok(MapBoundaryRow {
-                component: row.get(0)?,
-                symbol: Symbol {
-                    id: row.get(1)?,
-                    name: row.get(2)?,
-                    kind: row.get(3)?,
-                    file_path: row.get(4)?,
-                    line_start: row.get(5)?,
-                    line_end: row.get(6)?,
-                    signature: row.get(7)?,
-                    parent_id: row.get(8)?,
-                    decorators: row.get(9)?,
-                },
-            })
-        })?;
-        rows.collect()
+        Ok(result)
     }
 
     pub fn map_centrality(
@@ -1689,8 +1770,130 @@ impl Store {
         top_probe: usize,
         production_only: bool,
     ) -> SqlResult<Vec<MapCentralityRow>> {
-        let definition_filter = maybe_production_path_filter(production_only, "s.file_path");
-        let caller_filter = maybe_production_path_filter(production_only, "caller.file_path");
+        if kind == "root" {
+            // A whole-index map already contains every definition and every
+            // caller, so joining each call edge back through scoped_names (and
+            // then through caller) only multiplies work. Aggregate the two
+            // target indexes directly, choose at most `top_probe` names by
+            // their first deterministic definition, and expand definitions
+            // only for those candidate names.
+            let caller_join = if production_only {
+                "JOIN symbols caller ON caller.id = edges.from_id"
+            } else {
+                ""
+            };
+            let caller_filter = maybe_production_symbol_filter(production_only, "caller");
+            let collision_filter = maybe_production_symbol_filter(production_only, "collision");
+            let first_filter = maybe_production_symbol_filter(production_only, "first");
+            let result_filter = maybe_production_symbol_filter(production_only, "s");
+            let sql = format!(
+                "WITH callers(nm, from_id) AS (
+                     SELECT edges.to_name, edges.from_id
+                     FROM edges INDEXED BY idx_edges_calls_to_name
+                     {caller_join}
+                     WHERE edges.kind = 'calls'
+                       {caller_filter}
+                     UNION
+                     SELECT edges.to_type, edges.from_id
+                     FROM edges INDEXED BY idx_edges_calls_to_type
+                     {caller_join}
+                     WHERE edges.kind = 'calls'
+                       AND edges.to_type IS NOT NULL
+                       AND edges.to_type <> ''
+                       {caller_filter}
+                 ),
+                 name_degrees AS MATERIALIZED (
+                     SELECT nm, COUNT(*) AS in_degree
+                     FROM callers
+                     GROUP BY nm
+                 ),
+                 collisions AS MATERIALIZED (
+                     SELECT collision.name, COUNT(*) AS name_collision
+                     FROM symbols collision INDEXED BY idx_symbols_name
+                     WHERE collision.kind != 'module'
+                       {collision_filter}
+                     GROUP BY collision.name
+                 ),
+                 name_first AS MATERIALIZED (
+                     SELECT collisions.name,
+                            collisions.name_collision,
+                            (
+                                SELECT first.id
+                                FROM symbols first INDEXED BY idx_symbols_name
+                                LEFT JOIN symbols first_parent ON first_parent.id = first.parent_id
+                                WHERE first.name = collisions.name
+                                  AND first.kind != 'module'
+                                  {first_filter}
+                                ORDER BY first.file_path, first.line_start, first.name,
+                                         first.kind, first.line_end,
+                                         COALESCE(first.signature, ''),
+                                         COALESCE(first.decorators, ''),
+                                         COALESCE(first_parent.file_path, ''),
+                                         COALESCE(first_parent.line_start, -1),
+                                         COALESCE(first_parent.name, ''),
+                                         COALESCE(first_parent.kind, ''),
+                                         COALESCE(first_parent.line_end, -1),
+                                         COALESCE(first_parent.signature, ''),
+                                         COALESCE(first_parent.decorators, '')
+                                LIMIT 1
+                            ) AS first_id
+                     FROM collisions
+                 ),
+                 candidate_names AS MATERIALIZED (
+                     SELECT degrees.nm,
+                            degrees.in_degree,
+                            names.name_collision
+                     FROM name_degrees degrees
+                     JOIN name_first names ON names.name = degrees.nm
+                     JOIN symbols first ON first.id = names.first_id
+                     LEFT JOIN symbols first_parent ON first_parent.id = first.parent_id
+                     ORDER BY (names.name_collision > 1), degrees.in_degree DESC,
+                              first.file_path, first.line_start, first.name,
+                              first.kind, first.line_end,
+                              COALESCE(first.signature, ''),
+                              COALESCE(first.decorators, ''),
+                              COALESCE(first_parent.file_path, ''),
+                              COALESCE(first_parent.line_start, -1),
+                              COALESCE(first_parent.name, ''),
+                              COALESCE(first_parent.kind, ''),
+                              COALESCE(first_parent.line_end, -1),
+                              COALESCE(first_parent.signature, ''),
+                              COALESCE(first_parent.decorators, '')
+                     LIMIT ?1
+                 )
+                 SELECT {SYMBOL_COLS_S},
+                        candidates.in_degree,
+                        candidates.name_collision
+                 FROM candidate_names candidates
+                 JOIN symbols s INDEXED BY idx_symbols_name ON s.name = candidates.nm
+                 LEFT JOIN symbols parent ON parent.id = s.parent_id
+                 WHERE s.kind != 'module'
+                   {result_filter}
+                 ORDER BY (candidates.name_collision > 1),
+                          candidates.in_degree DESC,
+                          s.file_path, s.line_start, s.name, s.kind, s.line_end,
+                          COALESCE(s.signature, ''), COALESCE(s.decorators, ''),
+                          COALESCE(parent.file_path, ''),
+                          COALESCE(parent.line_start, -1),
+                          COALESCE(parent.name, ''), COALESCE(parent.kind, ''),
+                          COALESCE(parent.line_end, -1),
+                          COALESCE(parent.signature, ''),
+                          COALESCE(parent.decorators, '')
+                 LIMIT ?1"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(params![top_probe as i64], |row| {
+                Ok(MapCentralityRow {
+                    symbol: Self::row_to_symbol(row)?,
+                    in_degree: row.get(9)?,
+                    name_collision: row.get(10)?,
+                })
+            })?;
+            return rows.collect();
+        }
+
+        let definition_filter = maybe_production_symbol_filter(production_only, "s");
+        let caller_filter = maybe_production_symbol_filter(production_only, "caller");
         let sql = format!(
             "WITH scoped_defs AS (
                  SELECT {SYMBOL_COLS_S},
@@ -1714,31 +1917,38 @@ impl Store {
                        )
                    )
              ),
+             scoped_names AS (
+                 SELECT DISTINCT name
+                 FROM scoped_defs
+             ),
              -- In-degree depends only on a definition's *name* (plus the
              -- uniform caller-side production_only filter), never on which
              -- specific def row it is — so aggregate once over the UNION ALL
              -- of the to_name and to_type edge branches (grouping by to_name
              -- alone would drop `Type::method()` callers) and join scoped
-             -- defs to it by name, instead of joining every def to every
-             -- same-named edge.
+             -- names to the dedicated target indexes. This prevents a small
+             -- map scope from scanning every call edge in a monorepo.
              name_degrees AS (
                  SELECT nm, COUNT(DISTINCT from_id) AS in_degree FROM (
                      SELECT e.to_name AS nm, e.from_id
-                     FROM edges e
+                     FROM scoped_names n
+                     JOIN edges e INDEXED BY idx_edges_calls_to_name
+                       ON e.to_name = n.name AND e.kind = 'calls'
                      JOIN symbols caller ON caller.id = e.from_id
-                     WHERE e.kind = 'calls'
+                     WHERE 1 = 1
                      {caller_filter}
                      UNION ALL
                      SELECT e.to_type AS nm, e.from_id
-                     FROM edges e
+                     FROM scoped_names n
+                     JOIN edges e INDEXED BY idx_edges_calls_to_type
+                       ON e.to_type = n.name
+                      AND e.kind = 'calls'
+                      AND e.to_type IS NOT NULL
+                      AND e.to_type <> ''
                      JOIN symbols caller ON caller.id = e.from_id
-                     WHERE e.kind = 'calls' AND e.to_type IS NOT NULL AND e.to_type <> ''
+                     WHERE 1 = 1
                      {caller_filter}
                  ) GROUP BY nm
-             ),
-             scoped_names AS (
-                 SELECT DISTINCT name
-                 FROM scoped_defs
              ),
              collisions AS (
                  SELECT n.name,
@@ -1756,7 +1966,8 @@ impl Store {
              FROM scoped_defs d
              JOIN name_degrees degrees ON degrees.nm = d.name
              JOIN collisions ON collisions.name = d.name
-             ORDER BY degrees.in_degree DESC, d.file_path, d.line_start, d.name,
+             ORDER BY (collisions.name_collision > 1), degrees.in_degree DESC,
+                      d.file_path, d.line_start, d.name,
                       d.kind, d.line_end, COALESCE(d.signature, ''),
                       COALESCE(d.decorators, ''), d.parent_file_path,
                       d.parent_line_start, d.parent_name, d.parent_kind,
@@ -1790,8 +2001,60 @@ impl Store {
         limit: usize,
         production_only: bool,
     ) -> SqlResult<Vec<(String, String)>> {
-        let source_filter = maybe_production_path_filter(production_only, "source.file_path");
-        let target_filter = maybe_production_path_filter(production_only, "target.file_path");
+        let rows =
+            self.generic_map_import_edges_filtered(scope, kind, limit, production_only, true)?;
+        let mut pairs: std::collections::BTreeSet<(String, String)> = rows.into_iter().collect();
+        let (cpp_pairs, _) = self.cpp_include_pairs(Some((scope, kind)), limit, production_only)?;
+        pairs.extend(cpp_pairs);
+        Ok(pairs.into_iter().take(limit).collect())
+    }
+
+    /// Fetch the scoped import graph up to an exact work cap. Once more than
+    /// `cap` distinct generic edges exist, callers only need the truncation
+    /// fact: running an SCC algorithm on a partial graph would be misleading.
+    /// Omitting ORDER BY lets SQLite stop as soon as that fact is known instead
+    /// of sorting the entire monorepo graph.
+    pub fn map_import_edges_capped_filtered(
+        &self,
+        scope: &str,
+        kind: &str,
+        cap: usize,
+        production_only: bool,
+    ) -> SqlResult<(Vec<(String, String)>, bool)> {
+        let generic = self.generic_map_import_edges_filtered(
+            scope,
+            kind,
+            cap.saturating_add(1),
+            production_only,
+            false,
+        )?;
+        if generic.len() > cap {
+            return Ok((Vec::new(), true));
+        }
+
+        let (cpp_pairs, cpp_truncated) =
+            self.cpp_include_pairs(Some((scope, kind)), cap, production_only)?;
+        let mut pairs: std::collections::BTreeSet<(String, String)> = generic.into_iter().collect();
+        pairs.extend(cpp_pairs);
+        if cpp_truncated || pairs.len() > cap {
+            return Ok((Vec::new(), true));
+        }
+        Ok((pairs.into_iter().collect(), false))
+    }
+
+    fn generic_map_import_edges_filtered(
+        &self,
+        scope: &str,
+        kind: &str,
+        limit: usize,
+        production_only: bool,
+        deterministic_top: bool,
+    ) -> SqlResult<Vec<(String, String)>> {
+        let source_filter = maybe_production_symbol_filter(production_only, "source");
+        let target_filter = maybe_production_symbol_filter(production_only, "target");
+        let order_clause =
+            deterministic_top.then_some("ORDER BY source.file_path, target.file_path");
+        let order_clause = order_clause.unwrap_or("");
         let sql = format!(
             "WITH target_files AS (
                  -- Pre-dedup (name, file_path) before joining import edges:
@@ -1809,6 +2072,7 @@ impl Store {
              JOIN symbols source ON source.id = e.from_id
              JOIN target_files target ON target.name = e.to_name
              WHERE e.kind = 'imports'
+               AND (source.language IS NULL OR source.language != 'cpp')
                AND source.file_path != target.file_path
                {source_filter}
                AND (
@@ -1827,7 +2091,7 @@ impl Store {
                        AND substr(target.file_path, 1, length(?1) + 1) = ?1 || '/'
                    )
                )
-             ORDER BY source.file_path, target.file_path
+             {order_clause}
              LIMIT ?3"
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -1835,6 +2099,135 @@ impl Store {
             Ok((row.get(0)?, row.get(1)?))
         })?;
         rows.collect()
+    }
+
+    /// Resolve syntactic C/C++ `#include` edges to indexed files. Includes are
+    /// file dependencies, unlike `using` declarations, and therefore cannot
+    /// be resolved through a target symbol's leaf name.
+    fn cpp_include_pairs(
+        &self,
+        scope: Option<(&str, &str)>,
+        pair_limit: usize,
+        production_only: bool,
+    ) -> SqlResult<(std::collections::BTreeSet<(String, String)>, bool)> {
+        let source_filter = maybe_production_symbol_filter(production_only, "source");
+        let target_filter = maybe_production_symbol_filter(production_only, "target");
+        let scope_path = scope.map(|(path, _)| path);
+        let scope_kind = scope.map(|(_, kind)| kind);
+
+        let target_sql = format!(
+            "SELECT DISTINCT target.file_path
+             FROM symbols target
+             WHERE target.language = 'cpp'
+               {target_filter}
+               AND (
+                   ?2 IS NULL OR ?2 = 'root'
+                   OR (?2 = 'file' AND target.file_path = ?1)
+                   OR (
+                       ?2 = 'directory'
+                       AND substr(target.file_path, 1, length(?1) + 1) = ?1 || '/'
+                   )
+               )
+             ORDER BY target.file_path"
+        );
+        let mut target_stmt = self.conn.prepare(&target_sql)?;
+        let target_paths: Vec<String> = target_stmt
+            .query_map(params![scope_path, scope_kind], |row| row.get(0))?
+            .collect::<SqlResult<_>>()?;
+        let target_set: std::collections::BTreeSet<String> = target_paths.iter().cloned().collect();
+
+        let mut by_suffix: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for path in &target_paths {
+            let lower = path.to_ascii_lowercase();
+            let basename = lower.rsplit('/').next().unwrap_or(&lower).to_string();
+            by_suffix.entry(basename).or_default().push(path.clone());
+        }
+
+        let raw_limit = pair_limit.saturating_add(1);
+        let source_sql = format!(
+            "SELECT DISTINCT source.file_path, e.to_path
+             FROM edges e
+             JOIN symbols source ON source.id = e.from_id
+             WHERE e.kind = 'imports'
+               AND source.language = 'cpp'
+               AND e.to_name != '*'
+               AND e.to_path IS NOT NULL
+               AND e.to_path LIKE '%::*'
+               {source_filter}
+               AND (
+                   ?2 IS NULL OR ?2 = 'root'
+                   OR (?2 = 'file' AND source.file_path = ?1)
+                   OR (
+                       ?2 = 'directory'
+                       AND substr(source.file_path, 1, length(?1) + 1) = ?1 || '/'
+                   )
+               )
+             ORDER BY source.file_path, e.to_path
+             LIMIT ?3"
+        );
+        let mut source_stmt = self.conn.prepare(&source_sql)?;
+        let mut raw: Vec<(String, String)> = source_stmt
+            .query_map(params![scope_path, scope_kind, raw_limit as i64], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
+            .collect::<SqlResult<_>>()?;
+        let raw_truncated = raw.len() > pair_limit;
+        raw.truncate(pair_limit);
+
+        let mut pairs = std::collections::BTreeSet::new();
+        for (source, encoded_include) in raw {
+            let include = encoded_include
+                .strip_suffix("::*")
+                .unwrap_or(&encoded_include)
+                .replace('\\', "/");
+            let mut resolved = std::collections::BTreeSet::new();
+
+            if let Some(path) = normalize_repo_relative(&include) {
+                if target_set.contains(&path) {
+                    resolved.insert(path);
+                }
+            }
+            if let Some(parent) = source.rsplit_once('/').map(|(parent, _)| parent) {
+                if let Some(path) = normalize_repo_relative(&format!("{parent}/{include}")) {
+                    if target_set.contains(&path) {
+                        resolved.insert(path);
+                    }
+                }
+            }
+
+            // Project include roots are not available to the syntactic
+            // indexer. Fall back deterministically to matching suffixes; this
+            // deliberately over-approximates when several headers share a
+            // basename, while still preserving the actual target file path.
+            if resolved.is_empty() {
+                let lower = include.to_ascii_lowercase();
+                let basename = lower.rsplit('/').next().unwrap_or(&lower);
+                if let Some(candidates) = by_suffix.get(basename) {
+                    for candidate in candidates {
+                        let candidate_lower = candidate.to_ascii_lowercase();
+                        if !lower.contains('/')
+                            || candidate_lower == lower
+                            || candidate_lower.ends_with(&format!("/{lower}"))
+                        {
+                            resolved.insert(candidate.clone());
+                        }
+                    }
+                }
+            }
+
+            for target in resolved {
+                if source != target {
+                    pairs.insert((source.clone(), target));
+                }
+            }
+        }
+
+        let pair_truncated = pairs.len() > pair_limit;
+        if pair_truncated {
+            pairs = pairs.into_iter().take(pair_limit).collect();
+        }
+        Ok((pairs, raw_truncated || pair_truncated))
     }
 
     /// Replace the entire task-spec corpus with the supplied entries. Called by
@@ -1874,11 +2267,10 @@ impl Store {
     /// Strongly-connected components of size ≥ `min_size` in the file-level
     /// import graph. A returned SCC = a circular-import group.
     ///
-    /// Edges resolved by **leaf name match** — each `imports` edge targets every
-    /// file with a same-named symbol. Over-approximates: two unrelated `Logger`
-    /// symbols produce a cross-edge even if the importer meant neither. Upside:
-    /// no extractor-specific import resolution. Downside: false-positive cycles
-    /// to verify manually.
+    /// Non-C++ edges are resolved by leaf-name match. C/C++ `#include` edges
+    /// resolve to indexed header paths (exact, source-relative, then a
+    /// deterministic suffix fallback); `using` declarations are excluded from
+    /// the C++ file graph.
     ///
     /// Self-edges excluded (`from_file = to_file`).
     ///
@@ -1916,6 +2308,7 @@ impl Store {
              WHERE e.kind = 'imports'
                AND s_from.file_path != t.file_path
                AND (?1 IS NULL OR s_from.language = ?1)
+               AND (s_from.language IS NULL OR s_from.language != 'cpp')
              ORDER BY from_file, to_file
              LIMIT ?2",
         )?;
@@ -1925,8 +2318,17 @@ impl Store {
             let to: String = r.get(1)?;
             Ok((from, to))
         })?;
-        let pairs: Vec<(String, String)> = rows.collect::<SqlResult<_>>()?;
-        if pairs.len() > cap {
+        let generic_pairs: Vec<(String, String)> = rows.collect::<SqlResult<_>>()?;
+        let generic_truncated = generic_pairs.len() > cap;
+        let (cpp_pairs, cpp_truncated) = if language.is_none_or(|value| value == "cpp") {
+            self.cpp_include_pairs(None, cap, false)?
+        } else {
+            (std::collections::BTreeSet::new(), false)
+        };
+        let mut pairs: std::collections::BTreeSet<(String, String)> =
+            generic_pairs.into_iter().take(cap).collect();
+        pairs.extend(cpp_pairs);
+        if generic_truncated || cpp_truncated || pairs.len() > cap {
             return Ok((Vec::new(), true));
         }
 
@@ -2365,6 +2767,49 @@ mod tests {
         let store = Store::open(&path).unwrap();
         assert_eq!(store.symbol_count().unwrap(), 0);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn schema_rebuild_preserves_repository_identity_history_and_scratchpad() {
+        let path = tmp_db("schema_rebuild_identity");
+        {
+            let mut store = Store::open(&path).unwrap();
+            store.set_meta("index_root", "/tmp/example-repo").unwrap();
+            store
+                .replace_project_history(&[ProjectHistoryEntry {
+                    path: "CONTEXT.md".into(),
+                    kind: "context".into(),
+                    title: "Context".into(),
+                    body: "durable history".into(),
+                }])
+                .unwrap();
+            store
+                .scratchpad_append("planner", "handoff", "live note")
+                .unwrap();
+            store.upsert_file("src/lib.rs", 1, 1).unwrap();
+            store
+                .insert_symbol("entry", "function", "src/lib.rs", 1, 2, None, None)
+                .unwrap();
+            store.set_meta("schema_version", "6").unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.meta_value("schema_version").unwrap().as_deref(),
+            Some(SCHEMA_VERSION)
+        );
+        assert_eq!(
+            store.meta_value("index_root").unwrap().as_deref(),
+            Some("/tmp/example-repo")
+        );
+        assert_eq!(store.file_count().unwrap(), 0);
+        assert_eq!(store.symbol_count().unwrap(), 0);
+        assert_eq!(store.project_history_count().unwrap(), 1);
+        assert_eq!(
+            store.scratchpad_read(None, None, None, 10).unwrap().len(),
+            1
+        );
+        std::fs::remove_file(path).ok();
     }
 
     #[test]
@@ -2872,6 +3317,50 @@ mod tests {
     }
 
     #[test]
+    fn dependency_cycles_resolve_cpp_includes_to_header_files() {
+        let path = tmp_db("dep_cycles_cpp_includes");
+        let store = Store::open(&path).unwrap();
+        let a_module = store
+            .insert_symbol("<module>", "module", "src/a.h", 1, 10, None, None)
+            .unwrap();
+        let b_module = store
+            .insert_symbol("<module>", "module", "src/b.h", 1, 10, None, None)
+            .unwrap();
+        store
+            .insert_symbol("A", "class", "src/a.h", 2, 4, None, Some(a_module))
+            .unwrap();
+        store
+            .insert_symbol("B", "class", "src/b.h", 2, 4, None, Some(b_module))
+            .unwrap();
+        store
+            .conn
+            .execute("UPDATE symbols SET language = 'cpp'", [])
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO edges(from_id, to_name, to_path, kind, line) VALUES (?1, 'b.h', 'b.h::*', 'imports', 1)",
+                params![a_module],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO edges(from_id, to_name, to_path, kind, line) VALUES (?1, 'a.h', 'a.h::*', 'imports', 1)",
+                params![b_module],
+            )
+            .unwrap();
+
+        let (cycles, truncated) = store.dependency_cycles(Some("cpp"), 2).unwrap();
+        assert!(!truncated);
+        assert_eq!(
+            cycles,
+            vec![vec!["src/a.h".to_string(), "src/b.h".to_string()]]
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn centrality_filters_prefix_and_kind() {
         let path = tmp_db("centrality_filters");
         let store = Store::open(&path).unwrap();
@@ -2936,7 +3425,39 @@ mod tests {
     }
 
     #[test]
-    fn map_boundaries_use_one_batched_statement_and_exact_external_scope() {
+    fn production_classification_is_shared_by_files_and_symbols() {
+        let path = tmp_db("production_classification_shared");
+        let store = Store::open(&path).unwrap();
+        for file in [
+            "src/live.py",
+            "src/test_helpers/service.py",
+            "src/tests/service.py",
+            "src/service_test.py",
+        ] {
+            store.upsert_file(file, 1, 1).unwrap();
+            store
+                .insert_symbol("entry", "function", file, 1, 2, None, None)
+                .unwrap();
+        }
+
+        let files = store.map_paths_filtered("", "root", 10, true).unwrap();
+        let symbols = store
+            .conn
+            .prepare(
+                "SELECT DISTINCT file_path FROM symbols WHERE production = 1 ORDER BY file_path",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<SqlResult<Vec<String>>>()
+            .unwrap();
+        assert_eq!(files, symbols);
+        assert_eq!(files, vec!["src/live.py", "src/test_helpers/service.py"]);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn map_boundaries_are_deterministic_and_exact_external_scope() {
         let path = tmp_db("map_boundaries");
         let store = Store::open(&path).unwrap();
         let app_target = store
@@ -3023,6 +3544,91 @@ mod tests {
     }
 
     #[test]
+    fn map_boundaries_do_not_scan_unrelated_call_edges() {
+        let path = tmp_db("map_boundary_target_indexes");
+        let store = Store::open(&path).unwrap();
+        let target = store
+            .insert_symbol("boundary", "function", "src/app/lib.rs", 1, 3, None, None)
+            .unwrap();
+        let caller = store
+            .insert_symbol("caller", "function", "outside.rs", 1, 3, None, None)
+            .unwrap();
+        store
+            .insert_edge(caller, Some(target), "boundary", "calls", 2)
+            .unwrap();
+        store.conn.execute_batch("BEGIN").unwrap();
+        for _ in 0..20_000 {
+            store
+                .insert_edge(caller, None, "unrelated", "calls", 3)
+                .unwrap();
+        }
+        store.conn.execute_batch("COMMIT").unwrap();
+
+        let components = [MapBoundaryScope {
+            label: "src/app".into(),
+            path: "src/app".into(),
+            match_mode: MapBoundaryMatch::Recursive,
+        }];
+        let rows = store
+            .with_work_budget(
+                WorkBudget {
+                    deadline: None,
+                    op_ticks: Some(30),
+                },
+                || store.map_boundaries(&components, 10, 10),
+            )
+            .expect("boundary lookup must use target indexes");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].symbol.name, "boundary");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn map_boundaries_deduplicate_scoped_names_before_edge_lookup() {
+        let path = tmp_db("map_boundary_duplicate_names");
+        let store = Store::open(&path).unwrap();
+        store.conn.execute_batch("BEGIN").unwrap();
+        for index in 0..5_000 {
+            store
+                .insert_symbol(
+                    "shared",
+                    "function",
+                    &format!("src/app/{index:05}.rs"),
+                    1,
+                    2,
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+        store.conn.execute_batch("COMMIT").unwrap();
+        let caller = store
+            .insert_symbol("caller", "function", "outside.rs", 1, 2, None, None)
+            .unwrap();
+        store
+            .insert_edge(caller, None, "shared", "calls", 1)
+            .unwrap();
+        let components = [MapBoundaryScope {
+            label: "src/app".into(),
+            path: "src/app".into(),
+            match_mode: MapBoundaryMatch::Recursive,
+        }];
+
+        let rows = store
+            .with_work_budget(
+                WorkBudget {
+                    deadline: None,
+                    op_ticks: Some(300),
+                },
+                || store.map_boundaries(&components, 5, 5),
+            )
+            .expect("duplicate definitions must share one boundary-name lookup");
+        assert_eq!(rows.len(), 5);
+        assert!(rows.iter().all(|row| row.symbol.name == "shared"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn map_queries_obey_probe_limits_and_name_tie_order() {
         let path = tmp_db("map_probe_limits");
         let store = Store::open(&path).unwrap();
@@ -3053,6 +3659,42 @@ mod tests {
         let ranked = store.map_centrality("src", "directory", 1).unwrap();
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].symbol.name, "alpha");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn map_hotspots_rank_unambiguous_names_before_pooled_collisions() {
+        let path = tmp_db("map_hotspot_collision_confidence");
+        let store = Store::open(&path).unwrap();
+        let unique = store
+            .insert_symbol("unique", "function", "src/a.rs", 1, 2, None, None)
+            .unwrap();
+        let shared = store
+            .insert_symbol("shared", "function", "src/b.rs", 1, 2, None, None)
+            .unwrap();
+        store
+            .insert_symbol("shared", "function", "vendor/shared.rs", 1, 2, None, None)
+            .unwrap();
+        let first = store
+            .insert_symbol("first", "function", "outside/a.rs", 1, 2, None, None)
+            .unwrap();
+        let second = store
+            .insert_symbol("second", "function", "outside/b.rs", 1, 2, None, None)
+            .unwrap();
+        store
+            .insert_edge(first, Some(unique), "unique", "calls", 1)
+            .unwrap();
+        store
+            .insert_edge(first, Some(shared), "shared", "calls", 2)
+            .unwrap();
+        store
+            .insert_edge(second, Some(shared), "shared", "calls", 2)
+            .unwrap();
+
+        let ranked = store.map_centrality("src", "directory", 1).unwrap();
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].symbol.name, "unique");
+        assert_eq!(ranked[0].name_collision, 1);
         std::fs::remove_file(&path).ok();
     }
 
@@ -3124,6 +3766,42 @@ mod tests {
         assert!(plan
             .iter()
             .any(|detail| detail.contains("idx_symbols_name")));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn map_centrality_does_not_scan_unrelated_call_edges() {
+        let path = tmp_db("map_scoped_degree_work");
+        let store = Store::open(&path).unwrap();
+        let target = store
+            .insert_symbol("needle", "function", "src/app/lib.rs", 1, 3, None, None)
+            .unwrap();
+        let caller = store
+            .insert_symbol("caller", "function", "outside.rs", 1, 3, None, None)
+            .unwrap();
+        store
+            .insert_edge(caller, Some(target), "needle", "calls", 2)
+            .unwrap();
+        store.conn.execute_batch("BEGIN").unwrap();
+        for _ in 0..20_000 {
+            store
+                .insert_edge(caller, None, "unrelated", "calls", 3)
+                .unwrap();
+        }
+        store.conn.execute_batch("COMMIT").unwrap();
+
+        let rows = store
+            .with_work_budget(
+                WorkBudget {
+                    deadline: None,
+                    op_ticks: Some(200),
+                },
+                || store.map_centrality("src/app", "directory", 10),
+            )
+            .expect("scope-seeded degree lookup must stay inside the work cap");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].symbol.name, "needle");
+        assert_eq!(rows[0].in_degree, 1);
         std::fs::remove_file(&path).ok();
     }
 
@@ -3407,6 +4085,38 @@ mod tests {
     }
 
     #[test]
+    fn impact_of_many_uses_target_indexes_for_a_unique_seed() {
+        let path = tmp_db("impact_many_unique_seed_index");
+        let store = Store::open(&path).unwrap();
+        let caller = store
+            .insert_symbol("caller", "function", "src/caller.rs", 1, 2, None, None)
+            .unwrap();
+        store
+            .insert_edge(caller, None, "needle", "calls", 1)
+            .unwrap();
+        store.conn.execute_batch("BEGIN").unwrap();
+        for _ in 0..20_000 {
+            store
+                .insert_edge(caller, None, "unrelated", "calls", 2)
+                .unwrap();
+        }
+        store.conn.execute_batch("COMMIT").unwrap();
+
+        let rows = store
+            .with_work_budget(
+                WorkBudget {
+                    deadline: None,
+                    op_ticks: Some(50),
+                },
+                || store.impact_of_many(&["needle".to_string()], 1, 10, None),
+            )
+            .expect("unique target lookup must not scan every call edge");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].symbol.name, "caller");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn open_sets_busy_timeout_and_cache_size() {
         let path = tmp_db("pragmas");
         let store = Store::open(&path).unwrap();
@@ -3675,33 +4385,9 @@ mod tests {
         ids
     }
 
-    /// Mirrors `production_path_filter`'s segment-based exclusion in Rust.
+    /// Mirrors `production_path_filter` in Rust.
     fn production_excluded(file_path: &str) -> bool {
-        const SEGMENTS: &[&str] = &[
-            "test",
-            "tests",
-            "__tests__",
-            "fixture",
-            "fixtures",
-            "example",
-            "examples",
-            "demo",
-            "demos",
-            "benchmark",
-            "benchmarks",
-            "bench",
-            "benches",
-            "eval",
-            "evals",
-            "generated",
-            "vendor",
-            "node_modules",
-            "target",
-        ];
-        let wrapped = format!("/{}/", file_path.to_lowercase());
-        SEGMENTS
-            .iter()
-            .any(|segment| wrapped.contains(&format!("/{segment}/")))
+        !is_production_path(file_path)
     }
 
     fn bruteforce_in_degree(
@@ -3853,7 +4539,9 @@ mod tests {
                     .filter(|(_, _, _, _, in_degree, _)| *in_degree > 0)
                     .collect();
                 expected.sort_by(|a, b| {
-                    b.4.cmp(&a.4)
+                    (a.5 > 1)
+                        .cmp(&(b.5 > 1))
+                        .then_with(|| b.4.cmp(&a.4))
                         .then_with(|| a.2.cmp(&b.2))
                         .then_with(|| a.3.cmp(&b.3))
                 });

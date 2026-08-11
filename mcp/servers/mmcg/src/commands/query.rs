@@ -51,6 +51,9 @@ pub fn dispatch_map(
     index_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let store = Store::open(index_path)?;
+    let budget_ms = query_budget_ms_from_env(DEFAULT_CLI_BUDGET_MS);
+    store.push_work_budget(WorkBudget::from_millis(budget_ms));
+    let _budget_scope = WorkBudgetScope(&store);
     let map = queries::project_map_with_options(&store, path, depth, top, production_only)?;
     match format {
         crate::MapFormat::Json => println!("{}", serde_json::to_string_pretty(&map)?),
@@ -216,13 +219,73 @@ fn render_map_text(map: &queries::ProjectMapResponse) -> String {
 
 fn render_map_mermaid(map: &queries::ProjectMapResponse) -> String {
     let mut out = String::from("flowchart TD\n");
-    out.push_str(&format!("  n0[\"{}\"]\n", mermaid_label(&map.scope.path)));
+    out.push_str("  classDef boundary fill:#e8f1ff,stroke:#4b75b8\n");
+    out.push_str("  classDef hotspot fill:#fff0e6,stroke:#c35b22\n");
+    out.push_str("  classDef cycle fill:#ffe8e8,stroke:#b84b4b\n");
+    let file_count = map.files.total.unwrap_or(map.files.returned);
+    let language_summary = map
+        .languages
+        .items
+        .iter()
+        .take(4)
+        .map(|item| format!("{} {}", item.language, item.file_count))
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str(&format!(
+        "  n0[\"{} | {} files | {}\"]\n",
+        mermaid_label(&map.scope.path),
+        file_count,
+        mermaid_label(&language_summary)
+    ));
     for (index, component) in map.components.items.iter().enumerate() {
         let id = index + 1;
+        let languages = component
+            .languages
+            .iter()
+            .take(3)
+            .map(|item| format!("{} {}", item.language, item.file_count))
+            .collect::<Vec<_>>()
+            .join(", ");
         out.push_str(&format!(
-            "  n{id}[\"{}\"]\n  n0 --> n{id}\n",
-            mermaid_label(&component.path)
+            "  n{id}[\"{} | {} files | {}\"]\n  n0 --> n{id}\n",
+            mermaid_label(&component.path),
+            component.file_count,
+            mermaid_label(&languages)
         ));
+        for (boundary_index, boundary) in component.boundaries.items.iter().take(5).enumerate() {
+            let boundary_id = format!("b{id}_{boundary_index}");
+            out.push_str(&format!(
+                "  {boundary_id}[\"boundary {} | {}:{}\"]:::boundary\n  n{id} -.-> {boundary_id}\n",
+                mermaid_label(&boundary.name),
+                mermaid_label(&boundary.file),
+                boundary.line
+            ));
+        }
+    }
+    for (index, hotspot) in map.hotspots.items.iter().take(10).enumerate() {
+        out.push_str(&format!(
+            "  h{index}[\"hotspot {} | degree {} | {}:{}\"]:::hotspot\n  n0 --> h{index}\n",
+            mermaid_label(&hotspot.name),
+            hotspot.in_degree,
+            mermaid_label(&hotspot.file),
+            hotspot.line
+        ));
+    }
+    for (cycle_index, cycle) in map.cycles.items.iter().take(5).enumerate() {
+        let display_index = cycle_index + 1;
+        out.push_str(&format!(
+            "  cy{cycle_index}[\"cycle {display_index} | {} files\"]:::cycle\n",
+            cycle.len()
+        ));
+        for (member_index, member) in cycle.iter().enumerate() {
+            let member_id = format!("cy{cycle_index}_{member_index}");
+            out.push_str(&format!(
+                "  {member_id}[\"{}\"]:::cycle\n  cy{cycle_index} --> {member_id}\n",
+                mermaid_label(member)
+            ));
+            let next = (member_index + 1) % cycle.len();
+            out.push_str(&format!("  {member_id} -.-> cy{cycle_index}_{next}\n"));
+        }
     }
     out
 }
@@ -417,5 +480,39 @@ mod map_tests {
         );
         assert_eq!(natural_language_history_query("why is this?"), "");
         assert_eq!(safe_line_text("почему\nтак"), "почему\\nтак");
+    }
+
+    #[test]
+    fn mermaid_map_includes_boundaries_hotspots_and_cycles() {
+        let path = std::env::temp_dir().join(format!("mmcg-mermaid-map-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(&path).unwrap();
+        for file in ["src/a.py", "src/b.py", "outside.py"] {
+            store.upsert_file(file, 1, 1).unwrap();
+        }
+        let a = store
+            .insert_symbol("alpha", "function", "src/a.py", 1, 3, None, None)
+            .unwrap();
+        let b = store
+            .insert_symbol("beta", "function", "src/b.py", 1, 3, None, None)
+            .unwrap();
+        let outside = store
+            .insert_symbol("outside", "function", "outside.py", 1, 3, None, None)
+            .unwrap();
+        store
+            .insert_edge(outside, Some(a), "alpha", "calls", 2)
+            .unwrap();
+        store.insert_edge(a, Some(b), "beta", "imports", 2).unwrap();
+        store
+            .insert_edge(b, Some(a), "alpha", "imports", 2)
+            .unwrap();
+
+        let map = queries::project_map(&store, ".", 2, 20).unwrap();
+        let rendered = render_map_mermaid(&map);
+        assert!(rendered.contains("files"));
+        assert!(rendered.contains("boundary alpha"));
+        assert!(rendered.contains("hotspot alpha"));
+        assert!(rendered.contains("cycle 1"));
+        std::fs::remove_file(path).ok();
     }
 }

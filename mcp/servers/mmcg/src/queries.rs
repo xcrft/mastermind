@@ -10,7 +10,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 #[cfg(test)]
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize)]
@@ -96,8 +96,9 @@ pub fn lang_precision(file_path: &str) -> EdgePrecision {
     let ext = std::path::Path::new(file_path)
         .extension()
         .and_then(|e| e.to_str())
-        .unwrap_or("");
-    match ext {
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
         "rs" => EdgePrecision {
             confidence: "high",
             resolution: "syntactic",
@@ -118,7 +119,7 @@ pub fn lang_precision(file_path: &str) -> EdgePrecision {
             resolution: "syntactic",
             limitations: vec!["reflection not tracked"],
         },
-        "py" => EdgePrecision {
+        "py" | "pyi" => EdgePrecision {
             confidence: "medium",
             resolution: "heuristic",
             limitations: vec![
@@ -171,12 +172,12 @@ pub fn lang_precision(file_path: &str) -> EdgePrecision {
 }
 
 fn lang_from_ext(ext: &str) -> &'static str {
-    match ext {
+    match ext.to_ascii_lowercase().as_str() {
         "rs" => "rust",
         "go" => "go",
         "java" => "java",
         "cs" => "csharp",
-        "py" => "python",
+        "py" | "pyi" => "python",
         "ts" | "tsx" => "typescript",
         "js" | "jsx" | "mjs" | "cjs" => "javascript",
         "vue" => "vue",
@@ -286,7 +287,15 @@ pub fn search(
 ) -> rusqlite::Result<SearchResponse> {
     let raw = store.search_symbols(name, kind, language)?;
     let mut results: Vec<SymbolHit> = if collapse_partials {
-        collapse_partial_hits(raw)
+        let mut namespaces = HashMap::new();
+        for symbol in &raw {
+            if is_partial_symbol(symbol) {
+                if let Some(namespace) = store.enclosing_namespace(symbol.id)? {
+                    namespaces.insert(symbol.id, namespace);
+                }
+            }
+        }
+        collapse_partial_hits(raw, &namespaces)
     } else {
         raw.into_iter().map(SymbolHit::from).collect()
     };
@@ -309,26 +318,34 @@ pub fn search(
 ///
 /// Canonical hit is lex-first by file path; its `locations` lists every
 /// declaration (including itself).
-fn collapse_partial_hits(symbols: Vec<Symbol>) -> Vec<SymbolHit> {
-    use std::collections::HashMap;
+fn is_partial_symbol(symbol: &Symbol) -> bool {
+    symbol
+        .decorators
+        .as_deref()
+        .is_some_and(|decorators| decorators.contains(",partial,"))
+}
 
-    // Group key: (name, kind). Language omitted — partials are C#-only and SQL
-    // filters by language upstream.
-    let mut groups: HashMap<(String, String), Vec<Symbol>> = HashMap::new();
-    let mut order: Vec<(String, String)> = Vec::new();
+fn collapse_partial_hits(
+    symbols: Vec<Symbol>,
+    namespaces: &HashMap<i64, String>,
+) -> Vec<SymbolHit> {
+    // Namespace is part of partial-type identity. Malformed or legacy rows
+    // without a namespace are deliberately isolated by file instead of being
+    // merged just because their leaf names match.
+    let mut groups: HashMap<(String, String, String), Vec<Symbol>> = HashMap::new();
+    let mut order: Vec<(String, String, String)> = Vec::new();
     let mut passthrough: Vec<SymbolHit> = Vec::new();
 
     for sym in symbols {
-        let is_partial = sym
-            .decorators
-            .as_deref()
-            .map(|d| d.contains(",partial,"))
-            .unwrap_or(false);
-        if !is_partial {
+        if !is_partial_symbol(&sym) {
             passthrough.push(SymbolHit::from(sym));
             continue;
         }
-        let key = (sym.name.clone(), sym.kind.clone());
+        let identity = namespaces
+            .get(&sym.id)
+            .cloned()
+            .unwrap_or_else(|| format!("\0file:{}", sym.file_path));
+        let key = (sym.name.clone(), sym.kind.clone(), identity);
         if !groups.contains_key(&key) {
             order.push(key.clone());
         }
@@ -1748,11 +1765,15 @@ pub fn api_surface(
 
 pub fn status(store: &Store) -> rusqlite::Result<StatusResponse> {
     let db_path = store.db_path();
+    let stale_files = store
+        .meta_value("index_root")?
+        .map(|root| stale_count(std::path::Path::new(&root), db_path))
+        .unwrap_or(1);
     Ok(StatusResponse {
         db_path: db_path.to_string_lossy().to_string(),
         symbol_count: store.symbol_count()?,
         file_count: store.file_count()?,
-        stale_files: stale_count(db_path),
+        stale_files,
         extractor_contract_current: store.extractor_contract_current()?,
     })
 }
@@ -1760,15 +1781,17 @@ pub fn status(store: &Store) -> rusqlite::Result<StatusResponse> {
 /// Best-effort count of source files that differ from their stored index mtime
 /// (capped). Returns 1 when freshness cannot be read so `status` does not claim
 /// that a damaged index is current.
-/// The db path may be relative, so canonicalize before climbing to project root.
-fn stale_count(db_path: &std::path::Path) -> usize {
+/// Both paths may be relative, so canonicalize before comparing filesystem
+/// state. The repository root comes from the index binding rather than the DB
+/// location because `--index` may place SQLite anywhere.
+fn stale_count(index_root: &std::path::Path, db_path: &std::path::Path) -> usize {
     let Ok(db_abs) = db_path.canonicalize() else {
         return 1;
     };
-    let Some(root) = db_abs.parent().and_then(|d| d.parent()) else {
+    let Ok(root) = index_root.canonicalize() else {
         return 1;
     };
-    crate::workflow_status::stale_paths(root, &db_abs, 100)
+    crate::workflow_status::stale_paths(&root, &db_abs, 100)
         .map(|paths| paths.len())
         .unwrap_or(1)
 }
@@ -2283,7 +2306,6 @@ pub fn project_map_with_options(
     }
     let paths_truncated = selected.len() > MAP_PATH_LIMIT;
     selected.truncate(MAP_PATH_LIMIT);
-
     let mut language_counts = std::collections::BTreeMap::new();
     let mut component_counts: std::collections::BTreeMap<
         String,
@@ -2429,10 +2451,9 @@ pub fn project_map_with_options(
         hotspot_items.truncate(top as usize);
     }
 
-    let import_edges = store
-        .map_import_edges_filtered(&normalized, kind, MAP_CYCLE_EDGE_LIMIT + 1, production_only)
+    let (import_edges, cycle_work_truncated) = store
+        .map_import_edges_capped_filtered(&normalized, kind, MAP_CYCLE_EDGE_LIMIT, production_only)
         .map_err(|error| error.to_string())?;
-    let cycle_work_truncated = import_edges.len() > MAP_CYCLE_EDGE_LIMIT;
     let (cycle_total, cycle_items) = if cycle_work_truncated {
         (None, Vec::new())
     } else {
@@ -2729,6 +2750,10 @@ mod tests {
         for file in [
             "src/main.rs",
             "src/core/service.rs",
+            "src/core/test_helpers/service.py",
+            "src/core/service_test.py",
+            "src/core/widget.test.ts",
+            "src/core/DatabaseTest.cpp",
             "tests/fixture/main.rs",
             "examples/demo.rs",
             "evals/runner.py",
@@ -2757,6 +2782,17 @@ mod tests {
                 None,
             )
             .unwrap();
+        let helper = store
+            .insert_symbol(
+                "helper_target",
+                "function",
+                "src/core/test_helpers/service.py",
+                1,
+                3,
+                None,
+                None,
+            )
+            .unwrap();
         let caller = store
             .insert_symbol("caller", "function", "src/main.rs", 1, 3, None, None)
             .unwrap();
@@ -2766,17 +2802,25 @@ mod tests {
         store
             .insert_edge(caller, Some(fixture), "fixture_target", "calls", 3)
             .unwrap();
+        store
+            .insert_edge(caller, Some(helper), "helper_target", "calls", 4)
+            .unwrap();
 
         let value =
             serde_json::to_value(project_map_with_options(&store, ".", 2, 20, true).unwrap())
                 .unwrap();
         assert_eq!(value["scope"]["production_only"], true);
-        assert_eq!(value["files"]["total"], 2);
+        assert_eq!(value["files"]["total"], 3);
         let rendered = serde_json::to_string(&value).unwrap();
         assert!(!rendered.contains("tests/fixture"));
         assert!(!rendered.contains("examples/demo"));
         assert!(!rendered.contains("evals/runner"));
+        assert!(!rendered.contains("service_test.py"));
+        assert!(!rendered.contains("widget.test.ts"));
+        assert!(!rendered.contains("DatabaseTest.cpp"));
         assert!(rendered.contains("production_target"));
+        assert!(rendered.contains("test_helpers/service.py"));
+        assert!(rendered.contains("helper_target"));
         std::fs::remove_file(&path).ok();
     }
 
@@ -3443,13 +3487,21 @@ mod tests {
 
     #[test]
     fn collapse_partials_groups_only_partial_rows() {
-        let symbols = vec![
+        let mut symbols = vec![
             mk_sym("User", "class", "User.B.cs", 3, Some(",partial,")),
             mk_sym("User", "class", "User.A.cs", 3, Some(",partial,")),
             mk_sym("User", "class", "User.C.cs", 3, Some(",partial,")),
             mk_sym("Service", "class", "Service.cs", 2, None),
         ];
-        let hits = collapse_partial_hits(symbols);
+        for (index, symbol) in symbols.iter_mut().enumerate() {
+            symbol.id = index as i64 + 1;
+        }
+        let namespaces = HashMap::from([
+            (1, "App.Users".to_string()),
+            (2, "App.Users".to_string()),
+            (3, "App.Users".to_string()),
+        ]);
+        let hits = collapse_partial_hits(symbols, &namespaces);
         // 1 partial group (User) + 1 passthrough (Service) = 2
         assert_eq!(hits.len(), 2);
 
@@ -3474,9 +3526,163 @@ mod tests {
             mk_sym("Foo", "class", "A/Foo.cs", 1, None),
             mk_sym("Foo", "class", "B/Foo.cs", 1, None),
         ];
-        let hits = collapse_partial_hits(symbols);
+        let hits = collapse_partial_hits(symbols, &HashMap::new());
         assert_eq!(hits.len(), 2);
         assert!(hits.iter().all(|h| h.locations.is_none()));
+    }
+
+    #[test]
+    fn collapse_partials_does_not_merge_rows_without_shared_namespace_identity() {
+        let symbols = vec![
+            mk_sym(
+                "Settings",
+                "class",
+                "AppA/Settings.cs",
+                1,
+                Some(",partial,"),
+            ),
+            mk_sym(
+                "Settings",
+                "class",
+                "AppB/Settings.cs",
+                1,
+                Some(",partial,"),
+            ),
+        ];
+        let hits = collapse_partial_hits(symbols, &HashMap::new());
+        assert_eq!(hits.len(), 2);
+        assert!(hits
+            .iter()
+            .all(|hit| hit.locations.as_ref().is_some_and(|rows| rows.len() == 1)));
+    }
+
+    #[test]
+    fn search_collapses_partial_types_only_within_the_same_namespace() {
+        let path = tmp_db("partial_namespace_identity");
+        let mut store = Store::open(&path).unwrap();
+        for (file, namespace) in [
+            ("AppA/One.cs", "AppA"),
+            ("AppA/Two.cs", "AppA"),
+            ("AppB/One.cs", "AppB"),
+        ] {
+            store
+                .commit_file(crate::store::PendingFile {
+                    path: file.to_string(),
+                    mtime: 1,
+                    content_sha256: format!("hash-{file}"),
+                    language: "csharp".to_string(),
+                    symbols: vec![
+                        crate::store::PendingSymbol {
+                            name: "<module>".to_string(),
+                            kind: "module".to_string(),
+                            line_start: 1,
+                            line_end: 3,
+                            signature: None,
+                            parent_index: None,
+                            decorators: None,
+                        },
+                        crate::store::PendingSymbol {
+                            name: namespace.to_string(),
+                            kind: "namespace".to_string(),
+                            line_start: 1,
+                            line_end: 3,
+                            signature: Some(format!("namespace {namespace}")),
+                            parent_index: Some(0),
+                            decorators: None,
+                        },
+                        crate::store::PendingSymbol {
+                            name: "Settings".to_string(),
+                            kind: "class".to_string(),
+                            line_start: 2,
+                            line_end: 3,
+                            signature: Some("partial class Settings".to_string()),
+                            parent_index: Some(1),
+                            decorators: Some(",partial,".to_string()),
+                        },
+                    ],
+                    edges: Vec::new(),
+                })
+                .unwrap();
+        }
+
+        let response = search(&store, "Settings", Some("class"), Some("csharp"), true).unwrap();
+        assert_eq!(response.results.len(), 2);
+        let location_counts: Vec<usize> = response
+            .results
+            .iter()
+            .map(|hit| hit.locations.as_ref().unwrap().len())
+            .collect();
+        assert_eq!(location_counts, vec![2, 1]);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn search_uses_the_full_nested_namespace_identity_for_partials() {
+        let path = tmp_db("partial_nested_namespace_identity");
+        let mut store = Store::open(&path).unwrap();
+        for (file, outer) in [
+            ("AppA/One.cs", "AppA"),
+            ("AppA/Two.cs", "AppA"),
+            ("AppB/One.cs", "AppB"),
+        ] {
+            store
+                .commit_file(crate::store::PendingFile {
+                    path: file.to_string(),
+                    mtime: 1,
+                    content_sha256: format!("hash-{file}"),
+                    language: "csharp".to_string(),
+                    symbols: vec![
+                        crate::store::PendingSymbol {
+                            name: "<module>".to_string(),
+                            kind: "module".to_string(),
+                            line_start: 1,
+                            line_end: 5,
+                            signature: None,
+                            parent_index: None,
+                            decorators: None,
+                        },
+                        crate::store::PendingSymbol {
+                            name: outer.to_string(),
+                            kind: "namespace".to_string(),
+                            line_start: 1,
+                            line_end: 5,
+                            signature: Some(format!("namespace {outer}")),
+                            parent_index: Some(0),
+                            decorators: None,
+                        },
+                        crate::store::PendingSymbol {
+                            name: "Common".to_string(),
+                            kind: "namespace".to_string(),
+                            line_start: 2,
+                            line_end: 5,
+                            signature: Some("namespace Common".to_string()),
+                            parent_index: Some(1),
+                            decorators: None,
+                        },
+                        crate::store::PendingSymbol {
+                            name: "Settings".to_string(),
+                            kind: "class".to_string(),
+                            line_start: 3,
+                            line_end: 4,
+                            signature: Some("partial class Settings".to_string()),
+                            parent_index: Some(2),
+                            decorators: Some(",partial,".to_string()),
+                        },
+                    ],
+                    edges: Vec::new(),
+                })
+                .unwrap();
+        }
+
+        let response = search(&store, "Settings", Some("class"), Some("csharp"), true).unwrap();
+        assert_eq!(response.results.len(), 2);
+        let location_counts = response
+            .results
+            .iter()
+            .map(|hit| hit.locations.as_ref().unwrap().len())
+            .collect::<Vec<_>>();
+        assert_eq!(location_counts, vec![2, 1]);
+        std::fs::remove_file(path).ok();
     }
 
     fn impact_repo(name: &str, files: &[(&str, &str)]) -> PathBuf {
@@ -3529,6 +3735,21 @@ mod tests {
             .index_all(&mut store, true)
             .unwrap();
         store
+    }
+
+    #[test]
+    fn status_uses_bound_index_root_for_an_external_database() {
+        let root = impact_repo(
+            "status_external_db",
+            &[("src/app.py", "def current():\n    return 1\n")],
+        );
+        let store = index_impact(&root, "status_external_db");
+        assert!(!store.db_path().starts_with(&root));
+
+        let response = status(&store).unwrap();
+        assert_eq!(response.stale_files, 0);
+        assert!(response.extractor_contract_current);
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -4080,8 +4301,9 @@ mod tests {
     #[test]
     fn every_indexable_extension_reports_a_known_language_and_precision() {
         let extensions = [
-            "py", "ts", "tsx", "js", "jsx", "mjs", "cjs", "vue", "rs", "cs", "go", "java", "php",
-            "phtml", "c", "cc", "cpp", "cxx", "h", "hpp", "hh", "hxx", "ipp", "tpp",
+            "py", "pyi", "PY", "ts", "tsx", "js", "jsx", "mjs", "cjs", "vue", "rs", "cs", "go",
+            "java", "php", "phtml", "c", "cc", "cpp", "CPP", "cxx", "h", "hpp", "hh", "hxx", "ipp",
+            "tpp",
         ];
         for ext in extensions {
             let path = format!("src/file.{ext}");

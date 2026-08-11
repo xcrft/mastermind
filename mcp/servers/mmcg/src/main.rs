@@ -113,7 +113,7 @@ enum Cmd {
         depth: u8,
         #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=100))]
         top: u32,
-        /// Exclude tests, fixtures, examples, generated code, and vendored dependencies.
+        /// Exclude non-production path segments and conventional test filenames.
         #[arg(long)]
         production_only: bool,
     },
@@ -582,9 +582,8 @@ enum QueryCmd {
         language: Option<String>,
     },
     /// Detect circular imports — strongly-connected components of size ≥ min_size
-    /// in the file-level import graph. Resolves edges by leaf-name match
-    /// (over-approximating: may surface cycles between two unrelated symbols
-    /// sharing a name — manually verify before refactoring).
+    /// in the file-level import graph. C/C++ includes resolve to indexed header
+    /// paths; other languages use conservative leaf-name matching.
     DependencyCycles {
         #[arg(long)]
         language: Option<String>,
@@ -802,6 +801,15 @@ fn run_cli_inner(
                 stats.history_entries_truncated,
                 stats.duration_ms
             );
+            for path in &stats.skipped_binary_paths {
+                eprintln!("skipped binary source: {path:?}");
+            }
+            for path in &stats.skipped_too_large_paths {
+                eprintln!("skipped oversized source: {path:?}");
+            }
+            for path in &stats.skipped_paths {
+                eprintln!("skipped unsupported path: {path:?}");
+            }
             if stats.files_failed > 0 {
                 eprintln!("warning: {} files failed to parse", stats.files_failed);
             }

@@ -38,20 +38,40 @@ fn walk(
     module_index: usize,
 ) {
     let mut cursor = node.walk();
+    let mut active_parent = parent_index;
     for child in node.children(&mut cursor) {
         match child.kind() {
-            // Transparent containers — walk children with same parent context.
-            // C# 10 file-scoped namespaces (`namespace Foo;`) keep siblings
-            // module-level, so recurse past them.
             "namespace_declaration" => {
+                let name = name_field(&child, source).unwrap_or("<anon>").to_string();
+                let namespace_index = push_def_with_decorators(
+                    pending,
+                    name.clone(),
+                    "namespace",
+                    &child,
+                    Some(format!("namespace {name}")),
+                    active_parent,
+                    None,
+                );
                 if let Some(body) = child.child_by_field_name("body") {
-                    walk(body, source, pending, parent_index, module_index);
+                    walk(body, source, pending, Some(namespace_index), module_index);
                 } else {
-                    walk(child, source, pending, parent_index, module_index);
+                    walk(child, source, pending, Some(namespace_index), module_index);
                 }
             }
             "file_scoped_namespace_declaration" => {
-                walk(child, source, pending, parent_index, module_index);
+                let name = name_field(&child, source).unwrap_or("<anon>").to_string();
+                let namespace_index = push_def_with_decorators(
+                    pending,
+                    name.clone(),
+                    "namespace",
+                    &child,
+                    Some(format!("namespace {name}")),
+                    active_parent,
+                    None,
+                );
+                // C# 10 file-scoped namespaces own every following sibling in
+                // this compilation unit.
+                active_parent = Some(namespace_index);
             }
             "class_declaration" | "struct_declaration" | "record_declaration" => {
                 let kind = if child.kind() == "struct_declaration" {
@@ -71,7 +91,7 @@ fn walk(
                     kind,
                     &child,
                     signature,
-                    parent_index,
+                    active_parent,
                     decorators,
                 );
                 if let Some(body) = child.child_by_field_name("body") {
@@ -88,7 +108,7 @@ fn walk(
                     "interface",
                     &child,
                     signature,
-                    parent_index,
+                    active_parent,
                     decorators,
                 );
                 if let Some(body) = child.child_by_field_name("body") {
@@ -104,12 +124,12 @@ fn walk(
                     "enum",
                     &child,
                     signature,
-                    parent_index,
+                    active_parent,
                     collect_attributes(&child, source),
                 );
             }
             "method_declaration" | "local_function_statement" => {
-                let kind = method_kind_for(parent_index, pending);
+                let kind = method_kind_for(active_parent, pending);
                 let name = name_field(&child, source).unwrap_or("<anon>").to_string();
                 let signature = signature_until_body(&child, source);
                 let decorators = collect_attributes(&child, source);
@@ -119,7 +139,7 @@ fn walk(
                     kind,
                     &child,
                     signature,
-                    parent_index,
+                    active_parent,
                     decorators,
                 );
                 if let Some(body) = child.child_by_field_name("body") {
@@ -136,7 +156,7 @@ fn walk(
                     "method",
                     &child,
                     signature,
-                    parent_index,
+                    active_parent,
                     decorators,
                 );
                 if let Some(body) = child.child_by_field_name("body") {
@@ -152,12 +172,12 @@ fn walk(
                     "property",
                     &child,
                     signature,
-                    parent_index,
+                    active_parent,
                     collect_attributes(&child, source),
                 );
                 // Skip accessor bodies for symbols, but walk them for calls.
                 if let Some(acc) = child.child_by_field_name("accessors") {
-                    walk(acc, source, pending, parent_index, module_index);
+                    walk(acc, source, pending, active_parent, module_index);
                 }
             }
             "using_directive" => {
@@ -168,7 +188,7 @@ fn walk(
                     if let Some((name, path, to_type)) = leaf_and_path(&fn_node, source) {
                         push_call_with_type(
                             pending,
-                            parent_index.unwrap_or(module_index),
+                            active_parent.unwrap_or(module_index),
                             name,
                             path,
                             to_type,
@@ -176,14 +196,14 @@ fn walk(
                         );
                     }
                 }
-                walk(child, source, pending, parent_index, module_index);
+                walk(child, source, pending, active_parent, module_index);
             }
             "object_creation_expression" => {
                 if let Some(t) = child.child_by_field_name("type") {
                     if let Some((name, path, to_type)) = leaf_and_path(&t, source) {
                         push_call_with_type(
                             pending,
-                            parent_index.unwrap_or(module_index),
+                            active_parent.unwrap_or(module_index),
                             name,
                             path,
                             to_type,
@@ -191,9 +211,9 @@ fn walk(
                         );
                     }
                 }
-                walk(child, source, pending, parent_index, module_index);
+                walk(child, source, pending, active_parent, module_index);
             }
-            _ => walk(child, source, pending, parent_index, module_index),
+            _ => walk(child, source, pending, active_parent, module_index),
         }
     }
 }
@@ -526,8 +546,20 @@ mod tests {
         let root = path.parent().unwrap();
         let pending = parse_one(&path, root, &CsharpExtractor).unwrap();
         let names: Vec<&str> = pending.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"App.Sub"));
         assert!(names.contains(&"Service"));
         assert!(names.contains(&"Run"));
+        let namespace_index = pending
+            .symbols
+            .iter()
+            .position(|symbol| symbol.kind == "namespace" && symbol.name == "App.Sub")
+            .unwrap();
+        let service = pending
+            .symbols
+            .iter()
+            .find(|symbol| symbol.kind == "class" && symbol.name == "Service")
+            .unwrap();
+        assert_eq!(service.parent_index, Some(namespace_index));
     }
 
     #[test]

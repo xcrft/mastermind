@@ -1170,6 +1170,26 @@ def audit_publication_contract_errors(text: str, workflow: dict) -> list[str]:
     return errors
 
 
+def dockerfile_from_images(text: str) -> list[str]:
+    """Return every Dockerfile FROM image in stage order.
+
+    Docker instruction names are case-insensitive and may have leading horizontal
+    whitespace. Keep an empty sentinel for a FROM line without a parseable image so
+    malformed or continuation-based instructions fail the exact allowlist check.
+    """
+    images: list[str] = []
+    for line in text.splitlines():
+        match = re.match(r"^[ \t]*from(?:[ \t]+(.*))?$", line, flags=re.IGNORECASE)
+        if match is None:
+            continue
+        tokens = (match.group(1) or "").split()
+        image_index = 0
+        while image_index < len(tokens) and tokens[image_index].startswith("--"):
+            image_index += 1
+        images.append(tokens[image_index] if image_index < len(tokens) else "")
+    return images
+
+
 def validate_audit_action_security() -> list[Issue]:
     issues: list[Issue] = []
     parsed: dict[str, dict] = {}
@@ -1270,11 +1290,11 @@ def validate_audit_action_security() -> list[Issue]:
     except OSError as error:
         issues.append(Issue(docker_path, "error", f"cannot read Dockerfile: {error}"))
     else:
-        expected_from = {
+        expected_from = [
             "rust:1.96-bookworm@sha256:a339861ae23e9abb272cea45dfafde21760d2ce6577a70f8a926153677902663",
-            "buildpack-deps:bookworm-scm@sha256:877e9e4d949edfbcbedabc3a2d7ab593955fee5d6d0777adf3a991eb30c750d8",
-        }
-        actual_from = {line.split()[1] for line in docker_text.splitlines() if line.startswith("FROM ")}
+            "buildpack-deps:bookworm-scm@sha256:de4e518f98c6533eceeee6f8b14a77a918856fa8282a1b711c0292d089157c0c",
+        ]
+        actual_from = dockerfile_from_images(docker_text)
         if actual_from != expected_from:
             issues.append(Issue(docker_path, "error", "Docker stages must use the two audited immutable OCI digests"))
         if "cargo +1.96.0 build" not in docker_text or "--locked" not in docker_text:

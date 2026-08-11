@@ -324,32 +324,17 @@ jobs:
           name: npm-tarballs
           path: packed
 
-      - name: Publish all 8 packages
+      - name: Publish or verify all 8 packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          set -e
-          # Irreversible step — assert tarball counts before publishing. Expected
-          # platform count is derived from optionalDependencies (drift-proof).
-          EXPECT=$(node -p "Object.keys(require('$GITHUB_WORKSPACE/npm/mastermind/package.json').optionalDependencies).length")
-          PLAT=$(ls "$GITHUB_WORKSPACE"/packed/xcraftmind-mmcg-*.tgz 2>/dev/null | wc -l | tr -d ' ')
-          ROOT=$(ls "$GITHUB_WORKSPACE"/packed/xcraftmind-mastermind-*.tgz 2>/dev/null | wc -l | tr -d ' ')
-          if [ "$PLAT" != "$EXPECT" ] || [ "$ROOT" != "1" ]; then
-            echo "::error::expected $EXPECT platform + 1 root tarball, found $PLAT + $ROOT — aborting before irreversible publish"
-            ls "$GITHUB_WORKSPACE"/packed/
-            exit 1
-          fi
-          # Publish platform packages FIRST so the root's optionalDependencies
-          # can resolve to real registry entries (otherwise root install would
-          # silently skip them on first install). Order within platforms
-          # doesn't matter — they're independent.
-          for tgz in "$GITHUB_WORKSPACE"/packed/xcraftmind-mmcg-*.tgz; do
-            echo "→ npm publish $tgz"
-            npm publish --provenance --access public "$tgz"
-          done
-          # Root last.
-          echo "→ npm publish $GITHUB_WORKSPACE/packed/xcraftmind-mastermind-*.tgz"
-          npm publish --provenance --access public "$GITHUB_WORKSPACE"/packed/xcraftmind-mastermind-*.tgz
+          # The helper treats E404 as publishable, verifies any existing
+          # version against the local tarball's SHA-512 integrity, preserves
+          # provenance on new uploads, and reaches the root only after all
+          # platform packages are present with the expected bytes.
+          bash scripts/publish-npm-tarballs.sh \
+            "$GITHUB_WORKSPACE/packed" \
+            "$GITHUB_WORKSPACE/npm/mastermind/package.json"
 
   dry-run-notice:
     name: Dry-run notice

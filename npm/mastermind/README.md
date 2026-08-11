@@ -55,8 +55,8 @@ Small changes can use the codegraph directly without creating a task spec.
 - SHA-256 and Ed25519 audit evidence with a pinned GitHub Action
 - An optional user-global style portrait used only as advisory planner/executor input
 
-Supported languages: Python, TypeScript/TSX, JavaScript/JSX, Rust, C#, Go,
-Java, PHP, and C/C++.
+Supported languages: Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust,
+C#, Go, Java, PHP, and C/C++.
 
 ## Documentation
 

@@ -34,6 +34,24 @@ python3 -m venv .venv
 
 Exit code 0 means clean. See [`scripts/README.md`](scripts/README.md) for what it checks.
 
+**npm distribution** — run the host-native packaging smoke before changing the
+wrapper or release assembly:
+
+```bash
+just npm-smoke-native
+```
+
+This builds the native release binary, assembles its platform package, packs
+the root and platform npm tarballs, installs both tarballs in a scratch project,
+and runs the installed wrapper. It does not read from or publish to npm.
+
+The crates.io release workflow similarly uploads the exact `.crate` produced
+and tested by its verify job. It prepares Cargo registry metadata from that
+archive, carries the archive plus SHA-256 checksums across the approval gate,
+then uses Cargo's documented
+[registry Web API](https://doc.rust-lang.org/cargo/reference/registry-web-api.html#publish)
+without repackaging source.
+
 **Agent behavior** — if you change a subagent/skill prompt, run the relevant
 suite (`critic`, `auditor`, `intake`, or `workflow`). Before merging a broad
 workflow change, run `bash evals/run-verified.sh`; it executes deterministic

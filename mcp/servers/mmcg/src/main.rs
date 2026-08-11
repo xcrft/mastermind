@@ -81,7 +81,8 @@ Then open the project in Claude Code — the codegraph tools (search, callers, i
 Remove it all with `mastermind uninstall`. (`mmcg` is an alias for `mastermind` — same binary.)"
 )]
 struct Cli {
-    /// Path to the SQLite index file. Defaults to .mastermind/mmcg.db (relative to cwd).
+    /// Path to the SQLite index file. Root-scoped commands default to
+    /// <root>/.mastermind/mmcg.db; commands without a root default relative to cwd.
     #[arg(long, env = "MMCG_INDEX_PATH", global = true)]
     index: Option<PathBuf>,
 
@@ -753,6 +754,12 @@ fn default_index_path() -> PathBuf {
     PathBuf::from(".mastermind/mmcg.db")
 }
 
+fn index_path_for_root(explicit: Option<&std::path::Path>, root: &std::path::Path) -> PathBuf {
+    explicit
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| root.join(".mastermind/mmcg.db"))
+}
+
 /// Parse argv with the program name pinned to `mastermind` so `--help` and
 /// usage strings read consistently — the npm wrapper spawns the native binary
 /// directly, so argv[0] would otherwise surface the internal `mmcg` name.
@@ -766,13 +773,15 @@ fn run_cli_inner(
     cli: Cli,
     impact_engine: &mmcg::queries::ImpactEngine<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let index_path = cli.index.unwrap_or_else(default_index_path);
+    let index_override = cli.index;
+    let index_path = index_override.clone().unwrap_or_else(default_index_path);
 
     match cli.cmd {
         Cmd::Index { root, force } => {
             let root = root
                 .canonicalize()
                 .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
+            let index_path = index_path_for_root(index_override.as_deref(), &root);
             let mut store = Store::open(&index_path)?;
             let indexer = mmcg::indexer::Indexer::new(&root);
             let stats = indexer.index_all(&mut store, force)?;
@@ -819,6 +828,7 @@ fn run_cli_inner(
             let root = root
                 .canonicalize()
                 .map_err(|_| mmcg::queries::ChangeImpactError::RootMismatch)?;
+            let index_path = index_path_for_root(index_override.as_deref(), &root);
             let store = Store::open(&index_path)
                 .map_err(|_| mmcg::queries::ChangeImpactError::IndexStale)?;
             let top =
@@ -837,6 +847,10 @@ fn run_cli_inner(
             mmcg::mcp::serve(store)?;
         }
         Cmd::Watch { root } => {
+            let root = root
+                .canonicalize()
+                .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
+            let index_path = index_path_for_root(index_override.as_deref(), &root);
             let store = Store::open(&index_path)?;
             mmcg::watcher::run(root, store)?;
         }
@@ -844,7 +858,8 @@ fn run_cli_inner(
             let root = root
                 .canonicalize()
                 .unwrap_or_else(|_| std::env::current_dir().unwrap_or(root));
-            let ws = mmcg::workflow_status::WorkflowStatus::scan(&root);
+            let index_path = index_path_for_root(index_override.as_deref(), &root);
+            let ws = mmcg::workflow_status::WorkflowStatus::scan_with_index(&root, &index_path);
             print!("{}", ws.render_text());
         }
         Cmd::History { query, kind, top } => {
@@ -857,14 +872,16 @@ fn run_cli_inner(
             let root = root
                 .canonicalize()
                 .unwrap_or_else(|_| std::env::current_dir().unwrap_or(root));
-            let ws = mmcg::workflow_status::WorkflowStatus::scan(&root);
+            let index_path = index_path_for_root(index_override.as_deref(), &root);
+            let ws = mmcg::workflow_status::WorkflowStatus::scan_with_index(&root, &index_path);
             print!("{}", ws.render_next_text());
         }
         Cmd::Resume { root, task } => {
             let root = root
                 .canonicalize()
                 .unwrap_or_else(|_| std::env::current_dir().unwrap_or(root));
-            let ws = mmcg::workflow_status::WorkflowStatus::scan(&root);
+            let index_path = index_path_for_root(index_override.as_deref(), &root);
+            let ws = mmcg::workflow_status::WorkflowStatus::scan_with_index(&root, &index_path);
             print!("{}", ws.render_resume_text(task.as_deref()));
         }
         Cmd::Init {
@@ -878,9 +895,11 @@ fn run_cli_inner(
             let root = root
                 .canonicalize()
                 .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
+            let init_index_path = index_override.as_deref().map(std::path::Path::to_path_buf);
             commands::do_init(
                 &root,
                 commands::init::InitOpts {
+                    index_path: init_index_path,
                     force,
                     index: !no_index,
                     claude: !no_claude,
@@ -941,6 +960,8 @@ fn run_cli_inner(
             require_index,
             strict,
         } => {
+            let index_root = root.canonicalize().unwrap_or_else(|_| root.clone());
+            let index_path = index_path_for_root(index_override.as_deref(), &index_root);
             commands::verify_spec(&spec, root, json, require_index, strict, &index_path)?;
         }
         Cmd::AuditSpec {
@@ -951,6 +972,8 @@ fn run_cli_inner(
             executor_report,
             bundle,
         } => {
+            let index_root = root.canonicalize().unwrap_or_else(|_| root.clone());
+            let index_path = index_path_for_root(index_override.as_deref(), &index_root);
             commands::audit_spec(
                 &spec,
                 &since,
@@ -1008,8 +1031,9 @@ fn run_cli_inner(
             let root = root
                 .canonicalize()
                 .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
+            let index_path = index_path_for_root(index_override.as_deref(), &root);
             let me = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
-            let report = mmcg::doctor::run(&root, &me);
+            let report = mmcg::doctor::run_with_index(&root, &me, &index_path);
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else if explain {
@@ -1052,6 +1076,8 @@ fn run_cli_inner(
             changed_only,
             require_executor_report,
         } => {
+            let index_root = root.canonicalize().unwrap_or_else(|_| root.clone());
+            let index_path = index_path_for_root(index_override.as_deref(), &index_root);
             let ok = commands::ci(
                 commands::ci::CiOpts {
                     since,
@@ -1090,6 +1116,8 @@ fn run_cli_inner(
             max_iterations,
             force_iteration,
         } => {
+            let index_root = root.canonicalize().unwrap_or_else(|_| root.clone());
+            let index_path = index_path_for_root(index_override.as_deref(), &index_root);
             let outcome = commands::run_task(
                 &spec,
                 root,
@@ -1189,6 +1217,19 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_scoped_commands_default_the_index_to_the_selected_repository() {
+        let root = std::path::Path::new("/workspace/repository");
+        assert_eq!(
+            index_path_for_root(None, root),
+            root.join(".mastermind/mmcg.db")
+        );
+        assert_eq!(
+            index_path_for_root(Some(std::path::Path::new("custom/index.db")), root),
+            PathBuf::from("custom/index.db")
+        );
+    }
 
     fn claude_setup_args(argv: &[&str]) -> SetupArgs {
         let cli = Cli::try_parse_from(argv).unwrap();

@@ -374,6 +374,44 @@ def validate_release_badges() -> list[Issue]:
     return issues
 
 
+# These are the metadata and README surfaces that actually ship in the npm
+# tarball or crates.io archive. Keep new language support visible in every
+# distributed landing surface instead of only the repository README.
+DISTRIBUTED_VUE_MARKERS: dict[str, str] = {
+    "npm/mastermind/package.json": '"vue"',
+    "npm/mastermind/README.md": "Vue SFC",
+    "mcp/servers/mmcg/Cargo.toml": "Vue SFC",
+    "mcp/servers/mmcg/README.md": "Vue SFC",
+}
+
+
+def distributed_vue_metadata_contents() -> dict[str, str]:
+    contents: dict[str, str] = {}
+    for relative in DISTRIBUTED_VUE_MARKERS:
+        path = REPO_ROOT / relative
+        try:
+            contents[relative] = path.read_text(encoding="utf-8")
+        except OSError:
+            contents[relative] = ""
+    return contents
+
+
+def distributed_vue_metadata_errors(contents: dict[str, str] | None = None) -> list[str]:
+    values = distributed_vue_metadata_contents() if contents is None else contents
+    return [
+        relative
+        for relative, marker in DISTRIBUTED_VUE_MARKERS.items()
+        if marker not in values.get(relative, "")
+    ]
+
+
+def validate_distributed_language_metadata() -> list[Issue]:
+    return [
+        Issue(REPO_ROOT / relative, "error", "distributed package metadata must advertise Vue SFC support")
+        for relative in distributed_vue_metadata_errors()
+    ]
+
+
 # ----- mmcg template-mirror sync ---------------------------------------
 
 # The mmcg crate embeds two templates at build time via `include_str!` (CONTEXT.md
@@ -1280,9 +1318,11 @@ def validate_audit_action_security() -> list[Issue]:
     except (OSError, yaml.YAMLError) as error:
         issues.append(Issue(action_path, "error", f"invalid Action metadata: {error}"))
     else:
-        required_inputs = {"root", "since", "bundle-dir", "expected-repository", "expected-baseline", "expected-head", "require-clean-worktree"}
-        if not isinstance(action, dict) or not required_inputs.issubset(set(action.get("inputs", {}))):
+        required_inputs = ["root", "since", "bundle-dir", "expected-repository", "expected-baseline", "expected-head", "require-clean-worktree"]
+        if not isinstance(action, dict) or not set(required_inputs).issubset(set(action.get("inputs", {}))):
             issues.append(Issue(action_path, "error", "Action metadata lacks mandatory immutable-snapshot inputs"))
+        elif action.get("runs", {}).get("args") != [f"${{{{ inputs.{name} }}}}" for name in required_inputs]:
+            issues.append(Issue(action_path, "error", "Docker Action inputs must cross the container boundary through ordered runs.args"))
 
     docker_path = REPO_ROOT / "Dockerfile.audit-action"
     try:
@@ -1328,6 +1368,8 @@ def validate_audit_action_security() -> list[Issue]:
             issues.append(Issue(entrypoint_path, "error", "Action entrypoint must accept root dot and delegate output creation to the Rust no-follow helper"))
         if "--changed-only" not in entrypoint or "--require-executor-report" not in entrypoint:
             issues.append(Issue(entrypoint_path, "error", "Action entrypoint must audit only changed tasks and require executor evidence"))
+        if "handoff_output_to_workspace_owner" not in entrypoint or "chown -R -P --no-dereference --preserve-root" not in entrypoint:
+            issues.append(Issue(entrypoint_path, "error", "root-owned Docker Action outputs must be handed back to the GITHUB_WORKSPACE owner"))
 
     return issues
 
@@ -1351,6 +1393,7 @@ def main(argv: list[str]) -> int:
     issues.extend(validate_relative_links(rel_links))
     issues.extend(validate_installable_link_escape(rel_links))
     issues.extend(validate_release_badges())
+    issues.extend(validate_distributed_language_metadata())
 
     issues.extend(validate_mmcg_template_mirrors())
     issues.extend(validate_mmcg_tool_drift())

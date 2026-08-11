@@ -47,6 +47,7 @@ impl Default for SessionStore {
     }
 }
 
+// Three call sites for refresh() — used by snapshot-drift fixture.
 pub fn auth_refresh(store: &SessionStore) -> Result<Session, String> {
     store.refresh()
 }

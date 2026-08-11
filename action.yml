@@ -24,9 +24,17 @@ inputs:
     default: "true"
 outputs:
   bundle-dir:
-    description: Verified envelope directory
+    description: Verified envelope directory, repository-relative to GITHUB_WORKSPACE
   result-json:
-    description: Aggregate verification result path
+    description: Aggregate verification result path, repository-relative to GITHUB_WORKSPACE
 runs:
   using: docker
   image: Dockerfile.audit-action
+  args:
+    - ${{ inputs.root }}
+    - ${{ inputs.since }}
+    - ${{ inputs.bundle-dir }}
+    - ${{ inputs.expected-repository }}
+    - ${{ inputs.expected-baseline }}
+    - ${{ inputs.expected-head }}
+    - ${{ inputs.require-clean-worktree }}

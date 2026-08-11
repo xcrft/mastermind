@@ -1,3 +1,8 @@
+import json
+import os
+import shlex
+import subprocess
+import tempfile
 import unittest
 
 from evals import runner
@@ -18,6 +23,26 @@ verdict: drift
             runner.extract_audit_verdict(
                 "<!-- mastermind:audit-begin -->\n```yaml\nverdict: [\n```\n<!-- mastermind:audit-end -->"
             )
+        )
+
+    def test_audit_verification_requires_exact_passing_structured_rerun(self):
+        output = """\
+<!-- mastermind:audit-begin -->
+```yaml
+verdict: held
+verifications_rerun:
+  - cmd: "cargo test --locked exact_test"
+    result: pass
+```
+<!-- mastermind:audit-end -->
+"""
+        self.assertTrue(
+            runner.audit_verification_passed(
+                output, "cargo test --locked exact_test"
+            )
+        )
+        self.assertFalse(
+            runner.audit_verification_passed(output, "cargo test --locked other_test")
         )
 
     def test_intake_action_requires_valid_sentinel_yaml(self):
@@ -67,12 +92,88 @@ for (let index = 0; index < left.length; index += 1) mismatch |= left[index] ^ r
 
 
 class PromptIsolationTests(unittest.TestCase):
+    def test_auditor_runs_verify_as_an_exact_standalone_command(self):
+        auditor = runner.SUITES["auditor"]["subagent"].read_text(encoding="utf-8")
+        self.assertIn("Run each reported\n   `VERIFY` command exactly as written", auditor)
+        self.assertIn("do not prepend `cd`", auditor)
+        self.assertIn("do not append pipes", auditor)
+
     def test_synthetic_prompt_suites_cannot_inspect_the_maintainer_checkout(self):
         for suite in ("critic", "intake", "workflow"):
             self.assertEqual(runner.isolated_cli_args(suite), ["--safe-mode", "--tools", ""])
             self.assertTrue(runner.requires_prompt_sandbox(suite))
-        self.assertEqual(runner.isolated_cli_args("auditor"), [])
+        auditor_args = runner.isolated_cli_args("auditor")
+        self.assertIn("--strict-mcp-config", auditor_args)
+        self.assertIn("--setting-sources", auditor_args)
+        self.assertIn("--allowedTools", auditor_args)
+        allowed = auditor_args[auditor_args.index("--allowedTools") + 1]
+        for tool in (
+            "Read",
+            "Glob",
+            "Grep",
+            "Bash(git diff *)",
+            "Bash(git status *)",
+            "Bash(cargo test --locked *)",
+            "mcp__mmcg__mmcg_search",
+            "mcp__mmcg__mmcg_callers",
+            "mcp__mmcg__mmcg_impact",
+        ):
+            self.assertIn(tool, allowed)
+        self.assertNotIn("scratchpad_append", allowed)
+        self.assertNotIn("Bash(cargo *)", allowed)
+        self.assertNotIn("Bash(cargo test *)", allowed)
         self.assertFalse(runner.requires_prompt_sandbox("auditor"))
+
+    def test_auditor_runs_inside_its_disposable_fixture(self):
+        fixture = runner.REPO_ROOT / "evals/fixtures/fake-session"
+        self.assertEqual(
+            runner.evaluation_cwd("auditor", fixture_path=fixture, prompt_sandbox=None),
+            fixture,
+        )
+
+    def test_critic_prompt_states_the_no_tools_evaluation_boundary(self):
+        rendered = runner.render_critic_input(
+            {"problem": "p", "design": "d", "alternatives": [], "constraints": "c"}
+        )
+        self.assertIn("no repository checkout or tools are available", rendered)
+        self.assertIn("do not invoke tools", rendered)
+
+    def test_clean_auditor_fixture_has_an_executable_cargo_test_contract(self):
+        fixture = runner.FIXTURES_DIR / "fake-session"
+        baseline = fixture / "baseline"
+        clean = fixture / "changes/clean-add"
+        for relative in ("Cargo.toml", "Cargo.lock", "src/lib.rs"):
+            self.assertEqual(
+                (baseline / relative).read_text(),
+                (clean / relative).read_text(),
+                f"{relative} must stay unchanged so the eval remains a one-file diff",
+            )
+        cases = [
+            json.loads(line)
+            for line in (runner.EVALS_DIR / "auditor.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        case = next(case for case in cases if case["id"] == "a-003-clean-execution-held")
+        verify = next(
+            line for line in case["input"]["executor_report"].splitlines()
+            if line.startswith("VERIFY: ")
+        )
+        command = verify.removeprefix("VERIFY: ").removesuffix(" — PASSED")
+        self.assertTrue(command.startswith("cargo test --locked "))
+        allowed = runner.isolated_cli_args("auditor")
+        allowed = allowed[allowed.index("--allowedTools") + 1]
+        self.assertIn("Bash(cargo test --locked *)", allowed)
+
+        with tempfile.TemporaryDirectory() as target:
+            result = subprocess.run(
+                shlex.split(command),
+                cwd=clean,
+                env={**os.environ, "CARGO_TARGET_DIR": target},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_workflow_allowlist_matches_shipped_skills(self):
         shipped = {

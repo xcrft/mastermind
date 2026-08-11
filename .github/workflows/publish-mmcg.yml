@@ -8,13 +8,15 @@
 #   Settings → Environments → `prod` → Secrets → CARGO_REGISTRY_TOKEN
 #     Get the token from https://crates.io/me (API tokens).
 #   Optional but recommended: add a "Required reviewers" rule on the `prod`
-#   environment so a human approves before `cargo publish` runs.
+#   environment so a human approves before the exact artifact upload runs.
 #
 # Layout: two jobs.
-#   `verify` runs always (tag check, validator, tests, package). No secrets,
-#     no environment — so tests don't wait on approval gates.
-#   `publish` only runs if verify passes, uses environment `prod` so the
-#     CARGO_REGISTRY_TOKEN is in scope and any env protection rules kick in.
+#   `verify` runs always (tag check, validator, tests, package). It prepares
+#     Cargo registry metadata beside the verified `.crate` and seals both with
+#     SHA-256. No secrets, no environment — tests don't wait on approval gates.
+#   `publish` only runs if verify passes, downloads those exact bytes, checks
+#     their hashes, and uploads the verified `.crate` through Cargo's documented
+#     registry Web API. It never asks `cargo publish` to package the source again.
 #
 # Release procedure:
 #   1. Bump version in mcp/servers/mmcg/Cargo.toml (+ README frontmatter)
@@ -55,6 +57,11 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - name: Install Python for validator and artifact publisher
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
 
       - name: Cache cargo registry + target
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -99,11 +106,34 @@ jobs:
       - name: cargo package (builds the tarball that would ship to crates.io)
         run: cargo package --locked
 
+      - name: Bind registry metadata and checksums to the verified crate
+        working-directory: .
+        run: |
+          set -euo pipefail
+          version=$(awk -F'"' '/^version *=/ {print $2; exit}' mcp/servers/mmcg/Cargo.toml)
+          source_crate="mcp/servers/mmcg/target/package/mmcg-${version}.crate"
+          test -f "$source_crate" && test ! -L "$source_crate" || {
+            echo "::error::expected packaged artifact $source_crate" >&2
+            exit 1
+          }
+          mkdir release-crate
+          crate="release-crate/mmcg-${version}.crate"
+          cp "$source_crate" "$crate"
+          python3 scripts/publish-crate-artifact.py prepare \
+            --crate "$crate" \
+            --output "$crate.publish.json"
+          crate_dir=$(dirname "$crate")
+          crate_name=$(basename "$crate")
+          (
+            cd "$crate_dir"
+            sha256sum "$crate_name" "$crate_name.publish.json" >SHA256SUMS
+          )
+
       - name: Stash packaged crate for the publish job
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mmcg-crate
-          path: mcp/servers/mmcg/target/package/*.crate
+          path: release-crate/
           retention-days: 7
           if-no-files-found: error
 
@@ -128,13 +158,37 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - name: Download verified crate artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: mmcg-crate
+          path: verified-crate
 
-      - name: cargo publish
+      - name: Install Python for exact artifact publisher
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Publish exact verified crate bytes
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --locked
+        working-directory: .
+        run: |
+          set -euo pipefail
+          cd verified-crate
+          sha256sum --check SHA256SUMS
+          set -- *.crate
+          test "$#" = 1 && test -f "$1" || {
+            echo "::error::expected exactly one verified .crate artifact" >&2
+            exit 1
+          }
+          crate=$1
+          expected_sha256=$(awk -v file="$crate" '$2 == file {print $1}' SHA256SUMS)
+          test -n "$expected_sha256"
+          python3 "$GITHUB_WORKSPACE/scripts/publish-crate-artifact.py" publish \
+            --crate "$crate" \
+            --metadata "$crate.publish.json" \
+            --expected-sha256 "$expected_sha256"
 
   dry-run-notice:
     name: Dry-run notice

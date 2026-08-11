@@ -9,9 +9,10 @@
 //! | # | Name                  | Catches                                                |
 //! |---|-----------------------|--------------------------------------------------------|
 //! | 1 | `mmcg binary`          | sanity — we're running, report our version             |
-//! | 2 | `index database`       | `.mastermind/mmcg.db` exists                           |
-//! | 3 | `symbols indexed`      | non-empty index (catches "I ran init but not index")   |
-//! | 4 | `index freshness`      | no source file newer than the index                    |
+//! | 2 | `index database`       | selected index exists                                  |
+//! | 3 | `index repository`     | selected index belongs to the requested repository     |
+//! | 4 | `symbols indexed`      | non-empty index (catches "I ran init but not index")   |
+//! | 5 | `index freshness`      | no source file newer than the index                    |
 //! | 5 | `gitignore`            | `.mastermind/` is excluded from VCS                    |
 //! | 6 | `CLAUDE.md`            | exists and references the workflow                     |
 //! | 7 | `MCP config`           | mmcg registered in `~/.claude.json` (user) or `./.mcp.json` (project) |
@@ -178,16 +179,22 @@ impl Report {
 /// `mmcg_binary` is the binary used for the MCP-serve handshake check (usually
 /// `std::env::current_exe()`). Passed in so tests can override.
 pub fn run(root: &Path, mmcg_binary: &Path) -> Report {
+    run_with_index(root, mmcg_binary, &root.join(".mastermind/mmcg.db"))
+}
+
+/// Run every check against `root` using the selected index database.
+pub fn run_with_index(root: &Path, mmcg_binary: &Path, index_path: &Path) -> Report {
     let checks = vec![
         check_binary(),
         check_path_entries(),
-        check_index_db(root),
-        check_symbols_indexed(root),
-        check_index_freshness(root),
+        check_index_db(index_path),
+        check_index_root(root, index_path),
+        check_symbols_indexed(index_path),
+        check_index_freshness(root, index_path),
         check_gitignore(root),
         check_claude_md(root),
         check_mcp_config(root),
-        check_mcp_handshake(root, mmcg_binary),
+        check_mcp_handshake(index_path, mmcg_binary),
         check_subagent_mcp_servers(root),
         check_style_profile(root),
     ];
@@ -271,33 +278,57 @@ fn check_path_entries() -> Check {
     }
 }
 
-fn db_path(root: &Path) -> PathBuf {
-    root.join(".mastermind").join("mmcg.db")
-}
-
-fn check_index_db(root: &Path) -> Check {
-    let p = db_path(root);
-    if p.is_file() {
-        let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+fn check_index_db(index_path: &Path) -> Check {
+    if index_path.is_file() {
+        let size = std::fs::metadata(index_path).map(|m| m.len()).unwrap_or(0);
         Check {
             name: "index database",
             status: Status::Ok,
-            message: format!(".mastermind/mmcg.db ({})", format_bytes(size)),
+            message: format!("{} ({})", index_path.display(), format_bytes(size)),
             hint: None,
         }
     } else {
         Check {
             name: "index database",
             status: Status::Fail,
-            message: ".mastermind/mmcg.db not found".into(),
+            message: format!("{} not found", index_path.display()),
             hint: Some("run `mastermind init` then `mastermind index .`".into()),
         }
     }
 }
 
-fn check_symbols_indexed(root: &Path) -> Check {
-    let p = db_path(root);
-    if !p.is_file() {
+fn check_index_root(root: &Path, index_path: &Path) -> Check {
+    if !index_path.is_file() {
+        return Check {
+            name: "index repository",
+            status: Status::Warn,
+            message: "skipped — no index database".into(),
+            hint: None,
+        };
+    }
+    match crate::store::Store::open(index_path)
+        .map_err(|error| format!("can't open db: {error}"))
+        .and_then(|store| crate::indexer::validate_index_root(&store, root))
+    {
+        Ok(()) => Check {
+            name: "index repository",
+            status: Status::Ok,
+            message: format!("{} belongs to {}", index_path.display(), root.display()),
+            hint: None,
+        },
+        Err(error) => Check {
+            name: "index repository",
+            status: Status::Fail,
+            message: error,
+            hint: Some(
+                "pass the correct `--index` or rebuild the index for this repository".into(),
+            ),
+        },
+    }
+}
+
+fn check_symbols_indexed(index_path: &Path) -> Check {
+    if !index_path.is_file() {
         return Check {
             name: "symbols indexed",
             status: Status::Warn,
@@ -305,7 +336,7 @@ fn check_symbols_indexed(root: &Path) -> Check {
             hint: None,
         };
     }
-    let store = match crate::store::Store::open(&p) {
+    let store = match crate::store::Store::open(index_path) {
         Ok(s) => s,
         Err(e) => {
             return Check {
@@ -337,9 +368,8 @@ fn check_symbols_indexed(root: &Path) -> Check {
 
 /// Compare each indexable path with its stored source mtime.
 /// Stops at 10 hits to keep the doctor fast on large repos.
-fn check_index_freshness(root: &Path) -> Check {
-    let p = db_path(root);
-    if !p.is_file() {
+fn check_index_freshness(root: &Path, index_path: &Path) -> Check {
+    if !index_path.is_file() {
         return Check {
             name: "index freshness",
             status: Status::Warn,
@@ -347,7 +377,7 @@ fn check_index_freshness(root: &Path) -> Check {
             hint: None,
         };
     }
-    if crate::workflow_status::db_extractor_contract_current(&p) != Some(true) {
+    if crate::workflow_status::db_extractor_contract_current(index_path) != Some(true) {
         return Check {
             name: "index freshness",
             status: Status::Warn,
@@ -356,7 +386,7 @@ fn check_index_freshness(root: &Path) -> Check {
         };
     }
     let limit = 10usize;
-    let Some(stale) = crate::workflow_status::stale_paths(root, &p, limit) else {
+    let Some(stale) = crate::workflow_status::stale_paths(root, index_path, limit) else {
         return Check {
             name: "index freshness",
             status: Status::Warn,
@@ -526,13 +556,7 @@ fn check_mcp_config_at(root: &Path, home: Option<&Path>, canonical: &serde_json:
         statuses.push(format!("{label}={status}"));
     }
 
-    let continue_shape = serde_json::json!({
-        "schema": 1,
-        "owner": "mastermind",
-        "name": "mmcg",
-        "command": canonical.get("command").cloned().unwrap_or(serde_json::Value::Null),
-        "args": canonical.get("args").cloned().unwrap_or_else(|| serde_json::json!([])),
-    });
+    let continue_shape = crate::setup::continue_entry(canonical);
     let mut continue_candidates = vec![(
         "continue-project",
         root.join(".continue/mcpServers/mastermind.yaml"),
@@ -671,9 +695,8 @@ fn parse_codex_mmcg(bytes: &[u8]) -> Result<Option<serde_json::Value>, String> {
 /// Spawn `mmcg --index <db> serve`, write `initialize` + `tools/list`, read
 /// the responses, count tools. 3-second budget. Fails if the binary is missing
 /// OR the handshake fails.
-fn check_mcp_handshake(root: &Path, binary: &Path) -> Check {
-    let db = db_path(root);
-    if !db.is_file() {
+fn check_mcp_handshake(index_path: &Path, binary: &Path) -> Check {
+    if !index_path.is_file() {
         return Check {
             name: "MCP handshake",
             status: Status::Warn,
@@ -684,7 +707,7 @@ fn check_mcp_handshake(root: &Path, binary: &Path) -> Check {
 
     let mut child = match std::process::Command::new(binary)
         .arg("--index")
-        .arg(&db)
+        .arg(index_path)
         .arg("serve")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -1048,7 +1071,7 @@ mod tests {
     #[test]
     fn check_index_db_fails_when_missing() {
         let root = tmp();
-        let c = check_index_db(&root);
+        let c = check_index_db(&root.join("custom.db"));
         assert_eq!(c.status, Status::Fail);
         assert!(c.hint.as_deref().unwrap().contains("mastermind init"));
         fs::remove_dir_all(&root).ok();
@@ -1059,9 +1082,28 @@ mod tests {
         let root = tmp();
         fs::create_dir_all(root.join(".mastermind")).unwrap();
         fs::write(root.join(".mastermind/mmcg.db"), b"junk").unwrap();
-        let c = check_index_db(&root);
+        let c = check_index_db(&root.join(".mastermind/mmcg.db"));
         assert_eq!(c.status, Status::Ok);
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn check_index_root_rejects_a_database_from_another_repository() {
+        let requested = tmp().canonicalize().unwrap();
+        let indexed = tmp().canonicalize().unwrap();
+        let db = indexed.join("custom.db");
+        let store = crate::store::Store::open(&db).unwrap();
+        store
+            .set_meta("index_root", &indexed.to_string_lossy())
+            .unwrap();
+        drop(store);
+
+        let check = check_index_root(&requested, &db);
+        assert_eq!(check.status, Status::Fail);
+        assert!(check.message.contains("index belongs to"));
+        assert!(check.message.contains(&requested.display().to_string()));
+        fs::remove_dir_all(requested).ok();
+        fs::remove_dir_all(indexed).ok();
     }
 
     #[test]
@@ -1160,13 +1202,7 @@ mod tests {
             };
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             if label.starts_with("continue") {
-                let shape = serde_json::json!({
-                    "schema": 1,
-                    "owner": "mastermind",
-                    "name": "mmcg",
-                    "command": "/trusted/mmcg",
-                    "args": ["serve"],
-                });
+                let shape = crate::setup::continue_entry(&canonical);
                 fs::write(&path, serde_norway::to_string(&shape).unwrap()).unwrap();
             } else if label == "codex-user" {
                 fs::write(
@@ -1226,13 +1262,7 @@ mod tests {
                 )
                 .unwrap();
             }
-            let continue_shape = serde_json::json!({
-                "schema": 1,
-                "owner": "mastermind",
-                "name": "mmcg",
-                "command": command,
-                "args": [marker_arg],
-            });
+            let continue_shape = crate::setup::continue_entry(&configured);
             for path in [
                 root.join(".continue/mcpServers/mastermind.yaml"),
                 home.join(".continue/mcpServers/mastermind.yaml"),
@@ -1281,7 +1311,10 @@ mod tests {
             fs::create_dir_all(&codex_real).unwrap();
             fs::write(
                 continue_real.join("mastermind.yaml"),
-                "schema: 1\nowner: mastermind\nname: mmcg\ncommand: /trusted/mmcg\nargs: [serve]\n",
+                serde_norway::to_string(&crate::setup::continue_entry(
+                    &serde_json::json!({"command": "/trusted/mmcg", "args": ["serve"]}),
+                ))
+                .unwrap(),
             )
             .unwrap();
             fs::write(

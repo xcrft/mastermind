@@ -1,5 +1,21 @@
 use std::path::{Path, PathBuf};
 
+fn open_validated_index(
+    index_path: &Path,
+    root: &Path,
+) -> Result<Option<mmcg::store::Store>, Box<dyn std::error::Error>> {
+    if !index_path.is_file() {
+        return Ok(None);
+    }
+    let store = mmcg::store::Store::open(index_path)?;
+    if store.symbol_count()? == 0 {
+        return Ok(None);
+    }
+    mmcg::indexer::validate_index_root(&store, root)
+        .map_err(|error| format!("index/root mismatch: {error}"))?;
+    Ok(Some(store))
+}
+
 pub fn verify(
     spec: &Path,
     root: PathBuf,
@@ -13,7 +29,7 @@ pub fn verify(
         .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
     let parsed =
         mmcg::spec::parse_file(spec).map_err(|e| format!("parse {}: {e}", spec.display()))?;
-    let store = mmcg::store::Store::open(index_path).ok();
+    let store = open_validated_index(index_path, &root)?;
     let mut report = mmcg::verify_spec::run(&parsed, store.as_ref(), &root);
     if (strict || require_index) && store.is_none() {
         report.push_error(mmcg::verify_spec::Finding::StrictViolation {
@@ -51,7 +67,12 @@ pub fn audit(
         .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
     let parsed =
         mmcg::spec::parse_file(spec).map_err(|e| format!("parse {}: {e}", spec.display()))?;
-    let store = mmcg::store::Store::open(index_path)?;
+    let store = open_validated_index(index_path, &root)?.ok_or_else(|| {
+        format!(
+            "no populated index at `{}`; run `mastermind index .`",
+            index_path.display()
+        )
+    })?;
 
     let executor_report = executor_report_path
         .map(mmcg::executor_report::parse_file)

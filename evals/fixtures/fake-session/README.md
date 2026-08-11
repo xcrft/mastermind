@@ -8,10 +8,14 @@ real source trees instead of paraphrased synthetic diffs.
 
 ```
 baseline/                            # what the codebase looked like before the executor ran
+  Cargo.toml
+  Cargo.lock
+  src/lib.rs
   src/session.rs
 
 changes/
   clean-add/                          # executor added session_count() + its unit test, exactly per spec
+    Cargo.toml + Cargo.lock + src/lib.rs  # unchanged crate wiring copied into every variant
     src/session.rs
   false-test-claim/                   # executor added accessor but NO test (report lies)
     src/session.rs

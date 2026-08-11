@@ -65,9 +65,11 @@ mmcg impact --since main
 ```
 
 `index` is incremental by default and writes `.mastermind/mmcg.db`. Discovery
-honors Git and `.ignore` rules, skips binary-looking and oversized sources, and
-automatically rebuilds when stored extractor semantics are incompatible. Use
-`mmcg watch` to keep it refreshed while editing.
+honors Git and `.ignore` rules while retaining tracked sources, matches
+extensions case-insensitively, parses `.pyi` and BOM-marked UTF-16 sources, and
+reports bounded path samples for skipped inputs. It automatically rebuilds when
+stored extractor semantics are incompatible. Use `mmcg watch` to keep it
+refreshed while editing.
 
 Run the stdio MCP server directly:
 
@@ -101,7 +103,7 @@ engine cannot prove completeness.
 
 ## Supported languages
 
-- Python
+- Python and Python type stubs
 - TypeScript and TSX
 - JavaScript and JSX
 - Vue SFC
@@ -119,6 +121,8 @@ mmcg is a syntactic graph, not a compiler or language server:
 - Call resolution is primarily name-based rather than type-based.
 - Dynamic dispatch, reflection, generated code, and cross-language calls may be invisible.
 - Import paths reflect source spelling and do not resolve every re-export.
+- C/C++ include paths resolve to indexed files for architecture maps and cycle
+  detection, but included contents and compiler semantics are not expanded.
 - Dead-code and test-impact results are candidates to review, not deletion or test-skipping authorization.
 
 These trade-offs keep the index local, fast, portable, and easy for agents to query. The engine fails closed on stale index, root, Git snapshot, or work-limit conditions in change-impact workflows.

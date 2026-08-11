@@ -21,7 +21,10 @@ const CLIENT_INFO_META_KEY: &str = "io.modelcontextprotocol/clientInfo";
 const CLIENT_CAPABILITIES_META_KEY: &str = "io.modelcontextprotocol/clientCapabilities";
 const SERVER_INFO_META_KEY: &str = "io.modelcontextprotocol/serverInfo";
 const MCP_FRAME_MAX: usize = 1024 * 1024;
+/// Maximum complete JSON-RPC response size. Reserve one inbound-frame worth of
+/// space for the echoed request id and envelope when bounding the result value.
 const MCP_RESULT_MAX: usize = 8 * 1024 * 1024;
+const MCP_RESULT_VALUE_MAX: usize = MCP_RESULT_MAX - MCP_FRAME_MAX;
 const SERVER_NOT_INITIALIZED: i32 = -32002;
 const UNSUPPORTED_PROTOCOL_VERSION: i32 = -32022;
 const SCRATCHPAD_BODY_MAX: usize = 8 * 1024;
@@ -1043,7 +1046,7 @@ fn tool_result(
     let text = serde_json::to_string(&payload).map_err(|_| ToolCallError::Internal {
         class: "serialize_tool_payload",
     })?;
-    if text.len() > MCP_RESULT_MAX {
+    if text.len() > MCP_RESULT_VALUE_MAX {
         return small_tool_error(version, "Tool result exceeds 8 MiB; narrow the query");
     }
     let structured = if version.is_current() {
@@ -1067,6 +1070,14 @@ fn tool_result(
     }
     if version.is_stateless() {
         finish_stateless_result(&mut result, false);
+    }
+    let serialized_len = serde_json::to_vec(&result)
+        .map_err(|_| ToolCallError::Internal {
+            class: "serialize_tool_result",
+        })?
+        .len();
+    if serialized_len > MCP_RESULT_VALUE_MAX {
+        return small_tool_error(version, "Tool result exceeds 8 MiB; narrow the query");
     }
     Ok(result)
 }
@@ -1110,7 +1121,7 @@ fn opt_bool_arg(args: &Value, name: &str) -> Option<bool> {
 fn schema_search() -> Value {
     json!({
         "name": "mmcg_search",
-        "description": "Find symbols (functions, classes, methods, structs, traits, etc.) by exact name. Returns location, kind, signature, and any decorators/attributes. Pass `language` to filter by `python`/`typescript`/`tsx`/`javascript`/`rust`/`csharp` — defends against name collisions in monorepos. C# `partial class` declarations across files are collapsed into a single hit with a `locations` array by default; pass `collapse_partials: false` to see every declaration.",
+        "description": "Find symbols (functions, classes, methods, structs, traits, etc.) by exact name. Returns location, kind, signature, and any decorators/attributes. Pass `language` to filter by `python`/`typescript`/`tsx`/`javascript`/`rust`/`csharp` — defends against name collisions in monorepos. C# `partial class` declarations with the same namespace identity are collapsed into one hit with a `locations` array by default; pass `collapse_partials: false` to see every declaration.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1359,7 +1370,7 @@ fn schema_map() -> Value {
                 "path": { "type": "string", "default": ".", "description": "Repository-relative file or directory scope" },
                 "depth": { "type": "integer", "minimum": 1, "maximum": 6, "default": 2 },
                 "top": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
-                "production_only": { "type": "boolean", "default": false, "description": "Exclude tests, fixtures, examples, generated code, and vendored dependencies" }
+                "production_only": { "type": "boolean", "default": false, "description": "Exclude test/fixture/example/generated/vendor path segments and conventional test filenames" }
             }
         }
     })
@@ -1670,7 +1681,12 @@ fn handle_map(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     };
     let result =
         queries::project_map_with_options(store, path, depth as u8, top as u32, production_only)
-            .map_err(|error| HandlerError::internal("project_map_query", error))?;
+            .map_err(|error| match error.as_str() {
+                "map scope has no indexed files" | "map production scope has no indexed files" => {
+                    HandlerError::InvalidArguments(error)
+                }
+                _ => HandlerError::internal("project_map_query", error),
+            })?;
     serde_json::to_value(result)
         .map_err(|error| HandlerError::internal("serialize_response", error))
 }
@@ -2363,6 +2379,22 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("narrow the query"));
+
+        // Current MCP duplicates the logical payload into text and
+        // structuredContent. The cap applies to the serialized result, not
+        // just either individual copy.
+        let duplicated = tool_result(
+            ProtocolVersion::Current,
+            json!({ "blob": "x".repeat(MCP_RESULT_MAX / 2 + 4096) }),
+            false,
+        )
+        .unwrap();
+        assert_eq!(duplicated["isError"], true);
+        assert!(duplicated["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("narrow the query"));
+        assert!(serde_json::to_vec(&duplicated).unwrap().len() <= MCP_RESULT_MAX);
     }
 
     #[test]
@@ -2529,6 +2561,11 @@ mod tests {
             handle_map(&mut store, &json!({ "production_only": "yes" })),
             Err(HandlerError::InvalidArguments(message))
                 if message == "Invalid argument: production_only"
+        ));
+        assert!(matches!(
+            handle_map(&mut store, &json!({ "path": "missing" })),
+            Err(HandlerError::InvalidArguments(message))
+                if message == "map scope has no indexed files"
         ));
         let listed = tools_list(ProtocolVersion::Current);
         let map = listed["tools"]

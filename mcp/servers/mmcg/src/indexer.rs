@@ -8,6 +8,8 @@ use crate::store::{PendingFile, PendingSymbol, Store};
 use ignore::{IncrementalIgnore, WalkBuilder};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -38,7 +40,7 @@ pub use vue::VueExtractor;
 /// Semantic contract for the extractor output stored in SQLite. Bump this when
 /// an extractor or grammar change can alter symbols, edges, ownership, or paths
 /// without requiring a database schema migration.
-pub const EXTRACTOR_CONTRACT_VERSION: &str = "mmcg-extractors-v2";
+pub const EXTRACTOR_CONTRACT_VERSION: &str = "mmcg-extractors-v3";
 pub const EXTRACTOR_CONTRACT_META_KEY: &str = "extractor_contract_version";
 
 /// Bind a persisted codegraph to the repository it was built from.
@@ -71,7 +73,9 @@ pub fn validate_index_root(store: &Store, requested_root: &Path) -> Result<(), S
 /// Hard bound for source reads. Generated artifacts with a source-looking
 /// extension must not turn indexing into an unbounded allocation.
 pub const MAX_INDEXABLE_FILE_SIZE: u64 = 5 * 1024 * 1024;
+const SKIPPED_PATH_SAMPLE_LIMIT: usize = 20;
 const BINARY_SNIFF_BYTES: u64 = 8 * 1024;
+const GIT_TRACKED_PATH_OUTPUT_LIMIT: usize = 64 * 1024 * 1024;
 const MAX_HISTORY_ARTIFACT_SIZE: u64 = 1024 * 1024;
 const MAX_HISTORY_ENTRIES: usize = 5_000;
 
@@ -93,9 +97,12 @@ pub trait LanguageExtractor: Send + Sync {
 
 /// Map a file extension to a language extractor.
 pub fn extractor_for_path(path: &Path) -> Option<Box<dyn LanguageExtractor>> {
-    let ext = path.extension().and_then(|e| e.to_str())?;
-    match ext {
-        "py" => Some(Box::new(PythonExtractor)),
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())?
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "py" | "pyi" => Some(Box::new(PythonExtractor)),
         "ts" | "tsx" => Some(Box::new(TypescriptExtractor::new(ext == "tsx"))),
         "js" | "jsx" | "mjs" | "cjs" => Some(Box::new(JavascriptExtractor)),
         "rs" => Some(Box::new(RustExtractor)),
@@ -144,10 +151,16 @@ pub struct IndexStats {
     pub files_failed: u32,
     /// Unsupported extensions — skipped before parsing.
     pub files_skipped: u32,
+    /// Bounded deterministic sample of unsupported-extension paths.
+    pub skipped_paths: Vec<String>,
     /// Supported files rejected because their content appears binary.
     pub files_skipped_binary: u32,
+    /// Bounded deterministic sample of binary-classified source paths.
+    pub skipped_binary_paths: Vec<String>,
     /// Supported files rejected because they exceed [`MAX_INDEXABLE_FILE_SIZE`].
     pub files_skipped_too_large: u32,
+    /// Bounded deterministic sample of oversized source paths.
+    pub skipped_too_large_paths: Vec<String>,
     /// Indexable files whose stored mtime is current — skipped without parsing.
     pub files_unchanged: u32,
     /// In the index but gone from disk — purged.
@@ -260,18 +273,26 @@ impl Indexer {
             std::collections::HashSet::with_capacity(candidates.len());
 
         for path in &candidates {
+            let rel = path
+                .strip_prefix(&self.root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
             if extractor_for_path(path).is_none() {
                 stats.files_skipped += 1;
+                push_path_sample(&mut stats.skipped_paths, &rel);
                 continue;
             }
             match source_admission(path) {
                 Ok(()) => {}
                 Err(IndexError::Skipped(IndexSkipReason::Binary)) => {
                     stats.files_skipped_binary += 1;
+                    push_path_sample(&mut stats.skipped_binary_paths, &rel);
                     continue;
                 }
                 Err(IndexError::Skipped(IndexSkipReason::TooLarge { .. })) => {
                     stats.files_skipped_too_large += 1;
+                    push_path_sample(&mut stats.skipped_too_large_paths, &rel);
                     continue;
                 }
                 Err(_) => {
@@ -279,11 +300,6 @@ impl Indexer {
                     continue;
                 }
             }
-            let rel = path
-                .strip_prefix(&self.root)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .replace('\\', "/");
             current_paths.insert(rel.clone());
 
             if !force_full {
@@ -309,15 +325,23 @@ impl Indexer {
         // SQLite's single writer before parsing the next batch. The old all-at-once
         // collection retained every PendingFile until parsing the whole repository.
         for batch in to_parse.chunks(PARSE_BATCH_SIZE) {
-            let parsed: Vec<Result<PendingFile, IndexError>> = batch
+            let parsed: Vec<(PathBuf, Result<PendingFile, IndexError>)> = batch
                 .par_iter()
                 .filter_map(|path| {
                     let extractor = extractor_for_path(path)?;
-                    Some(parse_one(path, &self.root, extractor.as_ref()))
+                    Some((
+                        path.clone(),
+                        parse_one(path, &self.root, extractor.as_ref()),
+                    ))
                 })
                 .collect();
 
-            for outcome in parsed {
+            for (path, outcome) in parsed {
+                let rel = path
+                    .strip_prefix(&self.root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
                 match outcome {
                     Ok(pending) => {
                         stats.symbols_total += pending.symbols.len() as u32;
@@ -332,9 +356,11 @@ impl Indexer {
                     }
                     Err(IndexError::Skipped(IndexSkipReason::Binary)) => {
                         stats.files_skipped_binary += 1;
+                        push_path_sample(&mut stats.skipped_binary_paths, &rel);
                     }
                     Err(IndexError::Skipped(IndexSkipReason::TooLarge { .. })) => {
                         stats.files_skipped_too_large += 1;
+                        push_path_sample(&mut stats.skipped_too_large_paths, &rel);
                     }
                     Err(_) => stats.files_failed += 1,
                 }
@@ -565,8 +591,50 @@ impl Indexer {
     }
 }
 
+fn push_path_sample(samples: &mut Vec<String>, path: &str) {
+    if samples.len() < SKIPPED_PATH_SAMPLE_LIMIT && !samples.iter().any(|item| item == path) {
+        samples.push(path.to_string());
+    }
+}
+
 pub(crate) fn is_skipped_dir(name: &str) -> bool {
     SKIP_DIRS.contains(&name)
+}
+
+fn has_skipped_component(path: &Path) -> bool {
+    path.components()
+        .any(|component| is_skipped_dir(component.as_os_str().to_str().unwrap_or("")))
+}
+
+/// Tracked files remain source-of-truth even when a later or overly broad
+/// ignore rule matches them. Git itself applies ignore rules to untracked
+/// discovery, not to entries already present in the index. Failure to query Git
+/// is non-fatal: the ordinary ignore-aware filesystem walk remains available
+/// outside repositories and when Git is unavailable.
+fn git_tracked_relative_paths(root: &Path) -> Vec<PathBuf> {
+    let Ok(output) = crate::diff::run_bounded_git_with_limit(
+        root,
+        &["ls-files", "--cached", "-z", "--"],
+        None,
+        GIT_TRACKED_PATH_OUTPUT_LIMIT,
+    ) else {
+        return Vec::new();
+    };
+    if !output.success {
+        return Vec::new();
+    }
+    output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .filter_map(|path| std::str::from_utf8(path).ok())
+        .map(PathBuf::from)
+        .filter(|path| !path.is_absolute() && !has_skipped_component(path))
+        .filter(|path| {
+            std::fs::symlink_metadata(root.join(path))
+                .is_ok_and(|metadata| metadata.file_type().is_file())
+        })
+        .collect()
 }
 
 fn source_walk_builder(root: &Path) -> WalkBuilder {
@@ -585,14 +653,26 @@ fn source_walk_builder(root: &Path) -> WalkBuilder {
 /// All non-ignored files below `root`, in deterministic path order. Language
 /// filtering and content admission happen separately so stats stay truthful.
 pub(crate) fn source_candidates(root: &Path) -> Vec<PathBuf> {
-    let mut paths: Vec<PathBuf> = source_walk_builder(root)
+    let tracked = git_tracked_relative_paths(root);
+    let mut tracked_by_identity = HashMap::with_capacity(tracked.len());
+    for relative in &tracked {
+        let absolute = root.join(relative);
+        let identity = absolute.canonicalize().unwrap_or_else(|_| absolute.clone());
+        tracked_by_identity.insert(identity, absolute);
+    }
+
+    let mut paths: BTreeSet<PathBuf> = source_walk_builder(root)
         .build()
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
-        .map(|entry| entry.into_path())
+        .map(|entry| {
+            let path = entry.into_path();
+            let identity = path.canonicalize().unwrap_or_else(|_| path.clone());
+            tracked_by_identity.get(&identity).cloned().unwrap_or(path)
+        })
         .collect();
-    paths.sort();
-    paths
+    paths.extend(tracked.into_iter().map(|relative| root.join(relative)));
+    paths.into_iter().collect()
 }
 
 /// Stateful ignore matcher for watcher events. It applies the same gitignore
@@ -600,6 +680,7 @@ pub(crate) fn source_candidates(root: &Path) -> Vec<PathBuf> {
 pub(crate) struct SourceMatcher {
     root: PathBuf,
     matcher: IncrementalIgnore,
+    tracked: HashSet<PathBuf>,
 }
 
 impl SourceMatcher {
@@ -609,9 +690,16 @@ impl SourceMatcher {
             .into_iter()
             .next()
             .expect("one ignore matcher for one source root");
+        let mut tracked = HashSet::new();
+        for relative in git_tracked_relative_paths(root) {
+            let absolute = root.join(&relative);
+            tracked.insert(relative);
+            tracked.insert(absolute.canonicalize().unwrap_or(absolute));
+        }
         Self {
             root: root.to_path_buf(),
             matcher,
+            tracked,
         }
     }
 
@@ -629,6 +717,10 @@ impl SourceMatcher {
             .any(|component| is_skipped_dir(component.as_os_str().to_str().unwrap_or("")))
         {
             return true;
+        }
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if self.tracked.contains(&relative) || self.tracked.contains(&canonical) {
+            return false;
         }
         self.matcher.matched(relative, is_dir).is_ignore()
     }
@@ -650,45 +742,38 @@ fn extract_spec_title(body: &str, filename: &str) -> String {
 }
 
 fn guess_language_for(rel_path: &str) -> Option<&'static str> {
-    if rel_path.ends_with(".py") {
+    let extension = Path::new(rel_path)
+        .extension()
+        .and_then(|extension| extension.to_str())?
+        .to_ascii_lowercase();
+    if matches!(extension.as_str(), "py" | "pyi") {
         Some("python")
-    } else if rel_path.ends_with(".vue") {
+    } else if extension == "vue" {
         Some("vue")
-    } else if rel_path.ends_with(".tsx") {
+    } else if extension == "tsx" {
         Some("tsx")
-    } else if rel_path.ends_with(".ts") {
+    } else if extension == "ts" {
         Some("typescript")
-    } else if rel_path.ends_with(".jsx")
-        || rel_path.ends_with(".js")
-        || rel_path.ends_with(".mjs")
-        || rel_path.ends_with(".cjs")
-    {
+    } else if matches!(extension.as_str(), "jsx" | "js" | "mjs" | "cjs") {
         // `.jsx` is a JavaScript dialect — store as "javascript", not a distinct
         // "jsx". The MCP `language` enum and `lang_from_ext` already treat it as
         // javascript; "jsx" made `.jsx` symbols invisible to every
         // `language: "javascript"` filter.
         Some("javascript")
-    } else if rel_path.ends_with(".rs") {
+    } else if extension == "rs" {
         Some("rust")
-    } else if rel_path.ends_with(".cs") {
+    } else if extension == "cs" {
         Some("csharp")
-    } else if rel_path.ends_with(".go") {
+    } else if extension == "go" {
         Some("go")
-    } else if rel_path.ends_with(".java") {
+    } else if extension == "java" {
         Some("java")
-    } else if rel_path.ends_with(".php") || rel_path.ends_with(".phtml") {
+    } else if matches!(extension.as_str(), "php" | "phtml") {
         Some("php")
-    } else if rel_path.ends_with(".c")
-        || rel_path.ends_with(".cc")
-        || rel_path.ends_with(".cpp")
-        || rel_path.ends_with(".cxx")
-        || rel_path.ends_with(".h")
-        || rel_path.ends_with(".hpp")
-        || rel_path.ends_with(".hh")
-        || rel_path.ends_with(".hxx")
-        || rel_path.ends_with(".ipp")
-        || rel_path.ends_with(".tpp")
-    {
+    } else if matches!(
+        extension.as_str(),
+        "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh" | "hxx" | "ipp" | "tpp"
+    ) {
         Some("cpp")
     } else {
         None
@@ -768,7 +853,34 @@ fn read_source_bounded(path: &Path) -> Result<Vec<u8>, IndexError> {
 }
 
 pub(crate) fn is_binary_content(content: &[u8]) -> bool {
-    content.contains(&0)
+    !matches!(content, [0xff, 0xfe, ..] | [0xfe, 0xff, ..]) && content.contains(&0)
+}
+
+fn source_for_parser(source: &[u8]) -> Result<Cow<'_, [u8]>, IndexError> {
+    let (little_endian, body) = match source {
+        [0xff, 0xfe, rest @ ..] => (true, rest),
+        [0xfe, 0xff, rest @ ..] => (false, rest),
+        _ if is_binary_content(source) => {
+            return Err(IndexError::Skipped(IndexSkipReason::Binary));
+        }
+        _ => return Ok(Cow::Borrowed(source)),
+    };
+    if body.len() % 2 != 0 {
+        return Err(IndexError::Parse("odd-length UTF-16 source".to_string()));
+    }
+    let units = body
+        .chunks_exact(2)
+        .map(|pair| {
+            if little_endian {
+                u16::from_le_bytes([pair[0], pair[1]])
+            } else {
+                u16::from_be_bytes([pair[0], pair[1]])
+            }
+        })
+        .collect::<Vec<_>>();
+    let decoded = String::from_utf16(&units)
+        .map_err(|_| IndexError::Parse("invalid UTF-16 source".to_string()))?;
+    Ok(Cow::Owned(decoded.into_bytes()))
 }
 
 /// Parse a file's bytes WITHOUT touching the filesystem. Used by
@@ -784,16 +896,17 @@ pub(crate) fn parse_blob(
     mtime: i64,
     extractor: &dyn LanguageExtractor,
 ) -> Result<PendingFile, IndexError> {
+    let parser_source = source_for_parser(source)?;
     let mut parser = Parser::new();
     let language = extractor.language();
     parser
         .set_language(&language)
         .map_err(|e| IndexError::Parse(e.to_string()))?;
     let tree = parser
-        .parse(source, None)
+        .parse(parser_source.as_ref(), None)
         .ok_or_else(|| IndexError::Parse("tree-sitter parse returned None".to_string()))?;
 
-    let line_count = source.iter().filter(|&&b| b == b'\n').count() as u32 + 1;
+    let line_count = parser_source.iter().filter(|&&b| b == b'\n').count() as u32 + 1;
     let language = guess_language_for(rel_path).unwrap_or("").to_string();
     let mut pending = PendingFile {
         path: rel_path.to_string(),
@@ -816,7 +929,7 @@ pub(crate) fn parse_blob(
     });
     let module_index = pending.symbols.len() - 1;
 
-    extractor.extract(&tree, source, &mut pending, module_index);
+    extractor.extract(&tree, parser_source.as_ref(), &mut pending, module_index);
     Ok(pending)
 }
 
@@ -857,6 +970,7 @@ mod incremental_tests {
     use crate::store::Store;
     use std::env;
     use std::fs;
+    use std::process::Command;
     use std::time::{Duration, SystemTime};
 
     fn setup(name: &str) -> (PathBuf, PathBuf) {
@@ -867,6 +981,20 @@ mod incremental_tests {
         fs::create_dir_all(&dir).unwrap();
         let db = dir.join("idx.db");
         (dir, db)
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -1246,6 +1374,35 @@ mod incremental_tests {
     }
 
     #[test]
+    fn schema_rebuild_allows_in_place_reindex_with_retained_scratchpad() {
+        let (dir, db) = setup("schema_rebuild_in_place");
+        fs::write(dir.join("app.py"), "def current(): pass\n").unwrap();
+        {
+            let mut store = Store::open(&db).unwrap();
+            Indexer::new(&dir).index_all(&mut store, false).unwrap();
+            store
+                .scratchpad_append("planner", "handoff", "retain me")
+                .unwrap();
+            store.set_meta("schema_version", "6").unwrap();
+        }
+
+        let mut store = Store::open(&db).unwrap();
+        assert_eq!(store.file_count().unwrap(), 0);
+        let stats = Indexer::new(&dir).index_all(&mut store, false).unwrap();
+        assert_eq!(stats.files_indexed, 1);
+        assert_eq!(store.file_count().unwrap(), 1);
+        assert_eq!(
+            store
+                .scratchpad_read(None, None, None, 10)
+                .unwrap()
+                .first()
+                .map(|entry| entry.body.as_str()),
+            Some("retain me")
+        );
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn binary_and_oversized_sources_are_rejected_without_failing_the_run() {
         let (dir, db) = setup("source_admission");
         fs::write(dir.join("good.rs"), "pub fn good() {}\n").unwrap();
@@ -1259,9 +1416,93 @@ mod incremental_tests {
         assert_eq!(stats.files_indexed, 1);
         assert_eq!(stats.files_skipped_binary, 1);
         assert_eq!(stats.files_skipped_too_large, 1);
+        assert_eq!(stats.skipped_binary_paths, vec!["binary.rs"]);
+        assert_eq!(stats.skipped_too_large_paths, vec!["large.rs"]);
         assert_eq!(stats.files_failed, 0);
         assert_eq!(store.indexed_paths().unwrap(), vec!["good.rs"]);
 
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tracked_ignored_source_is_indexed_but_untracked_ignored_source_is_not() {
+        let (dir, db) = setup("tracked_ignored_source");
+        fs::write(dir.join(".gitignore"), "*.rs\n").unwrap();
+        fs::write(dir.join("tracked.rs"), "pub fn tracked() {}\n").unwrap();
+        fs::write(dir.join("untracked.rs"), "pub fn untracked() {}\n").unwrap();
+        git(&dir, &["init", "-q", "--initial-branch=main"]);
+        git(&dir, &["add", "-f", ".gitignore", "tracked.rs"]);
+
+        let mut store = Store::open(&db).unwrap();
+        let stats = Indexer::new(&dir).index_all(&mut store, false).unwrap();
+
+        assert_eq!(stats.files_indexed, 1);
+        assert_eq!(store.indexed_paths().unwrap(), vec!["tracked.rs"]);
+        let mut matcher = SourceMatcher::new(&dir);
+        assert!(!matcher.is_ignored(&dir.join("tracked.rs"), false));
+        assert!(matcher.is_ignored(&dir.join("untracked.rs"), false));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn utf16le_source_with_bom_is_decoded_and_indexed() {
+        let (dir, db) = setup("utf16le_source");
+        let mut bytes = vec![0xff, 0xfe];
+        for unit in "int unicode_source() { return 1; }\r\n".encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        fs::write(dir.join("unicode.cpp"), bytes).unwrap();
+
+        let mut store = Store::open(&db).unwrap();
+        let stats = Indexer::new(&dir).index_all(&mut store, false).unwrap();
+
+        assert_eq!(stats.files_skipped_binary, 0);
+        assert_eq!(stats.files_indexed, 1);
+        assert!(store
+            .search_symbols("unicode_source", Some("function"), Some("cpp"))
+            .unwrap()
+            .iter()
+            .any(|symbol| symbol.file_path == "unicode.cpp"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn source_extensions_are_matched_case_insensitively() {
+        let (dir, db) = setup("case_insensitive_extensions");
+        fs::write(dir.join("Legacy.CPP"), "int LegacyEntry() { return 0; }\n").unwrap();
+
+        let mut store = Store::open(&db).unwrap();
+        let stats = Indexer::new(&dir).index_all(&mut store, false).unwrap();
+
+        assert_eq!(stats.files_indexed, 1);
+        assert_eq!(store.indexed_paths().unwrap(), vec!["Legacy.CPP"]);
+        assert_eq!(
+            store
+                .search_symbols("LegacyEntry", Some("function"), Some("cpp"))
+                .unwrap()
+                .len(),
+            1
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn python_type_stubs_are_indexed_as_python() {
+        let (dir, db) = setup("python_type_stub");
+        fs::write(
+            dir.join("contracts.pyi"),
+            "class Service:\n    def execute(self, value: int) -> str: ...\n",
+        )
+        .unwrap();
+
+        let mut store = Store::open(&db).unwrap();
+        let stats = Indexer::new(&dir).index_all(&mut store, false).unwrap();
+        assert_eq!(stats.files_indexed, 1);
+        assert!(store
+            .search_symbols("Service", Some("class"), Some("python"))
+            .unwrap()
+            .iter()
+            .any(|symbol| symbol.file_path == "contracts.pyi"));
         fs::remove_dir_all(&dir).ok();
     }
 

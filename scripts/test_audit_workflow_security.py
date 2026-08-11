@@ -408,7 +408,9 @@ class EntrypointPathGrammarTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         text = (ROOT / "scripts/audit-action-entrypoint.sh").read_text(encoding="utf-8")
-        cls.functions = text[text.index("relative_path()") : text.index("workspace=")]
+        cls.functions = text[
+            text.index("relative_path()") : text.index('test "$#" -eq 7')
+        ]
 
     def check(self, function, value):
         script = self.functions + f'\n{function} "$1"'
@@ -439,7 +441,7 @@ class EntrypointHomeTests(unittest.TestCase):
     def setUpClass(cls):
         text = (ROOT / "scripts/audit-action-entrypoint.sh").read_text(encoding="utf-8")
         start = text.index("prepare_private_home()")
-        cls.function = text[start : text.index("workspace=", start)]
+        cls.function = text[start : text.index('test "$#" -eq 7', start)]
 
     def prepare(self, path):
         return subprocess.run(
@@ -474,6 +476,29 @@ class EntrypointHomeTests(unittest.TestCase):
 
 
 class RepositoryDeliveryContractTests(unittest.TestCase):
+    def test_docker_action_passes_every_input_as_an_ordered_argument(self):
+        action = yaml.safe_load((ROOT / "action.yml").read_text(encoding="utf-8"))
+        input_names = [
+            "root",
+            "since",
+            "bundle-dir",
+            "expected-repository",
+            "expected-baseline",
+            "expected-head",
+            "require-clean-worktree",
+        ]
+        self.assertEqual(
+            action["runs"].get("args"),
+            [f"${{{{ inputs.{name} }}}}" for name in input_names],
+            "Docker Action inputs must cross the container boundary through runs.args",
+        )
+
+        entrypoint = (ROOT / "scripts/audit-action-entrypoint.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('test "$#" -eq 7', entrypoint)
+        self.assertNotIn("printenv INPUT_", entrypoint)
+
     def test_docker_action_entrypoint_is_executable(self):
         entrypoint = ROOT / "scripts/audit-action-entrypoint.sh"
         mode = stat.S_IMODE(entrypoint.stat().st_mode)
@@ -580,7 +605,7 @@ class RepositoryDeliveryContractTests(unittest.TestCase):
     def test_action_output_path_conversion_is_behaviorally_covered(self):
         text = (ROOT / "scripts/audit-action-entrypoint.sh").read_text(encoding="utf-8")
         start = text.index("workspace_relative_path()")
-        functions = text[start : text.index("workspace=", start)]
+        functions = text[start : text.index('test "$#" -eq 7', start)]
 
         def convert(workspace, path):
             result = subprocess.run(

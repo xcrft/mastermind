@@ -40,14 +40,15 @@ prepare_private_home() {
   fi
 }
 
+test "$#" -eq 7 || fail "expected seven Action input arguments"
 workspace=${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is required}
-root_input=$(printenv INPUT_ROOT || printf '.')
-since=$(printenv INPUT_SINCE || true)
-bundle_input=$(printenv 'INPUT_BUNDLE-DIR' || printf '.mastermind/audit-output')
-expected_repository=$(printenv 'INPUT_EXPECTED-REPOSITORY' || true)
-expected_baseline=$(printenv 'INPUT_EXPECTED-BASELINE' || true)
-expected_head=$(printenv 'INPUT_EXPECTED-HEAD' || true)
-require_clean=$(printenv 'INPUT_REQUIRE-CLEAN-WORKTREE' || printf true)
+root_input=$1
+since=$2
+bundle_input=$3
+expected_repository=$4
+expected_baseline=$5
+expected_head=$6
+require_clean=$7
 
 full_oid "$since" || fail "since must be a full lowercase commit OID"
 full_oid "$expected_baseline" || fail "expected-baseline must be a full lowercase commit OID"

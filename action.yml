@@ -30,3 +30,11 @@ outputs:
 runs:
   using: docker
   image: Dockerfile.audit-action
+  args:
+    - ${{ inputs.root }}
+    - ${{ inputs.since }}
+    - ${{ inputs.bundle-dir }}
+    - ${{ inputs.expected-repository }}
+    - ${{ inputs.expected-baseline }}
+    - ${{ inputs.expected-head }}
+    - ${{ inputs.require-clean-worktree }}

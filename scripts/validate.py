@@ -1318,9 +1318,11 @@ def validate_audit_action_security() -> list[Issue]:
     except (OSError, yaml.YAMLError) as error:
         issues.append(Issue(action_path, "error", f"invalid Action metadata: {error}"))
     else:
-        required_inputs = {"root", "since", "bundle-dir", "expected-repository", "expected-baseline", "expected-head", "require-clean-worktree"}
-        if not isinstance(action, dict) or not required_inputs.issubset(set(action.get("inputs", {}))):
+        required_inputs = ["root", "since", "bundle-dir", "expected-repository", "expected-baseline", "expected-head", "require-clean-worktree"]
+        if not isinstance(action, dict) or not set(required_inputs).issubset(set(action.get("inputs", {}))):
             issues.append(Issue(action_path, "error", "Action metadata lacks mandatory immutable-snapshot inputs"))
+        elif action.get("runs", {}).get("args") != [f"${{{{ inputs.{name} }}}}" for name in required_inputs]:
+            issues.append(Issue(action_path, "error", "Docker Action inputs must cross the container boundary through ordered runs.args"))
 
     docker_path = REPO_ROOT / "Dockerfile.audit-action"
     try:

@@ -2088,13 +2088,14 @@ mod tests {
     }
 
     #[test]
-    fn mmcg_entry_global_mode_uses_mastermind_on_path() {
+    fn mmcg_entry_global_mode_uses_mastermind_on_non_windows_path() {
         let _guard = EnvGuard::set(&[
             ("MASTERMIND_INSTALL_MODE", "global"),
             ("MASTERMIND_VERSION", "0.22.0"),
             ("MASTERMIND_PACKAGE", "@xcraftmind/mastermind"),
         ]);
-        let entry = mmcg_entry(Path::new("/ignored/path/mmcg"));
+        let entry =
+            mmcg_entry_for_platform(Path::new("/ignored/path/mmcg"), NpmLauncherPlatform::Other);
         assert_eq!(
             entry.get("command").and_then(|v| v.as_str()),
             Some("mastermind"),

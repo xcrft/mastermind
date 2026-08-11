@@ -67,6 +67,13 @@ for (let index = 0; index < left.length; index += 1) mismatch |= left[index] ^ r
 
 
 class PromptIsolationTests(unittest.TestCase):
+    def test_synthetic_prompt_suites_cannot_inspect_the_maintainer_checkout(self):
+        for suite in ("critic", "intake", "workflow"):
+            self.assertEqual(runner.isolated_cli_args(suite), ["--safe-mode", "--tools", ""])
+            self.assertTrue(runner.requires_prompt_sandbox(suite))
+        self.assertEqual(runner.isolated_cli_args("auditor"), [])
+        self.assertFalse(runner.requires_prompt_sandbox("auditor"))
+
     def test_workflow_allowlist_matches_shipped_skills(self):
         shipped = {
             path.relative_to(runner.REPO_ROOT).as_posix()

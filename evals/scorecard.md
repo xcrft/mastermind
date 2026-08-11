@@ -4,12 +4,14 @@ This file records behavioral regression runs. It is not a model benchmark or a
 coverage percentage: case sets differ by suite, and elapsed time depends on the
 model, machine, and fixture setup.
 
-Latest complete runs: 2026-07-31, all four suites.
+Latest complete runs: 2026-07-31, all four suites. The 2026-08-11 rerun did
+not reach inference because the local Claude Code OAuth session had expired;
+those infrastructure exits are not recorded as model failures.
 
 | suite | model | date | result | first pass | elapsed | evidence |
 |---|---|---|---:|---:|---:|---|
 | auditor | opus | 2026-07-31 | 9/9 | 8/9 | 2,097.0 s | Real Git fixtures and live mmcg against a release build of this branch; `a-007` needed one sentinel retry |
-| critic | opus | 2026-07-31 | 5/5 | 5/5 | 283.0 s | Full suite; `c-002` passed this time — see below |
+| critic | opus | 2026-07-31 | 5/5 | 5/5 | 283.0 s | Historical full suite; `c-002` predates the prompt-isolation repair below and is not current verification |
 | intake | sonnet | 2026-07-31 | 5/5 | 5/5 | 98.4 s | Full suite |
 | workflow | sonnet | 2026-07-31 | 51/56 | 51/56 | 1,005.4 s | Full suite; the nine QA, backend, security, and product cases all passed on first attempt |
 | workflow | sonnet | 2026-07-30 | 45/47 | 45/47 | 778.9 s | Superseded snapshot |
@@ -41,13 +43,20 @@ assert. Both intake skills now mandate an output shape with a `Not verifiable` /
 `Outcome (not acceptance criteria)` heading, the way every audit skill already
 does. All repaired cases passed 3/3 afterwards.
 
-### `c-002` is flaky, which supports the earlier reading
+### `c-002` prompt-isolation repair, 2026-08-11
 
-The case failed on 2026-07-30 and passed on 2026-07-31 with no change to the
-fixture or the critic. That is the diagnosis holding: the critic suite runs with
-full tools, the fixture describes a repository that is not this one, and whether
-the case passes depends on whether the model happens to inspect the filesystem.
-A case whose result turns on that is not measuring the critic.
+The methodology defect is fixed in the runner. Critic, intake, and workflow cases now
+run with safe mode, an empty tool set, and a fresh empty temporary working
+directory for every case. They cannot inspect this maintainer checkout or
+inherit unrelated files from the system temporary directory. A deterministic
+harness regression locks all three conditions.
+
+The 2026-07-31 critic row remains as historical provenance, not proof of the
+new isolation path. A complete rerun was attempted on 2026-08-11, but Claude
+Code returned `Failed to authenticate: OAuth session expired and could not be
+refreshed` before sending any input tokens. Reauthenticate with `claude auth
+login`, then rerun the four suites before treating the repaired path as
+model-backed evidence.
 
 From the 2026-07-30 run: **the five repaired assertions held.** `w-008`, `w-029`, `w-031`, `w-032`, and
 `w-034` all passed, and the eight cases added since (`w-040`–`w-047`) passed on
@@ -65,23 +74,6 @@ affirmative claims already in the same list (`Cursor receives workflow skills`,
 `authorization is covered`), then verified by targeted rerun. **No complete run
 has been recorded since those two repairs**, so 45/47 stands as the reportable
 number.
-
-### `c-002`, as diagnosed on 2026-07-30
-
-The critic suite runs with full tools — only the workflow suite is invoked with
-`--safe-mode --tools ""`. The `c-002` fixture describes a design targeting
-`sdk/edge-ai-core/src/runtime/session.rs:302` and supplies an `mmcg_snapshot`
-for a codebase that is not this repository. The critic inspected the filesystem,
-found no `sdk/` directory and no such `SessionStore`, and returned `rethink` on
-Correctness — which is dimension 6 of its own contract, hallucinated targets,
-working exactly as specified.
-
-The case assumes the model takes the supplied snapshot at face value; it passed
-before because earlier runs did. Relaxing `not_contains: ["rethink"]` would hide
-a correct behaviour, so nothing was changed. The real options are a fixture that
-cites a path which exists, or running the critic suite without filesystem
-access the way the workflow suite already does — both are methodology decisions
-for the maintainer.
 
 ### The 34/39 intermediate run, 2026-07-30
 

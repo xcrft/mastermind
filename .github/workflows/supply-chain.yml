@@ -1,19 +1,11 @@
 name: Supply-chain policy
 
 on:
+  # This job is a required status. Do not path-filter it: skipped required
+  # workflows remain Pending and block unrelated PRs.
   pull_request:
-    paths:
-      - "mcp/servers/mmcg/Cargo.toml"
-      - "mcp/servers/mmcg/Cargo.lock"
-      - "deny.toml"
-      - ".github/workflows/supply-chain.yml"
   push:
     branches: [main]
-    paths:
-      - "mcp/servers/mmcg/Cargo.toml"
-      - "mcp/servers/mmcg/Cargo.lock"
-      - "deny.toml"
-      - ".github/workflows/supply-chain.yml"
   schedule:
     - cron: "17 6 * * 1"
   workflow_dispatch:

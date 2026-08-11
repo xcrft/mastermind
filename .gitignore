@@ -18,6 +18,9 @@ venv/
 # Secrets / local overrides — never commit
 .env
 .env.local
+.env.*
+!.env.example
+!.env.*.example
 *.local
 
 # Generic build / scratch

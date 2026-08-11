@@ -7,4 +7,4 @@
 ### servers/
 | Server | Transport | Description |
 |---|---|---|
-| [`mmcg`](servers/mmcg/README.md) | stdio | Mastermind Codegraph — 20 structural query tools over a local SQLite index. Nine languages: Python, TS/JS, Rust, C#, Go, Java, PHP, C/C++. Truth layer for the Mastermind workflow. |
+| [`mmcg`](servers/mmcg/README.md) | stdio | Mastermind Codegraph — 24 MCP tools: 23 read-only structural tools plus one additive local scratchpad write, over a local SQLite index. Supports Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, and C/C++. Truth layer for the Mastermind workflow. |

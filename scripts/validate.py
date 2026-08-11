@@ -17,7 +17,10 @@ from typing import Iterator
 try:
     import yaml
 except ImportError:
-    print("error: PyYAML not installed. Run: pip install -r scripts/requirements.txt", file=sys.stderr)
+    print(
+        "error: PyYAML not installed. Run: pip install --require-hashes -r scripts/requirements.txt",
+        file=sys.stderr,
+    )
     sys.exit(2)
 
 
@@ -411,6 +414,7 @@ MMCG_TOOL_LIST_DOCS: list[str] = [
 # We extract counts and assert they all match the count derived from mcp.rs.
 MMCG_TOOL_COUNT_DOCS: list[str] = [
     "docs/reference/mmcg.md",
+    "mcp/README.md",
     "mcp/servers/mmcg/README.md",
     "README.md",
 ]
@@ -796,7 +800,13 @@ def validate_workflow_eval_contract() -> list[Issue]:
     except OSError as error:
         issues.append(Issue(runner_path, "error", f"cannot read workflow eval runner: {error}"))
     else:
-        for token in ("WORKFLOW_ARTIFACTS", '"--safe-mode"', '"--tools", ""', "tempfile.gettempdir()"):
+        for token in (
+            "WORKFLOW_ARTIFACTS",
+            '"--safe-mode"',
+            '"--tools", ""',
+            "TemporaryDirectory",
+            "requires_prompt_sandbox",
+        ):
             if token not in runner:
                 issues.append(Issue(runner_path, "error", f"workflow eval sandbox missing {token!r}"))
         if '"--permission-mode", "default"' in runner:
@@ -897,6 +907,18 @@ def validate_repository_workflow_pins() -> list[Issue]:
             issues.append(Issue(path, "error", "manual workflow inputs must never authorize publishing"))
         if "github.repository == 'xcrft/mastermind' && github.event_name == 'push'" not in text:
             issues.append(Issue(path, "error", "publish job must require a tag push in the canonical repository"))
+        if "fetch-depth: 0" not in text or "merge-base --is-ancestor" not in text:
+            issues.append(Issue(path, "error", "tag publication must verify that the release commit is reachable from main"))
+
+    for name in ("ci-mmcg.yml", "ci-npm.yml", "supply-chain.yml", "validate.yml"):
+        path = workflow_dir / name
+        try:
+            workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError) as error:
+            issues.append(Issue(path, "error", f"invalid required workflow YAML: {error}"))
+            continue
+        if isinstance(workflow, dict) and required_workflow_has_path_filter(workflow):
+            issues.append(Issue(path, "error", "required workflow must not use pull_request path filters"))
     return issues
 
 
@@ -1058,6 +1080,15 @@ AUDIT_EXAMPLES = (
 
 def _workflow_trigger(workflow: dict) -> object:
     return workflow.get("on", workflow.get(True))
+
+
+def required_workflow_has_path_filter(workflow: dict) -> bool:
+    """Return whether a required PR workflow can be suppressed by file paths."""
+    trigger = _workflow_trigger(workflow)
+    pull_request = trigger.get("pull_request") if isinstance(trigger, dict) else None
+    return isinstance(pull_request, dict) and any(
+        key in pull_request for key in ("paths", "paths-ignore")
+    )
 
 
 def audit_pr_contract_errors(text: str, workflow: dict) -> list[str]:
@@ -1246,10 +1277,16 @@ def validate_audit_action_security() -> list[Issue]:
         actual_from = {line.split()[1] for line in docker_text.splitlines() if line.startswith("FROM ")}
         if actual_from != expected_from:
             issues.append(Issue(docker_path, "error", "Docker stages must use the two audited immutable OCI digests"))
-        if "cargo +1.96.0 build" not in docker_text or "--locked" not in docker_text or "USER 65532:65532" not in docker_text:
-            issues.append(Issue(docker_path, "error", "Docker Action must build with Rust 1.96 locked and run as the fixed non-root user"))
+        if "cargo +1.96.0 build" not in docker_text or "--locked" not in docker_text:
+            issues.append(Issue(docker_path, "error", "Docker Action must build with Rust 1.96 and the Cargo lockfile"))
+        if "COPY mcp/servers/mmcg/benches ./mcp/servers/mmcg/benches" not in docker_text:
+            issues.append(Issue(docker_path, "error", "Docker Action must include Cargo's declared benchmark target"))
+        if "COPY --chmod=0755 scripts/audit-action-entrypoint.sh" not in docker_text:
+            issues.append(Issue(docker_path, "error", "Docker Action must install an executable entrypoint"))
+        if re.search(r"^USER\s+", docker_text, re.MULTILINE):
+            issues.append(Issue(docker_path, "error", "GitHub Docker Action must use the default root user for GITHUB_WORKSPACE access"))
         if "RUN git --version" not in docker_text or "ENV HOME=/tmp/mastermind" not in docker_text:
-            issues.append(Issue(docker_path, "error", "Docker runtime must prove Git exists and provide the non-root private HOME"))
+            issues.append(Issue(docker_path, "error", "Docker runtime must prove Git exists and provide a private HOME"))
         if re.search(r"\b(?:apt|apk|yum|dnf)(?:-get)?\b", docker_text):
             issues.append(Issue(docker_path, "error", "Docker Action must not perform an unpinned package install"))
 
@@ -1259,6 +1296,8 @@ def validate_audit_action_security() -> list[Issue]:
     except OSError as error:
         issues.append(Issue(entrypoint_path, "error", f"cannot read Action entrypoint: {error}"))
     else:
+        if entrypoint_path.stat().st_mode & 0o100 == 0:
+            issues.append(Issue(entrypoint_path, "error", "Action entrypoint must be executable in the Git tree"))
         if "set -eu" not in entrypoint:
             issues.append(Issue(entrypoint_path, "error", "Action entrypoint must use set -eu"))
         if re.search(r"(^|\s)(eval|source|\.)\s", entrypoint, re.MULTILINE):

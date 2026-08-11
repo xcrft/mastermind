@@ -64,9 +64,8 @@ These directories are always skipped: `.git`, `.mastermind`, `.venv`, `venv`,
 The Mastermind workflow needs structural queries every few seconds (planner deciding blast radius, executor checking callers before edits). Grep/Read each costs hundreds of tokens; mmcg returns the same info in dozens. Multiplied across a workflow run, the difference is between affordable and not.
 
 mmcg is intentionally narrow:
-- Nine languages (Python, TypeScript/TSX, JavaScript/JSX, Rust, C#, Go, Java, PHP, C/C++) — extend by adding a parser, not by depending on multi-language toolchains
-- 24 query tools that map directly to the workflow's needs
-- 23 read-only MCP tools plus `mmcg_scratchpad_append`, which makes an additive write to the gitignored local index
+- Supports Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, and C/C++ — extend by adding a parser, not by depending on multi-language toolchains
+- 24 MCP tools: 23 read-only structural tools plus `mmcg_scratchpad_append`, which makes an additive write to the gitignored local index
 
 ## Performance model
 

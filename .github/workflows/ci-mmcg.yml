@@ -1,8 +1,8 @@
 # Per-PR cross-platform Rust CI for the mmcg crate.
 #
-# Runs on PRs that touch mmcg source / Cargo files OR the canonical templates
-# whose mirrors are embedded into the crate. Skips PRs that only edit unrelated
-# docs/skills so we don't burn CI for content-only changes.
+# Runs on every PR because its aggregate job is a required branch-protection
+# context. A required workflow must never be suppressed by path filters: GitHub
+# leaves the context Pending and blocks otherwise-valid changes.
 #
 # Pairs with:
 #   - validate.yml       (artifact-level frontmatter / link / template-mirror checks)
@@ -35,29 +35,8 @@ name: CI — mmcg
 
 on:
   pull_request:
-    paths:
-      - "mcp/servers/mmcg/**"
-      # Canonical templates whose mirrors live in mmcg/templates/.
-      # A change here implies a sync is needed; the validator catches it but
-      # we also re-test mmcg to make sure the embedded content still builds.
-      - "agents/claude-md/mastermind-context.md"
-      - "agents/claude-md/mastermind-workflow.md"
-      - "skills/workflow/mastermind-task-planning/references/spec-template.md"
-      # The CI fixture itself — changes here change what `verify-spec` /
-      # `audit-spec` see in every matrix entry.
-      - "tests/ci-fixture/**"
-      - ".github/workflows/ci-mmcg.yml"
   push:
     branches: [main]
-    paths:
-      - "mcp/servers/mmcg/**"
-      - "agents/claude-md/mastermind-context.md"
-      - "agents/claude-md/mastermind-workflow.md"
-      - "skills/workflow/mastermind-task-planning/references/spec-template.md"
-      - "tests/ci-fixture/**"
-      # Self-watch — a fix to the workflow itself should validate immediately
-      # on merge, not wait for the next mmcg/spec change to piggyback on.
-      - ".github/workflows/ci-mmcg.yml"
   # Manual trigger from the Actions tab for ad-hoc validation / debugging.
   workflow_dispatch:
 

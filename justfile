@@ -25,7 +25,7 @@ default:
 bootstrap:
     python3 -m venv .venv
     {{PY}} -m pip install -q --upgrade pip
-    {{PY}} -m pip install -q -r scripts/requirements.txt
+    {{PY}} -m pip install -q --require-hashes -r scripts/requirements.txt
     @echo "Python venv ready at .venv/. Run `just check` to verify everything."
 
 # ---- mmcg (Rust) ----

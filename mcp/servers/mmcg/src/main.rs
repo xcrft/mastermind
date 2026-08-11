@@ -16,6 +16,8 @@ use mmcg::store::Store;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+static BUILD_VERSION_MARKER: &str = concat!("MMCG_BUILD_VERSION=[", env!("CARGO_PKG_VERSION"), "]");
+
 /// Stack classifications used to inform drafting and diagnostics. CONTEXT.md
 /// itself stays stack-agnostic so derivable commands and layouts do not become
 /// duplicated project memory.
@@ -1180,6 +1182,7 @@ fn render_exit(
 }
 
 fn main() -> ExitCode {
+    std::hint::black_box(BUILD_VERSION_MARKER);
     render_exit(run(), &mut std::io::stderr())
 }
 

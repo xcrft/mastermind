@@ -40,6 +40,20 @@ prepare_private_home() {
   fi
 }
 
+handoff_output_to_workspace_owner() {
+  handoff_workspace=$1
+  handoff_root=$2
+  handoff_dir=$3
+  handoff_owner=$(stat -c '%u:%g' -- "$handoff_workspace") || return 1
+  chown -R -P --no-dereference --preserve-root "$handoff_owner" -- "$handoff_dir" || return 1
+  handoff_parent=${handoff_dir%/*}
+  while test "$handoff_parent" != "$handoff_root"; do
+    case "$handoff_parent/" in "$handoff_root/"*) ;; *) return 1 ;; esac
+    chown --no-dereference "$handoff_owner" -- "$handoff_parent" || return 1
+    handoff_parent=${handoff_parent%/*}
+  done
+}
+
 test "$#" -eq 7 || fail "expected seven Action input arguments"
 workspace=${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is required}
 root_input=$1
@@ -107,6 +121,8 @@ done
 test "$count" -gt 0 || fail "no audit envelopes produced"
 printf '],"result":"pass"}\n' >>"$tmp"
 mv "$tmp" "$aggregate"
+handoff_output_to_workspace_owner "$workspace_real" "$root_real" "$bundle_dir" \
+  || fail "cannot hand audit outputs to the GITHUB_WORKSPACE owner"
 
 delimiter="MMCG_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 {

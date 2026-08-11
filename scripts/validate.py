@@ -1368,6 +1368,8 @@ def validate_audit_action_security() -> list[Issue]:
             issues.append(Issue(entrypoint_path, "error", "Action entrypoint must accept root dot and delegate output creation to the Rust no-follow helper"))
         if "--changed-only" not in entrypoint or "--require-executor-report" not in entrypoint:
             issues.append(Issue(entrypoint_path, "error", "Action entrypoint must audit only changed tasks and require executor evidence"))
+        if "handoff_output_to_workspace_owner" not in entrypoint or "chown -R -P --no-dereference --preserve-root" not in entrypoint:
+            issues.append(Issue(entrypoint_path, "error", "root-owned Docker Action outputs must be handed back to the GITHUB_WORKSPACE owner"))
 
     return issues
 

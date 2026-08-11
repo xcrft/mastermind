@@ -498,6 +498,11 @@ class RepositoryDeliveryContractTests(unittest.TestCase):
         )
         self.assertIn('test "$#" -eq 7', entrypoint)
         self.assertNotIn("printenv INPUT_", entrypoint)
+        self.assertIn(
+            'handoff_output_to_workspace_owner "$workspace_real" "$root_real" "$bundle_dir"',
+            entrypoint,
+        )
+        self.assertIn("chown -R -P --no-dereference --preserve-root", entrypoint)
 
     def test_docker_action_entrypoint_is_executable(self):
         entrypoint = ROOT / "scripts/audit-action-entrypoint.sh"

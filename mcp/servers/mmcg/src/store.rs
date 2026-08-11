@@ -546,6 +546,25 @@ impl Store {
         }
     }
 
+    /// Stable long-running SQLite work for interrupt-path tests. Keeping the
+    /// query behind `Store` lets MCP watchdog tests exercise the real
+    /// cross-thread `InterruptHandle` without manufacturing a large fixture.
+    #[cfg(test)]
+    pub(crate) fn run_interrupt_probe(&self, budget: WorkBudget) -> SqlResult<i64> {
+        self.with_work_budget(budget, || {
+            self.conn
+                .prepare(
+                    "WITH RECURSIVE cnt(x) AS (
+                     SELECT 1
+                     UNION ALL
+                     SELECT x + 1 FROM cnt WHERE x < 100000000
+                 )
+                 SELECT count(*) FROM cnt",
+                )?
+                .query_row([], |row| row.get(0))
+        })
+    }
+
     pub fn db_path(&self) -> &Path {
         &self.db_path
     }
@@ -3425,41 +3444,64 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
-    #[test]
-    fn work_budget_interrupts_pathological_query() {
-        let path = tmp_db("work_budget_watchdog");
-        let store = Store::open(&path).unwrap();
-        let budget_ms = 50u64;
-        let started = Instant::now();
-        // A deterministically slow query, independent of any particular
-        // fixture's combinatorics — proves the generic guard mechanism, not
-        // just `impact_of_many`'s own fixed inner budget.
-        let result: SqlResult<i64> =
-            store.with_work_budget(WorkBudget::from_millis(budget_ms), || {
-                store
-                    .conn
-                    .prepare(
-                        "WITH RECURSIVE cnt(x) AS (
-                         SELECT 1
-                         UNION ALL
-                         SELECT x + 1 FROM cnt WHERE x < 100000000
-                     )
-                     SELECT count(*) FROM cnt",
-                    )?
-                    .query_row([], |r| r.get(0))
-            });
-        let elapsed = started.elapsed();
+    fn assert_sqlite_interrupted(result: &SqlResult<i64>) {
         assert!(
             matches!(
-                &result,
+                result,
                 Err(rusqlite::Error::SqliteFailure(e, _))
                     if e.code == rusqlite::ErrorCode::OperationInterrupted
             ),
             "expected a work-budget interrupt, got {result:?}"
         );
+    }
+
+    #[test]
+    fn work_budget_interrupts_sqlite_at_a_deterministic_op_cap() {
+        let path = tmp_db("work_budget_op_cap");
+        let store = Store::open(&path).unwrap();
+        let result = store.run_interrupt_probe(WorkBudget {
+            deadline: None,
+            op_ticks: Some(1),
+        });
+
+        assert_sqlite_interrupted(&result);
+        assert_eq!(store.take_interrupt_source(), Some(InterruptSource::Budget));
+        assert_eq!(
+            store.ops_counter.load(Ordering::Relaxed),
+            1,
+            "the first 1,000-instruction progress tick must raise the interrupt"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn fifty_millisecond_work_budget_interrupts_with_scheduler_tolerance() {
+        const BUDGET: Duration = Duration::from_millis(50);
+        const SCHEDULER_TOLERANCE: Duration = Duration::from_secs(1);
+
+        let path = tmp_db("work_budget_deadline");
+        let store = Store::open(&path).unwrap();
+        let budget = WorkBudget::from_millis(BUDGET.as_millis() as u64);
+        assert_eq!(budget.deadline, Some(BUDGET));
+        assert_eq!(budget.op_ticks, None);
+
+        let started = Instant::now();
+        let result = store.run_interrupt_probe(budget);
+        let elapsed = started.elapsed();
+
+        // Correct SQLite interrupt propagation is proven without wall-clock
+        // scheduling in the op-cap test above. This measurement independently
+        // keeps the production 50ms deadline exact while allowing a descheduled
+        // CI worker a bounded amount of wall-clock delay.
+        assert_sqlite_interrupted(&result);
+        assert_eq!(store.take_interrupt_source(), Some(InterruptSource::Budget));
         assert!(
-            elapsed < Duration::from_millis(budget_ms * 2),
-            "elapsed {elapsed:?} exceeded 2x the {budget_ms}ms budget"
+            elapsed >= BUDGET,
+            "the deadline fired earlier than its 50ms contract: {elapsed:?}"
+        );
+        assert!(
+            elapsed < BUDGET + SCHEDULER_TOLERANCE,
+            "50ms deadline exceeded the 1s scheduler allowance: {elapsed:?}"
         );
         std::fs::remove_file(&path).ok();
     }

@@ -25,7 +25,20 @@ mastermind setup continue --scope project --root . --write
 mastermind setup continue --scope user --write
 ```
 
-The owned document contains only `schema: 1`, `owner: mastermind`, `name: mmcg`, `command`, and `args`. Mastermind does not merge this entry into Continue's general JSON configuration.
+Mastermind writes Continue's standalone MCP schema. For a global npm install, the generated document is equivalent to:
+
+```yaml
+name: Mastermind MCP
+version: 1.0.0
+schema: v1
+mcpServers:
+  - name: mmcg
+    command: mastermind
+    args:
+      - serve
+```
+
+The `command` and `args` follow the detected install mode. On Windows, global, npx, and project-local npm launchers use `cmd.exe /d /s /c` so Continue can execute npm's `.cmd` shims. Mastermind does not merge this entry into Continue's general JSON configuration.
 
 ## Updating and removing
 
@@ -42,4 +55,4 @@ mastermind setup continue --scope project --root . --remove --write
 mastermind doctor
 ```
 
-Doctor parses the owned YAML as bounded data, rejects symlinked files or existing path ancestors, compares the document structurally with the trusted current entry, and never executes its configured command. Reload Continue after applying a change. The former experimental JSON instructions are not supported.
+Doctor parses the owned YAML as bounded data, rejects symlinked files or existing path ancestors, compares the full standalone document structurally with the trusted current entry, and never executes its configured command. Reload Continue after applying a change. The former experimental JSON instructions are not supported.

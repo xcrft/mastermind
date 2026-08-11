@@ -7,10 +7,11 @@ set -euo pipefail
 repository="xcrft/mastermind"
 reviewer="aglumova"
 apply=false
+prevent_self_review=false
 api_version="2026-03-10"
 
 usage() {
-    echo "usage: $0 [--repository owner/repo] [--reviewer login] [--apply]" >&2
+    echo "usage: $0 [--repository owner/repo] [--reviewer login] [--prevent-self-review] [--apply]" >&2
 }
 
 while [ "$#" -gt 0 ]; do
@@ -27,6 +28,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --apply)
             apply=true
+            shift
+            ;;
+        --prevent-self-review)
+            prevent_self_review=true
             shift
             ;;
         -h|--help)
@@ -59,10 +64,12 @@ Repository: $repository
 Authenticated permission: $permission
 Would configure:
   - npm-prod required_reviewers: $reviewer
+  - npm-prod prevent_self_review: $prevent_self_review
   - npm-prod deployment tag policy: npm-v*
   - active npm release tag ruleset: refs/tags/npm-v*
   - required main checks: validator, Rust, npm smoke, cargo-deny
 Re-run with --apply using a repository-admin gh session.
+Enable --prevent-self-review only with an eligible reviewer different from the workflow initiator.
 EOF
     exit 0
 fi
@@ -72,6 +79,14 @@ if [ "$permission" != "ADMIN" ]; then
     exit 1
 fi
 
+if "$prevent_self_review"; then
+    current_actor=$(gh api user --jq .login)
+    if [ "$reviewer" = "$current_actor" ]; then
+        echo "error: --prevent-self-review requires an eligible reviewer different from the workflow initiator (authenticated actor: $current_actor)" >&2
+        exit 1
+    fi
+fi
+
 api() {
     gh api -H "X-GitHub-Api-Version: $api_version" "$@"
 }
@@ -79,9 +94,11 @@ api() {
 reviewer_id=$(api "users/$reviewer" --jq .id)
 
 # Configure required_reviewers without reading or replacing environment secrets.
-jq -n --argjson reviewer_id "$reviewer_id" '{
+jq -n \
+  --argjson reviewer_id "$reviewer_id" \
+  --argjson prevent_self_review "$prevent_self_review" '{
   wait_timer: 0,
-  prevent_self_review: false,
+  prevent_self_review: $prevent_self_review,
   reviewers: [{type: "User", id: $reviewer_id}],
   deployment_branch_policy: {
     protected_branches: false,

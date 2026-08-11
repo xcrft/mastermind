@@ -23,6 +23,23 @@ root_path() {
   relative_path "$1"
 }
 
+workspace_relative_path() {
+  case "$2" in
+    "$1"/*) printf '%s\n' "${2#"$1"/}" ;;
+    *) return 1 ;;
+  esac
+}
+
+prepare_private_home() {
+  home_path=$1
+  test ! -L "$home_path" || return 1
+  if test -e "$home_path"; then
+    test -d "$home_path" && test -w "$home_path"
+  else
+    mkdir -m 700 -- "$home_path"
+  fi
+}
+
 workspace=${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is required}
 root_input=$(printenv INPUT_ROOT || printf '.')
 since=$(printenv INPUT_SINCE || true)
@@ -43,22 +60,27 @@ root_path "$root_input" || fail "root must be a safe repository-relative path or
 relative_path "$bundle_input" || fail "bundle-dir must be a safe repository-relative path"
 
 workspace_real=$(CDPATH= cd -- "$workspace" && pwd -P) || fail "cannot resolve GITHUB_WORKSPACE"
-mkdir -m 700 "$HOME" || fail "cannot create private HOME"
-export GIT_CONFIG_NOSYSTEM=1
-export GIT_CONFIG_GLOBAL=/dev/null
-export GIT_CONFIG_COUNT=1
-export GIT_CONFIG_KEY_0=safe.directory
-export GIT_CONFIG_VALUE_0=$workspace_real
+home=${HOME:?HOME is required}
+prepare_private_home "$home" || fail "HOME must be a writable real directory or a creatable private path"
 root="$workspace_real/$root_input"
 root_real=$(CDPATH= cd -- "$root" && pwd -P) || fail "cannot resolve root"
 case "$root_real/" in "$workspace_real/"*) ;; *) fail "root escapes GITHUB_WORKSPACE" ;; esac
+export GIT_CONFIG_NOSYSTEM=1
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_COUNT=2
+export GIT_CONFIG_KEY_0=safe.directory
+export GIT_CONFIG_VALUE_0="$workspace_real"
+export GIT_CONFIG_KEY_1=safe.directory
+export GIT_CONFIG_VALUE_1="$root_real"
 
 bundle_dir=$(/usr/local/bin/mastermind audit prepare-output --root "$root_real" --path "$bundle_input") || fail "cannot prepare contained bundle-dir"
+bundle_output=$(workspace_relative_path "$workspace_real" "$bundle_dir") || fail "bundle-dir is outside GITHUB_WORKSPACE"
 
 /usr/local/bin/mastermind ci --since "$since" --root "$root_real" \
   --changed-only --require-executor-report --bundle-dir "$bundle_dir"
 
 aggregate="$bundle_dir/result.json"
+aggregate_output="$bundle_output/result.json"
 tmp="$bundle_dir/.result.tmp"
 printf '{"schema_version":1,"verified":[' >"$tmp"
 first=true
@@ -87,8 +109,8 @@ mv "$tmp" "$aggregate"
 
 delimiter="MMCG_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 {
-  printf 'bundle-dir<<%s\n%s\n%s\n' "$delimiter" "$bundle_dir" "$delimiter"
-  printf 'result-json<<%s\n%s\n%s\n' "$delimiter" "$aggregate" "$delimiter"
+  printf 'bundle-dir<<%s\n%s\n%s\n' "$delimiter" "$bundle_output" "$delimiter"
+  printf 'result-json<<%s\n%s\n%s\n' "$delimiter" "$aggregate_output" "$delimiter"
 } >>"${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
 {
   printf '## Mastermind verifiable audit\n\n'

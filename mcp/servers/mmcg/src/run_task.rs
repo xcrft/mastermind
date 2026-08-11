@@ -17,6 +17,7 @@
 //! `.mastermind/run-state/<basename>.json` to avoid a shared `tasks/state.json`.
 
 use crate::audit_spec;
+use crate::indexer::{validate_index_root, Indexer};
 use crate::spec::{self, ParsedSpec};
 use crate::store::Store;
 use crate::verify_spec;
@@ -57,6 +58,11 @@ pub struct RunState {
     /// serde default `0` — "not yet counted".
     #[serde(default)]
     pub iteration: u32,
+    /// Preserve the pre-flight docs/spec-only escape hatch across hand-off so
+    /// post-flight does not turn an intentionally ungrounded task into a hard
+    /// index-identity failure.
+    #[serde(default)]
+    pub allow_no_index: bool,
 }
 
 fn default_run_status() -> String {
@@ -246,6 +252,43 @@ Complete this after semantic review. Replace each `pending` with `updated` or\n\
     );
     std::fs::write(path, body)?;
     Ok(true)
+}
+
+/// Return true only after both durable-knowledge dispositions were reviewed
+/// and the generated placeholder reason was replaced. The Markdown file remains
+/// authoritative; lifecycle commands derive completion from it instead of
+/// treating post-flight success as semantic review.
+pub fn history_review_complete(review_path: &Path) -> bool {
+    let Ok(body) = std::fs::read_to_string(review_path) else {
+        return false;
+    };
+    let field = |name: &str| {
+        let prefix = format!("- **{name}:**");
+        body.lines()
+            .find_map(|line| line.trim().strip_prefix(&prefix))
+            .map(str::trim)
+    };
+    let disposition_complete = |value: Option<&str>| {
+        value.is_some_and(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "updated" | "not applicable"
+            )
+        })
+    };
+    let reason_reviewed = field("Reason").is_some_and(|reason| {
+        !reason.is_empty() && !reason.eq_ignore_ascii_case("semantic review required")
+    });
+    disposition_complete(field("Context"))
+        && disposition_complete(field("Lesson"))
+        && reason_reviewed
+}
+
+fn refresh_durable_history(store: &mut Store, repo_root: &Path) -> Result<u32, String> {
+    Indexer::new(repo_root)
+        .index_project_history(store)
+        .map(|stats| stats.indexed)
+        .map_err(|error| error.to_string())
 }
 
 fn display_relative(repo_root: &Path, path: &Path) -> String {
@@ -556,16 +599,55 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts)
         );
     }
 
-    if !opts.post_only
-        && existing
-            .as_ref()
-            .is_some_and(|state| state.status == "learned")
-    {
-        println!(
-            "Task already complete — state is `{}`. Use --reset to start a new iteration or --post-only to re-audit.",
-            state_path.display()
-        );
-        return Outcome::PostHeld;
+    if !opts.post_only {
+        if let Some(state) = existing.as_ref() {
+            if state.status == "learned" {
+                println!(
+                    "Task already complete — state is `{}`. Use --reset to start a new iteration or --post-only to re-audit.",
+                    state_path.display()
+                );
+                return Outcome::PostHeld;
+            }
+            if state.status == "history_review_required" {
+                let review_path = history_review_file_path(repo_root, spec_path);
+                if history_review_complete(&review_path) {
+                    let mut store = match Store::open(index_path) {
+                        Ok(store) => store,
+                        Err(error) => {
+                            eprintln!(
+                                "error: opening index `{}` for semantic history refresh: {error}",
+                                index_path.display()
+                            );
+                            return Outcome::PostBroken;
+                        }
+                    };
+                    if let Err(error) = refresh_durable_history(&mut store, repo_root) {
+                        eprintln!(
+                            "error: refreshing durable history before semantic completion: {error}"
+                        );
+                        return Outcome::PostBroken;
+                    }
+                    let mut completed = state.clone();
+                    completed.status = "learned".into();
+                    completed.next_step = Some("close".into());
+                    completed.last_artifact = Some("history-review.md".into());
+                    if let Err(error) = save_state(&state_path, &completed) {
+                        eprintln!(
+                            "error: persisting reviewed state `{}`: {error}",
+                            state_path.display()
+                        );
+                        return Outcome::PostBroken;
+                    }
+                    println!("Task complete — semantic history review is resolved.");
+                } else {
+                    println!(
+                        "Mechanical audit is held; semantic history review is still required at `{}`.",
+                        review_path.display()
+                    );
+                }
+                return Outcome::PostHeld;
+            }
+        }
     }
 
     // Default mode + state present → resume post.
@@ -616,31 +698,56 @@ fn run_pre(
     // or empty index, verify-spec silently degrades to file-existence checks and
     // audit-spec to git-diff-only. Escape hatch `--allow-no-index` for docs-only
     // specs.
-    let store = Store::open(index_path).ok();
-    if !opts.allow_no_index {
-        match store.as_ref() {
-            None => {
+    let mut store = Store::open(index_path).ok();
+    match store.as_ref() {
+        None if !opts.allow_no_index => {
+            eprintln!(
+                "❌ No index at `{}`. Run `mastermind index .` first, or pass --allow-no-index for docs-only specs.",
+                index_path.display()
+            );
+            return Outcome::PreFailed;
+        }
+        Some(index) => match index.symbol_count() {
+            Ok(0) if opts.allow_no_index => {
+                // An empty SQLite shell carries no repository identity and
+                // contributes no graph evidence. Treat it exactly like no index
+                // for an explicitly docs-only task.
+                store = None;
+            }
+            Ok(0) => {
                 eprintln!(
-                    "❌ No index at `{}`. Run `mastermind index .` first, or pass --allow-no-index for docs-only specs.",
+                    "❌ Index at `{}` is empty (0 symbols). Run `mastermind index .` to populate, or pass --allow-no-index for docs-only specs.",
                     index_path.display()
                 );
                 return Outcome::PreFailed;
             }
-            Some(s) => match s.symbol_count() {
-                Ok(0) => {
-                    eprintln!(
-                        "❌ Index at `{}` is empty (0 symbols). Run `mastermind index .` to populate, or pass --allow-no-index for docs-only specs.",
-                        index_path.display()
-                    );
+            Ok(_) => {
+                if let Err(error) = validate_index_root(index, repo_root) {
+                    eprintln!("❌ Index/root mismatch: {error}");
                     return Outcome::PreFailed;
                 }
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("warning: querying index symbol count: {e}");
-                    // Tolerate transient SQL errors — verify-spec below fails
-                    // louder if the store is actually broken.
-                }
-            },
+            }
+            Err(error) => {
+                eprintln!("❌ Cannot query index `{}`: {error}", index_path.display());
+                return Outcome::PreFailed;
+            }
+        },
+        None => {}
+    }
+    if let Some(index) = store.as_mut() {
+        let refresh = match Indexer::new(repo_root).index_all(index, false) {
+            Ok(stats) => stats,
+            Err(error) => {
+                eprintln!("❌ Refreshing index before pre-flight failed: {error}");
+                return Outcome::PreFailed;
+            }
+        };
+        if refresh.files_failed > 0 {
+            eprintln!(
+                "❌ Pre-flight index refresh failed for {} file(s); refusing to verify against stale graph data",
+                refresh.files_failed
+            );
+            return Outcome::PreFailed;
         }
     }
 
@@ -700,6 +807,7 @@ fn run_pre(
         baseline_ref: head.clone(),
         started_at: timestamp_now(),
         iteration,
+        allow_no_index: opts.allow_no_index,
     };
     if let Err(e) = save_state(state_path, &state) {
         eprintln!("error: writing state `{}`: {e}", state_path.display());
@@ -773,13 +881,40 @@ fn run_post(
         );
     }
 
-    let store = match Store::open(index_path) {
+    let mut store = match Store::open(index_path) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: opening index `{}`: {e}", index_path.display());
             return Outcome::PostBroken;
         }
     };
+    let populated = match store.symbol_count() {
+        Ok(count) => count > 0,
+        Err(error) => {
+            eprintln!("error: querying index `{}`: {error}", index_path.display());
+            return Outcome::PostBroken;
+        }
+    };
+    if populated || !state.allow_no_index {
+        if let Err(error) = validate_index_root(&store, repo_root) {
+            eprintln!("error: index/root mismatch: {error}");
+            return Outcome::PostBroken;
+        }
+        let refresh = match Indexer::new(repo_root).index_all(&mut store, false) {
+            Ok(stats) => stats,
+            Err(error) => {
+                eprintln!("error: refreshing index before post-flight: {error}");
+                return Outcome::PostBroken;
+            }
+        };
+        if refresh.files_failed > 0 {
+            eprintln!(
+                "error: post-flight index refresh failed for {} file(s); refusing to audit stale graph data",
+                refresh.files_failed
+            );
+            return Outcome::PostBroken;
+        }
+    }
 
     let report_path = spec_path
         .parent()
@@ -869,37 +1004,63 @@ fn run_post(
         println!("\n--- Release notes draft ---\n{body}");
         let release_path = release_file_path(repo_root, spec_path);
         if let Some(parent) = release_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                eprintln!(
+                    "error: failed to create release-note directory `{}`: {error}",
+                    parent.display()
+                );
+                return Outcome::PostBroken;
+            }
         }
-        match std::fs::write(&release_path, &body) {
-            Ok(()) => println!("Release notes saved to {}", release_path.display()),
-            Err(e) => eprintln!(
-                "warning: failed to write release notes `{}`: {e}",
+        if let Err(error) = std::fs::write(&release_path, &body) {
+            eprintln!(
+                "error: failed to write release notes `{}`: {error}",
                 release_path.display()
-            ),
+            );
+            return Outcome::PostBroken;
         }
-        match ensure_history_review(repo_root, spec_path, &release_path) {
-            Ok(true) => println!(
-                "History review saved to {}",
-                history_review_file_path(repo_root, spec_path).display()
-            ),
-            Err(error) => eprintln!("warning: failed to create history review: {error}"),
-            _ => {}
+        println!("Release notes saved to {}", release_path.display());
+        if let Err(error) =
+            ensure_history_review(repo_root, spec_path, &release_path).map(|created| {
+                if created {
+                    println!(
+                        "History review saved to {}",
+                        history_review_file_path(repo_root, spec_path).display()
+                    );
+                }
+            })
+        {
+            eprintln!("error: failed to create history review: {error}");
+            return Outcome::PostBroken;
         }
+        if let Err(error) = refresh_durable_history(&mut store, repo_root) {
+            eprintln!("error: refreshing durable post-flight history: {error}");
+            return Outcome::PostBroken;
+        }
+        let review_path = history_review_file_path(repo_root, spec_path);
         let mut complete = state.clone();
-        complete.status = "learned".into();
+        if history_review_complete(&review_path) {
+            complete.status = "learned".into();
+            complete.next_step = Some("close".into());
+        } else {
+            complete.status = "history_review_required".into();
+            complete.next_step = Some("review_history".into());
+        }
         complete.risk = Some("low".into());
-        complete.next_step = Some("close".into());
         complete.blocking_reason = None;
-        complete.last_artifact = Some("audit.md".into());
+        complete.last_artifact = Some("history-review.md".into());
         if let Err(error) = save_state(state_path, &complete) {
             eprintln!(
-                "error: persisting complete state `{}`: {error}",
+                "error: persisting post-flight state `{}`: {error}",
                 state_path.display()
             );
             return Outcome::PostBroken;
         }
     } else {
+        if let Err(error) = refresh_durable_history(&mut store, repo_root) {
+            eprintln!("error: refreshing durable failed-audit history: {error}");
+            return Outcome::PostBroken;
+        }
         let mut failed = state.clone();
         failed.status = match outcome {
             Outcome::PostDrift => "drift",
@@ -1167,6 +1328,7 @@ verifications: []\n\
             baseline_ref: "abc1234".into(),
             started_at: 123456,
             iteration: 0,
+            allow_no_index: true,
         };
         save_state(&path, &state).unwrap();
         let loaded = load_state(&path).unwrap().expect("present");
@@ -1174,6 +1336,7 @@ verifications: []\n\
         assert_eq!(loaded.spec_hash, state.spec_hash);
         assert_eq!(loaded.baseline_ref, state.baseline_ref);
         assert_eq!(loaded.started_at, state.started_at);
+        assert!(loaded.allow_no_index);
         delete_state(&path).unwrap();
         assert!(load_state(&path).unwrap().is_none());
         fs::remove_dir_all(&dir).ok();
@@ -1438,6 +1601,64 @@ verifications: []\n\
     }
 
     #[test]
+    fn pre_flight_rejects_an_index_from_another_repository() {
+        let indexed_root = tmp("foreign_index_source");
+        init_repo(&indexed_root);
+        fs::create_dir_all(indexed_root.join("src")).unwrap();
+        fs::write(
+            indexed_root.join("src/lib.py"),
+            "def foreign_symbol(): pass\n",
+        )
+        .unwrap();
+        git(&indexed_root, &["add", "-A"]);
+        git(&indexed_root, &["commit", "-q", "-m", "foreign baseline"]);
+        let index_path = indexed_root.join("idx.db");
+        let mut store = Store::open(&index_path).unwrap();
+        Indexer::new(&indexed_root)
+            .index_all(&mut store, false)
+            .unwrap();
+        drop(store);
+
+        let target_root = tmp("foreign_index_target");
+        init_repo(&target_root);
+        fs::create_dir_all(target_root.join("src")).unwrap();
+        fs::write(target_root.join("src/lib.py"), "def local_symbol(): pass\n").unwrap();
+        git(&target_root, &["add", "-A"]);
+        git(&target_root, &["commit", "-q", "-m", "target baseline"]);
+        let task_dir = target_root.join(".mastermind/tasks/081-root-binding");
+        fs::create_dir_all(&task_dir).unwrap();
+        let spec_path = task_dir.join("spec.md");
+        fs::write(
+            &spec_path,
+            "# Root binding\n\n## Goals\n- Edit `src/lib.py`\n## Alternatives Considered\n- none\n## Tests Plan\n- n/a\n## Documentation Plan\n- n/a\n## Observability Plan\n- n/a\n## Performance Considerations\n- O(1)\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            run(
+                &spec_path,
+                &target_root,
+                &index_path,
+                RunOpts {
+                    pre_only: true,
+                    ..Default::default()
+                }
+            ),
+            Outcome::PreFailed,
+            "a populated index must be bound to the repository it was built from"
+        );
+        assert!(
+            load_state(&state_file_path(&target_root, &spec_path))
+                .unwrap()
+                .is_none(),
+            "a root mismatch must fail before lifecycle state is written"
+        );
+
+        fs::remove_dir_all(indexed_root).ok();
+        fs::remove_dir_all(target_root).ok();
+    }
+
+    #[test]
     fn auto_resume_post_held_emits_release_notes_and_completes_state() {
         let dir = tmp("autoresume_held");
         init_repo(&dir);
@@ -1490,23 +1711,47 @@ verifications: []\n\
         .unwrap();
         git(&dir, &["add", "-A"]);
         git(&dir, &["commit", "-q", "-m", "executor"]);
-        let mut store = Store::open(&index_path).unwrap();
-        Indexer::new(&dir).index_all(&mut store, false).unwrap();
-        drop(store);
         write_executor_report(&spec_path, &["src/lib.py"]);
 
-        // Second run auto-resumes into post-flight.
+        // Second run auto-resumes into post-flight. Production must refresh the
+        // graph itself; callers should not need a manual `mastermind index .`
+        // between executor handoff and audit.
         let outcome = run(&spec_path, &dir, &index_path, RunOpts::default());
         assert_eq!(outcome, Outcome::PostHeld);
-        // Held → controller records completion and writes release notes.
-        let completed = load_state(&state_path).unwrap().expect("complete state");
-        assert_eq!(completed.status, "learned");
-        assert_eq!(completed.last_artifact.as_deref(), Some("audit.md"));
+        let store = Store::open(&index_path).unwrap();
+        assert!(
+            store
+                .search_symbols("extra", None, None)
+                .unwrap()
+                .iter()
+                .any(|symbol| symbol.file_path == "src/lib.py"),
+            "post-flight must audit and retain the refreshed implementation graph"
+        );
+        drop(store);
+        // Held → the mechanical audit is complete, but semantic history review
+        // remains an explicit lifecycle phase.
+        let completed = load_state(&state_path).unwrap().expect("review state");
+        assert_eq!(completed.status, "history_review_required");
+        assert_eq!(completed.next_step.as_deref(), Some("review_history"));
+        assert_eq!(
+            completed.last_artifact.as_deref(),
+            Some("history-review.md")
+        );
         let release_path = release_file_path(&dir, &spec_path);
         assert!(release_path.exists(), "release notes file should exist");
         let body = fs::read_to_string(&release_path).unwrap();
         assert!(body.starts_with("# Clean add"));
         assert!(body.contains("Audit: ✅ Held"));
+        let store = Store::open(&index_path).unwrap();
+        assert!(
+            store
+                .search_project_history("Clean add", Some("release_notes"), 10)
+                .unwrap()
+                .iter()
+                .any(|entry| entry.path.ends_with("050-clean-add.md")),
+            "post-flight must make newly-written release notes immediately searchable"
+        );
+        drop(store);
         let review_path = history_review_file_path(&dir, &spec_path);
         let review = fs::read_to_string(&review_path).unwrap();
         assert!(review.contains("**Context:** pending"));
@@ -1519,7 +1764,35 @@ verifications: []\n\
             run(&spec_path, &dir, &index_path, RunOpts::default()),
             Outcome::PostHeld
         );
+        assert_eq!(
+            load_state(&state_path).unwrap().unwrap().status,
+            "history_review_required"
+        );
+
+        fs::write(
+            dir.join("CONTEXT.md"),
+            "semantic review captured the zebra routing invariant\n",
+        )
+        .unwrap();
+        fs::write(
+            &review_path,
+            "- **Context:** updated\n- **Lesson:** not applicable\n- **Reason:** captured zebra routing in CONTEXT.md\n",
+        )
+        .unwrap();
+        assert_eq!(
+            run(&spec_path, &dir, &index_path, RunOpts::default()),
+            Outcome::PostHeld
+        );
         assert_eq!(load_state(&state_path).unwrap().unwrap().status, "learned");
+        let store = Store::open(&index_path).unwrap();
+        assert!(
+            store
+                .search_project_history("zebra routing", Some("context"), 10)
+                .unwrap()
+                .iter()
+                .any(|entry| entry.path == "CONTEXT.md"),
+            "semantic completion must refresh edited durable history before reporting learned"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 

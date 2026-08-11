@@ -1,16 +1,22 @@
 import copy
+import contextlib
 import hashlib
+import importlib.util
+import io
 import json
 import os
 import pathlib
 import re
 import stat
+import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 import warnings
 import zipfile
+from unittest import mock
 
 import yaml
 
@@ -428,6 +434,45 @@ class EntrypointPathGrammarTests(unittest.TestCase):
                     self.assertFalse(self.check("root_path", value))
 
 
+class EntrypointHomeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        text = (ROOT / "scripts/audit-action-entrypoint.sh").read_text(encoding="utf-8")
+        start = text.index("prepare_private_home()")
+        cls.function = text[start : text.index("workspace=", start)]
+
+    def prepare(self, path):
+        return subprocess.run(
+            ["sh", "-c", self.function + '\nprepare_private_home "$1"', "test", str(path)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def test_existing_home_is_accepted_and_missing_home_is_private(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            existing = root / "existing home"
+            existing.mkdir()
+            self.assertEqual(self.prepare(existing).returncode, 0)
+
+            missing = root / "new home"
+            result = self.prepare(missing)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(missing.is_dir())
+            self.assertEqual(stat.S_IMODE(missing.stat().st_mode), 0o700)
+
+    @unittest.skipIf(os.name == "nt", "symlink semantics differ on Windows")
+    def test_symlink_home_is_rejected(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            target = root / "target"
+            target.mkdir()
+            link = root / "home-link"
+            link.symlink_to(target, target_is_directory=True)
+            self.assertNotEqual(self.prepare(link).returncode, 0)
+
+
 class RepositoryDeliveryContractTests(unittest.TestCase):
     def test_docker_action_entrypoint_is_executable(self):
         entrypoint = ROOT / "scripts/audit-action-entrypoint.sh"
@@ -493,6 +538,114 @@ class RepositoryDeliveryContractTests(unittest.TestCase):
         self.assertIn("test -x /usr/local/bin/audit-action-entrypoint", workflow)
         self.assertIn("touch /github/workspace/.mastermind-action-write-smoke", workflow)
 
+    def test_action_outputs_are_repository_relative_and_consumed_by_a_real_job(self):
+        action = yaml.safe_load((ROOT / "action.yml").read_text(encoding="utf-8"))
+        for name in ("bundle-dir", "result-json"):
+            self.assertIn("repository-relative", action["outputs"][name]["description"])
+
+        workflow = yaml.safe_load(
+            (ROOT / ".github/workflows/validate.yml").read_text(encoding="utf-8")
+        )
+        job = workflow["jobs"].get("audit-action-self-test")
+        self.assertIsNotNone(job, "validate.yml must execute and consume the local Action")
+        steps = job["steps"]
+        producer = next(step for step in steps if step.get("uses") == "./")
+        self.assertEqual(producer.get("id"), "audit")
+        consumer = next(step for step in steps if step.get("name") == "Consume repository-relative Action outputs")
+        self.assertEqual(consumer["env"]["BUNDLE_DIR"], "${{ steps.audit.outputs.bundle-dir }}")
+        self.assertEqual(consumer["env"]["RESULT_JSON"], "${{ steps.audit.outputs.result-json }}")
+        self.assertIn('case "$BUNDLE_DIR" in /*)', consumer["run"])
+        self.assertIn('case "$RESULT_JSON" in /*)', consumer["run"])
+        self.assertIn('test -f "$RESULT_JSON"', consumer["run"])
+
+    def test_existing_required_context_aggregates_contracts_and_real_action(self):
+        workflow = yaml.safe_load(
+            (ROOT / ".github/workflows/validate.yml").read_text(encoding="utf-8")
+        )
+        required = next(
+            job
+            for job in workflow["jobs"].values()
+            if job.get("name") == "Frontmatter & cross-references"
+        )
+        self.assertEqual(
+            set(required.get("needs", [])),
+            {"artifact-contracts", "audit-action-self-test"},
+        )
+        self.assertIn("always()", str(required.get("if", "")))
+        script = "\n".join(step.get("run", "") for step in required["steps"])
+        self.assertIn("needs.artifact-contracts.result", str(required))
+        self.assertIn("needs.audit-action-self-test.result", str(required))
+        self.assertGreaterEqual(script.count('= "success"'), 2)
+
+    def test_action_output_path_conversion_is_behaviorally_covered(self):
+        text = (ROOT / "scripts/audit-action-entrypoint.sh").read_text(encoding="utf-8")
+        start = text.index("workspace_relative_path()")
+        functions = text[start : text.index("workspace=", start)]
+
+        def convert(workspace, path):
+            result = subprocess.run(
+                ["sh", "-c", functions + '\nworkspace_relative_path "$1" "$2"', "test", workspace, path],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            return result.returncode, result.stdout.strip()
+
+        self.assertEqual(convert("/github/workspace", "/github/workspace/.mastermind/out"), (0, ".mastermind/out"))
+        self.assertEqual(convert("/github/workspace", "/github/workspace/sub dir/out"), (0, "sub dir/out"))
+        self.assertNotEqual(convert("/github/workspace", "/tmp/out")[0], 0)
+
+    def test_native_npm_smoke_has_a_documented_local_recipe(self):
+        justfile = (ROOT / "justfile").read_text(encoding="utf-8")
+        recipe = justfile[justfile.index("npm-smoke-native:") :]
+        for token in (
+            "cargo build --release",
+            "build-npm-packages.sh",
+            "npm pack",
+            "npm install --no-save",
+            "node_modules/.bin/mastermind --version",
+        ):
+            self.assertIn(token, recipe)
+        contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+        self.assertIn("just npm-smoke-native", contributing)
+
+    def test_npm_publish_job_uses_resumable_root_last_helper(self):
+        workflow = yaml.safe_load(
+            (ROOT / ".github/workflows/publish-npm.yml").read_text(encoding="utf-8")
+        )
+        publish_steps = workflow["jobs"]["publish"]["steps"]
+        publish = next(step for step in publish_steps if step.get("name") == "Publish or verify all 8 packages")
+        self.assertIn("scripts/publish-npm-tarballs.sh", publish["run"])
+        self.assertNotIn("npm publish", publish["run"])
+
+    def test_crate_publish_uploads_the_verified_artifact_without_repackaging(self):
+        workflow = yaml.safe_load(
+            (ROOT / ".github/workflows/publish-mmcg.yml").read_text(encoding="utf-8")
+        )
+        verify_runs = "\n".join(
+            step.get("run", "") for step in workflow["jobs"]["verify"]["steps"]
+        )
+        publish_runs = "\n".join(
+            step.get("run", "") for step in workflow["jobs"]["publish"]["steps"]
+        )
+        self.assertIn("publish-crate-artifact.py prepare", verify_runs)
+        self.assertIn("sha256sum", verify_runs)
+        self.assertIn("sha256sum --check", publish_runs)
+        self.assertRegex(publish_runs, r'publish-crate-artifact\.py"? publish')
+        self.assertNotRegex(publish_runs, r"\bcargo\s+publish\b")
+
+    def test_distributed_package_surfaces_advertise_vue(self):
+        missing = validator.distributed_vue_metadata_errors()
+        self.assertEqual(missing, [])
+
+        surfaces = validator.distributed_vue_metadata_contents()
+        for relative, marker in validator.DISTRIBUTED_VUE_MARKERS.items():
+            with self.subTest(path=relative):
+                changed = dict(surfaces)
+                self.assertIn(marker, changed[relative])
+                changed[relative] = changed[relative].replace(marker, "")
+                self.assertIn(relative, validator.distributed_vue_metadata_errors(changed))
+
     def test_required_workflow_filter_detector_rejects_both_filter_forms(self):
         detector = getattr(validator, "required_workflow_has_path_filter", None)
         self.assertIsNotNone(detector, "validator needs a semantic required-workflow filter guard")
@@ -532,13 +685,145 @@ class RepositoryDeliveryContractTests(unittest.TestCase):
             "npm-prod",
             "npm-v*",
             "required_reviewers",
+            "--prevent-self-review",
+            "prevent_self_review=false",
+            "eligible reviewer different from the workflow initiator",
             "wrapper check + linux-x64 install smoke",
             "advisories, licenses, bans, sources",
             "viewerPermission",
             "--apply",
         ):
             self.assertIn(token, text)
+        self.assertIn('current_actor=$(gh api user --jq .login)', text)
+        self.assertIn('"$reviewer" = "$current_actor"', text)
         self.assertNotEqual(stat.S_IMODE(path.stat().st_mode) & stat.S_IXUSR, 0)
+
+    def test_self_review_prevention_rejects_the_authenticated_reviewer(self):
+        script = ROOT / "scripts/configure-github-protections.sh"
+        with tempfile.TemporaryDirectory() as raw:
+            fake_bin = pathlib.Path(raw)
+            gh = fake_bin / "gh"
+            gh.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = repo ]; then printf 'ADMIN\\n'; exit 0; fi\n"
+                "if [ \"$1\" = api ] && [ \"$2\" = user ]; then printf 'aglumova\\n'; exit 0; fi\n"
+                "exit 99\n",
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+            result = subprocess.run(
+                [
+                    str(script),
+                    "--repository",
+                    "xcrft/mastermind",
+                    "--reviewer",
+                    "aglumova",
+                    "--prevent-self-review",
+                    "--apply",
+                ],
+                env={**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("different from the workflow initiator", result.stderr)
+
+
+class CratesIoArtifactPublisherTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.path = ROOT / "scripts/publish-crate-artifact.py"
+        if not cls.path.is_file():
+            raise AssertionError("missing exact-artifact crates.io publisher")
+        spec = importlib.util.spec_from_file_location("publish_crate_artifact", cls.path)
+        cls.module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(cls.module)
+
+    def test_publish_body_contains_the_exact_verified_crate_bytes(self):
+        self.assertEqual(
+            self.module.CRATES_IO_PUBLISH_URL,
+            "https://crates.io/api/v1/crates/new",
+        )
+        cargo_manifest = (ROOT / "mcp/servers/mmcg/Cargo.toml").read_text(encoding="utf-8")
+        self.assertIn('publish = ["crates-io"]', cargo_manifest)
+        metadata = {"name": "mmcg", "vers": "1.2.1", "deps": [], "features": {}}
+        crate = b"verified-crate-bytes\x00\xff"
+        body = self.module.build_publish_body(metadata, crate)
+        metadata_len = struct.unpack("<I", body[:4])[0]
+        encoded = body[4 : 4 + metadata_len]
+        crate_len_at = 4 + metadata_len
+        crate_len = struct.unpack("<I", body[crate_len_at : crate_len_at + 4])[0]
+        uploaded = body[crate_len_at + 4 :]
+        self.assertEqual(json.loads(encoded), metadata)
+        self.assertEqual(crate_len, len(crate))
+        self.assertEqual(uploaded, crate)
+
+    def test_crate_binding_rejects_metadata_for_a_different_version(self):
+        with tempfile.TemporaryDirectory() as raw:
+            crate_path = pathlib.Path(raw) / "mmcg-1.2.1.crate"
+            with tarfile.open(crate_path, "w:gz") as archive:
+                cargo = b'[package]\nname = "mmcg"\nversion = "1.2.1"\n'
+                info = tarfile.TarInfo("mmcg-1.2.1/Cargo.toml")
+                info.size = len(cargo)
+                archive.addfile(info, io.BytesIO(cargo))
+            with self.assertRaisesRegex(ValueError, "metadata.*crate"):
+                self.module.validate_crate_binding(
+                    crate_path,
+                    {"name": "mmcg", "vers": "9.9.9"},
+                )
+
+    def test_publish_checks_sha_and_puts_the_exact_crate_bytes(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self, _limit):
+                return b"{}"
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            crate_path = root / "mmcg-1.2.1.crate"
+            with tarfile.open(crate_path, "w:gz") as archive:
+                cargo = b'[package]\nname = "mmcg"\nversion = "1.2.1"\n'
+                info = tarfile.TarInfo("mmcg-1.2.1/Cargo.toml")
+                info.size = len(cargo)
+                archive.addfile(info, io.BytesIO(cargo))
+            crate_bytes = crate_path.read_bytes()
+            metadata_path = root / "publish.json"
+            metadata_path.write_text(
+                json.dumps({"name": "mmcg", "vers": "1.2.1"}),
+                encoding="utf-8",
+            )
+            expected = hashlib.sha256(crate_bytes).hexdigest()
+            captured = []
+
+            def urlopen(request, timeout):
+                captured.append((request, timeout))
+                return Response()
+
+            with mock.patch.dict(os.environ, {"CARGO_REGISTRY_TOKEN": "secret-token"}), mock.patch.object(
+                self.module.urllib.request, "urlopen", side_effect=urlopen
+            ):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.module.publish(crate_path, metadata_path, expected)
+
+            self.assertEqual(len(captured), 1)
+            request, timeout = captured[0]
+            self.assertEqual(request.full_url, self.module.CRATES_IO_PUBLISH_URL)
+            self.assertEqual(request.method, "PUT")
+            self.assertEqual(timeout, 120)
+            self.assertEqual(request.get_header("Authorization"), "secret-token")
+            self.assertTrue(request.data.endswith(crate_bytes))
+
+            with mock.patch.object(self.module.urllib.request, "urlopen") as unopened:
+                with self.assertRaisesRegex(ValueError, "SHA-256"):
+                    self.module.publish(crate_path, metadata_path, "0" * 64)
+                unopened.assert_not_called()
 
 
 if __name__ == "__main__":

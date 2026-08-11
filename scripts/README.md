@@ -74,4 +74,13 @@ scripts/configure-github-protections.sh --apply
 
 The script never reads or replaces environment secrets. It configures the npm
 reviewer/tag boundary and ensures every unfiltered required workflow is present
-in the active `main` ruleset.
+in the active `main` ruleset. Self-review prevention stays disabled by default
+so a single maintainer cannot deadlock a release. Enable it only with a distinct
+eligible reviewer:
+
+```bash
+scripts/configure-github-protections.sh \
+  --reviewer another-maintainer \
+  --prevent-self-review \
+  --apply
+```

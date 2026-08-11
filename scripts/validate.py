@@ -374,6 +374,44 @@ def validate_release_badges() -> list[Issue]:
     return issues
 
 
+# These are the metadata and README surfaces that actually ship in the npm
+# tarball or crates.io archive. Keep new language support visible in every
+# distributed landing surface instead of only the repository README.
+DISTRIBUTED_VUE_MARKERS: dict[str, str] = {
+    "npm/mastermind/package.json": '"vue"',
+    "npm/mastermind/README.md": "Vue SFC",
+    "mcp/servers/mmcg/Cargo.toml": "Vue SFC",
+    "mcp/servers/mmcg/README.md": "Vue SFC",
+}
+
+
+def distributed_vue_metadata_contents() -> dict[str, str]:
+    contents: dict[str, str] = {}
+    for relative in DISTRIBUTED_VUE_MARKERS:
+        path = REPO_ROOT / relative
+        try:
+            contents[relative] = path.read_text(encoding="utf-8")
+        except OSError:
+            contents[relative] = ""
+    return contents
+
+
+def distributed_vue_metadata_errors(contents: dict[str, str] | None = None) -> list[str]:
+    values = distributed_vue_metadata_contents() if contents is None else contents
+    return [
+        relative
+        for relative, marker in DISTRIBUTED_VUE_MARKERS.items()
+        if marker not in values.get(relative, "")
+    ]
+
+
+def validate_distributed_language_metadata() -> list[Issue]:
+    return [
+        Issue(REPO_ROOT / relative, "error", "distributed package metadata must advertise Vue SFC support")
+        for relative in distributed_vue_metadata_errors()
+    ]
+
+
 # ----- mmcg template-mirror sync ---------------------------------------
 
 # The mmcg crate embeds two templates at build time via `include_str!` (CONTEXT.md
@@ -1351,6 +1389,7 @@ def main(argv: list[str]) -> int:
     issues.extend(validate_relative_links(rel_links))
     issues.extend(validate_installable_link_escape(rel_links))
     issues.extend(validate_release_badges())
+    issues.extend(validate_distributed_language_metadata())
 
     issues.extend(validate_mmcg_template_mirrors())
     issues.extend(validate_mmcg_tool_drift())

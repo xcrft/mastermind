@@ -130,6 +130,47 @@ GIT_ENV = {
 # when available so color hints still work in interactive mode.
 _PROC_ENV: dict[str, str] = {**os.environ, "TERM": os.environ.get("TERM") or "dumb"}
 
+AUDITOR_ALLOWED_TOOLS = (
+    "Read",
+    "Glob",
+    "Grep",
+    "Bash(git diff)",
+    "Bash(git diff *)",
+    "Bash(git log)",
+    "Bash(git log *)",
+    "Bash(git show *)",
+    "Bash(git status)",
+    "Bash(git status *)",
+    "Bash(git rev-parse *)",
+    "Bash(git ls-files)",
+    "Bash(git ls-files *)",
+    "Bash(git grep *)",
+    "Bash(cargo test --locked *)",
+    "mcp__mmcg__mmcg_search",
+    "mcp__mmcg__mmcg_callers",
+    "mcp__mmcg__mmcg_callees",
+    "mcp__mmcg__mmcg_impact",
+    "mcp__mmcg__mmcg_symbols_in_file",
+    "mcp__mmcg__mmcg_outline",
+    "mcp__mmcg__mmcg_files",
+    "mcp__mmcg__mmcg_imports",
+    "mcp__mmcg__mmcg_imported_by",
+    "mcp__mmcg__mmcg_unreferenced",
+    "mcp__mmcg__mmcg_api_surface",
+    "mcp__mmcg__mmcg_symbols_changed_since",
+    "mcp__mmcg__mmcg_dependency_cycles",
+    "mcp__mmcg__mmcg_tasks",
+    "mcp__mmcg__mmcg_history",
+    "mcp__mmcg__mmcg_centrality",
+    "mcp__mmcg__mmcg_map",
+    "mcp__mmcg__mmcg_change_impact",
+    "mcp__mmcg__mmcg_test_impact",
+    "mcp__mmcg__mmcg_recent_changes",
+    "mcp__mmcg__mmcg_status",
+    "mcp__mmcg__mmcg_scratchpad_read",
+    "mcp__mmcg__mmcg_change_class",
+)
+
 
 @dataclass
 class Result:
@@ -282,6 +323,8 @@ def render_critic_input(inp: dict) -> str:
     if isinstance(alternatives, list):
         alternatives = "\n".join(f"- {a}" for a in alternatives)
     return (
+        "**Evaluation boundary:** no repository checkout or tools are available. "
+        "Assess only the supplied design and mmcg snapshot; do not invoke tools.\n\n"
         f"**Problem:** {inp.get('problem', '')}\n\n"
         f"**Proposed design:** {inp.get('design', '')}\n\n"
         f"**Alternatives considered:**\n{alternatives}\n\n"
@@ -294,12 +337,37 @@ def isolated_cli_args(suite_name: str) -> list[str]:
     """Deny repository tools to suites whose fixtures exist only in prompts."""
     if suite_name in {"critic", "intake", "workflow"}:
         return ["--safe-mode", "--tools", ""]
+    if suite_name == "auditor":
+        return [
+            "--tools",
+            "Read,Glob,Grep,Bash",
+            "--allowedTools",
+            ",".join(AUDITOR_ALLOWED_TOOLS),
+            "--setting-sources",
+            "",
+            "--strict-mcp-config",
+            "--disable-slash-commands",
+            "--no-chrome",
+        ]
     return []
 
 
 def requires_prompt_sandbox(suite_name: str) -> bool:
     """Return whether a prompt-only suite needs a fresh, empty working tree."""
     return suite_name in {"critic", "intake", "workflow"}
+
+
+def evaluation_cwd(
+    suite_name: str,
+    *,
+    fixture_path: Path | None,
+    prompt_sandbox: tempfile.TemporaryDirectory[str] | None,
+) -> Path | None:
+    if suite_name == "auditor":
+        return fixture_path
+    if prompt_sandbox is not None:
+        return Path(prompt_sandbox.name)
+    return None
 
 
 def render_workflow_input(inp: dict) -> str:
@@ -369,13 +437,8 @@ _INTAKE_BLOCK_RE = re.compile(
 )
 
 
-def extract_audit_verdict(output: str) -> str | None:
-    """Return the `verdict` field from a structured audit tail, or None.
-
-    Requires valid YAML inside the sentinel block — no regex fallback.
-    A malformed block is treated the same as an absent block (None),
-    so the caller will fail the case rather than guess.
-    """
+def extract_audit_data(output: str) -> dict | None:
+    """Return the validated mapping from a structured audit tail, or None."""
     m = _AUDIT_BLOCK_RE.search(output)
     if not m:
         return None
@@ -383,11 +446,34 @@ def extract_audit_verdict(output: str) -> str | None:
         return None
     try:
         data = _yaml.safe_load(m.group(1))
-        if isinstance(data, dict) and data.get("verdict"):
-            return str(data["verdict"]).lower().strip()
+        if isinstance(data, dict):
+            return data
     except Exception:
         pass
     return None
+
+
+def extract_audit_verdict(output: str) -> str | None:
+    """Return the `verdict` field from a structured audit tail, or None."""
+    data = extract_audit_data(output)
+    if data and data.get("verdict"):
+        return str(data["verdict"]).lower().strip()
+    return None
+
+
+def audit_verification_passed(output: str, expected_command: str) -> bool:
+    data = extract_audit_data(output)
+    if not data:
+        return False
+    reruns = data.get("verifications_rerun")
+    if not isinstance(reruns, list):
+        return False
+    return any(
+        isinstance(entry, dict)
+        and entry.get("cmd") == expected_command
+        and str(entry.get("result", "")).lower() == "pass"
+        for entry in reruns
+    )
 
 
 def extract_intake_action(output: str) -> str | None:
@@ -548,7 +634,11 @@ def evaluate_case(
         workflow_safety = isolated_cli_args(suite_name)
         if requires_prompt_sandbox(suite_name):
             prompt_sandbox = tempfile.TemporaryDirectory(prefix="mastermind-eval-")
-        evaluation_cwd = Path(prompt_sandbox.name) if prompt_sandbox is not None else None
+        case_cwd = evaluation_cwd(
+            suite_name,
+            fixture_path=fixture_path,
+            prompt_sandbox=prompt_sandbox,
+        )
         cmd = [
             "claude",
             "-p",
@@ -568,7 +658,7 @@ def evaluate_case(
             proc = subprocess.run(
                 cmd, input=user_message, capture_output=True, text=True,
                 env=_PROC_ENV,
-                cwd=evaluation_cwd,
+                cwd=case_cwd,
                 timeout=480,
             )
         except subprocess.TimeoutExpired:
@@ -583,10 +673,16 @@ def evaluate_case(
                 [f"claude exit {proc.returncode}: {err}"], 0, fixture_path,
             )
 
+        permission_denials: list[dict] = []
         try:
             payload = json.loads(proc.stdout)
             output = payload.get("result", "")
             duration_ms = int(payload.get("duration_ms", 0))
+            raw_denials = payload.get("permission_denials", [])
+            if isinstance(raw_denials, list):
+                permission_denials = [
+                    denial for denial in raw_denials if isinstance(denial, dict)
+                ]
         except json.JSONDecodeError:
             output = proc.stdout
             duration_ms = 0
@@ -639,6 +735,14 @@ def evaluate_case(
                 passed = False
                 reasons.append(f"none of expected verdicts {candidates} found")
 
+        expected_rerun = expect.get("verification_rerun")
+        if expected_rerun and suite_name == "auditor":
+            if not audit_verification_passed(output, expected_rerun):
+                passed = False
+                reasons.append(
+                    f"structured audit did not record a passing rerun of {expected_rerun!r}"
+                )
+
         for phrase in expect.get("contains", []):
             if phrase.lower() not in output.lower():
                 passed = False
@@ -665,6 +769,12 @@ def evaluate_case(
             if comment_reasons:
                 passed = False
                 reasons.extend(comment_reasons)
+
+        if not passed and permission_denials:
+            reasons.append(
+                "permission denials: "
+                + json.dumps(permission_denials, sort_keys=True, ensure_ascii=False)
+            )
 
         return Result(
             case_id,

@@ -14,8 +14,8 @@ permissions:
   contents: read
 
 jobs:
-  validate:
-    name: Frontmatter & cross-references
+  artifact-contracts:
+    name: Artifact contracts
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -40,6 +40,15 @@ jobs:
       - name: Run audit workflow security fixtures
         run: python scripts/test_audit_workflow_security.py
 
+  audit-action-self-test:
+    name: Docker Action self-consumer
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Build and smoke Docker Action image
         run: |
           set -euo pipefail
@@ -63,3 +72,110 @@ jobs:
           test "$exit_code" -ne 0
           test "$exit_code" -ne 126
           grep -q "GITHUB_WORKSPACE is required" <<<"$output"
+
+      - name: Create a clean two-commit audit fixture
+        id: fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=.action-self-test
+          mkdir -p "$root/src"
+          git -C "$root" init --quiet --initial-branch=main
+          git -C "$root" config user.email action-self-test@example.invalid
+          git -C "$root" config user.name action-self-test
+          git -C "$root" remote add origin https://github.com/xcrft/action-self-test.git
+          printf 'def value():\n    return 1\n' >"$root/src/lib.py"
+          printf '.mastermind/mmcg.db*\n.mastermind/audit-output/\n' >"$root/.gitignore"
+          git -C "$root" add -A
+          git -C "$root" commit --quiet -m baseline
+          baseline=$(git -C "$root" rev-parse HEAD)
+
+          mkdir -p "$root/.mastermind/tasks/001-action-self-test"
+          printf 'def value():\n    return 2\n' >"$root/src/lib.py"
+          cat >"$root/.mastermind/tasks/001-action-self-test/spec.md" <<'SPEC'
+          ---
+          id: "001"
+          title: Exercise the repository Action
+          mode: verified
+          touches:
+            - file: src/lib.py
+          ---
+          # Action self-test
+
+          ## Goals
+          - Change the fixture value.
+
+          ## Scope
+          - Only `src/lib.py` changes outside task evidence.
+
+          ## Acceptance Criteria
+          - [ ] The Action seals and verifies one audit envelope.
+
+          ## Tests Plan
+          - The workflow consumes both declared Action outputs.
+
+          ## Final Verification
+          - Parse `result.json` and require a passing aggregate.
+          SPEC
+          cat >"$root/.mastermind/tasks/001-action-self-test/executor-report.md" <<'REPORT'
+          <!-- mastermind:report-begin -->
+          ```yaml
+          schema_version: 1
+          spec: .mastermind/tasks/001-action-self-test/spec.md
+          status: complete
+          phases:
+            - id: "1"
+              status: done
+          files_modified:
+            - src/lib.py
+          claims: []
+          defects: []
+          verifications: []
+          ```
+          <!-- mastermind:report-end -->
+          REPORT
+          git -C "$root" add -A
+          git -C "$root" commit --quiet -m audited-change
+          head=$(git -C "$root" rev-parse HEAD)
+          printf 'baseline=%s\nhead=%s\n' "$baseline" "$head" >>"$GITHUB_OUTPUT"
+
+      - name: Run this repository's Action
+        id: audit
+        uses: ./
+        with:
+          root: .action-self-test
+          since: ${{ steps.fixture.outputs.baseline }}
+          bundle-dir: .mastermind/audit-output
+          expected-repository: xcrft/action-self-test
+          expected-baseline: ${{ steps.fixture.outputs.baseline }}
+          expected-head: ${{ steps.fixture.outputs.head }}
+          require-clean-worktree: "true"
+
+      - name: Consume repository-relative Action outputs
+        shell: bash
+        env:
+          BUNDLE_DIR: ${{ steps.audit.outputs.bundle-dir }}
+          RESULT_JSON: ${{ steps.audit.outputs.result-json }}
+        run: |
+          set -euo pipefail
+          case "$BUNDLE_DIR" in /*) echo "::error::bundle-dir must be repository-relative"; exit 1 ;; esac
+          case "$RESULT_JSON" in /*) echo "::error::result-json must be repository-relative"; exit 1 ;; esac
+          test -d "$BUNDLE_DIR"
+          test -f "$RESULT_JSON"
+          test "$(find "$BUNDLE_DIR" -maxdepth 1 -name '*.bundle.json' -type f | wc -l | tr -d ' ')" = 1
+          python3 -c 'import json, os; value=json.load(open(os.environ["RESULT_JSON"])); assert value["result"] == "pass" and len(value["verified"]) == 1, value'
+
+  required-validation:
+    name: Frontmatter & cross-references
+    if: ${{ always() }}
+    needs: [artifact-contracts, audit-action-self-test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require artifact contracts and the real Docker Action
+        env:
+          ARTIFACT_CONTRACTS_RESULT: ${{ needs.artifact-contracts.result }}
+          ACTION_SELF_TEST_RESULT: ${{ needs.audit-action-self-test.result }}
+        run: |
+          set -euo pipefail
+          test "$ARTIFACT_CONTRACTS_RESULT" = "success"
+          test "$ACTION_SELF_TEST_RESULT" = "success"

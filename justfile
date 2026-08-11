@@ -84,6 +84,50 @@ validate:
 npm-test:
     npm test --prefix npm/mastermind
 
+# Exercise the local host's complete distribution chain without a registry:
+# native release build -> platform package -> npm pack -> tarball install -> wrapper smoke.
+npm-smoke-native:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    target=$(rustc -vV | awk '/^host: / {print $2}')
+    case "$target" in
+        aarch64-apple-darwin) variant=darwin-arm64; executable=mmcg ;;
+        x86_64-apple-darwin) variant=darwin-x64; executable=mmcg ;;
+        x86_64-unknown-linux-gnu) variant=linux-x64-gnu; executable=mmcg ;;
+        aarch64-unknown-linux-gnu) variant=linux-arm64-gnu; executable=mmcg ;;
+        x86_64-unknown-linux-musl) variant=linux-x64-musl; executable=mmcg ;;
+        aarch64-unknown-linux-musl) variant=linux-arm64-musl; executable=mmcg ;;
+        x86_64-pc-windows-msvc) variant=win32-x64-msvc; executable=mmcg.exe ;;
+        *) echo "unsupported native npm smoke target: $target" >&2; exit 2 ;;
+    esac
+    cargo build --release --manifest-path {{MMCG}}/Cargo.toml --locked
+    ./scripts/build-npm-packages.sh "$target" "{{MMCG}}/target/release/$executable"
+    bash scripts/stage-npm-share.sh
+
+    smoke_root=$(mktemp -d)
+    trap 'rm -rf "$smoke_root"' EXIT
+    pack_dir="$smoke_root/packed"
+    install_dir="$smoke_root/install"
+    mkdir -p "$pack_dir" "$install_dir"
+    (cd npm/mastermind && npm pack --pack-destination "$pack_dir")
+    (cd "npm/platforms/$variant" && npm pack --pack-destination "$pack_dir")
+
+    version=$(node -p "require('./npm/mastermind/package.json').version")
+    root_tgz="$pack_dir/xcraftmind-mastermind-${version}.tgz"
+    platform_tgz="$pack_dir/xcraftmind-mmcg-${variant}-${version}.tgz"
+    test -f "$root_tgz" && test -f "$platform_tgz"
+    cd "$install_dir"
+    npm init -y >/dev/null
+    npm install --no-save --offline "$root_tgz" "$platform_tgz"
+    actual=$(./node_modules/.bin/mastermind --version)
+    test "$actual" = "mastermind $version" || {
+        echo "wrapper version mismatch: expected mastermind $version, got $actual" >&2
+        exit 1
+    }
+    ./node_modules/.bin/mastermind doctor --json >doctor.json || true
+    python3 -c 'import json; value=json.load(open("doctor.json")); assert "checks" in value, value'
+    echo "Native npm tarball smoke passed for $target ($version)."
+
 # Test audit publication fixtures and the eval harness itself without calling a model.
 eval-harness:
     {{PY}} scripts/test_audit_workflow_security.py

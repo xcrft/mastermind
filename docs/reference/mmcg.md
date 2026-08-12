@@ -2,7 +2,7 @@
 
 This is the exhaustive technical reference for the mmcg engine. For the shortest path to a working installation, start with [Getting started](../getting-started.md); for the product overview, return to the [Mastermind README](../../README.md).
 
-A small Rust binary that builds a structural index of a codebase (Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, C/C++). It serves the graph over **MCP** (23 read-only tools plus one additive local scratchpad write), but MCP is only one surface. The same binary provides spec gates (`verify-spec` / `audit-spec`), project setup (`init` / `doctor`), and the user-global style miner.
+A small Rust binary that builds a structural index of a codebase (Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, C/C++). It serves the graph over **MCP** (24 read-only tools plus one additive local scratchpad write), but MCP is only one surface. The same binary provides spec gates (`verify-spec` / `audit-spec`), project setup (`init` / `doctor`), and the user-global style miner.
 
 > Installed via npm (`@xcraftmind/mastermind`)? The command is **`mastermind`** — the same binary. The `mmcg` name used throughout this doc is the cargo-installed alias (`cargo install mmcg`).
 
@@ -69,7 +69,7 @@ The Mastermind workflow needs structural queries every few seconds (planner deci
 
 mmcg is intentionally narrow:
 - Supports Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, and C/C++ — extend by adding a parser, not by depending on multi-language toolchains
-- 24 MCP tools: 23 read-only structural tools plus `mmcg_scratchpad_append`, which makes an additive write to the gitignored local index
+- 25 MCP tools: 24 read-only structural/semantic tools plus `mmcg_scratchpad_append`, which makes an additive write to the gitignored local index
 
 ## Performance model
 
@@ -108,6 +108,10 @@ mmcg index ~/code/my-project
 
 # Force full re-index — re-parses everything regardless of mtime
 mmcg index --force
+
+# Optionally add compiler-resolved SCIP evidence without replacing the graph.
+mmcg enrich --scip index.scip
+mmcg query semantic "scip-clang . my-package . PaymentService#charge()." --top 100
 
 # Watch a directory and re-index on file changes (long-running, also incremental)
 mmcg watch
@@ -257,6 +261,46 @@ When to use `--force`:
 
 The index lives at `.mastermind/mmcg.db` in the current directory by default. Override with `--index <path>` or env var `MMCG_INDEX_PATH`.
 
+## Optional SCIP semantic overlay
+
+Tree-sitter remains the default graph: it is local, incremental, portable, and
+does not require every language toolchain. `mmcg enrich --scip index.scip`
+decodes the standard SCIP protobuf and atomically replaces only a separate set
+of `semantic_*` tables. It never rewrites `symbols`, `edges`, files, history,
+or scratchpad data. A failed import leaves the previous overlay intact.
+
+The importer accepts typed SCIP ranges and the deprecated packed range form,
+validates canonical repository-relative document paths, rejects paths and
+symlinks that escape the indexed root, and bounds the artifact at 512 MiB,
+documents at 500,000, occurrences at 10 million, definitions at 2 million,
+symbol-information records at 2 million, and semantic edges at 5 million. It
+streams top-level protobuf fields in bounded passes instead of retaining the
+full SCIP index and all embedded source text in memory. Source files are hashed at
+import. The reported `project_root` must resolve to the indexed repository; a
+portable or moved artifact is accepted only when every `Document.text` exactly
+matches its current file. Successful sources expose `repository_verified`.
+When some text is omitted, repository identity is still verified but the result
+carries `semantic_artifact_revision_unverified`. Later file changes suppress
+affected semantic facts as stale rather than silently mixing revisions.
+
+SCIP occurrence references become `reference` or `import` evidence; explicit
+SCIP relationships remain `implementation`, `type_definition`, `definition`,
+or `reference`. These are not relabelled as calls because SCIP occurrences do
+not prove that every reference is a call. The resolution contract is explicit:
+
+- Tree-sitter topology is the default and the no-SCIP fallback;
+- an exact matching SCIP symbol/file endpoint is the preferred static source,
+  with `provenance=scip` and `confidence=high`;
+- a Tree-sitter-only edge stays `syntactic` / medium confidence;
+- OpenTelemetry remains observed runtime corroboration and never creates
+  topology.
+
+Use `mmcg query semantic SYMBOL` or the read-only `mmcg_semantic` MCP tool to
+inspect definitions and relationships directly. Lens loads a valid imported
+overlay automatically, shows its producer and precision diagnostics, and only
+decorates exact returned endpoint and display-name pairs. `mmcg map`, callers,
+impact, and all existing tools continue to work unchanged without SCIP.
+
 ## Mastermind Lens (`mmcg ui`)
 
 Lens is a browser review surface for one baseline-to-working-tree change. It
@@ -300,6 +344,8 @@ evidence:
   `docs/CODEOWNERS` in that order, with `--codeowners PATH` as an override;
 - bounded Git churn and contributor names from the last 200 commits by default,
   configurable with `--git-commits 0..1000` (`0` disables Git history).
+- the repository's persisted SCIP overlay, when present and fresh. It is not a
+  UI flag or report path; import it first with `mmcg enrich --scip index.scip`.
 
 Evidence is matched only to files already returned by the bounded change,
 impact, and candidate-test trace. The versioned `evidence` response includes
@@ -327,7 +373,9 @@ uses the base-branch file. Git history is pinned to the impact snapshot's HEAD
 and does not follow renames.
 
 The UI renders redundant text and visual marks for SARIF, coverage, JUnit,
-runtime spans, project knowledge, ownership, and churn. Runtime parent-child
+SCIP, runtime spans, project knowledge, ownership, and churn. Exact SCIP
+symbol/file endpoint pairs supersede Tree-sitter as static provenance without
+changing the returned graph. Runtime parent-child
 file pairs may decorate an already returned static edge in either direction,
 but they never create a node or edge. Overlay switches change emphasis and
 inspector detail only; they do not add or remove codegraph topology. Imported
@@ -416,6 +464,7 @@ Run `mmcg watch` in a separate terminal so the index stays current while you wor
 | `mmcg_unreferenced` | optional `kind`, `language` | Symbols that no edge references. Dead-code candidates. **Review manually** — see Limitations for false-positive scenarios. |
 | `mmcg_api_surface` | `prefix`, optional `language` | Symbols under `prefix` referenced from at least one file OUTSIDE `prefix`. Empirical "who-uses-this-module" map; doesn't need declared visibility. |
 | `mmcg_centrality` | optional `prefix`, `language`, `kind`, `top` (default 20) | Rank symbols by in-degree (distinct callers). Pre-flight "where is the gravity" — top hits are the structural attractors of the codebase or a subdirectory. Use to learn what to read first on unfamiliar code. Excludes synthetic `<module>` rows and zero-degree symbols. |
+| `mmcg_semantic` | `symbol`, optional `top` (default 100, max 500) | Compiler-resolved SCIP definitions, references, implementations, type definitions, and explicit provenance. Returns `fallback_active: true` instead of an error when no overlay exists. Stale document facts are omitted with diagnostics. |
 | `mmcg_map` | optional `path` (default `.`), `depth` (1–6, default 2), `top` (1–100, default 20), `production_only` (default `false`) | Schema-v1 architecture briefing with lexical file/directory scope: `%` and `_` are literal bytes, selected-directory components are relative to that directory, root components remain repository-relative, and selected files retain their paths. `production_only` excludes conventional test/fixture/example/generated/vendor path segments and test filenames (`test_*`, `*_test.*`, `*.test.*`, `*.spec.*`, `*Test.*`, `*Tests.*`) before bounded queries run. Hotspots prefer unambiguous definitions before pooled same-name collisions. JSON, text, Mermaid, and CLI SARIF are projections of the same result; Mermaid includes component counts/languages, boundaries, hotspots, and cycle rings, while SARIF exports returned cycles as architecture findings. Caps are 50,000 aggregation paths, 20 languages, 20 components, 20 boundaries/component and 400 globally, 50 entry points, 100 hotspots, 50,000 scoped cycle edges, 50 cycles, and 500 cycle memberships. `path_work_limit` marks path-derived partial aggregates; `top_probe` marks a hotspot or per-component boundary cap+1 probe; `global_probe_limit` marks components whose certainty was prevented by the 401st global boundary row; cycle `work_limit` returns no cycles because SCC analysis was skipped before truncated edges could be analyzed. |
 | `mmcg_change_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Stable schema-v1 analysis of the resolved baseline against staged, unstaged, and untracked content. Reports added/removed/signature/body-changed symbols, batched transitive callers, component crossings, ranked test candidates, a `disciplines` block routing the change to an evidence set, exact collection metadata, caps, and precision notes. Root, SHA-256 index freshness, Git snapshot, and SQLite snapshot checks fail closed with stable codes. |
 | `mmcg_test_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Exact test-focused projection of `mmcg_change_impact`. Changed tests and depth-1 graph tests are direct, deeper graph tests are transitive, and scoped filename candidates are heuristic. Focused candidates never replace the repository's full required gate. |
@@ -534,7 +583,7 @@ subprocess never reaches it. The watchdog is what covers those paths.
 - **Ten language families.** Python (`.py`, `.pyi`), TS/TSX (`.ts`, `.tsx`), JS/JSX (`.js`, `.jsx`, `.mjs`, `.cjs`), Vue SFC (`.vue`), Rust (`.rs`), C# (`.cs`), Go (`.go`), Java (`.java`), PHP (`.php`, `.phtml`), C/C++ (`.c`, `.cc`, `.cpp`, `.cxx`, `.h`, `.hpp`, `.hh`, `.hxx`, `.ipp`, `.tpp`). Extension matching is case-insensitive. Other extensions are skipped and appear in the bounded diagnostics sample.
 - **Call resolution is name-based, not type-based.** `obj.foo()` records a call to "foo" with literal path "obj.foo" — but `obj` isn't resolved to a type, so cross-file precision is best-effort.
 - **No cross-file symbol resolution.** Edges store `to_name` and `to_path` (strings), not `to_id`. Searching "callers of foo" finds *every* call to "foo" anywhere — even unrelated ones in different modules. The `to_path` column reduces ambiguity for imports specifically (use `mmcg_imported_by` with `match: path`).
-- **Path-based queries reflect literal source text, not semantic FQN.** When you index code with `use foo::bar::Baz` and `mmcg_imported_by --query "foo::bar::Baz" --match path` you'll get that file. But if another file imports the same type via `use crate::Baz` (re-exported), it stores `to_path = "crate::Baz"` and won't match the FQN query. Resolving paths to canonical FQNs would require parsing `Cargo.toml` / `package.json` / `pyproject.toml` and following re-exports — that's compiler-level work and out of scope. **Use `match: name` for "find all consumers"** (catches everything regardless of import phrasing); reserve `match: path` for "find this exact import spelling".
+- **Default path-based queries reflect literal source text, not semantic FQN.** When you index code with `use foo::bar::Baz` and `mmcg_imported_by --query "foo::bar::Baz" --match path` you'll get that file. But if another file imports the same type via `use crate::Baz` (re-exported), it stores `to_path = "crate::Baz"` and won't match the FQN query. **Use `match: name` for "find all syntactic consumers"**; reserve `match: path` for "find this exact import spelling". When the language's SCIP producer resolves the re-export, import its artifact and use `mmcg_semantic` for the compiler identity; this does not rewrite the literal Tree-sitter import edge.
 - **`to_type` for member-call detection uses a capital-letter heuristic in TS/JS/Python.** `Class.method()`, `JSON.parse()`, `Foo.bar.baz()` correctly emit `to_type = "Class"` / `"JSON"` / `"Foo"` (rightmost capitalized receiver). For Rust, `to_type` is unambiguous via the `scoped_identifier` AST node — no heuristic needed. The heuristic misses calls on uppercase-named variables (e.g. `const FOO = new Bar(); FOO.method()` won't emit `to_type=FOO`) but matches the common convention used in idiomatic JS/TS/Python code.
 - **JSX component usage is resolved by the uppercase-tag convention.** `<Button />` and `<Select.Option />` emit `calls` edges from the containing component; `<div>` and `<section>` do not, because a syntactic parser cannot otherwise tell a component from a host element. A component deliberately named in lowercase is invisible, and a capitalized host element in a custom renderer would be counted. `mmcg_callers` on a component therefore answers "who renders this", which is the frontend equivalent of "who calls this".
 - **Variable-declared functions are named after their binding.** `const Card = () => …`, `const Card = function () {…}`, and one level of wrapper call (`memo(…)`, `forwardRef(…)`, `styled(…)`) become `function` symbols named `Card`, with the inner parameters as the signature so a changed props contract still reports as `signature_changed`. Wrapper unwrapping stops at one level: `memo(forwardRef(() => …))` finds no inner function and produces no symbol. A non-function value that merely receives a callback (`const x = compute(() => 1)`) is captured as a function symbol — a known over-capture of the same heuristic.
@@ -547,7 +596,7 @@ subprocess never reaches it. The watchdog is what covers those paths.
 - **`mmcg_recent_changes` reflects index mtime, not git history.** If you re-index after rewriting history (rebase, amend, force-push) every touched file appears as "recent". Use `git log --since=...` for git truth; use this tool for "what has my watcher seen lately".
 - **C# partial classes** are stored as one symbol per file under an indexed namespace parent. `mmcg_search` collapses declarations only when name, kind, and namespace identity all match, returning a `locations` array; set `collapse_partials: false` to opt out. Legacy/malformed rows without namespace identity remain separate rather than risk merging unrelated types. `mmcg_callers` / `mmcg_callees` / `mmcg_impact` / `mmcg_outline` are unaffected: they resolve by name. Non-partial classes with colliding names across namespaces are *not* collapsed.
 - **Python module-level constants** (`MAX_RETRIES = 5`, `__all__ = [...]`, `HOST, PORT = ...`) are captured as `kind="constant"` since 0.14.0. Scoping is strict — only DIRECT children of the module node count; assignments inside `if` / `for` / `try` / class bodies / function bodies are not constants. `mmcg_unreferenced` **excludes constants by default** because the call/import graph doesn't track value-reads — every constant would otherwise appear as dead. Opt-in with `kind=constant` to surface unused constants explicitly. `mmcg_callers MAX_RETRIES` still works for the cases where a constant is referenced via `import` (`from foo import MAX_RETRIES` produces an `imports` edge) or attribute access (`foo.MAX_RETRIES` produces a `calls` edge to leaf `MAX_RETRIES`). Other languages: not extracted (TS/Rust/Go/etc. constants are typed declarations through different AST shapes — file a request if you need them).
-- **C/C++ is best-effort.** The C/C++ extractor uses tree-sitter alone — no preprocessor, no template instantiation, no semantic analysis. Concretely: (a) **macros are invisible** — `TEST(Suite, Name) { ... }` is seen as a call to `TEST`, not as a function definition, so gtest/Catch2 test bodies don't appear in `mmcg_search` and calls inside macro arguments may be lost; (b) **templates** record the template name but not instantiations (`vector<int>` doesn't create a `vector<int>` symbol); (c) **header/source split** produces two symbol rows (`void Foo::bar()` declared in `.h` and defined in `.cpp` = two `bar` hits); (d) **ADL/overload resolution** isn't performed (`swap(a, b)` records `swap` without knowing which namespace it resolves to); (e) **`#include` file resolution** tries exact repository-relative, source-relative, then deterministic suffix matches for map/cycle edges. It can over-approximate when several headers share a basename and it does not parse the included contents. For high-precision C++ structural analysis use `clangd` (semantic, slow, large) or `ctags` (similar tradeoffs to this extractor). mmcg uses one `tree-sitter-cpp` grammar for both `.c` and `.cpp` files — rare C-only code that uses C++ keywords as identifiers (e.g. a variable named `new`) may mis-parse.
+- **C/C++ Tree-sitter is best-effort.** The default C/C++ extractor has no preprocessor, template instantiation, or semantic analysis. Concretely: (a) **macros are invisible** — `TEST(Suite, Name) { ... }` is seen as a call to `TEST`, not as a function definition, so gtest/Catch2 test bodies don't appear in `mmcg_search` and calls inside macro arguments may be lost; (b) **templates** record the template name but not instantiations (`vector<int>` doesn't create a `vector<int>` symbol); (c) **header/source split** produces two symbol rows (`void Foo::bar()` declared in `.h` and defined in `.cpp` = two `bar` hits); (d) **ADL/overload resolution** isn't performed (`swap(a, b)` records `swap` without knowing which namespace it resolves to); (e) **`#include` file resolution** tries exact repository-relative, source-relative, then deterministic suffix matches for map/cycle edges. It can over-approximate when several headers share a basename and it does not parse the included contents. A `scip-clang` artifact imported through `mmcg enrich --scip` can add compiler-resolved identities and references, while the syntactic graph remains the fallback. mmcg uses one `tree-sitter-cpp` grammar for both `.c` and `.cpp` files — rare C-only code that uses C++ keywords as identifiers (e.g. a variable named `new`) may mis-parse.
 
 ## CI
 

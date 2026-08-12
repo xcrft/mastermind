@@ -217,6 +217,7 @@ static TOOLS: &[ToolDef] = &[
     read_only_tool("mmcg_tasks", schema_tasks, handle_tasks),
     read_only_tool("mmcg_history", schema_history, handle_history),
     read_only_tool("mmcg_centrality", schema_centrality, handle_centrality),
+    read_only_tool("mmcg_semantic", schema_semantic, handle_semantic),
     read_only_tool("mmcg_map", schema_map, handle_map),
     read_only_tool(
         "mmcg_change_impact",
@@ -1376,6 +1377,21 @@ fn schema_map() -> Value {
     })
 }
 
+fn schema_semantic() -> Value {
+    json!({
+        "name": "mmcg_semantic",
+        "description": "Inspect optional compiler-resolved SCIP definitions, references, implementations, and type-definition relationships. Results carry provenance=scip and confidence=high. If no SCIP overlay was imported, fallback_active=true and the normal Tree-sitter graph remains available. Import or replace the overlay explicitly with `mastermind enrich --scip index.scip`.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": { "type": "string", "minLength": 1, "maxLength": 16384, "description": "SCIP symbol string or literal display-name fragment" },
+                "top": { "type": "integer", "minimum": 1, "maximum": 500, "default": 100 }
+            },
+            "required": ["symbol"]
+        }
+    })
+}
+
 fn impact_input_schema(name: &str, description: &str) -> Value {
     json!({
         "name": name,
@@ -1687,6 +1703,27 @@ fn handle_map(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
                 }
                 _ => HandlerError::internal("project_map_query", error),
             })?;
+    serde_json::to_value(result)
+        .map_err(|error| HandlerError::internal("serialize_response", error))
+}
+
+fn handle_semantic(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
+    let symbol = str_arg(args, "symbol")?;
+    if symbol.trim().is_empty() || symbol.len() > 16 * 1024 {
+        return Err(HandlerError::InvalidArguments(
+            "Invalid argument: symbol".into(),
+        ));
+    }
+    let top = match args.get("top") {
+        None => 100,
+        Some(value) => value
+            .as_u64()
+            .filter(|value| (1..=500).contains(value))
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| HandlerError::InvalidArguments("Invalid argument: top".into()))?,
+    };
+    let result = crate::scip_overlay::query(store, symbol, top)
+        .map_err(|error| HandlerError::internal("semantic_query", error))?;
     serde_json::to_value(result)
         .map_err(|error| HandlerError::internal("serialize_response", error))
 }
@@ -2400,7 +2437,7 @@ mod tests {
     #[test]
     fn tool_annotations_match_behavior_table() {
         let legacy = tools_list(ProtocolVersion::Legacy);
-        assert_eq!(legacy["tools"].as_array().unwrap().len(), 24);
+        assert_eq!(legacy["tools"].as_array().unwrap().len(), 25);
         assert!(legacy["tools"]
             .as_array()
             .unwrap()
@@ -2409,7 +2446,7 @@ mod tests {
 
         let current = tools_list(ProtocolVersion::Current);
         let tools = current["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 24);
+        assert_eq!(tools.len(), 25);
         let mut readers = 0;
         for tool in tools {
             let annotations = &tool["annotations"];
@@ -2428,7 +2465,30 @@ mod tests {
                 readers += 1;
             }
         }
-        assert_eq!(readers, 23);
+        assert_eq!(readers, 24);
+    }
+
+    #[test]
+    fn semantic_tool_keeps_no_overlay_as_a_read_only_fallback() {
+        let path =
+            std::env::temp_dir().join(format!("mmcg-mcp-semantic-fallback-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut store = Store::open(&path).unwrap();
+        let result = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({
+                "name": "mmcg_semantic",
+                "arguments": { "symbol": "target", "top": 10 }
+            }),
+        )
+        .unwrap();
+        assert_eq!(result["isError"], false);
+        let payload = unwrap_content(&result);
+        assert_eq!(payload["available"], false);
+        assert_eq!(payload["fallback_active"], true);
+        assert_eq!(payload["resolution"]["default_graph"], "tree-sitter");
+        std::fs::remove_file(path).ok();
     }
 
     #[test]
@@ -2999,7 +3059,7 @@ mod tests {
     #[test]
     fn tools_list_covers_every_handler() {
         let listed: Vec<&str> = TOOLS.iter().map(|t| t.name).collect();
-        assert_eq!(listed.len(), 24, "expected 24 tools, got {}", listed.len());
+        assert_eq!(listed.len(), 25, "expected 25 tools, got {}", listed.len());
         for name in &listed {
             assert!(
                 TOOLS.iter().any(|t| &t.name == name),

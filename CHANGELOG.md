@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `mastermind enrich --scip index.scip` adds an optional compiler-resolved
+  semantic layer without replacing the default Tree-sitter graph. SCIP
+  definitions, references, implementations, and type definitions are stored in
+  separate additive tables, exposed through CLI/MCP, and shown in Lens with
+  explicit high-confidence provenance and stale-file suppression. Import is
+  streamed and rejects semantic evidence that cannot be bound to the indexed
+  repository.
 - `mastermind ui --since <ref>` serves Mastermind Lens: an offline, loopback-only,
   read-only diff-first review UI backed by the existing bounded project-map and
   change-impact schemas. Checkpointed indexes open immutably; active WAL state is

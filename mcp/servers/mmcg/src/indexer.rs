@@ -464,65 +464,88 @@ impl Indexer {
     ) -> Result<ProjectHistoryIndexStats, IndexError> {
         self.bind_or_validate_index_root(store)?;
         let mut candidates: Vec<(PathBuf, &'static str)> = Vec::new();
-        let mut add_if_present = |path: PathBuf, kind: &'static str| {
-            if std::fs::symlink_metadata(&path).is_ok() {
-                candidates.push((path, kind));
-            }
-        };
-        add_if_present(self.root.join("CONTEXT.md"), "context");
-        if let Ok(entries) = std::fs::read_dir(&self.root) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-                    continue;
-                };
-                if name.starts_with("CONTEXT-archive-") && name.ends_with(".md") {
-                    add_if_present(path, "context");
+        {
+            let mut add_if_present = |path: PathBuf, kind: &'static str| {
+                if std::fs::symlink_metadata(&path).is_ok() {
+                    candidates.push((path, kind));
+                }
+            };
+            add_if_present(self.root.join("CONTEXT.md"), "context");
+            if let Ok(entries) = std::fs::read_dir(&self.root) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                        continue;
+                    };
+                    if name.starts_with("CONTEXT-archive-") && name.ends_with(".md") {
+                        add_if_present(path, "context");
+                    }
                 }
             }
-        }
 
-        let tasks_dir = self.root.join(".mastermind").join("tasks");
-        add_if_present(tasks_dir.join("_lessons.md"), "lesson");
-        if tasks_dir.is_dir() {
-            for dirent in
-                std::fs::read_dir(&tasks_dir).map_err(|error| IndexError::Io(error.to_string()))?
-            {
-                let dirent = dirent.map_err(|error| IndexError::Io(error.to_string()))?;
-                let path = dirent.path();
-                let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-                    continue;
-                };
-                let Ok(metadata) = std::fs::symlink_metadata(&path) else {
-                    continue;
-                };
-                if !metadata.file_type().is_dir()
-                    || metadata.file_type().is_symlink()
-                    || name.starts_with('_')
-                    || name.starts_with('.')
+            let tasks_dir = self.root.join(".mastermind").join("tasks");
+            add_if_present(tasks_dir.join("_lessons.md"), "lesson");
+            if tasks_dir.is_dir() {
+                for dirent in std::fs::read_dir(&tasks_dir)
+                    .map_err(|error| IndexError::Io(error.to_string()))?
                 {
-                    continue;
+                    let dirent = dirent.map_err(|error| IndexError::Io(error.to_string()))?;
+                    let path = dirent.path();
+                    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                        continue;
+                    };
+                    let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                        continue;
+                    };
+                    if !metadata.file_type().is_dir()
+                        || metadata.file_type().is_symlink()
+                        || name.starts_with('_')
+                        || name.starts_with('.')
+                    {
+                        continue;
+                    }
+                    add_if_present(path.join("spec.md"), "task_spec");
+                    add_if_present(path.join("executor-report.md"), "executor_report");
+                    add_if_present(path.join("audit.md"), "audit");
+                    // Pre-0.39 tasks could keep release notes beside the spec.
+                    add_if_present(path.join("release-notes.md"), "release_notes");
                 }
-                add_if_present(path.join("spec.md"), "task_spec");
-                add_if_present(path.join("executor-report.md"), "executor_report");
-                add_if_present(path.join("audit.md"), "audit");
-                // Pre-0.39 tasks could keep release notes beside the spec.
-                add_if_present(path.join("release-notes.md"), "release_notes");
+            }
+            let releases_dir = self.root.join(".mastermind").join("releases");
+            if let Ok(entries) = std::fs::read_dir(&releases_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let is_markdown =
+                        path.extension().and_then(|value| value.to_str()) == Some("md");
+                    if is_markdown {
+                        add_if_present(path, "release_notes");
+                    }
+                }
             }
         }
-        let releases_dir = self.root.join(".mastermind").join("releases");
-        if let Ok(entries) = std::fs::read_dir(&releases_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let is_markdown = path.extension().and_then(|value| value.to_str()) == Some("md");
-                if is_markdown {
-                    add_if_present(path, "release_notes");
-                }
-            }
+        let mut decision_roots = [
+            "docs/adr",
+            "docs/adrs",
+            "docs/decisions",
+            "adr",
+            "adrs",
+            ".mastermind/decisions",
+        ]
+        .map(|relative| self.root.join(relative));
+        decision_roots.sort();
+        let mut decision_directories = 0usize;
+        let mut decision_truncated = false;
+        for decision_root in decision_roots {
+            decision_truncated |= add_markdown_tree_candidates(
+                &decision_root,
+                "architecture_decision",
+                &mut candidates,
+                &mut decision_directories,
+            );
         }
         candidates.sort_by(|left, right| left.0.cmp(&right.0));
         candidates.dedup_by(|left, right| left.0 == right.0);
-        let truncated = candidates.len() > MAX_HISTORY_ENTRIES;
+        let truncated = decision_truncated || candidates.len() > MAX_HISTORY_ENTRIES;
         candidates.truncate(MAX_HISTORY_ENTRIES);
 
         let mut entries = Vec::new();
@@ -589,6 +612,61 @@ impl Indexer {
             .commit_file(pending)
             .map_err(|e| IndexError::Other(e.to_string()))
     }
+}
+
+fn add_markdown_tree_candidates(
+    root: &Path,
+    kind: &'static str,
+    candidates: &mut Vec<(PathBuf, &'static str)>,
+    visited_directories: &mut usize,
+) -> bool {
+    let metadata = match std::fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    };
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return false;
+    }
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        if candidates.len() > MAX_HISTORY_ENTRIES || *visited_directories >= MAX_HISTORY_ENTRIES {
+            return true;
+        }
+        *visited_directories += 1;
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(_) => return true,
+        };
+        let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
+        entries.sort_by_key(std::fs::DirEntry::path);
+        let mut directories = Vec::new();
+        for entry in entries {
+            let path = entry.path();
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.file_type().is_dir() {
+                directories.push(path);
+            } else if metadata.file_type().is_file()
+                && path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|value| value.eq_ignore_ascii_case("md"))
+            {
+                candidates.push((path, kind));
+                if candidates.len() > MAX_HISTORY_ENTRIES {
+                    return true;
+                }
+            }
+        }
+        directories.reverse();
+        pending.extend(directories);
+    }
+    false
 }
 
 fn push_path_sample(samples: &mut Vec<String>, path: &str) {
@@ -1196,6 +1274,14 @@ mod incremental_tests {
             "# Audit\n\nVerified the runtime boundary.\n",
         )
         .unwrap();
+        let adr_dir = dir.join("docs/adr/accepted");
+        fs::create_dir_all(&adr_dir).unwrap();
+        fs::write(
+            adr_dir.join("004-storage.md"),
+            "# Storage boundary\n\nThe ledger owns durable payment state.\n",
+        )
+        .unwrap();
+        fs::write(adr_dir.join("draft.txt"), "not a durable Markdown ADR\n").unwrap();
         let releases_dir = dir.join(".mastermind/releases");
         fs::create_dir_all(&releases_dir).unwrap();
         fs::write(
@@ -1213,10 +1299,10 @@ mod incremental_tests {
         let mut store = Store::open(&db).unwrap();
         let indexer = Indexer::new(&dir);
         let stats = indexer.index_all(&mut store, false).unwrap();
-        assert_eq!(stats.history_entries_indexed, 7);
+        assert_eq!(stats.history_entries_indexed, 8);
         assert_eq!(stats.history_entries_skipped, 1);
         assert!(!stats.history_entries_truncated);
-        assert_eq!(store.project_history_count().unwrap(), 7);
+        assert_eq!(store.project_history_count().unwrap(), 8);
         let lesson = store
             .search_project_history("middleware bypassed", Some("lesson"), 10)
             .unwrap();
@@ -1239,10 +1325,17 @@ mod incremental_tests {
                 .len(),
             1
         );
+        assert_eq!(
+            store
+                .search_project_history("durable payment state", Some("architecture_decision"), 10,)
+                .unwrap()
+                .len(),
+            1
+        );
 
         fs::remove_file(task_dir.join("audit.md")).unwrap();
         let stats = indexer.index_all(&mut store, false).unwrap();
-        assert_eq!(stats.history_entries_indexed, 6);
+        assert_eq!(stats.history_entries_indexed, 7);
         assert!(store
             .search_project_history("runtime boundary", Some("audit"), 10)
             .unwrap()

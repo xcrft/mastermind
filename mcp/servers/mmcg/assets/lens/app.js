@@ -10,7 +10,7 @@
   const CONNECTED_PER_LANE = 5;
   const MOBILE_CANDIDATES_PER_PAGE = 5;
   const MOBILE_CONNECTED_PER_LANE = 2;
-  const OVERLAY_KEYS = ["findings", "coverage", "ownership", "churn"];
+  const OVERLAY_KEYS = ["findings", "coverage", "ownership", "churn", "tests", "runtime", "knowledge"];
 
   const state = {
     raw: null,
@@ -253,12 +253,17 @@
     const coverage = isRecord(source.coverage) ? record(source.coverage) : null;
     const ownership = isRecord(source.ownership) ? record(source.ownership) : null;
     const churn = isRecord(source.churn) ? record(source.churn) : null;
+    const testResults = isRecord(source.test_results) ? record(source.test_results) : null;
+    const runtime = isRecord(source.runtime) ? record(source.runtime) : null;
     return {
       path: text(source.path, ""),
       findings: array(source.findings).map(record),
       coverage: coverage,
       ownership: ownership,
       churn: churn,
+      testResults: testResults,
+      runtime: runtime,
+      knowledge: array(source.knowledge).map(record),
     };
   }
 
@@ -326,6 +331,17 @@
       const commits = finiteNumber(evidence.churn.commits);
       signals.push(displayNumber(commits) + " recent commit" + (commits === 1 ? "" : "s"));
     }
+    if (overlayEnabled("tests") && evidence.testResults) {
+      const failed = (finiteNumber(evidence.testResults.failed) || 0) + (finiteNumber(evidence.testResults.errors) || 0);
+      signals.push(displayNumber(failed) + " failed JUnit case" + (failed === 1 ? "" : "s"));
+    }
+    if (overlayEnabled("runtime") && evidence.runtime) {
+      const spans = finiteNumber(evidence.runtime.spans);
+      signals.push(displayNumber(spans) + " runtime span" + (spans === 1 ? "" : "s"));
+    }
+    if (overlayEnabled("knowledge") && evidence.knowledge.length > 0) {
+      signals.push(evidence.knowledge.length + " exact project-knowledge match" + (evidence.knowledge.length === 1 ? "" : "es"));
+    }
     return signals;
   }
 
@@ -349,6 +365,16 @@
     if (overlayEnabled("churn") && evidence.churn) {
       marks.push("G" + displayNumber(finiteNumber(evidence.churn.commits)));
     }
+    if (overlayEnabled("tests") && evidence.testResults) {
+      const failed = (finiteNumber(evidence.testResults.failed) || 0) + (finiteNumber(evidence.testResults.errors) || 0);
+      marks.push("T" + displayNumber(failed) + "F");
+    }
+    if (overlayEnabled("runtime") && evidence.runtime) {
+      marks.push("R" + displayNumber(finiteNumber(evidence.runtime.spans)));
+    }
+    if (overlayEnabled("knowledge") && evidence.knowledge.length > 0) {
+      marks.push("K" + evidence.knowledge.length);
+    }
     return marks.join(" · ");
   }
 
@@ -369,6 +395,7 @@
     const evidenceSources = collection(evidence.sources);
     const evidenceFiles = collection(evidence.files);
     const evidenceDiagnostics = collection(evidence.diagnostics);
+    const runtimeEdges = collection(evidence.runtime_edges);
     const evidenceByPath = new Map();
     evidenceFiles.items.map(normalizeFileEvidence).forEach(function (item) {
       if (item.path) {
@@ -482,6 +509,13 @@
     });
     edges.forEach(function (edge) {
       edge.ownershipBoundary = ownershipBoundary(edge.from.evidence, edge.to.evidence);
+      const fromFile = text(edge.from.symbol.file, "");
+      const toFile = text(edge.to.symbol.file, "");
+      edge.runtimeEvidence = runtimeEdges.items.map(record).filter(function (runtimeEdge) {
+        const parent = text(runtimeEdge.parent_file, "");
+        const child = text(runtimeEdge.child_file, "");
+        return (parent === fromFile && child === toFile) || (parent === toFile && child === fromFile);
+      });
     });
 
     const componentRows = buildComponentRows(
@@ -509,6 +543,7 @@
       evidenceSources: evidenceSources,
       evidenceFiles: evidenceFiles,
       evidenceDiagnostics: evidenceDiagnostics,
+      runtimeEdges: runtimeEdges,
       evidenceByPath: evidenceByPath,
       nodes: nodes,
       edges: edges,
@@ -635,6 +670,7 @@
       ["Map hotspots", map.hotspots],
       ["Map cycles", map.cycles],
       ["Evidence files", evidence.files],
+      ["Runtime evidence edges", evidence.runtime_edges],
       ["Evidence diagnostics", evidence.diagnostics],
     ];
     candidates.forEach(function (candidate) {
@@ -1038,7 +1074,7 @@
       ? "No external evidence sources loaded; the static graph remains available."
       : sources.length + " source" + (sources.length === 1 ? "" : "s") + " · " + matchedFiles + " matched trace file" + (matchedFiles === 1 ? "" : "s") + (record(state.model.evidence).partial === true ? " · partial" : "");
     if (sources.length === 0) {
-      elements.evidenceSourceList.appendChild(createElement("p", "evidence-source-list__empty", "Pass --sarif, --coverage, --codeowners, or --git-commits to add corroborating facts."));
+      elements.evidenceSourceList.appendChild(createElement("p", "evidence-source-list__empty", "Pass --sarif, --coverage, --junit, --otel, --codeowners, or --git-commits to add corroborating facts."));
       return;
     }
     sources.forEach(function (source) {
@@ -2081,8 +2117,9 @@
     const relation = edge.type === "test" ? "Test evidence" : "Impact evidence";
     const boundary = edge.crossing ? ", boundary crossing" : "";
     const ownership = overlayEnabled("ownership") && edge.ownershipBoundary ? ", ownership boundary" : "";
+    const runtime = overlayEnabled("runtime") && edge.runtimeEvidence.length > 0 ? ", runtime trace corroborated" : "";
     return relation + " from " + text(edge.from.symbol.name, "unnamed seed")
-      + " to " + text(edge.to.symbol.name, "unnamed claim") + boundary + ownership + ". Select for details.";
+      + " to " + text(edge.to.symbol.name, "unnamed claim") + boundary + ownership + runtime + ". Select for details.";
   }
 
   function drawEdge(layer, edge, from, to, mobile, width) {
@@ -2102,6 +2139,9 @@
     }
     if (overlayEnabled("ownership") && edge.ownershipBoundary) {
       classes.push("graph-edge--ownership");
+    }
+    if (overlayEnabled("runtime") && edge.runtimeEvidence.length > 0) {
+      classes.push("graph-edge--runtime");
     }
     if (state.selectedId === edge.id) {
       classes.push("is-selected");
@@ -2525,6 +2565,51 @@
         "No churn facts returned."
       );
     }
+    if (overlayEnabled("tests") && evidence.testResults) {
+      const tests = evidence.testResults;
+      const sourceIds = array(tests.source_ids).map(function (value) { return text(value, ""); }).filter(Boolean);
+      const summary = displayNumber(finiteNumber(tests.total)) + " total · "
+        + displayNumber(finiteNumber(tests.passed)) + " passed · "
+        + displayNumber(finiteNumber(tests.failed)) + " failed · "
+        + displayNumber(finiteNumber(tests.errors)) + " errors · "
+        + displayNumber(finiteNumber(tests.skipped)) + " skipped"
+        + (sourceIds.length > 0 ? " · sources " + sourceIds.join(", ") : "")
+        + (tests.failures_truncated === true ? " · failure details truncated" : "");
+      const failures = array(tests.failures).map(function (value) {
+        const failure = record(value);
+        const className = text(failure.class_name, "");
+        return text(failure.name, "Unnamed test") + " · " + text(failure.status, "failed")
+          + (className ? " · " + className : "") + " · " + text(failure.message, "No failure detail returned");
+      });
+      appendClaimList(
+        "JUnit · file-level",
+        [summary].concat(failures),
+        failures.length > 0 ? "risk" : "test",
+        "No JUnit facts returned."
+      );
+    }
+    if (overlayEnabled("runtime") && evidence.runtime) {
+      appendClaimList(
+        "Runtime spans · file-level",
+        [displayNumber(finiteNumber(evidence.runtime.spans)) + " spans · "
+          + displayNumber(finiteNumber(evidence.runtime.traces)) + " traces · sources "
+          + array(evidence.runtime.source_ids).map(function (value) { return text(value, ""); }).filter(Boolean).join(", ")],
+        "runtime",
+        "No runtime facts returned."
+      );
+    }
+    if (overlayEnabled("knowledge") && evidence.knowledge.length > 0) {
+      appendClaimList(
+        "Project knowledge · exact path",
+        evidence.knowledge.map(function (value) {
+          const item = record(value);
+          return text(item.kind, "project record") + " · " + text(item.title, "Untitled")
+            + " · " + text(item.artifact_path, "path unavailable") + " · " + text(item.excerpt, "No excerpt returned");
+        }),
+        "knowledge",
+        "No exact project-knowledge matches returned."
+      );
+    }
   }
 
   function renderEdgeInspector(edge) {
@@ -2545,6 +2630,7 @@
       ["Name collisions", displayNumber(edge.collisionCount)],
       ["Boundary crossing", edge.crossing ? "Observed" : "Not returned"],
       ["Ownership boundary", overlayEnabled("ownership") && edge.ownershipBoundary ? "Observed from CODEOWNERS" : "Not returned"],
+      ["Runtime trace", overlayEnabled("runtime") && edge.runtimeEvidence.length > 0 ? "Corroborated" : "Not returned"],
     ]);
     appendClaimList("Evidence endpoints", [
       "FROM · " + text(edge.from.symbol.name, "unnamed") + " · " + text(edge.from.symbol.file, "file unavailable") + formatLine(edge.from.symbol.line),
@@ -2564,6 +2650,23 @@
         ],
         "ownership",
         "No CODEOWNERS evidence returned."
+      );
+    }
+    if (overlayEnabled("runtime") && edge.runtimeEvidence.length > 0) {
+      appendClaimList(
+        "Runtime trace corroboration",
+        edge.runtimeEvidence.map(function (value) {
+          const runtime = record(value);
+          const names = array(runtime.span_names).map(function (name) { return text(name, ""); }).filter(Boolean);
+          return text(runtime.parent_file, "file unavailable") + " → " + text(runtime.child_file, "file unavailable")
+            + " · " + displayNumber(finiteNumber(runtime.spans)) + " spans · "
+            + displayNumber(finiteNumber(runtime.traces)) + " traces"
+            + (names.length > 0 ? " · " + names.join(", ") : "")
+            + (runtime.names_truncated === true ? " · span names truncated" : "")
+            + (array(runtime.source_ids).length > 0 ? " · sources " + array(runtime.source_ids).map(function (value) { return text(value, ""); }).filter(Boolean).join(", ") : "");
+        }),
+        "runtime",
+        "No matching runtime evidence returned."
       );
     }
     elements.inspector.appendChild(createElement(

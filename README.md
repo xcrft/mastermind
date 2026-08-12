@@ -80,6 +80,7 @@ See [Getting started](docs/getting-started.md) for global vs per-repository stat
 mastermind map .                     # readable architecture briefing
 mastermind map src --format mermaid  # scoped diagram
 mastermind map . --format json       # stable schema for automation
+mastermind map . --format sarif      # dependency cycles for GitHub code scanning
 mastermind map . --production-only   # hide tests, fixtures, examples, generated/vendor code
 ```
 
@@ -91,7 +92,8 @@ The map highlights languages, components, entry points, dependency boundaries, h
 mastermind ui --since main
 mastermind ui --since main \
   --sarif semgrep.sarif --sarif codeql.sarif \
-  --coverage lcov.info --coverage cobertura.xml
+  --coverage lcov.info --coverage cobertura.xml \
+  --junit junit.xml --otel traces.json
 ```
 
 Lens serves a local, read-only, diff-first review UI on an ephemeral loopback
@@ -101,11 +103,17 @@ Use `--path`, `--depth`, `--top`, or `--production-only` to narrow a large
 monorepo review.
 
 Lens evidence overlays correlate the returned static trace with SARIF findings,
-LCOV/Cobertura line coverage, CODEOWNERS, and bounded Git churn/contributors.
+LCOV/Cobertura line coverage, JUnit results, explicit OpenTelemetry code paths,
+CODEOWNERS, bounded Git churn/contributors, and exact changed-file mentions in
+indexed specs, ADRs, audits, lessons, and context.
 The graph topology stays unchanged: overlays add source-labelled marks and
 inspector facts rather than an opaque risk score. Lens auto-discovers
 `.github/CODEOWNERS`, `CODEOWNERS`, or `docs/CODEOWNERS`; use `--codeowners` to
 override it and `--git-commits 0..1000` to control history (`200` by default).
+Project-knowledge correlation is enabled by default; use
+`--no-project-knowledge` to suppress it. Runtime evidence decorates an existing
+static edge only when the two file endpoints match in either direction; it
+never creates graph topology.
 CODEOWNERS is matched as working-tree syntax only; Lens does not claim that a
 listed account has GitHub write access or replace base-branch review policy.
 Unreadable, oversized, invalid, or truncated sources remain visible as partial
@@ -117,9 +125,16 @@ the repository or codegraph database.
 ```bash
 mastermind impact --since main
 mastermind impact --since HEAD~1 --format json
+mastermind impact --since main --format sarif > mastermind-impact.sarif
 ```
 
 Impact analysis compares a Git baseline with committed, staged, unstaged, and untracked work. It reports symbol-level changes, affected callers, component crossings, and candidate tests. Focused candidates are evidence for prioritization, not a replacement for the repository's required test suite.
+
+The SARIF projections use stable architecture rule IDs and repository-relative
+artifact URIs so dependency cycles and cross-component change risks can be
+uploaded through GitHub's standard SARIF workflow. They export only returned
+bounded findings and preserve partial-result metadata; an empty partial export
+is not a clean verdict.
 
 ### Review architecture invariants
 

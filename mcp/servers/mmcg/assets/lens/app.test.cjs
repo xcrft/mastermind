@@ -212,7 +212,7 @@ function createDocument() {
     button.setAttribute("data-scope", scope);
     return button;
   });
-  const overlayButtons = ["findings", "coverage", "ownership", "churn"].map((overlay) => {
+  const overlayButtons = ["findings", "coverage", "ownership", "churn", "tests", "runtime", "knowledge"].map((overlay) => {
     const button = new MockElement("button");
     button.dataset.overlay = overlay;
     button.setAttribute("data-overlay", overlay);
@@ -263,14 +263,17 @@ function fixture() {
       schema_version: 1,
       partial: false,
       sources: {
-        total: 4,
-        returned: 4,
+        total: 7,
+        returned: 7,
         truncated: false,
         items: [
           { id: "sarif:0", kind: "sarif", label: "semgrep.sarif", status: "loaded", facts_total: 1, facts_returned: 1, files_matched: 1 },
           { id: "coverage:0", kind: "coverage", label: "lcov.info", status: "loaded", facts_total: 2, facts_returned: 2, files_matched: 1 },
           { id: "codeowners", kind: "codeowners", label: ".github/CODEOWNERS", status: "loaded", facts_total: 3, facts_returned: 3, files_matched: 3 },
           { id: "git-history", kind: "git_history", label: "Git · last 200 commits", status: "loaded", facts_total: 3, facts_returned: 3, files_matched: 2 },
+          { id: "junit:0", kind: "junit", label: "junit.xml", status: "loaded", facts_total: 1, facts_returned: 1, files_matched: 1 },
+          { id: "otel:0", kind: "otel", label: "traces.json", status: "loaded", facts_total: 2, facts_returned: 2, files_matched: 2 },
+          { id: "project-knowledge", kind: "project_knowledge", label: "Indexed project knowledge", status: "loaded", facts_total: 1, facts_returned: 1, files_matched: 1 },
         ],
       },
       files: {
@@ -284,22 +287,45 @@ function fixture() {
             coverage: { source_ids: ["coverage:0"], lines_found: 2, lines_hit: 1 },
             ownership: { codeowners_source_id: "codeowners", codeowners: ["@security"], contributors: [{ name: "Alice", commits: 2 }] },
             churn: { commits: 2, lines_added: 7, lines_deleted: 3 },
+            test_results: {
+              source_ids: ["junit:0"], total: 1, passed: 0, failed: 1, errors: 0, skipped: 0,
+              duration_ms: 11, failures_truncated: false,
+              failures: [{ source_id: "junit:0", name: "authorization rejects", class_name: "AuthTest", status: "failed", message: "expected denial" }],
+            },
+            runtime: { source_ids: ["otel:0"], spans: 1, traces: 1 },
+            knowledge: [{
+              source_id: "project-knowledge", artifact_path: "docs/adr/004-auth.md",
+              kind: "architecture_decision", title: "Auth boundary", match_kind: "exact_path",
+              excerpt: "Keep src/auth.rs behind the security boundary.",
+            }],
           },
           {
             path: "src/target.rs",
             findings: [],
             ownership: { codeowners_source_id: "codeowners", codeowners: [], contributors: [] },
+            runtime: { source_ids: ["otel:0"], spans: 1, traces: 1 },
+            knowledge: [],
           },
           {
             path: "tests/auth.rs",
             findings: [],
             ownership: { codeowners_source_id: "codeowners", codeowners: [], contributors: [{ name: "Bob", commits: 1 }] },
             churn: { commits: 1, lines_added: 4, lines_deleted: 0 },
+            knowledge: [],
           },
         ],
       },
+      runtime_edges: {
+        total: 1,
+        returned: 1,
+        truncated: false,
+        items: [{
+          source_ids: ["otel:0"], parent_file: "src/auth.rs", child_file: "src/target.rs",
+          spans: 1, traces: 1, span_names: ["authorize_target"], names_truncated: false,
+        }],
+      },
       diagnostics: { total: 0, returned: 0, truncated: false, items: [] },
-      limits: { artifact_bytes: 33554432, artifact_sources: 64, relevant_files: 1000, findings: 5000, findings_per_file: 100, coverage_lines: 500000, codeowner_rules: 50000, codeowners_bytes: 3145728, owners_per_rule: 50, contributors_per_file: 5, diagnostics: 100, git_commits: 200 },
+      limits: { artifact_bytes: 33554432, artifact_sources: 64, relevant_files: 1000, findings: 5000, findings_per_file: 100, coverage_lines: 500000, test_cases: 100000, runtime_spans: 100000, runtime_edges: 1000, knowledge_matches: 500, codeowner_rules: 50000, codeowners_bytes: 3145728, owners_per_rule: 50, contributors_per_file: 5, diagnostics: 100, git_commits: 200 },
     },
     map: {
       scope: { aggregation_paths_truncated: false },
@@ -426,8 +452,8 @@ async function main() {
   );
 
   const harness = await renderFixture();
-  assert.match(harness.nodes.get("evidence-summary").textContent, /4 sources · 3 matched trace files/i);
-  assert.equal(harness.nodes.get("evidence-source-list").querySelectorAll(".evidence-source").length, 4);
+  assert.match(harness.nodes.get("evidence-summary").textContent, /7 sources · 3 matched trace files/i);
+  assert.equal(harness.nodes.get("evidence-source-list").querySelectorAll(".evidence-source").length, 7);
   const changedCandidate = harness.nodes.get("mobile-trace-list").querySelectorAll(".mobile-candidate")[0];
   assert.ok(changedCandidate, "Changed claim with overlays must remain selectable on mobile");
   assert.equal(
@@ -452,7 +478,14 @@ async function main() {
   assert.match(changedInspector, /50% reported lines covered \(1\/2\)/i);
   assert.match(changedInspector, /CODEOWNERS · @security/i);
   assert.match(changedInspector, /Git contributor · Alice · 2 commits/i);
+  assert.match(changedInspector, /JUnit · file-level/i);
+  assert.match(changedInspector, /authorization rejects · failed · AuthTest · expected denial/i);
+  assert.match(changedInspector, /Runtime spans · file-level/i);
+  assert.match(changedInspector, /1 spans · 1 traces/i);
+  assert.match(changedInspector, /Project knowledge · exact path/i);
+  assert.match(changedInspector, /architecture_decision · Auth boundary/i);
   const nodeCountBeforeToggle = harness.nodes.get("trace-graph").querySelectorAll("[data-node-id]").length;
+  const edgeCountBeforeToggle = harness.nodes.get("trace-graph").querySelectorAll("[data-edge-id]").length;
   const findings = harness.overlayButtons.find((button) => button.dataset.overlay === "findings");
   findings.dispatch("click");
   assert.equal(findings.getAttribute("aria-pressed"), "false");
@@ -463,6 +496,19 @@ async function main() {
     "Overlay visibility must not alter graph topology"
   );
   findings.dispatch("click");
+  const runtime = harness.overlayButtons.find((button) => button.dataset.overlay === "runtime");
+  runtime.dispatch("click");
+  assert.equal(runtime.getAttribute("aria-pressed"), "false");
+  assert.equal(
+    harness.nodes.get("trace-graph").querySelectorAll("[data-edge-id]").length,
+    edgeCountBeforeToggle,
+    "Runtime overlay visibility must never create or remove graph topology"
+  );
+  runtime.dispatch("click");
+  const runtimeEdge = harness.nodes.get("trace-graph").querySelectorAll("[data-edge-id]")[0];
+  runtimeEdge.dispatch("click");
+  assert.match(harness.nodes.get("inspector-body").textContent, /Runtime trace corroboration/i);
+  assert.match(harness.nodes.get("inspector-body").textContent, /src\/auth\.rs → src\/target\.rs/i);
   harness.nodes.get("fit-button").dispatch("click");
   const testsScope = harness.scopeButtons.find((button) => button.dataset.scope === "test");
   testsScope.dispatch("click");

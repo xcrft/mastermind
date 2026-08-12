@@ -1331,12 +1331,12 @@ fn schema_tasks() -> Value {
 fn schema_history() -> Value {
     json!({
         "name": "mmcg_history",
-        "description": "Search durable project history across active and archived CONTEXT files, canonical task specs, executor reports, audits, release notes, and lessons. Candidate lessons are unresolved audit signals, not active guidance. Returns observed FTS matches plus skipped/truncated signals; ranking and co-occurrence do not establish causality or correctness. The returned Markdown paths remain the source of truth, and callers should re-index after Markdown changes.",
+        "description": "Search durable project history across active and archived CONTEXT files, canonical task specs, executor reports, audits, release notes, lessons, and Markdown architecture decisions in conventional ADR directories. Candidate lessons are unresolved audit signals, not active guidance. Returns observed FTS matches plus skipped/truncated signals; ranking and co-occurrence do not establish causality or correctness. The returned Markdown paths remain the source of truth, and callers should re-index after Markdown changes.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "query": { "type": "string", "description": "FTS5 MATCH query (e.g. 'rate limit', 'auth OR session', '\"token bucket\"')" },
-                "kind": { "type": "string", "enum": ["context", "lesson", "task_spec", "executor_report", "audit", "release_notes"], "description": "Optional exact artifact-kind filter" },
+                "kind": { "type": "string", "enum": ["context", "lesson", "task_spec", "executor_report", "audit", "release_notes", "architecture_decision"], "description": "Optional exact artifact-kind filter" },
                 "top": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10, "description": "How many observed matches to return" }
             },
             "required": ["query"]

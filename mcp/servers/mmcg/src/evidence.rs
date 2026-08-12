@@ -5,8 +5,12 @@
 //! repository. Every source is bounded and failures remain visible as partial
 //! diagnostics instead of being mistaken for an absence of evidence.
 
+mod junit;
+mod otel;
+
 use crate::diff::{run_bounded_git_with_limit_until, WorkingTreeDiffError};
 use crate::queries::ChangeImpactResponse;
+use aho_corasick::{AhoCorasickBuilder, MatchKind};
 use globset::{GlobBuilder, GlobMatcher};
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -26,6 +30,16 @@ const MAX_RELEVANT_FILES: usize = 1_000;
 const MAX_FINDINGS: usize = 5_000;
 const MAX_FINDINGS_PER_FILE: usize = 100;
 const MAX_COVERAGE_LINES: usize = 500_000;
+const MAX_TEST_CASES: usize = 100_000;
+const MAX_TEST_FAILURES: usize = 1_000;
+const MAX_TEST_FAILURES_PER_FILE: usize = 50;
+const MAX_RUNTIME_SPANS: usize = 100_000;
+const MAX_RUNTIME_EDGES: usize = 1_000;
+const MAX_RUNTIME_NAMES_PER_EDGE: usize = 5;
+const MAX_KNOWLEDGE_MATCHES: usize = 500;
+const MAX_KNOWLEDGE_PER_FILE: usize = 20;
+const MAX_KNOWLEDGE_ARTIFACTS: usize = 5_000;
+const MAX_KNOWLEDGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_SOURCE_FACTS: usize = 1_000_000;
 const MAX_CODEOWNER_RULES: usize = 50_000;
 const MAX_OWNERS_PER_RULE: usize = 50;
@@ -42,12 +56,20 @@ pub struct EvidenceOptions {
     pub git_commits: u16,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct EvidenceExtensionOptions {
+    pub junit: Vec<PathBuf>,
+    pub otel: Vec<PathBuf>,
+    pub project_knowledge: bool,
+}
+
 #[derive(Debug, Serialize)]
 pub struct EvidenceSnapshot {
     pub schema_version: u32,
     pub partial: bool,
     pub sources: EvidenceCollection<EvidenceSource>,
     pub files: EvidenceCollection<FileEvidence>,
+    pub runtime_edges: EvidenceCollection<RuntimeEdgeEvidence>,
     pub diagnostics: EvidenceCollection<EvidenceDiagnostic>,
     pub precision_notes: Vec<EvidencePrecisionNote>,
     pub limits: EvidenceLimits,
@@ -84,6 +106,62 @@ pub struct FileEvidence {
     pub ownership: Option<OwnershipEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub churn: Option<ChurnEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_results: Option<TestResultsEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<RuntimeFileEvidence>,
+    pub knowledge: Vec<KnowledgeEvidence>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct KnowledgeEvidence {
+    pub source_id: String,
+    pub artifact_path: String,
+    pub kind: String,
+    pub title: String,
+    pub match_kind: &'static str,
+    pub excerpt: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RuntimeFileEvidence {
+    pub source_ids: Vec<String>,
+    pub spans: u32,
+    pub traces: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RuntimeEdgeEvidence {
+    pub source_ids: Vec<String>,
+    pub parent_file: String,
+    pub child_file: String,
+    pub spans: u32,
+    pub traces: u32,
+    pub span_names: Vec<String>,
+    pub names_truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TestResultsEvidence {
+    pub source_ids: Vec<String>,
+    pub total: u32,
+    pub passed: u32,
+    pub failed: u32,
+    pub errors: u32,
+    pub skipped: u32,
+    pub duration_ms: u64,
+    pub failures: Vec<TestFailureEvidence>,
+    pub failures_truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TestFailureEvidence {
+    pub source_id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class_name: Option<String>,
+    pub status: String,
+    pub message: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -153,6 +231,16 @@ pub struct EvidenceLimits {
     pub findings: u32,
     pub findings_per_file: u32,
     pub coverage_lines: u32,
+    pub test_cases: u32,
+    pub test_failures: u32,
+    pub test_failures_per_file: u32,
+    pub runtime_spans: u32,
+    pub runtime_edges: u32,
+    pub runtime_names_per_edge: u32,
+    pub knowledge_matches: u32,
+    pub knowledge_per_file: u32,
+    pub knowledge_artifacts: u32,
+    pub knowledge_bytes: u64,
     pub codeowner_rules: u32,
     pub codeowners_bytes: u64,
     pub owners_per_rule: u32,
@@ -169,6 +257,38 @@ struct FileAccumulator {
     codeowners: Vec<String>,
     codeowners_source_id: Option<String>,
     churn: ChurnAccumulator,
+    tests: TestAccumulator,
+    runtime: RuntimeAccumulator,
+    knowledge: Vec<KnowledgeEvidence>,
+}
+
+#[derive(Default)]
+struct RuntimeAccumulator {
+    source_ids: BTreeSet<String>,
+    spans: u32,
+    traces: BTreeSet<String>,
+}
+
+#[derive(Default)]
+struct RuntimeEdgeAccumulator {
+    source_ids: BTreeSet<String>,
+    spans: u32,
+    traces: BTreeSet<String>,
+    span_names: BTreeSet<String>,
+    names_truncated: bool,
+}
+
+#[derive(Default)]
+struct TestAccumulator {
+    source_ids: BTreeSet<String>,
+    total: u32,
+    passed: u32,
+    failed: u32,
+    errors: u32,
+    skipped: u32,
+    duration_ms: u64,
+    failures: Vec<TestFailureEvidence>,
+    failures_truncated: bool,
 }
 
 #[derive(Default)]
@@ -193,6 +313,12 @@ struct Collector<'a> {
     partial: bool,
     finding_count: usize,
     coverage_line_count: usize,
+    test_case_count: usize,
+    test_failure_count: usize,
+    runtime_span_count: usize,
+    runtime_edges: BTreeMap<(String, String), RuntimeEdgeAccumulator>,
+    runtime_edges_truncated: bool,
+    knowledge_match_count: usize,
     deadline: Option<Instant>,
 }
 
@@ -268,9 +394,52 @@ pub fn collect(
     impact: &ChangeImpactResponse,
     deadline: Option<Instant>,
 ) -> EvidenceSnapshot {
+    collect_with_extensions(
+        root,
+        options,
+        &EvidenceExtensionOptions::default(),
+        impact,
+        deadline,
+    )
+}
+
+pub fn collect_with_extensions(
+    root: &Path,
+    options: &EvidenceOptions,
+    extensions: &EvidenceExtensionOptions,
+    impact: &ChangeImpactResponse,
+    deadline: Option<Instant>,
+) -> EvidenceSnapshot {
+    collect_internal(root, options, extensions, impact, None, deadline)
+}
+
+pub fn collect_with_store(
+    root: &Path,
+    options: &EvidenceOptions,
+    extensions: &EvidenceExtensionOptions,
+    impact: &ChangeImpactResponse,
+    store: &crate::store::Store,
+    deadline: Option<Instant>,
+) -> EvidenceSnapshot {
+    collect_internal(root, options, extensions, impact, Some(store), deadline)
+}
+
+fn collect_internal(
+    root: &Path,
+    options: &EvidenceOptions,
+    extensions: &EvidenceExtensionOptions,
+    impact: &ChangeImpactResponse,
+    store: Option<&crate::store::Store>,
+    deadline: Option<Instant>,
+) -> EvidenceSnapshot {
     let (relevant, relevant_truncated) = relevant_paths(impact);
-    let sources_truncated =
-        options.sarif.len().saturating_add(options.coverage.len()) > MAX_ARTIFACT_SOURCES;
+    let sources_truncated = options
+        .sarif
+        .len()
+        .saturating_add(options.coverage.len())
+        .saturating_add(extensions.junit.len())
+        .saturating_add(extensions.otel.len())
+        > MAX_ARTIFACT_SOURCES;
     let mut collector = Collector {
         root,
         relevant,
@@ -283,10 +452,20 @@ pub fn collect(
         partial: relevant_truncated || sources_truncated,
         finding_count: 0,
         coverage_line_count: 0,
+        test_case_count: 0,
+        test_failure_count: 0,
+        runtime_span_count: 0,
+        runtime_edges: BTreeMap::new(),
+        runtime_edges_truncated: false,
+        knowledge_match_count: 0,
         deadline,
     };
 
-    if !options.sarif.is_empty() || !options.coverage.is_empty() {
+    if !options.sarif.is_empty()
+        || !options.coverage.is_empty()
+        || !extensions.junit.is_empty()
+        || !extensions.otel.is_empty()
+    {
         collector.notes.push(EvidencePrecisionNote {
             source_id: "lens",
             code: "artifact_path_relocation",
@@ -295,7 +474,7 @@ pub fn collect(
         collector.notes.push(EvidencePrecisionNote {
             source_id: "lens",
             code: "artifact_revision_unverified",
-            message: "Lens preserves artifact provenance labels but cannot prove that a SARIF or coverage report was produced from the current Git revision.".into(),
+            message: "Lens preserves artifact provenance labels but cannot prove that a SARIF, coverage, JUnit, or OTLP report was produced from the current Git revision.".into(),
         });
     }
     if !options.coverage.is_empty() {
@@ -312,6 +491,13 @@ pub fn collect(
             message: "Git churn uses a bounded no-renames log window; contributor identities are author display names and rename history is not followed.".into(),
         });
     }
+    if !extensions.otel.is_empty() {
+        collector.notes.push(EvidencePrecisionNote {
+            source_id: "otel",
+            code: "runtime_file_path_evidence",
+            message: "OTLP spans match only explicit code.file.path/code.filepath attributes. Parent-child span pairs are file-level runtime evidence and never add codegraph topology.".into(),
+        });
+    }
 
     if relevant_truncated {
         collector.diagnostic(
@@ -324,7 +510,7 @@ pub fn collect(
         collector.diagnostic(
             "lens",
             "source_limit",
-            "Only the first 64 SARIF and coverage inputs were evaluated.",
+            "Only the first 64 SARIF, coverage, JUnit, and OTLP inputs were evaluated.",
         );
     }
 
@@ -341,6 +527,20 @@ pub fn collect(
             break;
         }
         collector.load_coverage(path, format!("coverage:{index}"));
+        loaded_artifacts += 1;
+    }
+    for (index, path) in extensions.junit.iter().enumerate() {
+        if loaded_artifacts >= MAX_ARTIFACT_SOURCES {
+            break;
+        }
+        collector.load_junit(path, format!("junit:{index}"));
+        loaded_artifacts += 1;
+    }
+    for (index, path) in extensions.otel.iter().enumerate() {
+        if loaded_artifacts >= MAX_ARTIFACT_SOURCES {
+            break;
+        }
+        collector.load_otel(path, format!("otel:{index}"));
         loaded_artifacts += 1;
     }
 
@@ -364,6 +564,41 @@ pub fn collect(
             "git-history".into(),
             &impact.baseline.head_oid,
         );
+    }
+    if extensions.project_knowledge {
+        collector.notes.push(EvidencePrecisionNote {
+            source_id: "project-knowledge",
+            code: "derived_history_snapshot",
+            message: "Project knowledge is correlated only by exact repository-path mentions from the derived history index; Markdown remains authoritative and must be re-indexed after changes.".into(),
+        });
+        match store.and_then(|store| {
+            let (entries, bounded_truncated) = store
+                .project_history_entries_bounded(MAX_KNOWLEDGE_ARTIFACTS, MAX_KNOWLEDGE_BYTES)
+                .ok()?;
+            let skipped = store
+                .meta_value("project_history_skipped")
+                .ok()?
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(0);
+            let indexed_truncated = store
+                .meta_value("project_history_truncated")
+                .ok()?
+                .is_some_and(|value| value == "true");
+            Some((entries, skipped, bounded_truncated || indexed_truncated))
+        }) {
+            Some((entries, skipped, truncated)) => collector.load_project_knowledge(
+                &entries,
+                skipped,
+                truncated,
+                "project-knowledge".into(),
+            ),
+            None => collector.source_error(
+                "project-knowledge".into(),
+                "project_knowledge",
+                "Indexed project knowledge".into(),
+                SourceFailure::Unavailable,
+            ),
+        }
     }
 
     collector.finish(options.git_commits)
@@ -554,6 +789,106 @@ impl Collector<'_> {
             .or_insert(hits);
         entry.coverage_sources.insert(source_id.to_string());
         true
+    }
+
+    fn add_test_case(
+        &mut self,
+        path: &str,
+        source_id: &str,
+        case: junit::JunitCase,
+    ) -> (bool, bool) {
+        if self.test_case_count >= MAX_TEST_CASES {
+            return (false, false);
+        }
+        self.test_case_count += 1;
+        let entry = self.files.entry(path.to_string()).or_default();
+        let tests = &mut entry.tests;
+        tests.source_ids.insert(source_id.to_string());
+        tests.total = tests.total.saturating_add(1);
+        tests.duration_ms = tests.duration_ms.saturating_add(case.duration_ms);
+        let mut failure_truncated = false;
+        let status = match case.status {
+            junit::JunitStatus::Passed => {
+                tests.passed = tests.passed.saturating_add(1);
+                None
+            }
+            junit::JunitStatus::Failed => {
+                tests.failed = tests.failed.saturating_add(1);
+                Some("failed")
+            }
+            junit::JunitStatus::Error => {
+                tests.errors = tests.errors.saturating_add(1);
+                Some("error")
+            }
+            junit::JunitStatus::Skipped => {
+                tests.skipped = tests.skipped.saturating_add(1);
+                None
+            }
+        };
+        if let Some(status) = status {
+            if self.test_failure_count < MAX_TEST_FAILURES
+                && tests.failures.len() < MAX_TEST_FAILURES_PER_FILE
+            {
+                self.test_failure_count += 1;
+                tests.failures.push(TestFailureEvidence {
+                    source_id: source_id.to_string(),
+                    name: case.name,
+                    class_name: case.class_name,
+                    status: status.into(),
+                    message: if case.message.is_empty() {
+                        "No failure detail returned.".into()
+                    } else {
+                        case.message
+                    },
+                });
+            } else {
+                tests.failures_truncated = true;
+                failure_truncated = true;
+            }
+        }
+        (true, failure_truncated)
+    }
+
+    fn add_runtime_span(&mut self, path: &str, source_id: &str, trace_id: &str) -> bool {
+        if self.runtime_span_count >= MAX_RUNTIME_SPANS {
+            return false;
+        }
+        self.runtime_span_count += 1;
+        let runtime = &mut self.files.entry(path.to_string()).or_default().runtime;
+        runtime.source_ids.insert(source_id.to_string());
+        runtime.spans = runtime.spans.saturating_add(1);
+        runtime.traces.insert(truncate_text(trace_id, 64));
+        true
+    }
+
+    fn add_runtime_edge(
+        &mut self,
+        parent_file: &str,
+        child_file: &str,
+        source_id: &str,
+        trace_id: &str,
+        span_name: &str,
+    ) -> (bool, bool) {
+        let key = (parent_file.to_string(), child_file.to_string());
+        if !self.runtime_edges.contains_key(&key) && self.runtime_edges.len() >= MAX_RUNTIME_EDGES {
+            self.runtime_edges_truncated = true;
+            return (false, false);
+        }
+        let edge = self.runtime_edges.entry(key).or_default();
+        edge.source_ids.insert(source_id.to_string());
+        edge.spans = edge.spans.saturating_add(1);
+        edge.traces.insert(truncate_text(trace_id, 64));
+        let mut name_truncated = false;
+        let span_name = truncate_text(span_name, 160);
+        if !edge.span_names.contains(&span_name) {
+            if edge.span_names.len() < MAX_RUNTIME_NAMES_PER_EDGE {
+                edge.span_names.insert(span_name);
+            } else {
+                edge.names_truncated = true;
+                name_truncated = true;
+            }
+        }
+        (true, name_truncated)
     }
 
     fn load_sarif(&mut self, path: &Path, id: String) {
@@ -777,6 +1112,310 @@ impl Collector<'_> {
             );
         }
         self.source_done(id, "coverage", label, stats);
+    }
+
+    fn load_junit(&mut self, path: &Path, id: String) {
+        let fallback = requested_label(path);
+        let input = match self.read_source(path) {
+            Ok(input) => input,
+            Err(error) => return self.source_error(id, "junit", fallback, error),
+        };
+        let label = input.label;
+        let parsed = match junit::parse(strip_utf8_bom(&input.bytes), self.deadline) {
+            Ok(parsed) => parsed,
+            Err(error) => return self.source_error(id, "junit", label, error),
+        };
+        let mut stats = SourceStats {
+            facts_total: parsed.facts_total,
+            partial: parsed.partial,
+            invalid_records: parsed.invalid_records,
+            work_limited: parsed.work_limited,
+            deadline_reached: parsed.deadline_reached,
+            ..SourceStats::default()
+        };
+        let mut failure_limited = false;
+        for case in parsed.cases {
+            if self.deadline_reached() {
+                stats.partial = true;
+                stats.deadline_reached = true;
+                break;
+            }
+            let Some(raw_path) = case.file.as_deref() else {
+                continue;
+            };
+            let Some(repo_path) = normalize_evidence_path(self.root, raw_path, &self.relevant)
+            else {
+                continue;
+            };
+            let (added, failure_truncated) = self.add_test_case(&repo_path, &id, case);
+            if added {
+                stats.facts_returned += 1;
+                stats.files.insert(repo_path);
+                failure_limited |= failure_truncated;
+            } else {
+                stats.partial = true;
+                stats.work_limited = true;
+            }
+        }
+        if stats.invalid_records {
+            self.diagnostic(
+                id.clone(),
+                "invalid_junit_record",
+                "Some JUnit testcases were invalid and were skipped.",
+            );
+        }
+        if stats.work_limited {
+            self.diagnostic(
+                id.clone(),
+                "junit_case_limit",
+                "Some matching JUnit testcases were omitted by the 100,000-case evidence limit.",
+            );
+        }
+        if failure_limited {
+            stats.partial = true;
+            self.diagnostic(
+                id.clone(),
+                "junit_failure_limit",
+                "JUnit totals remain complete, but some failure details were omitted by evidence limits.",
+            );
+        }
+        if stats.deadline_reached {
+            self.diagnostic(
+                id.clone(),
+                SourceFailure::Deadline.code(),
+                SourceFailure::Deadline.message(),
+            );
+        }
+        self.source_done(id, "junit", label, stats);
+    }
+
+    fn load_otel(&mut self, path: &Path, id: String) {
+        let fallback = requested_label(path);
+        let input = match self.read_source(path) {
+            Ok(input) => input,
+            Err(error) => return self.source_error(id, "otel", fallback, error),
+        };
+        let label = input.label;
+        let parsed = match otel::parse(strip_utf8_bom(&input.bytes), self.deadline) {
+            Ok(parsed) => parsed,
+            Err(error) => return self.source_error(id, "otel", label, error),
+        };
+        let mut stats = SourceStats {
+            facts_total: parsed.facts_total,
+            partial: parsed.partial,
+            invalid_records: parsed.invalid_records,
+            work_limited: parsed.work_limited,
+            deadline_reached: parsed.deadline_reached,
+            ..SourceStats::default()
+        };
+        let mut mapped = HashMap::<(String, String), (String, String)>::new();
+        let mut children = Vec::new();
+        for span in parsed.spans {
+            if self.deadline_reached() {
+                stats.partial = true;
+                stats.deadline_reached = true;
+                break;
+            }
+            let Some(raw_path) = span.file.as_deref() else {
+                continue;
+            };
+            let Some(repo_path) = normalize_evidence_path(self.root, raw_path, &self.relevant)
+            else {
+                continue;
+            };
+            if !self.add_runtime_span(&repo_path, &id, &span.trace_id) {
+                stats.partial = true;
+                stats.work_limited = true;
+                continue;
+            }
+            stats.facts_returned += 1;
+            stats.files.insert(repo_path.clone());
+            let key = (span.trace_id.clone(), span.span_id.clone());
+            if mapped
+                .insert(key, (repo_path.clone(), span.name.clone()))
+                .is_some()
+            {
+                stats.partial = true;
+                stats.invalid_records = true;
+            }
+            if let Some(parent_span_id) = span.parent_span_id {
+                children.push((span.trace_id, parent_span_id, repo_path, span.name));
+            }
+        }
+        let mut edge_limited = false;
+        let mut name_limited = false;
+        for (trace_id, parent_span_id, child_file, span_name) in children {
+            let Some((parent_file, _)) = mapped.get(&(trace_id.clone(), parent_span_id)) else {
+                continue;
+            };
+            let (added, truncated) =
+                self.add_runtime_edge(parent_file, &child_file, &id, &trace_id, &span_name);
+            edge_limited |= !added;
+            name_limited |= truncated;
+        }
+        if stats.invalid_records {
+            self.diagnostic(
+                id.clone(),
+                "invalid_otel_span",
+                "Some OTLP spans were invalid or duplicated and were skipped.",
+            );
+        }
+        if stats.work_limited {
+            self.diagnostic(
+                id.clone(),
+                "otel_span_limit",
+                "Some matching OTLP spans were omitted by the 100,000-span evidence limit.",
+            );
+        }
+        if edge_limited {
+            stats.partial = true;
+            self.diagnostic(
+                id.clone(),
+                "otel_edge_limit",
+                "Some runtime file pairs were omitted by the 1,000-edge evidence limit.",
+            );
+        }
+        if name_limited {
+            stats.partial = true;
+            self.diagnostic(
+                id.clone(),
+                "otel_span_name_limit",
+                "Runtime edge counts remain complete, but some span-name samples were omitted.",
+            );
+        }
+        if stats.deadline_reached {
+            self.diagnostic(
+                id.clone(),
+                SourceFailure::Deadline.code(),
+                SourceFailure::Deadline.message(),
+            );
+        }
+        self.source_done(id, "otel", label, stats);
+    }
+
+    fn load_project_knowledge(
+        &mut self,
+        entries: &[crate::store::ProjectHistoryEntry],
+        skipped: u32,
+        truncated: bool,
+        id: String,
+    ) {
+        let label = "Indexed project knowledge".to_string();
+        if self.relevant.is_empty() {
+            let stats = SourceStats {
+                partial: skipped > 0 || truncated,
+                ..SourceStats::default()
+            };
+            return self.source_done(id, "project_knowledge", label, stats);
+        }
+        let mut pattern_map = BTreeMap::<String, String>::new();
+        for path in &self.relevant {
+            pattern_map.insert(path.clone(), path.clone());
+            if path.contains('/') {
+                pattern_map.insert(path.replace('/', "\\"), path.clone());
+            }
+        }
+        let patterns = pattern_map.keys().cloned().collect::<Vec<_>>();
+        let canonical_paths = patterns
+            .iter()
+            .map(|pattern| pattern_map[pattern].clone())
+            .collect::<Vec<_>>();
+        let matcher = match AhoCorasickBuilder::new()
+            .match_kind(MatchKind::Standard)
+            .build(&patterns)
+        {
+            Ok(value) => value,
+            Err(_) => {
+                return self.source_error(
+                    id,
+                    "project_knowledge",
+                    label,
+                    SourceFailure::InvalidFormat,
+                )
+            }
+        };
+        let mut stats = SourceStats {
+            partial: skipped > 0 || truncated,
+            ..SourceStats::default()
+        };
+        let mut sorted = entries.iter().collect::<Vec<_>>();
+        sorted.sort_by(|left, right| {
+            left.path
+                .cmp(&right.path)
+                .then_with(|| left.kind.cmp(&right.kind))
+                .then_with(|| left.title.cmp(&right.title))
+        });
+        'entries: for (entry_index, entry) in sorted.into_iter().enumerate() {
+            if entry_index.is_multiple_of(64) && self.deadline_reached() {
+                stats.partial = true;
+                stats.deadline_reached = true;
+                break;
+            }
+            let mut matched_paths = BTreeMap::<String, (usize, usize)>::new();
+            for found in matcher.find_overlapping_iter(&entry.body) {
+                if !exact_path_boundaries(&entry.body, found.start(), found.end()) {
+                    continue;
+                }
+                let path = canonical_paths[found.pattern().as_usize()].clone();
+                matched_paths
+                    .entry(path)
+                    .or_insert((found.start(), found.end()));
+            }
+            for (path, (start, end)) in matched_paths {
+                stats.facts_total += 1;
+                if self.knowledge_match_count >= MAX_KNOWLEDGE_MATCHES {
+                    stats.partial = true;
+                    stats.work_limited = true;
+                    break 'entries;
+                }
+                let file = self.files.entry(path.clone()).or_default();
+                if file.knowledge.len() >= MAX_KNOWLEDGE_PER_FILE {
+                    stats.partial = true;
+                    stats.work_limited = true;
+                    continue;
+                }
+                self.knowledge_match_count += 1;
+                file.knowledge.push(KnowledgeEvidence {
+                    source_id: id.clone(),
+                    artifact_path: truncate_text(&entry.path, 240),
+                    kind: truncate_text(&entry.kind, 80),
+                    title: truncate_text(&entry.title, 200),
+                    match_kind: "exact_path",
+                    excerpt: excerpt_around(&entry.body, start, end),
+                });
+                stats.facts_returned += 1;
+                stats.files.insert(path);
+            }
+        }
+        if skipped > 0 {
+            self.diagnostic(
+                id.clone(),
+                "project_knowledge_skipped",
+                format!("{skipped} project-knowledge artifacts were skipped during indexing."),
+            );
+        }
+        if truncated {
+            self.diagnostic(
+                id.clone(),
+                "project_knowledge_index_truncated",
+                "The indexed project-knowledge corpus reached its 5,000-artifact limit.",
+            );
+        }
+        if stats.work_limited {
+            self.diagnostic(
+                id.clone(),
+                "project_knowledge_match_limit",
+                "Some exact project-knowledge mentions were omitted by evidence limits.",
+            );
+        }
+        if stats.deadline_reached {
+            self.diagnostic(
+                id.clone(),
+                SourceFailure::Deadline.code(),
+                SourceFailure::Deadline.message(),
+            );
+        }
+        self.source_done(id, "project_knowledge", label, stats);
     }
 
     fn load_codeowners(&mut self, path: &Path, id: String) {
@@ -1010,6 +1649,20 @@ impl Collector<'_> {
 
     fn finish(self, git_commits: u16) -> EvidenceSnapshot {
         let partial = self.partial || self.diagnostics_truncated;
+        let runtime_edges = self
+            .runtime_edges
+            .into_iter()
+            .map(|((parent_file, child_file), edge)| RuntimeEdgeEvidence {
+                source_ids: edge.source_ids.into_iter().collect(),
+                parent_file,
+                child_file,
+                spans: edge.spans,
+                traces: saturating_u32(edge.traces.len()),
+                span_names: edge.span_names.into_iter().collect(),
+                names_truncated: edge.names_truncated,
+            })
+            .collect::<Vec<_>>();
+        let runtime_edge_count = saturating_u32(runtime_edges.len());
         let files = self
             .files
             .into_iter()
@@ -1058,16 +1711,38 @@ impl Collector<'_> {
                     lines_added: accumulator.churn.lines_added,
                     lines_deleted: accumulator.churn.lines_deleted,
                 });
+                let test_results = (accumulator.tests.total > 0).then(|| TestResultsEvidence {
+                    source_ids: accumulator.tests.source_ids.into_iter().collect(),
+                    total: accumulator.tests.total,
+                    passed: accumulator.tests.passed,
+                    failed: accumulator.tests.failed,
+                    errors: accumulator.tests.errors,
+                    skipped: accumulator.tests.skipped,
+                    duration_ms: accumulator.tests.duration_ms,
+                    failures: accumulator.tests.failures,
+                    failures_truncated: accumulator.tests.failures_truncated,
+                });
+                let runtime = (accumulator.runtime.spans > 0).then(|| RuntimeFileEvidence {
+                    source_ids: accumulator.runtime.source_ids.into_iter().collect(),
+                    spans: accumulator.runtime.spans,
+                    traces: saturating_u32(accumulator.runtime.traces.len()),
+                });
                 let has_evidence = !accumulator.findings.is_empty()
                     || coverage.is_some()
                     || ownership.is_some()
-                    || churn.is_some();
+                    || churn.is_some()
+                    || test_results.is_some()
+                    || runtime.is_some()
+                    || !accumulator.knowledge.is_empty();
                 has_evidence.then_some(FileEvidence {
                     path,
                     findings: accumulator.findings,
                     coverage,
                     ownership,
                     churn,
+                    test_results,
+                    runtime,
+                    knowledge: accumulator.knowledge,
                 })
             })
             .collect::<Vec<_>>();
@@ -1091,6 +1766,13 @@ impl Collector<'_> {
                 truncation_reason: partial.then_some("evidence_source_partial"),
                 items: files,
             },
+            runtime_edges: EvidenceCollection {
+                total: (!self.runtime_edges_truncated).then_some(runtime_edge_count),
+                returned: runtime_edge_count,
+                truncated: self.runtime_edges_truncated,
+                truncation_reason: self.runtime_edges_truncated.then_some("runtime_edge_limit"),
+                items: runtime_edges,
+            },
             diagnostics: EvidenceCollection {
                 total: (!self.diagnostics_truncated).then_some(diagnostic_count),
                 returned: diagnostic_count,
@@ -1106,6 +1788,16 @@ impl Collector<'_> {
                 findings: MAX_FINDINGS as u32,
                 findings_per_file: MAX_FINDINGS_PER_FILE as u32,
                 coverage_lines: MAX_COVERAGE_LINES as u32,
+                test_cases: MAX_TEST_CASES as u32,
+                test_failures: MAX_TEST_FAILURES as u32,
+                test_failures_per_file: MAX_TEST_FAILURES_PER_FILE as u32,
+                runtime_spans: MAX_RUNTIME_SPANS as u32,
+                runtime_edges: MAX_RUNTIME_EDGES as u32,
+                runtime_names_per_edge: MAX_RUNTIME_NAMES_PER_EDGE as u32,
+                knowledge_matches: MAX_KNOWLEDGE_MATCHES as u32,
+                knowledge_per_file: MAX_KNOWLEDGE_PER_FILE as u32,
+                knowledge_artifacts: MAX_KNOWLEDGE_ARTIFACTS as u32,
+                knowledge_bytes: MAX_KNOWLEDGE_BYTES as u64,
                 codeowner_rules: MAX_CODEOWNER_RULES as u32,
                 codeowners_bytes: MAX_CODEOWNERS_BYTES,
                 owners_per_rule: MAX_OWNERS_PER_RULE as u32,
@@ -1148,6 +1840,57 @@ fn truncate_text(value: &str, maximum: usize) -> String {
     } else {
         prefix
     }
+}
+
+fn exact_path_boundaries(body: &str, start: usize, end: usize) -> bool {
+    let bytes = body.as_bytes();
+    let before = start.checked_sub(1).and_then(|index| bytes.get(index));
+    let after = bytes.get(end);
+    let after_is_boundary = match after {
+        Some(b'.') => bytes
+            .get(end.saturating_add(1))
+            .is_none_or(|byte| !is_path_byte(*byte)),
+        Some(byte) => !is_path_byte(*byte),
+        None => true,
+    };
+    before.is_none_or(|byte| !is_path_byte(*byte)) && after_is_boundary
+}
+
+fn is_path_byte(byte: u8) -> bool {
+    byte >= 0x80
+        || byte.is_ascii_alphanumeric()
+        || matches!(byte, b'_' | b'-' | b'.' | b'/' | b'\\')
+}
+
+fn excerpt_around(body: &str, start: usize, end: usize) -> String {
+    let mut excerpt_start = start.saturating_sub(100);
+    while excerpt_start < start && !body.is_char_boundary(excerpt_start) {
+        excerpt_start += 1;
+    }
+    let mut excerpt_end = end.saturating_add(100).min(body.len());
+    while excerpt_end > end && !body.is_char_boundary(excerpt_end) {
+        excerpt_end -= 1;
+    }
+    let mut output = String::new();
+    if excerpt_start > 0 {
+        output.push('…');
+    }
+    let mut previous_space = false;
+    for character in body[excerpt_start..excerpt_end].chars() {
+        if character.is_whitespace() || character.is_control() {
+            if !previous_space {
+                output.push(' ');
+                previous_space = true;
+            }
+        } else {
+            output.push(character);
+            previous_space = false;
+        }
+    }
+    if excerpt_end < body.len() {
+        output.push('…');
+    }
+    truncate_text(output.trim(), 280)
 }
 
 fn discover_codeowners(root: &Path) -> Option<PathBuf> {
@@ -1682,6 +2425,12 @@ mod tests {
             partial: false,
             finding_count: 0,
             coverage_line_count: 0,
+            test_case_count: 0,
+            test_failure_count: 0,
+            runtime_span_count: 0,
+            runtime_edges: BTreeMap::new(),
+            runtime_edges_truncated: false,
+            knowledge_match_count: 0,
             deadline: None,
         }
     }
@@ -1778,6 +2527,146 @@ mod tests {
         assert_eq!(xml_records["src/pay.rs"].len(), 2);
         assert_eq!(xml_records["src/pay.rs"][&1], 2);
         assert!(!xml_records.contains_key("src/other.rs"));
+    }
+
+    #[test]
+    fn junit_matches_only_explicit_trace_files_and_preserves_failures() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join("junit.xml"),
+            r#"<?xml version="1.0"?>
+            <testsuites><testsuite name="payments">
+              <testcase name="accepts_card" classname="payments.CardTests" file="tests/pay_test.rs" time="0.125" />
+              <testcase name="rejects_expired" classname="payments.CardTests" file="tests/pay_test.rs" time="0.250">
+                <failure message="expected decline"><![CDATA[stack <trace>]]></failure>
+              </testcase>
+              <testcase name="unmapped" classname="payments.GuessedTests" time="0.010" />
+            </testsuite></testsuites>"#,
+        )
+        .unwrap();
+
+        let mut collector = collector(root.path(), &["tests/pay_test.rs"]);
+        collector.load_junit(Path::new("junit.xml"), "junit:0".into());
+        let snapshot = collector.finish(0);
+
+        assert_eq!(snapshot.sources.items[0].facts_total, Some(3));
+        assert_eq!(snapshot.sources.items[0].facts_returned, 2);
+        let tests = snapshot.files.items[0].test_results.as_ref().unwrap();
+        assert_eq!(tests.total, 2);
+        assert_eq!(tests.passed, 1);
+        assert_eq!(tests.failed, 1);
+        assert_eq!(tests.errors, 0);
+        assert_eq!(tests.skipped, 0);
+        assert_eq!(tests.duration_ms, 375);
+        assert_eq!(tests.failures[0].name, "rejects_expired");
+        assert_eq!(
+            tests.failures[0].message,
+            "expected decline · stack <trace>"
+        );
+    }
+
+    #[test]
+    fn otlp_json_maps_code_paths_and_preserves_parent_child_runtime_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join("traces.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "resourceSpans": [{"scopeSpans": [{"spans": [
+                    {
+                        "traceId": "00112233445566778899aabbccddeeff",
+                        "spanId": "0011223344556677",
+                        "name": "checkout",
+                        "attributes": [{"key": "code.file.path", "value": {"stringValue": "src/caller.rs"}}]
+                    },
+                    {
+                        "traceId": "00112233445566778899aabbccddeeff",
+                        "spanId": "8899aabbccddeeff",
+                        "parentSpanId": "0011223344556677",
+                        "name": "charge",
+                        "attributes": [{"key": "code.file.path", "value": {"stringValue": "src/pay.rs"}}]
+                    },
+                    {
+                        "traceId": "ffeeddccbbaa99887766554433221100",
+                        "spanId": "ffeeddccbbaa9988",
+                        "name": "unmapped",
+                        "attributes": []
+                    }
+                ]}]}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut collector = collector(root.path(), &["src/caller.rs", "src/pay.rs"]);
+        collector.load_otel(Path::new("traces.json"), "otel:0".into());
+        let snapshot = collector.finish(0);
+
+        assert_eq!(snapshot.sources.items[0].facts_total, Some(3));
+        assert_eq!(snapshot.sources.items[0].facts_returned, 2);
+        assert_eq!(snapshot.runtime_edges.returned, 1);
+        let runtime = &snapshot.runtime_edges.items[0];
+        assert_eq!(runtime.parent_file, "src/caller.rs");
+        assert_eq!(runtime.child_file, "src/pay.rs");
+        assert_eq!(runtime.spans, 1);
+        assert_eq!(runtime.traces, 1);
+        let pay = snapshot
+            .files
+            .items
+            .iter()
+            .find(|item| item.path == "src/pay.rs")
+            .unwrap();
+        assert_eq!(pay.runtime.as_ref().unwrap().spans, 1);
+        assert_eq!(pay.runtime.as_ref().unwrap().traces, 1);
+    }
+
+    #[test]
+    fn project_knowledge_requires_an_exact_trace_path_mention() {
+        let root = tempfile::tempdir().unwrap();
+        let entries = vec![
+            crate::store::ProjectHistoryEntry {
+                path: ".mastermind/tasks/101-payment/spec.md".into(),
+                kind: "task_spec".into(),
+                title: "Payment boundary".into(),
+                body: "Route changes in `src/pay.rs` through the payment boundary.".into(),
+            },
+            crate::store::ProjectHistoryEntry {
+                path: ".mastermind/tasks/_lessons.md".into(),
+                kind: "lesson".into(),
+                title: "Lessons".into(),
+                body: "Do not treat src/pay.rs.bak as production evidence.".into(),
+            },
+            crate::store::ProjectHistoryEntry {
+                path: ".mastermind/tasks/101-payment/audit.md".into(),
+                kind: "audit".into(),
+                title: "Payment audit".into(),
+                body: "Verified `src\\pay.rs` against the runtime contract.".into(),
+            },
+            crate::store::ProjectHistoryEntry {
+                path: "docs/adr/004-storage.md".into(),
+                kind: "architecture_decision".into(),
+                title: "Storage boundary".into(),
+                body: "This decision covers src/storage.rs only.".into(),
+            },
+        ];
+
+        let mut collector = collector(root.path(), &["src/pay.rs"]);
+        collector.load_project_knowledge(&entries, 0, false, "project-knowledge".into());
+        let snapshot = collector.finish(0);
+
+        assert_eq!(snapshot.sources.items[0].facts_total, Some(2));
+        assert_eq!(snapshot.sources.items[0].facts_returned, 2);
+        assert!(
+            snapshot.sources.items[0].facts_returned
+                <= snapshot.sources.items[0].facts_total.unwrap()
+        );
+        let knowledge = &snapshot.files.items[0].knowledge;
+        assert_eq!(knowledge.len(), 2);
+        assert_eq!(knowledge[0].kind, "audit");
+        assert_eq!(knowledge[1].kind, "task_spec");
+        assert!(knowledge.iter().all(|item| item.match_kind == "exact_path"));
+        assert!(!knowledge
+            .iter()
+            .any(|item| item.artifact_path == ".mastermind/tasks/_lessons.md"));
     }
 
     #[test]

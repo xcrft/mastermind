@@ -596,6 +596,7 @@ dependencies = [
 name = "mmcg"
 version = "1.2.1"
 dependencies = [
+ "aho-corasick",
  "base64",
  "clap",
  "dirs",

@@ -691,6 +691,14 @@ body.is-refreshing .refresh-button__glyph {
   border-right: 0;
 }
 
+.overlay-control button:nth-child(4) {
+  border-right: 0;
+}
+
+.overlay-control button:nth-child(-n + 4) {
+  border-bottom: 1px solid var(--rule);
+}
+
 .overlay-control button[aria-pressed="true"] {
   color: var(--surface-clear);
   background: var(--ink);
@@ -1188,6 +1196,11 @@ body.is-refreshing .refresh-button__glyph {
 .graph-edge--ownership {
   stroke-dasharray: 2 4;
   stroke-width: 3;
+}
+
+.graph-edge--runtime {
+  filter: drop-shadow(0 0 2px rgba(36, 82, 209, 0.7));
+  stroke-width: 3.5;
 }
 
 .graph-edge-hit {
@@ -1980,10 +1993,14 @@ input:focus-visible {
   }
 
   .overlay-control button:nth-child(2) {
+    border-right: 1px solid var(--rule);
+  }
+
+  .overlay-control button:nth-child(2n) {
     border-right: 0;
   }
 
-  .overlay-control button:nth-child(-n + 2) {
+  .overlay-control button:nth-child(-n + 6) {
     border-bottom: 1px solid var(--rule);
   }
 

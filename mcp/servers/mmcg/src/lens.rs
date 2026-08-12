@@ -52,6 +52,7 @@ pub struct LensSnapshot {
     pub options: LensOptions,
     pub map: ProjectMapResponse,
     pub impact: ChangeImpactResponse,
+    pub evidence: crate::evidence::EvidenceSnapshot,
 }
 
 #[derive(Debug)]
@@ -162,7 +163,44 @@ pub fn build_snapshot(
     root: &Path,
     options: &LensOptions,
 ) -> Result<LensSnapshot, LensError> {
-    build_snapshot_until(store, root, options, request_deadline())
+    build_snapshot_with_evidence(
+        store,
+        root,
+        options,
+        &crate::evidence::EvidenceOptions::default(),
+    )
+}
+
+pub fn build_snapshot_with_evidence(
+    store: &Store,
+    root: &Path,
+    options: &LensOptions,
+    evidence: &crate::evidence::EvidenceOptions,
+) -> Result<LensSnapshot, LensError> {
+    build_snapshot_with_evidence_extensions(
+        store,
+        root,
+        options,
+        evidence,
+        &crate::evidence::EvidenceExtensionOptions::default(),
+    )
+}
+
+pub fn build_snapshot_with_evidence_extensions(
+    store: &Store,
+    root: &Path,
+    options: &LensOptions,
+    evidence: &crate::evidence::EvidenceOptions,
+    extensions: &crate::evidence::EvidenceExtensionOptions,
+) -> Result<LensSnapshot, LensError> {
+    build_snapshot_until(
+        store,
+        root,
+        options,
+        evidence,
+        extensions,
+        request_deadline(),
+    )
 }
 
 fn request_deadline() -> Option<Instant> {
@@ -281,6 +319,8 @@ fn build_snapshot_until(
     store: &Store,
     root: &Path,
     options: &LensOptions,
+    evidence_options: &crate::evidence::EvidenceOptions,
+    evidence_extensions: &crate::evidence::EvidenceExtensionOptions,
     deadline: Option<Instant>,
 ) -> Result<LensSnapshot, LensError> {
     let root = root
@@ -310,6 +350,14 @@ fn build_snapshot_until(
         options.production_only,
     )
     .map_err(LensError::MapUnavailable)?;
+    let evidence = crate::evidence::collect_with_store(
+        &root,
+        evidence_options,
+        evidence_extensions,
+        &impact,
+        store,
+        deadline,
+    );
 
     let name = root
         .file_name()
@@ -325,6 +373,7 @@ fn build_snapshot_until(
         options: options.clone(),
         map,
         impact,
+        evidence,
     })
 }
 
@@ -332,6 +381,40 @@ pub fn run(
     root: PathBuf,
     index_path: PathBuf,
     options: LensOptions,
+    port: u16,
+) -> Result<(), LensError> {
+    run_with_evidence(
+        root,
+        index_path,
+        options,
+        crate::evidence::EvidenceOptions::default(),
+        port,
+    )
+}
+
+pub fn run_with_evidence(
+    root: PathBuf,
+    index_path: PathBuf,
+    options: LensOptions,
+    evidence: crate::evidence::EvidenceOptions,
+    port: u16,
+) -> Result<(), LensError> {
+    run_with_evidence_extensions(
+        root,
+        index_path,
+        options,
+        evidence,
+        crate::evidence::EvidenceExtensionOptions::default(),
+        port,
+    )
+}
+
+pub fn run_with_evidence_extensions(
+    root: PathBuf,
+    index_path: PathBuf,
+    options: LensOptions,
+    evidence: crate::evidence::EvidenceOptions,
+    extensions: crate::evidence::EvidenceExtensionOptions,
     port: u16,
 ) -> Result<(), LensError> {
     let root = root
@@ -357,6 +440,8 @@ pub fn run(
         root,
         index_path,
         options,
+        evidence,
+        extensions,
         authority,
     };
     serve(listener, &state, None)
@@ -366,6 +451,8 @@ struct ServerState {
     root: PathBuf,
     index_path: PathBuf,
     options: LensOptions,
+    evidence: crate::evidence::EvidenceOptions,
+    extensions: crate::evidence::EvidenceExtensionOptions,
     authority: String,
 }
 
@@ -683,7 +770,14 @@ fn api_response(state: &ServerState) -> HttpResponse {
         let snapshot = Store::open_read_only_with_deadline(&state.index_path, deadline)
             .map_err(read_only_open_error)
             .and_then(|store| {
-                build_snapshot_until(&store, &state.root, &state.options, deadline)
+                build_snapshot_until(
+                    &store,
+                    &state.root,
+                    &state.options,
+                    &state.evidence,
+                    &state.extensions,
+                    deadline,
+                )
             })?;
         if index_source_state(&state.index_path)? != before {
             return Err(LensError::ImpactUnavailable(
@@ -840,6 +934,15 @@ mod tests {
         files
     }
 
+    fn directory_names(path: &Path) -> Vec<String> {
+        let mut names = fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
     #[test]
     fn snapshot_wraps_the_shared_map_and_impact_schemas() {
         let (repo, _index_dir, index_path) = fixture();
@@ -848,6 +951,9 @@ mod tests {
         let json = serde_json::to_value(snapshot).unwrap();
 
         assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["evidence"]["schema_version"], 1);
+        assert_eq!(json["evidence"]["sources"]["returned"], 0);
+        assert_eq!(json["evidence"]["files"]["returned"], 0);
         assert_eq!(json["map"]["schema_version"], 1);
         assert_eq!(json["impact"]["schema_version"], 1);
         assert_eq!(json["options"]["since"], "HEAD");
@@ -856,6 +962,158 @@ mod tests {
             json["impact"]["changes"]["files"]["items"][0]["path"],
             "src/lib.rs"
         );
+    }
+
+    #[test]
+    fn snapshot_adds_read_only_evidence_for_returned_trace_files() {
+        let (repo, _index_dir, index_path) = fixture();
+        fs::create_dir_all(repo.path().join(".github")).unwrap();
+        fs::write(
+            repo.path().join("semgrep.sarif"),
+            serde_json::to_vec(&serde_json::json!({
+                "version": "2.1.0",
+                "runs": [{
+                    "tool": {"driver": {"name": "Semgrep"}},
+                    "results": [{
+                        "ruleId": "rust.changed-seed",
+                        "level": "warning",
+                        "message": {"text": "Changed seed requires review"},
+                        "locations": [{"physicalLocation": {
+                            "artifactLocation": {"uri": "src/lib.rs"},
+                            "region": {"startLine": 1}
+                        }}]
+                    }]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            repo.path().join("lcov.info"),
+            "SF:src/lib.rs\nDA:1,1\nDA:2,0\nend_of_record\n",
+        )
+        .unwrap();
+        fs::write(
+            repo.path().join(".github/CODEOWNERS"),
+            "/src/** @rust-team\n",
+        )
+        .unwrap();
+        let source_paths = [
+            repo.path().join("semgrep.sarif"),
+            repo.path().join("lcov.info"),
+            repo.path().join(".github/CODEOWNERS"),
+        ];
+        let source_bytes = source_paths
+            .iter()
+            .map(fs::read)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let root_entries = directory_names(repo.path());
+        let github_entries = directory_names(&repo.path().join(".github"));
+        let lens_options = options();
+        let evidence_options = crate::evidence::EvidenceOptions {
+            sarif: vec![PathBuf::from("semgrep.sarif")],
+            coverage: vec![PathBuf::from("lcov.info")],
+            codeowners: None,
+            discover_codeowners: true,
+            git_commits: 10,
+        };
+
+        let store = Store::open_read_only(index_path).unwrap();
+        let snapshot =
+            build_snapshot_with_evidence(&store, repo.path(), &lens_options, &evidence_options)
+                .unwrap();
+        let json = serde_json::to_value(snapshot).unwrap();
+
+        assert_eq!(json["evidence"]["sources"]["returned"], 4);
+        let file = json["evidence"]["files"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["path"] == "src/lib.rs")
+            .unwrap();
+        assert_eq!(file["findings"][0]["tool"], "Semgrep");
+        assert_eq!(file["coverage"]["lines_found"], 2);
+        assert_eq!(file["coverage"]["lines_hit"], 1);
+        assert_eq!(file["ownership"]["codeowners"][0], "@rust-team");
+        assert!(file["churn"]["commits"].as_u64().unwrap() >= 1);
+        assert_eq!(directory_names(repo.path()), root_entries);
+        assert_eq!(
+            directory_names(&repo.path().join(".github")),
+            github_entries
+        );
+        assert_eq!(
+            source_paths
+                .iter()
+                .map(fs::read)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            source_bytes
+        );
+    }
+
+    #[test]
+    fn snapshot_exposes_junit_runtime_and_exact_project_knowledge() {
+        let (repo, _index_dir, index_path) = fixture();
+        fs::write(
+            repo.path().join("junit.xml"),
+            r#"<testsuite><testcase name="seed fails" file="src/lib.rs" time="0.01"><failure message="expected two"/></testcase></testsuite>"#,
+        )
+        .unwrap();
+        fs::write(
+            repo.path().join("traces.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "resourceSpans": [{"scopeSpans": [{"spans": [{
+                    "traceId": "trace-1",
+                    "spanId": "span-1",
+                    "name": "seed",
+                    "attributes": [{
+                        "key": "code.file.path",
+                        "value": {"stringValue": "src/lib.rs"}
+                    }]
+                }]}]}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut writable = Store::open(&index_path).unwrap();
+        writable
+            .replace_project_history(&[crate::store::ProjectHistoryEntry {
+                path: "docs/adr/001-seed.md".into(),
+                kind: "architecture_decision".into(),
+                title: "Keep seed deterministic".into(),
+                body: "The contract is implemented in src/lib.rs.".into(),
+            }])
+            .unwrap();
+        drop(writable);
+
+        let store = Store::open_read_only(index_path).unwrap();
+        let snapshot = build_snapshot_with_evidence_extensions(
+            &store,
+            repo.path(),
+            &options(),
+            &crate::evidence::EvidenceOptions::default(),
+            &crate::evidence::EvidenceExtensionOptions {
+                junit: vec![PathBuf::from("junit.xml")],
+                otel: vec![PathBuf::from("traces.json")],
+                project_knowledge: true,
+            },
+        )
+        .unwrap();
+        let json = serde_json::to_value(snapshot).unwrap();
+        let file = json["evidence"]["files"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["path"] == "src/lib.rs")
+            .unwrap();
+        assert_eq!(file["test_results"]["failed"], 1);
+        assert_eq!(file["runtime"]["spans"], 1);
+        assert_eq!(
+            file["knowledge"][0]["kind"], "architecture_decision",
+            "{json}"
+        );
+        assert_eq!(json["evidence"]["sources"]["returned"], 3);
     }
 
     #[test]
@@ -929,6 +1187,8 @@ mod tests {
             root: repo.path().to_path_buf(),
             index_path,
             options: options(),
+            evidence: crate::evidence::EvidenceOptions::default(),
+            extensions: crate::evidence::EvidenceExtensionOptions::default(),
             authority: authority.clone(),
         };
         let server = std::thread::spawn(move || serve(listener, &state, Some(1)).unwrap());
@@ -966,6 +1226,8 @@ mod tests {
             root: repo.path().to_path_buf(),
             index_path,
             options: options(),
+            evidence: crate::evidence::EvidenceOptions::default(),
+            extensions: crate::evidence::EvidenceExtensionOptions::default(),
             authority: "127.0.0.1:43123".into(),
         };
 
@@ -1007,6 +1269,8 @@ mod tests {
             root: repo.path().to_path_buf(),
             index_path,
             options: options(),
+            evidence: crate::evidence::EvidenceOptions::default(),
+            extensions: crate::evidence::EvidenceExtensionOptions::default(),
             authority: "127.0.0.1:43123".into(),
         };
 
@@ -1033,6 +1297,8 @@ mod tests {
             root: repo.path().to_path_buf(),
             index_path,
             options: options(),
+            evidence: crate::evidence::EvidenceOptions::default(),
+            extensions: crate::evidence::EvidenceExtensionOptions::default(),
             authority: "127.0.0.1:43123".into(),
         };
 
@@ -1063,6 +1329,8 @@ mod tests {
             root: repo.path().to_path_buf(),
             index_path,
             options: options(),
+            evidence: crate::evidence::EvidenceOptions::default(),
+            extensions: crate::evidence::EvidenceExtensionOptions::default(),
             authority: "127.0.0.1:43123".into(),
         };
 

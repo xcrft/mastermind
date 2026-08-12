@@ -2756,6 +2756,51 @@ impl Store {
         rows.collect()
     }
 
+    /// Deterministic bounded read of the derived project-history corpus for
+    /// local evidence correlation. Markdown remains authoritative.
+    pub fn project_history_entries_bounded(
+        &self,
+        limit: usize,
+        byte_limit: usize,
+    ) -> SqlResult<(Vec<ProjectHistoryEntry>, bool)> {
+        let query_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
+        let mut stmt = self.conn.prepare(
+            "SELECT path, kind, title, body
+             FROM project_history_fts
+             ORDER BY path, kind, title
+             LIMIT ?1",
+        )?;
+        let mut rows = stmt.query(params![query_limit])?;
+        let mut entries = Vec::new();
+        let mut bytes = 0usize;
+        let mut truncated = false;
+        while let Some(row) = rows.next()? {
+            if entries.len() >= limit {
+                truncated = true;
+                break;
+            }
+            let entry = ProjectHistoryEntry {
+                path: row.get(0)?,
+                kind: row.get(1)?,
+                title: row.get(2)?,
+                body: row.get(3)?,
+            };
+            let entry_bytes = entry
+                .path
+                .len()
+                .saturating_add(entry.kind.len())
+                .saturating_add(entry.title.len())
+                .saturating_add(entry.body.len());
+            if entry_bytes > byte_limit.saturating_sub(bytes) {
+                truncated = true;
+                break;
+            }
+            bytes = bytes.saturating_add(entry_bytes);
+            entries.push(entry);
+        }
+        Ok((entries, truncated))
+    }
+
     pub fn project_history_count(&self) -> SqlResult<u32> {
         self.conn
             .query_row("SELECT COUNT(*) FROM project_history_fts", [], |row| {

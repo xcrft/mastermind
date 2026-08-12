@@ -604,6 +604,16 @@ pub(crate) fn run_bounded_git_with_limit(
     input: Option<&[u8]>,
     output_limit: usize,
 ) -> Result<BoundedGitOutput, WorkingTreeDiffError> {
+    run_bounded_git_with_limit_until(repo, args, input, output_limit, None)
+}
+
+pub(crate) fn run_bounded_git_with_limit_until(
+    repo: &Path,
+    args: &[&str],
+    input: Option<&[u8]>,
+    output_limit: usize,
+    deadline: Option<Instant>,
+) -> Result<BoundedGitOutput, WorkingTreeDiffError> {
     let start = Instant::now();
     let mut child = git_command(args)
         .current_dir(repo)
@@ -638,7 +648,9 @@ pub(crate) fn run_bounded_git_with_limit(
         });
         receiver
     });
-    let timeout = git_timeout();
+    let timeout = deadline.map_or_else(git_timeout, |deadline| {
+        git_timeout().min(deadline.saturating_duration_since(start))
+    });
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,

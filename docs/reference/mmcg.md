@@ -121,18 +121,23 @@ mmcg history "webhook dedupe"
 mmcg history "runtime boundary" --kind audit
 mmcg why "why is webhook dedupe durable?"
 
-# Build one bounded schema-v1 project map with safe text, JSON, or Mermaid projections
+# Build one bounded schema-v1 project map with text, JSON, Mermaid, or SARIF projections
 mmcg map . --format text
 mmcg map src --format json --depth 2 --top 20
 mmcg map . --format mermaid
+mmcg map . --format sarif > mastermind-map.sarif
 
 # Analyze baseline vs staged, unstaged, and untracked changes.
 mmcg impact --since main --format text --depth 3 --top 100
 mmcg impact --since HEAD~1 --format json
+mmcg impact --since main --format sarif > mastermind-impact.sarif
 
 # Serve the local, read-only diff-first Lens UI on an ephemeral loopback port.
 mmcg ui --since main
 mmcg ui --since origin/main --path src --depth 2 --top 50 --production-only
+mmcg ui --since main --sarif semgrep.sarif --sarif codeql.sarif \
+  --coverage lcov.info --coverage cobertura.xml \
+  --junit junit.xml --otel traces.json
 
 # Health-check the project setup (index, gitignore, CLAUDE.md, MCP config,
 # `mmcg serve` handshake). Exit code 1 if any check fails — wire into CI.
@@ -274,6 +279,81 @@ source-content or mutation routes.
 `--production-only` bound the initial review. Run `mmcg index .` first; Lens
 will report a missing or stale index rather than create or update one.
 
+### Evidence overlays
+
+Lens can correlate the returned change/impact trace with additional read-only
+evidence:
+
+- repeatable `--sarif PATH` inputs for SARIF 2.1 findings;
+- repeatable `--coverage PATH` inputs, auto-detected as LCOV tracefiles or
+  Cobertura XML;
+- repeatable `--junit PATH` inputs for JUnit XML. Only explicit testcase `file`
+  attributes are correlated; class names are not guessed into paths;
+- repeatable `--otel PATH` inputs for OTLP JSON. Only explicit
+  `code.file.path` or legacy `code.filepath` span attributes are correlated;
+- exact repository-path mentions from the indexed project-history corpus,
+  including specs, executor reports, audits, lessons, context, release notes,
+  and Markdown decisions under conventional `docs/adr`, `docs/adrs`,
+  `docs/decisions`, `adr`, `adrs`, or `.mastermind/decisions` directories.
+  This is enabled by default; `--no-project-knowledge` disables it;
+- CODEOWNERS from `.github/CODEOWNERS`, repository-root `CODEOWNERS`, or
+  `docs/CODEOWNERS` in that order, with `--codeowners PATH` as an override;
+- bounded Git churn and contributor names from the last 200 commits by default,
+  configurable with `--git-commits 0..1000` (`0` disables Git history).
+
+Evidence is matched only to files already returned by the bounded change,
+impact, and candidate-test trace. The versioned `evidence` response includes
+source status, file-level facts, diagnostics, and applied limits. A source that
+is missing, changes during the read, exceeds 32 MiB, has invalid syntax, hits a
+work cap, or exceeds the request deadline is reported as partial/error; it is
+never silently treated as a clean result. Findings are capped at 5,000 total
+and 100 per file, coverage at 500,000 unique lines, JUnit at 100,000 cases and
+1,000 returned failure details, OTLP at 100,000 matched spans and 1,000 file
+pairs, project knowledge at 500 exact matches, and combined artifact inputs at
+64. CODEOWNERS stays below GitHub's 3 MiB limit and at 50,000 rules and 50
+owners per rule, contributor details at five recent names per file, and
+diagnostics at 100. Churn totals stay complete when contributor names are
+truncated. Git output is capped at 8 MiB.
+
+Repository-relative artifact paths match exactly. Reports produced under a
+different absolute build root may use a unique repository-path suffix match;
+this relocation and the maximum-hit merge used for duplicate coverage lines
+are reported as precision notes. Artifact labels preserve provenance, but Lens
+cannot prove that a SARIF, coverage, JUnit, or OTLP report was produced from the current Git
+revision. CODEOWNERS matching uses the working-tree file,
+including last-match-wins and explicit no-owner rules; it does not verify GitHub
+account/team existence or write permission, and GitHub review assignment still
+uses the base-branch file. Git history is pinned to the impact snapshot's HEAD
+and does not follow renames.
+
+The UI renders redundant text and visual marks for SARIF, coverage, JUnit,
+runtime spans, project knowledge, ownership, and churn. Runtime parent-child
+file pairs may decorate an already returned static edge in either direction,
+but they never create a node or edge. Overlay switches change emphasis and
+inspector detail only; they do not add or remove codegraph topology. Imported
+artifacts and Git history are parsed in memory. Project knowledge is read from
+the derived SQLite history corpus; Markdown remains authoritative and must be
+re-indexed after changes. Lens writes none of this evidence to source files or
+SQLite.
+
+### SARIF export
+
+`mmcg map --format sarif` exports returned dependency cycles with the stable
+rule ID `mastermind/dependency-cycle`. `mmcg impact --format sarif` exports
+returned cross-component change impacts with
+`mastermind/component-boundary-change`, anchoring the primary location to the
+changed symbol and linking the impacted symbol as a related location. Both are
+SARIF 2.1.0 documents with repository-relative, percent-encoded artifact URIs,
+Mastermind's semantic version, and run properties that expose query scope,
+baseline/head identity, and partial-result state. The exporter never converts a
+truncated query into a completeness claim.
+
+Use GitHub's `github/codeql-action/upload-sarif` action when uploading these
+files so GitHub can populate missing fingerprints. Stable `ruleId` values and
+consistent relative paths are retained across runs for alert identity.
+See [GitHub's SARIF support contract](https://docs.github.com/en/code-security/reference/code-scanning/sarif-files/sarif-support)
+for ingestion limits and PR annotation behavior.
+
 ## MCP server usage
 
 ```bash
@@ -336,11 +416,11 @@ Run `mmcg watch` in a separate terminal so the index stays current while you wor
 | `mmcg_unreferenced` | optional `kind`, `language` | Symbols that no edge references. Dead-code candidates. **Review manually** — see Limitations for false-positive scenarios. |
 | `mmcg_api_surface` | `prefix`, optional `language` | Symbols under `prefix` referenced from at least one file OUTSIDE `prefix`. Empirical "who-uses-this-module" map; doesn't need declared visibility. |
 | `mmcg_centrality` | optional `prefix`, `language`, `kind`, `top` (default 20) | Rank symbols by in-degree (distinct callers). Pre-flight "where is the gravity" — top hits are the structural attractors of the codebase or a subdirectory. Use to learn what to read first on unfamiliar code. Excludes synthetic `<module>` rows and zero-degree symbols. |
-| `mmcg_map` | optional `path` (default `.`), `depth` (1–6, default 2), `top` (1–100, default 20), `production_only` (default `false`) | Schema-v1 architecture briefing with lexical file/directory scope: `%` and `_` are literal bytes, selected-directory components are relative to that directory, root components remain repository-relative, and selected files retain their paths. `production_only` excludes conventional test/fixture/example/generated/vendor path segments and test filenames (`test_*`, `*_test.*`, `*.test.*`, `*.spec.*`, `*Test.*`, `*Tests.*`) before bounded queries run. Hotspots prefer unambiguous definitions before pooled same-name collisions. JSON, text, and Mermaid are projections of the same result; Mermaid includes component counts/languages, boundaries, hotspots, and cycle rings. Caps are 50,000 aggregation paths, 20 languages, 20 components, 20 boundaries/component and 400 globally, 50 entry points, 100 hotspots, 50,000 scoped cycle edges, 50 cycles, and 500 cycle memberships. `path_work_limit` marks path-derived partial aggregates; `top_probe` marks a hotspot or per-component boundary cap+1 probe; `global_probe_limit` marks components whose certainty was prevented by the 401st global boundary row; cycle `work_limit` returns no cycles because SCC analysis was skipped before truncated edges could be analyzed. |
+| `mmcg_map` | optional `path` (default `.`), `depth` (1–6, default 2), `top` (1–100, default 20), `production_only` (default `false`) | Schema-v1 architecture briefing with lexical file/directory scope: `%` and `_` are literal bytes, selected-directory components are relative to that directory, root components remain repository-relative, and selected files retain their paths. `production_only` excludes conventional test/fixture/example/generated/vendor path segments and test filenames (`test_*`, `*_test.*`, `*.test.*`, `*.spec.*`, `*Test.*`, `*Tests.*`) before bounded queries run. Hotspots prefer unambiguous definitions before pooled same-name collisions. JSON, text, Mermaid, and CLI SARIF are projections of the same result; Mermaid includes component counts/languages, boundaries, hotspots, and cycle rings, while SARIF exports returned cycles as architecture findings. Caps are 50,000 aggregation paths, 20 languages, 20 components, 20 boundaries/component and 400 globally, 50 entry points, 100 hotspots, 50,000 scoped cycle edges, 50 cycles, and 500 cycle memberships. `path_work_limit` marks path-derived partial aggregates; `top_probe` marks a hotspot or per-component boundary cap+1 probe; `global_probe_limit` marks components whose certainty was prevented by the 401st global boundary row; cycle `work_limit` returns no cycles because SCC analysis was skipped before truncated edges could be analyzed. |
 | `mmcg_change_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Stable schema-v1 analysis of the resolved baseline against staged, unstaged, and untracked content. Reports added/removed/signature/body-changed symbols, batched transitive callers, component crossings, ranked test candidates, a `disciplines` block routing the change to an evidence set, exact collection metadata, caps, and precision notes. Root, SHA-256 index freshness, Git snapshot, and SQLite snapshot checks fail closed with stable codes. |
 | `mmcg_test_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Exact test-focused projection of `mmcg_change_impact`. Changed tests and depth-1 graph tests are direct, deeper graph tests are transitive, and scoped filename candidates are heuristic. Focused candidates never replace the repository's full required gate. |
 | `mmcg_tasks` | `query`, optional `top` (default 10) | Full-text search past task specs (`.mastermind/tasks/<NNN>-<name>/spec.md`). FTS5 MATCH syntax (bare words AND-joined, `"phrases"`, `OR`/`NOT`). Returns paths, titles, and snippet excerpts with `«match»` highlights ranked by BM25. Use as planner pre-flight: "have we touched this area before?" surfaces past designs and prior verdicts. Top-level files prefixed with `_` (e.g. `_lessons.md`) and bare `.md` files at the top of `tasks/` (legacy 0.6.x layout) are intentionally excluded. |
-| `mmcg_history` | `query`, optional `kind`, `top` (default 10) | Searches `CONTEXT.md`, `CONTEXT-archive-*.md`, canonical task specs, executor reports, audits, `.mastermind/releases/*.md`, legacy task-local release notes, and lessons. `candidate` lessons are unresolved signals, not active guidance. Returns observed matches, `skipped_artifacts`, `truncated`, and an explicit retrieval-only epistemic contract. Markdown remains authoritative; re-index after Markdown changes. Each artifact is capped at 1 MiB and the corpus at 5,000 files. |
+| `mmcg_history` | `query`, optional `kind`, `top` (default 10) | Searches `CONTEXT.md`, `CONTEXT-archive-*.md`, canonical task specs, executor reports, audits, `.mastermind/releases/*.md`, legacy task-local release notes, lessons, and Markdown architecture decisions under conventional ADR directories. `architecture_decision` is an exact `kind` filter. `candidate` lessons are unresolved signals, not active guidance. Returns observed matches, `skipped_artifacts`, `truncated`, and an explicit retrieval-only epistemic contract. Markdown remains authoritative; re-index after Markdown changes. Each artifact is capped at 1 MiB and the corpus at 5,000 files. |
 | `mmcg_dependency_cycles` | optional `language`, `min_size` (default 2) | Detect circular imports — strongly-connected components in the file-level import graph (Tarjan's algorithm). Each result is a cycle = a list of files. Pre-merge guard ("does this PR introduce a new cycle?") and architectural-hygiene survey. Resolves edges by leaf-name match — over-approximates (two unrelated `Logger` symbols cross-link) so verify before refactoring. Bump `min_size` to hide trivial A↔B and surface only larger structural problems. Work-capped at 50,000 file-pair edges: above that, `truncated: true` with an empty `cycles` list — incomplete and possibly inaccurate, not "more available"; narrow with `language` and retry. |
 | `mmcg_symbols_changed_since` | `git_ref`, optional `root` | Symbol-level diff between a git ref and the current index. Returns `{added, removed, signature_changed}` symbol sets for files in `git diff --name-only <ref>..HEAD`. Re-parses old blobs from `git show <ref>:<path>` using the same extractor. Different from `mmcg_recent_changes` (watcher mtime) — this is git-ref-based, answering "what symbols did THIS PR/branch touch?". PR-review pre-flight, auditor verification, "what new public API appeared in v2.3?". Git subprocesses are killed after `MMCG_GIT_TIMEOUT_MS`; the per-file loop is capped at 10,000 files with `truncated: true` marking a partial diff. |
 | `mmcg_status` | — | Index path, file/symbol counts, and bounded `stale_files`. A non-zero value means re-index before trusting structural answers. |

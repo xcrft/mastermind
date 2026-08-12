@@ -1621,6 +1621,15 @@ mod tests {
         info
     }
 
+    fn local_file_uri(path: &Path) -> String {
+        let normalized = path.to_string_lossy().replace('\\', "/");
+        if normalized.starts_with('/') {
+            format!("file://{normalized}")
+        } else {
+            format!("file:///{normalized}")
+        }
+    }
+
     fn fixture() -> (TempDir, Store, PathBuf) {
         let temp = TempDir::new().unwrap();
         let root = temp.path().join("repo");
@@ -1660,7 +1669,7 @@ mod tests {
 
         let mut index = Index::new();
         index.metadata = MessageField::some(Metadata {
-            project_root: format!("file://{}", root.display()),
+            project_root: local_file_uri(&root),
             tool_info: MessageField::some(ToolInfo {
                 name: "scip-clang".into(),
                 version: "test".into(),
@@ -1738,7 +1747,7 @@ mod tests {
         }
         let foreign = temp.path().join("foreign-repo");
         std::fs::create_dir(&foreign).unwrap();
-        index.metadata.as_mut().unwrap().project_root = format!("file://{}", foreign.display());
+        index.metadata.as_mut().unwrap().project_root = local_file_uri(&foreign);
         scip::write_message_to_file(&path, index).unwrap();
 
         let error = import(&store, &path).unwrap_err().to_string();

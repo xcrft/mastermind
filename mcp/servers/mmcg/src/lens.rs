@@ -280,6 +280,13 @@ pub(crate) fn standalone_html(snapshot: &LensSnapshot) -> Result<Vec<u8>, LensEr
 }
 
 fn standalone_html_from_json(snapshot_json: &str) -> Result<Vec<u8>, LensError> {
+    standalone_html_from_template(snapshot_json, INDEX_HTML)
+}
+
+fn standalone_html_from_template(
+    snapshot_json: &str,
+    template: &str,
+) -> Result<Vec<u8>, LensError> {
     let escaped_json = snapshot_json
         .replace('&', "\\u0026")
         .replace('<', "\\u003c")
@@ -291,11 +298,12 @@ fn standalone_html_from_json(snapshot_json: &str) -> Result<Vec<u8>, LensError> 
         "default-src 'none'; script-src '{script_hash}' '{snapshot_hash}'; style-src '{style_hash}'; img-src data:; connect-src 'none'; font-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     );
     let served_csp = "    <meta\n      http-equiv=\"Content-Security-Policy\"\n      content=\"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'\"\n    >\n";
-    let mut html = INDEX_HTML.replace(
+    let template = template.replace("\r\n", "\n");
+    let mut html = template.replace(
         served_csp,
         &format!("    <meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\">\n"),
     );
-    if html == INDEX_HTML {
+    if html == template {
         return Err(LensError::Serialization);
     }
     html = html.replace(
@@ -1151,6 +1159,19 @@ mod tests {
         assert!(html.contains("connect-src 'none'"));
         assert!(html.contains("sha256-"));
         assert!(html.contains("Offline package"));
+    }
+
+    #[test]
+    fn standalone_html_accepts_crlf_checkout_assets() {
+        let crlf_template = INDEX_HTML.replace('\n', "\r\n");
+
+        let html = standalone_html_from_template("{}", &crlf_template).unwrap();
+        let html = String::from_utf8(html).unwrap();
+
+        assert!(html.contains("id=\"lens-snapshot\""));
+        assert!(html.contains("connect-src 'none'"));
+        assert!(!html.contains("href=\"styles.css\""));
+        assert!(!html.contains("src=\"app.js\""));
     }
 
     fn directory_snapshot(path: &Path) -> Vec<(String, Vec<u8>)> {

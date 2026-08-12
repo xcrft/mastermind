@@ -985,8 +985,15 @@ fn rename_package_noclobber(source: &Path, target: &Path) -> std::io::Result<()>
 #[cfg(windows)]
 fn rename_package_noclobber(source: &Path, target: &Path) -> std::io::Result<()> {
     // MoveFileEx without MOVEFILE_REPLACE_EXISTING is the behavior used by
-    // std::fs::rename on Windows, so an existing destination fails.
-    std::fs::rename(source, target)
+    // std::fs::rename on Windows, so an existing destination fails. Windows
+    // reports a non-empty destination directory as ERROR_DIR_NOT_EMPTY; map it
+    // to the cross-platform no-clobber contract consumed by write_package.
+    match std::fs::rename(source, target) {
+        Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => Err(
+            std::io::Error::new(std::io::ErrorKind::AlreadyExists, error),
+        ),
+        result => result,
+    }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", windows)))]

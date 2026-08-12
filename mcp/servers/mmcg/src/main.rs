@@ -150,6 +150,18 @@ enum Cmd {
         /// Exclude conventional tests, fixtures, examples, generated, and vendor paths from the architecture map.
         #[arg(long)]
         production_only: bool,
+        /// Import a SARIF 2.1 report as read-only Lens evidence. Repeatable.
+        #[arg(long = "sarif", value_name = "PATH")]
+        sarif: Vec<PathBuf>,
+        /// Import an LCOV tracefile or Cobertura XML report. Repeatable.
+        #[arg(long = "coverage", value_name = "PATH")]
+        coverage: Vec<PathBuf>,
+        /// Override the repository CODEOWNERS file used by Lens.
+        #[arg(long, value_name = "PATH")]
+        codeowners: Option<PathBuf>,
+        /// Bound read-only Git churn and contributor evidence. Zero disables it.
+        #[arg(long, default_value_t = 200, value_parser = clap::value_parser!(u16).range(0..=1000))]
+        git_commits: u16,
         /// Loopback port. Zero asks the OS for an available ephemeral port.
         #[arg(long, default_value_t = 0)]
         port: u16,
@@ -878,13 +890,17 @@ fn run_cli_inner(
             depth,
             top,
             production_only,
+            sarif,
+            coverage,
+            codeowners,
+            git_commits,
             port,
         } => {
             let root = root
                 .canonicalize()
                 .map_err(|_| mmcg::lens::LensError::RootUnavailable)?;
             let index_path = index_path_for_root(index_override.as_deref(), &root);
-            mmcg::lens::run(
+            mmcg::lens::run_with_evidence(
                 root,
                 index_path,
                 mmcg::lens::LensOptions {
@@ -893,6 +909,13 @@ fn run_cli_inner(
                     depth,
                     top,
                     production_only,
+                },
+                mmcg::evidence::EvidenceOptions {
+                    sarif,
+                    coverage,
+                    discover_codeowners: codeowners.is_none(),
+                    codeowners,
+                    git_commits,
                 },
                 port,
             )?;
@@ -1429,14 +1452,61 @@ mod tests {
                 depth: 3,
                 top: 100,
                 production_only: true,
+                sarif,
+                coverage,
+                codeowners: None,
+                git_commits: 200,
                 port: 0,
             } if since == "origin/main"
                 && root.as_path() == std::path::Path::new(".")
                 && path == "."
+                && sarif.is_empty()
+                && coverage.is_empty()
         ));
 
         assert!(
             Cli::try_parse_from(["mastermind", "ui", "--since", "main", "--depth", "6",]).is_err()
         );
+
+        let overlays = Cli::try_parse_from([
+            "mastermind",
+            "ui",
+            "--since",
+            "main",
+            "--sarif",
+            "semgrep.sarif",
+            "--sarif",
+            "codeql.sarif",
+            "--coverage",
+            "lcov.info",
+            "--coverage",
+            "cobertura.xml",
+            "--codeowners",
+            ".github/CODEOWNERS",
+            "--git-commits",
+            "25",
+        ])
+        .unwrap();
+        assert!(matches!(
+            overlays.cmd,
+            Cmd::Ui {
+                sarif,
+                coverage,
+                codeowners: Some(codeowners),
+                git_commits: 25,
+                ..
+            } if sarif == [PathBuf::from("semgrep.sarif"), PathBuf::from("codeql.sarif")]
+                && coverage == [PathBuf::from("lcov.info"), PathBuf::from("cobertura.xml")]
+                && codeowners.as_path() == std::path::Path::new(".github/CODEOWNERS")
+        ));
+        assert!(Cli::try_parse_from([
+            "mastermind",
+            "ui",
+            "--since",
+            "main",
+            "--git-commits",
+            "1001",
+        ])
+        .is_err());
     }
 }

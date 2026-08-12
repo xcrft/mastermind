@@ -13,6 +13,7 @@ pub mod audit_spec;
 pub mod context_doctor;
 pub mod diff;
 pub mod doctor;
+pub mod evidence;
 pub mod executor_report;
 pub mod fingerprint;
 pub mod hex;

@@ -89,6 +89,9 @@ The map highlights languages, components, entry points, dependency boundaries, h
 
 ```bash
 mastermind ui --since main
+mastermind ui --since main \
+  --sarif semgrep.sarif --sarif codeql.sarif \
+  --coverage lcov.info --coverage cobertura.xml
 ```
 
 Lens serves a local, read-only, diff-first review UI on an ephemeral loopback
@@ -96,6 +99,18 @@ port. It uses the same bounded architecture-map and change-impact schemas as the
 CLI/MCP surfaces, adds no CDN or telemetry, and never exposes a write endpoint.
 Use `--path`, `--depth`, `--top`, or `--production-only` to narrow a large
 monorepo review.
+
+Lens evidence overlays correlate the returned static trace with SARIF findings,
+LCOV/Cobertura line coverage, CODEOWNERS, and bounded Git churn/contributors.
+The graph topology stays unchanged: overlays add source-labelled marks and
+inspector facts rather than an opaque risk score. Lens auto-discovers
+`.github/CODEOWNERS`, `CODEOWNERS`, or `docs/CODEOWNERS`; use `--codeowners` to
+override it and `--git-commits 0..1000` to control history (`200` by default).
+CODEOWNERS is matched as working-tree syntax only; Lens does not claim that a
+listed account has GitHub write access or replace base-branch review policy.
+Unreadable, oversized, invalid, or truncated sources remain visible as partial
+diagnostics. Reports and history are parsed in memory and are never written to
+the repository or codegraph database.
 
 ### Understand change and test impact
 

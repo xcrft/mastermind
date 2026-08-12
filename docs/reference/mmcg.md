@@ -133,6 +133,8 @@ mmcg impact --since HEAD~1 --format json
 # Serve the local, read-only diff-first Lens UI on an ephemeral loopback port.
 mmcg ui --since main
 mmcg ui --since origin/main --path src --depth 2 --top 50 --production-only
+mmcg ui --since main --sarif semgrep.sarif --sarif codeql.sarif \
+  --coverage lcov.info --coverage cobertura.xml
 
 # Health-check the project setup (index, gitignore, CLAUDE.md, MCP config,
 # `mmcg serve` handshake). Exit code 1 if any check fails — wire into CI.
@@ -273,6 +275,47 @@ source-content or mutation routes.
 `--since` is required. `--path`, `--depth 1..5`, `--top 1..100`, and
 `--production-only` bound the initial review. Run `mmcg index .` first; Lens
 will report a missing or stale index rather than create or update one.
+
+### Evidence overlays
+
+Lens can correlate the returned change/impact trace with additional read-only
+evidence:
+
+- repeatable `--sarif PATH` inputs for SARIF 2.1 findings;
+- repeatable `--coverage PATH` inputs, auto-detected as LCOV tracefiles or
+  Cobertura XML;
+- CODEOWNERS from `.github/CODEOWNERS`, repository-root `CODEOWNERS`, or
+  `docs/CODEOWNERS` in that order, with `--codeowners PATH` as an override;
+- bounded Git churn and contributor names from the last 200 commits by default,
+  configurable with `--git-commits 0..1000` (`0` disables Git history).
+
+Evidence is matched only to files already returned by the bounded change,
+impact, and candidate-test trace. The versioned `evidence` response includes
+source status, file-level facts, diagnostics, and applied limits. A source that
+is missing, changes during the read, exceeds 32 MiB, has invalid syntax, hits a
+work cap, or exceeds the request deadline is reported as partial/error; it is
+never silently treated as a clean result. Findings are capped at 5,000 total
+and 100 per file, coverage at 500,000 unique lines, combined SARIF/coverage
+inputs at 64, CODEOWNERS below GitHub's 3 MiB limit and at 50,000 rules and 50
+owners per rule, contributor details at five recent names per file, and
+diagnostics at 100. Churn totals stay complete when contributor names are
+truncated. Git output is capped at 8 MiB.
+
+Repository-relative artifact paths match exactly. Reports produced under a
+different absolute build root may use a unique repository-path suffix match;
+this relocation and the maximum-hit merge used for duplicate coverage lines
+are reported as precision notes. Artifact labels preserve provenance, but Lens
+cannot prove that a SARIF or coverage report was produced from the current Git
+revision. CODEOWNERS matching uses the working-tree file,
+including last-match-wins and explicit no-owner rules; it does not verify GitHub
+account/team existence or write permission, and GitHub review assignment still
+uses the base-branch file. Git history is pinned to the impact snapshot's HEAD
+and does not follow renames.
+
+The UI renders redundant text and visual marks for SARIF, coverage, ownership,
+and churn. Overlay switches change emphasis and inspector detail only; they do
+not add or remove codegraph nodes or edges. Imported artifacts and Git history
+are parsed in memory. Lens does not write them to source files or SQLite.
 
 ## MCP server usage
 

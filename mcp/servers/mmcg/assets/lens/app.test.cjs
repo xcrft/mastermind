@@ -7,6 +7,7 @@ const vm = require("node:vm");
 
 const APP_SOURCE = fs.readFileSync(path.join(__dirname, "app.js"), "utf8");
 const HTML_SOURCE = fs.readFileSync(path.join(__dirname, "index.html"), "utf8");
+const CSS_SOURCE = fs.readFileSync(path.join(__dirname, "styles.css"), "utf8");
 
 class TokenList {
   constructor() {
@@ -113,6 +114,10 @@ class MockElement {
     return this.attributes.has(name) ? this.attributes.get(name) : null;
   }
 
+  removeAttribute(name) {
+    this.attributes.delete(name);
+  }
+
   addEventListener(type, handler) {
     if (!this.listeners[type]) {
       this.listeners[type] = [];
@@ -184,6 +189,7 @@ const ELEMENT_IDS = [
   "clear-search", "fit-button", "component-list", "graph-frame", "trace-graph", "graph-state",
   "trace-context", "mobile-trace-list", "trace-count", "inspector-body", "precision-list",
   "precision-count", "limits-list", "limits-count", "schema-label", "status-region",
+  "evidence-summary", "evidence-source-list",
   "metric-files", "metric-files-note", "metric-symbols", "metric-symbols-note", "metric-impact",
   "metric-impact-note", "metric-crossings", "metric-crossings-note", "metric-tests",
   "metric-tests-note",
@@ -206,16 +212,27 @@ function createDocument() {
     button.setAttribute("data-scope", scope);
     return button;
   });
+  const overlayButtons = ["findings", "coverage", "ownership", "churn"].map((overlay) => {
+    const button = new MockElement("button");
+    button.dataset.overlay = overlay;
+    button.setAttribute("data-overlay", overlay);
+    button.setAttribute("aria-pressed", "true");
+    return button;
+  });
   return {
     nodes: nodes,
     scopeButtons: scopeButtons,
+    overlayButtons: overlayButtons,
     document: {
       body: new MockElement("body"),
       getElementById(id) {
         return nodes.get(id);
       },
       querySelectorAll(selector) {
-        return selector === "[data-scope]" ? scopeButtons : [];
+        if (selector === "[data-scope]") {
+          return scopeButtons;
+        }
+        return selector === "[data-overlay]" ? overlayButtons : [];
       },
       createElement(tagName) {
         return new MockElement(tagName);
@@ -242,6 +259,48 @@ function fixture() {
     schema_version: 1,
     repository: { name: "example", root_label: "." },
     options: { since: "main", path: ".", depth: 3, top: 100, production_only: false },
+    evidence: {
+      schema_version: 1,
+      partial: false,
+      sources: {
+        total: 4,
+        returned: 4,
+        truncated: false,
+        items: [
+          { id: "sarif:0", kind: "sarif", label: "semgrep.sarif", status: "loaded", facts_total: 1, facts_returned: 1, files_matched: 1 },
+          { id: "coverage:0", kind: "coverage", label: "lcov.info", status: "loaded", facts_total: 2, facts_returned: 2, files_matched: 1 },
+          { id: "codeowners", kind: "codeowners", label: ".github/CODEOWNERS", status: "loaded", facts_total: 3, facts_returned: 3, files_matched: 3 },
+          { id: "git-history", kind: "git_history", label: "Git · last 200 commits", status: "loaded", facts_total: 3, facts_returned: 3, files_matched: 2 },
+        ],
+      },
+      files: {
+        total: 3,
+        returned: 3,
+        truncated: false,
+        items: [
+          {
+            path: "src/auth.rs",
+            findings: [{ source_id: "sarif:0", tool: "Semgrep", rule_id: "auth.bypass", level: "error", message: "Authorization result is ignored", line: 42, column: 3 }],
+            coverage: { source_ids: ["coverage:0"], lines_found: 2, lines_hit: 1 },
+            ownership: { codeowners_source_id: "codeowners", codeowners: ["@security"], contributors: [{ name: "Alice", commits: 2 }] },
+            churn: { commits: 2, lines_added: 7, lines_deleted: 3 },
+          },
+          {
+            path: "src/target.rs",
+            findings: [],
+            ownership: { codeowners_source_id: "codeowners", codeowners: [], contributors: [] },
+          },
+          {
+            path: "tests/auth.rs",
+            findings: [],
+            ownership: { codeowners_source_id: "codeowners", codeowners: [], contributors: [{ name: "Bob", commits: 1 }] },
+            churn: { commits: 1, lines_added: 4, lines_deleted: 0 },
+          },
+        ],
+      },
+      diagnostics: { total: 0, returned: 0, truncated: false, items: [] },
+      limits: { artifact_bytes: 33554432, artifact_sources: 64, relevant_files: 1000, findings: 5000, findings_per_file: 100, coverage_lines: 500000, codeowner_rules: 50000, codeowners_bytes: 3145728, owners_per_rule: 50, contributors_per_file: 5, diagnostics: 100, git_commits: 200 },
+    },
     map: {
       scope: { aggregation_paths_truncated: false },
       files: { total: 2, returned: 2, truncated: false, items: [] },
@@ -282,7 +341,18 @@ function fixture() {
           { component: "tests", changed_symbols: 0, impacted_symbols: 0, candidate_tests: 1 },
         ],
       },
-      impact: { total: 0, returned: 0, truncated: false, items: [] },
+      impact: {
+        total: 1,
+        returned: 1,
+        truncated: false,
+        items: [{
+          symbol: { file: "src/target.rs", name: "authorize_target", kind: "function", line: 7 },
+          minimum_depth: 1,
+          edge_precision: ["syntactic"],
+          name_collision_count: 0,
+          seeds: [changed],
+        }],
+      },
       api_crossings: { total: 0, returned: 0, truncated: false, items: [] },
       tests: {
         total: 1,
@@ -348,8 +418,52 @@ async function main() {
   const refreshTag = HTML_SOURCE.match(/<button[^>]*id="refresh-button"[^>]*>/);
   assert.ok(refreshTag, "Refresh button must exist");
   assert.match(refreshTag[0], /aria-label="Refresh Lens snapshot"/, "Refresh needs an explicit mobile-safe accessible name");
+  const mobileCss = CSS_SOURCE.slice(CSS_SOURCE.indexOf("@media (max-width: 720px)"));
+  assert.match(
+    mobileCss,
+    /\.evidence-source-list\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*repeat\(2,/s,
+    "Mobile evidence sources must wrap into a visible two-column register"
+  );
 
   const harness = await renderFixture();
+  assert.match(harness.nodes.get("evidence-summary").textContent, /4 sources · 3 matched trace files/i);
+  assert.equal(harness.nodes.get("evidence-source-list").querySelectorAll(".evidence-source").length, 4);
+  const changedCandidate = harness.nodes.get("mobile-trace-list").querySelectorAll(".mobile-candidate")[0];
+  assert.ok(changedCandidate, "Changed claim with overlays must remain selectable on mobile");
+  assert.equal(
+    harness.nodes.get("trace-graph").getAttribute("hidden"),
+    "",
+    "Mobile index must remove the dormant SVG from layout"
+  );
+  changedCandidate.dispatch("click");
+  assert.equal(
+    harness.nodes.get("trace-graph").getAttribute("hidden"),
+    null,
+    "Selecting a mobile claim must reveal its compact SVG"
+  );
+  assert.equal(
+    harness.nodes.get("trace-graph").querySelectorAll(".graph-edge--ownership").length,
+    1,
+    "A named owner to explicit no-owner transition must remain visible as an ownership boundary"
+  );
+  const changedInspector = harness.nodes.get("inspector-body").textContent;
+  assert.match(changedInspector, /SARIF findings · file-level/i);
+  assert.match(changedInspector, /Semgrep \/ auth\.bypass:42:3/i);
+  assert.match(changedInspector, /50% reported lines covered \(1\/2\)/i);
+  assert.match(changedInspector, /CODEOWNERS · @security/i);
+  assert.match(changedInspector, /Git contributor · Alice · 2 commits/i);
+  const nodeCountBeforeToggle = harness.nodes.get("trace-graph").querySelectorAll("[data-node-id]").length;
+  const findings = harness.overlayButtons.find((button) => button.dataset.overlay === "findings");
+  findings.dispatch("click");
+  assert.equal(findings.getAttribute("aria-pressed"), "false");
+  assert.doesNotMatch(harness.nodes.get("inspector-body").textContent, /SARIF findings/i);
+  assert.equal(
+    harness.nodes.get("trace-graph").querySelectorAll("[data-node-id]").length,
+    nodeCountBeforeToggle,
+    "Overlay visibility must not alter graph topology"
+  );
+  findings.dispatch("click");
+  harness.nodes.get("fit-button").dispatch("click");
   const testsScope = harness.scopeButtons.find((button) => button.dataset.scope === "test");
   testsScope.dispatch("click");
   const candidate = harness.nodes.get("mobile-trace-list").querySelectorAll(".mobile-candidate")[0];
@@ -360,12 +474,20 @@ async function main() {
   assert.match(inspectorText, /heuristic evidence/i);
   assert.match(inspectorText, /no graph seed returned/i);
   assert.match(inspectorText, /component tests/i);
+  assert.match(inspectorText, /CODEOWNERS · explicitly unowned/i);
+  assert.match(inspectorText, /Git contributor · Bob · 1 commits/i);
+  assert.match(inspectorText, /1 commits · \+4 \/ −0 lines/i);
   assert.doesNotMatch(inspectorText, /unnamed seed|file unavailable/i, "Null seed must not invent an endpoint");
   assert.equal(
     harness.nodes.get("trace-graph").querySelectorAll("[data-edge-id]").length,
     0,
     "Null seed must not create a graph edge"
   );
+
+  const ownership = harness.overlayButtons.find((button) => button.dataset.overlay === "ownership");
+  ownership.dispatch("click");
+  assert.equal(ownership.getAttribute("aria-pressed"), "false");
+  assert.doesNotMatch(harness.nodes.get("inspector-body").textContent, /CODEOWNERS/i);
 
   process.stdout.write("Lens focused DOM/static regressions passed\n");
 }

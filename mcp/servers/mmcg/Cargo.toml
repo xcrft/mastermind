@@ -58,6 +58,7 @@ notify = "8.2"
 # JSON for MCP protocol
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+quick-xml = "0.41"
 sha2 = "0.11"
 base64 = "0.23"
 ed25519-dalek = { version = "3", features = ["rand_core"] }
@@ -80,6 +81,8 @@ clap = { version = "4.5", features = ["derive", "env"] }
 # Filesystem walking
 walkdir = "2.5"
 ignore = "0.4"
+globset = "0.4"
+aho-corasick = "1.1"
 
 # Cross-platform home dir lookup for `mmcg doctor`'s MCP-config check.
 dirs = "6"

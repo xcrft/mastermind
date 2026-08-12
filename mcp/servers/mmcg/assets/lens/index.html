@@ -148,10 +148,32 @@
         </button>
       </section>
 
+      <section class="evidence-deck" aria-labelledby="evidence-heading">
+        <div class="evidence-deck__heading">
+          <div>
+            <p class="section-index">03 / Evidence overlays</p>
+            <h2 id="evidence-heading">Corroborating signals</h2>
+          </div>
+          <p id="evidence-summary">No external evidence sources loaded yet.</p>
+        </div>
+        <div class="overlay-control" role="group" aria-label="Visible evidence overlay types">
+          <button type="button" data-overlay="findings" aria-pressed="true" disabled>SARIF</button>
+          <button type="button" data-overlay="coverage" aria-pressed="true" disabled>Coverage</button>
+          <button type="button" data-overlay="ownership" aria-pressed="true" disabled>Ownership</button>
+          <button type="button" data-overlay="churn" aria-pressed="true" disabled>Churn</button>
+          <button type="button" data-overlay="tests" aria-pressed="true" disabled>JUnit</button>
+          <button type="button" data-overlay="runtime" aria-pressed="true" disabled>Runtime</button>
+          <button type="button" data-overlay="knowledge" aria-pressed="true" disabled>Knowledge</button>
+        </div>
+        <div class="evidence-source-list" id="evidence-source-list">
+          <p class="evidence-source-list__empty">Static graph evidence remains available without external reports.</p>
+        </div>
+      </section>
+
       <section class="component-deck" aria-labelledby="component-heading">
         <div class="component-deck__heading">
           <div>
-            <p class="section-index">03 / Boundaries</p>
+            <p class="section-index">04 / Boundaries</p>
             <h2 id="component-heading">Component register</h2>
           </div>
           <p>Filter by architecture boundary</p>
@@ -165,7 +187,7 @@
         <section class="trace-panel" aria-labelledby="trace-heading">
           <header class="trace-panel__header">
             <div>
-              <p class="section-index">04 / Blast trace</p>
+              <p class="section-index">05 / Blast trace</p>
               <h2 id="trace-heading">Observed reach</h2>
             </div>
             <p class="trace-count" id="trace-count">0 visible / 0 returned</p>
@@ -205,9 +227,9 @@
 
         <aside class="inspector" aria-labelledby="inspector-heading">
           <header class="inspector__header">
-            <p class="section-index">05 / Evidence</p>
+            <p class="section-index">06 / Evidence</p>
             <h2 id="inspector-heading">Claim inspector</h2>
-            <span class="inspector__mode">Repository facts only</span>
+            <span class="inspector__mode">Repository + imported facts</span>
           </header>
           <div class="inspector__body" id="inspector-body">
             <div class="inspector-empty">
@@ -221,7 +243,7 @@
 
       <section class="method-ledger" aria-labelledby="method-heading">
         <header>
-          <p class="section-index">06 / Calibration record</p>
+          <p class="section-index">07 / Calibration record</p>
           <h2 id="method-heading">Precision &amp; limits</h2>
         </header>
         <div class="method-ledger__columns">

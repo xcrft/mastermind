@@ -59,6 +59,10 @@ pub fn dispatch_map(
         crate::MapFormat::Json => println!("{}", serde_json::to_string_pretty(&map)?),
         crate::MapFormat::Text => print!("{}", render_map_text(&map)),
         crate::MapFormat::Mermaid => print!("{}", render_map_mermaid(&map)),
+        crate::MapFormat::Sarif => println!(
+            "{}",
+            serde_json::to_string_pretty(&mmcg::sarif_export::project_map(&map))?
+        ),
     }
     Ok(())
 }
@@ -294,10 +298,19 @@ pub fn render_change_impact(
     response: &queries::ChangeImpactResponse,
     format: crate::ImpactFormat,
 ) -> Result<String, serde_json::Error> {
-    if matches!(format, crate::ImpactFormat::Json) {
-        let mut output = serde_json::to_string_pretty(response)?;
-        output.push('\n');
-        return Ok(output);
+    match format {
+        crate::ImpactFormat::Json => {
+            let mut output = serde_json::to_string_pretty(response)?;
+            output.push('\n');
+            return Ok(output);
+        }
+        crate::ImpactFormat::Sarif => {
+            let mut output =
+                serde_json::to_string_pretty(&mmcg::sarif_export::change_impact(response))?;
+            output.push('\n');
+            return Ok(output);
+        }
+        crate::ImpactFormat::Text => {}
     }
     let mut output = format!(
         "mastermind impact — {}..{}\n\nChanged symbols\n",
@@ -513,6 +526,51 @@ mod map_tests {
         assert!(rendered.contains("boundary alpha"));
         assert!(rendered.contains("hotspot alpha"));
         assert!(rendered.contains("cycle 1"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn sarif_map_exports_cycles_with_stable_rules_and_relative_locations() {
+        let path = std::env::temp_dir().join(format!("mmcg-sarif-map-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(&path).unwrap();
+        for file in ["src/a file.py", "src/b.py"] {
+            store.upsert_file(file, 1, 1).unwrap();
+        }
+        let a = store
+            .insert_symbol("alpha", "function", "src/a file.py", 1, 3, None, None)
+            .unwrap();
+        let b = store
+            .insert_symbol("beta", "function", "src/b.py", 1, 3, None, None)
+            .unwrap();
+        store.insert_edge(a, Some(b), "beta", "imports", 2).unwrap();
+        store
+            .insert_edge(b, Some(a), "alpha", "imports", 2)
+            .unwrap();
+
+        let map = queries::project_map(&store, ".", 2, 20).unwrap();
+        let sarif = mmcg::sarif_export::project_map(&map);
+        assert_eq!(sarif["version"], "2.1.0");
+        assert_eq!(
+            sarif["runs"][0]["tool"]["driver"]["rules"][0]["id"],
+            "mastermind/dependency-cycle"
+        );
+        assert_eq!(
+            sarif["runs"][0]["results"][0]["ruleId"],
+            "mastermind/dependency-cycle"
+        );
+        assert_eq!(
+            sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]
+                ["uri"],
+            "src/a%20file.py"
+        );
+        assert_eq!(
+            sarif["runs"][0]["results"][0]["relatedLocations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
         std::fs::remove_file(path).ok();
     }
 }

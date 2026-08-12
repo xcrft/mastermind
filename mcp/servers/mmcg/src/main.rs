@@ -46,6 +46,7 @@ pub enum MapFormat {
     Text,
     Json,
     Mermaid,
+    Sarif,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -53,6 +54,7 @@ pub enum MapFormat {
 pub enum ImpactFormat {
     Text,
     Json,
+    Sarif,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -150,6 +152,27 @@ enum Cmd {
         /// Exclude conventional tests, fixtures, examples, generated, and vendor paths from the architecture map.
         #[arg(long)]
         production_only: bool,
+        /// Import a SARIF 2.1 report as read-only Lens evidence. Repeatable.
+        #[arg(long = "sarif", value_name = "PATH")]
+        sarif: Vec<PathBuf>,
+        /// Import an LCOV tracefile or Cobertura XML report. Repeatable.
+        #[arg(long = "coverage", value_name = "PATH")]
+        coverage: Vec<PathBuf>,
+        /// Import a JUnit XML test report. Only explicit testcase file paths are correlated. Repeatable.
+        #[arg(long = "junit", value_name = "PATH")]
+        junit: Vec<PathBuf>,
+        /// Import an OpenTelemetry OTLP JSON trace export. Repeatable.
+        #[arg(long = "otel", value_name = "PATH")]
+        otel: Vec<PathBuf>,
+        /// Override the repository CODEOWNERS file used by Lens.
+        #[arg(long, value_name = "PATH")]
+        codeowners: Option<PathBuf>,
+        /// Do not correlate exact changed-file mentions from indexed specs, ADRs, audits, and lessons.
+        #[arg(long)]
+        no_project_knowledge: bool,
+        /// Bound read-only Git churn and contributor evidence. Zero disables it.
+        #[arg(long, default_value_t = 200, value_parser = clap::value_parser!(u16).range(0..=1000))]
+        git_commits: u16,
         /// Loopback port. Zero asks the OS for an available ephemeral port.
         #[arg(long, default_value_t = 0)]
         port: u16,
@@ -169,13 +192,13 @@ enum Cmd {
         #[arg(default_value = ".")]
         root: PathBuf,
     },
-    /// Search durable project decisions, reports, audits, lessons, and context.
+    /// Search durable project decisions/ADRs, reports, audits, lessons, and context.
     /// Results are observed retrieval evidence; Markdown remains authoritative.
     History {
         /// FTS5 MATCH query.
         query: String,
         /// Limit results to one artifact kind.
-        #[arg(long, value_parser = ["context", "lesson", "task_spec", "executor_report", "audit", "release_notes"])]
+        #[arg(long, value_parser = ["context", "lesson", "task_spec", "executor_report", "audit", "release_notes", "architecture_decision"])]
         kind: Option<String>,
         #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=50))]
         top: u32,
@@ -652,7 +675,7 @@ enum QueryCmd {
     /// Search all durable project-history artifacts, not only task specs.
     History {
         query: String,
-        #[arg(long, value_parser = ["context", "lesson", "task_spec", "executor_report", "audit", "release_notes"])]
+        #[arg(long, value_parser = ["context", "lesson", "task_spec", "executor_report", "audit", "release_notes", "architecture_decision"])]
         kind: Option<String>,
         #[arg(long, default_value_t = 10)]
         top: u32,
@@ -878,13 +901,20 @@ fn run_cli_inner(
             depth,
             top,
             production_only,
+            sarif,
+            coverage,
+            junit,
+            otel,
+            codeowners,
+            no_project_knowledge,
+            git_commits,
             port,
         } => {
             let root = root
                 .canonicalize()
                 .map_err(|_| mmcg::lens::LensError::RootUnavailable)?;
             let index_path = index_path_for_root(index_override.as_deref(), &root);
-            mmcg::lens::run(
+            mmcg::lens::run_with_evidence_extensions(
                 root,
                 index_path,
                 mmcg::lens::LensOptions {
@@ -893,6 +923,18 @@ fn run_cli_inner(
                     depth,
                     top,
                     production_only,
+                },
+                mmcg::evidence::EvidenceOptions {
+                    sarif,
+                    coverage,
+                    discover_codeowners: codeowners.is_none(),
+                    codeowners,
+                    git_commits,
+                },
+                mmcg::evidence::EvidenceExtensionOptions {
+                    junit,
+                    otel,
+                    project_knowledge: !no_project_knowledge,
                 },
                 port,
             )?;
@@ -1406,6 +1448,48 @@ mod tests {
 
         let why = Cli::try_parse_from(["mastermind", "why", "idempotency"]).unwrap();
         assert!(matches!(why.cmd, Cmd::Why { query, top: 10 } if query == "idempotency"));
+
+        let decision = Cli::try_parse_from([
+            "mastermind",
+            "history",
+            "storage boundary",
+            "--kind",
+            "architecture_decision",
+        ])
+        .unwrap();
+        assert!(matches!(
+            decision.cmd,
+            Cmd::History { kind: Some(kind), .. } if kind == "architecture_decision"
+        ));
+    }
+
+    #[test]
+    fn architecture_risks_have_sarif_cli_projections() {
+        let map = Cli::try_parse_from(["mastermind", "map", ".", "--format", "sarif"]).unwrap();
+        assert!(matches!(
+            map.cmd,
+            Cmd::Map {
+                format: MapFormat::Sarif,
+                ..
+            }
+        ));
+
+        let impact = Cli::try_parse_from([
+            "mastermind",
+            "impact",
+            "--since",
+            "main",
+            "--format",
+            "sarif",
+        ])
+        .unwrap();
+        assert!(matches!(
+            impact.cmd,
+            Cmd::Impact {
+                format: ImpactFormat::Sarif,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1429,14 +1513,76 @@ mod tests {
                 depth: 3,
                 top: 100,
                 production_only: true,
+                sarif,
+                coverage,
+                junit,
+                otel,
+                codeowners: None,
+                no_project_knowledge: false,
+                git_commits: 200,
                 port: 0,
             } if since == "origin/main"
                 && root.as_path() == std::path::Path::new(".")
                 && path == "."
+                && sarif.is_empty()
+                && coverage.is_empty()
+                && junit.is_empty()
+                && otel.is_empty()
         ));
 
         assert!(
             Cli::try_parse_from(["mastermind", "ui", "--since", "main", "--depth", "6",]).is_err()
         );
+
+        let overlays = Cli::try_parse_from([
+            "mastermind",
+            "ui",
+            "--since",
+            "main",
+            "--sarif",
+            "semgrep.sarif",
+            "--sarif",
+            "codeql.sarif",
+            "--coverage",
+            "lcov.info",
+            "--coverage",
+            "cobertura.xml",
+            "--junit",
+            "junit.xml",
+            "--otel",
+            "traces.json",
+            "--no-project-knowledge",
+            "--codeowners",
+            ".github/CODEOWNERS",
+            "--git-commits",
+            "25",
+        ])
+        .unwrap();
+        assert!(matches!(
+            overlays.cmd,
+            Cmd::Ui {
+                sarif,
+                coverage,
+                junit,
+                otel,
+                codeowners: Some(codeowners),
+                no_project_knowledge: true,
+                git_commits: 25,
+                ..
+            } if sarif == [PathBuf::from("semgrep.sarif"), PathBuf::from("codeql.sarif")]
+                && coverage == [PathBuf::from("lcov.info"), PathBuf::from("cobertura.xml")]
+                && junit == [PathBuf::from("junit.xml")]
+                && otel == [PathBuf::from("traces.json")]
+                && codeowners.as_path() == std::path::Path::new(".github/CODEOWNERS")
+        ));
+        assert!(Cli::try_parse_from([
+            "mastermind",
+            "ui",
+            "--since",
+            "main",
+            "--git-commits",
+            "1001",
+        ])
+        .is_err());
     }
 }

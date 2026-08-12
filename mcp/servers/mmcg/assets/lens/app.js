@@ -10,6 +10,7 @@
   const CONNECTED_PER_LANE = 5;
   const MOBILE_CANDIDATES_PER_PAGE = 5;
   const MOBILE_CONNECTED_PER_LANE = 2;
+  const OVERLAY_KEYS = ["findings", "coverage", "ownership", "churn", "tests", "runtime", "knowledge"];
 
   const state = {
     raw: null,
@@ -29,6 +30,7 @@
     activeNodeIds: null,
     lanePages: { changed: 0, impacted: 0, test: 0 },
     mobilePage: 0,
+    overlays: new Set(OVERLAY_KEYS),
   };
 
   const elements = {};
@@ -165,6 +167,9 @@
     elements.scopeButtons.forEach(function (button) {
       button.disabled = !enabled;
     });
+    elements.overlayButtons.forEach(function (button) {
+      button.disabled = !enabled;
+    });
   }
 
   function announce(message) {
@@ -243,10 +248,141 @@
     return { name: "Unclassified", basis: "No component evidence" };
   }
 
+  function normalizeFileEvidence(value) {
+    const source = record(value);
+    const coverage = isRecord(source.coverage) ? record(source.coverage) : null;
+    const ownership = isRecord(source.ownership) ? record(source.ownership) : null;
+    const churn = isRecord(source.churn) ? record(source.churn) : null;
+    const testResults = isRecord(source.test_results) ? record(source.test_results) : null;
+    const runtime = isRecord(source.runtime) ? record(source.runtime) : null;
+    return {
+      path: text(source.path, ""),
+      findings: array(source.findings).map(record),
+      coverage: coverage,
+      ownership: ownership,
+      churn: churn,
+      testResults: testResults,
+      runtime: runtime,
+      knowledge: array(source.knowledge).map(record),
+    };
+  }
+
+  function ownerNames(evidence) {
+    return evidence && evidence.ownership
+      ? array(evidence.ownership.codeowners).map(function (value) { return text(value, ""); }).filter(Boolean)
+      : [];
+  }
+
+  function hasCodeownersEvidence(evidence) {
+    return evidence && evidence.ownership
+      ? text(evidence.ownership.codeowners_source_id, "") !== "" || ownerNames(evidence).length > 0
+      : false;
+  }
+
+  function ownerLabel(evidence) {
+    const owners = ownerNames(evidence);
+    return owners.length > 0 ? owners.join(", ") : "explicitly unowned";
+  }
+
+  function ownershipEndpointLabel(evidence) {
+    return hasCodeownersEvidence(evidence) ? ownerLabel(evidence) : "no CODEOWNERS match returned";
+  }
+
+  function ownershipBoundary(left, right) {
+    if (!hasCodeownersEvidence(left) || !hasCodeownersEvidence(right)) {
+      return false;
+    }
+    const leftOwners = new Set(ownerNames(left).map(function (owner) { return owner.toLowerCase(); }));
+    const rightOwners = new Set(ownerNames(right).map(function (owner) { return owner.toLowerCase(); }));
+    return leftOwners.size !== rightOwners.size || Array.from(leftOwners).some(function (owner) {
+      return !rightOwners.has(owner);
+    });
+  }
+
+  function overlayEnabled(key) {
+    return state.overlays.has(key);
+  }
+
+  function coverageLabel(coverage) {
+    const found = finiteNumber(record(coverage).lines_found);
+    const hit = finiteNumber(record(coverage).lines_hit);
+    if (found === null || hit === null || found === 0) {
+      return "Coverage count unavailable";
+    }
+    return Math.round((hit / found) * 100) + "% reported lines covered (" + hit + "/" + found + ")";
+  }
+
+  function evidenceSignals(node) {
+    const evidence = node.evidence;
+    if (!evidence) {
+      return [];
+    }
+    const signals = [];
+    if (overlayEnabled("findings") && evidence.findings.length > 0) {
+      signals.push(evidence.findings.length + " file-level SARIF finding" + (evidence.findings.length === 1 ? "" : "s"));
+    }
+    if (overlayEnabled("coverage") && evidence.coverage) {
+      signals.push(coverageLabel(evidence.coverage));
+    }
+    if (overlayEnabled("ownership") && hasCodeownersEvidence(evidence)) {
+      signals.push("CODEOWNERS " + ownerLabel(evidence));
+    }
+    if (overlayEnabled("churn") && evidence.churn) {
+      const commits = finiteNumber(evidence.churn.commits);
+      signals.push(displayNumber(commits) + " recent commit" + (commits === 1 ? "" : "s"));
+    }
+    if (overlayEnabled("tests") && evidence.testResults) {
+      const failed = (finiteNumber(evidence.testResults.failed) || 0) + (finiteNumber(evidence.testResults.errors) || 0);
+      signals.push(displayNumber(failed) + " failed JUnit case" + (failed === 1 ? "" : "s"));
+    }
+    if (overlayEnabled("runtime") && evidence.runtime) {
+      const spans = finiteNumber(evidence.runtime.spans);
+      signals.push(displayNumber(spans) + " runtime span" + (spans === 1 ? "" : "s"));
+    }
+    if (overlayEnabled("knowledge") && evidence.knowledge.length > 0) {
+      signals.push(evidence.knowledge.length + " exact project-knowledge match" + (evidence.knowledge.length === 1 ? "" : "es"));
+    }
+    return signals;
+  }
+
+  function evidenceMark(node) {
+    const evidence = node.evidence;
+    if (!evidence) {
+      return "";
+    }
+    const marks = [];
+    if (overlayEnabled("findings") && evidence.findings.length > 0) {
+      marks.push("S" + evidence.findings.length);
+    }
+    if (overlayEnabled("coverage") && evidence.coverage) {
+      const found = finiteNumber(evidence.coverage.lines_found);
+      const hit = finiteNumber(evidence.coverage.lines_hit);
+      marks.push(found && hit !== null ? "C" + Math.round((hit / found) * 100) : "C?");
+    }
+    if (overlayEnabled("ownership") && hasCodeownersEvidence(evidence)) {
+      marks.push(ownerNames(evidence).length > 0 ? "O" : "O0");
+    }
+    if (overlayEnabled("churn") && evidence.churn) {
+      marks.push("G" + displayNumber(finiteNumber(evidence.churn.commits)));
+    }
+    if (overlayEnabled("tests") && evidence.testResults) {
+      const failed = (finiteNumber(evidence.testResults.failed) || 0) + (finiteNumber(evidence.testResults.errors) || 0);
+      marks.push("T" + displayNumber(failed) + "F");
+    }
+    if (overlayEnabled("runtime") && evidence.runtime) {
+      marks.push("R" + displayNumber(finiteNumber(evidence.runtime.spans)));
+    }
+    if (overlayEnabled("knowledge") && evidence.knowledge.length > 0) {
+      marks.push("K" + evidence.knowledge.length);
+    }
+    return marks.join(" · ");
+  }
+
   function normalizePayload(payload) {
     const raw = record(payload);
     const map = record(raw.map);
     const impact = record(raw.impact);
+    const evidence = record(raw.evidence);
     const changes = record(impact.changes);
 
     const files = collection(changes.files);
@@ -256,6 +392,16 @@
     const affectedComponents = collection(impact.affected_components);
     const apiCrossings = collection(impact.api_crossings);
     const mapComponents = collection(map.components);
+    const evidenceSources = collection(evidence.sources);
+    const evidenceFiles = collection(evidence.files);
+    const evidenceDiagnostics = collection(evidence.diagnostics);
+    const runtimeEdges = collection(evidence.runtime_edges);
+    const evidenceByPath = new Map();
+    evidenceFiles.items.map(normalizeFileEvidence).forEach(function (item) {
+      if (item.path) {
+        evidenceByPath.set(item.path, item);
+      }
+    });
     const paths = knownComponentPaths(mapComponents.items, affectedComponents.items);
 
     const nodes = [];
@@ -300,6 +446,9 @@
         }),
       });
     });
+    nodes.forEach(function (node) {
+      node.evidence = evidenceByPath.get(text(node.symbol.file, "")) || null;
+    });
 
     const changedByIdentity = new Map();
     nodes.filter(function (node) {
@@ -310,7 +459,6 @@
       matches.push(node);
       changedByIdentity.set(key, matches);
     });
-
     const edges = [];
     nodes.filter(function (node) {
       return node.type === "impacted";
@@ -359,6 +507,16 @@
         });
       });
     });
+    edges.forEach(function (edge) {
+      edge.ownershipBoundary = ownershipBoundary(edge.from.evidence, edge.to.evidence);
+      const fromFile = text(edge.from.symbol.file, "");
+      const toFile = text(edge.to.symbol.file, "");
+      edge.runtimeEvidence = runtimeEdges.items.map(record).filter(function (runtimeEdge) {
+        const parent = text(runtimeEdge.parent_file, "");
+        const child = text(runtimeEdge.child_file, "");
+        return (parent === fromFile && child === toFile) || (parent === toFile && child === fromFile);
+      });
+    });
 
     const componentRows = buildComponentRows(
       affectedComponents.items,
@@ -381,12 +539,18 @@
       affectedComponents: affectedComponents,
       apiCrossings: apiCrossings,
       mapComponents: mapComponents,
+      evidence: evidence,
+      evidenceSources: evidenceSources,
+      evidenceFiles: evidenceFiles,
+      evidenceDiagnostics: evidenceDiagnostics,
+      runtimeEdges: runtimeEdges,
+      evidenceByPath: evidenceByPath,
       nodes: nodes,
       edges: edges,
       components: componentRows,
-      precisionNotes: collectPrecisionNotes(map, impact),
-      truncations: collectTruncations(map, impact),
-      limits: collectLimits(raw, map, impact),
+      precisionNotes: collectPrecisionNotes(map, impact, evidence),
+      truncations: collectTruncations(map, impact, evidence),
+      limits: collectLimits(raw, map, impact, evidence),
     };
   }
 
@@ -438,7 +602,7 @@
     });
   }
 
-  function collectPrecisionNotes(map, impact) {
+  function collectPrecisionNotes(map, impact, evidence) {
     const notes = [];
     array(map.precision_notes).forEach(function (value) {
       const note = record(value);
@@ -462,6 +626,22 @@
         notes.push({ code: text(value, "Impact precision"), message: "", source: "Impact" });
       }
     });
+    array(evidence.precision_notes).forEach(function (value) {
+      const note = record(value);
+      notes.push({
+        code: text(note.code, "Evidence precision"),
+        message: text(note.message, ""),
+        source: "Evidence · " + text(note.source_id, "unknown source"),
+      });
+    });
+    collection(evidence.diagnostics).items.forEach(function (value) {
+      const diagnostic = record(value);
+      notes.push({
+        code: text(diagnostic.code, "Evidence diagnostic"),
+        message: text(diagnostic.message, ""),
+        source: "Evidence · " + text(diagnostic.source_id, "unknown source"),
+      });
+    });
     const seen = new Set();
     return notes.filter(function (note) {
       const key = note.source + "|" + note.code + "|" + note.message;
@@ -473,7 +653,7 @@
     });
   }
 
-  function collectTruncations(map, impact) {
+  function collectTruncations(map, impact, evidence) {
     const results = [];
     const changes = record(impact.changes);
     const candidates = [
@@ -489,6 +669,9 @@
       ["Map entry points", map.entry_points],
       ["Map hotspots", map.hotspots],
       ["Map cycles", map.cycles],
+      ["Evidence files", evidence.files],
+      ["Runtime evidence edges", evidence.runtime_edges],
+      ["Evidence diagnostics", evidence.diagnostics],
     ];
     candidates.forEach(function (candidate) {
       const value = collection(candidate[1]);
@@ -544,10 +727,11 @@
     }
   }
 
-  function collectLimits(raw, map, impact) {
+  function collectLimits(raw, map, impact, evidence) {
     const entries = [];
     flattenPrimitiveEntries("Map", map.limits, 0, entries);
     flattenPrimitiveEntries("Impact", impact.limits, 0, entries);
+    flattenPrimitiveEntries("Evidence", evidence.limits, 0, entries);
     const baseline = record(impact.baseline);
     ["includes_worktree", "includes_untracked"].forEach(function (key) {
       if (Object.prototype.hasOwnProperty.call(baseline, key)) {
@@ -577,6 +761,9 @@
     elements.clearSearch = byId("clear-search");
     elements.scopeButtons = Array.from(document.querySelectorAll("[data-scope]"));
     elements.fit = byId("fit-button");
+    elements.overlayButtons = Array.from(document.querySelectorAll("[data-overlay]"));
+    elements.evidenceSummary = byId("evidence-summary");
+    elements.evidenceSourceList = byId("evidence-source-list");
     elements.componentList = byId("component-list");
     elements.graphFrame = byId("graph-frame");
     elements.graph = byId("trace-graph");
@@ -637,6 +824,23 @@
         state.mobilePage = 0;
         renderGraph();
         announceVisibleClaims();
+      });
+    });
+    elements.overlayButtons.forEach(function (button) {
+      button.addEventListener("click", function () {
+        const overlay = button.dataset.overlay;
+        if (!OVERLAY_KEYS.includes(overlay)) {
+          return;
+        }
+        if (state.overlays.has(overlay)) {
+          state.overlays.delete(overlay);
+        } else {
+          state.overlays.add(overlay);
+        }
+        button.setAttribute("aria-pressed", String(state.overlays.has(overlay)));
+        renderGraph();
+        renderInspector();
+        announce(overlay + " overlay " + (state.overlays.has(overlay) ? "shown" : "hidden") + ". Topology remains unchanged.");
       });
     });
     elements.fit.addEventListener("click", resetAperture);
@@ -747,6 +951,7 @@
     renderHeader();
     renderMetrics();
     renderNotices();
+    renderEvidenceSources();
     renderComponents();
     renderMethodLedger();
     setEnabled(true);
@@ -861,6 +1066,30 @@
     elements.noticeStack.hidden = elements.noticeStack.childElementCount === 0;
   }
 
+  function renderEvidenceSources() {
+    clearNode(elements.evidenceSourceList);
+    const sources = state.model.evidenceSources.items.map(record);
+    const matchedFiles = returnedCount(state.model.evidenceFiles);
+    elements.evidenceSummary.textContent = sources.length === 0
+      ? "No external evidence sources loaded; the static graph remains available."
+      : sources.length + " source" + (sources.length === 1 ? "" : "s") + " · " + matchedFiles + " matched trace file" + (matchedFiles === 1 ? "" : "s") + (record(state.model.evidence).partial === true ? " · partial" : "");
+    if (sources.length === 0) {
+      elements.evidenceSourceList.appendChild(createElement("p", "evidence-source-list__empty", "Pass --sarif, --coverage, --junit, --otel, --codeowners, or --git-commits to add corroborating facts."));
+      return;
+    }
+    sources.forEach(function (source) {
+      const status = text(source.status, "unknown");
+      const card = createElement("article", "evidence-source evidence-source--" + status);
+      card.appendChild(createElement("span", "evidence-source__kind", text(source.kind, "source") + " · " + status));
+      card.appendChild(createElement("span", "evidence-source__label", text(source.label, "Unnamed source")));
+      const returned = finiteNumber(source.facts_returned);
+      const total = finiteNumber(source.facts_total);
+      const facts = displayNumber(returned) + " facts" + (total === null ? "" : " / " + displayNumber(total)) + " · " + displayNumber(finiteNumber(source.files_matched)) + " files";
+      card.appendChild(createElement("span", "evidence-source__facts", facts));
+      elements.evidenceSourceList.appendChild(card);
+    });
+  }
+
   function componentMeta(row) {
     if (!row.map) {
       return row.name === "Unclassified" ? "No component evidence returned" : "No matching map row returned";
@@ -969,6 +1198,7 @@
       text(node.symbol.kind, ""),
       node.type,
       node.component.name,
+      evidenceSignals(node).join(" "),
     ].join(" ").toLocaleLowerCase();
   }
 
@@ -1029,7 +1259,7 @@
     clearNode(elements.mobileTraceList);
     elements.graphFrame.classList.remove("has-graph-state");
     elements.mobileTraceList.hidden = true;
-    elements.graph.hidden = false;
+    setGraphVisible(true);
 
     const nodes = apertureNodes();
     const zeroChange = totalOrReturned(state.model.files) === 0 && totalOrReturned(state.model.changedSymbols) === 0;
@@ -1083,6 +1313,14 @@
     elements.graph.setAttribute("viewBox", "0 0 1 1");
     elements.graph.setAttribute("width", "1");
     elements.graph.setAttribute("height", "1");
+  }
+
+  function setGraphVisible(visible) {
+    if (visible) {
+      elements.graph.removeAttribute("hidden");
+    } else {
+      elements.graph.setAttribute("hidden", "");
+    }
   }
 
   function renderTraceContext(mode, summary, actions) {
@@ -1327,7 +1565,7 @@
   }
 
   function renderMobileIndex(nodes) {
-    elements.graph.hidden = true;
+    setGraphVisible(false);
     elements.mobileTraceList.hidden = false;
     elements.graphState.hidden = true;
     const scoped = state.scope === "all"
@@ -1372,7 +1610,8 @@
       button.appendChild(createElement("span", "mobile-candidate__kind", text(node.symbol.kind, "unknown") + " / " + node.type));
       button.appendChild(createElement("span", "mobile-candidate__name", text(node.symbol.name, "Unnamed symbol")));
       button.appendChild(createElement("span", "mobile-candidate__path", text(node.symbol.file, "File unavailable") + formatLine(node.symbol.line)));
-      button.appendChild(createElement("span", "mobile-candidate__meta", nodeMetadata(node)));
+      const mobileEvidence = evidenceMark(node);
+      button.appendChild(createElement("span", "mobile-candidate__meta", nodeMetadata(node) + (mobileEvidence ? " · " + mobileEvidence : "")));
       button.addEventListener("click", function () { selectClaim(node); });
       item.appendChild(button);
       list.appendChild(item);
@@ -1393,7 +1632,7 @@
   }
 
   function renderClaimSvg(nodes, edges, width, mobile) {
-    elements.graph.hidden = false;
+    setGraphVisible(true);
     elements.mobileTraceList.hidden = true;
     elements.graphState.hidden = true;
     const layout = mobile ? mobileLayout(nodes, width) : desktopLayout(nodes, width);
@@ -1440,7 +1679,7 @@
   function renderClusterOverview(nodes, width) {
     const overview = buildClusterOverview(nodes);
     const layout = clusterLayout(overview.clusters, width);
-    elements.graph.hidden = false;
+    setGraphVisible(true);
     elements.mobileTraceList.hidden = true;
     elements.graphState.hidden = true;
     elements.graph.setAttribute("viewBox", "0 0 " + layout.width + " " + layout.height);
@@ -1506,6 +1745,9 @@
         const components = Array.from(new Set(groupedNodes.map(function (node) { return node.component.name; })));
         const files = new Set(groupedNodes.map(function (node) { return text(node.symbol.file, ""); }).filter(Boolean));
         const crossings = groupedNodes.reduce(function (sum, node) { return sum + node.crossings.length; }, 0);
+        const evidenceCount = groupedNodes.reduce(function (sum, node) {
+          return sum + (evidenceSignals(node).length > 0 ? 1 : 0);
+        }, 0);
         const cluster = {
           id: "cluster:" + type + ":" + index,
           type: type,
@@ -1516,6 +1758,7 @@
           componentNames: components,
           fileCount: files.size,
           crossingCount: crossings,
+          evidenceCount: evidenceCount,
         };
         clusters.push(cluster);
         groupedNodes.forEach(function (node) { clusterByNodeId.set(node.id, cluster); });
@@ -1600,7 +1843,7 @@
     if (state.scope !== "all" && state.scope !== cluster.type) {
       classes.push("is-scope-muted");
     }
-    const label = cluster.count + " " + cluster.type + " claims in " + cluster.label + ", across " + cluster.fileCount + " files. Activate to browse individual claims.";
+    const label = cluster.count + " " + cluster.type + " claims in " + cluster.label + ", across " + cluster.fileCount + " files, " + cluster.evidenceCount + " with visible overlays. Activate to browse individual claims.";
     const group = createSvg("g", {
       class: classes.join(" "),
       transform: "translate(" + position.x + " " + position.y + ")",
@@ -1645,7 +1888,7 @@
       x: 11,
       y: 54,
       class: "graph-cluster__meta",
-    }, cluster.fileCount + " file" + (cluster.fileCount === 1 ? "" : "s") + (cluster.crossingCount > 0 ? " · " + cluster.crossingCount + " crossings" : "")));
+    }, cluster.fileCount + " file" + (cluster.fileCount === 1 ? "" : "s") + (cluster.crossingCount > 0 ? " · " + cluster.crossingCount + " crossings" : "") + (cluster.evidenceCount > 0 ? " · E " + cluster.evidenceCount : "")));
     activateSvgCluster(group, cluster);
     layer.appendChild(group);
   }
@@ -1873,8 +2116,10 @@
   function edgeLabel(edge) {
     const relation = edge.type === "test" ? "Test evidence" : "Impact evidence";
     const boundary = edge.crossing ? ", boundary crossing" : "";
+    const ownership = overlayEnabled("ownership") && edge.ownershipBoundary ? ", ownership boundary" : "";
+    const runtime = overlayEnabled("runtime") && edge.runtimeEvidence.length > 0 ? ", runtime trace corroborated" : "";
     return relation + " from " + text(edge.from.symbol.name, "unnamed seed")
-      + " to " + text(edge.to.symbol.name, "unnamed claim") + boundary + ". Select for details.";
+      + " to " + text(edge.to.symbol.name, "unnamed claim") + boundary + ownership + runtime + ". Select for details.";
   }
 
   function drawEdge(layer, edge, from, to, mobile, width) {
@@ -1891,6 +2136,12 @@
     const classes = ["graph-edge", "graph-edge--" + edge.type];
     if (edge.crossing) {
       classes.push("graph-edge--crossing");
+    }
+    if (overlayEnabled("ownership") && edge.ownershipBoundary) {
+      classes.push("graph-edge--ownership");
+    }
+    if (overlayEnabled("runtime") && edge.runtimeEvidence.length > 0) {
+      classes.push("graph-edge--runtime");
     }
     if (state.selectedId === edge.id) {
       classes.push("is-selected");
@@ -1924,7 +2175,8 @@
   function nodeLabel(node) {
     const line = finiteNumber(node.symbol.line);
     const location = text(node.symbol.file, "file unavailable") + (line === null ? "" : ":" + line);
-    return node.type + " symbol " + text(node.symbol.name, "unnamed") + ", " + location + ", component " + node.component.name + ". Select for evidence.";
+    const signals = evidenceSignals(node);
+    return node.type + " symbol " + text(node.symbol.name, "unnamed") + ", " + location + ", component " + node.component.name + (signals.length > 0 ? ", evidence: " + signals.join(", ") : "") + ". Select for evidence.";
   }
 
   function drawNode(layer, node, position, textWidth) {
@@ -1934,6 +2186,17 @@
     }
     if (node.crossings.length > 0) {
       classes.push("graph-node--crossing");
+    }
+    const visibleFindings = node.evidence && overlayEnabled("findings") ? node.evidence.findings : [];
+    if (visibleFindings.length > 0) {
+      classes.push("graph-node--finding");
+    }
+    if (node.evidence && node.evidence.coverage && overlayEnabled("coverage")) {
+      const found = finiteNumber(node.evidence.coverage.lines_found);
+      const hit = finiteNumber(node.evidence.coverage.lines_hit);
+      if (found !== null && found > 0 && hit !== null && hit < found) {
+        classes.push("graph-node--coverage-gap");
+      }
     }
     if (state.selectedId === node.id) {
       classes.push("is-selected");
@@ -1983,24 +2246,32 @@
         "text-anchor": "end",
       }, "CROSSING"));
     }
+    const mark = evidenceMark(node);
+    if (mark) {
+      group.appendChild(createSvg("text", {
+        x: 14,
+        y: position.height - 6,
+        class: "graph-node__evidence-mark",
+      }, compact(mark, Math.max(8, Math.floor(textWidth * 0.38)))));
+    }
     group.appendChild(createSvg("text", {
       x: 14,
-      y: 33,
+      y: 31,
       class: "graph-node__name",
     }, compact(text(node.symbol.name, "unnamed symbol"), textWidth)));
     const line = finiteNumber(node.symbol.line);
     const path = text(node.symbol.file, "file unavailable") + (line === null ? "" : ":" + line);
     group.appendChild(createSvg("text", {
       x: 14,
-      y: 49,
+      y: 45,
       class: "graph-node__file",
     }, compact(path, textWidth)));
     group.appendChild(createSvg("text", {
       x: position.width - 11,
-      y: position.height - 8,
+      y: position.height - 6,
       class: "graph-node__meta",
       "text-anchor": "end",
-    }, compact(nodeMetadata(node), Math.max(10, Math.floor(textWidth * 0.68)))));
+    }, compact(nodeMetadata(node), Math.max(8, Math.floor(textWidth * 0.45)))));
     activateSvgClaim(group, node);
     layer.appendChild(group);
   }
@@ -2063,7 +2334,7 @@
     clearNode(elements.graph);
     clearNode(elements.mobileTraceList);
     elements.mobileTraceList.hidden = true;
-    elements.graph.hidden = false;
+    setGraphVisible(true);
     elements.graphFrame.classList.add("has-graph-state");
     renderTraceContext("Loading snapshot", "Resolving the bounded claim aperture from the local repository.", []);
     clearNode(elements.graphState);
@@ -2241,6 +2512,104 @@
         "No boundary evidence returned."
       );
     }
+    appendOverlayEvidence(node);
+  }
+
+  function appendOverlayEvidence(node) {
+    const evidence = node.evidence;
+    if (!evidence) {
+      return;
+    }
+    if (overlayEnabled("findings")) {
+      const findings = evidence.findings.map(function (value) {
+        const finding = record(value);
+        const line = finiteNumber(finding.line);
+        const column = finiteNumber(finding.column);
+        const location = line === null ? "" : ":" + line + (column === null ? "" : ":" + column);
+        return text(finding.level, "warning").toUpperCase() + " · " + text(finding.tool, "SARIF") + " / " + text(finding.rule_id, "unclassified") + location + " · " + text(finding.message, "No message returned");
+      });
+      if (findings.length > 0) {
+        appendClaimList("SARIF findings · file-level", findings, "risk", "No matching findings returned.");
+      }
+    }
+    if (overlayEnabled("coverage") && evidence.coverage) {
+      const sourceIds = array(evidence.coverage.source_ids)
+        .map(function (value) { return text(value, ""); })
+        .filter(Boolean);
+      appendClaimList(
+        "Coverage · file-level",
+        [coverageLabel(evidence.coverage) + (sourceIds.length > 0 ? " · sources " + sourceIds.join(", ") : "")],
+        "coverage",
+        "No coverage facts returned."
+      );
+    }
+    if (overlayEnabled("ownership") && evidence.ownership) {
+      const ownership = [];
+      const owners = ownerNames(evidence);
+      if (hasCodeownersEvidence(evidence)) {
+        ownership.push("CODEOWNERS · " + (owners.length > 0 ? owners.join(", ") : "explicitly unowned"));
+      }
+      array(evidence.ownership.contributors).forEach(function (value) {
+        const contributor = record(value);
+        ownership.push("Git contributor · " + text(contributor.name, "Unknown") + " · " + displayNumber(finiteNumber(contributor.commits)) + " commits");
+      });
+      if (ownership.length > 0) {
+        appendClaimList("Ownership · file-level", ownership, "ownership", "No ownership facts returned.");
+      }
+    }
+    if (overlayEnabled("churn") && evidence.churn) {
+      appendClaimList(
+        "Recent churn · file-level",
+        [displayNumber(finiteNumber(evidence.churn.commits)) + " commits · +" + displayNumber(finiteNumber(evidence.churn.lines_added)) + " / −" + displayNumber(finiteNumber(evidence.churn.lines_deleted)) + " lines in the configured history window"],
+        "churn",
+        "No churn facts returned."
+      );
+    }
+    if (overlayEnabled("tests") && evidence.testResults) {
+      const tests = evidence.testResults;
+      const sourceIds = array(tests.source_ids).map(function (value) { return text(value, ""); }).filter(Boolean);
+      const summary = displayNumber(finiteNumber(tests.total)) + " total · "
+        + displayNumber(finiteNumber(tests.passed)) + " passed · "
+        + displayNumber(finiteNumber(tests.failed)) + " failed · "
+        + displayNumber(finiteNumber(tests.errors)) + " errors · "
+        + displayNumber(finiteNumber(tests.skipped)) + " skipped"
+        + (sourceIds.length > 0 ? " · sources " + sourceIds.join(", ") : "")
+        + (tests.failures_truncated === true ? " · failure details truncated" : "");
+      const failures = array(tests.failures).map(function (value) {
+        const failure = record(value);
+        const className = text(failure.class_name, "");
+        return text(failure.name, "Unnamed test") + " · " + text(failure.status, "failed")
+          + (className ? " · " + className : "") + " · " + text(failure.message, "No failure detail returned");
+      });
+      appendClaimList(
+        "JUnit · file-level",
+        [summary].concat(failures),
+        failures.length > 0 ? "risk" : "test",
+        "No JUnit facts returned."
+      );
+    }
+    if (overlayEnabled("runtime") && evidence.runtime) {
+      appendClaimList(
+        "Runtime spans · file-level",
+        [displayNumber(finiteNumber(evidence.runtime.spans)) + " spans · "
+          + displayNumber(finiteNumber(evidence.runtime.traces)) + " traces · sources "
+          + array(evidence.runtime.source_ids).map(function (value) { return text(value, ""); }).filter(Boolean).join(", ")],
+        "runtime",
+        "No runtime facts returned."
+      );
+    }
+    if (overlayEnabled("knowledge") && evidence.knowledge.length > 0) {
+      appendClaimList(
+        "Project knowledge · exact path",
+        evidence.knowledge.map(function (value) {
+          const item = record(value);
+          return text(item.kind, "project record") + " · " + text(item.title, "Untitled")
+            + " · " + text(item.artifact_path, "path unavailable") + " · " + text(item.excerpt, "No excerpt returned");
+        }),
+        "knowledge",
+        "No exact project-knowledge matches returned."
+      );
+    }
   }
 
   function renderEdgeInspector(edge) {
@@ -2260,6 +2629,8 @@
       ["Evidence kind", edge.evidence ? text(edge.evidence.kind, "Not classified") : "Impact seed"],
       ["Name collisions", displayNumber(edge.collisionCount)],
       ["Boundary crossing", edge.crossing ? "Observed" : "Not returned"],
+      ["Ownership boundary", overlayEnabled("ownership") && edge.ownershipBoundary ? "Observed from CODEOWNERS" : "Not returned"],
+      ["Runtime trace", overlayEnabled("runtime") && edge.runtimeEvidence.length > 0 ? "Corroborated" : "Not returned"],
     ]);
     appendClaimList("Evidence endpoints", [
       "FROM · " + text(edge.from.symbol.name, "unnamed") + " · " + text(edge.from.symbol.file, "file unavailable") + formatLine(edge.from.symbol.line),
@@ -2269,6 +2640,34 @@
       appendClaimList("Component boundary", [
         text(record(edge.crossing).changed_component, "unknown source") + " → " + text(record(edge.crossing).impacted_component, "unknown target"),
       ], "risk", "No component names returned.");
+    }
+    if (overlayEnabled("ownership") && edge.ownershipBoundary) {
+      appendClaimList(
+        "Ownership boundary",
+        [
+          "FROM · " + ownershipEndpointLabel(edge.from.evidence),
+          "TO · " + ownershipEndpointLabel(edge.to.evidence),
+        ],
+        "ownership",
+        "No CODEOWNERS evidence returned."
+      );
+    }
+    if (overlayEnabled("runtime") && edge.runtimeEvidence.length > 0) {
+      appendClaimList(
+        "Runtime trace corroboration",
+        edge.runtimeEvidence.map(function (value) {
+          const runtime = record(value);
+          const names = array(runtime.span_names).map(function (name) { return text(name, ""); }).filter(Boolean);
+          return text(runtime.parent_file, "file unavailable") + " → " + text(runtime.child_file, "file unavailable")
+            + " · " + displayNumber(finiteNumber(runtime.spans)) + " spans · "
+            + displayNumber(finiteNumber(runtime.traces)) + " traces"
+            + (names.length > 0 ? " · " + names.join(", ") : "")
+            + (runtime.names_truncated === true ? " · span names truncated" : "")
+            + (array(runtime.source_ids).length > 0 ? " · sources " + array(runtime.source_ids).map(function (value) { return text(value, ""); }).filter(Boolean).join(", ") : "");
+        }),
+        "runtime",
+        "No matching runtime evidence returned."
+      );
     }
     elements.inspector.appendChild(createElement(
       "p",
@@ -2290,6 +2689,7 @@
       + totalOrReturned(model.changedSymbols) + " changed symbols, "
       + totalOrReturned(model.impactedSymbols) + " impacted symbols, and "
       + totalOrReturned(model.tests) + " candidate tests. "
+      + returnedCount(model.evidenceSources) + " evidence sources were evaluated. "
       + (model.truncations.length > 0 ? "The result is partial." : "No truncation was reported.");
   }
 

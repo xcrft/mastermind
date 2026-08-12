@@ -94,7 +94,7 @@ See the [client integration guides](https://github.com/xcrft/mastermind/tree/mai
 | Symbol graph | Search, callers, callees, imports, outlines, API surface |
 | Architecture | Project map, centrality, dependency cycles, unreferenced candidates |
 | Change analysis | Git-aware symbol changes, blast radius, component crossings |
-| Local review UI | Read-only diff-first Lens with bounded evidence traces |
+| Local review UI | Read-only diff-first Lens with bounded SARIF, coverage, JUnit, OTLP, project-knowledge, ownership, and churn overlays |
 | Test selection | Direct, transitive, and heuristic candidates with evidence |
 | Workflow gates | `verify-spec`, `audit-spec`, and `run-task` |
 | Local coordination | Bounded additive scratchpad and indexed project history |

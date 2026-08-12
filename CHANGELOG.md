@@ -12,6 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read-only diff-first review UI backed by the existing bounded project-map and
   change-impact schemas. Checkpointed indexes open immutably; active WAL state is
   read through a bounded private snapshot without creating source sidecars.
+- Lens evidence overlays now correlate returned trace files with bounded SARIF,
+  LCOV/Cobertura, JUnit, explicit OTLP code paths, CODEOWNERS, Git churn, and
+  exact mentions from indexed specs, ADRs, audits, lessons, and context. Runtime
+  facts can decorate an existing static edge but never add graph topology.
+- `mastermind map --format sarif` exports dependency cycles and
+  `mastermind impact --format sarif` exports cross-component change risks as
+  GitHub-compatible SARIF 2.1 with stable rule IDs and relative locations.
 
 ## [1.2.1] - 2026-07-31
 

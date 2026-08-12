@@ -462,6 +462,9 @@ fn execute(store: &Store, q: QueryCmd) -> Result<Value, Box<dyn std::error::Erro
         QueryCmd::Explain { name, language } => {
             serde_json::to_value(queries::explain(store, &name, language.as_deref())?)?
         }
+        QueryCmd::Semantic { symbol, top } => {
+            serde_json::to_value(mmcg::scip_overlay::query(store, &symbol, top)?)?
+        }
     })
 }
 

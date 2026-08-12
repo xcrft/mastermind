@@ -72,6 +72,22 @@ mastermind doctor
 
 See [Getting started](docs/getting-started.md) for global vs per-repository state, project-local installation, and client-specific setup.
 
+The fast local Tree-sitter graph is always the default. Repositories that
+already produce a [SCIP](https://github.com/scip-code/scip) index can add
+compiler-resolved definitions, references, implementations, and type
+definitions without replacing that graph:
+
+```bash
+mastermind enrich --scip index.scip
+mastermind query semantic "scip-clang . my-package . PaymentService#charge()."
+```
+
+SCIP facts live in separate SQLite tables with `provenance=scip` and
+`confidence=high`. Lens prefers an exact SCIP symbol/file pair over matching
+Tree-sitter evidence, keeps runtime traces as `observed`, and falls back to the
+syntactic graph when the overlay is absent or stale. Imports are bound to the
+indexed repository through SCIP `project_root` or exact embedded document text.
+
 ## Core workflows
 
 ### Map a project
@@ -105,7 +121,8 @@ monorepo review.
 Lens evidence overlays correlate the returned static trace with SARIF findings,
 LCOV/Cobertura line coverage, JUnit results, explicit OpenTelemetry code paths,
 CODEOWNERS, bounded Git churn/contributors, and exact changed-file mentions in
-indexed specs, ADRs, audits, lessons, and context.
+indexed specs, ADRs, audits, lessons, and context. An imported SCIP overlay is
+loaded automatically and decorates only exact symbol/file endpoint matches.
 The graph topology stays unchanged: overlays add source-labelled marks and
 inspector facts rather than an opaque risk score. Lens auto-discovers
 `.github/CODEOWNERS`, `CODEOWNERS`, or `docs/CODEOWNERS`; use `--codeowners` to
@@ -182,7 +199,7 @@ re-mining preserves.
 
 ### Query the graph from an agent
 
-The MCP server exposes 24 bounded tools for symbol search, callers/callees,
+The MCP server exposes 25 bounded tools for symbol search, callers/callees,
 imports, architecture maps, change impact, test impact, cycles, API surface, and
 project history. The same engine is available through the CLI.
 

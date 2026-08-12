@@ -25,6 +25,7 @@ pub mod miner;
 pub mod queries;
 pub mod run_task;
 pub mod sarif_export;
+pub mod scip_overlay;
 pub mod setup;
 pub mod spec;
 pub mod store;

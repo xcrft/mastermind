@@ -4,13 +4,16 @@
 //!   symbols(id, name, kind, file_path, line_start, line_end, signature, parent_id)
 //!   edges(id, from_id, to_id?, to_name, kind, line)
 //!   files(path, indexed_at, symbol_count)
+//!   semantic_* (optional compiler-resolved overlay; never rewrites the graph)
 //!   meta(key, value)
 
+use crate::scip_overlay::{SemanticDefinition, SemanticEdge, SemanticImportBatch, SemanticSource};
 use rusqlite::{
     params, types::Value as SqlValue, Connection, OpenFlags, OptionalExtension, Result as SqlResult,
 };
 use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
@@ -1069,6 +1072,83 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_scratchpad_ts ON scratchpad(ts);
             CREATE INDEX IF NOT EXISTS idx_scratchpad_agent ON scratchpad(agent);
+
+            -- Optional SCIP semantic overlay. These tables are additive and
+            -- deliberately separate from `symbols` / `edges`: Tree-sitter is
+            -- still the default graph and remains usable when no overlay exists.
+            CREATE TABLE IF NOT EXISTS semantic_sources (
+                id                       INTEGER PRIMARY KEY CHECK (id = 1),
+                tool_name                TEXT NOT NULL,
+                tool_version             TEXT NOT NULL,
+                project_root             TEXT NOT NULL,
+                artifact_path            TEXT NOT NULL,
+                artifact_sha256          TEXT NOT NULL,
+                imported_at              INTEGER NOT NULL,
+                document_count           INTEGER NOT NULL,
+                definition_count         INTEGER NOT NULL,
+                edge_count               INTEGER NOT NULL,
+                text_verified_documents  INTEGER NOT NULL,
+                repository_verified      INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS semantic_documents (
+                path                  TEXT PRIMARY KEY,
+                source_id             INTEGER NOT NULL REFERENCES semantic_sources(id) ON DELETE CASCADE,
+                language              TEXT NOT NULL,
+                position_encoding     TEXT NOT NULL,
+                content_sha256        TEXT NOT NULL,
+                source_text_verified  INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_semantic_documents_source
+                ON semantic_documents(source_id);
+            CREATE TABLE IF NOT EXISTS semantic_definitions (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_id      INTEGER NOT NULL REFERENCES semantic_sources(id) ON DELETE CASCADE,
+                symbol         TEXT NOT NULL,
+                display_name   TEXT NOT NULL,
+                kind           TEXT NOT NULL,
+                file_path      TEXT NOT NULL REFERENCES semantic_documents(path) ON DELETE CASCADE,
+                line           INTEGER NOT NULL,
+                character      INTEGER NOT NULL,
+                end_line       INTEGER NOT NULL,
+                end_character  INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_semantic_definitions_symbol
+                ON semantic_definitions(symbol);
+            CREATE INDEX IF NOT EXISTS idx_semantic_definitions_display
+                ON semantic_definitions(display_name);
+            CREATE INDEX IF NOT EXISTS idx_semantic_definitions_file
+                ON semantic_definitions(file_path);
+            CREATE TABLE IF NOT EXISTS semantic_edges (
+                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_id          INTEGER NOT NULL REFERENCES semantic_sources(id) ON DELETE CASCADE,
+                from_symbol        TEXT,
+                from_display_name  TEXT,
+                from_file          TEXT NOT NULL REFERENCES semantic_documents(path) ON DELETE CASCADE,
+                from_line          INTEGER NOT NULL,
+                from_character     INTEGER NOT NULL,
+                occurrence_line    INTEGER NOT NULL,
+                occurrence_character INTEGER NOT NULL,
+                to_symbol          TEXT NOT NULL,
+                to_display_name    TEXT NOT NULL,
+                to_file            TEXT REFERENCES semantic_documents(path) ON DELETE CASCADE,
+                to_line            INTEGER,
+                to_character       INTEGER,
+                kind               TEXT NOT NULL,
+                UNIQUE (
+                    source_id, from_symbol, from_file, from_line, from_character,
+                    occurrence_line, occurrence_character, to_symbol, to_file, kind
+                )
+            );
+            CREATE INDEX IF NOT EXISTS idx_semantic_edges_from_symbol
+                ON semantic_edges(from_symbol);
+            CREATE INDEX IF NOT EXISTS idx_semantic_edges_to_symbol
+                ON semantic_edges(to_symbol);
+            CREATE INDEX IF NOT EXISTS idx_semantic_edges_from_file
+                ON semantic_edges(from_file);
+            CREATE INDEX IF NOT EXISTS idx_semantic_edges_to_file
+                ON semantic_edges(to_file);
+            CREATE INDEX IF NOT EXISTS idx_semantic_edges_kind
+                ON semantic_edges(kind);
             "#,
         )?;
 
@@ -1083,6 +1163,10 @@ impl Store {
             "ALTER TABLE files ADD COLUMN content_sha256 TEXT NOT NULL DEFAULT ''",
             [],
         );
+        let _ = self.conn.execute(
+            "ALTER TABLE semantic_sources ADD COLUMN repository_verified INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
 
         // Stamp the active version on first init and after a derived-schema
         // rebuild. Other metadata — especially index_root — remains intact.
@@ -1092,6 +1176,329 @@ impl Store {
             params![SCHEMA_VERSION],
         )?;
         Ok(())
+    }
+
+    fn semantic_tables_exist(&self) -> SqlResult<bool> {
+        self.conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'semantic_sources'",
+                [],
+                |_| Ok(true),
+            )
+            .optional()
+            .map(|value| value.unwrap_or(false))
+    }
+
+    fn semantic_repository_verified_column_exists(&self) -> SqlResult<bool> {
+        self.conn
+            .query_row(
+                "SELECT 1 FROM pragma_table_info('semantic_sources')
+                 WHERE name = 'repository_verified'",
+                [],
+                |_| Ok(true),
+            )
+            .optional()
+            .map(|value| value.unwrap_or(false))
+    }
+
+    /// Metadata for the currently imported compiler-resolved overlay.
+    /// `None` is the normal Tree-sitter-only state, including a v7 database
+    /// created by an older binary before the additive semantic tables existed.
+    pub fn semantic_source(&self) -> SqlResult<Option<SemanticSource>> {
+        if !self.semantic_tables_exist()? {
+            return Ok(None);
+        }
+        let repository_verified = if self.semantic_repository_verified_column_exists()? {
+            "repository_verified"
+        } else {
+            "0 AS repository_verified"
+        };
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT tool_name, tool_version, project_root, artifact_path,
+                        artifact_sha256, imported_at, document_count,
+                        definition_count, edge_count, text_verified_documents,
+                        {repository_verified}
+                     FROM semantic_sources WHERE id = 1"
+                ),
+                [],
+                |row| {
+                    let documents = row.get::<_, u32>(6)?;
+                    let text_verified_documents = row.get::<_, u32>(9)?;
+                    Ok(SemanticSource {
+                        format: "scip",
+                        tool_name: row.get(0)?,
+                        tool_version: row.get(1)?,
+                        project_root: row.get(2)?,
+                        artifact_path: row.get(3)?,
+                        artifact_sha256: row.get(4)?,
+                        imported_at: row.get(5)?,
+                        documents,
+                        definitions: row.get(7)?,
+                        edges: row.get(8)?,
+                        text_verified_documents,
+                        repository_verified: row.get(10)?,
+                        revision_verified: documents > 0 && documents == text_verified_documents,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    /// Atomically replace the entire SCIP snapshot after it has been decoded
+    /// and validated in memory. Any parse/path/range error therefore leaves the
+    /// previous known-good overlay intact.
+    pub(crate) fn replace_semantic_overlay(&self, batch: &SemanticImportBatch) -> SqlResult<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM semantic_sources", [])?;
+        tx.execute(
+            "INSERT INTO semantic_sources(
+                id, tool_name, tool_version, project_root, artifact_path,
+                artifact_sha256, imported_at, document_count, definition_count,
+                edge_count, text_verified_documents, repository_verified
+             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                batch.source.tool_name,
+                batch.source.tool_version,
+                batch.source.project_root,
+                batch.source.artifact_path,
+                batch.source.artifact_sha256,
+                batch.source.imported_at,
+                batch.source.documents,
+                batch.source.definitions,
+                batch.source.edges,
+                batch.source.text_verified_documents,
+                batch.source.repository_verified,
+            ],
+        )?;
+        {
+            let mut statement = tx.prepare(
+                "INSERT INTO semantic_documents(
+                    path, source_id, language, position_encoding,
+                    content_sha256, source_text_verified
+                 ) VALUES (?1, 1, ?2, ?3, ?4, ?5)",
+            )?;
+            for document in &batch.documents {
+                statement.execute(params![
+                    document.path,
+                    document.language,
+                    document.position_encoding,
+                    document.content_sha256,
+                    document.source_text_verified,
+                ])?;
+            }
+        }
+        {
+            let mut statement = tx.prepare(
+                "INSERT INTO semantic_definitions(
+                    source_id, symbol, display_name, kind, file_path, line,
+                    character, end_line, end_character
+                 ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )?;
+            for definition in &batch.definitions {
+                statement.execute(params![
+                    definition.symbol,
+                    definition.display_name,
+                    definition.kind,
+                    definition.file,
+                    definition.line,
+                    definition.character,
+                    definition.end_line,
+                    definition.end_character,
+                ])?;
+            }
+        }
+        {
+            let mut statement = tx.prepare(
+                "INSERT OR IGNORE INTO semantic_edges(
+                    source_id, from_symbol, from_display_name, from_file,
+                    from_line, from_character, occurrence_line,
+                    occurrence_character, to_symbol, to_display_name,
+                    to_file, to_line, to_character, kind
+                 ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            )?;
+            for edge in &batch.edges {
+                statement.execute(params![
+                    edge.from_symbol,
+                    edge.from_display_name,
+                    edge.from_file,
+                    edge.from_line,
+                    edge.from_character,
+                    edge.occurrence_line,
+                    edge.occurrence_character,
+                    edge.to_symbol,
+                    edge.to_display_name,
+                    edge.to_file,
+                    edge.to_line,
+                    edge.to_character,
+                    edge.kind,
+                ])?;
+            }
+        }
+        tx.commit()
+    }
+
+    pub(crate) fn semantic_definitions(
+        &self,
+        query: Option<&str>,
+        limit: usize,
+    ) -> SqlResult<(Vec<SemanticDefinition>, bool)> {
+        if !self.semantic_tables_exist()? {
+            return Ok((Vec::new(), false));
+        }
+        let limit = limit.clamp(1, 5_000);
+        let mut sql = String::from(
+            "SELECT symbol, display_name, kind, file_path, line, character,
+                    end_line, end_character
+             FROM semantic_definitions",
+        );
+        let mut values = Vec::<SqlValue>::new();
+        if let Some(query) = query {
+            sql.push_str(" WHERE instr(lower(symbol || ' ' || display_name), lower(?)) > 0");
+            values.push(query.to_string().into());
+        }
+        sql.push_str(" ORDER BY file_path, line, character, symbol LIMIT ?");
+        values.push(
+            i64::try_from(limit.saturating_add(1))
+                .unwrap_or(i64::MAX)
+                .into(),
+        );
+        let mut statement = self.conn.prepare(&sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(values.iter()), |row| {
+            Ok(SemanticDefinition {
+                symbol: row.get(0)?,
+                display_name: row.get(1)?,
+                kind: row.get(2)?,
+                file: row.get(3)?,
+                line: row.get(4)?,
+                character: row.get(5)?,
+                end_line: row.get(6)?,
+                end_character: row.get(7)?,
+                provenance: "scip",
+                confidence: "high",
+            })
+        })?;
+        let mut items = rows.collect::<SqlResult<Vec<_>>>()?;
+        let truncated = items.len() > limit;
+        items.truncate(limit);
+        Ok((items, truncated))
+    }
+
+    pub(crate) fn semantic_edges(
+        &self,
+        query: Option<&str>,
+        relevant_paths: &[String],
+        limit: usize,
+    ) -> SqlResult<(Vec<SemanticEdge>, bool)> {
+        if !self.semantic_tables_exist()? {
+            return Ok((Vec::new(), false));
+        }
+        let limit = limit.clamp(1, 10_000);
+        let relevant_paths = relevant_paths.iter().take(2_000).collect::<Vec<_>>();
+        let mut values = Vec::<SqlValue>::new();
+        let mut sql = String::new();
+        if !relevant_paths.is_empty() {
+            sql.push_str("WITH relevant(path) AS (VALUES ");
+            for (index, path) in relevant_paths.iter().enumerate() {
+                if index > 0 {
+                    sql.push(',');
+                }
+                sql.push_str("(?)");
+                values.push((*path).clone().into());
+            }
+            sql.push_str(") ");
+        }
+        sql.push_str(
+            "SELECT from_symbol, from_display_name, from_file, from_line,
+                    from_character, occurrence_line, occurrence_character,
+                    to_symbol, to_display_name, to_file, to_line, to_character, kind
+             FROM semantic_edges",
+        );
+        let mut predicates = Vec::new();
+        if !relevant_paths.is_empty() {
+            predicates.push(
+                "(from_file IN (SELECT path FROM relevant)
+                  AND to_file IN (SELECT path FROM relevant))",
+            );
+        }
+        if let Some(query) = query {
+            predicates.push(
+                "instr(lower(
+                    coalesce(from_symbol, '') || ' ' ||
+                    coalesce(from_display_name, '') || ' ' ||
+                    to_symbol || ' ' || to_display_name
+                 ), lower(?)) > 0",
+            );
+            values.push(query.to_string().into());
+        }
+        if !predicates.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&predicates.join(" AND "));
+        }
+        sql.push_str(" ORDER BY from_file, from_line, from_character, to_symbol, kind LIMIT ?");
+        values.push(
+            i64::try_from(limit.saturating_add(1))
+                .unwrap_or(i64::MAX)
+                .into(),
+        );
+        let mut statement = self.conn.prepare(&sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(values.iter()), |row| {
+            Ok(SemanticEdge {
+                from_symbol: row.get(0)?,
+                from_display_name: row.get(1)?,
+                from_file: row.get(2)?,
+                from_line: row.get(3)?,
+                from_character: row.get(4)?,
+                occurrence_line: row.get(5)?,
+                occurrence_character: row.get(6)?,
+                to_symbol: row.get(7)?,
+                to_display_name: row.get(8)?,
+                to_file: row.get(9)?,
+                to_line: row.get(10)?,
+                to_character: row.get(11)?,
+                kind: row.get(12)?,
+                provenance: "scip",
+                confidence: "high",
+            })
+        })?;
+        let mut items = rows.collect::<SqlResult<Vec<_>>>()?;
+        let truncated = items.len() > limit;
+        items.truncate(limit);
+        Ok((items, truncated))
+    }
+
+    pub(crate) fn semantic_document_hashes(
+        &self,
+        paths: &[String],
+    ) -> SqlResult<HashMap<String, String>> {
+        if !self.semantic_tables_exist()? || paths.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut hashes = HashMap::new();
+        for chunk in paths.chunks(500) {
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT path, content_sha256 FROM semantic_documents
+                 WHERE path IN ({placeholders})"
+            );
+            let values = chunk
+                .iter()
+                .map(|path| SqlValue::from((*path).clone()))
+                .collect::<Vec<_>>();
+            let mut statement = self.conn.prepare(&sql)?;
+            let rows = statement.query_map(rusqlite::params_from_iter(values.iter()), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (path, digest) = row?;
+                hashes.insert(path, digest);
+            }
+        }
+        Ok(hashes)
     }
 
     /// Wipe everything related to a single file before re-indexing it.
@@ -3158,6 +3565,37 @@ mod tests {
         let store = Store::open(&path).unwrap();
         assert_eq!(store.symbol_count().unwrap(), 0);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn read_only_legacy_semantic_source_fails_closed_without_identity_column() {
+        let path = tmp_db("legacy_semantic_source");
+        {
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE semantic_sources (
+                        id INTEGER PRIMARY KEY,
+                        tool_name TEXT NOT NULL,
+                        tool_version TEXT NOT NULL,
+                        project_root TEXT NOT NULL,
+                        artifact_path TEXT NOT NULL,
+                        artifact_sha256 TEXT NOT NULL,
+                        imported_at INTEGER NOT NULL,
+                        document_count INTEGER NOT NULL,
+                        definition_count INTEGER NOT NULL,
+                        edge_count INTEGER NOT NULL,
+                        text_verified_documents INTEGER NOT NULL
+                    );
+                    INSERT INTO semantic_sources VALUES
+                        (1, 'legacy', '1', '/repo', '/tmp/index.scip', 'sha', 1, 1, 1, 1, 1);",
+                )
+                .unwrap();
+        }
+        let store = Store::open_read_only(&path).unwrap();
+        let source = store.semantic_source().unwrap().unwrap();
+        assert!(!source.repository_verified);
+        std::fs::remove_file(path).ok();
     }
 
     #[test]

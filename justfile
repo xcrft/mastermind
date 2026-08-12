@@ -84,6 +84,10 @@ validate:
 npm-test:
     npm test --prefix npm/mastermind
 
+# Exercise the dependency-free Lens DOM harness and accessibility contracts.
+lens-ui-test:
+    node --test mcp/servers/mmcg/assets/lens/app.test.cjs
+
 # Exercise the local host's complete distribution chain without a registry:
 # native release build -> platform package -> npm pack -> tarball install -> wrapper smoke.
 npm-smoke-native:
@@ -149,7 +153,7 @@ sync-templates:
     @echo "Templates synced to {{MMCG}}/templates/. Run `just validate` to confirm parity."
 
 # Everything deterministic that should pass before pushing.
-check: fmt-check lint test validate npm-test eval-harness security
+check: fmt-check lint test validate npm-test lens-ui-test eval-harness security
 
 # ---- dev smoke / one-shot queries ----
 

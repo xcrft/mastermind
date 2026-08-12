@@ -39,6 +39,7 @@ cd your-project
 mastermind index .
 mastermind map .
 mastermind impact --since main
+mastermind ui --since main
 mastermind miner profile .  # optional personal profile; no init required
 ```
 
@@ -50,6 +51,7 @@ Small changes can use the codegraph directly without creating a task spec.
 - Architecture maps plus runtime, state, retry, and compatibility reviews
 - Symbol search, callers, imports, cycles, and API surface
 - Changed symbols, affected callers, component crossings, and candidate tests
+- A local, read-only diff-first Lens UI backed by the same map and impact engine
 - Direct, verified, and strict task workflows based on change risk
 - Executor reports checked against the real Git diff and codegraph
 - SHA-256 and Ed25519 audit evidence with a pinned GitHub Action

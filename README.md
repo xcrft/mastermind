@@ -60,6 +60,7 @@ cd your-project
 mastermind index .
 mastermind map .
 mastermind impact --since main
+mastermind policy check --since main
 mastermind ui --since main
 ```
 
@@ -152,6 +153,37 @@ artifact URIs so dependency cycles and cross-component change risks can be
 uploaded through GitHub's standard SARIF workflow. They export only returned
 bounded findings and preserve partial-result metadata; an empty partial export
 is not a clean verdict.
+
+### Enforce architecture policy as code
+
+Keep a small, reviewable `mastermind-policy.yml` in the repository and evaluate
+it against the same bounded change graph used by impact and Lens:
+
+```yaml
+version: 1
+rules:
+  - id: domain-must-not-import-infrastructure
+    from: src/domain/**
+    deny_imports: src/infrastructure/**
+  - id: no-new-payment-cycles
+    scope: services/payment/**
+    max_new_cycles: 0
+  - id: public-api-review
+    when: api_surface_changed
+    require_owner: platform
+```
+
+```bash
+mastermind policy check --since main
+mastermind policy check --since main --format sarif > mastermind-policy.sarif
+```
+
+The v1 DSL also supports blast-radius budgets, related-test requirements,
+CODEOWNERS boundary checks, and held strict-workflow evidence for critical
+paths. A check exits non-zero for either a violation or incomplete evidence; a
+work limit can never become a clean result. See the complete
+[example policy](docs/examples/mastermind-policy.yml) and
+[CLI contract](docs/reference/mmcg.md#architecture-policy-as-code-mmcg-policy-check).
 
 ### Review architecture invariants
 

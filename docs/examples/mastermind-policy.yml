@@ -1,0 +1,29 @@
+version: 1
+rules:
+  - id: domain-must-not-import-infrastructure
+    from: src/domain/**
+    deny_imports: src/infrastructure/**
+
+  - id: no-new-payment-cycles
+    scope: services/payment/**
+    max_new_cycles: 0
+
+  - id: public-api-review
+    when: api_surface_changed
+    require_owner: platform
+
+  - id: payment-blast-budget
+    scope: services/payment/**
+    max_blast_radius: 25
+
+  - id: payment-needs-tests
+    scope: services/payment/**
+    require_tests: true
+
+  - id: payment-ownership-boundary
+    scope: services/payment/**
+    deny_ownership_crossings: true
+
+  - id: critical-payment-workflow
+    critical: services/payment/**
+    require_workflow: strict

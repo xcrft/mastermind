@@ -497,6 +497,8 @@ pub struct Collection<T> {
 #[derive(Debug, Clone, Serialize)]
 pub struct ChangeImpactResponse {
     pub schema_version: u32,
+    #[serde(skip)]
+    pub(crate) snapshot_token: String,
     pub baseline: ImpactBaseline,
     pub scope: ImpactScope,
     pub changes: ImpactChanges,
@@ -1403,6 +1405,7 @@ pub fn change_impact(
     };
     Ok(ChangeImpactResponse {
         schema_version: 1,
+        snapshot_token: working.snapshot_token,
         baseline: ImpactBaseline {
             requested_ref: git_ref.to_string(),
             baseline_oid: working.baseline_oid,
@@ -2199,7 +2202,7 @@ fn boundary_scope(scope: &str, kind: &str, component: &str) -> Option<MapBoundar
     }
 }
 
-fn map_cycle_components(edges: &[(String, String)]) -> Vec<Vec<String>> {
+pub(crate) fn map_cycle_components(edges: &[(String, String)]) -> Vec<Vec<String>> {
     let mut graph: std::collections::BTreeMap<String, Vec<String>> = Default::default();
     let mut reverse: std::collections::BTreeMap<String, Vec<String>> = Default::default();
     for (from, to) in edges {

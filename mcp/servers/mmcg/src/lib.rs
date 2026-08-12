@@ -7,6 +7,7 @@
 //!
 //! Supported languages: Python, TypeScript/TSX, JavaScript/JSX, Rust, C#, Go,
 //! Java, PHP, C/C++. C/C++ is best-effort syntactic — see README Limitations.
+//! Repository-owned architecture policies consume the same bounded graph.
 
 pub mod audit_bundle;
 pub mod audit_spec;
@@ -22,6 +23,7 @@ pub mod lens;
 pub mod lessons;
 pub mod mcp;
 pub mod miner;
+pub mod policy;
 pub mod queries;
 pub mod run_task;
 pub mod sarif_export;

@@ -3,12 +3,15 @@
 //! The exporter reports only evidence already returned by bounded map/impact
 //! queries. It never upgrades a partial graph into a claim of completeness.
 
+use crate::policy::PolicyReport;
 use crate::queries::{ChangeImpactResponse, ProjectMapResponse};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 const SARIF_SCHEMA: &str = "https://json.schemastore.org/sarif-2.1.0.json";
 const CYCLE_RULE: &str = "mastermind/dependency-cycle";
 const CROSSING_RULE: &str = "mastermind/component-boundary-change";
+const POLICY_INCOMPLETE_RULE: &str = "mastermind/policy-evaluation-incomplete";
 
 pub fn project_map(map: &ProjectMapResponse) -> Value {
     let mut partial_reasons = Vec::new();
@@ -162,6 +165,127 @@ pub fn change_impact(response: &ChangeImpactResponse) -> Value {
     )
 }
 
+pub fn architecture_policy(report: &PolicyReport) -> Value {
+    let mut rules = report
+        .rules
+        .iter()
+        .map(|item| policy_rule(&item.id, item.kind, item.description))
+        .collect::<Vec<_>>();
+    if !report.diagnostics.is_empty() {
+        rules.push(policy_rule(
+            POLICY_INCOMPLETE_RULE,
+            "policy-evaluation-incomplete",
+            "Architecture policy evidence was incomplete, so the check cannot pass.",
+        ));
+    }
+
+    let mut results = report
+        .violations
+        .iter()
+        .map(|violation| {
+            let related = violation
+                .related_locations
+                .iter()
+                .enumerate()
+                .map(|(index, related)| {
+                    let mut value = location(&related.path, related.line);
+                    value["id"] = json!(index + 1);
+                    value["message"] = json!({ "text": safe_message_text(&related.message, 240) });
+                    value
+                })
+                .collect::<Vec<_>>();
+            let mut properties = violation.properties.clone();
+            properties.insert("policyRuleKind".into(), json!(violation.rule_kind));
+            properties.insert("baselineOid".into(), json!(report.baseline.baseline_oid));
+            properties.insert("headOid".into(), json!(report.baseline.head_oid));
+            let fingerprint = stable_fingerprint(&json!({
+                "ruleId": violation.rule_id,
+                "ruleKind": violation.rule_kind,
+                "path": violation.location.path,
+                "message": violation.message,
+                "relatedPaths": violation
+                    .related_locations
+                    .iter()
+                    .map(|location| location.path.as_str())
+                    .collect::<Vec<_>>(),
+                "properties": violation.properties
+            }));
+            json!({
+                "ruleId": violation.rule_id,
+                "level": violation.level,
+                "message": { "text": safe_message_text(&violation.message, 1_000) },
+                "partialFingerprints": { "primaryLocationLineHash": fingerprint },
+                "locations": [{
+                    "message": { "text": safe_message_text(&violation.location.message, 240) },
+                    "physicalLocation": physical_location(
+                        &violation.location.path,
+                        violation.location.line
+                    )
+                }],
+                "relatedLocations": related,
+                "properties": properties
+            })
+        })
+        .collect::<Vec<_>>();
+    results.extend(report.diagnostics.iter().map(|diagnostic| {
+        let fingerprint = stable_fingerprint(&json!({
+            "ruleId": diagnostic.rule_id,
+            "code": diagnostic.code,
+            "configPath": report.config.path
+        }));
+        json!({
+            "ruleId": POLICY_INCOMPLETE_RULE,
+            "level": "error",
+            "partialFingerprints": { "primaryLocationLineHash": fingerprint },
+            "message": {
+                "text": safe_message_text(
+                    &format!(
+                        "Policy rule '{}' could not be evaluated completely ({}): {}",
+                        diagnostic.rule_id, diagnostic.code, diagnostic.message
+                    ),
+                    1_000
+                )
+            },
+            "locations": [location(&report.config.path, None)],
+            "properties": {
+                "policyRuleId": diagnostic.rule_id,
+                "diagnosticCode": diagnostic.code,
+                "baselineOid": report.baseline.baseline_oid,
+                "headOid": report.baseline.head_oid
+            }
+        })
+    }));
+
+    document(
+        "mastermind/policy-check/",
+        rules,
+        results,
+        json!({
+            "analysis": "architecture-policy",
+            "configPath": report.config.path,
+            "configSha256": report.config.sha256,
+            "configVersion": report.config.version,
+            "requestedRef": report.baseline.requested_ref,
+            "baselineOid": report.baseline.baseline_oid,
+            "headOid": report.baseline.head_oid,
+            "includesWorktree": report.baseline.includes_worktree,
+            "includesUntracked": report.baseline.includes_untracked,
+            "passed": report.passed,
+            "partial": !report.complete,
+            "rulesEvaluated": report.summary.rules_evaluated,
+            "violations": report.summary.violations,
+            "diagnostics": report.summary.diagnostics,
+            "precisionNotes": report.precision_notes
+        }),
+    )
+}
+
+fn stable_fingerprint(value: &Value) -> String {
+    let bytes = serde_json::to_vec(value).expect("JSON value serialization is infallible");
+    let digest = crate::hex::encode(&Sha256::digest(bytes));
+    format!("{}:1", &digest[..16])
+}
+
 fn document(
     automation_id: &str,
     rules: Vec<Value>,
@@ -229,6 +353,24 @@ fn rule(id: &str, name: &str, description: &str, help: &str) -> Value {
             "precision": "high",
             "problem.severity": "warning",
             "tags": ["architecture", "mastermind"]
+        }
+    })
+}
+
+fn policy_rule(id: &str, name: &str, description: &str) -> Value {
+    json!({
+        "id": id,
+        "name": name,
+        "shortDescription": { "text": description },
+        "fullDescription": { "text": description },
+        "help": {
+            "text": "Change the architecture, add the required evidence, or update the repository-owned policy deliberately."
+        },
+        "defaultConfiguration": { "level": "error" },
+        "properties": {
+            "precision": "medium",
+            "problem.severity": "error",
+            "tags": ["architecture", "policy", "mastermind"]
         }
     })
 }
@@ -312,6 +454,7 @@ mod tests {
         };
         let response = ChangeImpactResponse {
             schema_version: 1,
+            snapshot_token: "snapshot".into(),
             baseline: ImpactBaseline {
                 requested_ref: "main".into(),
                 baseline_oid: "111".into(),

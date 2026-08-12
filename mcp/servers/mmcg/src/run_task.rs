@@ -22,10 +22,16 @@ use crate::spec::{self, ParsedSpec};
 use crate::store::Store;
 use crate::verify_spec;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeSet, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+const STRICT_EVIDENCE_FILE_LIMIT: usize = 1_000;
+const STRICT_EVIDENCE_TOTAL_BYTE_LIMIT: u64 = 32 * 1024 * 1024;
+const STRICT_EVIDENCE_GIT_BYTE_LIMIT: usize = 2 * 1024 * 1024;
 
 /// Controller-owned handshake between pre- and post-flight. Canonical task
 /// specs keep it beside the spec as `<task>/state.json`; legacy flat specs use
@@ -50,6 +56,11 @@ pub struct RunState {
     pub spec_hash: String,
     /// `git rev-parse HEAD` captured at pre-flight — the audit's `--since`.
     pub baseline_ref: String,
+    /// SHA-256 binding a held strict audit to the exact declared touch files.
+    /// Older state files deserialize without it and are not accepted as
+    /// architecture-policy evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_snapshot_sha256: Option<String>,
     /// Unix epoch seconds at pre-flight.
     pub started_at: u64,
     /// Iteration count — +1 on every pre-flight entry; first fresh run is `1`.
@@ -353,10 +364,148 @@ pub fn delete_state(path: &Path) -> std::io::Result<()> {
 /// Rust toolchain — fine for "did the spec change between pre and post" on the
 /// same machine. Cross-toolchain-upgrade false positives are harmless (warn,
 /// not block).
-fn hash_text(text: &str) -> String {
+pub(crate) fn hash_text(text: &str) -> String {
     let mut h = DefaultHasher::new();
     text.hash(&mut h);
     format!("{:016x}", h.finish())
+}
+
+pub(crate) fn strict_workflow_snapshot(
+    repo_root: &Path,
+    baseline_ref: &str,
+    touch_files: &[String],
+) -> Result<String, String> {
+    if !matches!(baseline_ref.len(), 40 | 64)
+        || !baseline_ref.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("strict-workflow baseline must be an exact Git object ID".into());
+    }
+    let mut paths = BTreeSet::new();
+    for file in touch_files {
+        let normalized = crate::audit_bundle::normalize_relative_path(Path::new(file))
+            .map_err(|_| format!("invalid strict-workflow touch path `{file}`"))?;
+        if normalized.starts_with(".mastermind/tasks/")
+            || normalized.starts_with(".mastermind/releases/")
+        {
+            return Err(format!(
+                "strict-workflow evidence cannot attest its own artifact path `{normalized}`"
+            ));
+        }
+        paths.insert(normalized);
+    }
+    if paths.is_empty() || paths.len() > STRICT_EVIDENCE_FILE_LIMIT {
+        return Err(format!(
+            "strict-workflow evidence requires 1..={STRICT_EVIDENCE_FILE_LIMIT} touch files"
+        ));
+    }
+
+    let root = repo_root
+        .canonicalize()
+        .map_err(|_| "strict-workflow repository root is unavailable".to_string())?;
+    let mut digest = Sha256::new();
+    digest.update(b"mastermind-strict-workflow-snapshot-v1\0");
+    digest.update(baseline_ref.as_bytes());
+    digest.update([0]);
+    let mut git_args = vec![
+        "-c",
+        "diff.external=",
+        "diff",
+        "--raw",
+        "--no-abbrev",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        baseline_ref,
+        "--",
+    ];
+    git_args.extend(paths.iter().map(String::as_str));
+    let raw = crate::diff::run_bounded_git_with_limit(
+        &root,
+        &git_args,
+        None,
+        STRICT_EVIDENCE_GIT_BYTE_LIMIT,
+    )
+    .map_err(|error| format!("strict-workflow git snapshot failed: {}", error.code()))?;
+    if !raw.success {
+        return Err("strict-workflow baseline is unavailable".into());
+    }
+    digest.update(b"git-raw\0");
+    digest.update(raw.stdout);
+    digest.update([0]);
+    let mut total_bytes = 0u64;
+
+    for relative in &paths {
+        digest.update(relative.as_bytes());
+        digest.update([0]);
+        let mut current = root.clone();
+        let parts = relative.split('/').collect::<Vec<_>>();
+        let mut missing = false;
+        for (index, part) in parts.iter().enumerate() {
+            current.push(part);
+            match std::fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(format!(
+                        "strict-workflow touch path `{relative}` traverses a symlink"
+                    ));
+                }
+                Ok(metadata) if index + 1 < parts.len() && !metadata.is_dir() => {
+                    return Err(format!(
+                        "strict-workflow touch path `{relative}` has a non-directory parent"
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    missing = true;
+                    break;
+                }
+                Err(_) => {
+                    return Err(format!(
+                        "strict-workflow touch path `{relative}` cannot be inspected"
+                    ));
+                }
+            }
+        }
+        if missing {
+            digest.update(b"missing\0");
+            continue;
+        }
+
+        let metadata = std::fs::symlink_metadata(&current)
+            .map_err(|_| format!("strict-workflow touch path `{relative}` cannot be inspected"))?;
+        if !metadata.is_file() {
+            return Err(format!(
+                "strict-workflow touch path `{relative}` is not a regular file"
+            ));
+        }
+        if metadata.len() > crate::audit_bundle::BUNDLE_INPUT_MAX as u64 {
+            return Err(format!(
+                "strict-workflow touch file `{relative}` exceeds the 16 MiB limit"
+            ));
+        }
+        total_bytes = total_bytes
+            .checked_add(metadata.len())
+            .filter(|total| *total <= STRICT_EVIDENCE_TOTAL_BYTE_LIMIT)
+            .ok_or_else(|| {
+                "strict-workflow touch files exceed the 32 MiB total limit".to_string()
+            })?;
+        digest.update(b"file\0");
+        digest.update(metadata.len().to_le_bytes());
+
+        let mut file = std::fs::File::open(&current)
+            .map_err(|_| format!("strict-workflow touch file `{relative}` cannot be read"))?;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .map_err(|_| format!("strict-workflow touch file `{relative}` cannot be read"))?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+        }
+        digest.update([0]);
+    }
+    Ok(crate::hex::encode(&digest.finalize()))
 }
 
 fn timestamp_now() -> u64 {
@@ -805,6 +954,7 @@ fn run_pre(
         spec_path: resolved_spec_path.display().to_string(),
         spec_hash: hash_text(&spec_body),
         baseline_ref: head.clone(),
+        held_snapshot_sha256: None,
         started_at: timestamp_now(),
         iteration,
         allow_no_index: opts.allow_no_index,
@@ -993,6 +1143,28 @@ fn run_post(
     }
 
     if matches!(outcome, Outcome::PostHeld) {
+        let held_snapshot_sha256 = match parsed.frontmatter.as_ref() {
+            Some(frontmatter)
+                if frontmatter.mode.as_deref() == Some("strict")
+                    && !frontmatter.touches.is_empty() =>
+            {
+                let touches = frontmatter
+                    .touches
+                    .iter()
+                    .map(|touch| touch.file.clone())
+                    .collect::<Vec<_>>();
+                match strict_workflow_snapshot(repo_root, &state.baseline_ref, &touches) {
+                    Ok(snapshot) => Some(snapshot),
+                    Err(error) => {
+                        eprintln!(
+                            "warning: held audit has no architecture-policy snapshot: {error}"
+                        );
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
         let notes = compute_release_notes(
             &parsed,
             &spec_body,
@@ -1049,6 +1221,7 @@ fn run_post(
         complete.risk = Some("low".into());
         complete.blocking_reason = None;
         complete.last_artifact = Some("history-review.md".into());
+        complete.held_snapshot_sha256 = held_snapshot_sha256;
         if let Err(error) = save_state(state_path, &complete) {
             eprintln!(
                 "error: persisting post-flight state `{}`: {error}",
@@ -1326,6 +1499,7 @@ verifications: []\n\
             spec_path: "specs/foo.md".into(),
             spec_hash: "deadbeefcafef00d".into(),
             baseline_ref: "abc1234".into(),
+            held_snapshot_sha256: Some("feedface".into()),
             started_at: 123456,
             iteration: 0,
             allow_no_index: true,
@@ -1335,6 +1509,7 @@ verifications: []\n\
         assert_eq!(loaded.spec_path, state.spec_path);
         assert_eq!(loaded.spec_hash, state.spec_hash);
         assert_eq!(loaded.baseline_ref, state.baseline_ref);
+        assert_eq!(loaded.held_snapshot_sha256, state.held_snapshot_sha256);
         assert_eq!(loaded.started_at, state.started_at);
         assert!(loaded.allow_no_index);
         delete_state(&path).unwrap();
@@ -1674,6 +1849,16 @@ verifications: []\n\
         fs::write(
             &spec_path,
             "\
+---
+mode: strict
+touches:
+  - file: src/lib.py
+    language: python
+    symbols:
+      - name: stays
+verify:
+  - cmd: python3 -m py_compile src/lib.py
+---
 # Clean add
 
 ## Goals
@@ -1732,6 +1917,10 @@ verifications: []\n\
         // remains an explicit lifecycle phase.
         let completed = load_state(&state_path).unwrap().expect("review state");
         assert_eq!(completed.status, "history_review_required");
+        assert!(
+            completed.held_snapshot_sha256.is_some(),
+            "a held strict task must persist an exact touch-file snapshot"
+        );
         assert_eq!(completed.next_step.as_deref(), Some("review_history"));
         assert_eq!(
             completed.last_artifact.as_deref(),

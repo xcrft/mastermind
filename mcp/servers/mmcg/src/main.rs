@@ -4,6 +4,7 @@
 //!   mastermind init           — scaffold a project, build the index, draft CONTEXT.md
 //!   mastermind setup claude   — register the codegraph with Claude Code (MCP)
 //!   mastermind index [PATH]   — build or refresh the index
+//!   mastermind ui --since REF — open the local diff-first Lens UI
 //!   mastermind serve          — run as MCP stdio server
 //!   mastermind doctor         — health-check the setup
 //!   mastermind query <kind>   — one-shot query from the CLI (handy for debugging)
@@ -75,6 +76,7 @@ over MCP, plus runs spec-driven workflow gates (verify-spec / audit-spec).\n\n\
 Onboard a project (run inside your repo):\n  \
 mastermind init                       scaffold .mastermind/, build the index, draft CONTEXT.md\n  \
 mastermind setup claude --write-mcp   register the codegraph with Claude Code (run once)\n  \
+mastermind ui --since main            inspect this change in the local read-only Lens UI\n  \
 mastermind doctor                     verify the setup\n\n\
 Installed via npm? `mastermind install` does the global setup (workflow agents + skills + MCP) in one step — then `mastermind init` per repo.\n\n\
 Then open the project in Claude Code — the codegraph tools (search, callers, impact, …) are available. \
@@ -129,6 +131,28 @@ enum Cmd {
         top: u32,
         #[arg(long, default_value = ".")]
         root: PathBuf,
+    },
+    /// Serve Mastermind Lens: a local, read-only, diff-first change review UI.
+    Ui {
+        /// Git ref used as the change-impact baseline.
+        #[arg(long)]
+        since: String,
+        /// Project root. Defaults to cwd.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Repository-relative map scope. Defaults to the repository root.
+        #[arg(long, default_value = ".")]
+        path: String,
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u8).range(1..=5))]
+        depth: u8,
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=100))]
+        top: u32,
+        /// Exclude conventional tests, fixtures, examples, generated, and vendor paths from the architecture map.
+        #[arg(long)]
+        production_only: bool,
+        /// Loopback port. Zero asks the OS for an available ephemeral port.
+        #[arg(long, default_value_t = 0)]
+        port: u16,
     },
     /// Run as an MCP stdio server. Reads JSON-RPC from stdin, writes to stdout.
     Serve,
@@ -847,6 +871,32 @@ fn run_cli_inner(
                 commands::query::render_change_impact(&response, format)?
             );
         }
+        Cmd::Ui {
+            since,
+            root,
+            path,
+            depth,
+            top,
+            production_only,
+            port,
+        } => {
+            let root = root
+                .canonicalize()
+                .map_err(|_| mmcg::lens::LensError::RootUnavailable)?;
+            let index_path = index_path_for_root(index_override.as_deref(), &root);
+            mmcg::lens::run(
+                root,
+                index_path,
+                mmcg::lens::LensOptions {
+                    since,
+                    path,
+                    depth,
+                    top,
+                    production_only,
+                },
+                port,
+            )?;
+        }
         Cmd::Serve => {
             let store = Store::open(&index_path)?;
             store.set_default_work_budget_ms(mmcg::store::query_budget_ms_from_env(
@@ -1356,5 +1406,37 @@ mod tests {
 
         let why = Cli::try_parse_from(["mastermind", "why", "idempotency"]).unwrap();
         assert!(matches!(why.cmd, Cmd::Why { query, top: 10 } if query == "idempotency"));
+    }
+
+    #[test]
+    fn lens_ui_is_a_bounded_root_scoped_cli_command() {
+        assert!(Cli::try_parse_from(["mastermind", "ui"]).is_err());
+
+        let cli = Cli::try_parse_from([
+            "mastermind",
+            "ui",
+            "--since",
+            "origin/main",
+            "--production-only",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Ui {
+                since,
+                root,
+                path,
+                depth: 3,
+                top: 100,
+                production_only: true,
+                port: 0,
+            } if since == "origin/main"
+                && root.as_path() == std::path::Path::new(".")
+                && path == "."
+        ));
+
+        assert!(
+            Cli::try_parse_from(["mastermind", "ui", "--since", "main", "--depth", "6",]).is_err()
+        );
     }
 }

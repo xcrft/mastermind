@@ -612,18 +612,26 @@ fn has_skipped_component(path: &Path) -> bool {
 /// is non-fatal: the ordinary ignore-aware filesystem walk remains available
 /// outside repositories and when Git is unavailable.
 fn git_tracked_relative_paths(root: &Path) -> Vec<PathBuf> {
-    let Ok(output) = crate::diff::run_bounded_git_with_limit(
+    tracked_relative_paths(root).unwrap_or_default()
+}
+
+/// Existing tracked files, bounded by the same subprocess timeout and output
+/// cap used during indexing. Indexing can fall back to the ignore-aware walk
+/// when Git is unavailable; fail-closed readers such as Lens use the `Result`
+/// to avoid treating an incomplete tracked-file inventory as fresh.
+pub(crate) fn tracked_relative_paths(
+    root: &Path,
+) -> Result<Vec<PathBuf>, crate::diff::WorkingTreeDiffError> {
+    let output = crate::diff::run_bounded_git_with_limit(
         root,
         &["ls-files", "--cached", "-z", "--"],
         None,
         GIT_TRACKED_PATH_OUTPUT_LIMIT,
-    ) else {
-        return Vec::new();
-    };
+    )?;
     if !output.success {
-        return Vec::new();
+        return Err(crate::diff::WorkingTreeDiffError::GitUnavailable);
     }
-    output
+    Ok(output
         .stdout
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
@@ -634,7 +642,7 @@ fn git_tracked_relative_paths(root: &Path) -> Vec<PathBuf> {
             std::fs::symlink_metadata(root.join(path))
                 .is_ok_and(|metadata| metadata.file_type().is_file())
         })
-        .collect()
+        .collect())
 }
 
 fn source_walk_builder(root: &Path) -> WalkBuilder {

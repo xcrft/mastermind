@@ -52,6 +52,7 @@ pub struct LensSnapshot {
     pub options: LensOptions,
     pub map: ProjectMapResponse,
     pub impact: ChangeImpactResponse,
+    pub semantic: crate::scip_overlay::SemanticOverlaySnapshot,
     pub evidence: crate::evidence::EvidenceSnapshot,
 }
 
@@ -350,6 +351,36 @@ fn build_snapshot_until(
         options.production_only,
     )
     .map_err(LensError::MapUnavailable)?;
+    let semantic_paths = impact
+        .changes
+        .files
+        .items
+        .iter()
+        .map(|item| item.path.clone())
+        .chain(
+            impact
+                .changes
+                .symbols
+                .items
+                .iter()
+                .map(|item| item.file.clone()),
+        )
+        .chain(
+            impact
+                .impact
+                .items
+                .iter()
+                .map(|item| item.symbol.file.clone()),
+        )
+        .chain(
+            impact
+                .tests
+                .items
+                .iter()
+                .map(|item| item.symbol.file.clone()),
+        );
+    let semantic = crate::scip_overlay::for_lens(store, &root, semantic_paths)
+        .unwrap_or_else(|_| crate::scip_overlay::unavailable_with_diagnostic());
     let evidence = crate::evidence::collect_with_store(
         &root,
         evidence_options,
@@ -373,6 +404,7 @@ fn build_snapshot_until(
         options: options.clone(),
         map,
         impact,
+        semantic,
         evidence,
     })
 }

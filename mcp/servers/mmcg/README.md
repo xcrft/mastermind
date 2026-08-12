@@ -1,6 +1,6 @@
 ---
 name: mmcg
-description: Mastermind Codegraph — fast multi-language code indexer (Python + TypeScript/TSX + JavaScript/JSX + Vue SFC + Rust + C# + Go + Java + PHP + C/C++) exposed over MCP. Indexes symbols, calls, imports, and durable project history into a local SQLite database and exposes 24 bounded tools for AI coding agents.
+description: Mastermind Codegraph — fast multi-language code indexer (Python + TypeScript/TSX + JavaScript/JSX + Vue SFC + Rust + C# + Go + Java + PHP + C/C++) exposed over MCP. Indexes symbols, calls, imports, and durable project history into a local SQLite database and exposes 25 bounded tools for AI coding agents.
 metadata:
   version: 1.2.1
   authors:
@@ -59,6 +59,7 @@ SQLite and tree-sitter are bundled. No system SQLite or parser libraries are req
 ```bash
 cd your-project
 mmcg index .
+mmcg enrich --scip index.scip # optional compiler-resolved overlay
 mmcg status
 mmcg map .
 mmcg impact --since main
@@ -92,6 +93,7 @@ See the [client integration guides](https://github.com/xcrft/mastermind/tree/mai
 | Area | Examples |
 |---|---|
 | Symbol graph | Search, callers, callees, imports, outlines, API surface |
+| Semantic overlay | Optional SCIP definitions, references, implementations, and provenance |
 | Architecture | Project map, centrality, dependency cycles, unreferenced candidates |
 | Change analysis | Git-aware symbol changes, blast radius, component crossings |
 | Local review UI | Read-only diff-first Lens with bounded SARIF, coverage, JUnit, OTLP, project-knowledge, ownership, and churn overlays |
@@ -99,7 +101,7 @@ See the [client integration guides](https://github.com/xcrft/mastermind/tree/mai
 | Workflow gates | `verify-spec`, `audit-spec`, and `run-task` |
 | Local coordination | Bounded additive scratchpad and indexed project history |
 
-The MCP surface contains 23 read-only tools and one additive local scratchpad
+The MCP surface contains 24 read-only tools and one additive local scratchpad
 write. Results are bounded and return precision or truncation notes when the
 engine cannot prove completeness.
 
@@ -118,7 +120,7 @@ engine cannot prove completeness.
 
 ## Precision model
 
-mmcg is a syntactic graph, not a compiler or language server:
+The default mmcg graph is syntactic, not a compiler or language server:
 
 - Call resolution is primarily name-based rather than type-based.
 - Dynamic dispatch, reflection, generated code, and cross-language calls may be invisible.
@@ -128,6 +130,14 @@ mmcg is a syntactic graph, not a compiler or language server:
 - Dead-code and test-impact results are candidates to review, not deletion or test-skipping authorization.
 
 These trade-offs keep the index local, fast, portable, and easy for agents to query. The engine fails closed on stale index, root, Git snapshot, or work-limit conditions in change-impact workflows.
+
+`mmcg enrich --scip index.scip` is an optional second layer. It stores
+compiler-resolved facts separately, exposes them through `query semantic` and
+`mmcg_semantic`, and lets Lens prefer exact SCIP evidence while retaining the
+Tree-sitter topology and no-toolchain fallback. Embedded SCIP document text is
+verified when available; `project_root` must identify this repository unless
+every document embeds matching text. Later source changes suppress stale
+semantic facts.
 
 ## Reference
 

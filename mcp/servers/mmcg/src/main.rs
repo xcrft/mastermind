@@ -4,6 +4,7 @@
 //!   mastermind init           — scaffold a project, build the index, draft CONTEXT.md
 //!   mastermind setup claude   — register the codegraph with Claude Code (MCP)
 //!   mastermind index [PATH]   — build or refresh the index
+//!   mastermind enrich --scip  — add optional compiler-resolved evidence
 //!   mastermind ui --since REF — open the local diff-first Lens UI
 //!   mastermind serve          — run as MCP stdio server
 //!   mastermind doctor         — health-check the setup
@@ -105,6 +106,13 @@ enum Cmd {
         /// Re-parse every file regardless of mtime. Use after schema changes or to recover from a stale index.
         #[arg(long)]
         force: bool,
+    },
+    /// Add an optional compiler-resolved semantic overlay to the existing
+    /// Tree-sitter codegraph. Replaces only the previous SCIP overlay.
+    Enrich {
+        /// SCIP protobuf index produced by a language-specific SCIP indexer.
+        #[arg(long, value_name = "PATH")]
+        scip: PathBuf,
     },
     /// Build a compact deterministic architecture briefing from the codegraph.
     Map {
@@ -699,6 +707,13 @@ enum QueryCmd {
         #[arg(long)]
         language: Option<String>,
     },
+    /// Inspect compiler-resolved SCIP definitions and references. An empty
+    /// result with fallback_active=true means the Tree-sitter-only mode is active.
+    Semantic {
+        symbol: String,
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=500))]
+        top: u32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -863,6 +878,18 @@ fn run_cli_inner(
             if stats.extractor_contract_rebuilt {
                 eprintln!("extractor contract changed: rebuilt all structural data");
             }
+        }
+        Cmd::Enrich { scip } => {
+            if !index_path.is_file() {
+                return Err(format!(
+                    "codegraph index {} does not exist; run `mastermind index .` first",
+                    index_path.display()
+                )
+                .into());
+            }
+            let store = Store::open(&index_path)?;
+            let summary = mmcg::scip_overlay::import(&store, &scip)?;
+            println!("{}", serde_json::to_string_pretty(&summary)?);
         }
         Cmd::Map {
             path,
@@ -1329,6 +1356,37 @@ mod tests {
             index_path_for_root(Some(std::path::Path::new("custom/index.db")), root),
             PathBuf::from("custom/index.db")
         );
+    }
+
+    #[test]
+    fn enrich_and_semantic_query_cli_contracts_are_explicit() {
+        let enrich = Cli::try_parse_from([
+            "mastermind",
+            "--index",
+            "graph.db",
+            "enrich",
+            "--scip",
+            "index.scip",
+        ])
+        .unwrap();
+        assert!(
+            matches!(enrich.cmd, Cmd::Enrich { scip } if scip == std::path::Path::new("index.scip"))
+        );
+
+        let query = Cli::try_parse_from([
+            "mastermind",
+            "query",
+            "semantic",
+            "scip-clang . demo . target().",
+            "--top",
+            "25",
+        ])
+        .unwrap();
+        assert!(matches!(
+            query.cmd,
+            Cmd::Query(QueryCmd::Semantic { symbol, top })
+                if symbol == "scip-clang . demo . target()." && top == 25
+        ));
     }
 
     fn claude_setup_args(argv: &[&str]) -> SetupArgs {

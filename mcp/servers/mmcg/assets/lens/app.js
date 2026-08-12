@@ -10,7 +10,7 @@
   const CONNECTED_PER_LANE = 5;
   const MOBILE_CANDIDATES_PER_PAGE = 5;
   const MOBILE_CONNECTED_PER_LANE = 2;
-  const OVERLAY_KEYS = ["findings", "coverage", "ownership", "churn", "tests", "runtime", "knowledge"];
+  const OVERLAY_KEYS = ["findings", "coverage", "ownership", "churn", "tests", "semantic", "runtime", "knowledge"];
 
   const state = {
     raw: null,
@@ -109,6 +109,29 @@
 
   function symbolMatches(left, right) {
     return symbolIdentity(left) === symbolIdentity(right);
+  }
+
+  function semanticMatchesGraphEdge(value, edge) {
+    const semantic = record(value);
+    const fromFile = text(edge.from.symbol.file, "");
+    const toFile = text(edge.to.symbol.file, "");
+    const fromName = text(edge.from.symbol.name, "");
+    const toName = text(edge.to.symbol.name, "");
+    const semanticFromFile = text(semantic.from_file, "");
+    const semanticToFile = text(semantic.to_file, "");
+    const semanticFromName = text(semantic.from_display_name, "");
+    const semanticToName = text(semantic.to_display_name, "");
+    const semanticFromLine = finiteNumber(semantic.from_line);
+    const semanticToLine = finiteNumber(semantic.to_line);
+    const fromLine = finiteNumber(edge.from.symbol.line);
+    const toLine = finiteNumber(edge.to.symbol.line);
+    const direct = semanticFromFile === fromFile && semanticToFile === toFile
+      && semanticFromName === fromName && semanticToName === toName
+      && semanticFromLine === fromLine && semanticToLine === toLine;
+    const reverse = semanticFromFile === toFile && semanticToFile === fromFile
+      && semanticFromName === toName && semanticToName === fromName
+      && semanticFromLine === toLine && semanticToLine === fromLine;
+    return direct || reverse;
   }
 
   function shortOid(value) {
@@ -383,6 +406,7 @@
     const map = record(raw.map);
     const impact = record(raw.impact);
     const evidence = record(raw.evidence);
+    const semantic = record(raw.semantic);
     const changes = record(impact.changes);
 
     const files = collection(changes.files);
@@ -396,6 +420,7 @@
     const evidenceFiles = collection(evidence.files);
     const evidenceDiagnostics = collection(evidence.diagnostics);
     const runtimeEdges = collection(evidence.runtime_edges);
+    const semanticEdges = collection(semantic.edges);
     const evidenceByPath = new Map();
     evidenceFiles.items.map(normalizeFileEvidence).forEach(function (item) {
       if (item.path) {
@@ -516,6 +541,9 @@
         const child = text(runtimeEdge.child_file, "");
         return (parent === fromFile && child === toFile) || (parent === toFile && child === fromFile);
       });
+      edge.semanticEvidence = semanticEdges.items.map(record).filter(function (semanticEdge) {
+        return semanticMatchesGraphEdge(semanticEdge, edge);
+      });
     });
 
     const componentRows = buildComponentRows(
@@ -540,16 +568,18 @@
       apiCrossings: apiCrossings,
       mapComponents: mapComponents,
       evidence: evidence,
+      semantic: semantic,
       evidenceSources: evidenceSources,
       evidenceFiles: evidenceFiles,
       evidenceDiagnostics: evidenceDiagnostics,
       runtimeEdges: runtimeEdges,
+      semanticEdges: semanticEdges,
       evidenceByPath: evidenceByPath,
       nodes: nodes,
       edges: edges,
       components: componentRows,
-      precisionNotes: collectPrecisionNotes(map, impact, evidence),
-      truncations: collectTruncations(map, impact, evidence),
+      precisionNotes: collectPrecisionNotes(map, impact, evidence, semantic),
+      truncations: collectTruncations(map, impact, evidence, semantic),
       limits: collectLimits(raw, map, impact, evidence),
     };
   }
@@ -602,7 +632,7 @@
     });
   }
 
-  function collectPrecisionNotes(map, impact, evidence) {
+  function collectPrecisionNotes(map, impact, evidence, semantic) {
     const notes = [];
     array(map.precision_notes).forEach(function (value) {
       const note = record(value);
@@ -642,6 +672,14 @@
         source: "Evidence · " + text(diagnostic.source_id, "unknown source"),
       });
     });
+    array(semantic.diagnostics).forEach(function (value) {
+      const diagnostic = record(value);
+      notes.push({
+        code: text(diagnostic.code, "Semantic diagnostic"),
+        message: text(diagnostic.message, ""),
+        source: "Semantic · SCIP",
+      });
+    });
     const seen = new Set();
     return notes.filter(function (note) {
       const key = note.source + "|" + note.code + "|" + note.message;
@@ -653,7 +691,7 @@
     });
   }
 
-  function collectTruncations(map, impact, evidence) {
+  function collectTruncations(map, impact, evidence, semantic) {
     const results = [];
     const changes = record(impact.changes);
     const candidates = [
@@ -672,6 +710,8 @@
       ["Evidence files", evidence.files],
       ["Runtime evidence edges", evidence.runtime_edges],
       ["Evidence diagnostics", evidence.diagnostics],
+      ["SCIP semantic definitions", semantic.definitions],
+      ["SCIP semantic edges", semantic.edges],
     ];
     candidates.forEach(function (candidate) {
       const value = collection(candidate[1]);
@@ -1069,13 +1109,42 @@
   function renderEvidenceSources() {
     clearNode(elements.evidenceSourceList);
     const sources = state.model.evidenceSources.items.map(record);
-    const matchedFiles = returnedCount(state.model.evidenceFiles);
-    elements.evidenceSummary.textContent = sources.length === 0
+    const semantic = record(state.model.semantic);
+    const semanticSource = isRecord(semantic.source) ? record(semantic.source) : null;
+    const sourceCount = sources.length + (semanticSource ? 1 : 0);
+    const matchedPaths = new Set();
+    state.model.evidenceFiles.items.map(record).forEach(function (file) {
+      const path = text(file.path, "");
+      if (path) {
+        matchedPaths.add(path);
+      }
+    });
+    state.model.semanticEdges.items.map(record).forEach(function (edge) {
+      const from = text(edge.from_file, "");
+      const to = text(edge.to_file, "");
+      if (from) {
+        matchedPaths.add(from);
+      }
+      if (to) {
+        matchedPaths.add(to);
+      }
+    });
+    const matchedFiles = matchedPaths.size;
+    elements.evidenceSummary.textContent = sourceCount === 0
       ? "No external evidence sources loaded; the static graph remains available."
-      : sources.length + " source" + (sources.length === 1 ? "" : "s") + " · " + matchedFiles + " matched trace file" + (matchedFiles === 1 ? "" : "s") + (record(state.model.evidence).partial === true ? " · partial" : "");
-    if (sources.length === 0) {
-      elements.evidenceSourceList.appendChild(createElement("p", "evidence-source-list__empty", "Pass --sarif, --coverage, --junit, --otel, --codeowners, or --git-commits to add corroborating facts."));
+      : sourceCount + " source" + (sourceCount === 1 ? "" : "s") + " · " + matchedFiles + " matched trace file" + (matchedFiles === 1 ? "" : "s") + ((record(state.model.evidence).partial === true || semantic.partial === true) ? " · partial" : "");
+    if (sourceCount === 0) {
+      elements.evidenceSourceList.appendChild(createElement("p", "evidence-source-list__empty", "Use mastermind enrich --scip index.scip or pass external evidence flags to add corroborating facts."));
       return;
+    }
+    if (semanticSource) {
+      const status = semantic.partial === true ? "partial" : "loaded";
+      const card = createElement("article", "evidence-source evidence-source--" + status);
+      card.appendChild(createElement("span", "evidence-source__kind", "scip · " + status));
+      card.appendChild(createElement("span", "evidence-source__label", text(semanticSource.tool_name, "SCIP producer") + (text(semanticSource.tool_version, "") ? " " + text(semanticSource.tool_version, "") : "")));
+      const identity = semanticSource.repository_verified === true ? "repository verified" : "repository unverified";
+      card.appendChild(createElement("span", "evidence-source__facts", displayNumber(finiteNumber(semanticSource.edges)) + " compiler-resolved edges · " + displayNumber(finiteNumber(semanticSource.documents)) + " documents · " + identity));
+      elements.evidenceSourceList.appendChild(card);
     }
     sources.forEach(function (source) {
       const status = text(source.status, "unknown");
@@ -2118,8 +2187,9 @@
     const boundary = edge.crossing ? ", boundary crossing" : "";
     const ownership = overlayEnabled("ownership") && edge.ownershipBoundary ? ", ownership boundary" : "";
     const runtime = overlayEnabled("runtime") && edge.runtimeEvidence.length > 0 ? ", runtime trace corroborated" : "";
+    const semantic = overlayEnabled("semantic") && edge.semanticEvidence.length > 0 ? ", SCIP compiler-resolved, high confidence" : ", Tree-sitter syntactic, medium confidence";
     return relation + " from " + text(edge.from.symbol.name, "unnamed seed")
-      + " to " + text(edge.to.symbol.name, "unnamed claim") + boundary + ownership + runtime + ". Select for details.";
+      + " to " + text(edge.to.symbol.name, "unnamed claim") + boundary + ownership + semantic + runtime + ". Select for details.";
   }
 
   function drawEdge(layer, edge, from, to, mobile, width) {
@@ -2142,6 +2212,9 @@
     }
     if (overlayEnabled("runtime") && edge.runtimeEvidence.length > 0) {
       classes.push("graph-edge--runtime");
+    }
+    if (overlayEnabled("semantic") && edge.semanticEvidence.length > 0) {
+      classes.push("graph-edge--semantic");
     }
     if (state.selectedId === edge.id) {
       classes.push("is-selected");
@@ -2625,7 +2698,8 @@
     appendClaimGrid([
       ["Relation", isTest ? "Changed seed → candidate test" : "Changed seed → impacted symbol"],
       ["Minimum depth", displayNumber(edge.minimumDepth)],
-      ["Precision", edge.precision.join(", ") || "Not returned"],
+      ["Precision", overlayEnabled("semantic") && edge.semanticEvidence.length > 0 ? "high" : (edge.precision.join(", ") || "medium")],
+      ["Static provenance", overlayEnabled("semantic") && edge.semanticEvidence.length > 0 ? "SCIP (preferred)" : "Tree-sitter (fallback)"],
       ["Evidence kind", edge.evidence ? text(edge.evidence.kind, "Not classified") : "Impact seed"],
       ["Name collisions", displayNumber(edge.collisionCount)],
       ["Boundary crossing", edge.crossing ? "Observed" : "Not returned"],
@@ -2669,12 +2743,31 @@
         "No matching runtime evidence returned."
       );
     }
+    if (overlayEnabled("semantic") && edge.semanticEvidence.length > 0) {
+      appendClaimList(
+        "Compiler-resolved semantic evidence",
+        edge.semanticEvidence.map(function (value) {
+          const semantic = record(value);
+          return text(semantic.kind, "reference") + " · "
+            + text(semantic.from_display_name, "file scope") + " · "
+            + text(semantic.from_file, "file unavailable") + formatLine(semantic.from_line)
+            + " → " + text(semantic.to_display_name, "symbol unavailable") + " · "
+            + text(semantic.to_file, "external symbol") + formatLine(semantic.to_line)
+            + " · reference at " + text(semantic.from_file, "file unavailable") + formatLine(semantic.occurrence_line)
+            + " · SCIP / high";
+        }),
+        "semantic",
+        "No matching SCIP edge returned."
+      );
+    }
     elements.inspector.appendChild(createElement(
       "p",
       "claim-note",
       isTest
         ? "This line exists only because the test evidence explicitly names the changed symbol as its seed."
-        : "This line exists only because the impacted symbol explicitly names the changed symbol in its seeds array."
+        : (overlayEnabled("semantic") && edge.semanticEvidence.length > 0
+          ? "SCIP is the preferred static provenance for this exact endpoint and symbol pair; Tree-sitter remains the fallback topology."
+          : "This line exists only because the impacted symbol explicitly names the changed symbol in its seeds array.")
     ));
   }
 

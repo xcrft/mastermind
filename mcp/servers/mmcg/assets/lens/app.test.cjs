@@ -212,7 +212,7 @@ function createDocument() {
     button.setAttribute("data-scope", scope);
     return button;
   });
-  const overlayButtons = ["findings", "coverage", "ownership", "churn", "tests", "runtime", "knowledge"].map((overlay) => {
+  const overlayButtons = ["findings", "coverage", "ownership", "churn", "tests", "semantic", "runtime", "knowledge"].map((overlay) => {
     const button = new MockElement("button");
     button.dataset.overlay = overlay;
     button.setAttribute("data-overlay", overlay);
@@ -259,6 +259,35 @@ function fixture() {
     schema_version: 1,
     repository: { name: "example", root_label: "." },
     options: { since: "main", path: ".", depth: 3, top: 100, production_only: false },
+    semantic: {
+      schema_version: 1,
+      available: true,
+      partial: false,
+      fallback_active: false,
+      source: {
+        format: "scip", tool_name: "rust-analyzer", tool_version: "test",
+        documents: 2, definitions: 2, edges: 1, text_verified_documents: 2,
+        repository_verified: true, revision_verified: true,
+      },
+      definitions: { total: 0, returned: 0, truncated: false, items: [] },
+      edges: {
+        total: 1,
+        returned: 1,
+        truncated: false,
+        items: [{
+          from_symbol: "rust-analyzer . example . authorize_target().",
+          from_display_name: "authorize_target",
+          from_file: "src/target.rs", from_line: 7, from_character: 4,
+          occurrence_line: 9, occurrence_character: 6,
+          to_symbol: "rust-analyzer . example . authorize().",
+          to_display_name: "authorize",
+          to_file: "src/auth.rs", to_line: 42, to_character: 4,
+          kind: "reference", provenance: "scip", confidence: "high",
+        }],
+      },
+      diagnostics: [],
+      resolution: { default_graph: "tree-sitter", static_precedence: ["scip", "tree-sitter"], runtime_confidence: "observed", fallback_without_scip: "tree-sitter" },
+    },
     evidence: {
       schema_version: 1,
       partial: false,
@@ -452,8 +481,9 @@ async function main() {
   );
 
   const harness = await renderFixture();
-  assert.match(harness.nodes.get("evidence-summary").textContent, /7 sources · 3 matched trace files/i);
-  assert.equal(harness.nodes.get("evidence-source-list").querySelectorAll(".evidence-source").length, 7);
+  assert.match(harness.nodes.get("evidence-summary").textContent, /8 sources · 3 matched trace files/i);
+  assert.equal(harness.nodes.get("evidence-source-list").querySelectorAll(".evidence-source").length, 8);
+  assert.match(harness.nodes.get("evidence-source-list").textContent, /repository verified/i);
   const changedCandidate = harness.nodes.get("mobile-trace-list").querySelectorAll(".mobile-candidate")[0];
   assert.ok(changedCandidate, "Changed claim with overlays must remain selectable on mobile");
   assert.equal(
@@ -471,6 +501,11 @@ async function main() {
     harness.nodes.get("trace-graph").querySelectorAll(".graph-edge--ownership").length,
     1,
     "A named owner to explicit no-owner transition must remain visible as an ownership boundary"
+  );
+  assert.equal(
+    harness.nodes.get("trace-graph").querySelectorAll(".graph-edge--semantic").length,
+    1,
+    "An exact SCIP symbol, file, and definition-line pair must upgrade static provenance"
   );
   const changedInspector = harness.nodes.get("inspector-body").textContent;
   assert.match(changedInspector, /SARIF findings · file-level/i);
@@ -507,8 +542,19 @@ async function main() {
   runtime.dispatch("click");
   const runtimeEdge = harness.nodes.get("trace-graph").querySelectorAll("[data-edge-id]")[0];
   runtimeEdge.dispatch("click");
+  assert.match(harness.nodes.get("inspector-body").textContent, /Static provenanceSCIP \(preferred\)/i);
+  assert.match(harness.nodes.get("inspector-body").textContent, /Compiler-resolved semantic evidence/i);
+  assert.match(harness.nodes.get("inspector-body").textContent, /reference at src\/target\.rs:9/i);
   assert.match(harness.nodes.get("inspector-body").textContent, /Runtime trace corroboration/i);
   assert.match(harness.nodes.get("inspector-body").textContent, /src\/auth\.rs → src\/target\.rs/i);
+  const semantic = harness.overlayButtons.find((button) => button.dataset.overlay === "semantic");
+  const semanticEdgeCount = harness.nodes.get("trace-graph").querySelectorAll("[data-edge-id]").length;
+  semantic.dispatch("click");
+  assert.equal(semantic.getAttribute("aria-pressed"), "false");
+  assert.equal(harness.nodes.get("trace-graph").querySelectorAll(".graph-edge--semantic").length, 0);
+  assert.equal(harness.nodes.get("trace-graph").querySelectorAll("[data-edge-id]").length, semanticEdgeCount);
+  assert.match(harness.nodes.get("inspector-body").textContent, /Static provenanceTree-sitter \(fallback\)/i);
+  semantic.dispatch("click");
   harness.nodes.get("fit-button").dispatch("click");
   const testsScope = harness.scopeButtons.find((button) => button.dataset.scope === "test");
   testsScope.dispatch("click");

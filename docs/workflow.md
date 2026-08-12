@@ -22,6 +22,7 @@ readable for compatibility, but new tasks should use `verified` or `strict`.
 mastermind index .
 mastermind map .
 mastermind impact --since main
+mastermind temporal --since main
 # implement the change
 mastermind impact --since main
 # run focused tests and the repository-required gate

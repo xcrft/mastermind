@@ -52,8 +52,24 @@ pub struct LensSnapshot {
     pub options: LensOptions,
     pub map: ProjectMapResponse,
     pub impact: ChangeImpactResponse,
+    pub temporal: LensTemporalSnapshot,
     pub semantic: crate::scip_overlay::SemanticOverlaySnapshot,
     pub evidence: crate::evidence::EvidenceSnapshot,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LensTemporalSnapshot {
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<crate::temporal::TemporalResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<LensTemporalDiagnostic>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LensTemporalDiagnostic {
+    pub code: &'static str,
+    pub message: &'static str,
 }
 
 #[derive(Debug)]
@@ -337,6 +353,12 @@ fn build_snapshot_until(
         return Err(LensError::AnalysisTimeout);
     }
 
+    let index_version = store
+        .data_version()
+        .map_err(|_| LensError::ImpactUnavailable(ChangeImpactError::SnapshotChanged))?;
+    let source_index_state = store
+        .source_index_state()
+        .map_err(|_| LensError::ImpactUnavailable(ChangeImpactError::SnapshotChanged))?;
     validate_index_snapshot(store, &root, deadline)?;
 
     let impact = queries::change_impact(
@@ -347,14 +369,61 @@ fn build_snapshot_until(
         options.top as usize,
     )
     .map_err(LensError::ImpactUnavailable)?;
-    let map = queries::project_map_with_options(
+    let map = match queries::project_map_with_options(
         store,
         &options.path,
         options.depth,
         options.top,
         options.production_only,
-    )
-    .map_err(LensError::MapUnavailable)?;
+    ) {
+        Ok(map) => map,
+        Err(error)
+            if error.contains("scope has no indexed files")
+                && crate::temporal::scope_has_deleted_file(&impact, &options.path)
+                    .map_err(LensError::MapUnavailable)? =>
+        {
+            queries::empty_project_map(&options.path, options.depth, options.production_only)
+                .map_err(LensError::MapUnavailable)?
+        }
+        Err(error) => return Err(LensError::MapUnavailable(error)),
+    };
+    let temporal_options = crate::temporal::TemporalOptions {
+        since: options.since.clone(),
+        path: options.path.clone(),
+        depth: options.depth,
+        top: options.top,
+        production_only: options.production_only,
+        codeowners: evidence_options.codeowners.clone(),
+    };
+    let temporal = match crate::temporal::analyze_with_impact(
+        store,
+        &root,
+        &temporal_options,
+        &impact,
+        Some(&map),
+    ) {
+        Ok(data) => LensTemporalSnapshot {
+            status: "available",
+            data: Some(data),
+            diagnostic: None,
+        },
+        Err(crate::temporal::TemporalError::SnapshotChanged) => {
+            return Err(LensError::ImpactUnavailable(
+                ChangeImpactError::SnapshotChanged,
+            ));
+        }
+        Err(crate::temporal::TemporalError::Impact(error)) => {
+            return Err(LensError::ImpactUnavailable(error));
+        }
+        Err(error) => LensTemporalSnapshot {
+            status: "unavailable",
+            data: None,
+            diagnostic: Some(LensTemporalDiagnostic {
+                code: error.code(),
+                message: "Temporal architecture could not be completed within its bounded snapshot contract.",
+            }),
+        },
+    };
     let semantic_paths = impact
         .changes
         .files
@@ -401,6 +470,19 @@ fn build_snapshot_until(
         .unwrap_or("repository")
         .to_string();
     let root_label = impact.scope.repository_relative_root.clone();
+    if store
+        .data_version()
+        .map_err(|_| LensError::ImpactUnavailable(ChangeImpactError::SnapshotChanged))?
+        != index_version
+        || store
+            .source_index_state()
+            .map_err(|_| LensError::ImpactUnavailable(ChangeImpactError::SnapshotChanged))?
+            != source_index_state
+    {
+        return Err(LensError::ImpactUnavailable(
+            ChangeImpactError::SnapshotChanged,
+        ));
+    }
 
     Ok(LensSnapshot {
         schema_version: 1,
@@ -408,6 +490,7 @@ fn build_snapshot_until(
         options: options.clone(),
         map,
         impact,
+        temporal,
         semantic,
         evidence,
     })
@@ -982,7 +1065,7 @@ mod tests {
     #[test]
     fn snapshot_wraps_the_shared_map_and_impact_schemas() {
         let (repo, _index_dir, index_path) = fixture();
-        let store = Store::open_read_only(index_path).unwrap();
+        let store = Store::open_read_only(&index_path).unwrap();
         let snapshot = build_snapshot(&store, repo.path(), &options()).unwrap();
         let json = serde_json::to_value(snapshot).unwrap();
 
@@ -992,12 +1075,79 @@ mod tests {
         assert_eq!(json["evidence"]["files"]["returned"], 0);
         assert_eq!(json["map"]["schema_version"], 1);
         assert_eq!(json["impact"]["schema_version"], 1);
+        assert_eq!(json["temporal"]["status"], "available");
+        assert_eq!(json["temporal"]["data"]["schema_version"], 1);
+        assert_eq!(
+            json["temporal"]["data"]["provenance"]["baseline_graph"],
+            "git_blob_rewind_private_sqlite_snapshot"
+        );
         assert_eq!(json["options"]["since"], "HEAD");
         assert_eq!(json["impact"]["changes"]["files"]["returned"], 1);
         assert_eq!(
             json["impact"]["changes"]["files"]["items"][0]["path"],
             "src/lib.rs"
         );
+    }
+
+    #[test]
+    fn snapshot_explains_a_fully_deleted_selected_scope() {
+        let repo = tempfile::tempdir().unwrap();
+        let index_dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(repo.path().join("legacy")).unwrap();
+        fs::write(
+            repo.path().join("legacy/api.py"),
+            "def legacy_api():\n    return 1\n",
+        )
+        .unwrap();
+        git(repo.path(), &["init", "-q"]);
+        git(repo.path(), &["config", "user.email", "lens@example.test"]);
+        git(repo.path(), &["config", "user.name", "Lens Test"]);
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-qm", "baseline"]);
+        fs::remove_file(repo.path().join("legacy/api.py")).unwrap();
+
+        let index_path = index_dir.path().join("mmcg.db");
+        let mut writable = Store::open(&index_path).unwrap();
+        Indexer::new(repo.path())
+            .index_all(&mut writable, true)
+            .unwrap();
+        drop(writable);
+        let store = Store::open_read_only(&index_path).unwrap();
+        let mut lens_options = options();
+        lens_options.path = "legacy".to_string();
+
+        let snapshot = build_snapshot(&store, repo.path(), &lens_options).unwrap();
+        let json = serde_json::to_value(snapshot).unwrap();
+
+        assert_eq!(json["map"]["files"]["total"], 0);
+        assert_eq!(json["temporal"]["status"], "available");
+        assert_eq!(
+            json["temporal"]["data"]["components"]["removed"]["items"][0]["path"],
+            "."
+        );
+
+        lens_options.path = "typo/never/existed".to_string();
+        let error = build_snapshot(&store, repo.path(), &lens_options)
+            .expect_err("a scope absent from both snapshots must not look clean");
+        assert!(matches!(error, LensError::MapUnavailable(_)));
+
+        fs::create_dir_all(repo.path().join("docs-only")).unwrap();
+        fs::write(repo.path().join("docs-only/README.md"), "temporary docs\n").unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-qm", "docs baseline"]);
+        fs::remove_file(repo.path().join("docs-only/README.md")).unwrap();
+        drop(store);
+        let mut writable = Store::open(&index_path).unwrap();
+        Indexer::new(repo.path())
+            .index_all(&mut writable, true)
+            .unwrap();
+        drop(writable);
+        let store = Store::open_read_only(&index_path).unwrap();
+        lens_options.since = "HEAD".to_string();
+        lens_options.path = "docs-only".to_string();
+        let error = build_snapshot(&store, repo.path(), &lens_options)
+            .expect_err("a deleted non-source must not prove a deleted architecture scope");
+        assert!(matches!(error, LensError::MapUnavailable(_)));
     }
 
     #[test]
@@ -1249,6 +1399,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(body).unwrap();
         assert_eq!(json["schema_version"], 1);
         assert_eq!(json["map"]["schema_version"], 1);
+        assert_eq!(json["temporal"]["status"], "available");
         assert_eq!(json["impact"]["changes"]["files"]["returned"], 1);
         assert_eq!(directory_snapshot(index_dir.path()), index_before);
         drop(writer);

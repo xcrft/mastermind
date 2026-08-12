@@ -5,6 +5,7 @@
 //!   mastermind setup claude   — register the codegraph with Claude Code (MCP)
 //!   mastermind index [PATH]   — build or refresh the index
 //!   mastermind enrich --scip  — add optional compiler-resolved evidence
+//!   mastermind temporal       — compare architecture at a Git baseline
 //!   mastermind ui --since REF — open the local diff-first Lens UI
 //!   mastermind serve          — run as MCP stdio server
 //!   mastermind doctor         — health-check the setup
@@ -58,6 +59,13 @@ pub enum ImpactFormat {
     Sarif,
 }
 
+#[derive(Copy, Clone, Debug, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum TemporalFormat {
+    Text,
+    Json,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 #[clap(rename_all = "kebab-case")]
 pub enum PolicyFormat {
@@ -86,8 +94,9 @@ pub enum UninstallScope {
 over MCP, plus runs spec-driven workflow gates (verify-spec / audit-spec).\n\n\
 Onboard a project (run inside your repo):\n  \
 mastermind init                       scaffold .mastermind/, build the index, draft CONTEXT.md\n  \
-mastermind setup claude --write-mcp   register the codegraph with Claude Code (run once)\n  \
-mastermind ui --since main            inspect this change in the local read-only Lens UI\n  \
+  mastermind setup claude --write-mcp   register the codegraph with Claude Code (run once)\n  \
+mastermind temporal --since main        review architecture drift over time\n  \
+  mastermind ui --since main            inspect this change in the local read-only Lens UI\n  \
 mastermind doctor                     verify the setup\n\n\
 Installed via npm? `mastermind install` does the global setup (workflow agents + skills + MCP) in one step — then `mastermind init` per repo.\n\n\
 Then open the project in Claude Code — the codegraph tools (search, callers, impact, …) are available. \
@@ -149,6 +158,26 @@ enum Cmd {
         top: u32,
         #[arg(long, default_value = ".")]
         root: PathBuf,
+    },
+    /// Compare bounded architecture snapshots between a Git baseline and the indexed worktree.
+    Temporal {
+        #[arg(long)]
+        since: String,
+        #[arg(long, value_enum, default_value_t = TemporalFormat::Text)]
+        format: TemporalFormat,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long, default_value = ".")]
+        path: String,
+        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..=5))]
+        depth: u8,
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=100))]
+        top: u32,
+        #[arg(long)]
+        production_only: bool,
+        /// Override the repository CODEOWNERS file used for ownership drift.
+        #[arg(long, value_name = "PATH")]
+        codeowners: Option<PathBuf>,
     },
     /// Evaluate repository-owned architecture rules over bounded change evidence.
     #[command(subcommand)]
@@ -962,6 +991,34 @@ fn run_cli_inner(
                 commands::query::render_change_impact(&response, format)?
             );
         }
+        Cmd::Temporal {
+            since,
+            format,
+            root,
+            path,
+            depth,
+            top,
+            production_only,
+            codeowners,
+        } => {
+            let root = root
+                .canonicalize()
+                .map_err(|_| mmcg::queries::ChangeImpactError::RootMismatch)?;
+            let index_path = index_path_for_root(index_override.as_deref(), &root);
+            commands::query::dispatch_temporal(
+                &mmcg::temporal::TemporalOptions {
+                    since,
+                    path,
+                    depth,
+                    top,
+                    production_only,
+                    codeowners,
+                },
+                format,
+                &root,
+                &index_path,
+            )?;
+        }
         Cmd::Policy(PolicyCmd::Check {
             since,
             root,
@@ -1671,6 +1728,49 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn temporal_graph_is_a_bounded_root_scoped_command() {
+        assert!(Cli::try_parse_from(["mastermind", "temporal"]).is_err());
+        let cli = Cli::try_parse_from([
+            "mastermind",
+            "temporal",
+            "--since",
+            "origin/main",
+            "--format",
+            "json",
+            "--path",
+            "services/payment",
+            "--depth",
+            "3",
+            "--top",
+            "50",
+            "--production-only",
+            "--codeowners",
+            ".github/CODEOWNERS",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Temporal {
+                since,
+                format: TemporalFormat::Json,
+                root,
+                path,
+                depth: 3,
+                top: 50,
+                production_only: true,
+                codeowners: Some(codeowners),
+            } if since == "origin/main"
+                && root.as_path() == std::path::Path::new(".")
+                && path == "services/payment"
+                && codeowners.as_path() == std::path::Path::new(".github/CODEOWNERS")
+        ));
+        assert!(Cli::try_parse_from(
+            ["mastermind", "temporal", "--since", "main", "--depth", "6",]
+        )
+        .is_err());
     }
 
     #[test]

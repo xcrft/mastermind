@@ -2470,6 +2470,10 @@ mod tests {
 
     #[test]
     fn continue_removes_only_owned_shape_and_force_backs_up_customized_content() {
+        let _canonical_entry = TestCanonicalEntryGuard::new(json!({
+            "command": "/bin/mmcg",
+            "args": ["serve"],
+        }));
         let root = tmp("continue-owned");
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();

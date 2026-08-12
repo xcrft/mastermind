@@ -2275,6 +2275,69 @@ pub fn project_map(
     project_map_with_options(store, path, depth, top, false)
 }
 
+/// Empty head-side projection for consumers that still need to explain a
+/// fully deleted scope. The ordinary `map` command keeps its explicit
+/// no-files error; Lens uses this only when Git impact proves the deletion.
+pub(crate) fn empty_project_map(
+    path: &str,
+    depth: u8,
+    production_only: bool,
+) -> Result<ProjectMapResponse, String> {
+    let normalized = normalize_map_path(path)?;
+    Ok(ProjectMapResponse {
+        schema_version: 1,
+        scope: MapScope {
+            path: if normalized.is_empty() {
+                ".".into()
+            } else {
+                normalized
+            },
+            kind: if path.is_empty() || path == "." {
+                "root".into()
+            } else {
+                "directory".into()
+            },
+            depth: depth.clamp(1, 6),
+            aggregation_paths_truncated: false,
+            production_only,
+        },
+        files: MapCount {
+            total: Some(0),
+            returned: 0,
+            truncated: false,
+            truncation_reason: None,
+        },
+        languages: empty_map_section(),
+        components: empty_map_section(),
+        entry_points: empty_map_section(),
+        hotspots: empty_map_section(),
+        cycles: empty_map_section(),
+        limits: MapLimits {
+            paths: MAP_PATH_LIMIT as u32,
+            languages: MAP_LANGUAGE_LIMIT as u32,
+            components: MAP_COMPONENT_LIMIT as u32,
+            boundaries_per_component: MAP_BOUNDARY_LIMIT as u32,
+            boundaries_global: MAP_BOUNDARY_GLOBAL_LIMIT as u32,
+            entry_points: MAP_ENTRY_LIMIT as u32,
+            hotspots: 100,
+            cycle_edges: MAP_CYCLE_EDGE_LIMIT as u32,
+            cycles: MAP_CYCLE_LIMIT as u32,
+            cycle_memberships: MAP_CYCLE_MEMBERSHIP_LIMIT as u32,
+        },
+        precision_notes: Vec::new(),
+    })
+}
+
+fn empty_map_section<T>() -> MapSection<T> {
+    MapSection {
+        total: Some(0),
+        returned: 0,
+        truncated: false,
+        truncation_reason: None,
+        items: Vec::new(),
+    }
+}
+
 pub fn project_map_with_options(
     store: &Store,
     path: &str,

@@ -102,6 +102,7 @@ Analyze the current worktree against a baseline:
 
 ```bash
 mastermind impact --since main
+mastermind temporal --since main
 ```
 
 ## Build a personal style profile without project initialization
@@ -199,5 +200,6 @@ is outside `.mastermind/` and can be shared normally.
 - Run `mastermind map .` to learn a repository.
 - Run `mastermind demo hallucinated-symbol` for a zero-setup audit example.
 - Run `mastermind impact --since main` before submitting a change.
+- Run `mastermind temporal --since main` when architecture drift matters.
 - Read [How the workflow works](workflow.md) to use checked task specs.
 - Add [verifiable audits](github-action.md) to CI.

@@ -3,6 +3,7 @@ name = "mmcg"
 version = "1.2.1"
 edition = "2021"
 rust-version = "1.96"
+build = "build.rs"
 description = "Mastermind Codegraph — fast multi-language code indexer (Python, TypeScript, JavaScript, Vue SFC, Rust, C#, Go, Java, PHP, C/C++) with MCP interface. Truth layer for AI coding agents."
 authors = ["mastermind"]
 license = "MIT"

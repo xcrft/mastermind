@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `mastermind policy check --since <ref>` evaluates a strict v1
+  `mastermind-policy.yml` DSL over normalized codegraph, Git, CODEOWNERS, test,
+  and workflow evidence. It covers forbidden dependency directions, new-cycle
+  and blast-radius budgets, observed API-owner requirements, related tests,
+  ownership crossings, and held strict-workflow evidence. Text, JSON, and SARIF
+  outputs fail closed when relevant evidence is truncated or unavailable.
+  Strict evidence is bound to the audited touch-file snapshot, related tests
+  must be graph-linked or in scope, and report cardinality is bounded.
 - `mastermind enrich --scip index.scip` adds an optional compiler-resolved
   semantic layer without replacing the default Tree-sitter graph. SCIP
   definitions, references, implementations, and type definitions are stored in

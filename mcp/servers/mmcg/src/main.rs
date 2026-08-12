@@ -60,6 +60,14 @@ pub enum ImpactFormat {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 #[clap(rename_all = "kebab-case")]
+pub enum PolicyFormat {
+    Text,
+    Json,
+    Sarif,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
 pub enum UninstallScope {
     /// This project only: remove `.mastermind/` and the project `.mcp.json` mmcg entry.
     Project,
@@ -142,6 +150,9 @@ enum Cmd {
         #[arg(long, default_value = ".")]
         root: PathBuf,
     },
+    /// Evaluate repository-owned architecture rules over bounded change evidence.
+    #[command(subcommand)]
+    Policy(PolicyCmd),
     /// Serve Mastermind Lens: a local, read-only, diff-first change review UI.
     Ui {
         /// Git ref used as the change-impact baseline.
@@ -478,6 +489,36 @@ enum Cmd {
     /// code-shape style). Output lives under `~/.mastermind/`, not the project.
     #[command(subcommand)]
     Miner(MinerCmd),
+}
+
+#[derive(Subcommand)]
+enum PolicyCmd {
+    /// Check architecture policy against a baseline and exit non-zero on violations or incomplete evidence.
+    Check {
+        /// Git ref used as the diff and cycle-comparison baseline.
+        #[arg(long)]
+        since: String,
+        /// Project root. Defaults to cwd.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Repository-owned v1 policy file.
+        #[arg(long, default_value = "mastermind-policy.yml")]
+        config: PathBuf,
+        #[arg(long, value_enum, default_value_t = PolicyFormat::Text)]
+        format: PolicyFormat,
+        /// Override the repository CODEOWNERS file.
+        #[arg(long, value_name = "PATH")]
+        codeowners: Option<PathBuf>,
+        /// Directory containing canonical strict task evidence.
+        #[arg(long, default_value = ".mastermind/tasks", value_name = "PATH")]
+        workflow_evidence: PathBuf,
+        /// Static caller depth used for blast-radius and boundary evidence.
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(1..=5))]
+        depth: u32,
+        /// Maximum returned impacted symbols. Incomplete evidence fails closed.
+        #[arg(long, default_value_t = 500, value_parser = clap::value_parser!(u32).range(1..=500))]
+        top: u32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -921,6 +962,54 @@ fn run_cli_inner(
                 commands::query::render_change_impact(&response, format)?
             );
         }
+        Cmd::Policy(PolicyCmd::Check {
+            since,
+            root,
+            config,
+            format,
+            codeowners,
+            workflow_evidence,
+            depth,
+            top,
+        }) => {
+            let root = root
+                .canonicalize()
+                .map_err(|_| mmcg::policy::PolicyError::new_for_cli("policy_root_unavailable"))?;
+            let index_path = index_path_for_root(index_override.as_deref(), &root);
+            let store = Store::open_read_only(&index_path)
+                .map_err(|_| mmcg::policy::PolicyError::new_for_cli("policy_index_unavailable"))?;
+            let report = mmcg::policy::check(
+                &store,
+                &root,
+                &mmcg::policy::CheckOptions {
+                    since,
+                    config_path: config,
+                    codeowners,
+                    workflow_evidence_path: workflow_evidence,
+                    depth,
+                    top: usize::try_from(top).map_err(|_| {
+                        mmcg::policy::PolicyError::new_for_cli("invalid_policy_limit")
+                    })?,
+                },
+            )?;
+            match format {
+                PolicyFormat::Text => print!("{}", mmcg::policy::render_text(&report)),
+                PolicyFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
+                PolicyFormat::Sarif => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&mmcg::sarif_export::architecture_policy(
+                            &report
+                        ))?
+                    );
+                }
+            }
+            if !report.passed {
+                std::process::exit(1);
+            }
+        }
         Cmd::Ui {
             since,
             root,
@@ -1318,6 +1407,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 fn cli_error_line(error: &(dyn std::error::Error + 'static)) -> String {
     if let Some(error) = error.downcast_ref::<mmcg::queries::ChangeImpactError>() {
         error.code().to_string()
+    } else if let Some(error) = error.downcast_ref::<mmcg::policy::PolicyError>() {
+        error.to_string()
     } else {
         format!("mmcg error: {error}")
     }
@@ -1386,6 +1477,38 @@ mod tests {
             query.cmd,
             Cmd::Query(QueryCmd::Semantic { symbol, top })
                 if symbol == "scip-clang . demo . target()." && top == 25
+        ));
+    }
+
+    #[test]
+    fn architecture_policy_cli_contract_is_explicit() {
+        let cli = Cli::try_parse_from([
+            "mastermind",
+            "policy",
+            "check",
+            "--since",
+            "main",
+            "--format",
+            "sarif",
+            "--config",
+            "architecture.yml",
+            "--workflow-evidence",
+            "policy-evidence",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Policy(PolicyCmd::Check {
+                since,
+                config,
+                format: PolicyFormat::Sarif,
+                workflow_evidence,
+                depth: 3,
+                top: 500,
+                ..
+            }) if since == "main"
+                && config == std::path::Path::new("architecture.yml")
+                && workflow_evidence == std::path::Path::new("policy-evidence")
         ));
     }
 

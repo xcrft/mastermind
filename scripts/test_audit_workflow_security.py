@@ -512,6 +512,9 @@ class RepositoryDeliveryContractTests(unittest.TestCase):
     def test_docker_action_uses_default_root_user_for_workspace_access(self):
         dockerfile = (ROOT / "Dockerfile.audit-action").read_text(encoding="utf-8")
         self.assertIn("COPY mcp/servers/mmcg/benches ./mcp/servers/mmcg/benches", dockerfile)
+        self.assertIn(
+            "COPY mcp/servers/mmcg/build.rs ./mcp/servers/mmcg/build.rs", dockerfile
+        )
         self.assertIsNone(
             re.search(r"^USER\s+", dockerfile, flags=re.MULTILINE),
             "GitHub Docker Actions must use the default root user for GITHUB_WORKSPACE",

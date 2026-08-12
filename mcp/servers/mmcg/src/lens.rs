@@ -219,7 +219,11 @@ fn remaining_work_budget(deadline: Option<Instant>) -> WorkBudget {
     }
 }
 
-fn validate_index_snapshot(
+/// Fail-closed freshness proof shared by read-only architecture consumers.
+/// It checks indexed rows against source files and tracked source files against
+/// indexed rows, so deletions and newly tracked files cannot hide in one
+/// direction of the comparison.
+pub(crate) fn validate_index_snapshot(
     store: &Store,
     root: &Path,
     deadline: Option<Instant>,

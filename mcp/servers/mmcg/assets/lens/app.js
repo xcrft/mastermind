@@ -993,23 +993,32 @@
     }
 
     try {
-      const response = await fetch("/api/lens", {
-        method: "GET",
-        headers: { Accept: "application/json" },
-        cache: "no-store",
-      });
+      const embedded = document.getElementById("lens-snapshot");
       let payload;
-      try {
-        payload = await response.json();
-      } catch (error) {
-        throw new LensRequestError("invalid_json", "The local server returned an unreadable snapshot.");
-      }
-      const apiError = record(record(payload).error);
-      if (!response.ok || Object.keys(apiError).length > 0) {
-        throw new LensRequestError(
-          text(apiError.code, "http_" + response.status),
-          text(apiError.message, "The local Lens endpoint could not produce a snapshot.")
-        );
+      if (embedded) {
+        try {
+          payload = JSON.parse(embedded.textContent);
+        } catch (error) {
+          throw new LensRequestError("invalid_json", "The review package contains an unreadable snapshot.");
+        }
+      } else {
+        const response = await fetch("/api/lens", {
+          method: "GET",
+          headers: { Accept: "application/json" },
+          cache: "no-store",
+        });
+        try {
+          payload = await response.json();
+        } catch (error) {
+          throw new LensRequestError("invalid_json", "The local server returned an unreadable snapshot.");
+        }
+        const apiError = record(record(payload).error);
+        if (!response.ok || Object.keys(apiError).length > 0) {
+          throw new LensRequestError(
+            text(apiError.code, "http_" + response.status),
+            text(apiError.message, "The local Lens endpoint could not produce a snapshot.")
+          );
+        }
       }
 
       state.raw = payload;
@@ -1045,7 +1054,7 @@
     } finally {
       state.refreshing = false;
       document.body.classList.remove("is-refreshing");
-      elements.refresh.disabled = false;
+      elements.refresh.disabled = Boolean(document.getElementById("lens-snapshot"));
       elements.graphFrame.setAttribute("aria-busy", "false");
       updateSnapshotAge();
     }

@@ -423,8 +423,11 @@ Repository-relative artifact paths match exactly. Reports produced under a
 different absolute build root may use a unique repository-path suffix match;
 this relocation and the maximum-hit merge used for duplicate coverage lines
 are reported as precision notes. Artifact labels preserve provenance, but Lens
-cannot prove that a SARIF, coverage, JUnit, or OTLP report was produced from the current Git
-revision. CODEOWNERS matching uses the working-tree file,
+alone cannot prove that a SARIF, coverage, JUnit, or OTLP report was produced
+from the current Git revision. A PR evidence package binds the exact report
+bytes a reviewer saw to its resolved HEAD, while an optional producer
+attestation records the stronger revision claim described below. CODEOWNERS
+matching uses the working-tree file,
 including last-match-wins and explicit no-owner rules; it does not verify GitHub
 account/team existence or write permission, and GitHub review assignment still
 uses the base-branch file. Git history is pinned to the impact snapshot's HEAD
@@ -441,6 +444,72 @@ artifacts and Git history are parsed in memory. Project knowledge is read from
 the derived SQLite history corpus; Markdown remains authoritative and must be
 re-indexed after changes. Lens writes none of this evidence to source files or
 SQLite.
+
+### PR evidence package (`mmcg review export`)
+
+`mmcg review export --since REF --out DIR` captures the same fail-closed Lens
+snapshot without starting an HTTP server. `DIR` must not already exist. The
+export is assembled in a private sibling temporary directory and renamed only
+after every payload is synced, so a failed run does not publish a half-package.
+
+The package contains:
+
+- `index.html`: one autonomous Lens document with the snapshot, CSS, and JS
+  embedded under a hash-only CSP. It has no fetch, CDN, telemetry, or write
+  path;
+- `mastermind.sarif`: the project-map and change-impact SARIF projections as
+  two independently identified runs;
+- `summary.md`: a short, bounded reviewer summary with links to the HTML and
+  SARIF payloads;
+- `manifest.json`: strict schema-v1 repository, scope, evidence, payload digest,
+  and partial/truncation state bindings;
+- `mastermind-review.yml`: the pinned
+  [GitHub Actions example](../examples/mastermind-review-pr.yml) for artifact
+  and SARIF upload.
+
+The workflow builds the checked-out binary when it runs in the Mastermind
+source repository, so a command introduced by the pull request is exercised
+before release. In consuming repositories it installs the exact npm version
+recorded in the template and verifies `review export` before indexing.
+Compilation and analysis run with a read-only token; a separate action-only job
+receives `security-events: write` and uploads the already-produced SARIF
+artifact.
+
+The export accepts the same `--path`, `--depth`, `--top`,
+`--production-only`, `--sarif`, `--coverage`, `--junit`, `--otel`,
+`--codeowners`, `--git-commits`, and `--no-project-knowledge` inputs as Lens.
+It rechecks external files after analysis and fails if their exact bytes change.
+The manifest records their SHA-256 digests next to the resolved head OID. This
+is a **digest binding at export time**: it proves exactly which report bytes a
+reviewer saw at that revision, not that Semgrep, CodeQL, a test runner, or an
+OTel collector produced those bytes from that revision.
+
+For the stronger producer claim, create a strict JSON attestation and pass
+`--evidence-attestation PATH`:
+
+```json
+{
+  "schema_version": 1,
+  "head_oid": "0123456789abcdef0123456789abcdef01234567",
+  "artifacts": [
+    {
+      "kind": "sarif",
+      "path": "reports/semgrep.sarif",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ]
+}
+```
+
+Every path must be canonical and repository-relative; every listed digest must
+match a requested evidence input and `head_oid` must match the Lens snapshot.
+Unknown or duplicate JSON fields, digest drift, and revision drift fail closed.
+This v1 attestation is explicitly recorded as unsigned CI evidence. A signed
+workflow, artifact attestation, or other trust anchor may authenticate its
+producer separately. The formal contracts are
+[`mastermind-review-manifest-v1.schema.json`](../../schemas/mastermind-review-manifest-v1.schema.json)
+and
+[`mastermind-evidence-attestation-v1.schema.json`](../../schemas/mastermind-evidence-attestation-v1.schema.json).
 
 ### SARIF export
 

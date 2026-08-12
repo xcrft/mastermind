@@ -7,6 +7,7 @@
 //!   mastermind enrich --scip  — add optional compiler-resolved evidence
 //!   mastermind temporal       — compare architecture at a Git baseline
 //!   mastermind ui --since REF — open the local diff-first Lens UI
+//!   mastermind review export  — write an autonomous PR evidence package
 //!   mastermind serve          — run as MCP stdio server
 //!   mastermind doctor         — health-check the setup
 //!   mastermind query <kind>   — one-shot query from the CLI (handy for debugging)
@@ -182,6 +183,9 @@ enum Cmd {
     /// Evaluate repository-owned architecture rules over bounded change evidence.
     #[command(subcommand)]
     Policy(PolicyCmd),
+    /// Build portable review evidence from the same bounded Lens snapshot.
+    #[command(subcommand)]
+    Review(ReviewCmd),
     /// Serve Mastermind Lens: a local, read-only, diff-first change review UI.
     Ui {
         /// Git ref used as the change-impact baseline.
@@ -547,6 +551,56 @@ enum PolicyCmd {
         /// Maximum returned impacted symbols. Incomplete evidence fails closed.
         #[arg(long, default_value_t = 500, value_parser = clap::value_parser!(u32).range(1..=500))]
         top: u32,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReviewCmd {
+    /// Export one autonomous HTML/SARIF/Markdown package plus its revision manifest and CI workflow.
+    Export {
+        /// Git ref used as the change-impact baseline.
+        #[arg(long)]
+        since: String,
+        /// New output directory. Export refuses to overwrite an existing path.
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+        /// Project root. Defaults to cwd.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Repository-relative map scope. Defaults to the repository root.
+        #[arg(long, default_value = ".")]
+        path: String,
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u8).range(1..=5))]
+        depth: u8,
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=100))]
+        top: u32,
+        /// Exclude conventional tests, fixtures, examples, generated, and vendor paths from the architecture map.
+        #[arg(long)]
+        production_only: bool,
+        /// Import a SARIF 2.1 report as read-only evidence. Repeatable.
+        #[arg(long = "sarif", value_name = "PATH")]
+        sarif: Vec<PathBuf>,
+        /// Import an LCOV tracefile or Cobertura XML report. Repeatable.
+        #[arg(long = "coverage", value_name = "PATH")]
+        coverage: Vec<PathBuf>,
+        /// Import a JUnit XML test report. Repeatable.
+        #[arg(long = "junit", value_name = "PATH")]
+        junit: Vec<PathBuf>,
+        /// Import an OpenTelemetry OTLP JSON trace export. Repeatable.
+        #[arg(long = "otel", value_name = "PATH")]
+        otel: Vec<PathBuf>,
+        /// Override the repository CODEOWNERS file used by Lens.
+        #[arg(long, value_name = "PATH")]
+        codeowners: Option<PathBuf>,
+        /// Do not correlate exact changed-file mentions from indexed specs, ADRs, audits, and lessons.
+        #[arg(long)]
+        no_project_knowledge: bool,
+        /// Bound read-only Git churn and contributor evidence. Zero disables it.
+        #[arg(long, default_value_t = 200, value_parser = clap::value_parser!(u16).range(0..=1000))]
+        git_commits: u16,
+        /// Optional strict v1 producer manifest binding repository-relative evidence digests to the same head OID.
+        #[arg(long, value_name = "PATH")]
+        evidence_attestation: Option<PathBuf>,
     },
 }
 
@@ -1066,6 +1120,66 @@ fn run_cli_inner(
             if !report.passed {
                 std::process::exit(1);
             }
+        }
+        Cmd::Review(ReviewCmd::Export {
+            since,
+            out,
+            root,
+            path,
+            depth,
+            top,
+            production_only,
+            sarif,
+            coverage,
+            junit,
+            otel,
+            codeowners,
+            no_project_knowledge,
+            git_commits,
+            evidence_attestation,
+        }) => {
+            let root = root
+                .canonicalize()
+                .map_err(|_| mmcg::lens::LensError::RootUnavailable)?;
+            let index_path = index_path_for_root(index_override.as_deref(), &root);
+            let result =
+                mmcg::review_package::export(&mmcg::review_package::ReviewExportOptions {
+                    root,
+                    index_path,
+                    out,
+                    lens: mmcg::lens::LensOptions {
+                        since,
+                        path,
+                        depth,
+                        top,
+                        production_only,
+                    },
+                    evidence: mmcg::evidence::EvidenceOptions {
+                        sarif,
+                        coverage,
+                        discover_codeowners: codeowners.is_none(),
+                        codeowners,
+                        git_commits,
+                    },
+                    extensions: mmcg::evidence::EvidenceExtensionOptions {
+                        junit,
+                        otel,
+                        project_knowledge: !no_project_knowledge,
+                    },
+                    evidence_attestation,
+                })?;
+            println!(
+                "review package: {} | head {} | {} | {} files | evidence {}",
+                result.output_dir.display(),
+                result.head_oid,
+                if result.partial {
+                    "partial"
+                } else {
+                    "complete"
+                },
+                result.artifacts,
+                result.evidence_binding,
+            );
         }
         Cmd::Ui {
             since,
@@ -1863,6 +1977,75 @@ mod tests {
             "main",
             "--git-commits",
             "1001",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn review_export_matches_lens_bounds_and_revision_inputs() {
+        assert!(
+            Cli::try_parse_from(["mastermind", "review", "export", "--since", "main"]).is_err()
+        );
+        let cli = Cli::try_parse_from([
+            "mastermind",
+            "review",
+            "export",
+            "--since",
+            "origin/main",
+            "--out",
+            "mastermind-review",
+            "--path",
+            "services/payment",
+            "--production-only",
+            "--sarif",
+            "semgrep.sarif",
+            "--coverage",
+            "lcov.info",
+            "--junit",
+            "junit.xml",
+            "--otel",
+            "traces.json",
+            "--evidence-attestation",
+            "evidence-attestation.json",
+            "--git-commits",
+            "25",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Review(ReviewCmd::Export {
+                since,
+                out,
+                path,
+                depth: 3,
+                top: 100,
+                production_only: true,
+                sarif,
+                coverage,
+                junit,
+                otel,
+                git_commits: 25,
+                evidence_attestation: Some(attestation),
+                ..
+            }) if since == "origin/main"
+                && out.as_path() == std::path::Path::new("mastermind-review")
+                && path == "services/payment"
+                && sarif == [PathBuf::from("semgrep.sarif")]
+                && coverage == [PathBuf::from("lcov.info")]
+                && junit == [PathBuf::from("junit.xml")]
+                && otel == [PathBuf::from("traces.json")]
+                && attestation.as_path() == std::path::Path::new("evidence-attestation.json")
+        ));
+        assert!(Cli::try_parse_from([
+            "mastermind",
+            "review",
+            "export",
+            "--since",
+            "main",
+            "--out",
+            "review",
+            "--depth",
+            "6",
         ])
         .is_err());
     }

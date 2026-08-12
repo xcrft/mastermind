@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `mastermind temporal --since <ref>` and read-only `mmcg_temporal` compare a
+  bounded Git-baseline architecture with the indexed worktree. Schema v1 covers
+  component and public-boundary drift, new/resolved/membership-changed cycles, centrality and
+  hotspot movement, base/head CODEOWNERS changes, and exact history records that
+  may need review after paths or APIs disappear. Baseline blobs are rewound only
+  in a private writable SQLite snapshot, and Lens renders the same payload.
+  Snapshot revision checks, cooperative cancellation, fully deleted scopes,
+  ownership-only CODEOWNERS drift, and bounded hostile diagnostics fail closed.
 - `mastermind policy check --since <ref>` evaluates a strict v1
   `mastermind-policy.yml` DSL over normalized codegraph, Git, CODEOWNERS, test,
   and workflow evidence. It covers forbidden dependency directions, new-cycle

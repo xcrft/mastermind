@@ -60,6 +60,7 @@ cd your-project
 mastermind index .
 mastermind map .
 mastermind impact --since main
+mastermind temporal --since main
 mastermind policy check --since main
 mastermind ui --since main
 ```
@@ -103,6 +104,23 @@ mastermind map . --production-only   # hide tests, fixtures, examples, generated
 
 The map highlights languages, components, entry points, dependency boundaries, hotspots, and cycles without asking an agent to grep the entire repository.
 
+### Review architecture over time
+
+```bash
+mastermind temporal --since main
+mastermind temporal --since HEAD~5 --path services/payment --format json
+```
+
+Temporal Graph compares the indexed working copy with a resolved Git baseline.
+It reports added and removed components and boundaries, introduced, resolved,
+and membership-changed cycles, centrality and hotspot drift, CODEOWNERS changes,
+public API drift, and indexed history records that exactly mention removed or
+signature-drifted architecture paths. The baseline is reconstructed by
+rewinding changed Git blobs in a private temporary SQLite snapshot; Mastermind
+does not checkout files or write to the source index. Ownership-only rules and
+fully deleted scopes are preserved, concurrent index revisions fail closed,
+and every section marks bounded partial projections explicitly.
+
 ### Review a change in Mastermind Lens
 
 ```bash
@@ -137,6 +155,10 @@ listed account has GitHub write access or replace base-branch review policy.
 Unreadable, oversized, invalid, or truncated sources remain visible as partial
 diagnostics. Reports and history are parsed in memory and are never written to
 the repository or codegraph database.
+
+Lens also renders the same Temporal Graph response below the blast trace. A
+temporal failure is isolated and labelled instead of turning missing evidence
+into a clean architecture verdict; snapshot races still fail the whole refresh.
 
 ### Understand change and test impact
 

@@ -67,6 +67,110 @@ pub fn dispatch_map(
     Ok(())
 }
 
+pub fn dispatch_temporal(
+    options: &mmcg::temporal::TemporalOptions,
+    format: crate::TemporalFormat,
+    root: &Path,
+    index_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let store = Store::open_read_only(index_path)?;
+    let budget_ms = query_budget_ms_from_env(DEFAULT_CLI_BUDGET_MS);
+    store.push_work_budget(WorkBudget::from_millis(budget_ms));
+    let _budget_scope = WorkBudgetScope(&store);
+    let response = mmcg::temporal::analyze(&store, root, options)?;
+    match format {
+        crate::TemporalFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&response)?)
+        }
+        crate::TemporalFormat::Text => print!("{}", render_temporal_text(&response)),
+    }
+    Ok(())
+}
+
+pub fn render_temporal_text(response: &mmcg::temporal::TemporalResponse) -> String {
+    let mut output = format!(
+        "Temporal architecture · {} → working copy\nScope: {} · changed: {} · partial: {}\n\n",
+        safe_text(&response.baseline.requested_ref),
+        safe_text(&response.scope.path),
+        if response.summary.architecture_changed {
+            "yes"
+        } else {
+            "no"
+        },
+        if response.partial { "yes" } else { "no" }
+    );
+    output.push_str(&render_temporal_counts(&response.summary));
+    if !response.cycles.added.items.is_empty() {
+        output.push_str("\nIntroduced cycles\n");
+        for cycle in &response.cycles.added.items {
+            output.push_str(&format!("  {}\n", safe_text(&cycle.join(" -> "))));
+        }
+    }
+    if !response.cycles.changed.items.is_empty() {
+        output.push_str("\nChanged cycle membership\n");
+        for cycle in &response.cycles.changed.items {
+            output.push_str(&format!(
+                "  +[{}] -[{}]\n",
+                safe_text(&cycle.added_members.join(", ")),
+                safe_text(&cycle.removed_members.join(", "))
+            ));
+        }
+    }
+    if !response.centrality.items.is_empty() {
+        output.push_str("\nCentrality drift\n");
+        for item in &response.centrality.items {
+            output.push_str(&format!(
+                "  {} — {} → {} ({:+})\n",
+                safe_text(&item.name),
+                item.base_in_degree,
+                item.head_in_degree,
+                item.in_degree_delta
+            ));
+        }
+    }
+    if !response.history_review_candidates.items.is_empty() {
+        output.push_str("\nHistory review candidates\n");
+        for item in &response.history_review_candidates.items {
+            output.push_str(&format!(
+                "  {} mentions {} ({})\n",
+                safe_text(&item.artifact_path),
+                safe_text(&item.referenced_path),
+                safe_text(&item.trigger)
+            ));
+        }
+    }
+    if !response.diagnostics.is_empty() {
+        output.push_str("\nPrecision notes\n");
+        for item in &response.diagnostics {
+            output.push_str(&format!(
+                "  {} — {}\n",
+                safe_text(&item.code),
+                safe_text(&item.message)
+            ));
+        }
+    }
+    output
+}
+
+fn render_temporal_counts(summary: &mmcg::temporal::TemporalSummary) -> String {
+    format!(
+        "Components  +{}  -{}\nBoundaries  +{}  -{}  ~{}\nCycles      +{}  -{}  ~{}\nCentrality  {} increases · hotspots +{} -{}\nOwnership   {} changes\nHistory     {} review candidates\n",
+        summary.components_added,
+        summary.components_removed,
+        summary.boundaries_added,
+        summary.boundaries_removed,
+        summary.boundaries_changed,
+        summary.cycles_introduced,
+        summary.cycles_resolved,
+        summary.cycles_changed,
+        summary.centrality_increases,
+        summary.hotspot_entries,
+        summary.hotspot_exits,
+        summary.ownership_changes,
+        summary.history_review_candidates,
+    )
+}
+
 pub fn dispatch_history(
     query: &str,
     kind: Option<&str>,
@@ -482,6 +586,32 @@ mod map_tests {
         assert!(!label.contains("%%"));
         assert!(!label.contains('['));
         assert!(!label.contains('"'));
+    }
+
+    #[test]
+    fn temporal_text_summary_keeps_every_drift_category() {
+        let rendered = render_temporal_counts(&mmcg::temporal::TemporalSummary {
+            architecture_changed: true,
+            components_added: 1,
+            components_removed: 2,
+            boundaries_added: 3,
+            boundaries_removed: 4,
+            boundaries_changed: 5,
+            cycles_introduced: 6,
+            cycles_resolved: 7,
+            cycles_changed: 8,
+            centrality_increases: 9,
+            hotspot_entries: 10,
+            hotspot_exits: 11,
+            ownership_changes: 12,
+            history_review_candidates: 13,
+        });
+
+        assert!(rendered.contains("Components  +1  -2"));
+        assert!(rendered.contains("Boundaries  +3  -4  ~5"));
+        assert!(rendered.contains("Cycles      +6  -7  ~8"));
+        assert!(rendered.contains("hotspots +10 -11"));
+        assert!(rendered.contains("History     13 review candidates"));
     }
 
     #[test]

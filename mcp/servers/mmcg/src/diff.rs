@@ -614,6 +614,17 @@ pub(crate) fn run_bounded_git_with_limit_until(
     output_limit: usize,
     deadline: Option<Instant>,
 ) -> Result<BoundedGitOutput, WorkingTreeDiffError> {
+    run_bounded_git_controlled(repo, args, input, output_limit, deadline, None)
+}
+
+fn run_bounded_git_controlled(
+    repo: &Path,
+    args: &[&str],
+    input: Option<&[u8]>,
+    output_limit: usize,
+    deadline: Option<Instant>,
+    interrupted: Option<&dyn Fn() -> bool>,
+) -> Result<BoundedGitOutput, WorkingTreeDiffError> {
     let start = Instant::now();
     let mut child = git_command(args)
         .current_dir(repo)
@@ -654,6 +665,11 @@ pub(crate) fn run_bounded_git_with_limit_until(
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
+            Ok(None) if interrupted.is_some_and(|check| check()) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(WorkingTreeDiffError::GitTimeout);
+            }
             Ok(None) if start.elapsed() < timeout => {
                 std::thread::sleep(CHILD_POLL_INTERVAL);
             }
@@ -708,10 +724,21 @@ fn resolve_commit(repo: &Path, git_ref: &str) -> Result<String, WorkingTreeDiffE
 }
 
 fn resolve_head(repo: &Path) -> Result<String, WorkingTreeDiffError> {
-    let output = run_bounded_git(
+    resolve_head_controlled(repo, None, None)
+}
+
+fn resolve_head_controlled(
+    repo: &Path,
+    deadline: Option<Instant>,
+    interrupted: Option<&dyn Fn() -> bool>,
+) -> Result<String, WorkingTreeDiffError> {
+    let output = run_bounded_git_controlled(
         repo,
         &["rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"],
         None,
+        GIT_OUTPUT_LIMIT,
+        deadline,
+        interrupted,
     )?;
     if !output.success {
         return Err(WorkingTreeDiffError::InvalidRef);
@@ -734,7 +761,16 @@ fn collect_worktree_paths(
     repo: &Path,
     baseline_oid: &str,
 ) -> Result<(Vec<WorkingTreeChangedFile>, Option<u32>, bool, u32), WorkingTreeDiffError> {
-    let diff = run_bounded_git(
+    collect_worktree_paths_controlled(repo, baseline_oid, None, None)
+}
+
+fn collect_worktree_paths_controlled(
+    repo: &Path,
+    baseline_oid: &str,
+    deadline: Option<Instant>,
+    interrupted: Option<&dyn Fn() -> bool>,
+) -> Result<(Vec<WorkingTreeChangedFile>, Option<u32>, bool, u32), WorkingTreeDiffError> {
+    let diff = run_bounded_git_controlled(
         repo,
         &[
             "-c",
@@ -749,6 +785,9 @@ fn collect_worktree_paths(
             "--",
         ],
         None,
+        GIT_OUTPUT_LIMIT,
+        deadline,
+        interrupted,
     )?;
     if !diff.success {
         return Err(WorkingTreeDiffError::InvalidRef);
@@ -767,7 +806,7 @@ fn collect_worktree_paths(
     // `--full-name` keeps untracked paths repository-relative like the diff
     // side. Without it `ls-files` reports paths relative to `repo`, so a caller
     // passing a subdirectory would mix two path namespaces in one result.
-    let untracked = run_bounded_git(
+    let untracked = run_bounded_git_controlled(
         repo,
         &[
             "ls-files",
@@ -778,6 +817,9 @@ fn collect_worktree_paths(
             "--",
         ],
         None,
+        GIT_OUTPUT_LIMIT,
+        deadline,
+        interrupted,
     )?;
     if !untracked.success {
         return Err(WorkingTreeDiffError::GitUnavailable);
@@ -827,20 +869,66 @@ fn baseline_blobs(
     baseline_oid: &str,
     files: &[WorkingTreeChangedFile],
 ) -> Result<BTreeMap<String, Option<Vec<u8>>>, WorkingTreeDiffError> {
+    let paths = files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    baseline_blobs_for_paths(repo, baseline_oid, &paths)
+}
+
+/// Fetch a bounded set of blobs from one resolved baseline commit with a
+/// single `git cat-file --batch` process. Missing paths are returned as
+/// `None`, which is how temporal rewind represents files added after the
+/// baseline.
+pub(crate) fn baseline_blobs_for_paths(
+    repo: &Path,
+    baseline_oid: &str,
+    paths: &[String],
+) -> Result<BTreeMap<String, Option<Vec<u8>>>, WorkingTreeDiffError> {
+    baseline_blobs_for_paths_controlled(repo, baseline_oid, paths, None, None)
+}
+
+pub(crate) fn baseline_blobs_for_paths_controlled(
+    repo: &Path,
+    baseline_oid: &str,
+    paths: &[String],
+    deadline: Option<Instant>,
+    interrupted: Option<&dyn Fn() -> bool>,
+) -> Result<BTreeMap<String, Option<Vec<u8>>>, WorkingTreeDiffError> {
+    if paths.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let deadline = deadline.or_else(|| Some(Instant::now() + git_timeout()));
+    let object_ids = baseline_blob_oids(repo, baseline_oid, paths, deadline, interrupted)?;
+    let requests = paths
+        .iter()
+        .filter_map(|path| object_ids.get(path).map(|oid| (path, oid)))
+        .collect::<Vec<_>>();
+    let mut blobs = paths
+        .iter()
+        .map(|path| (path.clone(), None))
+        .collect::<BTreeMap<_, _>>();
+    if requests.is_empty() {
+        return Ok(blobs);
+    }
     let mut input = Vec::new();
-    for file in files {
-        input.extend_from_slice(baseline_oid.as_bytes());
-        input.push(b':');
-        input.extend_from_slice(file.path.as_bytes());
+    for (_, oid) in &requests {
+        input.extend_from_slice(oid.as_bytes());
         input.push(b'\n');
     }
-    let output = run_bounded_git(repo, &["cat-file", "--batch"], Some(&input))?;
+    let output = run_bounded_git_controlled(
+        repo,
+        &["cat-file", "--batch"],
+        Some(&input),
+        GIT_OUTPUT_LIMIT,
+        deadline,
+        interrupted,
+    )?;
     if !output.success {
         return Err(WorkingTreeDiffError::InvalidRef);
     }
     let mut cursor = 0usize;
-    let mut blobs = BTreeMap::new();
-    for file in files {
+    for (path, expected_oid) in requests {
         let Some(relative_newline) = output.stdout[cursor..]
             .iter()
             .position(|byte| *byte == b'\n')
@@ -850,27 +938,146 @@ fn baseline_blobs(
         let header_end = cursor + relative_newline;
         let header = &output.stdout[cursor..header_end];
         cursor = header_end + 1;
-        if header.ends_with(b" missing") {
-            blobs.insert(file.path.clone(), None);
-            continue;
-        }
         let header_text =
             std::str::from_utf8(header).map_err(|_| WorkingTreeDiffError::InvalidRef)?;
-        let size = header_text
-            .split_whitespace()
-            .nth(2)
+        let mut fields = header_text.split_whitespace();
+        let returned_oid = fields.next().ok_or(WorkingTreeDiffError::InvalidRef)?;
+        let object_type = fields.next().ok_or(WorkingTreeDiffError::InvalidRef)?;
+        let size = fields
+            .next()
             .and_then(|value| value.parse::<usize>().ok())
             .ok_or(WorkingTreeDiffError::InvalidRef)?;
-        if cursor + size >= output.stdout.len() {
+        if returned_oid != expected_oid
+            || !matches!(object_type, "blob" | "commit" | "tree" | "tag")
+            || fields.next().is_some()
+        {
+            return Err(WorkingTreeDiffError::InvalidRef);
+        }
+        if cursor + size >= output.stdout.len() || output.stdout[cursor + size] != b'\n' {
             return Err(WorkingTreeDiffError::InvalidRef);
         }
         blobs.insert(
-            file.path.clone(),
+            path.clone(),
             Some(output.stdout[cursor..cursor + size].to_vec()),
         );
         cursor += size + 1;
     }
+    if cursor != output.stdout.len() {
+        return Err(WorkingTreeDiffError::InvalidRef);
+    }
     Ok(blobs)
+}
+
+fn baseline_blob_oids(
+    repo: &Path,
+    baseline_oid: &str,
+    paths: &[String],
+    deadline: Option<Instant>,
+    interrupted: Option<&dyn Fn() -> bool>,
+) -> Result<BTreeMap<String, String>, WorkingTreeDiffError> {
+    const PATHSPEC_ARG_BYTES: usize = 32 * 1024;
+    const PATHS_PER_BATCH: usize = 256;
+
+    let requested = paths.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    let mut object_ids = BTreeMap::new();
+    let mut output_bytes = 0usize;
+    let mut offset = 0usize;
+    while offset < paths.len() {
+        let mut end = offset;
+        let mut argument_bytes = 0usize;
+        while end < paths.len() && end - offset < PATHS_PER_BATCH {
+            let path = &paths[end];
+            if path.as_bytes().contains(&0) {
+                return Err(WorkingTreeDiffError::InvalidRef);
+            }
+            let next_bytes = path.len().saturating_add(10);
+            if end > offset && argument_bytes.saturating_add(next_bytes) > PATHSPEC_ARG_BYTES {
+                break;
+            }
+            argument_bytes = argument_bytes.saturating_add(next_bytes);
+            end += 1;
+        }
+        let pathspecs = paths[offset..end]
+            .iter()
+            .map(|path| format!(":(literal){path}"))
+            .collect::<Vec<_>>();
+        let mut args = vec!["ls-tree", "-r", "-z", "--full-tree", baseline_oid, "--"];
+        args.extend(pathspecs.iter().map(String::as_str));
+        let output =
+            run_bounded_git_controlled(repo, &args, None, GIT_OUTPUT_LIMIT, deadline, interrupted)?;
+        if !output.success {
+            return Err(WorkingTreeDiffError::InvalidRef);
+        }
+        output_bytes = output_bytes.saturating_add(output.stdout.len());
+        if output_bytes > GIT_OUTPUT_LIMIT {
+            return Err(WorkingTreeDiffError::GitOutputLimit);
+        }
+        let mut entries = output.stdout.split(|byte| *byte == 0).peekable();
+        while let Some(entry) = entries.next() {
+            if entry.is_empty() {
+                if entries.peek().is_some() {
+                    return Err(WorkingTreeDiffError::InvalidRef);
+                }
+                break;
+            }
+            let tab = entry
+                .iter()
+                .position(|byte| *byte == b'\t')
+                .ok_or(WorkingTreeDiffError::InvalidRef)?;
+            let metadata =
+                std::str::from_utf8(&entry[..tab]).map_err(|_| WorkingTreeDiffError::InvalidRef)?;
+            let path = std::str::from_utf8(&entry[tab + 1..])
+                .map_err(|_| WorkingTreeDiffError::InvalidRef)?;
+            let mut fields = metadata.split_whitespace();
+            let _mode = fields.next().ok_or(WorkingTreeDiffError::InvalidRef)?;
+            let object_type = fields.next().ok_or(WorkingTreeDiffError::InvalidRef)?;
+            let oid = fields.next().ok_or(WorkingTreeDiffError::InvalidRef)?;
+            if !matches!(object_type, "blob" | "commit" | "tree" | "tag")
+                || fields.next().is_some()
+                || !requested.contains(path)
+                || object_ids
+                    .insert(path.to_string(), oid.to_string())
+                    .is_some()
+            {
+                return Err(WorkingTreeDiffError::InvalidRef);
+            }
+        }
+        offset = end;
+    }
+    Ok(object_ids)
+}
+
+/// Recheck the inexpensive filesystem/Git token used by temporal analysis
+/// without parsing every changed source file a third time. Cooperative
+/// controls let MCP cancellation stop the extra Git work promptly.
+pub(crate) fn validate_working_tree_snapshot_controlled(
+    repo: &Path,
+    baseline_oid: &str,
+    expected_head_oid: &str,
+    expected_files: &[WorkingTreeChangedFile],
+    expected_token: &str,
+    deadline: Option<Instant>,
+    interrupted: Option<&dyn Fn() -> bool>,
+) -> Result<(), WorkingTreeDiffError> {
+    if resolve_head_controlled(repo, deadline, interrupted)? != expected_head_oid {
+        return Err(WorkingTreeDiffError::SnapshotChanged);
+    }
+    let (files, _, truncated, _) =
+        collect_worktree_paths_controlled(repo, baseline_oid, deadline, interrupted)?;
+    if truncated || files != expected_files {
+        return Err(WorkingTreeDiffError::SnapshotChanged);
+    }
+    let token = working_tree_snapshot_token_controlled(
+        repo,
+        expected_head_oid,
+        &files,
+        deadline,
+        interrupted,
+    )?;
+    if token != expected_token {
+        return Err(WorkingTreeDiffError::SnapshotChanged);
+    }
+    Ok(())
 }
 
 pub(crate) fn working_tree_snapshot_token(
@@ -878,7 +1085,24 @@ pub(crate) fn working_tree_snapshot_token(
     head_oid: &str,
     files: &[WorkingTreeChangedFile],
 ) -> Result<String, WorkingTreeDiffError> {
-    let index = run_bounded_git(repo, &["write-tree"], None)?;
+    working_tree_snapshot_token_controlled(repo, head_oid, files, None, None)
+}
+
+fn working_tree_snapshot_token_controlled(
+    repo: &Path,
+    head_oid: &str,
+    files: &[WorkingTreeChangedFile],
+    deadline: Option<Instant>,
+    interrupted: Option<&dyn Fn() -> bool>,
+) -> Result<String, WorkingTreeDiffError> {
+    let index = run_bounded_git_controlled(
+        repo,
+        &["write-tree"],
+        None,
+        GIT_OUTPUT_LIMIT,
+        deadline,
+        interrupted,
+    )?;
     if !index.success {
         return Err(WorkingTreeDiffError::SnapshotChanged);
     }
@@ -886,6 +1110,9 @@ pub(crate) fn working_tree_snapshot_token(
     digest.update(head_oid.as_bytes());
     digest.update(&index.stdout);
     for file in files {
+        if interrupted.is_some_and(|check| check()) {
+            return Err(WorkingTreeDiffError::GitTimeout);
+        }
         digest.update(file.path.as_bytes());
         digest.update([0]);
         digest.update(file.status.as_bytes());
@@ -1403,6 +1630,55 @@ mod tests {
         let second = symbols_changed_in_worktree(store.store(), &dir, "HEAD").unwrap();
         assert_eq!(first.files, second.files);
         assert_eq!(first.files[0].path, "line\nbreak.py");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn baseline_blob_batch_is_nul_safe_for_newline_paths() {
+        let dir = init_repo("baseline_blob_nul");
+        let tracked = "src/evil\nname.py";
+        let baseline_body = b"def baseline():\n    return 1\n";
+        write(&dir, tracked, std::str::from_utf8(baseline_body).unwrap());
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+        let baseline = resolve_commit(&dir, "HEAD").unwrap();
+
+        let missing = "src/missing\nname.py".to_string();
+        let blobs =
+            baseline_blobs_for_paths(&dir, &baseline, &[tracked.to_string(), missing.clone()])
+                .unwrap();
+
+        assert_eq!(blobs.get(tracked), Some(&Some(baseline_body.to_vec())));
+        assert_eq!(blobs.get(&missing), Some(&None));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn baseline_blob_batch_preserves_gitlink_compatibility() {
+        let dir = init_repo("baseline_blob_gitlink");
+        write(&dir, "README.md", "baseline\n");
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "target"]);
+        let target = resolve_commit(&dir, "HEAD").unwrap();
+        run(
+            &dir,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{target},vendor/lib"),
+            ],
+        );
+        run(&dir, &["commit", "-q", "-m", "gitlink"]);
+        let baseline = resolve_commit(&dir, "HEAD").unwrap();
+
+        let blobs = baseline_blobs_for_paths(&dir, &baseline, &["vendor/lib".to_string()]).unwrap();
+
+        assert!(blobs
+            .get("vendor/lib")
+            .and_then(|value| value.as_ref())
+            .is_some_and(|bytes| !bytes.is_empty()));
         fs::remove_dir_all(&dir).ok();
     }
 

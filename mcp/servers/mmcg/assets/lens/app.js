@@ -407,6 +407,8 @@
     const impact = record(raw.impact);
     const evidence = record(raw.evidence);
     const semantic = record(raw.semantic);
+    const temporalEnvelope = record(raw.temporal);
+    const temporal = record(temporalEnvelope.data);
     const changes = record(impact.changes);
 
     const files = collection(changes.files);
@@ -551,6 +553,27 @@
       mapComponents.items,
       nodes
     );
+    const precisionNotes = collectPrecisionNotes(map, impact, evidence, semantic);
+    array(temporal.diagnostics).forEach(function (value) {
+      const item = record(value);
+      precisionNotes.push({
+        code: text(item.code, "Temporal precision"),
+        message: text(item.message, ""),
+        source: "Temporal",
+      });
+    });
+    const temporalDiagnostic = record(temporalEnvelope.diagnostic);
+    if (Object.keys(temporalDiagnostic).length > 0) {
+      precisionNotes.push({
+        code: text(temporalDiagnostic.code, "Temporal unavailable"),
+        message: text(temporalDiagnostic.message, ""),
+        source: "Temporal",
+      });
+    }
+    const truncations = collectTruncations(map, impact, evidence, semantic);
+    appendTemporalTruncations(truncations, temporal);
+    const limits = collectLimits(raw, map, impact, evidence);
+    flattenPrimitiveEntries("Temporal", temporal.limits, 0, limits);
 
     return {
       raw: raw,
@@ -569,6 +592,8 @@
       mapComponents: mapComponents,
       evidence: evidence,
       semantic: semantic,
+      temporalEnvelope: temporalEnvelope,
+      temporal: temporal,
       evidenceSources: evidenceSources,
       evidenceFiles: evidenceFiles,
       evidenceDiagnostics: evidenceDiagnostics,
@@ -578,10 +603,42 @@
       nodes: nodes,
       edges: edges,
       components: componentRows,
-      precisionNotes: collectPrecisionNotes(map, impact, evidence, semantic),
-      truncations: collectTruncations(map, impact, evidence, semantic),
-      limits: collectLimits(raw, map, impact, evidence),
+      precisionNotes: precisionNotes,
+      truncations: truncations,
+      limits: limits,
     };
+  }
+
+  function appendTemporalTruncations(output, temporal) {
+    const components = record(temporal.components);
+    const boundaries = record(temporal.boundaries);
+    const cycles = record(temporal.cycles);
+    const hotspots = record(temporal.hotspots);
+    const ownership = record(temporal.ownership);
+    [
+      ["Temporal components added", components.added],
+      ["Temporal components removed", components.removed],
+      ["Temporal components changed", components.changed],
+      ["Temporal boundaries added", boundaries.added],
+      ["Temporal boundaries removed", boundaries.removed],
+      ["Temporal boundaries changed", boundaries.changed],
+      ["Temporal cycles introduced", cycles.added],
+      ["Temporal cycles resolved", cycles.removed],
+      ["Temporal cycles changed", cycles.changed],
+      ["Temporal centrality", temporal.centrality],
+      ["Temporal hotspot entries", hotspots.entered],
+      ["Temporal hotspot exits", hotspots.exited],
+      ["Temporal ownership", ownership.changes],
+      ["Temporal history review", temporal.history_review_candidates],
+    ].forEach(function (entry) {
+      const value = collection(entry[1]);
+      if (value.truncated || value.totalUnknown) {
+        output.push({ label: entry[0], reason: value.reason || "bounded projection" });
+      }
+    });
+    if (temporal.partial === true && !output.some(function (item) { return item.label.startsWith("Temporal"); })) {
+      output.push({ label: "Temporal architecture", reason: "bounded base/head map" });
+    }
   }
 
   function buildComponentRows(affectedItems, mapItems, nodes) {
@@ -804,6 +861,16 @@
     elements.overlayButtons = Array.from(document.querySelectorAll("[data-overlay]"));
     elements.evidenceSummary = byId("evidence-summary");
     elements.evidenceSourceList = byId("evidence-source-list");
+    elements.temporalSummary = byId("temporal-summary");
+    elements.temporalEvents = byId("temporal-events");
+    elements.temporalMetric = {
+      components: byId("temporal-components"),
+      boundaries: byId("temporal-boundaries"),
+      cycles: byId("temporal-cycles"),
+      centrality: byId("temporal-centrality"),
+      ownership: byId("temporal-ownership"),
+      history: byId("temporal-history"),
+    };
     elements.componentList = byId("component-list");
     elements.graphFrame = byId("graph-frame");
     elements.graph = byId("trace-graph");
@@ -993,6 +1060,7 @@
     renderNotices();
     renderEvidenceSources();
     renderComponents();
+    renderTemporal();
     renderMethodLedger();
     setEnabled(true);
     renderGraph();
@@ -1102,8 +1170,127 @@
           "Do not read this trace as complete: " + labels.join("; ") + suffix + ". See the calibration record below."
         );
       }
+      if (text(state.model.temporalEnvelope.status, "unavailable") !== "available") {
+        const diagnostic = record(state.model.temporalEnvelope.diagnostic);
+        appendNotice(
+          "warning",
+          "Temporal · " + text(diagnostic.code, "unavailable"),
+          text(diagnostic.message, "The base/head architecture comparison was not returned; the ordinary diff trace remains available.")
+        );
+      }
     }
     elements.noticeStack.hidden = elements.noticeStack.childElementCount === 0;
+  }
+
+  function temporalPair(added, removed, changed) {
+    const plus = totalOrReturned(collection(added));
+    const minus = totalOrReturned(collection(removed));
+    const drift = changed === undefined ? null : totalOrReturned(collection(changed));
+    return "+" + displayNumber(plus) + " −" + displayNumber(minus) + (drift === null ? "" : " ~" + displayNumber(drift));
+  }
+
+  function renderTemporal() {
+    clearNode(elements.temporalEvents);
+    const envelope = state.model.temporalEnvelope;
+    const temporal = state.model.temporal;
+    if (text(envelope.status, "unavailable") !== "available" || Object.keys(temporal).length === 0) {
+      Object.values(elements.temporalMetric).forEach(function (element) {
+        element.textContent = "—";
+      });
+      const diagnostic = record(envelope.diagnostic);
+      elements.temporalSummary.textContent = text(
+        diagnostic.message,
+        "Temporal architecture is unavailable for this snapshot; the current impact trace is still valid."
+      );
+      elements.temporalEvents.appendChild(createElement("p", "temporal-events__empty", "No base/head architecture delta was returned."));
+      return;
+    }
+
+    const summary = record(temporal.summary);
+    const components = record(temporal.components);
+    const boundaries = record(temporal.boundaries);
+    const cycles = record(temporal.cycles);
+    const ownership = record(temporal.ownership);
+    const hotspots = record(temporal.hotspots);
+    elements.temporalMetric.components.textContent = temporalPair(components.added, components.removed, components.changed);
+    elements.temporalMetric.boundaries.textContent = temporalPair(boundaries.added, boundaries.removed, boundaries.changed);
+    elements.temporalMetric.cycles.textContent = temporalPair(cycles.added, cycles.removed, cycles.changed);
+    elements.temporalMetric.centrality.textContent = "↑" + displayNumber(finiteNumber(summary.centrality_increases));
+    elements.temporalMetric.ownership.textContent = displayNumber(finiteNumber(summary.ownership_changes));
+    elements.temporalMetric.history.textContent = displayNumber(finiteNumber(summary.history_review_candidates));
+    const changed = summary.architecture_changed === true;
+    elements.temporalSummary.textContent = changed
+      ? "Architecture drift detected between " + text(record(temporal.baseline).requested_ref, "the baseline") + " and the indexed working copy" + (temporal.partial === true ? "; bounded projection is partial." : ".")
+      : "No architecture drift was observed in the returned base/head projection.";
+
+    const events = [];
+    collection(components.added).items.forEach(function (value) {
+      const item = record(value);
+      events.push({ kind: "added", label: "Component added", detail: text(item.path, "component") + " · " + displayNumber(finiteNumber(item.file_count)) + " files" });
+    });
+    collection(components.removed).items.forEach(function (value) {
+      const item = record(value);
+      events.push({ kind: "removed", label: "Component removed", detail: text(item.path, "component") + " · " + displayNumber(finiteNumber(item.file_count)) + " files at baseline" });
+    });
+    collection(components.changed).items.forEach(function (value) {
+      const item = record(value);
+      events.push({ kind: "changed", label: "Component shape changed", detail: text(item.path, "component") + " · " + displayNumber(finiteNumber(item.base_file_count)) + " → " + displayNumber(finiteNumber(item.head_file_count)) + " files" });
+    });
+    collection(cycles.added).items.forEach(function (value) {
+      events.push({ kind: "cycle", label: "Cycle introduced", detail: array(value).map(function (path) { return text(path, ""); }).filter(Boolean).join(" → ") });
+    });
+    collection(cycles.removed).items.forEach(function (value) {
+      events.push({ kind: "removed", label: "Cycle resolved", detail: array(value).map(function (path) { return text(path, ""); }).filter(Boolean).join(" → ") });
+    });
+    collection(cycles.changed).items.forEach(function (value) {
+      const item = record(value);
+      events.push({ kind: "changed", label: "Cycle membership changed", detail: "+ " + array(item.added_members).join(", ") + " · − " + array(item.removed_members).join(", ") });
+    });
+    collection(boundaries.added).items.forEach(function (value) {
+      const item = record(value);
+      events.push({ kind: "added", label: "Public boundary added", detail: text(item.name, "symbol") + " · " + text(item.component, "component") + " · " + text(item.file, "unknown file") });
+    });
+    collection(boundaries.removed).items.forEach(function (value) {
+      const item = record(value);
+      events.push({ kind: "removed", label: "Public boundary removed", detail: text(item.name, "symbol") + " · " + text(item.component, "component") + " · " + text(item.file, "unknown file") });
+    });
+    collection(boundaries.changed).items.forEach(function (value) {
+      const item = record(value);
+      events.push({ kind: "changed", label: "Public API drift", detail: text(item.name, "symbol") + " · " + text(item.file, "unknown file") });
+    });
+    collection(temporal.centrality).items.forEach(function (value) {
+      const item = record(value);
+      events.push({ kind: "gravity", label: "Centrality drift", detail: text(item.name, "symbol") + " · " + displayNumber(finiteNumber(item.base_in_degree)) + " → " + displayNumber(finiteNumber(item.head_in_degree)) });
+    });
+    collection(hotspots.entered).items.forEach(function (value) {
+      const item = record(value);
+      events.push({ kind: "gravity", label: "Hotspot entered", detail: text(item.name, "symbol") + " · " + text(item.file, "unknown file") + " · rank " + displayNumber(finiteNumber(item.rank)) });
+    });
+    collection(hotspots.exited).items.forEach(function (value) {
+      const item = record(value);
+      events.push({ kind: "removed", label: "Hotspot exited", detail: text(item.name, "symbol") + " · " + text(item.file, "unknown file") + " · baseline rank " + displayNumber(finiteNumber(item.rank)) });
+    });
+    collection(ownership.changes).items.forEach(function (value) {
+      const item = record(value);
+      events.push({ kind: "owner", label: "Ownership changed", detail: text(item.path, "unknown path") + " · " + array(item.base_owners).join(", ") + " → " + array(item.head_owners).join(", ") });
+    });
+    collection(temporal.history_review_candidates).items.forEach(function (value) {
+      const item = record(value);
+      events.push({ kind: "history", label: "History needs review", detail: text(item.artifact_path, "artifact") + " mentions " + text(item.referenced_path, "changed path") });
+    });
+    if (events.length === 0) {
+      elements.temporalEvents.appendChild(createElement("p", "temporal-events__empty", "No architecture events were observed in the returned projection."));
+      return;
+    }
+    events.slice(0, 12).forEach(function (event) {
+      const row = createElement("article", "temporal-event temporal-event--" + event.kind);
+      row.appendChild(createElement("span", "temporal-event__kind", event.label));
+      row.appendChild(createElement("span", "temporal-event__detail", event.detail));
+      elements.temporalEvents.appendChild(row);
+    });
+    if (events.length > 12) {
+      elements.temporalEvents.appendChild(createElement("p", "temporal-events__empty", "+" + (events.length - 12) + " more bounded events in the JSON snapshot."));
+    }
   }
 
   function renderEvidenceSources() {

@@ -2,7 +2,7 @@
 
 This is the exhaustive technical reference for the mmcg engine. For the shortest path to a working installation, start with [Getting started](../getting-started.md); for the product overview, return to the [Mastermind README](../../README.md).
 
-A small Rust binary that builds a structural index of a codebase (Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, C/C++). It serves the graph over **MCP** (24 read-only tools plus one additive local scratchpad write), but MCP is only one surface. The same binary provides spec gates (`verify-spec` / `audit-spec`), project setup (`init` / `doctor`), and the user-global style miner.
+A small Rust binary that builds a structural index of a codebase (Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, C/C++). It serves the graph over **MCP** (25 read-only tools plus one additive local scratchpad write), but MCP is only one surface. The same binary provides spec gates (`verify-spec` / `audit-spec`), project setup (`init` / `doctor`), and the user-global style miner.
 
 > Installed via npm (`@xcraftmind/mastermind`)? The command is **`mastermind`** — the same binary. The `mmcg` name used throughout this doc is the cargo-installed alias (`cargo install mmcg`).
 
@@ -69,7 +69,7 @@ The Mastermind workflow needs structural queries every few seconds (planner deci
 
 mmcg is intentionally narrow:
 - Supports Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, and C/C++ — extend by adding a parser, not by depending on multi-language toolchains
-- 25 MCP tools: 24 read-only structural/semantic tools plus `mmcg_scratchpad_append`, which makes an additive write to the gitignored local index
+- 26 MCP tools: 25 read-only structural/semantic tools plus `mmcg_scratchpad_append`, which makes an additive write to the gitignored local index
 
 ## Performance model
 
@@ -135,6 +135,10 @@ mmcg map . --format sarif > mastermind-map.sarif
 mmcg impact --since main --format text --depth 3 --top 100
 mmcg impact --since HEAD~1 --format json
 mmcg impact --since main --format sarif > mastermind-impact.sarif
+
+# Compare bounded architecture snapshots over time.
+mmcg temporal --since main
+mmcg temporal --since HEAD~5 --path services/payment --format json
 
 # Evaluate repository-owned architecture rules. Violations and incomplete
 # evidence both exit non-zero.
@@ -305,6 +309,55 @@ inspect definitions and relationships directly. Lens loads a valid imported
 overlay automatically, shows its producer and precision diagnostics, and only
 decorates exact returned endpoint and display-name pairs. `mmcg map`, callers,
 impact, and all existing tools continue to work unchanged without SCIP.
+
+## Temporal Graph (`mmcg temporal`)
+
+`mmcg temporal --since REF` compares the indexed working copy with a resolved
+Git commit without checking out the old tree. Mastermind clones the exact
+current SQLite connection snapshot into a private temporary writable database,
+batch-loads the changed blobs at the baseline, rewinds only supported changed
+source paths, and runs the same bounded `project_map` engine on both sides.
+The repository index, source files, Git index, and source WAL/SHM files remain
+unchanged. Data-version plus source database/WAL metadata are rechecked so a
+concurrent watcher cannot mix two SQLite revisions into one result. A fully
+deleted selected scope is reconstructed from the baseline instead of failing
+as an empty head map.
+
+Schema v1 reports:
+
+- added, removed, and file/language-drifted components;
+- added, removed, and signature-drifted cross-component boundaries. The same
+  evidence is exposed as `public_api`; it is observed external graph use, not a
+  claim about a language's declared visibility;
+- introduced, resolved, and membership-changed dependency cycles. Expanding or
+  merging an existing SCC is not mislabeled as a newly introduced cycle;
+- in-degree and rank movement for symbols observed in both bounded hotspot
+  windows, plus entries/exits from those windows;
+- CODEOWNERS changes across the bounded selected source paths, changed files,
+  and returned boundary paths, using the base and head files independently with
+  last-match-wins semantics. This includes ownership-only rule changes;
+- review candidates when current indexed history exactly mentions a deleted
+  path, removed component, removed public boundary, or signature-drifted public
+  API. This is a correlation signal, not proof that an ADR or decision is
+  obsolete.
+
+The file change set is capped at 10,000 and must be complete before rewind; an
+overflow fails closed. Output sections have their own limits, and the response
+sets `partial: true` when either project-map projection or a temporal section is
+truncated. Component, boundary, cycle, and hotspot claims therefore describe
+the returned deterministic window when the underlying map is partial. Ownership
+checks at most 500 relevant paths; history scans at most 5,000 derived artifacts
+and 32 MiB and returns at most 500 candidates. Diagnostics are capped at 100
+with an explicit `diagnostics_truncated` flag. Git, CODEOWNERS, history, rewind,
+and SQLite phases cooperatively observe the request budget/cancel signal.
+Temporal topology is Tree-sitter syntactic evidence in v1; SCIP, runtime,
+coverage, and test overlays keep their separate provenance in Lens.
+
+The same response is available through read-only `mmcg_temporal` and appears in
+Lens below the blast trace. Lens renders bounded identities for component,
+boundary/API, cycle, hotspot, ownership, and history events. It isolates a
+bounded temporal-unavailable result so ordinary impact evidence remains usable,
+but a repository, Git, or SQLite snapshot race still fails the refresh.
 
 ## Mastermind Lens (`mmcg ui`)
 
@@ -570,6 +623,7 @@ Run `mmcg watch` in a separate terminal so the index stays current while you wor
 | `mmcg_centrality` | optional `prefix`, `language`, `kind`, `top` (default 20) | Rank symbols by in-degree (distinct callers). Pre-flight "where is the gravity" — top hits are the structural attractors of the codebase or a subdirectory. Use to learn what to read first on unfamiliar code. Excludes synthetic `<module>` rows and zero-degree symbols. |
 | `mmcg_semantic` | `symbol`, optional `top` (default 100, max 500) | Compiler-resolved SCIP definitions, references, implementations, type definitions, and explicit provenance. Returns `fallback_active: true` instead of an error when no overlay exists. Stale document facts are omitted with diagnostics. |
 | `mmcg_map` | optional `path` (default `.`), `depth` (1–6, default 2), `top` (1–100, default 20), `production_only` (default `false`) | Schema-v1 architecture briefing with lexical file/directory scope: `%` and `_` are literal bytes, selected-directory components are relative to that directory, root components remain repository-relative, and selected files retain their paths. `production_only` excludes conventional test/fixture/example/generated/vendor path segments and test filenames (`test_*`, `*_test.*`, `*.test.*`, `*.spec.*`, `*Test.*`, `*Tests.*`) before bounded queries run. Hotspots prefer unambiguous definitions before pooled same-name collisions. JSON, text, Mermaid, and CLI SARIF are projections of the same result; Mermaid includes component counts/languages, boundaries, hotspots, and cycle rings, while SARIF exports returned cycles as architecture findings. Caps are 50,000 aggregation paths, 20 languages, 20 components, 20 boundaries/component and 400 globally, 50 entry points, 100 hotspots, 50,000 scoped cycle edges, 50 cycles, and 500 cycle memberships. `path_work_limit` marks path-derived partial aggregates; `top_probe` marks a hotspot or per-component boundary cap+1 probe; `global_probe_limit` marks components whose certainty was prevented by the 401st global boundary row; cycle `work_limit` returns no cycles because SCC analysis was skipped before truncated edges could be analyzed. |
+| `mmcg_temporal` | `since`, optional `root`, `path` (default `.`), `depth` (1–5, default 2), `top` (1–100, default 20), `production_only`, `codeowners` | Schema-v1 base-vs-indexed-worktree architecture delta. It rewinds changed Git blobs only in a private SQLite snapshot and reports components, public boundaries/API, cycles, centrality/hotspot drift, base/head CODEOWNERS changes, exact history review candidates, provenance, limits, and partial diagnostics. A truncated 10,000-file change set fails closed. |
 | `mmcg_change_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Stable schema-v1 analysis of the resolved baseline against staged, unstaged, and untracked content. Reports added/removed/signature/body-changed symbols, batched transitive callers, component crossings, ranked test candidates, a `disciplines` block routing the change to an evidence set, exact collection metadata, caps, and precision notes. Root, SHA-256 index freshness, Git snapshot, and SQLite snapshot checks fail closed with stable codes. |
 | `mmcg_test_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Exact test-focused projection of `mmcg_change_impact`. Changed tests and depth-1 graph tests are direct, deeper graph tests are transitive, and scoped filename candidates are heuristic. Focused candidates never replace the repository's full required gate. |
 | `mmcg_tasks` | `query`, optional `top` (default 10) | Full-text search past task specs (`.mastermind/tasks/<NNN>-<name>/spec.md`). FTS5 MATCH syntax (bare words AND-joined, `"phrases"`, `OR`/`NOT`). Returns paths, titles, and snippet excerpts with `«match»` highlights ranked by BM25. Use as planner pre-flight: "have we touched this area before?" surfaces past designs and prior verdicts. Top-level files prefixed with `_` (e.g. `_lessons.md`) and bare `.md` files at the top of `tasks/` (legacy 0.6.x layout) are intentionally excluded. |

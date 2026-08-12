@@ -190,6 +190,8 @@ const ELEMENT_IDS = [
   "trace-context", "mobile-trace-list", "trace-count", "inspector-body", "precision-list",
   "precision-count", "limits-list", "limits-count", "schema-label", "status-region",
   "evidence-summary", "evidence-source-list",
+  "temporal-summary", "temporal-events", "temporal-components", "temporal-boundaries",
+  "temporal-cycles", "temporal-centrality", "temporal-ownership", "temporal-history",
   "metric-files", "metric-files-note", "metric-symbols", "metric-symbols-note", "metric-impact",
   "metric-impact-note", "metric-crossings", "metric-crossings-note", "metric-tests",
   "metric-tests-note",
@@ -259,6 +261,50 @@ function fixture() {
     schema_version: 1,
     repository: { name: "example", root_label: "." },
     options: { since: "main", path: ".", depth: 3, top: 100, production_only: false },
+    temporal: {
+      status: "available",
+      data: {
+        schema_version: 1,
+        baseline: { requested_ref: "main" },
+        summary: {
+          architecture_changed: true,
+          components_added: 1, components_removed: 0,
+          boundaries_added: 1, boundaries_removed: 0, boundaries_changed: 0,
+          cycles_introduced: 1, cycles_resolved: 0,
+          centrality_increases: 1, hotspot_entries: 1, hotspot_exits: 0,
+          cycles_changed: 0,
+          ownership_changes: 1, history_review_candidates: 1,
+        },
+        components: {
+          added: { total: 1, returned: 1, truncated: false, items: [{ path: "payments", file_count: 1, languages: [{ language: "rust", file_count: 1 }] }] },
+          removed: { total: 1, returned: 1, truncated: false, items: [{ path: "legacy", file_count: 1, languages: [{ language: "python", file_count: 1 }] }] },
+          changed: { total: 0, returned: 0, truncated: false, items: [] },
+        },
+        boundaries: {
+          added: { total: 1, returned: 1, truncated: false, items: [{ component: "payments", file: "src/auth.rs", name: "charge</span>", kind: "function", line: 42 }] },
+          removed: { total: 0, returned: 0, truncated: false, items: [] },
+          changed: { total: 0, returned: 0, truncated: false, items: [] },
+        },
+        cycles: {
+          added: { total: 1, returned: 1, truncated: false, items: [["payments/api.rs", "ledger/api.rs"]] },
+          removed: { total: 1, returned: 1, truncated: false, items: [["legacy/a.py", "legacy/b.py"]] },
+          changed: { total: 0, returned: 0, truncated: false, items: [] },
+        },
+        centrality: { total: 1, returned: 1, truncated: false, items: [{ file: "src/auth.rs", name: "authorize", kind: "function", base_in_degree: 2, head_in_degree: 5, in_degree_delta: 3 }] },
+        hotspots: {
+          entered: { total: 1, returned: 1, truncated: false, items: [{ file: "src/auth.rs", name: "authorize", kind: "function", rank: 1, in_degree: 5 }] },
+          exited: { total: 1, returned: 1, truncated: false, items: [{ file: "legacy/auth.py", name: "legacy_auth", kind: "function", rank: 2, in_degree: 3 }] },
+          moved: { total: 1, returned: 1, truncated: false, items: [] },
+        },
+        ownership: {
+          changes: { total: 1, returned: 1, truncated: false, items: [{ path: "src/auth.rs", base_owners: ["@platform"], head_owners: ["@security"] }] },
+        },
+        history_review_candidates: { total: 1, returned: 1, truncated: false, items: [{ artifact_path: "docs/adr/004-auth.md", referenced_path: "src/legacy.rs", trigger: "path_deleted" }] },
+        limits: { ownership_paths: 500 },
+        diagnostics: [],
+        partial: false,
+      },
+    },
     semantic: {
       schema_version: 1,
       available: true,
@@ -427,7 +473,7 @@ function fixture() {
   };
 }
 
-async function renderFixture() {
+async function renderFixture(payload) {
   const harness = createDocument();
   const window = {
     setTimeout(handler) {
@@ -446,7 +492,7 @@ async function renderFixture() {
     document: harness.document,
     window: window,
     ResizeObserver: window.ResizeObserver,
-    fetch: async () => ({ ok: true, status: 200, json: async () => fixture() }),
+    fetch: async () => ({ ok: true, status: 200, json: async () => payload || fixture() }),
     Intl: Intl,
     Date: Date,
     Map: Map,
@@ -484,6 +530,33 @@ async function main() {
   assert.match(harness.nodes.get("evidence-summary").textContent, /8 sources · 3 matched trace files/i);
   assert.equal(harness.nodes.get("evidence-source-list").querySelectorAll(".evidence-source").length, 8);
   assert.match(harness.nodes.get("evidence-source-list").textContent, /repository verified/i);
+  assert.match(harness.nodes.get("temporal-summary").textContent, /Architecture drift detected/i);
+  assert.equal(harness.nodes.get("temporal-components").textContent, "+1 −1 ~0");
+  assert.equal(harness.nodes.get("temporal-cycles").textContent, "+1 −1 ~0");
+  assert.match(harness.nodes.get("temporal-events").textContent, /Cycle introduced/i);
+  assert.match(harness.nodes.get("temporal-events").textContent, /Component removed/i);
+  assert.match(harness.nodes.get("temporal-events").textContent, /Cycle resolved/i);
+  assert.match(harness.nodes.get("temporal-events").textContent, /Hotspot entered/i);
+  assert.match(harness.nodes.get("temporal-events").textContent, /Hotspot exited/i);
+  assert.match(harness.nodes.get("temporal-events").textContent, /charge<\/span>/i);
+  assert.match(harness.nodes.get("temporal-events").textContent, /History needs review/i);
+
+  const unavailable = fixture();
+  unavailable.temporal = {
+    status: "unavailable",
+    diagnostic: { code: "snapshot_unavailable", message: "Temporal snapshot stayed bounded." },
+  };
+  const unavailableHarness = await renderFixture(unavailable);
+  assert.equal(unavailableHarness.nodes.get("temporal-components").textContent, "—");
+  assert.match(unavailableHarness.nodes.get("temporal-summary").textContent, /stayed bounded/i);
+  assert.match(unavailableHarness.nodes.get("notice-stack").textContent, /Temporal · snapshot_unavailable/i);
+
+  const partial = fixture();
+  partial.temporal.data.partial = true;
+  partial.temporal.data.diagnostics = [{ code: "bounded_map_projection", message: "Only the returned temporal window is comparable." }];
+  const partialHarness = await renderFixture(partial);
+  assert.match(partialHarness.nodes.get("temporal-summary").textContent, /bounded projection is partial/i);
+  assert.match(partialHarness.nodes.get("precision-list").textContent, /returned temporal window/i);
   const changedCandidate = harness.nodes.get("mobile-trace-list").querySelectorAll(".mobile-candidate")[0];
   assert.ok(changedCandidate, "Changed claim with overlays must remain selectable on mobile");
   assert.equal(

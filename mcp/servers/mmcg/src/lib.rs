@@ -31,6 +31,7 @@ pub mod scip_overlay;
 pub mod setup;
 pub mod spec;
 pub mod store;
+pub mod temporal;
 pub mod verify_spec;
 pub mod watcher;
 pub mod workflow_status;

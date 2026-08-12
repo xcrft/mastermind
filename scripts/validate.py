@@ -1341,6 +1341,8 @@ def validate_audit_action_security() -> list[Issue]:
             issues.append(Issue(docker_path, "error", "Docker Action must build with Rust 1.96 and the Cargo lockfile"))
         if "COPY mcp/servers/mmcg/benches ./mcp/servers/mmcg/benches" not in docker_text:
             issues.append(Issue(docker_path, "error", "Docker Action must include Cargo's declared benchmark target"))
+        if "COPY mcp/servers/mmcg/build.rs ./mcp/servers/mmcg/build.rs" not in docker_text:
+            issues.append(Issue(docker_path, "error", "Docker Action must include Cargo's declared build script"))
         if "COPY --chmod=0755 scripts/audit-action-entrypoint.sh" not in docker_text:
             issues.append(Issue(docker_path, "error", "Docker Action must install an executable entrypoint"))
         if re.search(r"^USER\s+", docker_text, re.MULTILINE):

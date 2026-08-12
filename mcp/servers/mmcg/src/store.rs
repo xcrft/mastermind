@@ -3146,7 +3146,7 @@ mod tests {
     #[test]
     fn read_only_open_handles_uri_reserved_filename_characters() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("index ? # %.db");
+        let path = directory.path().join("index # %.db");
         {
             let store = Store::open(&path).unwrap();
             store

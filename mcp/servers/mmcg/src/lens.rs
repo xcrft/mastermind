@@ -1163,7 +1163,7 @@ mod tests {
 
     #[test]
     fn standalone_html_accepts_crlf_checkout_assets() {
-        let crlf_template = INDEX_HTML.replace('\n', "\r\n");
+        let crlf_template = INDEX_HTML.replace("\r\n", "\n").replace('\n', "\r\n");
 
         let html = standalone_html_from_template("{}", &crlf_template).unwrap();
         let html = String::from_utf8(html).unwrap();

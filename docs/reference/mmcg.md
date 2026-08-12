@@ -136,6 +136,11 @@ mmcg impact --since main --format text --depth 3 --top 100
 mmcg impact --since HEAD~1 --format json
 mmcg impact --since main --format sarif > mastermind-impact.sarif
 
+# Evaluate repository-owned architecture rules. Violations and incomplete
+# evidence both exit non-zero.
+mmcg policy check --since main
+mmcg policy check --since main --format sarif > mastermind-policy.sarif
+
 # Serve the local, read-only diff-first Lens UI on an ephemeral loopback port.
 mmcg ui --since main
 mmcg ui --since origin/main --path src --depth 2 --top 50 --production-only
@@ -401,6 +406,105 @@ files so GitHub can populate missing fingerprints. Stable `ruleId` values and
 consistent relative paths are retained across runs for alert identity.
 See [GitHub's SARIF support contract](https://docs.github.com/en/code-security/reference/code-scanning/sarif-files/sarif-support)
 for ingestion limits and PR annotation behavior.
+
+## Architecture policy as code (`mmcg policy check`)
+
+`mmcg policy check --since REF` evaluates a repository-owned
+`mastermind-policy.yml` over one normalized evidence input. Git/SQLite,
+CODEOWNERS, and strict workflow artifacts are collected first; the policy
+evaluator itself is deterministic and has no Rego, OPA daemon, network access,
+or embedded general-purpose runtime.
+
+```yaml
+version: 1
+rules:
+  - id: domain-must-not-import-infrastructure
+    from: src/domain/**
+    deny_imports: src/infrastructure/**
+
+  - id: no-new-payment-cycles
+    scope: services/payment/**
+    max_new_cycles: 0
+
+  - id: public-api-review
+    when: api_surface_changed
+    require_owner: platform
+
+  - id: payment-blast-budget
+    scope: services/payment/**
+    max_blast_radius: 25
+
+  - id: payment-needs-tests
+    scope: services/payment/**
+    require_tests: true
+
+  - id: payment-ownership-boundary
+    scope: services/payment/**
+    deny_ownership_crossings: true
+
+  - id: critical-payment-workflow
+    critical: services/payment/**
+    require_workflow: strict
+```
+
+The schema is intentionally closed: unknown keys, duplicate IDs, invalid globs,
+more than one action in a rule, no-op booleans, and configurations above 100
+rules are errors.
+The default file is `mastermind-policy.yml`; use `--config PATH` to select a
+different file inside the repository. A symlink that resolves outside the
+repository is rejected. Paths are repository-relative glob patterns with `/`
+separators.
+
+Evaluation is diff-first:
+
+- `deny_imports` reports current forbidden import edges only when the source
+  file is part of the baseline-to-working-tree change;
+- `max_new_cycles` compares current SCC membership with the exact baseline Git
+  blobs, without checking out or mutating the baseline worktree;
+- `api_surface_changed` means an observed changed symbol reaches another
+  inferred top-level component. It is empirical cross-component usage, not a
+  language-level `public`/`export` declaration claim;
+- `max_blast_radius` counts unique returned impacted symbols whose changed seed
+  matches the rule scope;
+- `require_tests` accepts bounded graph-linked candidates or test files inside
+  the configured scope. A test elsewhere under the same top-level directory is
+  not treated as related. The rule does not claim that those tests ran or
+  passed;
+- `deny_ownership_crossings` compares CODEOWNER sets on the changed and
+  impacted sides of an observed component crossing. Missing ownership makes
+  the rule incomplete rather than silently clean;
+- `require_workflow: strict` requires a canonical strict `spec.md`, matching
+  baseline `state.json`, held `audit.md`, and an exact touched-file entry. The
+  held state carries a SHA-256 snapshot of every declared touch, so editing a
+  critical file after the audit invalidates the evidence.
+
+The default workflow evidence directory is `.mastermind/tasks`; CI must restore
+the canonical task artifacts or point `--workflow-evidence PATH` at the
+downloaded evidence directory. CODEOWNERS is discovered in GitHub priority
+order, or overridden with `--codeowners PATH`.
+
+Policy topology stays on the fast default syntactic graph in v1. Imported SCIP
+and runtime overlays retain their provenance for Lens but do not add or remove
+policy edges. Strict workflow evidence validates canonical local artifact
+consistency; it does not prove an audit signature, GitHub approval, or remote CI
+execution.
+
+Impact defaults are depth 3 and top 500 for policy checks. Override them with
+`--depth 1..5` and `--top 1..500`. Import/cycle work is capped at 50,000 file
+edges; baseline cycle comparison is capped at 500 files and 32 MiB; workflow
+evidence is capped at 1,000 tasks and 1 MiB per artifact. A strict snapshot can
+bind at most 1,000 touch files, 16 MiB each and 32 MiB total. Reports stop at
+1,000 total results (reserving one result for the fail-closed diagnostic) and
+become incomplete rather than allocating unbounded SARIF. Any relevant cap, stale index, concurrent snapshot
+change, or unreadable required evidence exits non-zero. JSON and SARIF preserve
+`complete`, diagnostics, baseline/head OIDs, config path, and config SHA-256.
+SARIF uses each configured rule ID as its stable `ruleId`; incomplete evaluation emits
+`mastermind/policy-evaluation-incomplete` at the config location.
+Policy results also include deterministic `partialFingerprints` so repeated
+uploads can retain alert identity when source line numbers move.
+
+See [`docs/examples/mastermind-policy.yml`](../examples/mastermind-policy.yml)
+for all v1 rule forms.
 
 ## MCP server usage
 

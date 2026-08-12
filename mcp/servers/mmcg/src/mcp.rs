@@ -219,6 +219,7 @@ static TOOLS: &[ToolDef] = &[
     read_only_tool("mmcg_centrality", schema_centrality, handle_centrality),
     read_only_tool("mmcg_semantic", schema_semantic, handle_semantic),
     read_only_tool("mmcg_map", schema_map, handle_map),
+    read_only_tool("mmcg_temporal", schema_temporal, handle_temporal),
     read_only_tool(
         "mmcg_change_impact",
         schema_change_impact,
@@ -1377,6 +1378,26 @@ fn schema_map() -> Value {
     })
 }
 
+fn schema_temporal() -> Value {
+    json!({
+        "name": "mmcg_temporal",
+        "description": "Compare bounded base-vs-worktree architecture snapshots: components, cross-component boundaries/public API, cycles, centrality/hotspot drift, CODEOWNERS changes, and exact history review candidates. The baseline is rewound in a private temporary SQLite snapshot; the repository and source index remain read-only.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "since": { "type": "string", "description": "Git ref used as the baseline" },
+                "root": { "type": "string", "description": "Repository root; defaults to the index binding" },
+                "path": { "type": "string", "default": ".", "description": "Repository-relative architecture scope" },
+                "depth": { "type": "integer", "minimum": 1, "maximum": 5, "default": 2 },
+                "top": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
+                "production_only": { "type": "boolean", "default": false },
+                "codeowners": { "type": "string", "description": "Optional repository-relative CODEOWNERS override" }
+            },
+            "required": ["since"]
+        }
+    })
+}
+
 fn schema_semantic() -> Value {
     json!({
         "name": "mmcg_semantic",
@@ -1704,6 +1725,86 @@ fn handle_map(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
                 _ => HandlerError::internal("project_map_query", error),
             })?;
     serde_json::to_value(result)
+        .map_err(|error| HandlerError::internal("serialize_response", error))
+}
+
+fn handle_temporal(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
+    let since = str_arg(args, "since")?.to_string();
+    let root = match args.get("root") {
+        None => store
+            .meta_value("index_root")
+            .map_err(|error| HandlerError::internal("temporal_index_root", error))?
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| HandlerError::InvalidArguments("index_stale".to_string()))?
+            .canonicalize()
+            .map_err(|_| HandlerError::InvalidArguments("root_mismatch".to_string()))?,
+        Some(Value::String(value)) => std::path::PathBuf::from(value)
+            .canonicalize()
+            .map_err(|_| HandlerError::InvalidArguments("root_mismatch".to_string()))?,
+        Some(_) => {
+            return Err(HandlerError::InvalidArguments(
+                "Invalid argument: root".to_string(),
+            ))
+        }
+    };
+    let path = match args.get("path") {
+        None => ".".to_string(),
+        Some(Value::String(value)) => {
+            queries::normalize_map_path(value)
+                .map_err(|_| HandlerError::InvalidArguments("Invalid argument: path".into()))?;
+            value.clone()
+        }
+        Some(_) => {
+            return Err(HandlerError::InvalidArguments(
+                "Invalid argument: path".to_string(),
+            ))
+        }
+    };
+    let depth = match args.get("depth") {
+        None => 2,
+        Some(value) => value
+            .as_u64()
+            .filter(|value| (1..=5).contains(value))
+            .and_then(|value| u8::try_from(value).ok())
+            .ok_or_else(|| HandlerError::InvalidArguments("Invalid argument: depth".into()))?,
+    };
+    let top = match args.get("top") {
+        None => 20,
+        Some(value) => value
+            .as_u64()
+            .filter(|value| (1..=100).contains(value))
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| HandlerError::InvalidArguments("Invalid argument: top".into()))?,
+    };
+    let production_only = match args.get("production_only") {
+        None => false,
+        Some(value) => value.as_bool().ok_or_else(|| {
+            HandlerError::InvalidArguments("Invalid argument: production_only".into())
+        })?,
+    };
+    let codeowners = match args.get("codeowners") {
+        None => None,
+        Some(Value::String(value)) => Some(std::path::PathBuf::from(value)),
+        Some(_) => {
+            return Err(HandlerError::InvalidArguments(
+                "Invalid argument: codeowners".to_string(),
+            ))
+        }
+    };
+    let response = crate::temporal::analyze(
+        store,
+        &root,
+        &crate::temporal::TemporalOptions {
+            since,
+            path,
+            depth,
+            top,
+            production_only,
+            codeowners,
+        },
+    )
+    .map_err(|error| HandlerError::InvalidArguments(error.code().to_string()))?;
+    serde_json::to_value(response)
         .map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
@@ -2437,7 +2538,7 @@ mod tests {
     #[test]
     fn tool_annotations_match_behavior_table() {
         let legacy = tools_list(ProtocolVersion::Legacy);
-        assert_eq!(legacy["tools"].as_array().unwrap().len(), 25);
+        assert_eq!(legacy["tools"].as_array().unwrap().len(), 26);
         assert!(legacy["tools"]
             .as_array()
             .unwrap()
@@ -2446,7 +2547,7 @@ mod tests {
 
         let current = tools_list(ProtocolVersion::Current);
         let tools = current["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 25);
+        assert_eq!(tools.len(), 26);
         let mut readers = 0;
         for tool in tools {
             let annotations = &tool["annotations"];
@@ -2465,7 +2566,7 @@ mod tests {
                 readers += 1;
             }
         }
-        assert_eq!(readers, 24);
+        assert_eq!(readers, 25);
     }
 
     #[test]
@@ -2689,6 +2790,69 @@ mod tests {
     }
 
     #[test]
+    fn temporal_tool_returns_schema_v1_and_is_read_only() {
+        let (root, mut store) = impact_fixture("temporal");
+        let actual = handle_temporal(
+            &mut store,
+            &json!({
+                "since": "HEAD",
+                "root": root.to_string_lossy(),
+                "path": ".",
+                "depth": 2,
+                "top": 20
+            }),
+        )
+        .unwrap();
+        assert_eq!(actual["schema_version"], 1);
+        assert_eq!(
+            actual["provenance"]["head_graph"],
+            "indexed_worktree_snapshot"
+        );
+        let listed = tools_list(ProtocolVersion::Current);
+        let temporal = listed["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "mmcg_temporal")
+            .unwrap();
+        assert_eq!(temporal["annotations"], json!({ "readOnlyHint": true }));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn temporal_tool_maps_midflight_non_sql_cancel_to_cancelled() {
+        let (root, mut store) = impact_fixture("temporal_cancel");
+        let cancel = store.cancel_handle();
+        let _hook = crate::temporal::install_temporal_test_hook(
+            crate::temporal::TemporalTestStage::AfterImpact,
+            move || cancel.cancel(),
+        );
+
+        let result = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({
+                "name": "mmcg_temporal",
+                "arguments": {
+                    "since": "HEAD",
+                    "root": root.to_string_lossy(),
+                    "path": ".",
+                    "depth": 2,
+                    "top": 20
+                }
+            }),
+        )
+        .unwrap();
+        let content = unwrap_content(&result);
+
+        assert_eq!(
+            content.get("code").and_then(Value::as_str),
+            Some("cancelled")
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn test_impact_is_an_exact_projection_of_change_impact() {
         let (root, mut store) = impact_fixture("projection");
         let full = handle_change_impact(
@@ -2764,8 +2928,9 @@ mod tests {
         }
         let order: Vec<_> = TOOLS.iter().map(|tool| tool.name).collect();
         let map = order.iter().position(|name| *name == "mmcg_map").unwrap();
-        assert_eq!(order[map + 1], "mmcg_change_impact");
-        assert_eq!(order[map + 2], "mmcg_test_impact");
+        assert_eq!(order[map + 1], "mmcg_temporal");
+        assert_eq!(order[map + 2], "mmcg_change_impact");
+        assert_eq!(order[map + 3], "mmcg_test_impact");
         std::fs::remove_file(path).ok();
     }
 
@@ -3059,7 +3224,7 @@ mod tests {
     #[test]
     fn tools_list_covers_every_handler() {
         let listed: Vec<&str> = TOOLS.iter().map(|t| t.name).collect();
-        assert_eq!(listed.len(), 25, "expected 25 tools, got {}", listed.len());
+        assert_eq!(listed.len(), 26, "expected 26 tools, got {}", listed.len());
         for name in &listed {
             assert!(
                 TOOLS.iter().any(|t| &t.name == name),

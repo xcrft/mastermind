@@ -396,7 +396,7 @@ struct SourceFileState {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct IndexFileState {
+pub(crate) struct IndexFileState {
     database: SourceFileState,
     wal: Option<SourceFileState>,
 }
@@ -733,6 +733,66 @@ impl Store {
         Ok(Self::from_connection(conn, db_path, snapshot_dir))
     }
 
+    /// Clone the exact connection snapshot into a private writable database.
+    ///
+    /// Temporal analysis uses this to rewind changed files to a Git baseline
+    /// without checking out files or mutating the repository index. `VACUUM
+    /// INTO` reads through this connection, so rows that came from an active
+    /// WAL snapshot are retained. The only writes land under a temporary
+    /// directory owned by the returned [`Store`].
+    pub(crate) fn private_writable_snapshot(&self) -> SqlResult<Self> {
+        let state = index_file_state(&self.db_path)?;
+        let source_bytes = state
+            .database
+            .len
+            .checked_add(state.wal.as_ref().map_or(0, |wal| wal.len))
+            .ok_or_else(sqlite_snapshot_too_large)?;
+        if source_bytes > READ_ONLY_SNAPSHOT_MAX_BYTES {
+            return Err(sqlite_snapshot_too_large());
+        }
+        let snapshot_dir = tempfile::Builder::new()
+            .prefix("mastermind-temporal-index-")
+            .tempdir()
+            .map_err(|error| sqlite_io_error("create temporal index snapshot", error))?;
+        let snapshot_path = snapshot_dir.path().join("mmcg.db");
+        let query_only = self
+            .conn
+            .query_row("PRAGMA query_only", [], |row| row.get::<_, i64>(0))?
+            != 0;
+        if query_only {
+            self.conn.execute_batch("PRAGMA query_only = OFF;")?;
+        }
+        let vacuum = self.conn.execute(
+            "VACUUM INTO ?1",
+            params![snapshot_path.to_string_lossy().as_ref()],
+        );
+        let restore = if query_only {
+            self.conn.execute_batch("PRAGMA query_only = ON;")
+        } else {
+            Ok(())
+        };
+        vacuum?;
+        restore?;
+
+        let conn = Connection::open(&snapshot_path)?;
+        conn.execute_batch(
+            r#"
+            PRAGMA foreign_keys = ON;
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
+            PRAGMA busy_timeout = 5000;
+            PRAGMA cache_size = -65536;
+            "#,
+        )?;
+        let mut snapshot = Self::from_connection(conn, snapshot_path, Some(snapshot_dir));
+        snapshot.interrupt_source = Arc::clone(&self.interrupt_source);
+        snapshot.set_default_work_budget(self.default_work_budget());
+        if !snapshot.schema_current()? {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        Ok(snapshot)
+    }
+
     pub fn schema_current(&self) -> SqlResult<bool> {
         Ok(self.meta_value("schema_version")?.as_deref() == Some(SCHEMA_VERSION))
     }
@@ -759,6 +819,48 @@ impl Store {
     /// override it once at startup from `MMCG_QUERY_BUDGET_MS`.
     pub fn default_work_budget(&self) -> WorkBudget {
         self.default_budget.get()
+    }
+
+    /// Remaining effective budget of the innermost active guard. Separate
+    /// private SQLite snapshots use this to preserve the parent request's
+    /// deadline and operation cap instead of starting a fresh allowance.
+    pub(crate) fn remaining_work_budget(&self) -> WorkBudget {
+        let stack = self.guard_stack.borrow();
+        let Some(frame) = stack.last() else {
+            return self.default_work_budget();
+        };
+        let now = Instant::now();
+        WorkBudget {
+            deadline: frame
+                .deadline
+                .map(|deadline| deadline.saturating_duration_since(now)),
+            op_ticks: frame.op_cap.map(|cap| {
+                let used = self
+                    .ops_counter
+                    .load(Ordering::Relaxed)
+                    .saturating_sub(frame.ops_baseline);
+                cap.saturating_sub(used)
+            }),
+        }
+    }
+
+    /// Cooperative check for non-SQL phases inside a guarded graph request.
+    /// It shares the same cancel/budget marker used by SQLite so transports
+    /// keep returning `cancelled` and `work_limit_exceeded` consistently.
+    pub(crate) fn work_interrupted(&self) -> bool {
+        if self.interrupt_source.load(Ordering::SeqCst) == INTERRUPT_CANCEL {
+            return true;
+        }
+        let expired = self
+            .guard_stack
+            .borrow()
+            .last()
+            .is_some_and(|frame| frame.expired(&self.ops_counter));
+        if expired {
+            self.interrupt_source
+                .store(INTERRUPT_BUDGET, Ordering::SeqCst);
+        }
+        expired
     }
 
     /// Override the default work budget directly — used by tests that need an
@@ -820,7 +922,7 @@ impl Store {
         stack.push(frame);
         drop(stack);
         self.install_progress_handler();
-        if expired {
+        if expired && self.interrupt_source.load(Ordering::SeqCst) != INTERRUPT_CANCEL {
             self.interrupt_source
                 .store(INTERRUPT_BUDGET, Ordering::SeqCst);
         }
@@ -849,7 +951,9 @@ impl Store {
             1_000,
             Some(move || {
                 ops_counter.fetch_add(1, Ordering::Relaxed);
-                if frame.expired(&ops_counter) {
+                if interrupt_source.load(Ordering::SeqCst) == INTERRUPT_CANCEL {
+                    true
+                } else if frame.expired(&ops_counter) {
                     interrupt_source.store(INTERRUPT_BUDGET, Ordering::SeqCst);
                     true
                 } else {
@@ -1742,6 +1846,13 @@ impl Store {
                 Box::new(error),
             )
         })
+    }
+
+    /// Metadata token for the canonical source database and active WAL, used
+    /// by long read-only analyses to reject a result assembled while an
+    /// external watcher advanced the index.
+    pub(crate) fn source_index_state(&self) -> SqlResult<IndexFileState> {
+        index_file_state(&self.db_path)
     }
 
     pub fn begin_read_snapshot(&self) -> SqlResult<()> {
@@ -3624,6 +3735,32 @@ mod tests {
             .is_err());
         assert_eq!(read_only.symbol_count().unwrap(), 1);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn private_writable_snapshot_isolated_from_read_only_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("index.db");
+        {
+            let source = Store::open(&path).unwrap();
+            source.set_meta("temporal_probe", "source").unwrap();
+        }
+        let before = directory_bytes(directory.path());
+        let source = Store::open_read_only(&path).unwrap();
+
+        let snapshot = source.private_writable_snapshot().unwrap();
+        snapshot.set_meta("temporal_probe", "snapshot").unwrap();
+
+        assert_eq!(
+            source.meta_value("temporal_probe").unwrap().as_deref(),
+            Some("source")
+        );
+        assert_eq!(
+            snapshot.meta_value("temporal_probe").unwrap().as_deref(),
+            Some("snapshot")
+        );
+        assert!(!snapshot.db_path().starts_with(directory.path()));
+        assert_eq!(directory_bytes(directory.path()), before);
     }
 
     #[test]

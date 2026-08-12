@@ -1893,7 +1893,7 @@ fn excerpt_around(body: &str, start: usize, end: usize) -> String {
     truncate_text(output.trim(), 280)
 }
 
-fn discover_codeowners(root: &Path) -> Option<PathBuf> {
+pub(crate) fn discover_codeowners(root: &Path) -> Option<PathBuf> {
     exact_directory(root, ".github")
         .and_then(|directory| exact_regular_file(&directory, "CODEOWNERS"))
         .or_else(|| exact_regular_file(root, "CODEOWNERS"))
@@ -2310,6 +2310,114 @@ struct OwnerRule {
     matchers: Vec<GlobMatcher>,
     owners: Vec<String>,
     owners_truncated: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct CodeownersResolution {
+    pub owners_by_path: BTreeMap<String, Vec<String>>,
+    pub partial: bool,
+    pub diagnostics_truncated: bool,
+    pub diagnostics: Vec<String>,
+}
+
+/// Resolve CODEOWNERS text for a bounded path set using the same last-match
+/// semantics as Lens evidence. This pure projection is shared by temporal
+/// analysis so base and head ownership are compared with identical syntax.
+#[cfg(test)]
+pub(crate) fn resolve_codeowners_bytes(
+    bytes: &[u8],
+    paths: &[String],
+) -> Result<CodeownersResolution, &'static str> {
+    resolve_codeowners_bytes_controlled(bytes, paths, &|| false)
+}
+
+pub(crate) fn resolve_codeowners_bytes_controlled(
+    bytes: &[u8],
+    paths: &[String],
+    interrupted: &dyn Fn() -> bool,
+) -> Result<CodeownersResolution, &'static str> {
+    const MATCH_WORK_LIMIT: usize = 5_000_000;
+    if bytes.len() as u64 >= MAX_CODEOWNERS_BYTES {
+        return Err("codeowners_too_large");
+    }
+    let text = std::str::from_utf8(strip_utf8_bom(bytes)).map_err(|_| "invalid_utf8")?;
+    let mut rules = Vec::new();
+    let mut partial = false;
+    let mut diagnostics = Vec::new();
+    let mut diagnostics_truncated = false;
+    for (line_index, line) in text.lines().enumerate() {
+        if interrupted() {
+            return Err("work_interrupted");
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if rules.len() >= MAX_CODEOWNER_RULES {
+            partial = true;
+            diagnostics.push("codeowner_rule_limit".to_string());
+            break;
+        }
+        match parse_owner_rule(trimmed) {
+            Ok(rule) => {
+                if rule.owners_truncated {
+                    partial = true;
+                    if diagnostics.len() < MAX_DIAGNOSTICS.saturating_sub(1) {
+                        diagnostics.push(format!("codeowner_owner_limit:{}", line_index + 1));
+                    } else {
+                        diagnostics_truncated = true;
+                    }
+                }
+                rules.push(rule);
+            }
+            Err(()) => {
+                partial = true;
+                if diagnostics.len() < MAX_DIAGNOSTICS.saturating_sub(1) {
+                    diagnostics.push(format!("invalid_codeowner_pattern:{}", line_index + 1));
+                } else {
+                    diagnostics_truncated = true;
+                }
+            }
+        }
+    }
+    let mut owners_by_path = BTreeMap::new();
+    let mut operations = 0usize;
+    'paths: for path in paths {
+        let mut owners = None;
+        for rule in &rules {
+            operations = operations.saturating_add(1);
+            if operations.is_multiple_of(1_024) && interrupted() {
+                return Err("work_interrupted");
+            }
+            if operations > MATCH_WORK_LIMIT {
+                partial = true;
+                if diagnostics.len() < MAX_DIAGNOSTICS.saturating_sub(1) {
+                    diagnostics.push("codeowner_match_work_limit".to_string());
+                } else {
+                    diagnostics_truncated = true;
+                }
+                break 'paths;
+            }
+            if rule.matches(path) {
+                owners = Some(rule.owners.clone());
+            }
+        }
+        if let Some(owners) = owners {
+            owners_by_path.insert(path.clone(), owners);
+        }
+    }
+    if diagnostics_truncated {
+        diagnostics.truncate(MAX_DIAGNOSTICS.saturating_sub(1));
+        diagnostics.push("codeowner_diagnostic_limit".to_string());
+    }
+    diagnostics.sort();
+    diagnostics.dedup();
+    Ok(CodeownersResolution {
+        owners_by_path,
+        partial,
+        diagnostics_truncated,
+        diagnostics,
+    })
 }
 
 impl OwnerRule {
@@ -2906,5 +3014,19 @@ mod tests {
         assert!(snapshot.partial);
         assert_eq!(snapshot.sources.items[0].status, "error");
         assert_eq!(snapshot.diagnostics.items[0].code, "codeowners_too_large");
+    }
+
+    #[test]
+    fn pure_codeowners_resolution_bounds_invalid_line_diagnostics() {
+        let bytes = "!\n".repeat(MAX_CODEOWNER_RULES + 10_000);
+        let resolution =
+            resolve_codeowners_bytes(bytes.as_bytes(), &["src/pay.rs".to_string()]).unwrap();
+
+        assert!(resolution.partial);
+        assert!(resolution.diagnostics.len() <= MAX_DIAGNOSTICS);
+        assert!(resolution
+            .diagnostics
+            .iter()
+            .any(|value| value == "codeowner_diagnostic_limit"));
     }
 }

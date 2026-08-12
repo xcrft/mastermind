@@ -9,7 +9,7 @@
 | transport | stdio |
 | command | `mastermind serve` |
 | protocol | MCP 2025-11-25; legacy 2024-11-05 |
-| tools | 25: 24 read-only, 1 additive local write (see below) |
+| tools | 26: 25 read-only, 1 additive local write (see below) |
 | resources | none |
 | prompts | none |
 
@@ -67,7 +67,8 @@ The `--index` flag is global and must come before `serve`.
   `mmcg_symbols_in_file`.
 - Relationships and architecture: `mmcg_callers`, `mmcg_callees`,
   `mmcg_imports`, `mmcg_imported_by`, `mmcg_impact`, `mmcg_api_surface`,
-  `mmcg_centrality`, `mmcg_dependency_cycles`, `mmcg_unreferenced`, `mmcg_semantic`, `mmcg_map`.
+  `mmcg_centrality`, `mmcg_dependency_cycles`, `mmcg_unreferenced`,
+  `mmcg_semantic`, `mmcg_map`, `mmcg_temporal`.
 - Change analysis: `mmcg_symbols_changed_since`, `mmcg_change_class`,
   `mmcg_change_impact`, `mmcg_test_impact`, `mmcg_recent_changes`.
 - Workflow state: `mmcg_tasks`, `mmcg_history`, `mmcg_status`, `mmcg_scratchpad_read`, and the

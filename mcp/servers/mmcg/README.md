@@ -63,6 +63,7 @@ mmcg enrich --scip index.scip # optional compiler-resolved overlay
 mmcg status
 mmcg map .
 mmcg impact --since main
+mmcg temporal --since main
 mmcg ui --since main
 ```
 
@@ -94,14 +95,14 @@ See the [client integration guides](https://github.com/xcrft/mastermind/tree/mai
 |---|---|
 | Symbol graph | Search, callers, callees, imports, outlines, API surface |
 | Semantic overlay | Optional SCIP definitions, references, implementations, and provenance |
-| Architecture | Project map, centrality, dependency cycles, unreferenced candidates |
+| Architecture | Project map, temporal drift, centrality, dependency cycles, unreferenced candidates |
 | Change analysis | Git-aware symbol changes, blast radius, component crossings |
 | Local review UI | Read-only diff-first Lens with bounded SARIF, coverage, JUnit, OTLP, project-knowledge, ownership, and churn overlays |
 | Test selection | Direct, transitive, and heuristic candidates with evidence |
 | Workflow gates | `verify-spec`, `audit-spec`, and `run-task` |
 | Local coordination | Bounded additive scratchpad and indexed project history |
 
-The MCP surface contains 24 read-only tools and one additive local scratchpad
+The MCP surface contains 25 read-only tools and one additive local scratchpad
 write. Results are bounded and return precision or truncation notes when the
 engine cannot prove completeness.
 

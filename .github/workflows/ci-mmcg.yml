@@ -120,6 +120,10 @@ jobs:
       - name: cargo test --all
         run: cargo test --all --locked --target ${{ matrix.target }}
 
+      - name: Lens DOM + accessibility regressions
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: node --test assets/lens/app.test.cjs
+
       - name: cargo build --release
         run: cargo build --release --locked --target ${{ matrix.target }}
 

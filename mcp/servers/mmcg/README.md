@@ -62,6 +62,7 @@ mmcg index .
 mmcg status
 mmcg map .
 mmcg impact --since main
+mmcg ui --since main
 ```
 
 `index` is incremental by default and writes `.mastermind/mmcg.db`. Discovery
@@ -93,6 +94,7 @@ See the [client integration guides](https://github.com/xcrft/mastermind/tree/mai
 | Symbol graph | Search, callers, callees, imports, outlines, API surface |
 | Architecture | Project map, centrality, dependency cycles, unreferenced candidates |
 | Change analysis | Git-aware symbol changes, blast radius, component crossings |
+| Local review UI | Read-only diff-first Lens with bounded evidence traces |
 | Test selection | Direct, transitive, and heuristic candidates with evidence |
 | Workflow gates | `verify-spec`, `audit-spec`, and `run-task` |
 | Local coordination | Bounded additive scratchpad and indexed project history |

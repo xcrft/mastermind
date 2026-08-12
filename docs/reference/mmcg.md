@@ -130,6 +130,10 @@ mmcg map . --format mermaid
 mmcg impact --since main --format text --depth 3 --top 100
 mmcg impact --since HEAD~1 --format json
 
+# Serve the local, read-only diff-first Lens UI on an ephemeral loopback port.
+mmcg ui --since main
+mmcg ui --since origin/main --path src --depth 2 --top 50 --production-only
+
 # Health-check the project setup (index, gitignore, CLAUDE.md, MCP config,
 # `mmcg serve` handshake). Exit code 1 if any check fails — wire into CI.
 mmcg doctor                                          # human-readable report
@@ -247,6 +251,28 @@ When to use `--force`:
 **Best practice:** pick one project root (usually `.` from your project's top directory) and stick with it. `mmcg watch` always uses the root you pass at startup. If you accidentally indexed a different root, run `mmcg index --force <correct-root>` to rebuild from scratch.
 
 The index lives at `.mastermind/mmcg.db` in the current directory by default. Override with `--index <path>` or env var `MMCG_INDEX_PATH`.
+
+## Mastermind Lens (`mmcg ui`)
+
+Lens is a browser review surface for one baseline-to-working-tree change. It
+does not maintain a second analysis engine: `/api/lens` wraps the existing
+schema-v1 project-map and change-impact responses, including their truncation,
+precision, collision, and work-limit notes.
+
+The server binds only to `127.0.0.1`; port `0` is the default and lets the OS
+choose a free port. It accepts same-origin `GET`/`HEAD` requests, serves embedded
+offline assets under a restrictive content-security policy, and opens the
+existing SQLite index in query-only mode. A checkpointed index is opened
+directly as immutable; an active WAL is copied with the database into a bounded
+private temporary snapshot (2 GiB and at most 60 seconds, or the shorter request
+deadline), so Lens never creates or changes source sidecars.
+Refreshes fail closed when the repository, index, WAL, baseline, or work
+snapshot changes, or when indexed source files disappeared. There are no
+source-content or mutation routes.
+
+`--since` is required. `--path`, `--depth 1..5`, `--top 1..100`, and
+`--production-only` bound the initial review. Run `mmcg index .` first; Lens
+will report a missing or stale index rather than create or update one.
 
 ## MCP server usage
 

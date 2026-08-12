@@ -17,6 +17,7 @@ pub mod executor_report;
 pub mod fingerprint;
 pub mod hex;
 pub mod indexer;
+pub mod lens;
 pub mod lessons;
 pub mod mcp;
 pub mod miner;

@@ -16,6 +16,7 @@ publish = ["crates-io"]
 # Keep the published tarball small — exclude build output, smoke fixtures, etc.
 exclude = [
     "target/*",
+    "assets/lens/*.test.cjs",
     "*.db",
     "*.db-shm",
     "*.db-wal",
@@ -63,6 +64,7 @@ ed25519-dalek = { version = "3", features = ["rand_core"] }
 libc = "0.2"
 similar = "3.1"
 fs2 = "0.4"
+tempfile = "3"
 
 # YAML frontmatter in spec files. `serde_norway` is the maintained fork of
 # `serde_yaml` (archived upstream Sept 2024) — switched to it from `serde_yml`
@@ -84,9 +86,6 @@ dirs = "6"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
-
-[dev-dependencies]
-tempfile = "3"
 
 [[bench]]
 name = "indexer"

@@ -517,6 +517,12 @@ class RepositoryDeliveryContractTests(unittest.TestCase):
             "GitHub Docker Actions must use the default root user for GITHUB_WORKSPACE",
         )
 
+    def test_docker_action_copies_compile_time_lens_assets(self):
+        dockerfile = (ROOT / "Dockerfile.audit-action").read_text(encoding="utf-8")
+        self.assertIn(
+            "COPY mcp/servers/mmcg/assets ./mcp/servers/mmcg/assets", dockerfile
+        )
+
     def test_docker_from_detector_fails_closed_on_every_stage_form(self):
         dockerfile = (ROOT / "Dockerfile.audit-action").read_text(encoding="utf-8")
         approved = validator.dockerfile_from_images(dockerfile)

@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    >
+    <meta name="description" content="Local, read-only change impact review for Mastermind repositories.">
+    <title>Mastermind Lens</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#trace-heading">Skip to blast trace</a>
+
+    <header class="masthead">
+      <div class="masthead__calibration" aria-hidden="true">
+        <span>00</span><span>25</span><span>50</span><span>75</span><span>100</span>
+      </div>
+
+      <div class="masthead__body">
+        <div class="identity-block">
+          <p class="eyebrow">Local change intelligence</p>
+          <div class="wordmark">
+            <span class="wordmark__mark" aria-hidden="true">M</span>
+            <div>
+              <h1>Mastermind Lens</h1>
+              <p>Diff-first blast trace</p>
+            </div>
+          </div>
+        </div>
+
+        <dl class="revision-strip" aria-label="Repository revision">
+          <div class="revision-strip__repo">
+            <dt>Repository</dt>
+            <dd id="repository-name">—</dd>
+            <dd class="revision-strip__root" id="repository-root">—</dd>
+          </div>
+          <div>
+            <dt>Baseline</dt>
+            <dd id="baseline-ref">—</dd>
+            <dd class="revision-strip__oid"><span id="baseline-oid">———————</span></dd>
+          </div>
+          <div class="revision-strip__arrow" aria-hidden="true">→</div>
+          <div>
+            <dt>Head</dt>
+            <dd>Working copy</dd>
+            <dd class="revision-strip__oid"><span id="head-oid">———————</span></dd>
+          </div>
+        </dl>
+
+        <div class="runtime-block">
+          <div class="runtime-flags" aria-label="Runtime restrictions">
+            <span>Local</span>
+            <span>Read only</span>
+          </div>
+          <button class="refresh-button" id="refresh-button" type="button" aria-label="Refresh Lens snapshot">
+            <span class="refresh-button__glyph" aria-hidden="true">↻</span>
+            <span>Refresh snapshot</span>
+          </button>
+          <p class="snapshot-age" id="snapshot-age">Awaiting first scan</p>
+        </div>
+      </div>
+    </header>
+
+    <main class="shell">
+      <section class="notice-stack" id="notice-stack" aria-label="Snapshot notices" hidden></section>
+
+      <section class="instrument-panel" aria-labelledby="instrument-heading">
+        <div class="instrument-panel__label">
+          <p class="section-index">01 / Exposure</p>
+          <h2 id="instrument-heading">Change instrument</h2>
+          <p id="instrument-summary">Calibrating the current diff.</p>
+        </div>
+
+        <div class="metric-strip" id="metric-strip">
+          <article class="metric" data-metric="files">
+            <p class="metric__index">A</p>
+            <p class="metric__value" id="metric-files">—</p>
+            <h3>Changed files</h3>
+            <p class="metric__note" id="metric-files-note">Pending</p>
+          </article>
+          <article class="metric" data-metric="symbols">
+            <p class="metric__index">B</p>
+            <p class="metric__value" id="metric-symbols">—</p>
+            <h3>Changed symbols</h3>
+            <p class="metric__note" id="metric-symbols-note">Pending</p>
+          </article>
+          <article class="metric" data-metric="impact">
+            <p class="metric__index">C</p>
+            <p class="metric__value" id="metric-impact">—</p>
+            <h3>Impacted symbols</h3>
+            <p class="metric__note" id="metric-impact-note">Pending</p>
+          </article>
+          <article class="metric metric--risk" data-metric="crossings">
+            <p class="metric__index">D</p>
+            <p class="metric__value" id="metric-crossings">—</p>
+            <h3>API crossings</h3>
+            <p class="metric__note" id="metric-crossings-note">Pending</p>
+          </article>
+          <article class="metric metric--tests" data-metric="tests">
+            <p class="metric__index">E</p>
+            <p class="metric__value" id="metric-tests">—</p>
+            <h3>Candidate tests</h3>
+            <p class="metric__note" id="metric-tests-note">Pending</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="control-deck" aria-labelledby="controls-heading">
+        <div class="control-deck__heading">
+          <p class="section-index">02 / Aperture</p>
+          <h2 id="controls-heading">Trace controls</h2>
+        </div>
+
+        <div class="search-control">
+          <label for="trace-search">Search trace</label>
+          <div class="search-control__field">
+            <span aria-hidden="true">⌕</span>
+            <input
+              id="trace-search"
+              type="search"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="symbol, file, kind, component"
+              disabled
+            >
+            <button id="clear-search" type="button" aria-label="Clear trace search" disabled>Clear</button>
+          </div>
+        </div>
+
+        <div class="scope-control">
+          <span id="scope-label">Scope</span>
+          <div class="scope-control__buttons" role="group" aria-labelledby="scope-label">
+            <button type="button" data-scope="all" aria-pressed="true" disabled>All</button>
+            <button type="button" data-scope="changed" aria-pressed="false" disabled>Changed</button>
+            <button type="button" data-scope="impacted" aria-pressed="false" disabled>Impacted</button>
+            <button type="button" data-scope="test" aria-pressed="false" disabled>Tests</button>
+          </div>
+        </div>
+
+        <button class="fit-button" id="fit-button" type="button" disabled>
+          <span class="fit-button__corners" aria-hidden="true">⌜⌟</span>
+          <span>Fit / reset</span>
+        </button>
+      </section>
+
+      <section class="component-deck" aria-labelledby="component-heading">
+        <div class="component-deck__heading">
+          <div>
+            <p class="section-index">03 / Boundaries</p>
+            <h2 id="component-heading">Component register</h2>
+          </div>
+          <p>Filter by architecture boundary</p>
+        </div>
+        <div class="component-list" id="component-list">
+          <p class="component-list__pending">Component evidence will appear after the scan.</p>
+        </div>
+      </section>
+
+      <div class="workspace">
+        <section class="trace-panel" aria-labelledby="trace-heading">
+          <header class="trace-panel__header">
+            <div>
+              <p class="section-index">04 / Blast trace</p>
+              <h2 id="trace-heading">Observed reach</h2>
+            </div>
+            <p class="trace-count" id="trace-count">0 visible / 0 returned</p>
+          </header>
+
+          <div class="lane-key" aria-label="Graph legend">
+            <span class="lane-key__changed"><i aria-hidden="true"></i>Changed</span>
+            <span class="lane-key__impact"><i aria-hidden="true"></i>Impacted</span>
+            <span class="lane-key__test"><i aria-hidden="true"></i>Test evidence</span>
+            <span class="lane-key__crossing"><i aria-hidden="true"></i>Boundary crossing</span>
+          </div>
+
+          <div class="trace-context" id="trace-context" aria-live="polite">
+            <div>
+              <p class="trace-context__mode">Preparing aperture</p>
+              <p class="trace-context__summary">The bounded graph will appear after the scan.</p>
+            </div>
+          </div>
+
+          <div class="graph-frame" id="graph-frame" aria-busy="true">
+            <svg
+              id="trace-graph"
+              class="trace-graph"
+              role="group"
+              aria-label="Blast trace graph. Select a node or evidence line for details."
+              preserveAspectRatio="xMinYMin meet"
+            ></svg>
+            <div class="mobile-trace-list" id="mobile-trace-list" hidden></div>
+            <div class="graph-state" id="graph-state">
+              <div class="loading-calibration" aria-hidden="true"><span></span><span></span><span></span></div>
+              <p class="graph-state__eyebrow">Resolving repository evidence</p>
+              <h3>Calibrating blast trace</h3>
+              <p>Comparing the requested baseline with the current working copy.</p>
+            </div>
+          </div>
+        </section>
+
+        <aside class="inspector" aria-labelledby="inspector-heading">
+          <header class="inspector__header">
+            <p class="section-index">05 / Evidence</p>
+            <h2 id="inspector-heading">Claim inspector</h2>
+            <span class="inspector__mode">Repository facts only</span>
+          </header>
+          <div class="inspector__body" id="inspector-body">
+            <div class="inspector-empty">
+              <span class="inspector-empty__crosshair" aria-hidden="true">+</span>
+              <h3>Select a trace claim</h3>
+              <p>Choose a symbol or evidence line to inspect its source, depth, precision, and seeds.</p>
+            </div>
+          </div>
+        </aside>
+      </div>
+
+      <section class="method-ledger" aria-labelledby="method-heading">
+        <header>
+          <p class="section-index">06 / Calibration record</p>
+          <h2 id="method-heading">Precision &amp; limits</h2>
+        </header>
+        <div class="method-ledger__columns">
+          <section aria-labelledby="precision-heading">
+            <div class="method-ledger__subhead">
+              <h3 id="precision-heading">Precision notes</h3>
+              <span id="precision-count">0 notes</span>
+            </div>
+            <ul id="precision-list">
+              <li>Precision metadata will appear after the scan.</li>
+            </ul>
+          </section>
+          <section aria-labelledby="limits-heading">
+            <div class="method-ledger__subhead">
+              <h3 id="limits-heading">Work envelope</h3>
+              <span id="limits-count">Pending</span>
+            </div>
+            <dl id="limits-list">
+              <div><dt>Status</dt><dd>Awaiting snapshot</dd></div>
+            </dl>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <footer class="page-footer">
+      <p>Mastermind Lens reads local analysis only. It does not modify the repository or replace the full test gate.</p>
+      <p id="schema-label">Schema —</p>
+    </footer>
+
+    <div class="visually-hidden" id="status-region" role="status" aria-live="polite" aria-atomic="true"></div>
+  </body>
+</html>

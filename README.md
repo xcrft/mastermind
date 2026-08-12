@@ -60,6 +60,7 @@ cd your-project
 mastermind index .
 mastermind map .
 mastermind impact --since main
+mastermind ui --since main
 ```
 
 `index` is enough for codegraph, map, and impact features. Run `mastermind init` only when you want the complete spec-driven project workflow:
@@ -83,6 +84,18 @@ mastermind map . --production-only   # hide tests, fixtures, examples, generated
 ```
 
 The map highlights languages, components, entry points, dependency boundaries, hotspots, and cycles without asking an agent to grep the entire repository.
+
+### Review a change in Mastermind Lens
+
+```bash
+mastermind ui --since main
+```
+
+Lens serves a local, read-only, diff-first review UI on an ephemeral loopback
+port. It uses the same bounded architecture-map and change-impact schemas as the
+CLI/MCP surfaces, adds no CDN or telemetry, and never exposes a write endpoint.
+Use `--path`, `--depth`, `--top`, or `--production-only` to narrow a large
+monorepo review.
 
 ### Understand change and test impact
 

@@ -7,16 +7,20 @@
 //!   meta(key, value)
 
 use rusqlite::{
-    params, types::Value as SqlValue, Connection, OptionalExtension, Result as SqlResult,
+    params, types::Value as SqlValue, Connection, OpenFlags, OptionalExtension, Result as SqlResult,
 };
 use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const SCHEMA_VERSION: &str = "7";
+const READ_ONLY_SNAPSHOT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const READ_ONLY_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(60);
+const SNAPSHOT_COPY_BUFFER_BYTES: usize = 1024 * 1024;
 
 /// A per-request work-budget: a wall-clock deadline and/or a cap on SQLite
 /// progress-handler ticks (each tick fires every 1,000 VM instructions).
@@ -374,11 +378,268 @@ pub struct PendingEdge {
 
 pub struct Store {
     conn: Connection,
+    _snapshot_dir: Option<tempfile::TempDir>,
     db_path: PathBuf,
     guard_stack: RefCell<Vec<GuardFrame>>,
     ops_counter: Arc<AtomicU64>,
     interrupt_source: Arc<AtomicU8>,
     default_budget: Cell<WorkBudget>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SourceFileState {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct IndexFileState {
+    database: SourceFileState,
+    wal: Option<SourceFileState>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SnapshotCopyBudget {
+    max_bytes: u64,
+    deadline: Instant,
+}
+
+impl SnapshotCopyBudget {
+    fn for_request(request_deadline: Option<Instant>) -> Self {
+        let hard_deadline = Instant::now() + READ_ONLY_SNAPSHOT_TIMEOUT;
+        Self {
+            max_bytes: READ_ONLY_SNAPSHOT_MAX_BYTES,
+            deadline: request_deadline.map_or(hard_deadline, |value| value.min(hard_deadline)),
+        }
+    }
+}
+
+fn sqlite_io_error(context: &str, error: std::io::Error) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
+        Some(format!("{context}: {error}")),
+    )
+}
+
+fn sqlite_snapshot_changed() -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+        Some("index changed while creating a read-only snapshot".into()),
+    )
+}
+
+fn sqlite_snapshot_too_large() -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_TOOBIG),
+        Some("active index snapshot exceeds the read-only copy limit".into()),
+    )
+}
+
+fn sqlite_snapshot_timeout() -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_INTERRUPT),
+        Some("active index snapshot exceeded its copy deadline".into()),
+    )
+}
+
+fn sqlite_sidecar_path(db_path: &Path, suffix: &str) -> PathBuf {
+    let mut value = db_path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+fn source_file_state(path: &Path) -> SqlResult<SourceFileState> {
+    let metadata = std::fs::metadata(path).map_err(|error| sqlite_io_error("read index", error))?;
+    Ok(SourceFileState {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
+}
+
+fn optional_source_file_state(path: &Path) -> SqlResult<Option<SourceFileState>> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(Some(SourceFileState {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+        })),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(sqlite_io_error("read index sidecar", error)),
+    }
+}
+
+fn index_file_state(db_path: &Path) -> SqlResult<IndexFileState> {
+    Ok(IndexFileState {
+        database: source_file_state(db_path)?,
+        wal: optional_source_file_state(&sqlite_sidecar_path(db_path, "-wal"))?,
+    })
+}
+
+fn copy_file_bounded(
+    source: &Path,
+    destination: &Path,
+    budget: SnapshotCopyBudget,
+    copied: &mut u64,
+) -> SqlResult<()> {
+    if Instant::now() >= budget.deadline {
+        return Err(sqlite_snapshot_timeout());
+    }
+    let mut input = std::fs::File::open(source)
+        .map_err(|error| sqlite_io_error("open index snapshot source", error))?;
+    let mut output = std::fs::File::create(destination)
+        .map_err(|error| sqlite_io_error("create private index snapshot", error))?;
+    let mut buffer = vec![0u8; SNAPSHOT_COPY_BUFFER_BYTES];
+    loop {
+        if Instant::now() >= budget.deadline {
+            return Err(sqlite_snapshot_timeout());
+        }
+        let read_len = input
+            .read(&mut buffer)
+            .map_err(|error| sqlite_io_error("read index snapshot source", error))?;
+        if read_len == 0 {
+            break;
+        }
+        let read_bytes = u64::try_from(read_len).map_err(|_| sqlite_snapshot_too_large())?;
+        *copied = copied
+            .checked_add(read_bytes)
+            .filter(|value| *value <= budget.max_bytes)
+            .ok_or_else(sqlite_snapshot_too_large)?;
+        output
+            .write_all(&buffer[..read_len])
+            .map_err(|error| sqlite_io_error("write private index snapshot", error))?;
+    }
+    output
+        .flush()
+        .map_err(|error| sqlite_io_error("flush private index snapshot", error))
+}
+
+fn copy_index_snapshot(
+    db_path: &Path,
+    budget: SnapshotCopyBudget,
+) -> SqlResult<(tempfile::TempDir, PathBuf)> {
+    if Instant::now() >= budget.deadline {
+        return Err(sqlite_snapshot_timeout());
+    }
+    let before = index_file_state(db_path)?;
+    let expected_bytes = before
+        .database
+        .len
+        .checked_add(before.wal.as_ref().map_or(0, |wal| wal.len))
+        .ok_or_else(sqlite_snapshot_too_large)?;
+    if expected_bytes > budget.max_bytes {
+        return Err(sqlite_snapshot_too_large());
+    }
+    let snapshot_dir = tempfile::Builder::new()
+        .prefix("mastermind-lens-index-")
+        .tempdir()
+        .map_err(|error| sqlite_io_error("create private index snapshot", error))?;
+    let file_name = db_path
+        .file_name()
+        .ok_or_else(|| rusqlite::Error::InvalidPath(db_path.to_path_buf()))?;
+    let snapshot_path = snapshot_dir.path().join(file_name);
+    let source_wal = sqlite_sidecar_path(db_path, "-wal");
+    let snapshot_wal = sqlite_sidecar_path(&snapshot_path, "-wal");
+
+    let mut copied = 0;
+    copy_file_bounded(db_path, &snapshot_path, budget, &mut copied)?;
+    if before.wal.as_ref().is_some_and(|wal| wal.len > 0) {
+        copy_file_bounded(&source_wal, &snapshot_wal, budget, &mut copied)?;
+    }
+    if index_file_state(db_path)? == before {
+        return Ok((snapshot_dir, snapshot_path));
+    }
+    Err(sqlite_snapshot_changed())
+}
+
+fn open_private_index_snapshot(
+    db_path: &Path,
+    budget: SnapshotCopyBudget,
+) -> SqlResult<(Connection, tempfile::TempDir)> {
+    let (snapshot_dir, snapshot_path) = copy_index_snapshot(db_path, budget)?;
+    let connection = Connection::open_with_flags(
+        &snapshot_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE,
+    )?;
+    Ok((connection, snapshot_dir))
+}
+
+fn encode_sqlite_uri_path(path: &[u8]) -> Vec<u8> {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = Vec::with_capacity(path.len());
+    let mut previous_was_slash = false;
+    for &byte in path {
+        let byte = if cfg!(windows) && byte == b'\\' {
+            b'/'
+        } else {
+            byte
+        };
+        if byte == b'/' {
+            if !previous_was_slash {
+                encoded.push(byte);
+            }
+            previous_was_slash = true;
+            continue;
+        }
+        previous_was_slash = false;
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b':') {
+            encoded.push(byte);
+        } else {
+            encoded.push(b'%');
+            encoded.push(HEX[usize::from(byte >> 4)]);
+            encoded.push(HEX[usize::from(byte & 0x0f)]);
+        }
+    }
+    encoded
+}
+
+#[cfg(unix)]
+fn immutable_sqlite_uri(db_path: &Path) -> SqlResult<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    let absolute = std::path::absolute(db_path)
+        .map_err(|_| rusqlite::Error::InvalidPath(db_path.to_path_buf()))?;
+    let mut uri = b"file:".to_vec();
+    uri.extend(encode_sqlite_uri_path(absolute.as_os_str().as_bytes()));
+    uri.extend_from_slice(b"?mode=ro&immutable=1&cache=private");
+    Ok(PathBuf::from(OsString::from_vec(uri)))
+}
+
+#[cfg(not(unix))]
+fn immutable_sqlite_uri(db_path: &Path) -> SqlResult<PathBuf> {
+    let absolute = std::path::absolute(db_path)
+        .map_err(|_| rusqlite::Error::InvalidPath(db_path.to_path_buf()))?;
+    let text = absolute
+        .to_str()
+        .ok_or_else(|| rusqlite::Error::InvalidPath(absolute.clone()))?;
+    let path = windows_sqlite_uri_path(text)
+        .ok_or_else(|| rusqlite::Error::InvalidPath(absolute.clone()))?;
+    let mut uri = b"file:".to_vec();
+    uri.extend(path);
+    uri.extend_from_slice(b"?mode=ro&immutable=1&cache=private");
+    let uri = String::from_utf8(uri).map_err(|_| rusqlite::Error::InvalidPath(absolute))?;
+    Ok(PathBuf::from(uri))
+}
+
+#[cfg(any(test, not(unix)))]
+fn windows_sqlite_uri_path(text: &str) -> Option<Vec<u8>> {
+    if text
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(r"\\?\UNC\"))
+    {
+        return None;
+    }
+    let text = text.strip_prefix(r"\\?\").unwrap_or(text);
+    if text.starts_with(r"\\") {
+        return None;
+    }
+    let normalized = text.replace('\\', "/");
+    let mut path = encode_sqlite_uri_path(normalized.as_bytes());
+    if path.get(1) == Some(&b':') {
+        path.insert(0, b'/');
+    }
+    Some(path)
 }
 
 impl Store {
@@ -402,16 +663,91 @@ impl Store {
             PRAGMA cache_size = -65536;
             "#,
         )?;
-        let store = Self {
+        let store = Self::from_connection(conn, db_path, None);
+        store.init_schema()?;
+        Ok(store)
+    }
+
+    /// Open an existing index for query-only surfaces such as Lens.
+    ///
+    /// Unlike [`Store::open`], this never creates parent directories, creates
+    /// a database, creates WAL/SHM sidecars, changes journal settings, or runs
+    /// schema initialization. A missing or outdated index remains an explicit
+    /// operator error instead of a read-only command mutating repository state
+    /// while diagnosing it. A checkpointed database uses an immutable direct
+    /// connection. An active WAL is copied into a private temporary snapshot so
+    /// uncheckpointed rows remain visible without touching the source sidecars.
+    /// Long-running callers must reject a result if the source database or WAL
+    /// changes during the query, as Lens does around each refresh.
+    pub fn open_read_only(db_path: impl AsRef<Path>) -> SqlResult<Self> {
+        Self::open_read_only_with_deadline(db_path, None)
+    }
+
+    pub(crate) fn open_read_only_with_deadline(
+        db_path: impl AsRef<Path>,
+        request_deadline: Option<Instant>,
+    ) -> SqlResult<Self> {
+        let requested_path = db_path.as_ref();
+        let db_path = requested_path
+            .canonicalize()
+            .map_err(|error| sqlite_io_error("resolve read-only index", error))?;
+        let snapshot_budget = SnapshotCopyBudget::for_request(request_deadline);
+        let before = index_file_state(&db_path)?;
+        let (conn, snapshot_dir) = if before.wal.as_ref().is_some_and(|wal| wal.len > 0) {
+            let (conn, snapshot_dir) = open_private_index_snapshot(&db_path, snapshot_budget)?;
+            (conn, Some(snapshot_dir))
+        } else {
+            match immutable_sqlite_uri(&db_path) {
+                Ok(uri) => {
+                    let conn = Connection::open_with_flags(
+                        &uri,
+                        OpenFlags::SQLITE_OPEN_READ_ONLY
+                            | OpenFlags::SQLITE_OPEN_URI
+                            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                            | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE,
+                    )?;
+                    if index_file_state(&db_path)? != before {
+                        return Err(sqlite_snapshot_changed());
+                    }
+                    (conn, None)
+                }
+                Err(rusqlite::Error::InvalidPath(_)) => {
+                    let (conn, snapshot_dir) =
+                        open_private_index_snapshot(&db_path, snapshot_budget)?;
+                    (conn, Some(snapshot_dir))
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        conn.execute_batch(
+            r#"
+            PRAGMA foreign_keys = ON;
+            PRAGMA busy_timeout = 5000;
+            PRAGMA cache_size = -65536;
+            PRAGMA query_only = ON;
+            "#,
+        )?;
+        Ok(Self::from_connection(conn, db_path, snapshot_dir))
+    }
+
+    pub fn schema_current(&self) -> SqlResult<bool> {
+        Ok(self.meta_value("schema_version")?.as_deref() == Some(SCHEMA_VERSION))
+    }
+
+    fn from_connection(
+        conn: Connection,
+        db_path: PathBuf,
+        snapshot_dir: Option<tempfile::TempDir>,
+    ) -> Self {
+        Self {
             conn,
+            _snapshot_dir: snapshot_dir,
             db_path,
             guard_stack: RefCell::new(Vec::new()),
             ops_counter: Arc::new(AtomicU64::new(0)),
             interrupt_source: Arc::new(AtomicU8::new(INTERRUPT_NONE)),
             default_budget: Cell::new(WorkBudget::from_millis(DEFAULT_SERVE_BUDGET_MS)),
-        };
-        store.init_schema()?;
-        Ok(store)
+        }
     }
 
     /// The work budget applied at MCP tool dispatch / CLI query boundaries
@@ -2750,7 +3086,7 @@ fn tarjan_scc(adj: &std::collections::BTreeMap<String, Vec<String>>) -> Vec<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::env;
 
     /// Unique path per test — parallel tests can't share the file.
@@ -2761,12 +3097,196 @@ mod tests {
         p
     }
 
+    fn directory_bytes(path: &Path) -> BTreeMap<std::ffi::OsString, Vec<u8>> {
+        std::fs::read_dir(path)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), std::fs::read(entry.path()).unwrap())
+            })
+            .collect()
+    }
+
     #[test]
     fn schema_initializes() {
         let path = tmp_db("schema_initializes");
         let store = Store::open(&path).unwrap();
         assert_eq!(store.symbol_count().unwrap(), 0);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn read_only_open_never_creates_or_mutates_an_index() {
+        let missing = tmp_db("read_only_missing");
+        assert!(Store::open_read_only(&missing).is_err());
+        assert!(!missing.exists());
+
+        let path = tmp_db("read_only_existing");
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .insert_symbol("existing", "function", "src/lib.rs", 1, 2, None, None)
+                .unwrap();
+        }
+
+        let read_only = Store::open_read_only(&path).unwrap();
+        let query_only: i64 = read_only
+            .conn
+            .query_row("PRAGMA query_only", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(query_only, 1);
+        assert_eq!(read_only.symbol_count().unwrap(), 1);
+        assert!(read_only
+            .insert_symbol("forbidden", "function", "src/lib.rs", 3, 4, None, None)
+            .is_err());
+        assert_eq!(read_only.symbol_count().unwrap(), 1);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn read_only_open_handles_uri_reserved_filename_characters() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("index # %.db");
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .insert_symbol("existing", "function", "src/lib.rs", 1, 2, None, None)
+                .unwrap();
+        }
+        let before = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<BTreeSet<_>>();
+
+        let read_only = Store::open_read_only(&path).unwrap();
+        assert_eq!(read_only.symbol_count().unwrap(), 1);
+        drop(read_only);
+
+        let after = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn read_only_open_sees_an_active_wal_without_touching_its_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("active.db");
+        let writer = Store::open(&path).unwrap();
+        writer
+            .insert_symbol("in_wal", "function", "src/lib.rs", 1, 2, None, None)
+            .unwrap();
+        let before = directory_bytes(directory.path());
+
+        let read_only = Store::open_read_only(&path).unwrap();
+        assert!(read_only
+            .search_symbols("in_wal", None, None)
+            .unwrap()
+            .iter()
+            .any(|symbol| symbol.name == "in_wal"));
+        drop(read_only);
+
+        assert_eq!(directory_bytes(directory.path()), before);
+        drop(writer);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_open_follows_a_symlink_to_the_active_wal() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("real.db");
+        let alias = directory.path().join("alias.db");
+        let writer = Store::open(&path).unwrap();
+        writer
+            .insert_symbol(
+                "only_in_target_wal",
+                "function",
+                "src/lib.rs",
+                1,
+                2,
+                None,
+                None,
+            )
+            .unwrap();
+        symlink(&path, &alias).unwrap();
+        let before = directory_bytes(directory.path());
+
+        let read_only = Store::open_read_only(&alias).unwrap();
+        assert!(read_only
+            .search_symbols("only_in_target_wal", None, None)
+            .unwrap()
+            .iter()
+            .any(|symbol| symbol.name == "only_in_target_wal"));
+        drop(read_only);
+
+        assert_eq!(directory_bytes(directory.path()), before);
+        drop(writer);
+    }
+
+    #[test]
+    fn private_snapshot_copy_enforces_size_and_deadline_bounds() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("bounded.db");
+        let writer = Store::open(&path).unwrap();
+        writer
+            .insert_symbol("in_wal", "function", "src/lib.rs", 1, 2, None, None)
+            .unwrap();
+        let before = directory_bytes(directory.path());
+
+        let too_large = copy_index_snapshot(
+            &path,
+            SnapshotCopyBudget {
+                max_bytes: 1,
+                deadline: Instant::now() + Duration::from_secs(1),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            too_large.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::TooBig)
+        );
+
+        let timed_out = copy_index_snapshot(
+            &path,
+            SnapshotCopyBudget {
+                max_bytes: u64::MAX,
+                deadline: Instant::now(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            timed_out.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::OperationInterrupted)
+        );
+
+        let timed_out_open = match Store::open_read_only_with_deadline(&path, Some(Instant::now()))
+        {
+            Ok(_) => panic!("an expired request deadline must stop the WAL snapshot copy"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            timed_out_open.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::OperationInterrupted)
+        );
+        assert_eq!(directory_bytes(directory.path()), before);
+        drop(writer);
+    }
+
+    #[test]
+    fn windows_immutable_uri_paths_reject_unc_and_normalize_drives() {
+        assert_eq!(
+            String::from_utf8(windows_sqlite_uri_path(r"C:\repo\mmcg.db").unwrap()).unwrap(),
+            "/C:/repo/mmcg.db"
+        );
+        assert_eq!(
+            String::from_utf8(windows_sqlite_uri_path(r"\\?\C:\repo\mmcg.db").unwrap()).unwrap(),
+            "/C:/repo/mmcg.db"
+        );
+        assert!(windows_sqlite_uri_path(r"\\server\share\mmcg.db").is_none());
+        assert!(windows_sqlite_uri_path(r"\\?\UNC\server\share\mmcg.db").is_none());
     }
 
     #[test]

@@ -28,7 +28,7 @@
 //! - Per-file resolution: a symbol moved `a.py`→`b.py` shows as removed-from-a
 //!   + added-to-b, not "moved".
 
-use crate::indexer::{extractor_for_path, parse_blob};
+use crate::indexer::{extractor_for_path, parse_blob, MAX_INDEXABLE_FILE_SIZE};
 use crate::store::{Store, Symbol};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -46,6 +46,10 @@ use std::time::{Duration, Instant};
 
 pub const CHANGE_FILE_LIMIT: usize = 10_000;
 pub const GIT_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
+const CAT_FILE_RESPONSE_OVERHEAD: usize = 128;
+const BASELINE_BLOB_BATCH_OUTPUT_LIMIT: usize =
+    MAX_INDEXABLE_FILE_SIZE as usize + CAT_FILE_RESPONSE_OVERHEAD;
+const BASELINE_BLOB_TOTAL_LIMIT: usize = 64 * 1024 * 1024;
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Default `run_git` / `git_show_blob` subprocess deadline when
 /// `MMCG_GIT_TIMEOUT_MS` is unset — distinct from `GIT_TIMEOUT` above, which
@@ -871,21 +875,38 @@ fn baseline_blobs(
 ) -> Result<BTreeMap<String, Option<Vec<u8>>>, WorkingTreeDiffError> {
     let paths = files
         .iter()
+        .filter(|file| extractor_for_path(Path::new(&file.path)).is_some())
         .map(|file| file.path.clone())
         .collect::<Vec<_>>();
-    baseline_blobs_for_paths(repo, baseline_oid, &paths)
+    let mut blobs = files
+        .iter()
+        .map(|file| (file.path.clone(), None))
+        .collect::<BTreeMap<_, _>>();
+    blobs.extend(baseline_blobs_for_paths(repo, baseline_oid, &paths)?);
+    Ok(blobs)
 }
 
-/// Fetch a bounded set of blobs from one resolved baseline commit with a
-/// single `git cat-file --batch` process. Missing paths are returned as
-/// `None`, which is how temporal rewind represents files added after the
-/// baseline.
+/// Fetch a bounded set of blobs from one resolved baseline commit. Requests
+/// are split across bounded `git cat-file --batch` processes so the aggregate
+/// size of a large diff cannot trip the per-process output limit. Missing
+/// paths are returned as `None`, which is how temporal rewind represents files
+/// added after the baseline.
 pub(crate) fn baseline_blobs_for_paths(
     repo: &Path,
     baseline_oid: &str,
     paths: &[String],
 ) -> Result<BTreeMap<String, Option<Vec<u8>>>, WorkingTreeDiffError> {
     baseline_blobs_for_paths_controlled(repo, baseline_oid, paths, None, None)
+}
+
+fn accumulate_baseline_blob_bytes(
+    current: usize,
+    additional: usize,
+) -> Result<usize, WorkingTreeDiffError> {
+    current
+        .checked_add(additional)
+        .filter(|total| *total <= BASELINE_BLOB_TOTAL_LIMIT)
+        .ok_or(WorkingTreeDiffError::GitOutputLimit)
 }
 
 pub(crate) fn baseline_blobs_for_paths_controlled(
@@ -902,7 +923,7 @@ pub(crate) fn baseline_blobs_for_paths_controlled(
     let object_ids = baseline_blob_oids(repo, baseline_oid, paths, deadline, interrupted)?;
     let requests = paths
         .iter()
-        .filter_map(|path| object_ids.get(path).map(|oid| (path, oid)))
+        .filter_map(|path| object_ids.get(path).map(|oid| (path.clone(), oid.clone())))
         .collect::<Vec<_>>();
     let mut blobs = paths
         .iter()
@@ -911,8 +932,95 @@ pub(crate) fn baseline_blobs_for_paths_controlled(
     if requests.is_empty() {
         return Ok(blobs);
     }
-    let mut input = Vec::new();
+    let mut metadata_input = Vec::new();
     for (_, oid) in &requests {
+        metadata_input.extend_from_slice(oid.as_bytes());
+        metadata_input.push(b'\n');
+    }
+    let metadata = run_bounded_git_controlled(
+        repo,
+        &["cat-file", "--batch-check"],
+        Some(&metadata_input),
+        GIT_OUTPUT_LIMIT,
+        deadline,
+        interrupted,
+    )?;
+    if !metadata.success {
+        return Err(WorkingTreeDiffError::InvalidRef);
+    }
+
+    let mut metadata_lines = metadata.stdout.split(|byte| *byte == b'\n');
+    let mut sized_requests = Vec::with_capacity(requests.len());
+    let mut total_blob_bytes = 0usize;
+    for (path, expected_oid) in requests {
+        let line = metadata_lines
+            .next()
+            .filter(|line| !line.is_empty())
+            .ok_or(WorkingTreeDiffError::InvalidRef)?;
+        let line = std::str::from_utf8(line).map_err(|_| WorkingTreeDiffError::InvalidRef)?;
+        let mut fields = line.split_whitespace();
+        let returned_oid = fields.next().ok_or(WorkingTreeDiffError::InvalidRef)?;
+        let object_type = fields.next().ok_or(WorkingTreeDiffError::InvalidRef)?;
+        let size = fields
+            .next()
+            .and_then(|value| value.parse::<usize>().ok())
+            .ok_or(WorkingTreeDiffError::InvalidRef)?;
+        if returned_oid != expected_oid
+            || !matches!(object_type, "blob" | "commit" | "tree" | "tag")
+            || fields.next().is_some()
+        {
+            return Err(WorkingTreeDiffError::InvalidRef);
+        }
+        let response_size = size
+            .checked_add(CAT_FILE_RESPONSE_OVERHEAD)
+            .ok_or(WorkingTreeDiffError::GitOutputLimit)?;
+        if response_size > BASELINE_BLOB_BATCH_OUTPUT_LIMIT {
+            return Err(WorkingTreeDiffError::GitOutputLimit);
+        }
+        total_blob_bytes = accumulate_baseline_blob_bytes(total_blob_bytes, size)?;
+        sized_requests.push((path, expected_oid, size));
+    }
+    if metadata_lines.any(|line| !line.is_empty()) {
+        return Err(WorkingTreeDiffError::InvalidRef);
+    }
+
+    let mut batch_start = 0usize;
+    while batch_start < sized_requests.len() {
+        let mut batch_end = batch_start;
+        let mut expected_output = 0usize;
+        while batch_end < sized_requests.len() {
+            let response_size = sized_requests[batch_end]
+                .2
+                .saturating_add(CAT_FILE_RESPONSE_OVERHEAD);
+            if batch_end > batch_start
+                && expected_output.saturating_add(response_size) > BASELINE_BLOB_BATCH_OUTPUT_LIMIT
+            {
+                break;
+            }
+            expected_output = expected_output.saturating_add(response_size);
+            batch_end += 1;
+        }
+        fetch_baseline_blob_batch(
+            repo,
+            &sized_requests[batch_start..batch_end],
+            deadline,
+            interrupted,
+            &mut blobs,
+        )?;
+        batch_start = batch_end;
+    }
+    Ok(blobs)
+}
+
+fn fetch_baseline_blob_batch(
+    repo: &Path,
+    requests: &[(String, String, usize)],
+    deadline: Option<Instant>,
+    interrupted: Option<&dyn Fn() -> bool>,
+    blobs: &mut BTreeMap<String, Option<Vec<u8>>>,
+) -> Result<(), WorkingTreeDiffError> {
+    let mut input = Vec::new();
+    for (_, oid, _) in requests {
         input.extend_from_slice(oid.as_bytes());
         input.push(b'\n');
     }
@@ -920,7 +1028,7 @@ pub(crate) fn baseline_blobs_for_paths_controlled(
         repo,
         &["cat-file", "--batch"],
         Some(&input),
-        GIT_OUTPUT_LIMIT,
+        BASELINE_BLOB_BATCH_OUTPUT_LIMIT,
         deadline,
         interrupted,
     )?;
@@ -928,7 +1036,7 @@ pub(crate) fn baseline_blobs_for_paths_controlled(
         return Err(WorkingTreeDiffError::InvalidRef);
     }
     let mut cursor = 0usize;
-    for (path, expected_oid) in requests {
+    for (path, expected_oid, expected_size) in requests {
         let Some(relative_newline) = output.stdout[cursor..]
             .iter()
             .position(|byte| *byte == b'\n')
@@ -949,6 +1057,7 @@ pub(crate) fn baseline_blobs_for_paths_controlled(
             .ok_or(WorkingTreeDiffError::InvalidRef)?;
         if returned_oid != expected_oid
             || !matches!(object_type, "blob" | "commit" | "tree" | "tag")
+            || size != *expected_size
             || fields.next().is_some()
         {
             return Err(WorkingTreeDiffError::InvalidRef);
@@ -965,7 +1074,7 @@ pub(crate) fn baseline_blobs_for_paths_controlled(
     if cursor != output.stdout.len() {
         return Err(WorkingTreeDiffError::InvalidRef);
     }
-    Ok(blobs)
+    Ok(())
 }
 
 fn baseline_blob_oids(
@@ -1410,6 +1519,11 @@ mod tests {
         fs::write(p, content).unwrap();
     }
 
+    fn python_source_with_size(size: usize) -> String {
+        assert!(size >= 2);
+        format!("#{}\n", "x".repeat(size - 2))
+    }
+
     #[test]
     fn end_to_end_added_removed_changed_signature() {
         let dir = init_repo("e2e");
@@ -1680,6 +1794,102 @@ mod tests {
             .and_then(|value| value.as_ref())
             .is_some_and(|bytes| !bytes.is_empty()));
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn working_tree_diff_does_not_fetch_large_unsupported_baseline_blob() {
+        let dir = init_repo("unsupported_baseline_blob");
+        write(&dir, "src/lib.rs", "pub fn indexed() {}\n");
+        let asset = dir.join("asset.bin");
+        fs::File::create(&asset)
+            .unwrap()
+            .set_len((GIT_OUTPUT_LIMIT + 1) as u64)
+            .unwrap();
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&asset)
+            .unwrap()
+            .set_len((GIT_OUTPUT_LIMIT + 2) as u64)
+            .unwrap();
+
+        let store = indexed_worktree(&dir);
+        let changed = symbols_changed_in_worktree(store.store(), &dir, "HEAD").unwrap();
+
+        assert_eq!(changed.files.len(), 1);
+        assert_eq!(changed.files[0].path, "asset.bin");
+        assert!(changed.diff.added.is_empty());
+        assert!(changed.diff.removed.is_empty());
+        assert!(changed.diff.signature_changed.is_empty());
+        assert!(changed.diff.errors.is_empty());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn baseline_blob_batch_allows_single_indexable_blob_above_generic_git_limit() {
+        let dir = init_repo("single_large_indexable_blob");
+        let size = GIT_OUTPUT_LIMIT + 1024;
+        let body = python_source_with_size(size);
+        write(&dir, "src/large.py", &body);
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+        let baseline = resolve_commit(&dir, "HEAD").unwrap();
+
+        let blobs =
+            baseline_blobs_for_paths(&dir, &baseline, &["src/large.py".to_string()]).unwrap();
+
+        assert_eq!(
+            blobs.get("src/large.py").and_then(Option::as_deref),
+            Some(body.as_bytes())
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn baseline_blob_batch_chunks_indexable_aggregate_above_per_batch_limit() {
+        let dir = init_repo("aggregate_large_indexable_blobs");
+        let size = GIT_OUTPUT_LIMIT / 2 + 64 * 1024;
+        let first = python_source_with_size(size);
+        let second = python_source_with_size(size);
+        write(&dir, "src/first.py", &first);
+        write(&dir, "src/second.py", &second);
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+        let baseline = resolve_commit(&dir, "HEAD").unwrap();
+
+        let blobs = baseline_blobs_for_paths(
+            &dir,
+            &baseline,
+            &["src/first.py".to_string(), "src/second.py".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            blobs.get("src/first.py").and_then(Option::as_deref),
+            Some(first.as_bytes())
+        );
+        assert_eq!(
+            blobs.get("src/second.py").and_then(Option::as_deref),
+            Some(second.as_bytes())
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn baseline_blob_total_limit_is_inclusive_and_overflow_safe() {
+        assert_eq!(
+            accumulate_baseline_blob_bytes(BASELINE_BLOB_TOTAL_LIMIT - 1, 1),
+            Ok(BASELINE_BLOB_TOTAL_LIMIT)
+        );
+        assert_eq!(
+            accumulate_baseline_blob_bytes(BASELINE_BLOB_TOTAL_LIMIT, 1),
+            Err(WorkingTreeDiffError::GitOutputLimit)
+        );
+        assert_eq!(
+            accumulate_baseline_blob_bytes(usize::MAX, 1),
+            Err(WorkingTreeDiffError::GitOutputLimit)
+        );
     }
 
     #[test]

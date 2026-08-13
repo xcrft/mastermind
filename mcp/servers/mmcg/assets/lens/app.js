@@ -10,6 +10,7 @@
   const CONNECTED_PER_LANE = 5;
   const MOBILE_CANDIDATES_PER_PAGE = 5;
   const MOBILE_CONNECTED_PER_LANE = 2;
+  const MOBILE_TRACE_MAX_WIDTH = 699;
   const OVERLAY_KEYS = ["findings", "coverage", "ownership", "churn", "tests", "semantic", "runtime", "facts", "knowledge"];
 
   const state = {
@@ -30,6 +31,7 @@
     activeNodeIds: null,
     lanePages: { changed: 0, impacted: 0, test: 0 },
     mobilePage: 0,
+    returnCandidateId: null,
     overlays: new Set(OVERLAY_KEYS),
   };
 
@@ -880,6 +882,8 @@
     elements.snapshotAge = byId("snapshot-age");
     elements.noticeStack = byId("notice-stack");
     elements.instrumentSummary = byId("instrument-summary");
+    elements.completeness = byId("completeness-status");
+    elements.workspace = byId("review-workspace");
     elements.search = byId("trace-search");
     elements.clearSearch = byId("clear-search");
     elements.scopeButtons = Array.from(document.querySelectorAll("[data-scope]"));
@@ -909,6 +913,9 @@
     elements.precisionCount = byId("precision-count");
     elements.limitsList = byId("limits-list");
     elements.limitsCount = byId("limits-count");
+    elements.methodLedger = byId("method-ledger");
+    elements.methodLedgerDisclosure = byId("method-ledger-disclosure");
+    elements.methodLedgerToggle = byId("method-ledger-toggle");
     elements.schema = byId("schema-label");
     elements.statusRegion = byId("status-region");
     elements.metric = {
@@ -980,18 +987,16 @@
 
     if (typeof ResizeObserver === "function") {
       const observer = new ResizeObserver(function () {
-        const nextMode = elements.graphFrame.clientWidth < 700 ? "mobile" : "desktop";
+        const nextMode = traceModeForWidth(elements.graphFrame.clientWidth);
         if (state.model && nextMode !== state.layoutMode) {
-          state.layoutMode = nextMode;
           renderGraph();
         }
       });
       observer.observe(elements.graphFrame);
     } else {
       window.addEventListener("resize", function () {
-        const nextMode = elements.graphFrame.clientWidth < 700 ? "mobile" : "desktop";
+        const nextMode = traceModeForWidth(elements.graphFrame.clientWidth);
         if (state.model && nextMode !== state.layoutMode) {
-          state.layoutMode = nextMode;
           renderGraph();
         }
       });
@@ -1007,6 +1012,7 @@
     state.error = null;
     document.body.classList.toggle("is-refreshing", !initial || state.model !== null);
     elements.refresh.disabled = true;
+    elements.refresh.setAttribute("aria-busy", "true");
     elements.graphFrame.setAttribute("aria-busy", "true");
 
     if (state.loading) {
@@ -1081,6 +1087,7 @@
       state.refreshing = false;
       document.body.classList.remove("is-refreshing");
       elements.refresh.disabled = Boolean(document.getElementById("lens-snapshot"));
+      elements.refresh.setAttribute("aria-busy", "false");
       elements.graphFrame.setAttribute("aria-busy", "false");
       updateSnapshotAge();
     }
@@ -1093,6 +1100,7 @@
     renderHeader();
     renderMetrics();
     renderNotices();
+    renderCompleteness();
     renderEvidenceSources();
     renderComponents();
     renderTemporal();
@@ -1139,6 +1147,7 @@
     elements.metric[name].note.textContent = presentation.note;
     const article = elements.metric[name].value.closest(".metric");
     article.classList.toggle("is-partial", presentation.partial);
+    article.classList.toggle("is-zero", totalOrReturned(value) === 0);
   }
 
   function renderMetrics() {
@@ -1158,7 +1167,7 @@
     if (files === 0 && symbols === 0) {
       summary = model.truncations.length > 0
         ? "No returned change evidence. The snapshot is partial; inspect its limits."
-        : "No changes detected against the requested baseline.";
+        : "No changes were captured against the requested baseline.";
     } else if (crossings > 0) {
       summary = crossings + " boundary crossing" + (crossings === 1 ? "" : "s") + " observed; " + tests + " test candidate" + (tests === 1 ? "" : "s") + " returned.";
     } else if (impacts > 0) {
@@ -1169,11 +1178,26 @@
     elements.instrumentSummary.textContent = summary;
   }
 
-  function appendNotice(type, code, message) {
+  function appendNotice(type, code, message, action) {
     const notice = createElement("article", "notice notice--" + type);
     notice.appendChild(createElement("p", "notice__code", code));
-    notice.appendChild(createElement("p", "", message));
+    notice.appendChild(createElement("p", "notice__message", message));
+    if (action) {
+      const button = createElement("button", "notice__action", action.label);
+      button.type = "button";
+      button.addEventListener("click", action.handler);
+      notice.appendChild(button);
+    }
     elements.noticeStack.appendChild(notice);
+  }
+
+  function openMethodLedger() {
+    elements.methodLedgerDisclosure.open = true;
+    if (typeof elements.methodLedger.scrollIntoView === "function") {
+      elements.methodLedger.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    elements.methodLedgerToggle.focus({ preventScroll: true });
+    announce("Precision and limits opened.");
   }
 
   function renderNotices() {
@@ -1186,23 +1210,33 @@
       );
     }
     if (state.model) {
-      if (state.model.schemaVersion !== null && state.model.schemaVersion !== EXPECTED_SCHEMA) {
+      if (state.model.schemaVersion === null) {
         appendNotice(
-          "warning",
+          "error",
+          "Schema unavailable",
+          "The snapshot does not identify its schema. Evidence compatibility cannot be confirmed."
+        );
+      } else if (state.model.schemaVersion !== EXPECTED_SCHEMA) {
+        appendNotice(
+          "error",
           "Schema mismatch",
           "This UI targets schema 1 but received schema " + state.model.schemaVersion + ". Claims may be incomplete or unavailable."
         );
       }
       if (state.model.truncations.length > 0) {
-        const labels = state.model.truncations.slice(0, 4).map(function (item) {
-          return item.label + " (" + item.reason + ")";
+        const labels = state.model.truncations.slice(0, 2).map(function (item) {
+          return item.label;
         });
         const remaining = state.model.truncations.length - labels.length;
-        const suffix = remaining > 0 ? "; plus " + remaining + " more limit" + (remaining === 1 ? "" : "s") : "";
+        const causes = labels.join(" · ");
+        const suffix = remaining > 0
+          ? " · +" + remaining + " more"
+          : "";
         appendNotice(
           "warning",
-          "Partial result",
-          "Do not read this trace as complete: " + labels.join("; ") + suffix + ". See the calibration record below."
+          state.model.truncations.length + " bounded section" + (state.model.truncations.length === 1 ? "" : "s"),
+          "Review " + causes + suffix + " before approval.",
+          { label: "Open precision & limits", handler: openMethodLedger }
         );
       }
       if (text(state.model.temporalEnvelope.status, "unavailable") !== "available") {
@@ -1215,6 +1249,66 @@
       }
     }
     elements.noticeStack.hidden = elements.noticeStack.childElementCount === 0;
+  }
+
+  function renderCompleteness() {
+    elements.completeness.classList.remove("is-complete", "is-partial", "is-error");
+    if (state.stale && state.error) {
+      elements.completeness.textContent = "Stale snapshot · refresh failed";
+      elements.completeness.classList.add("is-error");
+      return;
+    }
+    if (!state.model) {
+      elements.completeness.textContent = state.error
+        ? "Snapshot unavailable · retry required"
+        : "Checking evidence completeness";
+      if (state.error) {
+        elements.completeness.classList.add("is-error");
+      }
+      return;
+    }
+    if (state.model.schemaVersion === null) {
+      elements.completeness.textContent = "Schema unavailable · compatibility unknown";
+      elements.completeness.classList.add("is-error");
+      return;
+    }
+    if (state.model.schemaVersion !== EXPECTED_SCHEMA) {
+      elements.completeness.textContent = "Schema mismatch · compatibility unknown";
+      elements.completeness.classList.add("is-error");
+      return;
+    }
+    const temporalUnavailable = text(state.model.temporalEnvelope.status, "unavailable") !== "available";
+    const partial = snapshotIsPartial();
+    if (partial) {
+      elements.completeness.textContent = "Partial evidence";
+      elements.completeness.classList.add("is-partial");
+    } else if (temporalUnavailable) {
+      elements.completeness.textContent = "Captured trace complete · temporal comparison unavailable";
+      elements.completeness.classList.add("is-partial");
+    } else {
+      elements.completeness.textContent = "No truncation reported · captured snapshot";
+      elements.completeness.classList.add("is-complete");
+    }
+  }
+
+  function snapshotIsPartial() {
+    if (!state.model) {
+      return false;
+    }
+    return state.model.truncations.length > 0
+      || state.model.schemaVersion !== EXPECTED_SCHEMA
+      || record(state.model.evidence).partial === true
+      || record(state.model.semantic).partial === true
+      || record(state.model.temporal).partial === true;
+  }
+
+  function completeZeroChange() {
+    if (!state.model || state.stale || state.error || state.model.schemaVersion !== EXPECTED_SCHEMA || snapshotIsPartial()) {
+      return false;
+    }
+    return totalOrReturned(state.model.files) === 0
+      && totalOrReturned(state.model.changedSymbols) === 0
+      && text(state.model.temporalEnvelope.status, "unavailable") === "available";
   }
 
   function temporalPair(added, removed, changed) {
@@ -1235,7 +1329,7 @@
       const diagnostic = record(envelope.diagnostic);
       elements.temporalSummary.textContent = text(
         diagnostic.message,
-        "Temporal architecture is unavailable for this snapshot; the current impact trace is still valid."
+        "Temporal architecture is unavailable for this snapshot; the captured impact trace remains available."
       );
       elements.temporalEvents.appendChild(createElement("p", "temporal-events__empty", "No base/head architecture delta was returned."));
       return;
@@ -1324,7 +1418,11 @@
       elements.temporalEvents.appendChild(row);
     });
     if (events.length > 12) {
-      elements.temporalEvents.appendChild(createElement("p", "temporal-events__empty", "+" + (events.length - 12) + " more bounded events in the JSON snapshot."));
+      elements.temporalEvents.appendChild(createElement(
+        "p",
+        "temporal-events__empty",
+        "+" + (events.length - 12) + " more returned events are not expanded here. Run mastermind temporal --since <baseline> --format json to inspect the bounded result."
+      ));
     }
   }
 
@@ -1538,9 +1636,15 @@
     ].join(" ").toLocaleLowerCase();
   }
 
-  function resetPages() {
+  function resetPages(preserveMobilePage) {
     state.lanePages = { changed: 0, impacted: 0, test: 0 };
-    state.mobilePage = 0;
+    if (!preserveMobilePage) {
+      state.mobilePage = 0;
+    }
+  }
+
+  function traceModeForWidth(width) {
+    return Math.floor(width || 0) <= MOBILE_TRACE_MAX_WIDTH ? "mobile" : "desktop";
   }
 
   function apertureNodes() {
@@ -1594,20 +1698,38 @@
     clearNode(elements.graph);
     clearNode(elements.mobileTraceList);
     elements.graphFrame.classList.remove("has-graph-state");
+    elements.workspace.classList.remove("is-zero-change");
     elements.mobileTraceList.hidden = true;
     setGraphVisible(true);
+
+    const width = Math.max(320, Math.floor(elements.graphFrame.clientWidth || 900));
+    state.layoutMode = traceModeForWidth(width);
+    elements.workspace.setAttribute("data-trace-mode", state.layoutMode);
+    const mobile = state.layoutMode === "mobile";
 
     const nodes = apertureNodes();
     const zeroChange = totalOrReturned(state.model.files) === 0 && totalOrReturned(state.model.changedSymbols) === 0;
     if (zeroChange) {
-      renderTraceContext("Zero-change result", "No changed files or symbols were returned for this baseline.", []);
+      const complete = completeZeroChange();
+      if (complete) {
+        elements.workspace.classList.add("is-zero-change");
+      }
+      const baseline = text(state.model.baseline.requested_ref, text(state.model.options.since, "the requested baseline"));
+      const scope = text(state.model.options.path, ".");
+      renderTraceContext(
+        complete ? "Zero-change snapshot" : "Zero-change result · evidence incomplete",
+        "Baseline " + baseline + " · scope " + scope + ". No changed files or symbols were returned.",
+        []
+      );
       elements.traceCount.textContent = "0 claims returned";
       showGraphState(
-        "No changes in scope",
-        state.model.truncations.length > 0
-          ? "No change evidence was returned, but the snapshot is partial. Review the limits before treating the baseline as clean."
-          : "The working copy matches the requested baseline within the analyzed scope.",
-        null
+        complete ? "No changes in captured scope" : "No returned changes — review limits",
+        complete
+          ? "At capture time, the working copy matched " + baseline + " within " + scope + ". Refresh after new edits, or inspect the evidence envelope below."
+          : "No change evidence was returned, but the snapshot is partial. Do not treat this baseline as clean until you review the limits.",
+        complete && !document.getElementById("lens-snapshot")
+          ? { label: "Refresh snapshot", handler: function () { loadSnapshot(false); } }
+          : { label: "Open precision & limits", handler: openMethodLedger }
       );
       setEmptySvg();
       return;
@@ -1625,9 +1747,6 @@
     }
 
     elements.graphState.hidden = true;
-    const width = Math.max(320, Math.floor(elements.graphFrame.clientWidth || 900));
-    const mobile = width < 700;
-    state.layoutMode = mobile ? "mobile" : "desktop";
     const localTrace = resolveLocalTrace(nodes);
 
     if (localTrace) {
@@ -1746,12 +1865,13 @@
   }
 
   function renderLocalTrace(trace, aperture, width, mobile) {
+    const returnLabel = mobile ? "Back to candidates" : "Back to aperture";
     if (!trace.root) {
       const loneNode = trace.target ? [trace.target] : [];
       renderTraceContext(
         trace.automatic ? "Search result" : "Selected claim",
         "No returned changed-symbol seed connects to this claim. The inspector still shows its repository evidence.",
-        [{ label: trace.automatic ? "Clear search" : "Back to aperture", handler: trace.automatic ? clearSearchAperture : clearSelection }]
+        [{ label: trace.automatic ? "Clear search" : returnLabel, handler: trace.automatic ? clearSearchAperture : clearSelection }]
       );
       elements.traceCount.textContent = loneNode.length + " displayed / " + aperture.length + " in aperture";
       renderClaimSvg(loneNode, [], width, mobile);
@@ -1774,7 +1894,7 @@
     }
 
     const actions = [{
-      label: trace.automatic ? "Clear search" : "Back to aperture",
+      label: trace.automatic ? "Clear search" : returnLabel,
       handler: trace.automatic ? clearSearchAperture : clearSelection,
     }];
     appendLanePagerActions(actions, "impacted", "Impact", impact);
@@ -1816,11 +1936,21 @@
   }
 
   function clearSelection() {
+    const restoreCandidateFocus = state.layoutMode === "mobile";
     state.selectedId = null;
     state.focusedSeedId = null;
-    resetPages();
+    resetPages(restoreCandidateFocus);
     renderGraph();
     renderInspector();
+    if (restoreCandidateFocus) {
+      const candidates = Array.from(elements.mobileTraceList.querySelectorAll("[data-candidate-id]"));
+      const target = candidates.find(function (candidate) {
+        return candidate.getAttribute("data-candidate-id") === state.returnCandidateId;
+      }) || candidates[0];
+      if (target) {
+        target.focus({ preventScroll: true });
+      }
+    }
     announce("Returned to the bounded claim aperture.");
   }
 
@@ -1942,13 +2072,17 @@
       const item = document.createElement("li");
       const button = createElement("button", "mobile-candidate mobile-candidate--" + node.type);
       button.type = "button";
+      button.setAttribute("data-candidate-id", node.id);
       button.setAttribute("aria-label", nodeLabel(node));
       button.appendChild(createElement("span", "mobile-candidate__kind", text(node.symbol.kind, "unknown") + " / " + node.type));
       button.appendChild(createElement("span", "mobile-candidate__name", text(node.symbol.name, "Unnamed symbol")));
       button.appendChild(createElement("span", "mobile-candidate__path", text(node.symbol.file, "File unavailable") + formatLine(node.symbol.line)));
       const mobileEvidence = evidenceMark(node);
       button.appendChild(createElement("span", "mobile-candidate__meta", nodeMetadata(node) + (mobileEvidence ? " · " + mobileEvidence : "")));
-      button.addEventListener("click", function () { selectClaim(node); });
+      button.addEventListener("click", function () {
+        state.returnCandidateId = node.id;
+        selectClaim(node);
+      });
       item.appendChild(button);
       list.appendChild(item);
     });
@@ -1971,18 +2105,21 @@
     setGraphVisible(true);
     elements.mobileTraceList.hidden = true;
     elements.graphState.hidden = true;
+    elements.graph.classList.remove("is-contained");
     const layout = mobile ? mobileLayout(nodes, width) : desktopLayout(nodes, width);
+    elements.graph.setAttribute("overflow", mobile ? "hidden" : "visible");
     elements.graph.setAttribute("viewBox", "0 0 " + layout.width + " " + layout.height);
     elements.graph.setAttribute("width", String(layout.width));
     elements.graph.setAttribute("height", String(layout.height));
     drawLayoutBackground(layout);
 
-    const edgeLayer = createSvg("g", { class: "graph-edges" });
+    const edgeLayer = createSvg("g", { class: "graph-edges", "aria-hidden": "true" });
+    const edgeInteractionLayer = createSvg("g", { class: "graph-edge-controls" });
     edges.forEach(function (edge) {
       const from = layout.positions.get(edge.from.id);
       const to = layout.positions.get(edge.to.id);
       if (from && to) {
-        drawEdge(edgeLayer, edge, from, to, mobile, width);
+        drawEdge(edgeLayer, edgeInteractionLayer, edge, from, to, mobile, width);
       }
     });
     elements.graph.appendChild(edgeLayer);
@@ -1995,6 +2132,8 @@
       }
     });
     elements.graph.appendChild(nodeLayer);
+    elements.graph.appendChild(edgeInteractionLayer);
+    elements.graph.classList.toggle("is-contained", mobile);
   }
 
   function drawLayoutBackground(layout) {
@@ -2023,12 +2162,13 @@
     elements.graph.setAttribute("height", String(layout.height));
     drawLayoutBackground(layout);
 
-    const edgeLayer = createSvg("g", { class: "graph-edges" });
+    const edgeLayer = createSvg("g", { class: "graph-edges", "aria-hidden": "true" });
+    const edgeInteractionLayer = createSvg("g", { class: "graph-edge-controls" });
     overview.edges.forEach(function (edge) {
       const from = layout.positions.get(edge.from.id);
       const to = layout.positions.get(edge.to.id);
       if (from && to) {
-        drawAggregateEdge(edgeLayer, edge, from, to, width);
+        drawAggregateEdge(edgeLayer, edgeInteractionLayer, edge, from, to, width);
       }
     });
     elements.graph.appendChild(edgeLayer);
@@ -2041,6 +2181,7 @@
       }
     });
     elements.graph.appendChild(clusterLayer);
+    elements.graph.appendChild(edgeInteractionLayer);
 
     renderTraceContext(
       "Component-cluster overview",
@@ -2258,7 +2399,7 @@
     });
   }
 
-  function drawAggregateEdge(layer, edge, from, to, width) {
+  function drawAggregateEdge(visibleLayer, interactionLayer, edge, from, to, width) {
     const path = edgePath(from, to, false, width, edge.type);
     const label = edge.count + " exact returned " + edge.type + " seed link" + (edge.count === 1 ? "" : "s") + " from " + edge.from.label + " to " + edge.to.label + (edge.crossingCount > 0 ? ", including " + edge.crossingCount + " boundary crossing" + (edge.crossingCount === 1 ? "" : "s") : "") + ". Activate to browse the source cluster.";
     const hit = createSvg("path", {
@@ -2269,8 +2410,6 @@
       role: "button",
       "aria-label": label,
     });
-    hit.appendChild(createSvg("title", {}, label));
-    activateSvgCluster(hit, edge.from);
     const classes = ["graph-edge", "graph-edge--" + edge.type, "graph-edge--aggregate"];
     if (edge.crossingCount > 0) {
       classes.push("graph-edge--crossing");
@@ -2280,8 +2419,11 @@
       class: classes.join(" "),
       "aria-hidden": "true",
     });
-    layer.appendChild(hit);
-    layer.appendChild(visible);
+    hit.appendChild(createSvg("title", {}, label));
+    activateSvgCluster(hit, edge.from);
+    connectEdgeInteraction(hit, visible);
+    visibleLayer.appendChild(visible);
+    interactionLayer.appendChild(hit);
   }
 
   function desktopLayout(nodes, width) {
@@ -2460,7 +2602,7 @@
       + " to " + text(edge.to.symbol.name, "unnamed claim") + boundary + ownership + semantic + runtime + facts + ". Select for details.";
   }
 
-  function drawEdge(layer, edge, from, to, mobile, width) {
+  function drawEdge(visibleLayer, interactionLayer, edge, from, to, mobile, width) {
     const path = edgePath(from, to, mobile, width, edge.type);
     const hit = createSvg("path", {
       d: path,
@@ -2499,8 +2641,18 @@
     const title = createSvg("title", {}, edgeLabel(edge));
     hit.appendChild(title);
     activateSvgClaim(hit, edge);
-    layer.appendChild(hit);
-    layer.appendChild(visible);
+    connectEdgeInteraction(hit, visible);
+    visibleLayer.appendChild(visible);
+    interactionLayer.appendChild(hit);
+  }
+
+  function connectEdgeInteraction(hit, visible) {
+    const show = function () { visible.classList.add("is-hovered"); };
+    const hide = function () { visible.classList.remove("is-hovered"); };
+    hit.addEventListener("mouseenter", show);
+    hit.addEventListener("mouseleave", hide);
+    hit.addEventListener("focus", show);
+    hit.addEventListener("blur", hide);
   }
 
   function nodeMetadata(node) {
@@ -2635,7 +2787,7 @@
   function selectClaim(claim) {
     state.selectedId = claim.id;
     state.disclosure = "selected";
-    resetPages();
+    resetPages(state.layoutMode === "mobile");
     if (claim.type === "changed" && claim.symbol) {
       state.focusedSeedId = claim.id;
     } else if (claim.from) {
@@ -2646,6 +2798,9 @@
     }
     renderGraph();
     renderInspector();
+    if (state.layoutMode === "mobile" && typeof elements.workspace.scrollIntoView === "function") {
+      elements.workspace.scrollIntoView({ block: "start" });
+    }
     const selector = claim.symbol ? "[data-node-id]" : "[data-edge-id]";
     const selected = Array.from(elements.graph.querySelectorAll(selector)).find(function (element) {
       const attribute = claim.symbol ? "data-node-id" : "data-edge-id";
@@ -2675,6 +2830,7 @@
   }
 
   function renderLoadingState() {
+    elements.workspace.classList.remove("has-selection");
     clearNode(elements.graph);
     clearNode(elements.mobileTraceList);
     elements.mobileTraceList.hidden = true;
@@ -2692,9 +2848,14 @@
     elements.graphState.appendChild(createElement("h3", "", "Calibrating blast trace"));
     elements.graphState.appendChild(createElement("p", "", "Comparing the requested baseline with the current working copy."));
     elements.graphState.hidden = false;
+    if (elements.completeness) {
+      elements.completeness.textContent = "Checking evidence completeness";
+      elements.completeness.classList.remove("is-complete", "is-partial", "is-error");
+    }
   }
 
   function renderInitialError(error) {
+    elements.workspace.classList.remove("is-zero-change", "has-selection");
     clearNode(elements.graph);
     renderTraceContext("Snapshot error", "No repository claims are available until the local endpoint succeeds.", []);
     showGraphState(
@@ -2702,9 +2863,17 @@
       error.message + " Error code: " + text(error.code, "unknown") + ".",
       { label: "Retry local scan", handler: function () { loadSnapshot(false); } }
     );
-    elements.noticeStack.hidden = true;
+    clearNode(elements.noticeStack);
+    appendNotice(
+      "error",
+      "Snapshot unavailable · " + text(error.code, "unknown"),
+      error.message + (/[.!?]$/.test(error.message) ? " " : ". ")
+        + "Use Refresh in the application bar or retry the local scan below."
+    );
+    elements.noticeStack.hidden = false;
     elements.traceCount.textContent = "No snapshot loaded";
     elements.instrumentSummary.textContent = "The local endpoint did not return review evidence.";
+    renderCompleteness();
     elements.schema.textContent = "Schema —";
     setEnabled(false);
   }
@@ -2721,6 +2890,7 @@
   function renderInspector() {
     clearNode(elements.inspector);
     const claim = selectedClaim();
+    elements.workspace.classList.toggle("has-selection", Boolean(claim));
     if (!claim) {
       const empty = createElement("div", "inspector-empty");
       empty.appendChild(createElement("span", "inspector-empty__crosshair", "+"));
@@ -2740,7 +2910,7 @@
     const heading = createElement("section", "claim-heading");
     const typeClass = variant ? " claim-heading__type--" + variant : "";
     heading.appendChild(createElement("p", "claim-heading__type" + typeClass, type));
-    heading.appendChild(createElement("h3", "", name));
+    heading.appendChild(createElement("h4", "", name));
     const location = createElement("p", "claim-heading__path");
     location.appendChild(document.createTextNode(file));
     if (line !== null) {
@@ -2767,7 +2937,7 @@
 
   function appendClaimList(title, values, variant, emptyMessage) {
     const section = createElement("section", "claim-section");
-    section.appendChild(createElement("h4", "", title));
+    section.appendChild(createElement("h5", "", title));
     const className = variant ? "claim-list claim-list--" + variant : "claim-list";
     const list = createElement("ul", className);
     if (values.length === 0) {
@@ -3082,11 +3252,13 @@
 
   function snapshotAnnouncement() {
     const model = state.model;
+    const semanticSourceCount = isRecord(record(model.semantic).source) ? 1 : 0;
+    const evidenceSourceCount = returnedCount(model.evidenceSources) + semanticSourceCount;
     return "Lens snapshot loaded. "
       + totalOrReturned(model.changedSymbols) + " changed symbols, "
       + totalOrReturned(model.impactedSymbols) + " impacted symbols, and "
       + totalOrReturned(model.tests) + " candidate tests. "
-      + returnedCount(model.evidenceSources) + " evidence sources were evaluated. "
+      + evidenceSourceCount + " evidence sources were evaluated. "
       + (model.truncations.length > 0 ? "The result is partial." : "No truncation was reported.");
   }
 
@@ -3095,7 +3267,17 @@
       return;
     }
     const count = apertureNodes().length;
-    const scope = state.scope === "all" ? "All claim types are emphasized." : laneTitle(state.scope) + " is emphasized; connected evidence remains available.";
+    const mobile = state.layoutMode === "mobile";
+    let scope;
+    if (mobile) {
+      scope = state.scope === "all"
+        ? "The mobile candidate list starts with changed claims."
+        : laneTitle(state.scope) + " filters the mobile candidate list; an opened trace keeps connected evidence.";
+    } else {
+      scope = state.scope === "all"
+        ? "All claim types share equal emphasis."
+        : laneTitle(state.scope) + " is emphasized; connected evidence remains available.";
+    }
     announce(count + " of " + state.model.nodes.length + " returned claims are in the aperture. " + scope);
   }
 

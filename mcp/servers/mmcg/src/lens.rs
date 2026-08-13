@@ -283,6 +283,18 @@ fn standalone_html_from_json(snapshot_json: &str) -> Result<Vec<u8>, LensError> 
     standalone_html_from_template(snapshot_json, INDEX_HTML)
 }
 
+fn replace_standalone_marker(
+    html: &mut String,
+    served: &str,
+    standalone: &str,
+) -> Result<(), LensError> {
+    if !html.contains(served) {
+        return Err(LensError::Serialization);
+    }
+    *html = html.replacen(served, standalone, 1);
+    Ok(())
+}
+
 fn standalone_html_from_template(
     snapshot_json: &str,
     template: &str,
@@ -311,15 +323,21 @@ fn standalone_html_from_template(
         &format!("    <style>{STYLES_CSS}</style>"),
     );
     html = html.replace("    <script src=\"app.js\" defer></script>\n", "");
-    html = html.replace("<span>Local</span>", "<span>Offline package</span>");
-    html = html.replace(
-        "aria-label=\"Refresh Lens snapshot\"",
-        "aria-label=\"Static Lens snapshot\"",
-    );
-    html = html.replace(
-        "<span>Refresh snapshot</span>",
-        "<span>Static snapshot</span>",
-    );
+    replace_standalone_marker(
+        &mut html,
+        "<span data-lens-runtime-label><i aria-hidden=\"true\"></i>Local</span>",
+        "<span data-lens-runtime-label><i aria-hidden=\"true\"></i>Offline package</span>",
+    )?;
+    replace_standalone_marker(
+        &mut html,
+        "data-lens-snapshot-action aria-label=\"Refresh Lens snapshot\"",
+        "data-lens-snapshot-action aria-label=\"Static Lens snapshot\"",
+    )?;
+    replace_standalone_marker(
+        &mut html,
+        "<span data-lens-action-label>Refresh</span>",
+        "<span data-lens-action-label>Static snapshot</span>",
+    )?;
     let scripts = format!(
         "    <script type=\"application/json\" id=\"lens-snapshot\">{escaped_json}</script>\n    <script>{APP_JS}</script>\n  </body>"
     );
@@ -1158,7 +1176,16 @@ mod tests {
         assert!(!html.contains("src=\"app.js\""));
         assert!(html.contains("connect-src 'none'"));
         assert!(html.contains("sha256-"));
-        assert!(html.contains("Offline package"));
+        assert!(html.contains(
+            "<span data-lens-runtime-label><i aria-hidden=\"true\"></i>Offline package</span>"
+        ));
+        assert!(html.contains(
+            "<button class=\"refresh-button\" id=\"refresh-button\" type=\"button\" data-lens-snapshot-action aria-label=\"Static Lens snapshot\""
+        ));
+        assert!(html.contains("<span data-lens-action-label>Static snapshot</span>"));
+        assert!(!html.contains("data-lens-runtime-label><i aria-hidden=\"true\"></i>Local<"));
+        assert!(!html.contains("data-lens-action-label>Refresh<"));
+        assert!(!html.contains("content: \"Local\""));
     }
 
     #[test]

@@ -1,7 +1,11 @@
+#[cfg(unix)]
 use base64::engine::general_purpose::STANDARD as BASE64;
+#[cfg(unix)]
 use base64::Engine;
+#[cfg(unix)]
 use ed25519_dalek::SigningKey;
 use serde_json::{json, Value};
+#[cfg(unix)]
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};

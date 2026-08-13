@@ -48,6 +48,7 @@ const MAX_LABEL_BYTES: usize = 512;
 pub enum FactError {
     InvalidManifest(String),
     InvalidQuery(String),
+    Signature(String),
     Io(String),
     Store(String),
     Git(String),
@@ -58,6 +59,7 @@ impl fmt::Display for FactError {
         match self {
             Self::InvalidManifest(message) => write!(formatter, "invalid fact manifest: {message}"),
             Self::InvalidQuery(message) => write!(formatter, "invalid fact query: {message}"),
+            Self::Signature(message) => write!(formatter, "fact signature error: {message}"),
             Self::Io(message) => write!(formatter, "fact ingestion I/O error: {message}"),
             Self::Store(message) => write!(formatter, "fact store error: {message}"),
             Self::Git(message) => write!(formatter, "fact repository error: {message}"),
@@ -169,6 +171,13 @@ pub(crate) struct FactSourceRecord {
     pub revision: String,
     pub manifest_sha256: String,
     pub manifest_bytes: u64,
+    pub signature_status: String,
+    pub signing_key_id: Option<String>,
+    pub signature_sha256: Option<String>,
+    pub signature_bytes: Option<u64>,
+    pub signing_public_key: Option<String>,
+    pub signature_value: Option<String>,
+    pub signed_manifest_digest: Option<String>,
     pub imported_at: i64,
     pub file_count: u32,
     pub annotation_count: u32,
@@ -282,6 +291,19 @@ pub struct FactSourceView {
     pub revision: String,
     pub manifest_sha256: String,
     pub manifest_bytes: u64,
+    pub signature_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signing_key_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signing_public_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signed_manifest_digest: Option<String>,
     pub imported_at: i64,
     pub status: &'static str,
     pub facts_total: u32,
@@ -724,7 +746,7 @@ pub fn contract(store: &Store) -> Result<FactContract, FactError> {
     })
 }
 
-fn indexed_root(store: &Store) -> Result<PathBuf, FactError> {
+pub(crate) fn indexed_root(store: &Store) -> Result<PathBuf, FactError> {
     store
         .meta_value("index_root")
         .map_err(|error| FactError::Store(error.to_string()))?
@@ -734,6 +756,37 @@ fn indexed_root(store: &Store) -> Result<PathBuf, FactError> {
                 .canonicalize()
                 .map_err(|error| FactError::Store(format!("resolve index root: {error}")))
         })
+}
+
+pub(crate) fn indexed_file_binding(
+    store: &Store,
+    root: &Path,
+    path: &str,
+) -> Result<FactFileRecord, FactError> {
+    let path = normalize_fact_path(path)?;
+    let expected = store
+        .file_content_sha256(&path)
+        .map_err(|error| FactError::Store(error.to_string()))?
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| invalid(format!("file `{path}` is absent from the current index")))?;
+    let bytes = read_contained_regular(
+        root,
+        &path,
+        crate::indexer::MAX_INDEXABLE_FILE_SIZE,
+        &format!("source file `{path}`"),
+        None,
+    )?;
+    let digest = crate::hex::encode(&Sha256::digest(&bytes));
+    if digest != expected {
+        return Err(invalid(format!(
+            "file `{path}` does not match the current codegraph index"
+        )));
+    }
+    Ok(FactFileRecord {
+        path,
+        sha256: digest,
+        bytes: bytes.len() as u64,
+    })
 }
 
 fn validate_capabilities(values: &[String]) -> Result<Vec<String>, FactError> {
@@ -859,19 +912,30 @@ fn verified_artifact(
     })
 }
 
-fn build_batch(
-    store: &Store,
-    manifest_path: &Path,
-) -> Result<(FactImportBatch, FactContract), FactError> {
-    let bytes = read_regular(manifest_path, MAX_MANIFEST_BYTES, "fact manifest")?;
-    let manifest: FactManifest = crate::audit_bundle::from_json_strict(&bytes)
-        .map_err(|error| invalid(error.to_string()))?;
+fn parse_manifest(bytes: &[u8]) -> Result<FactManifest, FactError> {
+    let manifest: FactManifest =
+        crate::audit_bundle::from_json_strict(bytes).map_err(|error| invalid(error.to_string()))?;
     if manifest.api_version != API_VERSION {
         return Err(invalid(format!(
             "unsupported api_version `{}`; expected `{API_VERSION}`",
             manifest.api_version
         )));
     }
+    Ok(manifest)
+}
+
+/// Validate the signed document shape without consulting repository state.
+/// Signing an unknown or duplicate-field JSON document would create a valid
+/// cryptographic envelope for bytes that ingestion can never accept.
+pub(crate) fn validate_manifest_document(bytes: &[u8]) -> Result<(), FactError> {
+    parse_manifest(bytes).map(|_| ())
+}
+
+fn build_batch_from_bytes(
+    store: &Store,
+    bytes: &[u8],
+) -> Result<(FactImportBatch, FactContract), FactError> {
+    let manifest = parse_manifest(bytes)?;
     let capabilities = validate_capabilities(&manifest.capabilities)?;
     validate_token(&manifest.producer.name, MAX_NAME_BYTES, "producer name")?;
     validate_text(
@@ -1092,8 +1156,15 @@ fn build_batch(
         capabilities: capabilities.join(","),
         repository_identity: contract.repository.identity.clone(),
         revision: contract.repository.revision.clone(),
-        manifest_sha256: crate::hex::encode(&Sha256::digest(&bytes)),
+        manifest_sha256: crate::hex::encode(&Sha256::digest(bytes)),
         manifest_bytes: bytes.len() as u64,
+        signature_status: "unsigned".into(),
+        signing_key_id: None,
+        signature_sha256: None,
+        signature_bytes: None,
+        signing_public_key: None,
+        signature_value: None,
+        signed_manifest_digest: None,
         imported_at,
         file_count,
         annotation_count,
@@ -1111,6 +1182,10 @@ fn build_batch(
         },
         contract,
     ))
+}
+
+pub(crate) fn validate_generated_manifest(store: &Store, bytes: &[u8]) -> Result<(), FactError> {
+    build_batch_from_bytes(store, bytes).map(|_| ())
 }
 
 fn revalidate_batch_snapshot(
@@ -1142,7 +1217,30 @@ fn revalidate_batch_snapshot(
 }
 
 pub fn import(store: &Store, manifest_path: &Path) -> Result<FactImportSummary, FactError> {
-    let (batch, contract) = build_batch(store, manifest_path)?;
+    import_with_trust(
+        store,
+        manifest_path,
+        &crate::fact_signature::FactTrustPolicy::default(),
+    )
+}
+
+pub fn import_with_trust(
+    store: &Store,
+    manifest_path: &Path,
+    policy: &crate::fact_signature::FactTrustPolicy,
+) -> Result<FactImportSummary, FactError> {
+    let bytes = read_regular(manifest_path, MAX_MANIFEST_BYTES, "fact manifest")?;
+    let trust = crate::fact_signature::verify_bytes(&bytes, policy)
+        .map_err(|error| FactError::Signature(error.to_string()))?;
+    let (mut batch, contract) = build_batch_from_bytes(store, &bytes)?;
+    batch.source.signature_status = trust.signature_status.into();
+    batch.source.signing_key_id = trust.signing_key_id;
+    batch.source.signature_sha256 = trust.signature_sha256;
+    batch.source.signature_bytes = trust.signature_bytes;
+    batch.source.signing_public_key = trust.signing_public_key;
+    batch.source.signature_value = trust.signature_value;
+    batch.source.signed_manifest_digest =
+        (trust.signature_status == "verified").then_some(trust.manifest_digest);
     let replaced_previous_dataset = store
         .fact_source_exists(&batch.source.producer_name, &batch.source.dataset)
         .map_err(|error| FactError::Store(error.to_string()))?;
@@ -1189,6 +1287,13 @@ fn source_view(
         revision: source.revision.clone(),
         manifest_sha256: source.manifest_sha256.clone(),
         manifest_bytes: source.manifest_bytes,
+        signature_status: source.signature_status.clone(),
+        signing_key_id: source.signing_key_id.clone(),
+        signature_sha256: source.signature_sha256.clone(),
+        signature_bytes: source.signature_bytes,
+        signing_public_key: source.signing_public_key.clone(),
+        signature: source.signature_value.clone(),
+        signed_manifest_digest: source.signed_manifest_digest.clone(),
         imported_at: source.imported_at,
         status,
         facts_total: source
@@ -1242,6 +1347,61 @@ fn validate_stored_files(
         }
     }
     Ok(())
+}
+
+fn validate_stored_signature(source: &FactSourceRecord) -> Result<(), FactError> {
+    match source.signature_status.as_str() {
+        "unsigned" => {
+            if source.signing_key_id.is_some()
+                || source.signature_sha256.is_some()
+                || source.signature_bytes.is_some()
+                || source.signing_public_key.is_some()
+                || source.signature_value.is_some()
+                || source.signed_manifest_digest.is_some()
+            {
+                return Err(FactError::Store(
+                    "unsigned fact source contains signature metadata".into(),
+                ));
+            }
+            Ok(())
+        }
+        "verified" => {
+            let (Some(key_id), Some(signature_sha256), Some(signature_bytes)) = (
+                source.signing_key_id.as_deref(),
+                source.signature_sha256.as_deref(),
+                source.signature_bytes,
+            ) else {
+                return Err(FactError::Store(
+                    "verified fact source is missing signature metadata".into(),
+                ));
+            };
+            let (Some(public_key), Some(signature), Some(manifest_digest)) = (
+                source.signing_public_key.as_deref(),
+                source.signature_value.as_deref(),
+                source.signed_manifest_digest.as_deref(),
+            ) else {
+                return Err(FactError::Store(
+                    "verified fact source is missing its reproducible signature proof".into(),
+                ));
+            };
+            validate_sha256(signature_sha256, "signature sha256")?;
+            if signature_bytes == 0 || signature_bytes > MAX_MANIFEST_BYTES {
+                return Err(FactError::Store(
+                    "verified fact source has an invalid signature size".into(),
+                ));
+            }
+            crate::fact_signature::verify_stored_proof(
+                manifest_digest,
+                key_id,
+                public_key,
+                signature,
+            )
+            .map_err(|error| FactError::Store(error.to_string()))
+        }
+        _ => Err(FactError::Store(
+            "fact source has an unknown signature status".into(),
+        )),
+    }
 }
 
 fn verify_artifact_record(
@@ -1361,7 +1521,8 @@ fn snapshot_filtered(
     let mut source_status = HashMap::new();
     for source in &source_rows {
         let public_id = source_public_id(&source.producer_name, &source.dataset);
-        if source.api_version != API_VERSION
+        if validate_stored_signature(source).is_err()
+            || source.api_version != API_VERSION
             || source.repository_identity != contract.repository.identity
             || source.revision != contract.repository.revision
         {

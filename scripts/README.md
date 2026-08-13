@@ -85,3 +85,20 @@ scripts/configure-github-protections.sh \
   --prevent-self-review \
   --apply
 ```
+
+## Registry release smoke
+
+The publish workflows run two post-publication checks against the public
+registries, not the workspace build:
+
+- `smoke-installed-npm-release.sh` installs the exact root npm package version
+  into an isolated temporary project, verifies the selected native package and
+  binary version, then exercises index, third-party adaptation, key generation,
+  signed import/query, and a two-repository team map;
+- `smoke-installed-crate-release.sh` installs the exact crate version into an
+  isolated Cargo root and verifies the shipped binary plus the `facts`, `team`,
+  and `review` command surfaces.
+
+Both scripts retry registry propagation for a bounded period and fail the
+release workflow if the published version cannot be installed or exercised.
+They are release gates only: local validation never publishes a package.

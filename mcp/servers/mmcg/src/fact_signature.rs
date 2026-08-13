@@ -199,6 +199,8 @@ fn require_new_output(path: &Path, label: &str) -> Result<(), FactSignatureError
 }
 
 fn write_new_key(path: &Path, bytes: &[u8], private: bool) -> Result<(), FactSignatureError> {
+    #[cfg(not(unix))]
+    let _ = private;
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]

@@ -2,7 +2,7 @@
 
 This is the exhaustive technical reference for the mmcg engine. For the shortest path to a working installation, start with [Getting started](../getting-started.md); for the product overview, return to the [Mastermind README](../../README.md).
 
-A small Rust binary that builds a structural index of a codebase (Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, C/C++). It serves the graph over **MCP** (25 read-only tools plus one additive local scratchpad write), but MCP is only one surface. The same binary provides spec gates (`verify-spec` / `audit-spec`), project setup (`init` / `doctor`), and the user-global style miner.
+A small Rust binary that builds a structural index of a codebase (Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, C/C++). It serves the graph over **MCP** (26 read-only tools plus one additive local scratchpad write), but MCP is only one surface. The same binary provides spec gates (`verify-spec` / `audit-spec`), project setup (`init` / `doctor`), and the user-global style miner.
 
 > Installed via npm (`@xcraftmind/mastermind`)? The command is **`mastermind`** — the same binary. The `mmcg` name used throughout this doc is the cargo-installed alias (`cargo install mmcg`).
 
@@ -69,7 +69,7 @@ The Mastermind workflow needs structural queries every few seconds (planner deci
 
 mmcg is intentionally narrow:
 - Supports Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, and C/C++ — extend by adding a parser, not by depending on multi-language toolchains
-- 26 MCP tools: 25 read-only structural/semantic tools plus `mmcg_scratchpad_append`, which makes an additive write to the gitignored local index
+- 27 MCP tools: 26 read-only structural/semantic/evidence tools plus `mmcg_scratchpad_append`, which makes an additive write to the gitignored local index
 
 ## Performance model
 
@@ -112,6 +112,9 @@ mmcg index --force
 # Optionally add compiler-resolved SCIP evidence without replacing the graph.
 mmcg enrich --scip index.scip
 mmcg query semantic "scip-clang . my-package . PaymentService#charge()." --top 100
+mmcg query facts --top 1
+mmcg enrich --facts facts.json
+mmcg query facts --path src --top 400
 
 # Watch a directory and re-index on file changes (long-running, also incremental)
 mmcg watch
@@ -310,6 +313,38 @@ overlay automatically, shows its producer and precision diagnostics, and only
 decorates exact returned endpoint and display-name pairs. `mmcg map`, callers,
 impact, and all existing tools continue to work unchanged without SCIP.
 
+## Declarative fact-ingestion SDK
+
+`mmcg enrich --facts MANIFEST` accepts the public strict
+[`mastermind-facts/v1` schema](../../schemas/mastermind-facts-v1.schema.json).
+First run `mmcg query facts --top 1` to obtain the current API version,
+capability list, repository identity, and exact Git revision. Producers may
+declare bounded `annotations` and `relationships`; they must bind every source
+and provenance artifact to a canonical repository-relative path, byte size,
+and SHA-256 digest.
+
+Mastermind validates the complete manifest before an atomic per-producer,
+per-dataset replacement. Unknown/duplicate fields, unsupported capabilities,
+path traversal, symlinks, digest/size mismatch, repository/revision mismatch,
+or stale codegraph files fail before the previous dataset is touched. Later
+source or revision drift makes the source explicitly stale and suppresses its
+facts. Import is capped at 16 MiB per manifest, 10,000 referenced files and 512
+MiB of source bytes, 64 provenance artifacts and 256 MiB of artifact bytes, and
+100,000 facts.
+
+`mmcg query facts --path PATH --top N` and the fixed read-only `mmcg_facts` MCP
+tool expose the same normalized snapshot, bounded provenance-artifact digests,
+and explicit limits. Lens projects
+annotations as source-labelled findings. A relationship may decorate an
+existing returned codegraph edge only when both file and line endpoints match;
+it cannot create topology.
+
+The manifest is data only. It cannot load native code, register MCP handlers,
+define executable policy rules, modify the language registry or graph, install
+a Tree-sitter grammar, execute a command, or access SQLite. Only Mastermind
+writes the private normalized tables. See the complete
+[producer guide and security model](../fact-ingestion-sdk.md).
+
 ## Temporal Graph (`mmcg temporal`)
 
 `mmcg temporal --since REF` compares the indexed working copy with a resolved
@@ -404,6 +439,9 @@ evidence:
   configurable with `--git-commits 0..1000` (`0` disables Git history).
 - the repository's persisted SCIP overlay, when present and fresh. It is not a
   UI flag or report path; import it first with `mmcg enrich --scip index.scip`.
+- current normalized declarative facts, when present. Import them first with
+  `mmcg enrich --facts MANIFEST`; stale repository, revision, or source bindings
+  are omitted with a diagnostic.
 
 Evidence is matched only to files already returned by the bounded change,
 impact, and candidate-test trace. The versioned `evidence` response includes
@@ -434,7 +472,8 @@ uses the base-branch file. Git history is pinned to the impact snapshot's HEAD
 and does not follow renames.
 
 The UI renders redundant text and visual marks for SARIF, coverage, JUnit,
-SCIP, runtime spans, project knowledge, ownership, and churn. Exact SCIP
+SCIP, normalized declarative facts, runtime spans, project knowledge,
+ownership, and churn. Exact SCIP
 symbol/file endpoint pairs supersede Tree-sitter as static provenance without
 changing the returned graph. Runtime parent-child
 file pairs may decorate an already returned static edge in either direction,
@@ -483,6 +522,16 @@ The manifest records their SHA-256 digests next to the resolved head OID. This
 is a **digest binding at export time**: it proves exactly which report bytes a
 reviewer saw at that revision, not that Semgrep, CodeQL, a test runner, or an
 OTel collector produced those bytes from that revision.
+
+Loaded `mastermind-facts/v1` datasets need no second sidecar attestation: their
+ingestion contract already verified exact repository identity, Git head, source
+digests, and provenance-artifact digests before Mastermind wrote normalized
+facts. The package therefore records the fact-manifest and returned provenance
+digests as unsigned `producer-attested` bindings and embeds the same normalized
+facts in the autonomous Lens HTML. A surrounding workflow must supply any
+stronger identity or signature trust anchor. A stale or truncated fact source
+remains an explicit partial state and is never promoted to a revision-bound
+claim.
 
 For the stronger producer claim, create a strict JSON attestation and pass
 `--evidence-attestation PATH`:
@@ -691,6 +740,7 @@ Run `mmcg watch` in a separate terminal so the index stays current while you wor
 | `mmcg_api_surface` | `prefix`, optional `language` | Symbols under `prefix` referenced from at least one file OUTSIDE `prefix`. Empirical "who-uses-this-module" map; doesn't need declared visibility. |
 | `mmcg_centrality` | optional `prefix`, `language`, `kind`, `top` (default 20) | Rank symbols by in-degree (distinct callers). Pre-flight "where is the gravity" — top hits are the structural attractors of the codebase or a subdirectory. Use to learn what to read first on unfamiliar code. Excludes synthetic `<module>` rows and zero-degree symbols. |
 | `mmcg_semantic` | `symbol`, optional `top` (default 100, max 500) | Compiler-resolved SCIP definitions, references, implementations, type definitions, and explicit provenance. Returns `fallback_active: true` instead of an error when no overlay exists. Stale document facts are omitted with diagnostics. |
+| `mmcg_facts` | optional `path` (default `.`), `top` (default 100, max 400) | Normalized `mastermind-facts/v1` annotations and relationships plus capability negotiation, exact repository/revision identity, provenance, source state, limits, and stale/truncation diagnostics. Read-only; it never loads producer code or creates graph topology. |
 | `mmcg_map` | optional `path` (default `.`), `depth` (1–6, default 2), `top` (1–100, default 20), `production_only` (default `false`) | Schema-v1 architecture briefing with lexical file/directory scope: `%` and `_` are literal bytes, selected-directory components are relative to that directory, root components remain repository-relative, and selected files retain their paths. `production_only` excludes conventional test/fixture/example/generated/vendor path segments and test filenames (`test_*`, `*_test.*`, `*.test.*`, `*.spec.*`, `*Test.*`, `*Tests.*`) before bounded queries run. Hotspots prefer unambiguous definitions before pooled same-name collisions. JSON, text, Mermaid, and CLI SARIF are projections of the same result; Mermaid includes component counts/languages, boundaries, hotspots, and cycle rings, while SARIF exports returned cycles as architecture findings. Caps are 50,000 aggregation paths, 20 languages, 20 components, 20 boundaries/component and 400 globally, 50 entry points, 100 hotspots, 50,000 scoped cycle edges, 50 cycles, and 500 cycle memberships. `path_work_limit` marks path-derived partial aggregates; `top_probe` marks a hotspot or per-component boundary cap+1 probe; `global_probe_limit` marks components whose certainty was prevented by the 401st global boundary row; cycle `work_limit` returns no cycles because SCC analysis was skipped before truncated edges could be analyzed. |
 | `mmcg_temporal` | `since`, optional `root`, `path` (default `.`), `depth` (1–5, default 2), `top` (1–100, default 20), `production_only`, `codeowners` | Schema-v1 base-vs-indexed-worktree architecture delta. It rewinds changed Git blobs only in a private SQLite snapshot and reports components, public boundaries/API, cycles, centrality/hotspot drift, base/head CODEOWNERS changes, exact history review candidates, provenance, limits, and partial diagnostics. A truncated 10,000-file change set fails closed. |
 | `mmcg_change_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Stable schema-v1 analysis of the resolved baseline against staged, unstaged, and untracked content. Reports added/removed/signature/body-changed symbols, batched transitive callers, component crossings, ranked test candidates, a `disciplines` block routing the change to an evidence set, exact collection metadata, caps, and precision notes. Root, SHA-256 index freshness, Git snapshot, and SQLite snapshot checks fail closed with stable codes. |

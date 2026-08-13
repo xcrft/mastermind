@@ -221,7 +221,11 @@ impl Indexer {
             || !store
                 .scratchpad_read(None, None, None, 1)
                 .map_err(|error| IndexError::Other(error.to_string()))?
-                .is_empty();
+                .is_empty()
+            || store
+                .fact_source_count()
+                .map_err(|error| IndexError::Other(error.to_string()))?
+                > 0;
         if has_unbound_data {
             return Err(IndexError::Other(
                 "existing index has no repository identity; rebuild it in a new database"

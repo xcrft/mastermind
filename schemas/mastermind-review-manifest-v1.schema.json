@@ -102,7 +102,7 @@
         "head_oid": { "$ref": "#/$defs/git_oid" },
         "sources": {
           "type": "array",
-          "maxItems": 65,
+          "maxItems": 193,
           "items": { "$ref": "#/$defs/evidence_source" }
         },
         "attestation": { "$ref": "#/$defs/attestation" }
@@ -137,7 +137,7 @@
       "required": ["id", "kind", "label", "repository_relative", "sha256", "bytes", "analysis_status", "revision_binding"],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
-        "kind": { "enum": ["sarif", "coverage", "junit", "otel", "codeowners"] },
+        "kind": { "enum": ["sarif", "coverage", "junit", "otel", "codeowners", "facts"] },
         "label": { "type": "string", "minLength": 1 },
         "repository_relative": { "type": "boolean" },
         "sha256": { "$ref": "#/$defs/sha256" },

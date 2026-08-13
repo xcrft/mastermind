@@ -16,6 +16,7 @@ pub mod diff;
 pub mod doctor;
 pub mod evidence;
 pub mod executor_report;
+pub mod facts;
 pub mod fingerprint;
 pub mod hex;
 pub mod indexer;

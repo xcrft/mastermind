@@ -186,8 +186,8 @@ class MockText {
 
 const ELEMENT_IDS = [
   "repository-name", "repository-root", "baseline-ref", "baseline-oid", "head-oid",
-  "refresh-button", "snapshot-age", "notice-stack", "instrument-summary", "trace-search",
-  "clear-search", "fit-button", "component-list", "graph-frame", "trace-graph", "graph-state",
+  "refresh-button", "snapshot-age", "notice-stack", "instrument-summary", "completeness-status", "trace-search",
+  "clear-search", "fit-button", "review-workspace", "component-list", "graph-frame", "trace-graph", "graph-state",
   "trace-context", "mobile-trace-list", "trace-count", "inspector-body", "precision-list",
   "precision-count", "limits-list", "limits-count", "schema-label", "status-region",
   "evidence-summary", "evidence-source-list",
@@ -195,7 +195,7 @@ const ELEMENT_IDS = [
   "temporal-cycles", "temporal-centrality", "temporal-ownership", "temporal-history",
   "metric-files", "metric-files-note", "metric-symbols", "metric-symbols-note", "metric-impact",
   "metric-impact-note", "metric-crossings", "metric-crossings-note", "metric-tests",
-  "metric-tests-note",
+  "metric-tests-note", "method-ledger", "method-ledger-disclosure", "method-ledger-toggle",
 ];
 
 function createDocument() {
@@ -524,12 +524,19 @@ function fixture() {
 async function renderFixture(payload, options) {
   const harness = createDocument();
   const settings = options || {};
+  if (settings.width) {
+    harness.nodes.get("graph-frame").clientWidth = settings.width;
+  }
   if (settings.embedded) {
     const embedded = new MockElement("script");
     embedded.textContent = JSON.stringify(payload || fixture());
     harness.nodes.set("lens-snapshot", embedded);
   }
   let fetchCalls = 0;
+  let releaseFetch = null;
+  const fetchGate = settings.deferFetch
+    ? new Promise((resolve) => { releaseFetch = resolve; })
+    : null;
   const window = {
     setTimeout(handler) {
       handler();
@@ -552,7 +559,27 @@ async function renderFixture(payload, options) {
       if (settings.rejectFetch) {
         throw new Error("standalone package attempted a network request");
       }
-      return { ok: true, status: 200, json: async () => payload || fixture() };
+      if (fetchGate) {
+        await fetchGate;
+      }
+      const configured = Array.isArray(settings.responses)
+        ? settings.responses[Math.min(fetchCalls - 1, settings.responses.length - 1)]
+        : settings.response;
+      if (configured && configured.reject) {
+        throw new Error(configured.reject);
+      }
+      return {
+        ok: configured ? configured.ok !== false : true,
+        status: configured && configured.status ? configured.status : 200,
+        json: async () => {
+          if (configured && configured.jsonError) {
+            throw new Error("invalid json");
+          }
+          return configured && Object.prototype.hasOwnProperty.call(configured, "payload")
+            ? configured.payload
+            : (payload || fixture());
+        },
+      };
     },
     Intl: Intl,
     Date: Date,
@@ -566,10 +593,26 @@ async function renderFixture(payload, options) {
     JSON: JSON,
     console: console,
   }, { filename: "app.js" });
-  await new Promise((resolve) => setImmediate(resolve));
-  await new Promise((resolve) => setImmediate(resolve));
+  const settle = async () => {
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+  };
+  harness.settle = settle;
+  if (settings.deferFetch) {
+    harness.releaseFetch = releaseFetch;
+  } else {
+    await settle();
+  }
   harness.fetchCalls = fetchCalls;
   return harness;
+}
+
+function cloneFixture() {
+  return JSON.parse(JSON.stringify(fixture()));
+}
+
+function cloneFixtureValue(value) {
+  return JSON.parse(JSON.stringify(value));
 }
 
 async function main() {
@@ -581,14 +624,77 @@ async function main() {
   const refreshTag = HTML_SOURCE.match(/<button[^>]*id="refresh-button"[^>]*>/);
   assert.ok(refreshTag, "Refresh button must exist");
   assert.match(refreshTag[0], /aria-label="Refresh Lens snapshot"/, "Refresh needs an explicit mobile-safe accessible name");
-  const mobileCss = CSS_SOURCE.slice(CSS_SOURCE.indexOf("@media (max-width: 720px)"));
+  assert.match(
+    HTML_SOURCE,
+    /default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'/,
+    "Lens must keep its strict same-origin CSP"
+  );
+  assert.doesNotMatch(HTML_SOURCE, /<(?:script|style)[^>]*>\s*[^<\s]/i, "Lens must not add inline executable content");
+  assert.doesNotMatch(HTML_SOURCE, /https?:\/\//i, "Lens must remain offline and dependency-free");
+  assert.match(HTML_SOURCE, /class="scope-control__hint"[^>]*>Emphasizes the graph · filters the mobile list</i);
+  assert.match(HTML_SOURCE, /<summary role="button" aria-label="Evidence overlay filters"/i);
+  assert.match(HTML_SOURCE, /<summary[^>]*role="button"[^>]*aria-label="Open the full precision and limits ledger"/i);
+  assert.match(
+    HTML_SOURCE,
+    /class="evidence-canvas"[\s\S]*class="review-brief"[\s\S]*class="review-workbench"/i,
+    "Review pulse and graph workbench must share one evidence canvas"
+  );
+  assert.match(APP_SOURCE, /Run mastermind temporal --since <baseline> --format json/);
+  const mobileCss = CSS_SOURCE;
   assert.match(
     mobileCss,
     /\.evidence-source-list\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*repeat\(2,/s,
     "Mobile evidence sources must wrap into a visible two-column register"
   );
+  assert.match(
+    mobileCss,
+    /\.lane-key__crossing\s*\{[^}]*display:\s*inline-flex/s,
+    "Mobile must retain boundary-crossing context"
+  );
+  assert.match(
+    CSS_SOURCE,
+    /\.revision-strip__repo\s*\{[^}]*display:\s*block/s,
+    "Narrow mobile must retain compact repository identity"
+  );
+  assert.match(CSS_SOURCE, /\.workspace\.is-zero-change[\s\S]*?\.workspace\.is-zero-change \.inspector[\s\S]*?display:\s*none/);
+  assert.match(CSS_SOURCE, /\.scope-control button,[\s\S]*?min-height:\s*44px/);
+  assert.match(CSS_SOURCE, /\.metric__note,[\s\S]*?font-size:\s*11px/);
+  assert.match(CSS_SOURCE, /@media \(max-width: 360px\)[\s\S]*?\.wordmark__compact[\s\S]*?display:\s*inline/);
+  assert.match(
+    CSS_SOURCE,
+    /body:has\(\.workspace\.has-selection\)[\s\S]*?\.trace-context[\s\S]*?position:\s*sticky/s,
+    "Selected mobile traces must retain sticky context"
+  );
+
+  const loadingHarness = await renderFixture(fixture(), { deferFetch: true });
+  assert.match(loadingHarness.nodes.get("graph-state").textContent, /Calibrating blast trace/i);
+  assert.equal(loadingHarness.nodes.get("graph-frame").getAttribute("aria-busy"), "true");
+  assert.equal(loadingHarness.nodes.get("refresh-button").getAttribute("aria-busy"), "true");
+  assert.match(loadingHarness.nodes.get("completeness-status").textContent, /Checking evidence completeness/i);
+  loadingHarness.releaseFetch();
+  await loadingHarness.settle();
+  assert.equal(loadingHarness.nodes.get("graph-frame").getAttribute("aria-busy"), "false");
+
+  const initialErrorHarness = await renderFixture(null, {
+    response: {
+      ok: false,
+      status: 422,
+      payload: { error: { code: "index_stale", message: "Reindex the repository before review." } },
+    },
+  });
+  assert.equal(initialErrorHarness.nodes.get("notice-stack").hidden, false);
+  assert.match(initialErrorHarness.nodes.get("notice-stack").textContent, /Snapshot unavailable · index_stale/i);
+  assert.match(initialErrorHarness.nodes.get("notice-stack").textContent, /Use Refresh/i);
+  assert.match(initialErrorHarness.nodes.get("completeness-status").textContent, /retry required/i);
+  assert.match(initialErrorHarness.nodes.get("graph-state").textContent, /Retry local scan/i);
+
+  const malformedHarness = await renderFixture(null, { response: { ok: true, status: 200, jsonError: true } });
+  assert.match(malformedHarness.nodes.get("notice-stack").textContent, /invalid_json/i);
 
   const harness = await renderFixture();
+  assert.match(harness.nodes.get("completeness-status").textContent, /No truncation reported/i);
+  assert.ok(harness.nodes.get("completeness-status").classList.contains("is-complete"));
+  assert.match(harness.nodes.get("status-region").textContent, /9 evidence sources were evaluated/i);
   assert.match(harness.nodes.get("evidence-summary").textContent, /9 sources · 3 matched trace files/i);
   assert.equal(harness.nodes.get("evidence-source-list").querySelectorAll(".evidence-source").length, 9);
   assert.match(harness.nodes.get("evidence-source-list").textContent, /repository verified/i);
@@ -606,6 +712,70 @@ async function main() {
   const standaloneHarness = await renderFixture(fixture(), { embedded: true, rejectFetch: true });
   assert.equal(standaloneHarness.fetchCalls, 0, "Standalone Lens must render embedded JSON without fetching");
   assert.match(standaloneHarness.nodes.get("repository-name").textContent, /example/i);
+
+  const staleHarness = await renderFixture(fixture(), {
+    responses: [
+      { ok: true, status: 200, payload: fixture() },
+      { ok: false, status: 422, payload: { error: { code: "revision_changed", message: "The revision moved during refresh." } } },
+    ],
+  });
+  staleHarness.nodes.get("refresh-button").dispatch("click");
+  await staleHarness.settle();
+  assert.match(staleHarness.nodes.get("repository-name").textContent, /example/i, "Failed refresh must retain the prior snapshot");
+  assert.match(staleHarness.nodes.get("notice-stack").textContent, /Stale · revision_changed/i);
+  assert.match(staleHarness.nodes.get("completeness-status").textContent, /Stale snapshot/i);
+  assert.ok(staleHarness.nodes.get("completeness-status").classList.contains("is-error"));
+
+  const schemaMismatch = cloneFixture();
+  schemaMismatch.schema_version = 7;
+  const schemaHarness = await renderFixture(schemaMismatch);
+  assert.match(schemaHarness.nodes.get("notice-stack").textContent, /Schema mismatch/i);
+  assert.match(schemaHarness.nodes.get("notice-stack").textContent, /received schema 7/i);
+
+  const truncated = cloneFixture();
+  truncated.impact.impact.total = 18;
+  truncated.impact.impact.returned = 1;
+  truncated.impact.impact.truncated = true;
+  truncated.impact.impact.truncation_reason = "work_limit";
+  const truncatedHarness = await renderFixture(truncated);
+  assert.match(truncatedHarness.nodes.get("notice-stack").textContent, /1 bounded section/i);
+  assert.match(truncatedHarness.nodes.get("notice-stack").textContent, /Review impacted symbols before approval/i);
+  assert.doesNotMatch(truncatedHarness.nodes.get("notice-stack").textContent, /work_limit/i);
+  assert.match(truncatedHarness.nodes.get("notice-stack").textContent, /Open precision & limits/i);
+  assert.match(truncatedHarness.nodes.get("completeness-status").textContent, /Partial evidence/i);
+  assert.ok(truncatedHarness.nodes.get("completeness-status").classList.contains("is-partial"));
+  const limitsAction = truncatedHarness.nodes.get("notice-stack").querySelectorAll(".notice__action")[0];
+  assert.ok(limitsAction, "Partial notice must provide a direct limits action");
+  limitsAction.dispatch("click");
+  assert.equal(truncatedHarness.nodes.get("method-ledger-disclosure").open, true);
+
+  const empty = cloneFixture();
+  const emptyCollection = { total: 0, returned: 0, truncated: false, items: [] };
+  empty.impact.changes.files = cloneFixtureValue(emptyCollection);
+  empty.impact.changes.symbols = cloneFixtureValue(emptyCollection);
+  empty.impact.impact = cloneFixtureValue(emptyCollection);
+  empty.impact.api_crossings = cloneFixtureValue(emptyCollection);
+  empty.impact.tests = cloneFixtureValue(emptyCollection);
+  empty.impact.affected_components = cloneFixtureValue(emptyCollection);
+  const emptyHarness = await renderFixture(empty, { width: 900 });
+  assert.match(emptyHarness.nodes.get("instrument-summary").textContent, /No changes detected/i);
+  assert.match(emptyHarness.nodes.get("graph-state").textContent, /No changes in scope/i);
+  assert.match(emptyHarness.nodes.get("trace-context").textContent, /Baseline main · scope \./i);
+  assert.ok(emptyHarness.nodes.get("review-workspace").classList.contains("is-zero-change"));
+  assert.doesNotMatch(emptyHarness.nodes.get("graph-state").textContent, /Select a trace claim/i);
+
+  const keyboardHarness = await renderFixture(fixture(), { width: 900 });
+  const graphChildren = keyboardHarness.nodes.get("trace-graph").children;
+  const clusterLayerIndex = graphChildren.findIndex((node) => node.classList && node.classList.contains("graph-clusters"));
+  const edgeControlIndex = graphChildren.findIndex((node) => node.classList && node.classList.contains("graph-edge-controls"));
+  assert.ok(clusterLayerIndex >= 0 && edgeControlIndex > clusterLayerIndex, "Keyboard order must reach graph claims before edge controls");
+  const cluster = keyboardHarness.nodes.get("trace-graph").querySelectorAll("[data-cluster-id]")[0];
+  assert.ok(cluster, "Desktop overview must expose keyboard-expandable clusters");
+  cluster.dispatch("keydown", { key: "Enter" });
+  const node = keyboardHarness.nodes.get("trace-graph").querySelectorAll("[data-node-id]")[0];
+  assert.ok(node, "Expanded cluster must expose keyboard-selectable claims");
+  node.dispatch("keydown", { key: " " });
+  assert.doesNotMatch(keyboardHarness.nodes.get("inspector-body").textContent, /Select a trace claim/i);
 
   const unavailable = fixture();
   unavailable.temporal = {
@@ -631,6 +801,15 @@ async function main() {
     "Mobile index must remove the dormant SVG from layout"
   );
   changedCandidate.dispatch("click");
+  assert.ok(
+    harness.nodes.get("review-workspace").classList.contains("has-selection"),
+    "Selecting a mobile claim must switch to the focused trace journey"
+  );
+  assert.match(
+    harness.nodes.get("trace-context").textContent,
+    /Back to candidates/i,
+    "Focused mobile traces must keep a persistent return to candidates"
+  );
   assert.equal(
     harness.nodes.get("trace-graph").getAttribute("hidden"),
     null,

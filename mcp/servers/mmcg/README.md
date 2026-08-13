@@ -60,6 +60,7 @@ SQLite and tree-sitter are bundled. No system SQLite or parser libraries are req
 cd your-project
 mmcg index .
 mmcg enrich --scip index.scip # optional compiler-resolved overlay
+mmcg enrich --facts facts.json # optional declarative fact overlay
 mmcg status
 mmcg map .
 mmcg impact --since main
@@ -95,6 +96,7 @@ See the [client integration guides](https://github.com/xcrft/mastermind/tree/mai
 |---|---|
 | Symbol graph | Search, callers, callees, imports, outlines, API surface |
 | Semantic overlay | Optional SCIP definitions, references, implementations, and provenance |
+| Extension facts | Revision-bound declarative annotations and relationships with no plugin execution |
 | Architecture | Project map, temporal drift, centrality, dependency cycles, unreferenced candidates |
 | Change analysis | Git-aware symbol changes, blast radius, component crossings |
 | Review evidence | Read-only diff-first Lens plus autonomous HTML/SARIF/summary packages with revision and evidence digests |
@@ -102,7 +104,7 @@ See the [client integration guides](https://github.com/xcrft/mastermind/tree/mai
 | Workflow gates | `verify-spec`, `audit-spec`, and `run-task` |
 | Local coordination | Bounded additive scratchpad and indexed project history |
 
-The MCP surface contains 25 read-only tools and one additive local scratchpad
+The MCP surface contains 26 read-only tools and one additive local scratchpad
 write. Results are bounded and return precision or truncation notes when the
 engine cannot prove completeness.
 
@@ -139,6 +141,16 @@ Tree-sitter topology and no-toolchain fallback. Embedded SCIP document text is
 verified when available; `project_root` must identify this repository unless
 every document embeds matching text. Later source changes suppress stale
 semantic facts.
+
+`mmcg enrich --facts facts.json` is the safe community-extension boundary. A
+strict [`mastermind-facts/v1`](https://github.com/xcrft/mastermind/blob/main/docs/fact-ingestion-sdk.md)
+manifest declares capabilities and binds every source/provenance artifact to
+the exact repository identity, Git revision, byte size, and SHA-256 digest.
+Mastermind validates the whole manifest before atomically replacing one
+producer dataset in private normalized tables. `query facts`, the fixed
+read-only `mmcg_facts` tool, and Lens can read it; producers cannot load native
+code, register MCP handlers or policy rules, change graph topology, or access
+SQLite directly.
 
 ## Reference
 

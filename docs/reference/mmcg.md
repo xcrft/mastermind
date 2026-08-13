@@ -323,6 +323,20 @@ declare bounded `annotations` and `relationships`; they must bind every source
 and provenance artifact to a canonical repository-relative path, byte size,
 and SHA-256 digest.
 
+`mmcg facts adapt` creates that manifest directly from one bounded SARIF,
+LCOV/Cobertura, JUnit, or OTLP JSON artifact. It uses the same parsers as Lens,
+requires every parsed fact to map to the current index, and publishes nothing
+when parsing is partial or truncated. Exact duplicate findings are collapsed by
+their content-derived IDs. `mmcg facts keygen` creates a non-overwriting local
+Ed25519 keypair from the operating system CSPRNG; `mmcg facts sign` and
+`mmcg facts verify` add a domain-separated Ed25519 proof defined by
+[`mastermind-fact-signature-v1`](../../schemas/mastermind-fact-signature-v1.schema.json).
+Trusted import uses `mmcg enrich --facts ... --signature ... --public-key ...
+--trusted-key-id ... --require-signature`; revocation IDs override the trust
+allowlist. Lens, CLI, MCP, and review export preserve the verified key ID and
+reproducible proof. Signatures prove allowlisted key control, not signer
+identity or signing time.
+
 Mastermind validates the complete manifest before an atomic per-producer,
 per-dataset replacement. Unknown/duplicate fields, unsupported capabilities,
 path traversal, symlinks, digest/size mismatch, repository/revision mismatch,
@@ -344,6 +358,26 @@ define executable policy rules, modify the language registry or graph, install
 a Tree-sitter grammar, execute a command, or access SQLite. Only Mastermind
 writes the private normalized tables. See the complete
 [producer guide and security model](../fact-ingestion-sdk.md).
+
+## Local team graph
+
+`mmcg team lock MANIFEST --output LOCK` resolves up to 16 local repository
+roots and indexes, then pins each credential-free identity, Git revision, and
+exact database plus active-WAL digest. Its JSON summary includes the exact
+`manifest_sha256` required by MCP authorization. Repository IDs use only ASCII
+letters, digits, dots, underscores, and hyphens so namespaced node IDs cannot
+collide. `mmcg team map LOCK` reopens those
+indexes through the read-only snapshot path, proves source/index freshness, and
+returns a bounded repository-namespaced graph. Internal imports remain
+Tree-sitter evidence; cross-repository edges are only explicit
+`team-manifest` claims and are never inferred.
+
+The fixed read-only `mmcg_team_map` MCP tool accepts a locked manifest inside
+the repository served by that MCP process only when the server operator has
+authorized that exact path with `MMCG_TEAM_MANIFEST`. Identity, revision,
+and exact manifest bytes must also match `MMCG_TEAM_MANIFEST_SHA256`. DB/WAL
+drift, duplicate canonical repositories, bounds, and timeouts fail closed. See
+the full [`mastermind-team/v1` contract](../team-graph.md).
 
 ## Temporal Graph (`mmcg temporal`)
 
@@ -526,10 +560,11 @@ OTel collector produced those bytes from that revision.
 Loaded `mastermind-facts/v1` datasets need no second sidecar attestation: their
 ingestion contract already verified exact repository identity, Git head, source
 digests, and provenance-artifact digests before Mastermind wrote normalized
-facts. The package therefore records the fact-manifest and returned provenance
-digests as unsigned `producer-attested` bindings and embeds the same normalized
-facts in the autonomous Lens HTML. A surrounding workflow must supply any
-stronger identity or signature trust anchor. A stale or truncated fact source
+facts. Unsigned datasets remain `producer-attested`. A dataset imported through
+an allowlisted Ed25519 key is `producer-signed`; the package records its key ID,
+public key, signature, detached-signature digest, and canonical signed-manifest
+digest. Mixed evidence is `partially-producer-signed`. The autonomous Lens HTML
+contains the same normalized facts. A stale, invalid-proof, or truncated source
 remains an explicit partial state and is never promoted to a revision-bound
 claim.
 
@@ -741,6 +776,7 @@ Run `mmcg watch` in a separate terminal so the index stays current while you wor
 | `mmcg_centrality` | optional `prefix`, `language`, `kind`, `top` (default 20) | Rank symbols by in-degree (distinct callers). Pre-flight "where is the gravity" — top hits are the structural attractors of the codebase or a subdirectory. Use to learn what to read first on unfamiliar code. Excludes synthetic `<module>` rows and zero-degree symbols. |
 | `mmcg_semantic` | `symbol`, optional `top` (default 100, max 500) | Compiler-resolved SCIP definitions, references, implementations, type definitions, and explicit provenance. Returns `fallback_active: true` instead of an error when no overlay exists. Stale document facts are omitted with diagnostics. |
 | `mmcg_facts` | optional `path` (default `.`), `top` (default 100, max 400) | Normalized `mastermind-facts/v1` annotations and relationships plus capability negotiation, exact repository/revision identity, provenance, source state, limits, and stale/truncation diagnostics. Read-only; it never loads producer code or creates graph topology. |
+| `mmcg_team_map` | `manifest` | Bounded `mastermind-team/v1` graph over pinned local read-only indexes. The locked manifest must be repository-relative, inside the MCP server root, and exactly authorized by `MMCG_TEAM_MANIFEST` plus `MMCG_TEAM_MANIFEST_SHA256`. Nodes are repository-namespaced; internal imports retain Tree-sitter provenance and cross-repository edges are explicit manifest claims. |
 | `mmcg_map` | optional `path` (default `.`), `depth` (1–6, default 2), `top` (1–100, default 20), `production_only` (default `false`) | Schema-v1 architecture briefing with lexical file/directory scope: `%` and `_` are literal bytes, selected-directory components are relative to that directory, root components remain repository-relative, and selected files retain their paths. `production_only` excludes conventional test/fixture/example/generated/vendor path segments and test filenames (`test_*`, `*_test.*`, `*.test.*`, `*.spec.*`, `*Test.*`, `*Tests.*`) before bounded queries run. Hotspots prefer unambiguous definitions before pooled same-name collisions. JSON, text, Mermaid, and CLI SARIF are projections of the same result; Mermaid includes component counts/languages, boundaries, hotspots, and cycle rings, while SARIF exports returned cycles as architecture findings. Caps are 50,000 aggregation paths, 20 languages, 20 components, 20 boundaries/component and 400 globally, 50 entry points, 100 hotspots, 50,000 scoped cycle edges, 50 cycles, and 500 cycle memberships. `path_work_limit` marks path-derived partial aggregates; `top_probe` marks a hotspot or per-component boundary cap+1 probe; `global_probe_limit` marks components whose certainty was prevented by the 401st global boundary row; cycle `work_limit` returns no cycles because SCC analysis was skipped before truncated edges could be analyzed. |
 | `mmcg_temporal` | `since`, optional `root`, `path` (default `.`), `depth` (1–5, default 2), `top` (1–100, default 20), `production_only`, `codeowners` | Schema-v1 base-vs-indexed-worktree architecture delta. It rewinds changed Git blobs only in a private SQLite snapshot and reports components, public boundaries/API, cycles, centrality/hotspot drift, base/head CODEOWNERS changes, exact history review candidates, provenance, limits, and partial diagnostics. A truncated 10,000-file change set fails closed. |
 | `mmcg_change_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Stable schema-v1 analysis of the resolved baseline against staged, unstaged, and untracked content. Reports added/removed/signature/body-changed symbols, batched transitive callers, component crossings, ranked test candidates, a `disciplines` block routing the change to an evidence set, exact collection metadata, caps, and precision notes. Root, SHA-256 index freshness, Git snapshot, and SQLite snapshot checks fail closed with stable codes. |

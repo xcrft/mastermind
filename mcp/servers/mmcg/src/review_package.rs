@@ -217,6 +217,16 @@ struct EvidenceSourceBinding {
     bytes: u64,
     analysis_status: &'static str,
     revision_binding: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signing_key_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signing_public_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signed_manifest_digest: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -325,13 +335,27 @@ pub fn export(options: &ReviewExportOptions) -> Result<ReviewExportResult, Revie
             message: "A producer-side evidence attestation matched the package Git head and exact artifact digests. The attestation is an unsigned CI fact unless the surrounding workflow supplies a stronger trust anchor.".into(),
         });
     }
-    if snapshot
+    let (has_signed_facts, has_unsigned_facts) = snapshot
         .evidence
         .sources
         .items
         .iter()
-        .any(|source| source.kind == "facts" && source.status == "loaded")
-    {
+        .filter(|source| source.kind == "facts" && source.status == "loaded")
+        .fold((false, false), |(signed, unsigned), source| {
+            if source.signature_status.as_deref() == Some("verified") {
+                (true, unsigned)
+            } else {
+                (signed, true)
+            }
+        });
+    if has_signed_facts {
+        snapshot.evidence.precision_notes.push(EvidencePrecisionNote {
+            source_id: "review-package",
+            code: "normalized_fact_signature_binding",
+            message: "manifest.json records verified Ed25519 key IDs and detached-signature digests for signed mastermind-facts/v1 manifests. The signature proves control of an explicitly trusted key; it does not independently prove a human identity or production time.".into(),
+        });
+    }
+    if has_unsigned_facts {
         snapshot.evidence.precision_notes.push(EvidencePrecisionNote {
             source_id: "review-package",
             code: "normalized_fact_revision_binding",
@@ -713,6 +737,11 @@ fn evidence_binding(
                 } else {
                     "digest-bound-at-export"
                 },
+                signing_key_id: None,
+                signature_sha256: None,
+                signing_public_key: None,
+                signature: None,
+                signed_manifest_digest: None,
             })
         })
         .collect::<Result<Vec<_>, ReviewPackageError>>()?;
@@ -726,6 +755,16 @@ fn evidence_binding(
         let (Some(sha256), Some(bytes)) = (&source.artifact_sha256, source.artifact_bytes) else {
             return Err(ReviewPackageError::EvidenceBinding(source.id.clone()));
         };
+        let signed = source.signature_status.as_deref() == Some("verified");
+        if signed
+            && (source.signing_key_id.is_none()
+                || source.signature_sha256.is_none()
+                || source.signing_public_key.is_none()
+                || source.signature.is_none()
+                || source.signed_manifest_digest.is_none())
+        {
+            return Err(ReviewPackageError::EvidenceBinding(source.id.clone()));
+        }
         bound_sources.push(EvidenceSourceBinding {
             id: source.id.clone(),
             kind: "facts".into(),
@@ -734,10 +773,27 @@ fn evidence_binding(
             sha256: sha256.clone(),
             bytes,
             analysis_status: source.status,
-            revision_binding: "producer-attested",
+            revision_binding: if signed {
+                "producer-signed"
+            } else {
+                "producer-attested"
+            },
+            signing_key_id: source.signing_key_id.clone(),
+            signature_sha256: source.signature_sha256.clone(),
+            signing_public_key: source.signing_public_key.clone(),
+            signature: source.signature.clone(),
+            signed_manifest_digest: source.signed_manifest_digest.clone(),
         });
     }
     for artifact in &snapshot.evidence.fact_artifacts.items {
+        let source = snapshot
+            .evidence
+            .sources
+            .items
+            .iter()
+            .find(|source| source.id == artifact.source_id)
+            .ok_or_else(|| ReviewPackageError::EvidenceBinding(artifact.source_id.clone()))?;
+        let signed = source.signature_status.as_deref() == Some("verified");
         bound_sources.push(EvidenceSourceBinding {
             id: format!("{}/artifact/{}", artifact.source_id, artifact.id),
             kind: "facts".into(),
@@ -746,7 +802,16 @@ fn evidence_binding(
             sha256: artifact.sha256.clone(),
             bytes: artifact.bytes,
             analysis_status: "loaded",
-            revision_binding: "producer-attested",
+            revision_binding: if signed {
+                "producer-signed"
+            } else {
+                "producer-attested"
+            },
+            signing_key_id: source.signing_key_id.clone(),
+            signature_sha256: source.signature_sha256.clone(),
+            signing_public_key: source.signing_public_key.clone(),
+            signature: source.signature.clone(),
+            signed_manifest_digest: source.signed_manifest_digest.clone(),
         });
     }
     bound_sources.sort_by(|left, right| left.id.cmp(&right.id));
@@ -754,8 +819,16 @@ fn evidence_binding(
         .iter()
         .filter(|source| source.revision_binding == "producer-attested")
         .count();
+    let signed_count = bound_sources
+        .iter()
+        .filter(|source| source.revision_binding == "producer-signed")
+        .count();
     let status = if bound_sources.is_empty() {
         "not-applicable"
+    } else if signed_count == bound_sources.len() {
+        "producer-signed"
+    } else if signed_count > 0 {
+        "partially-producer-signed"
     } else if attested_count == bound_sources.len() {
         "producer-attested"
     } else if attested_count > 0 {
@@ -1390,6 +1463,96 @@ mod tests {
         let html = std::fs::read_to_string(output.join("index.html")).unwrap();
         assert!(html.contains("arch.checkout-charge"));
         assert!(html.contains(&crate::hex::encode(&Sha256::digest(&artifact))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_preserves_reproducible_trusted_fact_signature_proof() {
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine;
+        use ed25519_dalek::SigningKey;
+        use std::os::unix::fs::PermissionsExt;
+
+        let (repository, state, index_path) = fixture();
+        let source = std::fs::read(repository.path().join("src/lib.rs")).unwrap();
+        let store = Store::open(&index_path).unwrap();
+        let contract = crate::facts::contract(&store).unwrap();
+        let manifest_path = state.path().join("signed-facts.json");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&serde_json::json!({
+                "api_version": crate::facts::API_VERSION,
+                "capabilities": ["annotations"],
+                "repository": {
+                    "identity": contract.repository.identity,
+                    "revision": contract.repository.revision
+                },
+                "producer": {"name": "com.example.signed", "version": "1.0.0"},
+                "dataset": "review",
+                "provenance": {"kind": "static-analysis", "artifacts": []},
+                "files": [{
+                    "path": "src/lib.rs",
+                    "sha256": crate::hex::encode(&Sha256::digest(&source)),
+                    "bytes": source.len()
+                }],
+                "artifacts": [],
+                "facts": [{
+                    "kind": "annotation",
+                    "id": "signed.review",
+                    "path": "src/lib.rs",
+                    "line": 1,
+                    "severity": "warning",
+                    "category": "architecture.review",
+                    "title": "Signed review",
+                    "message": "This fact was signed by a trusted producer key."
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let signing = SigningKey::from_bytes(&[23_u8; 32]);
+        let private_key = state.path().join("producer.seed");
+        let public_key = state.path().join("producer.pub");
+        let signature_path = state.path().join("signed-facts.sig.json");
+        std::fs::write(&private_key, format!("{}\n", BASE64.encode([23_u8; 32]))).unwrap();
+        std::fs::write(
+            &public_key,
+            format!("{}\n", BASE64.encode(signing.verifying_key().to_bytes())),
+        )
+        .unwrap();
+        std::fs::set_permissions(&private_key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(&public_key, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let signed =
+            crate::fact_signature::sign(&manifest_path, &private_key, &signature_path).unwrap();
+        let imported = crate::facts::import_with_trust(
+            &store,
+            &manifest_path,
+            &crate::fact_signature::FactTrustPolicy {
+                signature: Some(signature_path),
+                public_key: Some(public_key),
+                require_signature: true,
+                trusted_key_ids: [signed.key_id.clone()].into_iter().collect(),
+                revoked_key_ids: BTreeSet::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(imported.source.signature_status, "verified");
+        drop(store);
+
+        let output = repository.path().join("signed-fact-review");
+        let options = export_options(repository.path(), index_path, output.clone());
+        let result = export(&options).unwrap();
+        assert_eq!(result.evidence_binding, "producer-signed");
+        let manifest: Value =
+            serde_json::from_slice(&std::fs::read(output.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(manifest["evidence_binding"]["status"], "producer-signed");
+        let binding = &manifest["evidence_binding"]["sources"][0];
+        assert_eq!(binding["revision_binding"], "producer-signed");
+        assert_eq!(binding["signing_key_id"], signed.key_id);
+        assert_eq!(binding["signature"], signed.signature);
+        assert_eq!(binding["signed_manifest_digest"], signed.manifest_digest);
+        assert!(binding["signing_public_key"].as_str().is_some());
+        assert!(binding["signature_sha256"].as_str().is_some());
     }
 
     #[test]

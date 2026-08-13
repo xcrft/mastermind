@@ -65,6 +65,7 @@ quick-xml = "0.41"
 sha2 = "0.11"
 base64 = "0.23"
 ed25519-dalek = { version = "3", features = ["rand_core"] }
+getrandom = "0.4"
 libc = "0.2"
 similar = "3.1"
 fs2 = "0.4"

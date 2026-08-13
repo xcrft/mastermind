@@ -95,6 +95,9 @@ through the declarative [`mastermind-facts/v1` SDK](docs/fact-ingestion-sdk.md):
 
 ```bash
 mastermind query facts --top 1          # capability and revision contract
+mastermind facts adapt --format sarif \
+  --input semgrep.sarif --output facts.json \
+  --producer semgrep --producer-version 1.82.0 --dataset pr-security
 mastermind enrich --facts facts.json    # validate, then atomically normalize
 mastermind query facts --path src
 ```
@@ -102,6 +105,23 @@ mastermind query facts --path src
 Producers never run inside Mastermind and never receive SQLite, MCP-handler,
 policy-engine, or graph-mutation access. Lens reads current normalized facts;
 relationships only corroborate an existing exact file-and-line graph edge.
+Built-in adapters cover SARIF, LCOV/Cobertura, JUnit, and OTLP JSON. An optional
+domain-separated Ed25519 signature plus explicit trusted/revoked key policy
+turns the unsigned producer claim into verifiable producer provenance;
+`mastermind facts keygen` creates the local producer keypair without exposing
+or overwriting its private seed.
+
+Multiple local indexes can be joined without centralizing their databases:
+
+```bash
+mastermind team lock team.json --output team.lock.json
+mastermind team map team.lock.json
+```
+
+The [local team graph](docs/team-graph.md) pins every repository identity,
+revision, and DB/WAL snapshot. Nodes are repository-namespaced, internal edges
+retain Tree-sitter provenance, and cross-repository edges are present only when
+the manifest declares them explicitly.
 
 ## Core workflows
 
@@ -187,7 +207,9 @@ records baseline/head OIDs, working-tree state, exact SHA-256 digests for every
 payload and external evidence input, plus every returned partial, truncated,
 or unavailable analysis state. Existing output paths are never overwritten.
 Valid declarative fact datasets carry their already-verified manifest and
-provenance digests into this package as producer-attested head bindings.
+provenance digests into this package. Unsigned sources remain
+`producer-attested`; trusted Ed25519 sources carry reproducible proof and are
+labelled `producer-signed`.
 
 Use the same repeatable `--sarif`, `--coverage`, `--junit`, and `--otel`
 options as Lens. Exact artifact bytes are always bound to the exported head.

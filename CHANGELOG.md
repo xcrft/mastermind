@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Built-in `mastermind facts adapt` converters turn bounded SARIF,
+  LCOV/Cobertura, JUnit, and OTLP JSON artifacts into strict
+  `mastermind-facts/v1` manifests. Every emitted fact must map to the current
+  index; partial parsing and unmapped records fail before output publication.
+- Fact manifests can be signed and verified with a domain-separated Ed25519
+  contract and explicit trusted/revoked key policy. Trusted imports preserve a
+  reproducible signature proof for Lens, MCP, and PR evidence packages, while
+  unsigned imports remain visibly unsigned. `mastermind facts keygen` creates
+  the producer keypair from the OS CSPRNG without overwriting existing keys.
+- `mastermind team lock` and `mastermind team map`, plus the read-only
+  `mmcg_team_map` tool, federate up to 16 pinned local indexes into a bounded
+  repository-namespaced graph. Identity, Git revision, DB/WAL digest, and index
+  freshness are revalidated; cross-repository edges are explicit manifest
+  claims rather than guessed topology. Lock output reports the exact manifest
+  digest required to authorize the read-only MCP tool.
+- Release workflows now smoke-test the exact published npm and crates.io
+  versions by installing them into isolated temporary prefixes and exercising
+  the shipped binary. The npm smoke runs index, adapt, keygen, signed import,
+  query, and a two-repository team map end to end.
 - A minimal declarative fact-ingestion SDK accepts strict
   `mastermind-facts/v1` manifests with capability negotiation, exact repository
   and revision binding, source/provenance digests, bounded atomic replacement,

@@ -9,7 +9,9 @@ use crate::queries;
 use crate::store::{CancelHandle, InterruptSource, Store, WorkBudget};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::ffi::OsStr;
 use std::io::{self, BufRead, Read, Write};
+use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -219,6 +221,7 @@ static TOOLS: &[ToolDef] = &[
     read_only_tool("mmcg_centrality", schema_centrality, handle_centrality),
     read_only_tool("mmcg_semantic", schema_semantic, handle_semantic),
     read_only_tool("mmcg_facts", schema_facts, handle_facts),
+    read_only_tool("mmcg_team_map", schema_team_map, handle_team_map),
     read_only_tool("mmcg_map", schema_map, handle_map),
     read_only_tool("mmcg_temporal", schema_temporal, handle_temporal),
     read_only_tool(
@@ -1428,6 +1431,54 @@ fn schema_facts() -> Value {
     })
 }
 
+fn schema_team_map() -> Value {
+    json!({
+        "name": "mmcg_team_map",
+        "description": "Read the locked mastermind-team/v1 manifest explicitly authorized by the MCP server's MMCG_TEAM_MANIFEST path and MMCG_TEAM_MANIFEST_SHA256 digest, then return a bounded, namespaced graph over pinned local read-only indexes. Cross-repository edges are explicit manifest claims; Mastermind never guesses them.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "manifest": {
+                    "type": "string",
+                    "description": "Canonical repository-relative path to a locked mastermind-team/v1 manifest"
+                }
+            },
+            "required": ["manifest"]
+        }
+    })
+}
+
+fn authorized_team_manifest(
+    root: &std::path::Path,
+    requested: &str,
+    configured: Option<&OsStr>,
+) -> Result<PathBuf, HandlerError> {
+    let configured = configured.ok_or_else(|| {
+        HandlerError::InvalidArguments(
+            "Team graph is not configured; set MMCG_TEAM_MANIFEST on the MCP server".into(),
+        )
+    })?;
+    let configured = PathBuf::from(configured);
+    let configured = if configured.is_absolute() {
+        configured
+    } else {
+        root.join(configured)
+    };
+    let requested = root.join(requested);
+    let configured = configured.canonicalize().map_err(|_| {
+        HandlerError::InvalidArguments("Configured team manifest is unavailable".into())
+    })?;
+    let requested_identity = requested
+        .canonicalize()
+        .map_err(|_| HandlerError::InvalidArguments("Team manifest is unavailable".into()))?;
+    if !configured.starts_with(root) || configured != requested_identity {
+        return Err(HandlerError::InvalidArguments(
+            "Team manifest is not authorized by MMCG_TEAM_MANIFEST".into(),
+        ));
+    }
+    Ok(requested)
+}
+
 fn impact_input_schema(name: &str, description: &str) -> Value {
     json!({
         "name": name,
@@ -1866,6 +1917,33 @@ fn handle_facts(store: &mut Store, args: &Value) -> Result<Value, HandlerError> 
     };
     let result = crate::facts::snapshot(store, path, top)
         .map_err(|error| HandlerError::internal("fact_query", error))?;
+    serde_json::to_value(result)
+        .map_err(|error| HandlerError::internal("serialize_response", error))
+}
+
+fn handle_team_map(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
+    let manifest = str_arg(args, "manifest")?;
+    let manifest = crate::facts::normalize_fact_path(manifest)
+        .map_err(|_| HandlerError::InvalidArguments("Invalid argument: manifest".into()))?;
+    let root = store
+        .meta_value("index_root")
+        .map_err(|error| HandlerError::internal("team_index_root", error))?
+        .ok_or_else(|| HandlerError::InvalidArguments("Index has no repository root".into()))?;
+    let root = PathBuf::from(root)
+        .canonicalize()
+        .map_err(|error| HandlerError::internal("team_index_root", error))?;
+    let manifest = authorized_team_manifest(
+        &root,
+        &manifest,
+        std::env::var_os("MMCG_TEAM_MANIFEST").as_deref(),
+    )?;
+    let expected_digest = std::env::var("MMCG_TEAM_MANIFEST_SHA256").map_err(|_| {
+        HandlerError::InvalidArguments(
+            "Team graph is not configured; set MMCG_TEAM_MANIFEST_SHA256 on the MCP server".into(),
+        )
+    })?;
+    let result = crate::team::map_authorized(&manifest, &root, &expected_digest)
+        .map_err(|error| HandlerError::internal("team_map", error))?;
     serde_json::to_value(result)
         .map_err(|error| HandlerError::internal("serialize_response", error))
 }
@@ -2579,7 +2657,7 @@ mod tests {
     #[test]
     fn tool_annotations_match_behavior_table() {
         let legacy = tools_list(ProtocolVersion::Legacy);
-        assert_eq!(legacy["tools"].as_array().unwrap().len(), 27);
+        assert_eq!(legacy["tools"].as_array().unwrap().len(), 28);
         assert!(legacy["tools"]
             .as_array()
             .unwrap()
@@ -2588,7 +2666,7 @@ mod tests {
 
         let current = tools_list(ProtocolVersion::Current);
         let tools = current["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 27);
+        assert_eq!(tools.len(), 28);
         let mut readers = 0;
         for tool in tools {
             let annotations = &tool["annotations"];
@@ -2607,7 +2685,7 @@ mod tests {
                 readers += 1;
             }
         }
-        assert_eq!(readers, 26);
+        assert_eq!(readers, 27);
     }
 
     #[test]
@@ -3296,7 +3374,7 @@ mod tests {
     #[test]
     fn tools_list_covers_every_handler() {
         let listed: Vec<&str> = TOOLS.iter().map(|t| t.name).collect();
-        assert_eq!(listed.len(), 27, "expected 27 tools, got {}", listed.len());
+        assert_eq!(listed.len(), 28, "expected 28 tools, got {}", listed.len());
         for name in &listed {
             assert!(
                 TOOLS.iter().any(|t| &t.name == name),
@@ -3307,6 +3385,31 @@ mod tests {
         for t in TOOLS {
             assert!(seen.insert(t.name), "duplicate tool name: {}", t.name);
         }
+    }
+
+    #[test]
+    fn team_map_requires_an_exact_server_authorized_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join("team.lock.json");
+        std::fs::write(&manifest, b"{}\n").unwrap();
+        let canonical_root = root.path().canonicalize().unwrap();
+        let resolved = authorized_team_manifest(
+            &canonical_root,
+            "team.lock.json",
+            Some(OsStr::new("team.lock.json")),
+        )
+        .unwrap();
+        assert_eq!(resolved, canonical_root.join("team.lock.json"));
+
+        let other = root.path().join("other.lock.json");
+        std::fs::write(&other, b"{}\n").unwrap();
+        assert!(authorized_team_manifest(
+            &canonical_root,
+            "other.lock.json",
+            Some(OsStr::new("team.lock.json")),
+        )
+        .is_err());
+        assert!(authorized_team_manifest(&canonical_root, "team.lock.json", None).is_err());
     }
 
     #[test]

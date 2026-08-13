@@ -64,6 +64,14 @@ pub struct EvidenceExtensionOptions {
     pub project_knowledge: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum AdapterEvidenceKind {
+    Sarif,
+    Coverage,
+    Junit,
+    Otel,
+}
+
 #[derive(Debug, Serialize)]
 pub struct EvidenceSnapshot {
     pub schema_version: u32,
@@ -101,6 +109,18 @@ pub struct EvidenceSource {
     pub artifact_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signing_key_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signing_public_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signed_manifest_digest: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -670,12 +690,64 @@ fn collect_internal(
                     files_matched: 0,
                     artifact_sha256: None,
                     artifact_bytes: None,
+                    signature_status: None,
+                    signing_key_id: None,
+                    signature_sha256: None,
+                    signing_public_key: None,
+                    signature: None,
+                    signed_manifest_digest: None,
                 });
             }
         }
     }
 
     collector.finish(options.git_commits)
+}
+
+/// Parse exactly one external artifact against an explicit indexed-path
+/// inventory. Unlike Lens collection, this is not diff-scoped: adapters must
+/// bind every emitted fact to the current repository revision. Any parser
+/// truncation or malformed record is retained in `partial` and the adapter
+/// rejects the artifact rather than signing an incomplete projection.
+pub(crate) fn collect_for_fact_adapter(
+    root: &Path,
+    kind: AdapterEvidenceKind,
+    path: &Path,
+    relevant: BTreeSet<String>,
+    deadline: Option<Instant>,
+) -> EvidenceSnapshot {
+    let mut collector = Collector {
+        root,
+        relevant,
+        sources: Vec::new(),
+        files: BTreeMap::new(),
+        diagnostics: Vec::new(),
+        notes: Vec::new(),
+        diagnostics_truncated: false,
+        sources_truncated: false,
+        partial: false,
+        finding_count: 0,
+        coverage_line_count: 0,
+        test_case_count: 0,
+        test_failure_count: 0,
+        runtime_span_count: 0,
+        runtime_edges: BTreeMap::new(),
+        runtime_edges_truncated: false,
+        fact_artifacts: Vec::new(),
+        fact_artifacts_truncated: false,
+        fact_relationships: Vec::new(),
+        fact_relationships_truncated: false,
+        knowledge_match_count: 0,
+        deadline,
+        artifact_identities: HashMap::new(),
+    };
+    match kind {
+        AdapterEvidenceKind::Sarif => collector.load_sarif(path, "adapter:sarif".into()),
+        AdapterEvidenceKind::Coverage => collector.load_coverage(path, "adapter:coverage".into()),
+        AdapterEvidenceKind::Junit => collector.load_junit(path, "adapter:junit".into()),
+        AdapterEvidenceKind::Otel => collector.load_otel(path, "adapter:otel".into()),
+    }
+    collector.finish(0)
 }
 
 fn relevant_paths(impact: &ChangeImpactResponse) -> (BTreeSet<String>, bool) {
@@ -760,6 +832,12 @@ impl Collector<'_> {
             files_matched: 0,
             artifact_sha256: artifact.as_ref().map(|value| value.0.clone()),
             artifact_bytes: artifact.map(|value| value.1),
+            signature_status: None,
+            signing_key_id: None,
+            signature_sha256: None,
+            signing_public_key: None,
+            signature: None,
+            signed_manifest_digest: None,
         });
     }
 
@@ -776,6 +854,12 @@ impl Collector<'_> {
             files_matched: saturating_u32(stats.files.len()),
             artifact_sha256: artifact.as_ref().map(|value| value.0.clone()),
             artifact_bytes: artifact.map(|value| value.1),
+            signature_status: None,
+            signing_key_id: None,
+            signature_sha256: None,
+            signing_public_key: None,
+            signature: None,
+            signed_manifest_digest: None,
         });
     }
 
@@ -811,6 +895,12 @@ impl Collector<'_> {
                 files_matched: source.files_matched,
                 artifact_sha256: Some(source.manifest_sha256),
                 artifact_bytes: Some(source.manifest_bytes),
+                signature_status: Some(source.signature_status),
+                signing_key_id: source.signing_key_id,
+                signature_sha256: source.signature_sha256,
+                signing_public_key: source.signing_public_key,
+                signature: source.signature,
+                signed_manifest_digest: source.signed_manifest_digest,
             });
         }
         let mut annotation_truncated = false;

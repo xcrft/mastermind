@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/xcrft/mastermind/schemas/mastermind-fact-signature-v1.schema.json",
+  "title": "Mastermind fact manifest detached signature v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "domain",
+    "algorithm",
+    "canonicalization",
+    "key_id",
+    "manifest_digest",
+    "signature"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "domain": {
+      "const": "mastermind/fact-manifest-signature/v1"
+    },
+    "algorithm": {
+      "const": "ed25519"
+    },
+    "canonicalization": {
+      "const": "mastermind-cjson-v1"
+    },
+    "key_id": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "manifest_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "signature": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9+/]{86}==$"
+    }
+  }
+}

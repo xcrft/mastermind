@@ -1,191 +1,162 @@
-# Evals
+# Behavioral evaluations
 
-Adversarial test cases for the review subagents plus the planner, executor, and
-user-facing workflow skills.
+Adversarial regression cases for Mastermind agents and workflow skills. One case
+proves one expected behavior; suite pass rate is not a coverage or correctness
+metric.
 
-**This is not a coverage metric.** Each case is one regression scenario, not a guarantee.
+## Suite map
 
-## Files
+| File | Target | Expected result |
+|---|---|---|
+| `critic.jsonl` | Design critic | `rethink`, `revise`, or `ship` |
+| `auditor.jsonl` | Post-flight auditor | `held`, `drift`, or `broken` |
+| `intake.jsonl` | Prompt intake | `refined`, `passthrough`, or `ask` |
+| `workflow.jsonl` | Planner, executor, and portable skills | Required and forbidden signals |
+| `fixtures/` | Real Git histories for auditor cases | Exact planted change |
+| `scorecard.md` | Dated full-suite results | Environment and trust notes |
 
-- `critic.jsonl` — designs we want flagged (or cleanly passed); verdicts: `rethink`/`revise`/`ship`
-- `auditor.jsonl` — executor reports we want verified (or caught lying); verdicts: `held`/`drift`/`broken`
-- `intake.jsonl` — raw prompts the refiner should normalize; actions: `refined`/`passthrough`/`ask`
-- `workflow.jsonl` — planner/executor and product-skill contract regressions; each case names the exact prompt artifact it evaluates
-- `runner.py` — invokes the subagent via `claude -p`, asserts on verdict/action + key phrases
-- `ablation.py` — vanilla-vs-mastermind catch-rate study over the planted-defect auditor cases (does the codegraph + auditor contract beat plain `claude -p` + grep/read?); see [Ablation](#ablation)
-- `fixtures/` — real-git source trees used by auditor cases; see `fixtures/<name>/README.md`
-- `scorecard.md` — dated full-suite pass rates, trust conditions, and ablation status
+`runner.py` invokes `claude -p`. `test_runner.py` tests the deterministic
+parser, isolation, allowlist, and fixture machinery without calling a model.
 
 ## Run
 
-Needs `claude` CLI **and** `git` on PATH. Auth uses your Claude Code login (no API key, no per-token cost).
+Model-backed runs require authenticated `claude` and `git` executables:
 
 ```bash
-./evals/runner.py                                # all suites
-./evals/runner.py --suite critic                 # one suite
-./evals/runner.py --suite workflow               # planner/executor/product skills
-./evals/runner.py --case c-001-slop-rethink      # one case
-./evals/runner.py --model sonnet                 # default: opus
-./evals/runner.py --keep-fixtures                # don't delete tmp git repos (debug)
-./evals/runner.py --verbose-failures             # show bounded model output on failure
-bash evals/run-verified.sh --model sonnet        # deterministic gates, then all suites
+./evals/runner.py
+./evals/runner.py --suite critic
+./evals/runner.py --suite workflow
+./evals/runner.py --case c-001-slop-rethink
+./evals/runner.py --model sonnet
+./evals/runner.py --keep-fixtures
+./evals/runner.py --verbose-failures
 ```
 
-Each case takes ~30–60s (Opus). Auditor cases are slightly slower because the
-subagent actually runs `git diff`, `git log`, etc. on a real fixture repo.
+Run deterministic repository gates before every model-backed suite:
 
-## Auditor: real-git fixtures + live mmcg
+```bash
+bash evals/run-verified.sh --model sonnet
+```
 
-Auditor cases reference a fixture tree under `evals/fixtures/<name>/` rather than
-embedding a synthetic diff string. For each case the runner:
+Model-backed evals are hand-run, not ordinary CI. CI runs the deterministic
+harness contract through:
 
-1. Builds a tmp git repo
-2. Copies `fixtures/<name>/baseline/` → commits → tags `<baseline_ref>`
-3. Replaces the working tree with `fixtures/<name>/changes/<after_ref>/` → commits → tags `<after_ref>`
-4. Runs `mmcg index .` against the after-tree, leaving `.mastermind/mmcg.db` in the tmp repo
-5. Passes `--add-dir <tmp>` + `--mcp-config` (mmcg stdio server pointing at the index) to `claude -p`
-6. The auditor runs **real** `git diff <baseline>..<after>` AND calls live `mmcg_callers` / `mmcg_search` MCP tools against the after-tree index to compare against the spec's pre-edit snapshot
+```bash
+.venv/bin/python -m unittest evals/test_runner.py
+```
 
-This catches failure modes synthetic diffs miss: lazy auditors that trust the
-report, multi-file scope creep visible only in `git diff --name-only`, silent
-file deletions, snapshot drift where the symbol's caller count changed and the
-spec didn't acknowledge it.
+## Auditor fixture lifecycle
 
-The mmcg binary used is the in-tree `mcp/servers/mmcg/target/release/mmcg`
-when available (matches the SQL schema of the SDK in this checkout), falling
-back to whatever `mmcg` is on `$PATH`. Build it first with
-`cargo build --release --manifest-path mcp/servers/mmcg/Cargo.toml`.
+Each auditor case names `fixtures/<name>/`, a baseline tag, and an after tag.
+The runner:
 
-## Adding a case
+1. creates a temporary Git repository;
+2. commits the fixture baseline and tags it;
+3. replaces the tree with the named after-state, commits, and tags it;
+4. indexes the after-state with `mmcg`;
+5. gives the auditor the temporary repository and a live stdio MCP server;
+6. checks the structured audit verdict and required reasoning signals.
 
-### Critic case (no fixture)
+The auditor reads the real Git diff and codegraph. The JSONL case does not
+provide a synthetic diff. The runner prefers the in-tree release binary at
+`mcp/servers/mmcg/target/release/mmcg`, then falls back to `mmcg` on `PATH`.
+
+Build the matching binary before a model-backed auditor run:
+
+```bash
+cargo build --release --manifest-path mcp/servers/mmcg/Cargo.toml --locked
+```
+
+## Add a critic case
 
 ```jsonc
 {
   "id": "c-NNN-short-name",
-  "why": "what this catches — regression scenario or golden input",
-  "input": { /* domain-specific */ },
+  "why": "single regression scenario",
+  "input": {},
   "expect": {
-    "verdict": "rethink",           // prose regex match, case-insensitive word boundary
-    "contains": ["fabricated"],     // case-insensitive, all must be present
-    "not_contains": ["ship it"]     // none may be present
+    "verdict": "rethink",
+    "contains": ["required phrase"],
+    "not_contains": ["forbidden phrase"]
   }
 }
 ```
 
-### Auditor case (real git fixture)
-
-Verdict is checked against the **structured YAML tail** the auditor emits inside
-`<!-- mastermind:audit-begin --> … <!-- mastermind:audit-end -->` sentinels — not prose.
-If the auditor doesn't produce that block the case fails.
+## Add an auditor case
 
 ```jsonc
 {
   "id": "a-NNN-short-name",
-  "why": "what this catches",
-  "fixture": "fake-session",        // dir under evals/fixtures/
-  "baseline_ref": "baseline",       // tag name for the pre-edit commit
-  "after_ref": "scope-creep",       // tag name for the executor commit; also the changes/ subdir
-  "allow_no_mmcg": false,           // optional; default false — hard-fail if mmcg index missing
+  "why": "single planted defect",
+  "fixture": "fake-session",
+  "baseline_ref": "baseline",
+  "after_ref": "scope-creep",
+  "allow_no_mmcg": false,
   "input": {
     "spec_summary": "...",
-    "executor_report": "..."        // NO git_diff — auditor runs it itself
+    "executor_report": "..."
   },
   "expect": {
-    "verdict": ["drift", "broken"], // matched against structured verdict field, string OR list
-    "contains": ["config", "scope"],// secondary: prose phrases in reasoning
+    "verdict": ["drift", "broken"],
+    "contains": ["config", "scope"],
     "not_contains": ["contract held"]
   }
 }
 ```
 
-To add a new fixture variant: create `evals/fixtures/<name>/changes/<after_ref>/` with
-the full file tree at the after-commit. The runner overlays it on baseline (deletions
-work — files missing from the variant get removed in the second commit).
+Verdict assertions read the YAML block between
+`<!-- mastermind:audit-begin -->` and `<!-- mastermind:audit-end -->`. Missing
+or malformed structured output fails the case. Add a full after-tree under
+`fixtures/<name>/changes/<after_ref>/`; files absent from that tree are deleted
+in the generated commit.
 
-Rules:
-- **Adversarial** (something to catch) or **golden** (something to confirm passes) — nothing else
-- One scenario per case
-- Phrase-match assertions only — the runner doesn't use LLM-as-judge
-
-### Workflow case
-
-Workflow cases load the named repository artifact as the system prompt. This
-keeps the eval tied to the shipped skill or subagent instead of a copied prompt.
-The artifact set is exact and allowlisted. Workflow cases run from the system
-temporary directory in Claude safe mode with an empty tool set, so a changed
-prompt is evaluated as text and cannot operate on the maintainer's checkout.
+## Add a workflow case
 
 ```jsonc
 {
   "id": "w-NNN-short-name",
   "artifact": "skills/workflow/example/SKILL.md",
-  "input": {"prompt": "A self-contained scenario"},
+  "input": {"prompt": "self-contained scenario"},
   "expect": {
     "contains": ["required signal"],
-    "contains_any": [["equivalent phrase A", "equivalent phrase B"]],
+    "contains_any": [["equivalent A", "equivalent B"]],
     "not_contains": ["forbidden claim"],
     "code_comments": {"prefixes": ["//", "/*"], "min": 0, "max": 0}
   }
 }
 ```
 
-`code_comments` is optional. It counts comment markers outside quoted strings
-in fenced code blocks and can also require phrases in retained comments. Use it
-when the behavior under test is generated code, not merely advice about code.
+Workflow artifacts are allowlisted and loaded from the repository. Cases run
+from the system temporary directory in Claude safe mode with no tools, so the
+prompt under evaluation cannot operate on the maintainer checkout.
 
-## Intake suite
+## Case rules
 
-5 cases covering the refiner's core behaviors:
-
-| case | scenario | expected action |
-|---|---|---|
-| i-001 | vague client message with buried goal | `refined` — planner-ready prompt + NEEDS placeholders |
-| i-002 | already tight request with verb/deliverable/scope | `passthrough` — returned unchanged |
-| i-003 | genuinely ambiguous goal (multiple valid interpretations) | `ask` — 1-3 clarifying questions, no prompt |
-| i-004 | overbroad multi-intent bundle | `refined` — primary intent isolated, others marked out-of-scope |
-| i-005 | production database migration with risk signals | `refined` — strict mode, risk: high, rollback flagged as NEEDS |
-
-Each case asserts on the structured `<!-- mastermind:intake-begin --> ... <!-- mastermind:intake-end -->` YAML block the refiner emits. If the block is absent the case fails.
+- One adversarial or golden behavior per case.
+- Explain the regression in `why`; do not leak the expected answer into source
+  fixture files.
+- Use deterministic verdict and phrase assertions. The harness does not use an
+  LLM judge.
+- Use `code_comments` only when generated code, rather than prose advice, is
+  under test.
+- Run the focused case before the full suite and record full-suite results in
+  `scorecard.md`.
 
 ## Ablation
 
-`ablation.py` measures the **marginal value** of the codegraph + auditor contract:
-does the Mastermind auditor catch defects a strong *vanilla* agent misses? For each
-planted-defect auditor fixture it runs two conditions on the same git repo, scored
-with the same phrase signal as the suite:
+`ablation.py` compares planted-defect detection under two conditions on the
+same generated Git repository:
 
-- **vanilla** — plain `claude -p` with shell access (git/grep/read) and a neutral
-  senior-reviewer prompt. No mmcg, no auditor system prompt — the honest "Claude +
-  grep/read" baseline, so the delta isolates the codegraph + contract, not a strawman.
-- **mastermind** — the real auditor path (auditor subagent + live mmcg). Re-run
-  head-to-head with `--with-mastermind`; otherwise it compares against the auditor
-  suite's own result.
+- `vanilla`: a neutral reviewer with shell access, but no mmcg or Mastermind
+  auditor contract;
+- `mastermind`: the shipped auditor with the live codegraph.
 
-Golden (`held`) cases are excluded — nothing to catch. Record results in
-`scorecard.md`; keep full-suite results separate from targeted reruns.
+Golden `held` cases are excluded because there is no defect to catch.
 
 ```bash
-python evals/ablation.py                   # vanilla over all defect cases
-python evals/ablation.py --with-mastermind # both conditions, head-to-head
+python evals/ablation.py
+python evals/ablation.py --with-mastermind
 ```
 
-## When to run
-
-- Before editing any evaluated subagent or workflow skill
-- After editing them, to confirm behaviors still fire
-- When adding a new adversarial pattern as a regression test
-- After adding a fixture variant (smoke `--keep-fixtures` to inspect tmp repo)
-
-Not on every PR. Not in CI. Hand-run by the maintainer.
-
-The runner's parsing, allowlist, and input-isolation contract is deterministic
-and does run in CI via `python -m unittest evals/test_runner.py`.
-
-## Why no LLM-judge
-
-A judge model adds another non-deterministic layer. We assert on:
-1. Verdict label (`rethink` / `held` / etc.)
-2. Key phrases present / absent in reasoning
-
-If a case passes phrase matching but the reasoning is subtly wrong, that's not caught — accepted limitation.
+The score is phrase-based. It can miss subtly incorrect reasoning that happens
+to contain the expected signals; record that limitation with every result.

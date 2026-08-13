@@ -1,74 +1,122 @@
 # Contributing
 
-Mastermind is two things: **mmcg** (a Rust codegraph binary) and a **spec-driven workflow** (the subagents + skills installed into Claude Code). Contributions to either are welcome.
+Mastermind combines a Rust codegraph engine with installable workflow artifacts.
+Keep changes focused, preserve local-first behavior, and attach the exact checks
+you ran.
 
-## Project layout
+## Repository layout
 
-| Path | What it is |
+| Path | Responsibility |
 |---|---|
-| `mcp/servers/mmcg/` | The mmcg binary — Rust crate: indexer, MCP server, CLI gates, miners. |
-| `skills/` · `agents/` | The workflow artifacts (markdown + YAML frontmatter) installed by `mastermind init`. |
-| `npm/mastermind/` | The npm wrapper that ships the prebuilt binary + the workflow bundle. |
-| `scripts/` | `validate.py` (artifact-structure check) and friends. |
-| `evals/` | Adversarial eval suites for critic, auditor, intake, and all portable workflow skills. |
+| `mcp/servers/mmcg/` | Rust CLI, indexer, SQLite store, MCP server, Lens backend |
+| `mcp/servers/mmcg/assets/lens/` | Static Lens application |
+| `skills/`, `agents/` | Installed workflow and agent contracts |
+| `schemas/` | Public, versioned JSON contracts |
+| `npm/` | npm wrapper and platform packages |
+| `action.yml`, `Dockerfile` | GitHub Action runtime |
+| `docs/` | User and maintainer documentation |
+| `scripts/` | Validation, packaging, release, and smoke-test tooling |
+| `evals/` | Deterministic harness tests and optional model-backed evaluations |
 
-## Dev setup & checks
+## Prerequisites
 
-**Rust (`mcp/servers/mmcg/`)** — run all three before opening a PR:
+- Rust toolchain declared in `rust-toolchain.toml`
+- Node.js 24 or newer
+- Python 3.11 or newer
+- [`just`](https://github.com/casey/just)
+- `cargo-deny`
 
-```bash
-cd mcp/servers/mmcg
-cargo test
-cargo clippy --all-targets -- -D warnings
-cargo fmt -- --check
-cargo deny check
-```
-
-**Workflow artifacts (`skills/`, `agents/`)** — markdown with frontmatter; CI runs the structure validator, run it locally too:
+Install the Python validator dependencies once:
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install --require-hashes -r scripts/requirements.txt
-.venv/bin/python scripts/validate.py
 ```
 
-Exit code 0 means clean. See [`scripts/README.md`](scripts/README.md) for what it checks.
+## Canonical check
 
-**npm distribution** — run the host-native packaging smoke before changing the
-wrapper or release assembly:
+Run this before opening a pull request:
 
 ```bash
-just npm-smoke-native
+just check
 ```
 
-This builds the native release binary, assembles its platform package, packs
-the root and platform npm tarballs, installs both tarballs in a scratch project,
-and runs the installed wrapper. It does not read from or publish to npm.
+It runs the locked Rust tests, formatting and Clippy checks, npm tests, Lens
+tests, workflow-security tests, deterministic eval-harness tests, repository
+validation, and `cargo deny` policy checks. A passing subset is useful while
+developing but does not replace this gate.
 
-The crates.io release workflow similarly uploads the exact `.crate` produced
-and tested by its verify job. It prepares Cargo registry metadata from that
-archive, carries the archive plus SHA-256 checksums across the approval gate,
-then uses Cargo's documented
-[registry Web API](https://doc.rust-lang.org/cargo/reference/registry-web-api.html#publish)
-without repackaging source.
+## Focused checks
 
-**Agent behavior** — if you change a subagent/skill prompt, run the relevant
-suite (`critic`, `auditor`, `intake`, or `workflow`). Before merging a broad
-workflow change, run `bash evals/run-verified.sh`; it executes deterministic
-gates and then every model-backed suite. The evals need the `claude` CLI on
-PATH. `validate.py` checks structure, not behavior.
+| Change | Fast local command |
+|---|---|
+| Rust implementation | `cargo test --manifest-path mcp/servers/mmcg/Cargo.toml --locked` |
+| Rust lint | `cargo clippy --manifest-path mcp/servers/mmcg/Cargo.toml --locked --all-targets --all-features -- -D warnings` |
+| Rust formatting | `cargo fmt --manifest-path mcp/servers/mmcg/Cargo.toml --all -- --check` |
+| Public docs or repository contracts | `.venv/bin/python scripts/validate.py` |
+| npm wrapper or packaging | `just npm-smoke-native` |
+| Lens frontend | `node --test mcp/servers/mmcg/assets/lens/app.test.cjs` |
+| Eval harness | `.venv/bin/python -m unittest evals/test_runner.py` |
+
+`just npm-smoke-native` builds and installs local tarballs in a temporary
+project. It never reads from or publishes to npm.
+
+Model-backed evals require an authenticated `claude` CLI and are intentionally
+not part of ordinary CI:
+
+```bash
+bash evals/run-verified.sh
+```
+
+See [evals/README.md](evals/README.md) for suites and limitations.
+
+## Documentation changes
+
+- Put task-oriented guides in `docs/`; keep the root README as a short product
+  and onboarding page.
+- Put exhaustive CLI and MCP details in
+  [docs/reference/mmcg.md](docs/reference/mmcg.md).
+- Use commands that run from the repository root unless a section says
+  otherwise.
+- Label syntactic, compiler-resolved, declared, and observed evidence
+  separately.
+- Do not publish speed or accuracy comparisons without a reproducible corpus,
+  command, environment, and correctness boundary.
+- Run `.venv/bin/python scripts/validate.py`; it checks internal links, mirrors,
+  versioned artifacts, tool documentation, and release contracts.
+
+Benchmark methodology and current reference measurements live in
+[docs/benchmarks.md](docs/benchmarks.md). Benchmark changes must record the
+fixture size, command, number of runs, machine class, toolchain, and range—not
+only the fastest sample.
 
 ## Pull requests
 
-- Keep the change focused; describe **what** it does and **how you tested it**.
-- All checks above must pass — CI enforces them.
-- Commit subjects: a conventional prefix, imperative (`feat(miner): …`, `fix: …`); no long body needed.
-- Breaking changes (renames, removed flags, changed behavior): open an issue first to discuss.
+Include:
 
-## Reporting bugs
+1. the behavior or contract changed;
+2. the affected files and deliberate exclusions;
+3. the commands run and their results;
+4. any unavailable live, registry, browser, model, or authorization proof;
+5. screenshots only when rendered behavior changed.
 
-Use the [bug issue template](.github/ISSUE_TEMPLATE/bug.md) — include the version (`mmcg --version`), what you expected, what happened, and your OS.
+Use an imperative commit subject with a conventional prefix, for example
+`fix(index): reject stale snapshots`. Discuss compatibility-breaking CLI,
+schema, or workflow changes in an issue before implementation.
 
-## Code of conduct
+## Releases
 
-See [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
+Do not publish from a local checkout. The repository workflows build and carry
+forward exact artifacts, checksums, and approval evidence. Release smoke tests
+install the public registry package rather than reusing workspace artifacts.
+
+## Security
+
+Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
+For other bugs, use the
+[bug report template](.github/ISSUE_TEMPLATE/bug.md) and include
+`mastermind --version`, the operating system, expected behavior, and the exact
+failure.
+
+All participation is governed by the
+[Code of Conduct](CODE_OF_CONDUCT.md).

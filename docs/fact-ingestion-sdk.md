@@ -1,22 +1,33 @@
 # Declarative fact-ingestion SDK
 
-Mastermind extensions are data producers, not in-process plugins. A producer
-writes a strict, revision-bound JSON manifest; Mastermind validates the entire
-manifest and then atomically normalizes it into private SQLite tables. Lens and
-the fixed read-only `mmcg_facts` MCP tool consume those normalized facts.
+The extension boundary is data ingestion, not plugin execution. A producer
+emits a revision-bound JSON manifest. Mastermind validates the complete input,
+then atomically replaces that producer's normalized dataset in private SQLite
+tables. Lens, CLI, and the fixed read-only `mmcg_facts` tool read the result.
 
 The public v1 schema is
 [`schemas/mastermind-facts-v1.schema.json`](../schemas/mastermind-facts-v1.schema.json).
 Its API identifier is `mastermind-facts/v1`, with two capabilities:
 `annotations` and `relationships`.
 
+## Contract at a glance
+
+| Property | v1 behavior |
+|---|---|
+| Producer output | Inert JSON matching the public schema |
+| Repository binding | Exact repository identity and 40-character Git revision |
+| File binding | Canonical path, byte size, and SHA-256 digest |
+| Provenance | Bounded local artifacts, optionally signed with Ed25519 |
+| Database writes | Performed only by Mastermind after full validation |
+| Read surfaces | `query facts`, `mmcg_facts`, Lens, and review export |
+| Executable extension points | None |
+
 ## Built-in adapters
 
-Mastermind can turn common inert reports into the same strict manifest without
-requiring each producer to implement the schema. The adapter reads one bounded
-artifact, matches every emitted fact to the current index, records its exact
-digest and size, and refuses to write an output when parsing is partial or any
-fact cannot be mapped to an indexed repository file.
+Built-in adapters convert common reports into the same manifest. An adapter
+reads one bounded local artifact, maps every fact to the current index, records
+the exact digest and size, and emits nothing if parsing is partial or any fact
+cannot be mapped to an indexed repository file.
 
 ```bash
 mastermind facts adapt --format sarif \
@@ -40,7 +51,7 @@ mastermind facts adapt --format otel \
 relationships use `confidence=observed`; they still only decorate matching
 static endpoints in Lens and never create codegraph topology.
 
-## Producer flow
+## Custom producer flow
 
 Index the repository, then ask Mastermind for the exact contract that the
 manifest must bind:
@@ -51,9 +62,9 @@ mastermind query facts --top 1 > mastermind-facts-contract.json
 ```
 
 The response contains `contract.api_version`, `contract.repository.identity`,
-`contract.repository.revision`, and `contract.supported_capabilities`. A
-producer copies the API version and exact repository values into its manifest,
-hashes every referenced source and provenance artifact, and emits facts only.
+`contract.repository.revision`, and `contract.supported_capabilities`. Copy
+those exact values, hash every referenced source and provenance artifact, and
+emit only the declared fact kinds.
 
 ```json
 {
@@ -177,12 +188,12 @@ whether a signature predates key compromise. Those claims require an external
 identity and timestamp/transparency policy.
 
 The MCP equivalent is the built-in, read-only `mmcg_facts` tool with `path`
-and `top` arguments. Its bounded response includes the verified provenance
-artifact paths, sizes, and SHA-256 digests. Lens loads current facts
-automatically and shows the binding manifest digest on the producer card. Annotations appear
-as source-labelled findings; relationships may corroborate an already returned
-codegraph edge only when both file and line endpoints match. Facts never create
-or remove graph topology.
+and `top` arguments. Its bounded response includes verified provenance artifact
+paths, sizes, and SHA-256 digests. Lens loads current facts and shows the
+binding manifest digest on the producer card. Annotations appear as
+source-labelled findings. Relationships can corroborate a returned codegraph
+edge only when both file and line endpoints match; facts never create or remove
+graph topology.
 
 `mastermind review export` carries the same normalized facts into its autonomous
 HTML. Unsigned datasets remain `producer-attested`; verified datasets and their

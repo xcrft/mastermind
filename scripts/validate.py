@@ -914,6 +914,127 @@ def validate_executor_report_schema_contract() -> list[Issue]:
     return issues
 
 
+# ----- review evidence package -----------------------------------------
+
+def validate_review_package_contract() -> list[Issue]:
+    """Keep review export schemas, Rust implementation, and CI example aligned."""
+    issues: list[Issue] = []
+    manifest_path = REPO_ROOT / "schemas/mastermind-review-manifest-v1.schema.json"
+    attestation_path = REPO_ROOT / "schemas/mastermind-evidence-attestation-v1.schema.json"
+    for path, label, required in (
+        (
+            manifest_path,
+            "review manifest",
+            {
+                "schema_version",
+                "package_format",
+                "generator",
+                "repository",
+                "scope",
+                "analysis",
+                "evidence_binding",
+                "artifacts",
+                "content_sha256",
+            },
+        ),
+        (
+            attestation_path,
+            "evidence attestation",
+            {"schema_version", "head_oid", "artifacts"},
+        ),
+    ):
+        try:
+            schema = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            issues.append(Issue(path, "error", f"invalid {label} schema: {error}"))
+            continue
+        if schema.get("additionalProperties") is not False:
+            issues.append(Issue(path, "error", f"{label} schema must fail closed on unknown fields"))
+        if set(schema.get("required", [])) != required:
+            issues.append(Issue(path, "error", f"{label} schema required fields drifted"))
+        if schema.get("properties", {}).get("schema_version", {}).get("const") != 1:
+            issues.append(Issue(path, "error", f"{label} schema must pin version 1"))
+
+    rust_path = REPO_ROOT / "mcp/servers/mmcg/src/review_package.rs"
+    try:
+        rust = rust_path.read_text(encoding="utf-8")
+    except OSError as error:
+        issues.append(Issue(rust_path, "error", f"cannot read review exporter: {error}"))
+    else:
+        for token in (
+            "REVIEW_PACKAGE_SCHEMA: u32 = 1",
+            "EVIDENCE_ATTESTATION_SCHEMA: u32 = 1",
+            "standalone_html",
+            "mastermind.sarif",
+            "summary.md",
+            "manifest.json",
+            "mastermind-review.yml",
+            "digest-bound-at-export",
+            "producer-attested",
+            "from_json_strict",
+        ):
+            if token not in rust:
+                issues.append(Issue(rust_path, "error", f"review exporter missing {token!r}"))
+
+    workflow_path = REPO_ROOT / "docs/examples/mastermind-review-pr.yml"
+    try:
+        workflow_text = workflow_path.read_text(encoding="utf-8")
+        workflow = yaml.safe_load(workflow_text)
+    except (OSError, yaml.YAMLError) as error:
+        issues.append(Issue(workflow_path, "error", f"invalid review workflow: {error}"))
+    else:
+        package_path = REPO_ROOT / "npm/mastermind/package.json"
+        try:
+            package_version = json.loads(package_path.read_text(encoding="utf-8"))["version"]
+        except (OSError, json.JSONDecodeError, KeyError) as error:
+            issues.append(Issue(package_path, "error", f"cannot resolve review workflow version: {error}"))
+        else:
+            if f"@xcraftmind/mastermind@{package_version}" not in workflow_text:
+                issues.append(Issue(workflow_path, "error", "review workflow must pin the current npm version"))
+        for token in (
+            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+            "dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4",
+            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+            "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+            "github/codeql-action/upload-sarif@c54b30b7df092240050e69945842bc67aee0f0f4",
+            "github.event.pull_request.head.sha",
+            "github.event.pull_request.base.sha",
+            "refs/pull/${{ github.event.pull_request.number }}/head",
+            "github.repository == 'xcrft/mastermind'",
+            "persist-credentials: false",
+            "review export --since",
+            "review export --help",
+            "sarif_file: mastermind-review/mastermind.sarif",
+            "github.event.pull_request.head.repo.full_name == github.repository",
+            "github.actor != 'dependabot[bot]'",
+        ):
+            if token not in workflow_text:
+                issues.append(Issue(workflow_path, "error", f"review workflow missing {token!r}"))
+        if "pull_request_target" in workflow_text:
+            issues.append(Issue(workflow_path, "error", "review workflow must never run on pull_request_target"))
+        jobs = workflow.get("jobs", {}) if isinstance(workflow, dict) else {}
+        review = jobs.get("review", {}) if isinstance(jobs, dict) else {}
+        sarif_job = jobs.get("sarif", {}) if isinstance(jobs, dict) else {}
+        review_permissions = review.get("permissions", {}) if isinstance(review, dict) else {}
+        sarif_permissions = sarif_job.get("permissions", {}) if isinstance(sarif_job, dict) else {}
+        if review_permissions != {"contents": "read"}:
+            issues.append(Issue(workflow_path, "error", "review build job permissions must be read-only"))
+        if sarif_permissions != {"actions": "read", "contents": "read", "security-events": "write"}:
+            issues.append(Issue(workflow_path, "error", "SARIF upload job permissions must be exact and minimal"))
+        if sarif_job.get("needs") != "review" or any("run" in step for step in sarif_job.get("steps", [])):
+            issues.append(Issue(workflow_path, "error", "SARIF upload job must consume the review artifact without running pull-request code"))
+        embedded_path = REPO_ROOT / "mcp/servers/mmcg/assets/mastermind-review-pr.yml"
+        try:
+            embedded_text = embedded_path.read_text(encoding="utf-8")
+        except OSError as error:
+            issues.append(Issue(embedded_path, "error", f"cannot read embedded review workflow: {error}"))
+        else:
+            if embedded_text != workflow_text:
+                issues.append(Issue(embedded_path, "error", "embedded review workflow must match the documented example byte-for-byte"))
+    return issues
+
+
 # ----- repository workflow supply-chain contract -----------------------
 
 def validate_repository_workflow_pins() -> list[Issue]:
@@ -1402,6 +1523,7 @@ def main(argv: list[str]) -> int:
     issues.extend(validate_eval_fixture_clues())
     issues.extend(validate_workflow_eval_contract())
     issues.extend(validate_executor_report_schema_contract())
+    issues.extend(validate_review_package_contract())
     issues.extend(validate_repository_workflow_pins())
     issues.extend(validate_audit_action_security())
 

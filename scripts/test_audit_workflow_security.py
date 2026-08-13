@@ -90,6 +90,41 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(audit_publication_contract_errors(self.text, self.workflow), [])
         self.assertEqual(audit_pr_contract_errors(self.pr_text, self.pr_workflow), [])
 
+    def test_review_package_workflow_is_pinned_and_fork_safe(self):
+        path = ROOT / "docs/examples/mastermind-review-pr.yml"
+        text = path.read_text(encoding="utf-8")
+        workflow = yaml.safe_load(text)
+        review = workflow["jobs"]["review"]
+        sarif_job = workflow["jobs"]["sarif"]
+        self.assertEqual(review["permissions"], {"contents": "read"})
+        self.assertEqual(
+            sarif_job["permissions"],
+            {"actions": "read", "contents": "read", "security-events": "write"},
+        )
+        self.assertEqual(sarif_job["needs"], "review")
+        uses = [step.get("uses", "") for step in review["steps"]]
+        uses.extend(step.get("uses", "") for step in sarif_job["steps"])
+        self.assertIn("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", uses)
+        self.assertIn("actions/setup-node@820762786026740c76f36085b0efc47a31fe5020", uses)
+        self.assertIn("dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4", uses)
+        self.assertIn("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", uses)
+        self.assertIn("actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c", uses)
+        self.assertIn("github/codeql-action/upload-sarif@c54b30b7df092240050e69945842bc67aee0f0f4", uses)
+        self.assertEqual(
+            sarif_job["if"],
+            "github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]'",
+        )
+        self.assertFalse(any("run" in step for step in sarif_job["steps"]))
+        sarif = next(step for step in sarif_job["steps"] if "upload-sarif@" in step.get("uses", ""))
+        self.assertEqual(sarif["with"]["ref"], "refs/pull/${{ github.event.pull_request.number }}/head")
+        self.assertEqual(sarif["with"]["sha"], "${{ github.event.pull_request.head.sha }}")
+        self.assertIn("github.repository == 'xcrft/mastermind'", text)
+        self.assertIn("cargo build --release --locked --manifest-path mcp/servers/mmcg/Cargo.toml", text)
+        self.assertIn("review export --help", text)
+        self.assertIn("persist-credentials: false", text)
+        self.assertIn("github.event.pull_request.head.sha", text)
+        self.assertNotIn("pull_request_target", text)
+
     def test_attempt_specific_artifact_identity_is_mandatory(self):
         changed = copy.deepcopy(self.pr_workflow)
         changed["jobs"]["audit"]["steps"][-1]["with"]["name"] = "mastermind-pr-audit"

@@ -7,6 +7,8 @@
 
 use crate::queries::{self, ChangeImpactError, ChangeImpactResponse, ProjectMapResponse};
 use crate::store::{query_budget_ms_from_env, Store, WorkBudget, DEFAULT_CLI_BUDGET_MS};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -218,6 +220,121 @@ pub fn build_snapshot_with_evidence_extensions(
         extensions,
         request_deadline(),
     )
+}
+
+/// Build one fail-closed Lens snapshot from an existing index without serving
+/// HTTP. Review-package export uses this entry point so CLI, MCP, and Lens keep
+/// the same freshness, WAL, and bounded-analysis semantics.
+pub(crate) fn snapshot_from_paths_with_evidence_extensions(
+    root: &Path,
+    index_path: &Path,
+    options: &LensOptions,
+    evidence: &crate::evidence::EvidenceOptions,
+    extensions: &crate::evidence::EvidenceExtensionOptions,
+) -> Result<LensSnapshot, LensError> {
+    snapshot_from_paths_until(
+        root,
+        index_path,
+        options,
+        evidence,
+        extensions,
+        request_deadline(),
+    )
+}
+
+fn snapshot_from_paths_until(
+    root: &Path,
+    index_path: &Path,
+    options: &LensOptions,
+    evidence: &crate::evidence::EvidenceOptions,
+    extensions: &crate::evidence::EvidenceExtensionOptions,
+    deadline: Option<Instant>,
+) -> Result<LensSnapshot, LensError> {
+    let root = root
+        .canonicalize()
+        .map_err(|_| LensError::RootUnavailable)?;
+    let index_path = index_path
+        .canonicalize()
+        .map_err(|_| LensError::IndexUnavailable)?;
+    if !index_path.is_file() {
+        return Err(LensError::IndexUnavailable);
+    }
+    let before = index_source_state(&index_path)?;
+    let store =
+        Store::open_read_only_with_deadline(&index_path, deadline).map_err(read_only_open_error)?;
+    let snapshot = build_snapshot_until(&store, &root, options, evidence, extensions, deadline)?;
+    if index_source_state(&index_path)? != before {
+        return Err(LensError::ImpactUnavailable(
+            ChangeImpactError::SnapshotChanged,
+        ));
+    }
+    Ok(snapshot)
+}
+
+/// Render a single-file, offline Lens application. The snapshot, stylesheet,
+/// and application code are embedded under content hashes; the resulting CSP
+/// disables all network connections and external resources.
+pub(crate) fn standalone_html(snapshot: &LensSnapshot) -> Result<Vec<u8>, LensError> {
+    let snapshot_json = serde_json::to_string(snapshot).map_err(|_| LensError::Serialization)?;
+    standalone_html_from_json(&snapshot_json)
+}
+
+fn standalone_html_from_json(snapshot_json: &str) -> Result<Vec<u8>, LensError> {
+    standalone_html_from_template(snapshot_json, INDEX_HTML)
+}
+
+fn standalone_html_from_template(
+    snapshot_json: &str,
+    template: &str,
+) -> Result<Vec<u8>, LensError> {
+    let escaped_json = snapshot_json
+        .replace('&', "\\u0026")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e");
+    let script_hash = inline_hash(APP_JS.as_bytes());
+    let snapshot_hash = inline_hash(escaped_json.as_bytes());
+    let style_hash = inline_hash(STYLES_CSS.as_bytes());
+    let csp = format!(
+        "default-src 'none'; script-src '{script_hash}' '{snapshot_hash}'; style-src '{style_hash}'; img-src data:; connect-src 'none'; font-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    );
+    let served_csp = "    <meta\n      http-equiv=\"Content-Security-Policy\"\n      content=\"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'\"\n    >\n";
+    let template = template.replace("\r\n", "\n");
+    let mut html = template.replace(
+        served_csp,
+        &format!("    <meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\">\n"),
+    );
+    if html == template {
+        return Err(LensError::Serialization);
+    }
+    html = html.replace(
+        "    <link rel=\"stylesheet\" href=\"styles.css\">",
+        &format!("    <style>{STYLES_CSS}</style>"),
+    );
+    html = html.replace("    <script src=\"app.js\" defer></script>\n", "");
+    html = html.replace("<span>Local</span>", "<span>Offline package</span>");
+    html = html.replace(
+        "aria-label=\"Refresh Lens snapshot\"",
+        "aria-label=\"Static Lens snapshot\"",
+    );
+    html = html.replace(
+        "<span>Refresh snapshot</span>",
+        "<span>Static snapshot</span>",
+    );
+    let scripts = format!(
+        "    <script type=\"application/json\" id=\"lens-snapshot\">{escaped_json}</script>\n    <script>{APP_JS}</script>\n  </body>"
+    );
+    html = html.replace("  </body>", &scripts);
+    if html.contains("href=\"styles.css\"")
+        || html.contains("src=\"app.js\"")
+        || !html.contains("id=\"lens-snapshot\"")
+    {
+        return Err(LensError::Serialization);
+    }
+    Ok(html.into_bytes())
+}
+
+fn inline_hash(bytes: &[u8]) -> String {
+    format!("sha256-{}", BASE64.encode(Sha256::digest(bytes)))
 }
 
 fn request_deadline() -> Option<Instant> {
@@ -885,26 +1002,14 @@ fn route(path: &str, state: &ServerState) -> HttpResponse {
 
 fn api_response(state: &ServerState) -> HttpResponse {
     let deadline = request_deadline();
-    let result = index_source_state(&state.index_path).and_then(|before| {
-        let snapshot = Store::open_read_only_with_deadline(&state.index_path, deadline)
-            .map_err(read_only_open_error)
-            .and_then(|store| {
-                build_snapshot_until(
-                    &store,
-                    &state.root,
-                    &state.options,
-                    &state.evidence,
-                    &state.extensions,
-                    deadline,
-                )
-            })?;
-        if index_source_state(&state.index_path)? != before {
-            return Err(LensError::ImpactUnavailable(
-                ChangeImpactError::SnapshotChanged,
-            ));
-        }
-        Ok(snapshot)
-    });
+    let result = snapshot_from_paths_until(
+        &state.root,
+        &state.index_path,
+        &state.options,
+        &state.evidence,
+        &state.extensions,
+        deadline,
+    );
     match result {
         Ok(snapshot) => match serde_json::to_vec(&snapshot) {
             Ok(body) => HttpResponse::json(200, "OK", body),
@@ -1036,6 +1141,37 @@ mod tests {
             top: 100,
             production_only: false,
         }
+    }
+
+    #[test]
+    fn standalone_html_is_single_file_offline_and_script_safe() {
+        let html = standalone_html_from_json(
+            r#"{"repository":{"name":"</script><img src=x onerror=alert(1)>"}}"#,
+        )
+        .unwrap();
+        let html = String::from_utf8(html).unwrap();
+
+        assert!(html.contains("id=\"lens-snapshot\""));
+        assert!(html.contains("\\u003c/script\\u003e"));
+        assert!(!html.contains("</script><img"));
+        assert!(!html.contains("href=\"styles.css\""));
+        assert!(!html.contains("src=\"app.js\""));
+        assert!(html.contains("connect-src 'none'"));
+        assert!(html.contains("sha256-"));
+        assert!(html.contains("Offline package"));
+    }
+
+    #[test]
+    fn standalone_html_accepts_crlf_checkout_assets() {
+        let crlf_template = INDEX_HTML.replace("\r\n", "\n").replace('\n', "\r\n");
+
+        let html = standalone_html_from_template("{}", &crlf_template).unwrap();
+        let html = String::from_utf8(html).unwrap();
+
+        assert!(html.contains("id=\"lens-snapshot\""));
+        assert!(html.contains("connect-src 'none'"));
+        assert!(!html.contains("href=\"styles.css\""));
+        assert!(!html.contains("src=\"app.js\""));
     }
 
     fn directory_snapshot(path: &Path) -> Vec<(String, Vec<u8>)> {

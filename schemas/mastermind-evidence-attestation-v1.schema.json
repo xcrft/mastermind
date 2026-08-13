@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/xcrft/mastermind/blob/main/schemas/mastermind-evidence-attestation-v1.schema.json",
+  "title": "Mastermind external evidence attestation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "head_oid", "artifacts"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "head_oid": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "artifacts": {
+      "type": "array",
+      "maxItems": 65,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "path", "sha256"],
+        "properties": {
+          "kind": { "enum": ["sarif", "coverage", "junit", "otel", "codeowners"] },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)(?!.*\\/$)[^\\u0000-\\u001f\\u007f-\\u009f\\\\]+$"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
+    }
+  }
+}

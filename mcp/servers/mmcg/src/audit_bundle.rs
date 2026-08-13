@@ -1236,7 +1236,9 @@ fn read_key(path: &Path, private: bool) -> Result<[u8; 32], BundleError> {
         .map_err(|_| BundleError::Crypto("Ed25519 key must be 32 bytes".into()))
 }
 
-fn from_json_strict<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, BundleError> {
+pub(crate) fn from_json_strict<T: for<'de> Deserialize<'de>>(
+    bytes: &[u8],
+) -> Result<T, BundleError> {
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
     let value = NoDuplicates
         .deserialize(&mut deserializer)

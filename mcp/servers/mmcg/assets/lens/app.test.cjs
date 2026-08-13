@@ -473,8 +473,15 @@ function fixture() {
   };
 }
 
-async function renderFixture(payload) {
+async function renderFixture(payload, options) {
   const harness = createDocument();
+  const settings = options || {};
+  if (settings.embedded) {
+    const embedded = new MockElement("script");
+    embedded.textContent = JSON.stringify(payload || fixture());
+    harness.nodes.set("lens-snapshot", embedded);
+  }
+  let fetchCalls = 0;
   const window = {
     setTimeout(handler) {
       handler();
@@ -492,7 +499,13 @@ async function renderFixture(payload) {
     document: harness.document,
     window: window,
     ResizeObserver: window.ResizeObserver,
-    fetch: async () => ({ ok: true, status: 200, json: async () => payload || fixture() }),
+    fetch: async () => {
+      fetchCalls += 1;
+      if (settings.rejectFetch) {
+        throw new Error("standalone package attempted a network request");
+      }
+      return { ok: true, status: 200, json: async () => payload || fixture() };
+    },
     Intl: Intl,
     Date: Date,
     Map: Map,
@@ -507,6 +520,7 @@ async function renderFixture(payload) {
   }, { filename: "app.js" });
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
+  harness.fetchCalls = fetchCalls;
   return harness;
 }
 
@@ -540,6 +554,10 @@ async function main() {
   assert.match(harness.nodes.get("temporal-events").textContent, /Hotspot exited/i);
   assert.match(harness.nodes.get("temporal-events").textContent, /charge<\/span>/i);
   assert.match(harness.nodes.get("temporal-events").textContent, /History needs review/i);
+
+  const standaloneHarness = await renderFixture(fixture(), { embedded: true, rejectFetch: true });
+  assert.equal(standaloneHarness.fetchCalls, 0, "Standalone Lens must render embedded JSON without fetching");
+  assert.match(standaloneHarness.nodes.get("repository-name").textContent, /example/i);
 
   const unavailable = fixture();
   unavailable.temporal = {

@@ -97,7 +97,7 @@ See the [client integration guides](https://github.com/xcrft/mastermind/tree/mai
 | Semantic overlay | Optional SCIP definitions, references, implementations, and provenance |
 | Architecture | Project map, temporal drift, centrality, dependency cycles, unreferenced candidates |
 | Change analysis | Git-aware symbol changes, blast radius, component crossings |
-| Local review UI | Read-only diff-first Lens with bounded SARIF, coverage, JUnit, OTLP, project-knowledge, ownership, and churn overlays |
+| Review evidence | Read-only diff-first Lens plus autonomous HTML/SARIF/summary packages with revision and evidence digests |
 | Test selection | Direct, transitive, and heuristic candidates with evidence |
 | Workflow gates | `verify-spec`, `audit-spec`, and `run-task` |
 | Local coordination | Bounded additive scratchpad and indexed project history |

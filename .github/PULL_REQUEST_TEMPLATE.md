@@ -1,29 +1,21 @@
-<!--
-Thanks for contributing. Fill in the sections below; delete any that don't apply.
--->
+## Summary
 
-## What this PR does
+<!-- What changed and why? Keep this to the behavior or contract. -->
 
-<One or two sentences — what changes and why.>
+## Scope
 
-## Type of change
+<!-- Name the affected surfaces and any deliberate exclusions. -->
 
-- [ ] mmcg (Rust) — indexer / MCP / CLI / miner
-- [ ] Workflow artifact — skill / subagent / CLAUDE.md template
-- [ ] Docs
-- [ ] Bug fix
+## Verification
 
-## Checklist
+<!-- List exact commands and results. Mark unavailable live proof explicitly. -->
 
-- [ ] `cargo test` + `cargo clippy -- -D warnings` + `cargo fmt --check` pass (if Rust touched)
-- [ ] `python3 scripts/validate.py` passes (if artifacts touched)
-- [ ] Ran the evals for any changed subagent/skill prompt (`evals/runner.py`)
-- [ ] Change is focused; commit subjects use a conventional prefix
+- [ ] `just check`
+- [ ] Focused regression test added or updated when behavior changed
+- [ ] Documentation updated when a public command, schema, or limit changed
+- [ ] Screenshots attached when rendered behavior changed
+- [ ] No release or external publication was performed from this branch
 
-## How I tested it
+## Compatibility and risk
 
-<Concrete. What did you run? Input → output.>
-
-## Breaking change?
-
-<If yes: what breaks and the migration path. If no, delete this section.>
+<!-- Breaking behavior, migration path, security boundary, or `None`. -->

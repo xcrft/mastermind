@@ -1,10 +1,16 @@
-# MCP
+# MCP servers
 
-[Model Context Protocol](https://modelcontextprotocol.io) server configs.
+Mastermind ships one [Model Context Protocol](https://modelcontextprotocol.io)
+server.
 
-## Index
-
-### servers/
-| Server | Transport | Description |
+| Server | Transport | Surface |
 |---|---|---|
-| [`mmcg`](servers/mmcg/README.md) | stdio | Mastermind Codegraph — 27 MCP tools: 26 read-only structural/semantic/evidence tools plus one additive local scratchpad write, over a local SQLite index. Supports Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, and C/C++. Truth layer for the Mastermind workflow. |
+| [`mmcg`](servers/mmcg/README.md) | stdio | 28 bounded tools over a local SQLite index: 27 read-only queries and one additive scratchpad write |
+
+The server supports Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#,
+Go, Java, PHP, and C/C++. It exposes structural, semantic, evidence, history,
+and workflow-state queries; it does not expose arbitrary SQL or executable
+plugin hooks.
+
+Start with the [generic MCP guide](../docs/integrations/generic-mcp.md) or the
+[complete technical reference](../docs/reference/mmcg.md#mcp-tools).

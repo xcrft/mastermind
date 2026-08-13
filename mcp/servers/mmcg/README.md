@@ -1,6 +1,6 @@
 ---
 name: mmcg
-description: Mastermind Codegraph — fast multi-language code indexer (Python + TypeScript/TSX + JavaScript/JSX + Vue SFC + Rust + C# + Go + Java + PHP + C/C++) exposed over MCP. Indexes symbols, calls, imports, and durable project history into a local SQLite database and exposes 25 bounded tools for AI coding agents.
+description: Mastermind Codegraph — local multi-language code indexer for Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, and C/C++. Stores symbols, calls, imports, evidence, and project history in SQLite and exposes 28 bounded MCP tools.
 metadata:
   version: 2.0.0
   authors:
@@ -24,7 +24,10 @@ metadata:
 
 # mmcg — Mastermind Codegraph
 
-mmcg is the local structural engine inside [Mastermind](https://github.com/xcrft/mastermind). It indexes symbols, calls, and imports from a repository into SQLite, then exposes the graph through a CLI and MCP server.
+mmcg is the local structural engine inside
+[Mastermind](https://github.com/xcrft/mastermind). It indexes symbols, calls,
+imports, and evidence into SQLite, then exposes the same state through CLI,
+Lens, and MCP.
 
 Use it to answer questions such as:
 
@@ -34,7 +37,8 @@ Use it to answer questions such as:
 - What can the current worktree change affect?
 - Which tests are structurally connected to that change?
 
-The npm package exposes this binary as both `mastermind` and `mmcg`. Cargo installation uses the `mmcg` command.
+The npm package exposes this binary as both `mastermind` and `mmcg`. Cargo
+installation uses `mmcg`.
 
 ## Install
 
@@ -104,7 +108,7 @@ See the [client integration guides](https://github.com/xcrft/mastermind/tree/mai
 | Workflow gates | `verify-spec`, `audit-spec`, and `run-task` |
 | Local coordination | Bounded additive scratchpad and indexed project history |
 
-The MCP surface contains 26 read-only tools and one additive local scratchpad
+The MCP surface contains 27 read-only tools and one additive local scratchpad
 write. Results are bounded and return precision or truncation notes when the
 engine cannot prove completeness.
 
@@ -132,7 +136,9 @@ The default mmcg graph is syntactic, not a compiler or language server:
   detection, but included contents and compiler semantics are not expanded.
 - Dead-code and test-impact results are candidates to review, not deletion or test-skipping authorization.
 
-These trade-offs keep the index local, fast, portable, and easy for agents to query. The engine fails closed on stale index, root, Git snapshot, or work-limit conditions in change-impact workflows.
+This model keeps the default index local and independent of language
+toolchains. Change-impact workflows fail closed on stale index, root, Git
+snapshot, and work-limit conditions.
 
 `mmcg enrich --scip index.scip` is an optional second layer. It stores
 compiler-resolved facts separately, exposes them through `query semantic` and
@@ -170,11 +176,11 @@ cargo fmt --all -- --check
 cargo bench --bench indexer
 ```
 
-The index benchmark emits schema-v1 JSON for cold, warm, and 10%-incremental
-runs plus peak process RSS. Defaults are 1,000 synthetic Rust files with 20
-symbols each. Override them with `MMCG_BENCH_FILES`,
-`MMCG_BENCH_SYMBOLS_PER_FILE`, and `MMCG_BENCH_CHANGED_FILES`. Treat results as
-same-machine regression evidence, not a portable performance promise.
+The benchmark emits schema-v1 JSON for cold, warm, and 10%-incremental runs
+plus peak process RSS. See the
+[methodology and reference results](https://github.com/xcrft/mastermind/blob/main/docs/benchmarks.md).
+Treat results as same-machine regression evidence, not a portable performance
+promise.
 
 See [CONTRIBUTING.md](https://github.com/xcrft/mastermind/blob/main/CONTRIBUTING.md) for the repository-wide contribution guide.
 

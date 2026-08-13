@@ -1,49 +1,105 @@
 # Getting started
 
-Mastermind has two independent layers:
-
-1. A global CLI, workflow bundle, MCP registration, and optional personal style profile.
-2. A local codegraph for each repository you choose to index.
-
-You can install and connect Mastermind without initializing a project. `mastermind init` is only the convenience command for enabling the complete repository workflow.
+This guide takes a clean machine to a local index, a change-impact report, and
+an optional MCP connection. For exact flags and schemas, use the
+[technical reference](reference/mmcg.md).
 
 ## Requirements
 
-- Node.js 24+ for the npm package
-- Claude Code, Codex, Cursor, Continue, or another MCP stdio client
-- Git for baseline-aware change and audit commands
+| Install path | Requirement |
+|---|---|
+| npm, recommended | Node.js 24+ |
+| Cargo | Rust 1.96+ |
+| Baseline-aware commands | Git |
+| MCP | Claude Code, Codex, Cursor, Continue, or another stdio client |
 
-Rust is not needed for npm installation. Source builds require Rust 1.96+.
+The npm package includes native binaries for supported macOS, Linux, and
+Windows targets. It does not compile Rust during installation.
 
-## Install the CLI
+## 1. Install the CLI
 
-Global installation is simplest when you use Mastermind across repositories:
+Global installation:
 
 ```bash
 npm install -g @xcraftmind/mastermind
 mastermind --version
 ```
 
-For a version pinned to one repository:
+Repository-pinned installation:
 
 ```bash
 npm install -D @xcraftmind/mastermind
 npx mastermind --version
 ```
 
-## Connect an AI client
+Cargo installation exposes the same binary as `mmcg`:
 
-`mastermind setup` previews a redacted plan. Add `--write` to apply it.
+```bash
+cargo install mmcg --version 2.0.0 --locked
+mmcg --version
+```
 
-| Client | User-scope command | Notes |
-|---|---|---|
-| Claude Code | `mastermind install` | Installs skills, subagents, and user-scope MCP |
-| Codex | `mastermind install --client codex` | Installs skills and user-scope MCP |
-| Cursor | `mastermind setup cursor --scope user --write` | User and project scopes supported |
-| Continue | `mastermind setup continue --scope user --write` | Owns one `mastermind.yaml` file |
-| Generic | See [generic MCP setup](integrations/generic-mcp.md) | Requires an explicit config path |
+## 2. Index a repository
 
-Client guides document removal, project scope, backups, and the exact config shape:
+```bash
+cd your-repository
+mastermind index .
+mastermind status
+```
+
+The index is `.mastermind/mmcg.db`. Source discovery follows Git and `.ignore`
+rules and skips build/vendor directories. The first run parses supported files;
+later runs skip unchanged files.
+
+```bash
+mastermind index .          # incremental refresh
+mastermind index . --force  # full reparse
+mastermind watch            # long-running incremental refresh
+```
+
+Do not commit the database. `mastermind init` adds the normal ignore rule, but
+an index created directly may require this repository-specific entry:
+
+```gitignore
+.mastermind/
+```
+
+## 3. Get the first useful result
+
+```bash
+mastermind map .
+mastermind impact --since main
+mastermind temporal --since main
+mastermind ui --since main
+```
+
+- `map` summarizes components, entry points, dependencies, hotspots, and
+  cycles.
+- `impact` connects the current Git diff to changed symbols, callers,
+  component crossings, and candidate tests.
+- `temporal` compares architecture at the baseline and indexed worktree.
+- `ui` serves the same bounded snapshot in local read-only Mastermind Lens.
+
+Refresh the index before trusting a result after source changes. Stale,
+truncated, or work-limited analysis fails closed or is labelled partial; it is
+never presented as a clean review.
+
+## 4. Connect an AI client
+
+CLI use does not require MCP. If you want an agent to query the graph, choose
+one setup path:
+
+| Client | Command |
+|---|---|
+| Claude Code | `mastermind install` |
+| Codex | `mastermind install --client codex` |
+| Claude Code + Codex | `mastermind install --client all` |
+| Cursor | `mastermind setup cursor --scope user --write` |
+| Continue | `mastermind setup continue --scope user --write` |
+| Generic stdio client | [Generic MCP guide](integrations/generic-mcp.md) |
+
+`mastermind setup` previews a redacted plan when `--write` is absent. Client
+guides describe project scope, config ownership, backups, updates, and removal:
 
 - [Claude Code](integrations/claude-code.md)
 - [Codex](integrations/codex.md)
@@ -51,160 +107,78 @@ Client guides document removal, project scope, backups, and the exact config sha
 - [Continue](integrations/continue.md)
 - [Generic MCP](integrations/generic-mcp.md)
 
-No repository and no `mastermind init` are required for this step.
-
-## Install workflow adapters
+Verify installed workflow files and MCP configuration:
 
 ```bash
-mastermind install --client all
+mastermind doctor --workflow --client all
 ```
 
-This installs Mastermind-owned skills for Claude and Codex, Claude subagents,
-and both user-scope MCP registrations. Use `mastermind install` or
-`mastermind install --client codex` for one client. Cursor and Continue expose
-the MCP tools through `mastermind setup`; Mastermind does not claim a native
-workflow-extension format for those clients.
-
-The installer owns only artifacts recorded in a per-client manifest. Updates
-replace each owned skill directory atomically, remove retired owned artifacts,
-preserve unrelated user files, and roll back a partial client update.
-Doctor hashes every owned artifact, so a locally modified or truncated skill is
-reported as drift rather than accepted because the path merely exists.
+## Optional: export review evidence
 
 ```bash
-mastermind list
+mastermind review export --since main --out mastermind-review
+```
+
+The new directory contains standalone HTML, SARIF, a Markdown summary, a
+revision/evidence manifest, and a pinned GitHub Actions workflow. The exporter
+does not overwrite an existing path.
+
+## Optional: enable the task workflow
+
+You do not need `mastermind init` for indexing, CLI analysis, Lens, or MCP.
+Run it only when the repository should use Mastermind's task artifacts and
+project context:
+
+```bash
+mastermind init --no-claude
+mastermind doctor
+```
+
+Omit `--no-claude` only when you intend to let the configured Claude CLI draft
+repository context from source content. Existing `CONTEXT.md` and `CLAUDE.md`
+are preserved unless `--force` is supplied.
+
+The task workflow has three depths:
+
+| Mode | Use for | Task spec |
+|---|---|---|
+| Direct | Small, reversible changes | None |
+| Verified | Normal multi-file or delegated work | Required |
+| Strict | Auth, billing, migrations, public API, data loss, supply chain, difficult rollback | Required with risk and review evidence |
+
+Read [Workflow](workflow.md) before using `new-spec`, `verify-spec`, or
+`run-task`.
+
+## State and network behavior
+
+| Path | Scope | Contents | Commit? |
+|---|---|---|---|
+| `.mastermind/mmcg.db` | Repository | Generated graph and local scratchpad | No |
+| `.mastermind/tasks/` | Repository | Optional specs, reports, audits, state | Project decision |
+| `CONTEXT.md`, `CLAUDE.md` | Repository | Optional human/agent guidance | Project decision |
+| `~/.mastermind/` | User | Optional style profile | No |
+| Client config and workflow directories | User or repository | MCP registration and installed adapters | Depends on selected scope |
+
+Indexing, queries, Lens, policy evaluation, fact import, and review export run
+locally. The commands that may invoke an external model are explicit:
+
+- `mastermind init` without `--no-claude`;
+- `mastermind miner profile --deep`.
+
+## Update or remove
+
+```bash
+npm install -g @xcraftmind/mastermind@latest
 mastermind update --client all
 mastermind doctor --workflow --client all
 ```
 
-## Use the codegraph without project initialization
+Removal is scope-specific and dry-run-first. Read the relevant client guide and
+inspect the printed plan before adding a destructive flag.
 
-From any supported code repository:
+## Next
 
-```bash
-cd your-project
-mastermind index .
-mastermind status
-mastermind map .
-```
-
-This creates `.mastermind/mmcg.db`. It does not create task specs, `CONTEXT.md`, or a workflow `CLAUDE.md`.
-
-Refresh the index after edits:
-
-```bash
-mastermind index .       # incremental
-mastermind index . --force
-mastermind watch         # continuous refresh
-```
-
-Analyze the current worktree against a baseline:
-
-```bash
-mastermind impact --since main
-mastermind temporal --since main
-mastermind review export --since main --out mastermind-review
-```
-
-The review export is a portable PR artifact: open `mastermind-review/index.html`
-without a server, upload `mastermind-review/mastermind.sarif` to code scanning,
-or copy its pinned `mastermind-review.yml` into `.github/workflows/`.
-
-## Build a personal style profile without project initialization
-
-```bash
-mastermind miner profile .
-```
-
-This idempotently adds the current repository to the user-global
-`~/.mastermind/style.db` and regenerates `~/.mastermind/style.md`. It does not
-require `mastermind init`. The profile is advisory: target-repository code and
-formatter/linter policy, the approved task, product behavior, and security take
-precedence. A normal re-mine preserves manual overrides and the qualitative
-`Design patterns & tendencies` section. Deterministic code-shape observations
-are diagnostic evidence, not direct instructions for generated code.
-
-Use `/mastermind-style-deep` in a supported workflow client for an
-evidence-backed qualitative portrait. `mastermind miner profile --deep` remains
-a compatibility path that explicitly sends bounded added-line and commit
-samples to `claude -p` and replaces that interpreted section.
-
-## Enable the complete repository workflow
-
-```bash
-mastermind init
-mastermind doctor
-```
-
-`init` scaffolds `.mastermind/`, builds the index, and creates project context
-when missing. When invoked through the npm package, it also reconciles the
-Claude workflow bundle unless `--no-global` is supplied. Existing `CONTEXT.md`
-and `CLAUDE.md` files are preserved unless `--force` is used.
-
-Useful opt-outs:
-
-```bash
-mastermind init --no-claude  # do not draft context through Claude Code
-mastermind init --no-index   # scaffold without indexing
-mastermind init --no-global  # do not update ~/.claude
-mastermind init --no-seed-style # do not enrich the user-global style profile
-```
-
-## Choose a workflow depth
-
-Most small changes do not need a task spec:
-
-```bash
-mastermind impact --since main
-# implement and test
-mastermind impact --since main
-```
-
-Use the default verified contract for normal multi-file or delegated work:
-
-```bash
-mastermind new-spec "Add account recovery"
-mastermind verify-spec .mastermind/tasks/001-add-account-recovery/spec.md
-# approve Scope and Acceptance Criteria
-mastermind run-task .mastermind/tasks/001-add-account-recovery/spec.md --pre-only
-# hand spec.md to the implementation agent; it writes executor-report.md
-mastermind run-task .mastermind/tasks/001-add-account-recovery/spec.md --post-only
-```
-
-Use `--mode strict` for auth, billing, migrations, public APIs, data-loss,
-supply-chain, or difficult rollback. `lite` and `standard` remain compatible
-with old task files but are not recommended for new work.
-
-`run-task` stores lifecycle state beside each canonical spec as
-`<task>/state.json`. The executor owns only `<task>/executor-report.md`; the
-controller owns state, `audit.md`, lesson candidates, release-note eligibility,
-and the initial `<task>/history-review.md`. After semantic review, mark Context
-and Lesson there as `updated` or `not applicable` and replace the generated
-reason. The default handoff is client-neutral. `--exec` is a legacy Claude CLI
-convenience.
-
-## State and privacy
-
-| Location | Contains | Commit it? |
-|---|---|---|
-| `~/.claude/` | Installed Claude agents, skills, ownership manifest | No |
-| `~/.codex/` | Installed Codex skills and ownership manifest | No |
-| User client config | MCP registration | No |
-| `.mastermind/mmcg.db` | Local codegraph and scratchpad | No |
-| `.mastermind/tasks/` | Optional specs, reports, audits, history reviews, state, and lessons | Local by default; opt in explicitly |
-| `CONTEXT.md`, `CLAUDE.md` | Optional repository guidance | Your choice |
-
-The index is generated from local source files and stays local. `mastermind init`
-creates ignore rules for `.mastermind/`; to share selected history, explicitly
-negate those paths after the generated `*` rule and remove any broader root
-`.mastermind/` ignore, or version the desired artifacts elsewhere. `CONTEXT.md`
-is outside `.mastermind/` and can be shared normally.
-
-## Next steps
-
-- Run `mastermind map .` to learn a repository.
-- Run `mastermind demo hallucinated-symbol` for a zero-setup audit example.
-- Run `mastermind impact --since main` before submitting a change.
-- Run `mastermind temporal --since main` when architecture drift matters.
-- Read [How the workflow works](workflow.md) to use checked task specs.
-- Add [verifiable audits](github-action.md) to CI.
+- [Documentation index](README.md)
+- [CLI and MCP reference](reference/mmcg.md)
+- [Benchmarks](benchmarks.md)
+- [GitHub Action](github-action.md)

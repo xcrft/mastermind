@@ -135,7 +135,9 @@ class MockElement {
     (this.listeners[type] || []).forEach((handler) => handler(event));
   }
 
-  focus() {}
+  focus() {
+    this.focused = true;
+  }
 
   scrollTo() {}
 
@@ -159,7 +161,10 @@ class MockElement {
         return element.classList.contains(selector.slice(1));
       }
       const attribute = selector.match(/^\[([^\]]+)\]$/);
-      return attribute ? element.attributes.has(attribute[1]) : false;
+      if (attribute) {
+        return element.attributes.has(attribute[1]);
+      }
+      return element.tagName === selector.toLowerCase();
     };
     const results = [];
     const visit = (element) => {
@@ -534,6 +539,17 @@ async function renderFixture(payload, options) {
   }
   let fetchCalls = 0;
   let releaseFetch = null;
+  let intervalHandler = null;
+  let now = settings.now === undefined ? Date.now() : settings.now;
+  class HarnessDate extends Date {
+    constructor(...values) {
+      super(...(values.length > 0 ? values : [now]));
+    }
+
+    static now() {
+      return now;
+    }
+  }
   const fetchGate = settings.deferFetch
     ? new Promise((resolve) => { releaseFetch = resolve; })
     : null;
@@ -542,7 +558,8 @@ async function renderFixture(payload, options) {
       handler();
       return 1;
     },
-    setInterval() {
+    setInterval(handler) {
+      intervalHandler = handler;
       return 1;
     },
     addEventListener() {},
@@ -582,7 +599,7 @@ async function renderFixture(payload, options) {
       };
     },
     Intl: Intl,
-    Date: Date,
+    Date: HarnessDate,
     Map: Map,
     Set: Set,
     Array: Array,
@@ -604,6 +621,12 @@ async function renderFixture(payload, options) {
     await settle();
   }
   harness.fetchCalls = fetchCalls;
+  harness.advanceTime = (milliseconds) => {
+    now += milliseconds;
+    if (intervalHandler) {
+      intervalHandler();
+    }
+  };
   return harness;
 }
 
@@ -613,6 +636,46 @@ function cloneFixture() {
 
 function cloneFixtureValue(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function emptyFixture(source) {
+  const payload = cloneFixtureValue(source || fixture());
+  const empty = { total: 0, returned: 0, truncated: false, items: [] };
+  payload.impact.changes.files = cloneFixtureValue(empty);
+  payload.impact.changes.symbols = cloneFixtureValue(empty);
+  payload.impact.impact = cloneFixtureValue(empty);
+  payload.impact.api_crossings = cloneFixtureValue(empty);
+  payload.impact.tests = cloneFixtureValue(empty);
+  payload.impact.affected_components = cloneFixtureValue(empty);
+  return payload;
+}
+
+function paginatedMobileFixture() {
+  const payload = cloneFixture();
+  const seed = payload.impact.changes.symbols.items[0];
+  payload.impact.changes.symbols.items = Array.from({ length: 6 }, (_value, index) => ({
+    ...seed,
+    file: "src/change_" + (index + 1) + ".rs",
+    name: "changed_" + (index + 1),
+    line: index + 1,
+  }));
+  payload.impact.changes.symbols.total = 6;
+  payload.impact.changes.symbols.returned = 6;
+  return payload;
+}
+
+function relativeLuminance(hex) {
+  const channels = hex.match(/[0-9a-f]{2}/gi).map((value) => parseInt(value, 16) / 255);
+  return channels.reduce((result, value, index) => {
+    const linear = value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+    return result + linear * [0.2126, 0.7152, 0.0722][index];
+  }, 0);
+}
+
+function contrastRatio(foreground, background) {
+  const light = Math.max(relativeLuminance(foreground), relativeLuminance(background));
+  const dark = Math.min(relativeLuminance(foreground), relativeLuminance(background));
+  return (light + 0.05) / (dark + 0.05);
 }
 
 async function main() {
@@ -662,9 +725,55 @@ async function main() {
   assert.match(CSS_SOURCE, /@media \(max-width: 360px\)[\s\S]*?\.wordmark__compact[\s\S]*?display:\s*inline/);
   assert.match(
     CSS_SOURCE,
-    /body:has\(\.workspace\.has-selection\)[\s\S]*?\.trace-context[\s\S]*?position:\s*sticky/s,
+    /body:has\(\.workspace\[data-trace-mode="mobile"\]\.has-selection\)[\s\S]*?\.trace-context[\s\S]*?position:\s*sticky/s,
     "Selected mobile traces must retain sticky context"
   );
+  assert.match(
+    CSS_SOURCE,
+    /\.workspace\[data-trace-mode="mobile"\][\s\S]*?\.mobile-trace-list:not\(\[hidden\]\)[\s\S]*?display:\s*block/s,
+    "The JS-selected trace mode must be the CSS representation authority"
+  );
+  assert.match(
+    CSS_SOURCE,
+    /\.workspace\[data-trace-mode="mobile"\] \.mobile-trace-list:not\(\[hidden\]\)\s*\{[^}]*padding:\s*4px 12px 16px/s,
+    "Mobile-list appearance must follow the authoritative trace mode"
+  );
+  assert.match(
+    CSS_SOURCE,
+    /\.workspace\[data-trace-mode="mobile"\] \.mobile-candidate\s*\{[^}]*display:\s*grid;[^}]*min-height:\s*92px/s,
+    "Mobile candidates must keep their representation styling above the page-shell breakpoint"
+  );
+  assert.match(
+    CSS_SOURCE,
+    /\.workspace\[data-trace-mode="mobile"\] \.mobile-lane-summary\s*\{[^}]*display:\s*grid/s,
+    "Mobile summaries must follow the authoritative trace mode"
+  );
+  assert.match(
+    CSS_SOURCE,
+    /body:has\(\.workspace\[data-trace-mode="mobile"\]\.has-selection\) \.trace-context\s*\{[^}]*position:\s*sticky/s,
+    "Selected-trace context must follow the authoritative trace mode"
+  );
+  assert.match(CSS_SOURCE, /\.search-control input::placeholder\s*\{[^}]*color:\s*var\(--ink-soft\)/s);
+  assert.match(CSS_SOURCE, /\.search-control__field button\s*\{[^}]*color:\s*var\(--ink-soft\)/s);
+  assert.match(CSS_SOURCE, /\.overlay-disclosure summary small\s*\{[^}]*color:\s*var\(--ink-soft\)/s);
+  assert.match(CSS_SOURCE, /\.workspace\[data-trace-mode="mobile"\] \.mobile-candidate__meta\s*\{[^}]*color:\s*var\(--ink-soft\)/s);
+  assert.match(CSS_SOURCE, /\.workspace\[data-trace-mode="mobile"\] \.mobile-lane-summary p\s*\{[^}]*color:\s*var\(--ink-soft\)/s);
+  [
+    /\.metric--risk\.is-zero \.metric__alert,[\s\S]*?\.metric--risk\.is-zero \.metric__note\s*\{[^}]*color:\s*var\(--ink-soft\)/s,
+    /\.component-filter__counts,[\s\S]*?\.component-filter__meta\s*\{[^}]*color:\s*var\(--ink-soft\)/s,
+    /\.evidence-deck__heading > p,[\s\S]*?\.method-ledger > header > p\s*\{[^}]*color:\s*var\(--ink-soft\)/s,
+    /\.evidence-source-list__empty\s*\{[^}]*color:\s*var\(--ink-soft\)/s,
+    /\.evidence-source__kind,[\s\S]*?\.evidence-source__facts\s*\{[^}]*color:\s*var\(--ink-soft\)/s,
+    /\.temporal-metrics span\s*\{[^}]*color:\s*var\(--ink-soft\)/s,
+    /\.temporal-events__empty\s*\{[^}]*color:\s*var\(--ink-soft\)/s,
+    /\.method-ledger__disclosure summary span:last-child\s*\{[^}]*color:\s*var\(--ink-soft\)/s,
+    /#limits-list dt\s*\{[^}]*color:\s*var\(--ink-soft\)/s,
+    /\.page-footer\s*\{[^}]*color:\s*var\(--ink-soft\)/s,
+  ].forEach((selectorContract) => {
+    assert.match(CSS_SOURCE, selectorContract, "Small normal text on canvas backgrounds must use the AA muted token");
+  });
+  assert.ok(contrastRatio("#475569", "#f5f7fb") >= 4.5, "Normal muted text token must meet WCAG AA on the canvas");
+  assert.doesNotMatch(CSS_SOURCE, /content:\s*["']Local["']/, "Responsive CSS must not overwrite standalone runtime wording");
 
   const loadingHarness = await renderFixture(fixture(), { deferFetch: true });
   assert.match(loadingHarness.nodes.get("graph-state").textContent, /Calibrating blast trace/i);
@@ -709,6 +818,49 @@ async function main() {
   assert.match(harness.nodes.get("temporal-events").textContent, /charge<\/span>/i);
   assert.match(harness.nodes.get("temporal-events").textContent, /History needs review/i);
 
+  for (const width of [390, 700, 768, 820, 900, 1440]) {
+    const modeHarness = await renderFixture(fixture(), { width: width });
+    const mobile = width < 700;
+    assert.equal(
+      modeHarness.nodes.get("review-workspace").getAttribute("data-trace-mode"),
+      mobile ? "mobile" : "desktop",
+      "Trace mode must be explicit at " + width + "px"
+    );
+    assert.equal(
+      Number(modeHarness.nodes.get("trace-graph").getAttribute("hidden") === null)
+        + Number(modeHarness.nodes.get("mobile-trace-list").hidden === false),
+      1,
+      "Exactly one trace representation must be active at " + width + "px"
+    );
+  }
+
+  const ageHarness = await renderFixture(fixture(), { now: Date.UTC(2026, 7, 13, 12, 0, 0) });
+  assert.match(ageHarness.nodes.get("snapshot-age").textContent, /Snapshot just now/i);
+  ageHarness.advanceTime(2 * 60 * 60 * 1000);
+  assert.equal(ageHarness.nodes.get("snapshot-age").textContent, "Snapshot 2h ago");
+  assert.doesNotMatch(ageHarness.nodes.get("completeness-status").textContent, /current/i);
+
+  const focusHarness = await renderFixture(fixture(), { width: 390 });
+  const focusCandidate = focusHarness.nodes.get("mobile-trace-list").querySelectorAll(".mobile-candidate")[0];
+  focusCandidate.dispatch("click");
+  const backToCandidates = focusHarness.nodes.get("trace-context").querySelectorAll("button")[0];
+  backToCandidates.dispatch("click");
+  const restoredCandidate = focusHarness.nodes.get("mobile-trace-list").querySelectorAll(".mobile-candidate")[0];
+  assert.equal(restoredCandidate.focused, true, "Back to candidates must restore keyboard focus");
+
+  const paginatedHarness = await renderFixture(paginatedMobileFixture(), { width: 390 });
+  const pageActions = paginatedHarness.nodes.get("trace-context").querySelectorAll("button");
+  pageActions[1].dispatch("click");
+  assert.match(paginatedHarness.nodes.get("trace-context").textContent, /2\/2/);
+  const pageTwoOrigin = paginatedHarness.nodes.get("mobile-trace-list").querySelectorAll(".mobile-candidate")[0];
+  assert.match(pageTwoOrigin.textContent, /changed_6/i);
+  pageTwoOrigin.dispatch("click");
+  paginatedHarness.nodes.get("trace-context").querySelectorAll("button")[0].dispatch("click");
+  assert.match(paginatedHarness.nodes.get("trace-context").textContent, /2\/2/, "Back must preserve the originating mobile page");
+  const restoredPageTwoOrigin = paginatedHarness.nodes.get("mobile-trace-list").querySelectorAll(".mobile-candidate")[0];
+  assert.match(restoredPageTwoOrigin.textContent, /changed_6/i);
+  assert.equal(restoredPageTwoOrigin.focused, true, "Back must focus the page-two origin");
+
   const standaloneHarness = await renderFixture(fixture(), { embedded: true, rejectFetch: true });
   assert.equal(standaloneHarness.fetchCalls, 0, "Standalone Lens must render embedded JSON without fetching");
   assert.match(standaloneHarness.nodes.get("repository-name").textContent, /example/i);
@@ -731,6 +883,15 @@ async function main() {
   const schemaHarness = await renderFixture(schemaMismatch);
   assert.match(schemaHarness.nodes.get("notice-stack").textContent, /Schema mismatch/i);
   assert.match(schemaHarness.nodes.get("notice-stack").textContent, /received schema 7/i);
+  assert.ok(schemaHarness.nodes.get("completeness-status").classList.contains("is-error"));
+  assert.doesNotMatch(schemaHarness.nodes.get("completeness-status").textContent, /complete|current/i);
+
+  const missingSchema = emptyFixture();
+  delete missingSchema.schema_version;
+  const missingSchemaHarness = await renderFixture(missingSchema);
+  assert.match(missingSchemaHarness.nodes.get("notice-stack").textContent, /Schema unavailable/i);
+  assert.ok(missingSchemaHarness.nodes.get("completeness-status").classList.contains("is-error"));
+  assert.doesNotMatch(missingSchemaHarness.nodes.get("trace-context").textContent, /Review complete/i);
 
   const truncated = cloneFixture();
   truncated.impact.impact.total = 18;
@@ -749,18 +910,12 @@ async function main() {
   limitsAction.dispatch("click");
   assert.equal(truncatedHarness.nodes.get("method-ledger-disclosure").open, true);
 
-  const empty = cloneFixture();
-  const emptyCollection = { total: 0, returned: 0, truncated: false, items: [] };
-  empty.impact.changes.files = cloneFixtureValue(emptyCollection);
-  empty.impact.changes.symbols = cloneFixtureValue(emptyCollection);
-  empty.impact.impact = cloneFixtureValue(emptyCollection);
-  empty.impact.api_crossings = cloneFixtureValue(emptyCollection);
-  empty.impact.tests = cloneFixtureValue(emptyCollection);
-  empty.impact.affected_components = cloneFixtureValue(emptyCollection);
+  const empty = emptyFixture();
   const emptyHarness = await renderFixture(empty, { width: 900 });
-  assert.match(emptyHarness.nodes.get("instrument-summary").textContent, /No changes detected/i);
-  assert.match(emptyHarness.nodes.get("graph-state").textContent, /No changes in scope/i);
+  assert.match(emptyHarness.nodes.get("instrument-summary").textContent, /No changes were captured/i);
+  assert.match(emptyHarness.nodes.get("graph-state").textContent, /No changes in captured scope/i);
   assert.match(emptyHarness.nodes.get("trace-context").textContent, /Baseline main · scope \./i);
+  assert.doesNotMatch(emptyHarness.nodes.get("trace-context").textContent, /Review complete|current/i);
   assert.ok(emptyHarness.nodes.get("review-workspace").classList.contains("is-zero-change"));
   assert.doesNotMatch(emptyHarness.nodes.get("graph-state").textContent, /Select a trace claim/i);
 
@@ -810,6 +965,10 @@ async function main() {
     /Back to candidates/i,
     "Focused mobile traces must keep a persistent return to candidates"
   );
+  const claimHeading = harness.nodes.get("inspector-body").querySelectorAll(".claim-heading")[0];
+  assert.equal(claimHeading.children.find((child) => child.tagName === "h4")?.tagName, "h4");
+  const claimSection = harness.nodes.get("inspector-body").querySelectorAll(".claim-section")[0];
+  assert.equal(claimSection.children[0].tagName, "h5");
   assert.equal(
     harness.nodes.get("trace-graph").getAttribute("hidden"),
     null,

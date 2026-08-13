@@ -47,14 +47,14 @@
 
         <div class="runtime-block">
           <div class="runtime-flags" aria-label="Runtime restrictions">
-            <span><i aria-hidden="true"></i>Local</span>
+            <span data-lens-runtime-label><i aria-hidden="true"></i>Local</span>
             <span><i aria-hidden="true"></i>Read only</span>
           </div>
           <div class="refresh-cluster">
             <p class="snapshot-age" id="snapshot-age">Awaiting first scan</p>
-            <button class="refresh-button" id="refresh-button" type="button" aria-label="Refresh Lens snapshot">
+            <button class="refresh-button" id="refresh-button" type="button" data-lens-snapshot-action aria-label="Refresh Lens snapshot">
               <span class="refresh-button__glyph" aria-hidden="true">↻</span>
-              <span>Refresh</span>
+              <span data-lens-action-label>Refresh</span>
             </button>
           </div>
         </div>

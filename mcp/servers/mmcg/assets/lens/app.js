@@ -10,6 +10,7 @@
   const CONNECTED_PER_LANE = 5;
   const MOBILE_CANDIDATES_PER_PAGE = 5;
   const MOBILE_CONNECTED_PER_LANE = 2;
+  const MOBILE_TRACE_MAX_WIDTH = 699;
   const OVERLAY_KEYS = ["findings", "coverage", "ownership", "churn", "tests", "semantic", "runtime", "facts", "knowledge"];
 
   const state = {
@@ -30,6 +31,7 @@
     activeNodeIds: null,
     lanePages: { changed: 0, impacted: 0, test: 0 },
     mobilePage: 0,
+    returnCandidateId: null,
     overlays: new Set(OVERLAY_KEYS),
   };
 
@@ -985,18 +987,16 @@
 
     if (typeof ResizeObserver === "function") {
       const observer = new ResizeObserver(function () {
-        const nextMode = elements.graphFrame.clientWidth < 700 ? "mobile" : "desktop";
+        const nextMode = traceModeForWidth(elements.graphFrame.clientWidth);
         if (state.model && nextMode !== state.layoutMode) {
-          state.layoutMode = nextMode;
           renderGraph();
         }
       });
       observer.observe(elements.graphFrame);
     } else {
       window.addEventListener("resize", function () {
-        const nextMode = elements.graphFrame.clientWidth < 700 ? "mobile" : "desktop";
+        const nextMode = traceModeForWidth(elements.graphFrame.clientWidth);
         if (state.model && nextMode !== state.layoutMode) {
-          state.layoutMode = nextMode;
           renderGraph();
         }
       });
@@ -1167,7 +1167,7 @@
     if (files === 0 && symbols === 0) {
       summary = model.truncations.length > 0
         ? "No returned change evidence. The snapshot is partial; inspect its limits."
-        : "No changes detected against the requested baseline.";
+        : "No changes were captured against the requested baseline.";
     } else if (crossings > 0) {
       summary = crossings + " boundary crossing" + (crossings === 1 ? "" : "s") + " observed; " + tests + " test candidate" + (tests === 1 ? "" : "s") + " returned.";
     } else if (impacts > 0) {
@@ -1210,9 +1210,15 @@
       );
     }
     if (state.model) {
-      if (state.model.schemaVersion !== null && state.model.schemaVersion !== EXPECTED_SCHEMA) {
+      if (state.model.schemaVersion === null) {
         appendNotice(
-          "warning",
+          "error",
+          "Schema unavailable",
+          "The snapshot does not identify its schema. Evidence compatibility cannot be confirmed."
+        );
+      } else if (state.model.schemaVersion !== EXPECTED_SCHEMA) {
+        appendNotice(
+          "error",
           "Schema mismatch",
           "This UI targets schema 1 but received schema " + state.model.schemaVersion + ". Claims may be incomplete or unavailable."
         );
@@ -1261,16 +1267,26 @@
       }
       return;
     }
+    if (state.model.schemaVersion === null) {
+      elements.completeness.textContent = "Schema unavailable · compatibility unknown";
+      elements.completeness.classList.add("is-error");
+      return;
+    }
+    if (state.model.schemaVersion !== EXPECTED_SCHEMA) {
+      elements.completeness.textContent = "Schema mismatch · compatibility unknown";
+      elements.completeness.classList.add("is-error");
+      return;
+    }
     const temporalUnavailable = text(state.model.temporalEnvelope.status, "unavailable") !== "available";
     const partial = snapshotIsPartial();
     if (partial) {
       elements.completeness.textContent = "Partial evidence";
       elements.completeness.classList.add("is-partial");
     } else if (temporalUnavailable) {
-      elements.completeness.textContent = "Current trace complete · temporal comparison unavailable";
+      elements.completeness.textContent = "Captured trace complete · temporal comparison unavailable";
       elements.completeness.classList.add("is-partial");
     } else {
-      elements.completeness.textContent = "No truncation reported · snapshot is current";
+      elements.completeness.textContent = "No truncation reported · captured snapshot";
       elements.completeness.classList.add("is-complete");
     }
   }
@@ -1280,13 +1296,14 @@
       return false;
     }
     return state.model.truncations.length > 0
+      || state.model.schemaVersion !== EXPECTED_SCHEMA
       || record(state.model.evidence).partial === true
       || record(state.model.semantic).partial === true
       || record(state.model.temporal).partial === true;
   }
 
   function completeZeroChange() {
-    if (!state.model || state.stale || state.error || snapshotIsPartial()) {
+    if (!state.model || state.stale || state.error || state.model.schemaVersion !== EXPECTED_SCHEMA || snapshotIsPartial()) {
       return false;
     }
     return totalOrReturned(state.model.files) === 0
@@ -1312,7 +1329,7 @@
       const diagnostic = record(envelope.diagnostic);
       elements.temporalSummary.textContent = text(
         diagnostic.message,
-        "Temporal architecture is unavailable for this snapshot; the current impact trace is still valid."
+        "Temporal architecture is unavailable for this snapshot; the captured impact trace remains available."
       );
       elements.temporalEvents.appendChild(createElement("p", "temporal-events__empty", "No base/head architecture delta was returned."));
       return;
@@ -1619,9 +1636,15 @@
     ].join(" ").toLocaleLowerCase();
   }
 
-  function resetPages() {
+  function resetPages(preserveMobilePage) {
     state.lanePages = { changed: 0, impacted: 0, test: 0 };
-    state.mobilePage = 0;
+    if (!preserveMobilePage) {
+      state.mobilePage = 0;
+    }
+  }
+
+  function traceModeForWidth(width) {
+    return Math.floor(width || 0) <= MOBILE_TRACE_MAX_WIDTH ? "mobile" : "desktop";
   }
 
   function apertureNodes() {
@@ -1679,6 +1702,11 @@
     elements.mobileTraceList.hidden = true;
     setGraphVisible(true);
 
+    const width = Math.max(320, Math.floor(elements.graphFrame.clientWidth || 900));
+    state.layoutMode = traceModeForWidth(width);
+    elements.workspace.setAttribute("data-trace-mode", state.layoutMode);
+    const mobile = state.layoutMode === "mobile";
+
     const nodes = apertureNodes();
     const zeroChange = totalOrReturned(state.model.files) === 0 && totalOrReturned(state.model.changedSymbols) === 0;
     if (zeroChange) {
@@ -1689,15 +1717,15 @@
       const baseline = text(state.model.baseline.requested_ref, text(state.model.options.since, "the requested baseline"));
       const scope = text(state.model.options.path, ".");
       renderTraceContext(
-        complete ? "Review complete" : "Zero-change result · evidence incomplete",
+        complete ? "Zero-change snapshot" : "Zero-change result · evidence incomplete",
         "Baseline " + baseline + " · scope " + scope + ". No changed files or symbols were returned.",
         []
       );
       elements.traceCount.textContent = "0 claims returned";
       showGraphState(
-        complete ? "No changes in scope" : "No returned changes — review limits",
+        complete ? "No changes in captured scope" : "No returned changes — review limits",
         complete
-          ? "The working copy matches " + baseline + " within " + scope + ". Refresh after new edits, or inspect the evidence envelope below."
+          ? "At capture time, the working copy matched " + baseline + " within " + scope + ". Refresh after new edits, or inspect the evidence envelope below."
           : "No change evidence was returned, but the snapshot is partial. Do not treat this baseline as clean until you review the limits.",
         complete && !document.getElementById("lens-snapshot")
           ? { label: "Refresh snapshot", handler: function () { loadSnapshot(false); } }
@@ -1719,9 +1747,6 @@
     }
 
     elements.graphState.hidden = true;
-    const width = Math.max(320, Math.floor(elements.graphFrame.clientWidth || 900));
-    const mobile = width < 700;
-    state.layoutMode = mobile ? "mobile" : "desktop";
     const localTrace = resolveLocalTrace(nodes);
 
     if (localTrace) {
@@ -1911,11 +1936,21 @@
   }
 
   function clearSelection() {
+    const restoreCandidateFocus = state.layoutMode === "mobile";
     state.selectedId = null;
     state.focusedSeedId = null;
-    resetPages();
+    resetPages(restoreCandidateFocus);
     renderGraph();
     renderInspector();
+    if (restoreCandidateFocus) {
+      const candidates = Array.from(elements.mobileTraceList.querySelectorAll("[data-candidate-id]"));
+      const target = candidates.find(function (candidate) {
+        return candidate.getAttribute("data-candidate-id") === state.returnCandidateId;
+      }) || candidates[0];
+      if (target) {
+        target.focus({ preventScroll: true });
+      }
+    }
     announce("Returned to the bounded claim aperture.");
   }
 
@@ -2037,13 +2072,17 @@
       const item = document.createElement("li");
       const button = createElement("button", "mobile-candidate mobile-candidate--" + node.type);
       button.type = "button";
+      button.setAttribute("data-candidate-id", node.id);
       button.setAttribute("aria-label", nodeLabel(node));
       button.appendChild(createElement("span", "mobile-candidate__kind", text(node.symbol.kind, "unknown") + " / " + node.type));
       button.appendChild(createElement("span", "mobile-candidate__name", text(node.symbol.name, "Unnamed symbol")));
       button.appendChild(createElement("span", "mobile-candidate__path", text(node.symbol.file, "File unavailable") + formatLine(node.symbol.line)));
       const mobileEvidence = evidenceMark(node);
       button.appendChild(createElement("span", "mobile-candidate__meta", nodeMetadata(node) + (mobileEvidence ? " · " + mobileEvidence : "")));
-      button.addEventListener("click", function () { selectClaim(node); });
+      button.addEventListener("click", function () {
+        state.returnCandidateId = node.id;
+        selectClaim(node);
+      });
       item.appendChild(button);
       list.appendChild(item);
     });
@@ -2748,7 +2787,7 @@
   function selectClaim(claim) {
     state.selectedId = claim.id;
     state.disclosure = "selected";
-    resetPages();
+    resetPages(state.layoutMode === "mobile");
     if (claim.type === "changed" && claim.symbol) {
       state.focusedSeedId = claim.id;
     } else if (claim.from) {
@@ -2871,7 +2910,7 @@
     const heading = createElement("section", "claim-heading");
     const typeClass = variant ? " claim-heading__type--" + variant : "";
     heading.appendChild(createElement("p", "claim-heading__type" + typeClass, type));
-    heading.appendChild(createElement("h3", "", name));
+    heading.appendChild(createElement("h4", "", name));
     const location = createElement("p", "claim-heading__path");
     location.appendChild(document.createTextNode(file));
     if (line !== null) {
@@ -2898,7 +2937,7 @@
 
   function appendClaimList(title, values, variant, emptyMessage) {
     const section = createElement("section", "claim-section");
-    section.appendChild(createElement("h4", "", title));
+    section.appendChild(createElement("h5", "", title));
     const className = variant ? "claim-list claim-list--" + variant : "claim-list";
     const list = createElement("ul", className);
     if (values.length === 0) {

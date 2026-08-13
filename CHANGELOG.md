@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-08-13
+
+### Upgrade notes
+- 2.0.0 raises the on-disk graph schema from `6` to `7` and the extractor
+  contract from `mmcg-extractors-v2` to `mmcg-extractors-v3`. Run
+  `mastermind index .` once after upgrading. It rebuilds derived graph tables
+  in place while preserving repository identity and durable history/scratchpad
+  data; no manual SQLite migration is required. Refresh the index before
+  trusting Lens, MCP, map, impact, temporal, or policy results.
+- Package and command names remain `@xcraftmind/mastermind`, `mastermind`, and
+  `mmcg`. The Node.js 24+ and Rust 1.96+ requirements are unchanged.
+
 ### Added
 - Built-in `mastermind facts adapt` converters turn bounded SARIF,
   LCOV/Cobertura, JUnit, and OTLP JSON artifacts into strict
@@ -635,7 +647,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Seven prebuilt platform packages (`@xcraftmind/mmcg-*`) covering macOS (arm64, x64), Linux glibc and musl (x64, arm64), and Windows (x64). npm installs only the package matching the host's `os` / `cpu` / `libc`.
 - Install-mode-aware `setup claude` that writes the correct MCP `command` form for npx, global, project-local, and cargo installs.
 
-[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v1.1.1...HEAD
+[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v2.0.0...HEAD
+[2.0.0]: https://github.com/xcrft/mastermind/compare/npm-v1.2.1...npm-v2.0.0
+[1.2.1]: https://github.com/xcrft/mastermind/compare/npm-v1.2.0...npm-v1.2.1
+[1.2.0]: https://github.com/xcrft/mastermind/compare/npm-v1.1.1...npm-v1.2.0
 [1.1.1]: https://github.com/xcrft/mastermind/compare/npm-v1.1.0...npm-v1.1.1
 [1.1.0]: https://github.com/xcrft/mastermind/compare/npm-v1.0.0...npm-v1.1.0
 [1.0.0]: https://github.com/xcrft/mastermind/compare/npm-v0.38.1...npm-v1.0.0

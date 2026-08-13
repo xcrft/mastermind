@@ -35,7 +35,7 @@ npx mastermind --version
 Cargo installation exposes the same binary as `mmcg`:
 
 ```bash
-cargo install mmcg --version 2.0.0 --locked
+cargo install mmcg --version 2.0.1 --locked
 mmcg --version
 ```
 

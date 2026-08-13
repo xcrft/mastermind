@@ -10,7 +10,8 @@ npm, or model-backed test suites. CI executes it on every change.
 ### What it checks
 
 - artifact frontmatter, names, versions, domains, links, and template mirrors;
-- exact MCP tool count plus read/write annotations;
+- exact MCP tool count plus read/write annotations, and parity of the public
+  declarative-fact schema with its CLI/MCP/Lens ingestion boundary;
 - portable skill adapters and one behavioral eval case per shipped skill;
 - planner/executor/auditor ownership and structured-report schema parity;
 - GitHub Action SHA pins, required-check routing, Docker runtime packaging, and

@@ -813,6 +813,7 @@ fn normalize_evidence_path(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
     use std::fs;
 
     #[test]
@@ -1034,6 +1035,34 @@ rules:
         crate::indexer::Indexer::new(repo)
             .index_all(&mut store, true)
             .unwrap();
+        let bound_path = repo.join("services/payment/charge.py");
+        let bound_source = fs::read(&bound_path).unwrap();
+        let fact_contract = crate::facts::contract(&store).unwrap();
+        let fact_manifest = repo.join(".mastermind/policy-facts.json");
+        fs::write(
+            &fact_manifest,
+            serde_json::to_vec(&serde_json::json!({
+                "api_version": crate::facts::API_VERSION,
+                "capabilities": ["annotations"],
+                "repository": {
+                    "identity": fact_contract.repository.identity,
+                    "revision": fact_contract.repository.revision
+                },
+                "producer": {"name": "com.example.policy-test", "version": "1.0.0"},
+                "dataset": "stale-overlay",
+                "provenance": {"kind": "test", "artifacts": []},
+                "files": [{
+                    "path": "services/payment/charge.py",
+                    "sha256": crate::hex::encode(&Sha256::digest(&bound_source)),
+                    "bytes": bound_source.len()
+                }],
+                "artifacts": [],
+                "facts": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        crate::facts::import(&store, &fact_manifest).unwrap();
         fs::write(
             repo.join("services/payment/b.py"),
             "from services.payment.a import a\ndef b():\n    return a()\n",
@@ -1086,7 +1115,11 @@ rules:
             report.violations,
             report.diagnostics
         );
-        assert!(report.complete, "diagnostics: {:#?}", report.diagnostics);
+        assert!(
+            report.complete,
+            "a stale declarative overlay must not extend or block the closed policy DSL: {:#?}",
+            report.diagnostics
+        );
     }
 
     #[test]

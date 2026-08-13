@@ -569,6 +569,9 @@ fn execute(store: &Store, q: QueryCmd) -> Result<Value, Box<dyn std::error::Erro
         QueryCmd::Semantic { symbol, top } => {
             serde_json::to_value(mmcg::scip_overlay::query(store, &symbol, top)?)?
         }
+        QueryCmd::Facts { path, top } => {
+            serde_json::to_value(mmcg::facts::snapshot(store, &path, top as usize)?)?
+        }
     })
 }
 

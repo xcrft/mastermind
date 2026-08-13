@@ -4,7 +4,7 @@
 //!   mastermind init           — scaffold a project, build the index, draft CONTEXT.md
 //!   mastermind setup claude   — register the codegraph with Claude Code (MCP)
 //!   mastermind index [PATH]   — build or refresh the index
-//!   mastermind enrich --scip  — add optional compiler-resolved evidence
+//!   mastermind enrich         — add validated semantic or declarative evidence
 //!   mastermind temporal       — compare architecture at a Git baseline
 //!   mastermind ui --since REF — open the local diff-first Lens UI
 //!   mastermind review export  — write an autonomous PR evidence package
@@ -125,12 +125,24 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
-    /// Add an optional compiler-resolved semantic overlay to the existing
-    /// Tree-sitter codegraph. Replaces only the previous SCIP overlay.
+    /// Add a validated evidence overlay without replacing the Tree-sitter graph.
     Enrich {
         /// SCIP protobuf index produced by a language-specific SCIP indexer.
-        #[arg(long, value_name = "PATH")]
-        scip: PathBuf,
+        #[arg(
+            long,
+            value_name = "PATH",
+            required_unless_present = "facts",
+            conflicts_with = "facts"
+        )]
+        scip: Option<PathBuf>,
+        /// Strict mastermind-facts/v1 manifest produced by a declarative extension.
+        #[arg(
+            long,
+            value_name = "PATH",
+            required_unless_present = "scip",
+            conflicts_with = "scip"
+        )]
+        facts: Option<PathBuf>,
     },
     /// Build a compact deterministic architecture briefing from the codegraph.
     Map {
@@ -838,6 +850,15 @@ enum QueryCmd {
         #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=500))]
         top: u32,
     },
+    /// Read normalized declarative facts. The response also exposes the exact
+    /// repository identity, revision, API version, and supported capabilities
+    /// that a producer must place in its manifest.
+    Facts {
+        #[arg(long, default_value = ".")]
+        path: String,
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=400))]
+        top: u32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1003,7 +1024,7 @@ fn run_cli_inner(
                 eprintln!("extractor contract changed: rebuilt all structural data");
             }
         }
-        Cmd::Enrich { scip } => {
+        Cmd::Enrich { scip, facts } => {
             if !index_path.is_file() {
                 return Err(format!(
                     "codegraph index {} does not exist; run `mastermind index .` first",
@@ -1012,7 +1033,13 @@ fn run_cli_inner(
                 .into());
             }
             let store = Store::open(&index_path)?;
-            let summary = mmcg::scip_overlay::import(&store, &scip)?;
+            let summary = match (scip, facts) {
+                (Some(scip), None) => {
+                    serde_json::to_value(mmcg::scip_overlay::import(&store, &scip)?)?
+                }
+                (None, Some(facts)) => serde_json::to_value(mmcg::facts::import(&store, &facts)?)?,
+                _ => unreachable!("clap requires exactly one enrichment input"),
+            };
             println!("{}", serde_json::to_string_pretty(&summary)?);
         }
         Cmd::Map {
@@ -1632,7 +1659,7 @@ mod tests {
         ])
         .unwrap();
         assert!(
-            matches!(enrich.cmd, Cmd::Enrich { scip } if scip == std::path::Path::new("index.scip"))
+            matches!(enrich.cmd, Cmd::Enrich { scip: Some(scip), facts: None } if scip == std::path::Path::new("index.scip"))
         );
 
         let query = Cli::try_parse_from([
@@ -1649,6 +1676,50 @@ mod tests {
             Cmd::Query(QueryCmd::Semantic { symbol, top })
                 if symbol == "scip-clang . demo . target()." && top == 25
         ));
+    }
+
+    #[test]
+    fn enrich_accepts_one_declarative_fact_manifest() {
+        let enrich = Cli::try_parse_from([
+            "mastermind",
+            "--index",
+            "graph.db",
+            "enrich",
+            "--facts",
+            "mastermind-facts.json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            enrich.cmd,
+            Cmd::Enrich { scip: None, facts: Some(path) }
+                if path == std::path::Path::new("mastermind-facts.json")
+        ));
+
+        assert!(Cli::try_parse_from([
+            "mastermind",
+            "enrich",
+            "--scip",
+            "index.scip",
+            "--facts",
+            "mastermind-facts.json",
+        ])
+        .is_err());
+
+        let query = Cli::try_parse_from([
+            "mastermind",
+            "query",
+            "facts",
+            "--path",
+            "src",
+            "--top",
+            "250",
+        ])
+        .unwrap();
+        assert!(matches!(
+            query.cmd,
+            Cmd::Query(QueryCmd::Facts { path, top }) if path == "src" && top == 250
+        ));
+        assert!(Cli::try_parse_from(["mastermind", "query", "facts", "--top", "401",]).is_err());
     }
 
     #[test]

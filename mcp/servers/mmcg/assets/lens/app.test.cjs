@@ -8,6 +8,7 @@ const vm = require("node:vm");
 const APP_SOURCE = fs.readFileSync(path.join(__dirname, "app.js"), "utf8");
 const HTML_SOURCE = fs.readFileSync(path.join(__dirname, "index.html"), "utf8");
 const CSS_SOURCE = fs.readFileSync(path.join(__dirname, "styles.css"), "utf8");
+const FACT_SOURCE_ID = "facts:sha256:" + "f".repeat(64);
 
 class TokenList {
   constructor() {
@@ -214,7 +215,7 @@ function createDocument() {
     button.setAttribute("data-scope", scope);
     return button;
   });
-  const overlayButtons = ["findings", "coverage", "ownership", "churn", "tests", "semantic", "runtime", "knowledge"].map((overlay) => {
+  const overlayButtons = ["findings", "coverage", "ownership", "churn", "tests", "semantic", "runtime", "facts", "knowledge"].map((overlay) => {
     const button = new MockElement("button");
     button.dataset.overlay = overlay;
     button.setAttribute("data-overlay", overlay);
@@ -338,8 +339,8 @@ function fixture() {
       schema_version: 1,
       partial: false,
       sources: {
-        total: 7,
-        returned: 7,
+        total: 8,
+        returned: 8,
         truncated: false,
         items: [
           { id: "sarif:0", kind: "sarif", label: "semgrep.sarif", status: "loaded", facts_total: 1, facts_returned: 1, files_matched: 1 },
@@ -349,6 +350,7 @@ function fixture() {
           { id: "junit:0", kind: "junit", label: "junit.xml", status: "loaded", facts_total: 1, facts_returned: 1, files_matched: 1 },
           { id: "otel:0", kind: "otel", label: "traces.json", status: "loaded", facts_total: 2, facts_returned: 2, files_matched: 2 },
           { id: "project-knowledge", kind: "project_knowledge", label: "Indexed project knowledge", status: "loaded", facts_total: 1, facts_returned: 1, files_matched: 1 },
+          { id: FACT_SOURCE_ID, kind: "facts", label: "com.example.arch-lint 1.4.0 · default", status: "loaded", facts_total: 3, facts_returned: 3, files_matched: 2, artifact_sha256: "a".repeat(64), artifact_bytes: 1024 },
         ],
       },
       files: {
@@ -358,7 +360,10 @@ function fixture() {
         items: [
           {
             path: "src/auth.rs",
-            findings: [{ source_id: "sarif:0", tool: "Semgrep", rule_id: "auth.bypass", level: "error", message: "Authorization result is ignored", line: 42, column: 3 }],
+            findings: [
+              { source_id: "sarif:0", tool: "Semgrep", rule_id: "auth.bypass", level: "error", message: "Authorization result is ignored", line: 42, column: 3 },
+              { source_id: FACT_SOURCE_ID, tool: "com.example.arch-lint", rule_id: "architecture.boundary", level: "warning", message: "Payment boundary crossed", line: 42, column: 3 },
+            ],
             coverage: { source_ids: ["coverage:0"], lines_found: 2, lines_hit: 1 },
             ownership: { codeowners_source_id: "codeowners", codeowners: ["@security"], contributors: [{ name: "Alice", commits: 2 }] },
             churn: { commits: 2, lines_added: 7, lines_deleted: 3 },
@@ -399,8 +404,51 @@ function fixture() {
           spans: 1, traces: 1, span_names: ["authorize_target"], names_truncated: false,
         }],
       },
+      fact_artifacts: {
+        total: 1,
+        returned: 1,
+        truncated: false,
+        items: [{
+          source_id: FACT_SOURCE_ID,
+          id: "arch-lint-output",
+          path: "reports/arch-lint.json",
+          sha256: "b".repeat(64),
+          bytes: 4312,
+        }],
+      },
+      fact_relationships: {
+        total: 2,
+        returned: 2,
+        truncated: false,
+        items: [
+          {
+            source_id: FACT_SOURCE_ID,
+            fact_id: "architecture.auth-to-target",
+            relation: "calls",
+            from_path: "src/auth.rs",
+            from_line: 42,
+            from_column: 3,
+            to_path: "src/target.rs",
+            to_line: 7,
+            to_column: 1,
+            confidence: "high",
+            label: "Compiler-resolved auth to target call",
+          },
+          {
+            source_id: FACT_SOURCE_ID,
+            fact_id: "architecture.unrelated-lines",
+            relation: "calls",
+            from_path: "src/auth.rs",
+            from_line: 999,
+            to_path: "src/target.rs",
+            to_line: 998,
+            confidence: "high",
+            label: "Wrong-line relationship must not decorate the edge",
+          },
+        ],
+      },
       diagnostics: { total: 0, returned: 0, truncated: false, items: [] },
-      limits: { artifact_bytes: 33554432, artifact_sources: 64, relevant_files: 1000, findings: 5000, findings_per_file: 100, coverage_lines: 500000, test_cases: 100000, runtime_spans: 100000, runtime_edges: 1000, knowledge_matches: 500, codeowner_rules: 50000, codeowners_bytes: 3145728, owners_per_rule: 50, contributors_per_file: 5, diagnostics: 100, git_commits: 200 },
+      limits: { artifact_bytes: 33554432, artifact_sources: 64, relevant_files: 1000, findings: 5000, findings_per_file: 100, coverage_lines: 500000, test_cases: 100000, runtime_spans: 100000, runtime_edges: 1000, normalized_fact_sources: 64, normalized_fact_artifacts: 64, normalized_fact_relationships: 200, knowledge_matches: 500, codeowner_rules: 50000, codeowners_bytes: 3145728, owners_per_rule: 50, contributors_per_file: 5, diagnostics: 100, git_commits: 200 },
     },
     map: {
       scope: { aggregation_paths_truncated: false },
@@ -541,8 +589,8 @@ async function main() {
   );
 
   const harness = await renderFixture();
-  assert.match(harness.nodes.get("evidence-summary").textContent, /8 sources · 3 matched trace files/i);
-  assert.equal(harness.nodes.get("evidence-source-list").querySelectorAll(".evidence-source").length, 8);
+  assert.match(harness.nodes.get("evidence-summary").textContent, /9 sources · 3 matched trace files/i);
+  assert.equal(harness.nodes.get("evidence-source-list").querySelectorAll(".evidence-source").length, 9);
   assert.match(harness.nodes.get("evidence-source-list").textContent, /repository verified/i);
   assert.match(harness.nodes.get("temporal-summary").textContent, /Architecture drift detected/i);
   assert.equal(harness.nodes.get("temporal-components").textContent, "+1 −1 ~0");
@@ -598,9 +646,15 @@ async function main() {
     1,
     "An exact SCIP symbol, file, and definition-line pair must upgrade static provenance"
   );
+  assert.equal(
+    harness.nodes.get("trace-graph").querySelectorAll(".graph-edge--facts").length,
+    1,
+    "A normalized relationship may decorate only the existing exact-endpoint edge"
+  );
   const changedInspector = harness.nodes.get("inspector-body").textContent;
-  assert.match(changedInspector, /SARIF findings · file-level/i);
+  assert.match(changedInspector, /Findings · file-level/i);
   assert.match(changedInspector, /Semgrep \/ auth\.bypass:42:3/i);
+  assert.match(changedInspector, /com\.example\.arch-lint \/ architecture\.boundary:42:3/i);
   assert.match(changedInspector, /50% reported lines covered \(1\/2\)/i);
   assert.match(changedInspector, /CODEOWNERS · @security/i);
   assert.match(changedInspector, /Git contributor · Alice · 2 commits/i);
@@ -610,12 +664,16 @@ async function main() {
   assert.match(changedInspector, /1 spans · 1 traces/i);
   assert.match(changedInspector, /Project knowledge · exact path/i);
   assert.match(changedInspector, /architecture_decision · Auth boundary/i);
+  assert.match(
+    harness.nodes.get("evidence-source-list").textContent,
+    /manifest sha256 a{12}… · 1,?024 bytes/i
+  );
   const nodeCountBeforeToggle = harness.nodes.get("trace-graph").querySelectorAll("[data-node-id]").length;
   const edgeCountBeforeToggle = harness.nodes.get("trace-graph").querySelectorAll("[data-edge-id]").length;
   const findings = harness.overlayButtons.find((button) => button.dataset.overlay === "findings");
   findings.dispatch("click");
   assert.equal(findings.getAttribute("aria-pressed"), "false");
-  assert.doesNotMatch(harness.nodes.get("inspector-body").textContent, /SARIF findings/i);
+  assert.doesNotMatch(harness.nodes.get("inspector-body").textContent, /Findings · file-level/i);
   assert.equal(
     harness.nodes.get("trace-graph").querySelectorAll("[data-node-id]").length,
     nodeCountBeforeToggle,
@@ -638,6 +696,18 @@ async function main() {
   assert.match(harness.nodes.get("inspector-body").textContent, /reference at src\/target\.rs:9/i);
   assert.match(harness.nodes.get("inspector-body").textContent, /Runtime trace corroboration/i);
   assert.match(harness.nodes.get("inspector-body").textContent, /src\/auth\.rs → src\/target\.rs/i);
+  assert.match(harness.nodes.get("inspector-body").textContent, /Normalized relationship facts/i);
+  assert.match(harness.nodes.get("inspector-body").textContent, /Compiler-resolved auth to target call/i);
+  assert.match(harness.nodes.get("inspector-body").textContent, /facts:sha256:[0-9a-f]{64}/i);
+  assert.match(harness.nodes.get("inspector-body").textContent, /arch-lint-output · reports\/arch-lint\.json · sha256 b{64} · 4,?312 bytes/i);
+  assert.doesNotMatch(harness.nodes.get("inspector-body").textContent, /Wrong-line relationship/i);
+  const facts = harness.overlayButtons.find((button) => button.dataset.overlay === "facts");
+  const factEdgeCount = harness.nodes.get("trace-graph").querySelectorAll("[data-edge-id]").length;
+  facts.dispatch("click");
+  assert.equal(facts.getAttribute("aria-pressed"), "false");
+  assert.equal(harness.nodes.get("trace-graph").querySelectorAll(".graph-edge--facts").length, 0);
+  assert.equal(harness.nodes.get("trace-graph").querySelectorAll("[data-edge-id]").length, factEdgeCount);
+  facts.dispatch("click");
   const semantic = harness.overlayButtons.find((button) => button.dataset.overlay === "semantic");
   const semanticEdgeCount = harness.nodes.get("trace-graph").querySelectorAll("[data-edge-id]").length;
   semantic.dispatch("click");

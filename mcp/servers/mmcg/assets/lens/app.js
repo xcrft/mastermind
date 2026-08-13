@@ -10,7 +10,7 @@
   const CONNECTED_PER_LANE = 5;
   const MOBILE_CANDIDATES_PER_PAGE = 5;
   const MOBILE_CONNECTED_PER_LANE = 2;
-  const OVERLAY_KEYS = ["findings", "coverage", "ownership", "churn", "tests", "semantic", "runtime", "knowledge"];
+  const OVERLAY_KEYS = ["findings", "coverage", "ownership", "churn", "tests", "semantic", "runtime", "facts", "knowledge"];
 
   const state = {
     raw: null,
@@ -131,6 +131,23 @@
     const reverse = semanticFromFile === toFile && semanticToFile === fromFile
       && semanticFromName === toName && semanticToName === fromName
       && semanticFromLine === toLine && semanticToLine === fromLine;
+    return direct || reverse;
+  }
+
+  function factMatchesGraphEdge(value, edge) {
+    const fact = record(value);
+    const fromFile = text(edge.from.symbol.file, "");
+    const toFile = text(edge.to.symbol.file, "");
+    const fromLine = finiteNumber(edge.from.symbol.line);
+    const toLine = finiteNumber(edge.to.symbol.line);
+    const factFromFile = text(fact.from_path, "");
+    const factToFile = text(fact.to_path, "");
+    const factFromLine = finiteNumber(fact.from_line);
+    const factToLine = finiteNumber(fact.to_line);
+    const direct = factFromFile === fromFile && factToFile === toFile
+      && factFromLine === fromLine && factToLine === toLine;
+    const reverse = factFromFile === toFile && factToFile === fromFile
+      && factFromLine === toLine && factToLine === fromLine;
     return direct || reverse;
   }
 
@@ -342,7 +359,7 @@
     }
     const signals = [];
     if (overlayEnabled("findings") && evidence.findings.length > 0) {
-      signals.push(evidence.findings.length + " file-level SARIF finding" + (evidence.findings.length === 1 ? "" : "s"));
+      signals.push(evidence.findings.length + " file-level finding" + (evidence.findings.length === 1 ? "" : "s"));
     }
     if (overlayEnabled("coverage") && evidence.coverage) {
       signals.push(coverageLabel(evidence.coverage));
@@ -422,6 +439,8 @@
     const evidenceFiles = collection(evidence.files);
     const evidenceDiagnostics = collection(evidence.diagnostics);
     const runtimeEdges = collection(evidence.runtime_edges);
+    const factArtifacts = collection(evidence.fact_artifacts);
+    const factRelationships = collection(evidence.fact_relationships);
     const semanticEdges = collection(semantic.edges);
     const evidenceByPath = new Map();
     evidenceFiles.items.map(normalizeFileEvidence).forEach(function (item) {
@@ -546,6 +565,9 @@
       edge.semanticEvidence = semanticEdges.items.map(record).filter(function (semanticEdge) {
         return semanticMatchesGraphEdge(semanticEdge, edge);
       });
+      edge.factEvidence = factRelationships.items.map(record).filter(function (fact) {
+        return factMatchesGraphEdge(fact, edge);
+      });
     });
 
     const componentRows = buildComponentRows(
@@ -598,6 +620,8 @@
       evidenceFiles: evidenceFiles,
       evidenceDiagnostics: evidenceDiagnostics,
       runtimeEdges: runtimeEdges,
+      factArtifacts: factArtifacts,
+      factRelationships: factRelationships,
       semanticEdges: semanticEdges,
       evidenceByPath: evidenceByPath,
       nodes: nodes,
@@ -766,6 +790,8 @@
       ["Map cycles", map.cycles],
       ["Evidence files", evidence.files],
       ["Runtime evidence edges", evidence.runtime_edges],
+      ["Normalized fact provenance", evidence.fact_artifacts],
+      ["Normalized fact relationships", evidence.fact_relationships],
       ["Evidence diagnostics", evidence.diagnostics],
       ["SCIP semantic definitions", semantic.definitions],
       ["SCIP semantic edges", semantic.edges],
@@ -1305,6 +1331,7 @@
   function renderEvidenceSources() {
     clearNode(elements.evidenceSourceList);
     const sources = state.model.evidenceSources.items.map(record);
+    const factArtifacts = state.model.factArtifacts.items.map(record);
     const semantic = record(state.model.semantic);
     const semanticSource = isRecord(semantic.source) ? record(semantic.source) : null;
     const sourceCount = sources.length + (semanticSource ? 1 : 0);
@@ -1325,12 +1352,22 @@
         matchedPaths.add(to);
       }
     });
+    state.model.factRelationships.items.map(record).forEach(function (relationship) {
+      const from = text(relationship.from_path, "");
+      const to = text(relationship.to_path, "");
+      if (from) {
+        matchedPaths.add(from);
+      }
+      if (to) {
+        matchedPaths.add(to);
+      }
+    });
     const matchedFiles = matchedPaths.size;
     elements.evidenceSummary.textContent = sourceCount === 0
       ? "No external evidence sources loaded; the static graph remains available."
       : sourceCount + " source" + (sourceCount === 1 ? "" : "s") + " · " + matchedFiles + " matched trace file" + (matchedFiles === 1 ? "" : "s") + ((record(state.model.evidence).partial === true || semantic.partial === true) ? " · partial" : "");
     if (sourceCount === 0) {
-      elements.evidenceSourceList.appendChild(createElement("p", "evidence-source-list__empty", "Use mastermind enrich --scip index.scip or pass external evidence flags to add corroborating facts."));
+      elements.evidenceSourceList.appendChild(createElement("p", "evidence-source-list__empty", "Use mastermind enrich --scip index.scip, enrich --facts facts.json, or external evidence flags to add corroborating facts."));
       return;
     }
     if (semanticSource) {
@@ -1351,6 +1388,27 @@
       const total = finiteNumber(source.facts_total);
       const facts = displayNumber(returned) + " facts" + (total === null ? "" : " / " + displayNumber(total)) + " · " + displayNumber(finiteNumber(source.files_matched)) + " files";
       card.appendChild(createElement("span", "evidence-source__facts", facts));
+      if (text(source.kind, "") === "facts") {
+        const artifactCount = factArtifacts.filter(function (artifact) {
+          return text(artifact.source_id, "") === text(source.id, "");
+        }).length;
+        card.appendChild(createElement(
+          "span",
+          "evidence-source__facts",
+          artifactCount + " provenance artifact" + (artifactCount === 1 ? "" : "s")
+        ));
+      }
+      const digest = text(source.artifact_sha256, "");
+      if (digest) {
+        const digestLabel = text(source.kind, "") === "facts" ? "manifest sha256 " : "artifact sha256 ";
+        const identity = createElement(
+          "span",
+          "evidence-source__facts",
+          digestLabel + digest.slice(0, 12) + "… · " + displayNumber(finiteNumber(source.artifact_bytes)) + " bytes"
+        );
+        identity.setAttribute("title", digest);
+        card.appendChild(identity);
+      }
       elements.evidenceSourceList.appendChild(card);
     });
   }
@@ -2383,9 +2441,10 @@
     const boundary = edge.crossing ? ", boundary crossing" : "";
     const ownership = overlayEnabled("ownership") && edge.ownershipBoundary ? ", ownership boundary" : "";
     const runtime = overlayEnabled("runtime") && edge.runtimeEvidence.length > 0 ? ", runtime trace corroborated" : "";
+    const facts = overlayEnabled("facts") && edge.factEvidence.length > 0 ? ", normalized fact corroborated" : "";
     const semantic = overlayEnabled("semantic") && edge.semanticEvidence.length > 0 ? ", SCIP compiler-resolved, high confidence" : ", Tree-sitter syntactic, medium confidence";
     return relation + " from " + text(edge.from.symbol.name, "unnamed seed")
-      + " to " + text(edge.to.symbol.name, "unnamed claim") + boundary + ownership + semantic + runtime + ". Select for details.";
+      + " to " + text(edge.to.symbol.name, "unnamed claim") + boundary + ownership + semantic + runtime + facts + ". Select for details.";
   }
 
   function drawEdge(layer, edge, from, to, mobile, width) {
@@ -2411,6 +2470,9 @@
     }
     if (overlayEnabled("semantic") && edge.semanticEvidence.length > 0) {
       classes.push("graph-edge--semantic");
+    }
+    if (overlayEnabled("facts") && edge.factEvidence.length > 0) {
+      classes.push("graph-edge--facts");
     }
     if (state.selectedId === edge.id) {
       classes.push("is-selected");
@@ -2798,7 +2860,7 @@
         return text(finding.level, "warning").toUpperCase() + " · " + text(finding.tool, "SARIF") + " / " + text(finding.rule_id, "unclassified") + location + " · " + text(finding.message, "No message returned");
       });
       if (findings.length > 0) {
-        appendClaimList("SARIF findings · file-level", findings, "risk", "No matching findings returned.");
+        appendClaimList("Findings · file-level", findings, "risk", "No matching findings returned.");
       }
     }
     if (overlayEnabled("coverage") && evidence.coverage) {
@@ -2901,6 +2963,7 @@
       ["Boundary crossing", edge.crossing ? "Observed" : "Not returned"],
       ["Ownership boundary", overlayEnabled("ownership") && edge.ownershipBoundary ? "Observed from CODEOWNERS" : "Not returned"],
       ["Runtime trace", overlayEnabled("runtime") && edge.runtimeEvidence.length > 0 ? "Corroborated" : "Not returned"],
+      ["Normalized facts", overlayEnabled("facts") && edge.factEvidence.length > 0 ? "Corroborated" : "Not returned"],
     ]);
     appendClaimList("Evidence endpoints", [
       "FROM · " + text(edge.from.symbol.name, "unnamed") + " · " + text(edge.from.symbol.file, "file unavailable") + formatLine(edge.from.symbol.line),
@@ -2954,6 +3017,38 @@
         }),
         "semantic",
         "No matching SCIP edge returned."
+      );
+    }
+    if (overlayEnabled("facts") && edge.factEvidence.length > 0) {
+      appendClaimList(
+        "Normalized relationship facts",
+        edge.factEvidence.map(function (value) {
+          const fact = record(value);
+          return text(fact.relation, "relationship") + " · "
+            + text(fact.from_path, "file unavailable") + formatLine(fact.from_line)
+            + " → " + text(fact.to_path, "file unavailable") + formatLine(fact.to_line)
+            + " · " + text(fact.confidence, "unknown confidence")
+            + " · " + text(fact.label, "No label returned")
+            + " · " + text(fact.source_id, "unknown source");
+        }),
+        "facts",
+        "No matching normalized relationship facts returned."
+      );
+      const sourceIds = new Set(edge.factEvidence.map(function (value) {
+        return text(record(value).source_id, "");
+      }));
+      appendClaimList(
+        "Normalized fact provenance",
+        state.model.factArtifacts.items.map(record).filter(function (artifact) {
+          return sourceIds.has(text(artifact.source_id, ""));
+        }).map(function (artifact) {
+          return text(artifact.id, "artifact") + " · "
+            + text(artifact.path, "path unavailable") + " · sha256 "
+            + text(artifact.sha256, "unknown digest") + " · "
+            + displayNumber(finiteNumber(artifact.bytes)) + " bytes";
+        }),
+        "facts",
+        "No normalized provenance artifacts returned."
       );
     }
     elements.inspector.appendChild(createElement(

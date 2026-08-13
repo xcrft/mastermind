@@ -71,6 +71,8 @@ pub struct EvidenceSnapshot {
     pub sources: EvidenceCollection<EvidenceSource>,
     pub files: EvidenceCollection<FileEvidence>,
     pub runtime_edges: EvidenceCollection<RuntimeEdgeEvidence>,
+    pub fact_artifacts: EvidenceCollection<crate::facts::FactArtifact>,
+    pub fact_relationships: EvidenceCollection<crate::facts::FactRelationship>,
     pub diagnostics: EvidenceCollection<EvidenceDiagnostic>,
     pub precision_notes: Vec<EvidencePrecisionNote>,
     pub limits: EvidenceLimits,
@@ -242,6 +244,9 @@ pub struct EvidenceLimits {
     pub runtime_spans: u32,
     pub runtime_edges: u32,
     pub runtime_names_per_edge: u32,
+    pub normalized_fact_sources: u32,
+    pub normalized_fact_artifacts: u32,
+    pub normalized_fact_relationships: u32,
     pub knowledge_matches: u32,
     pub knowledge_per_file: u32,
     pub knowledge_artifacts: u32,
@@ -323,6 +328,10 @@ struct Collector<'a> {
     runtime_span_count: usize,
     runtime_edges: BTreeMap<(String, String), RuntimeEdgeAccumulator>,
     runtime_edges_truncated: bool,
+    fact_artifacts: Vec<crate::facts::FactArtifact>,
+    fact_artifacts_truncated: bool,
+    fact_relationships: Vec<crate::facts::FactRelationship>,
+    fact_relationships_truncated: bool,
     knowledge_match_count: usize,
     deadline: Option<Instant>,
     artifact_identities: HashMap<String, (String, u64)>,
@@ -416,7 +425,7 @@ pub fn collect_with_extensions(
     impact: &ChangeImpactResponse,
     deadline: Option<Instant>,
 ) -> EvidenceSnapshot {
-    collect_internal(root, options, extensions, impact, None, deadline)
+    collect_internal(root, options, extensions, impact, None, false, deadline)
 }
 
 pub fn collect_with_store(
@@ -427,7 +436,34 @@ pub fn collect_with_store(
     store: &crate::store::Store,
     deadline: Option<Instant>,
 ) -> EvidenceSnapshot {
-    collect_internal(root, options, extensions, impact, Some(store), deadline)
+    collect_internal(
+        root,
+        options,
+        extensions,
+        impact,
+        Some(store),
+        false,
+        deadline,
+    )
+}
+
+pub(crate) fn collect_with_store_and_normalized_facts(
+    root: &Path,
+    options: &EvidenceOptions,
+    extensions: &EvidenceExtensionOptions,
+    impact: &ChangeImpactResponse,
+    store: &crate::store::Store,
+    deadline: Option<Instant>,
+) -> EvidenceSnapshot {
+    collect_internal(
+        root,
+        options,
+        extensions,
+        impact,
+        Some(store),
+        true,
+        deadline,
+    )
 }
 
 fn collect_internal(
@@ -436,6 +472,7 @@ fn collect_internal(
     extensions: &EvidenceExtensionOptions,
     impact: &ChangeImpactResponse,
     store: Option<&crate::store::Store>,
+    include_normalized_facts: bool,
     deadline: Option<Instant>,
 ) -> EvidenceSnapshot {
     let (relevant, relevant_truncated) = relevant_paths(impact);
@@ -463,6 +500,10 @@ fn collect_internal(
         runtime_span_count: 0,
         runtime_edges: BTreeMap::new(),
         runtime_edges_truncated: false,
+        fact_artifacts: Vec::new(),
+        fact_artifacts_truncated: false,
+        fact_relationships: Vec::new(),
+        fact_relationships_truncated: false,
         knowledge_match_count: 0,
         deadline,
         artifact_identities: HashMap::new(),
@@ -608,6 +649,32 @@ fn collect_internal(
         }
     }
 
+    if include_normalized_facts {
+        let store = store.expect("normalized facts require a Mastermind store");
+        match crate::facts::snapshot_for_paths(
+            store,
+            &collector.relevant,
+            crate::facts::MAX_LENS_FACTS,
+            deadline,
+        ) {
+            Ok(snapshot) => collector.load_normalized_facts(snapshot),
+            Err(error) => {
+                collector.diagnostic("facts", "normalized_facts_unavailable", error.to_string());
+                collector.sources.push(EvidenceSource {
+                    id: "facts".into(),
+                    kind: "facts",
+                    label: "Normalized declarative facts".into(),
+                    status: "error",
+                    facts_total: None,
+                    facts_returned: 0,
+                    files_matched: 0,
+                    artifact_sha256: None,
+                    artifact_bytes: None,
+                });
+            }
+        }
+    }
+
     collector.finish(options.git_commits)
 }
 
@@ -710,6 +777,73 @@ impl Collector<'_> {
             artifact_sha256: artifact.as_ref().map(|value| value.0.clone()),
             artifact_bytes: artifact.map(|value| value.1),
         });
+    }
+
+    fn load_normalized_facts(&mut self, snapshot: crate::facts::FactSnapshot) {
+        self.partial |= snapshot.partial;
+        self.sources_truncated |= snapshot.sources.truncated;
+        self.fact_artifacts_truncated |= snapshot.artifacts.truncated;
+        self.fact_relationships_truncated |= snapshot.relationships.truncated;
+        if !snapshot.sources.items.is_empty() {
+            self.notes.push(EvidencePrecisionNote {
+                source_id: "facts",
+                code: "normalized_fact_overlay",
+                message: "Declarative facts are bound to the indexed repository, exact Git revision, and source digests. Relationship facts decorate only matching static graph endpoints and never create topology.".into(),
+            });
+        }
+        let producers = snapshot
+            .sources
+            .items
+            .iter()
+            .map(|source| (source.id.clone(), source.producer.clone()))
+            .collect::<HashMap<_, _>>();
+        for source in snapshot.sources.items {
+            self.sources.push(EvidenceSource {
+                id: source.id,
+                kind: "facts",
+                label: format!(
+                    "{} {} · {}",
+                    source.producer, source.producer_version, source.dataset
+                ),
+                status: source.status,
+                facts_total: Some(source.facts_total),
+                facts_returned: source.facts_returned,
+                files_matched: source.files_matched,
+                artifact_sha256: Some(source.manifest_sha256),
+                artifact_bytes: Some(source.manifest_bytes),
+            });
+        }
+        let mut annotation_truncated = false;
+        for annotation in snapshot.annotations.items {
+            let tool = producers
+                .get(&annotation.source_id)
+                .cloned()
+                .unwrap_or_else(|| "declarative-facts".into());
+            let finding = EvidenceFinding {
+                source_id: annotation.source_id,
+                tool,
+                rule_id: annotation.category,
+                level: annotation.severity,
+                message: format!("{}: {}", annotation.title, annotation.message),
+                line: Some(annotation.line),
+                column: annotation.column,
+            };
+            if !self.add_finding(&annotation.path, finding) {
+                annotation_truncated = true;
+            }
+        }
+        if annotation_truncated {
+            self.diagnostic(
+                "facts",
+                "normalized_fact_limit",
+                "Some normalized annotations were omitted by the Lens finding limits.",
+            );
+        }
+        self.fact_artifacts = snapshot.artifacts.items;
+        self.fact_relationships = snapshot.relationships.items;
+        for diagnostic in snapshot.diagnostics.items {
+            self.diagnostic(diagnostic.source_id, diagnostic.code, diagnostic.message);
+        }
     }
 
     fn register_artifact(&mut self, id: &str, input: &SourceInput) {
@@ -1691,6 +1825,8 @@ impl Collector<'_> {
             })
             .collect::<Vec<_>>();
         let runtime_edge_count = saturating_u32(runtime_edges.len());
+        let fact_artifact_count = saturating_u32(self.fact_artifacts.len());
+        let fact_relationship_count = saturating_u32(self.fact_relationships.len());
         let files = self
             .files
             .into_iter()
@@ -1801,6 +1937,24 @@ impl Collector<'_> {
                 truncation_reason: self.runtime_edges_truncated.then_some("runtime_edge_limit"),
                 items: runtime_edges,
             },
+            fact_artifacts: EvidenceCollection {
+                total: (!self.fact_artifacts_truncated).then_some(fact_artifact_count),
+                returned: fact_artifact_count,
+                truncated: self.fact_artifacts_truncated,
+                truncation_reason: self
+                    .fact_artifacts_truncated
+                    .then_some("normalized_fact_artifact_limit"),
+                items: self.fact_artifacts,
+            },
+            fact_relationships: EvidenceCollection {
+                total: (!self.fact_relationships_truncated).then_some(fact_relationship_count),
+                returned: fact_relationship_count,
+                truncated: self.fact_relationships_truncated,
+                truncation_reason: self
+                    .fact_relationships_truncated
+                    .then_some("normalized_fact_limit"),
+                items: self.fact_relationships,
+            },
             diagnostics: EvidenceCollection {
                 total: (!self.diagnostics_truncated).then_some(diagnostic_count),
                 returned: diagnostic_count,
@@ -1822,6 +1976,9 @@ impl Collector<'_> {
                 runtime_spans: MAX_RUNTIME_SPANS as u32,
                 runtime_edges: MAX_RUNTIME_EDGES as u32,
                 runtime_names_per_edge: MAX_RUNTIME_NAMES_PER_EDGE as u32,
+                normalized_fact_sources: crate::facts::MAX_LENS_SOURCES as u32,
+                normalized_fact_artifacts: crate::facts::MAX_LENS_ARTIFACTS as u32,
+                normalized_fact_relationships: crate::facts::MAX_LENS_FACTS as u32,
                 knowledge_matches: MAX_KNOWLEDGE_MATCHES as u32,
                 knowledge_per_file: MAX_KNOWLEDGE_PER_FILE as u32,
                 knowledge_artifacts: MAX_KNOWLEDGE_ARTIFACTS as u32,
@@ -2567,6 +2724,10 @@ mod tests {
             runtime_span_count: 0,
             runtime_edges: BTreeMap::new(),
             runtime_edges_truncated: false,
+            fact_artifacts: Vec::new(),
+            fact_artifacts_truncated: false,
+            fact_relationships: Vec::new(),
+            fact_relationships_truncated: false,
             knowledge_match_count: 0,
             deadline: None,
         }

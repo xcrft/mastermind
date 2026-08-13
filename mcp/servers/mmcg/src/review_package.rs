@@ -325,6 +325,19 @@ pub fn export(options: &ReviewExportOptions) -> Result<ReviewExportResult, Revie
             message: "A producer-side evidence attestation matched the package Git head and exact artifact digests. The attestation is an unsigned CI fact unless the surrounding workflow supplies a stronger trust anchor.".into(),
         });
     }
+    if snapshot
+        .evidence
+        .sources
+        .items
+        .iter()
+        .any(|source| source.kind == "facts" && source.status == "loaded")
+    {
+        snapshot.evidence.precision_notes.push(EvidencePrecisionNote {
+            source_id: "review-package",
+            code: "normalized_fact_revision_binding",
+            message: "manifest.json records each loaded mastermind-facts/v1 manifest and provenance-artifact digest as an unsigned producer-attested claim for this exact Git head; the autonomous HTML contains the normalized facts that were reviewed. A surrounding workflow must provide any stronger trust anchor.".into(),
+        });
+    }
     snapshot
         .evidence
         .precision_notes
@@ -662,7 +675,7 @@ fn evidence_binding(
     attestation: Option<AttestationBinding>,
     head_oid: &str,
 ) -> Result<EvidenceBinding, ReviewPackageError> {
-    let bound_sources = sources
+    let mut bound_sources = sources
         .iter()
         .map(|source| {
             let observed = snapshot
@@ -703,6 +716,40 @@ fn evidence_binding(
             })
         })
         .collect::<Result<Vec<_>, ReviewPackageError>>()?;
+    for source in snapshot
+        .evidence
+        .sources
+        .items
+        .iter()
+        .filter(|source| source.kind == "facts" && source.status == "loaded")
+    {
+        let (Some(sha256), Some(bytes)) = (&source.artifact_sha256, source.artifact_bytes) else {
+            return Err(ReviewPackageError::EvidenceBinding(source.id.clone()));
+        };
+        bound_sources.push(EvidenceSourceBinding {
+            id: source.id.clone(),
+            kind: "facts".into(),
+            label: source.label.clone(),
+            repository_relative: false,
+            sha256: sha256.clone(),
+            bytes,
+            analysis_status: source.status,
+            revision_binding: "producer-attested",
+        });
+    }
+    for artifact in &snapshot.evidence.fact_artifacts.items {
+        bound_sources.push(EvidenceSourceBinding {
+            id: format!("{}/artifact/{}", artifact.source_id, artifact.id),
+            kind: "facts".into(),
+            label: artifact.path.clone(),
+            repository_relative: true,
+            sha256: artifact.sha256.clone(),
+            bytes: artifact.bytes,
+            analysis_status: "loaded",
+            revision_binding: "producer-attested",
+        });
+    }
+    bound_sources.sort_by(|left, right| left.id.cmp(&right.id));
     let attested_count = bound_sources
         .iter()
         .filter(|source| source.revision_binding == "producer-attested")
@@ -1113,6 +1160,7 @@ mod tests {
     use super::*;
     use crate::indexer::Indexer;
     use crate::store::Store;
+    use sha2::{Digest, Sha256};
     use std::process::Command;
 
     fn git(root: &Path, args: &[&str]) -> String {
@@ -1254,6 +1302,94 @@ mod tests {
             export(&options),
             Err(ReviewPackageError::OutputExists)
         ));
+    }
+
+    #[test]
+    fn export_binds_normalized_fact_manifest_and_provenance_to_head() {
+        let (repository, state, index_path) = fixture();
+        std::fs::create_dir_all(repository.path().join("reports")).unwrap();
+        let artifact_path = repository.path().join("reports/arch-lint.json");
+        std::fs::write(&artifact_path, b"{\"producer\":\"arch-lint\"}\n").unwrap();
+        let source_path = repository.path().join("src/lib.rs");
+        let source = std::fs::read(&source_path).unwrap();
+        let artifact = std::fs::read(&artifact_path).unwrap();
+        let store = Store::open(&index_path).unwrap();
+        let contract = crate::facts::contract(&store).unwrap();
+        let manifest_path = state.path().join("facts.json");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&serde_json::json!({
+                "api_version": crate::facts::API_VERSION,
+                "capabilities": ["annotations", "relationships"],
+                "repository": {
+                    "identity": contract.repository.identity,
+                    "revision": contract.repository.revision
+                },
+                "producer": {"name": "com.example.arch-lint", "version": "1.0.0"},
+                "dataset": "review",
+                "provenance": {"kind": "static-analysis", "artifacts": ["arch-lint"]},
+                "files": [{
+                    "path": "src/lib.rs",
+                    "sha256": crate::hex::encode(&Sha256::digest(&source)),
+                    "bytes": source.len()
+                }],
+                "artifacts": [{
+                    "id": "arch-lint",
+                    "path": "reports/arch-lint.json",
+                    "sha256": crate::hex::encode(&Sha256::digest(&artifact)),
+                    "bytes": artifact.len()
+                }],
+                "facts": [
+                    {
+                        "kind": "annotation",
+                        "id": "arch.review",
+                        "path": "src/lib.rs",
+                        "line": 1,
+                        "severity": "warning",
+                        "category": "architecture.review",
+                        "title": "Review charge",
+                        "message": "The producer marked this changed function."
+                    },
+                    {
+                        "kind": "relationship",
+                        "id": "arch.checkout-charge",
+                        "relation": "calls",
+                        "from": {"path": "src/lib.rs", "line": 2},
+                        "to": {"path": "src/lib.rs", "line": 1},
+                        "confidence": "high",
+                        "label": "Producer-resolved checkout to charge call"
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let imported = crate::facts::import(&store, &manifest_path).unwrap();
+        let manifest_digest = imported.source.manifest_sha256;
+        drop(store);
+
+        let output = repository.path().join("fact-review");
+        let options = export_options(repository.path(), index_path, output.clone());
+        export(&options).unwrap();
+
+        let manifest: Value =
+            serde_json::from_slice(&std::fs::read(output.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(manifest["evidence_binding"]["status"], "producer-attested");
+        let bindings = manifest["evidence_binding"]["sources"].as_array().unwrap();
+        assert_eq!(bindings.len(), 2);
+        assert!(bindings.iter().all(|binding| {
+            binding["kind"] == "facts" && binding["revision_binding"] == "producer-attested"
+        }));
+        assert!(bindings
+            .iter()
+            .any(|binding| binding["sha256"] == manifest_digest));
+        assert!(bindings.iter().any(|binding| {
+            binding["label"] == "reports/arch-lint.json"
+                && binding["sha256"] == crate::hex::encode(&Sha256::digest(&artifact))
+        }));
+        let html = std::fs::read_to_string(output.join("index.html")).unwrap();
+        assert!(html.contains("arch.checkout-charge"));
+        assert!(html.contains(&crate::hex::encode(&Sha256::digest(&artifact))));
     }
 
     #[test]

@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A minimal declarative fact-ingestion SDK accepts strict
+  `mastermind-facts/v1` manifests with capability negotiation, exact repository
+  and revision binding, source/provenance digests, bounded atomic replacement,
+  normalized read-only CLI/MCP queries, and Lens evidence projection. Producers
+  cannot execute in-process code, register tools or policies, mutate the
+  codegraph topology, or access SQLite directly.
 - `mastermind temporal --since <ref>` and read-only `mmcg_temporal` compare a
   bounded Git-baseline architecture with the indexed worktree. Schema v1 covers
   component and public-boundary drift, new/resolved/membership-changed cycles, centrality and

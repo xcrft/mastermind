@@ -571,7 +571,7 @@ fn build_snapshot_until(
         );
     let semantic = crate::scip_overlay::for_lens(store, &root, semantic_paths)
         .unwrap_or_else(|_| crate::scip_overlay::unavailable_with_diagnostic());
-    let evidence = crate::evidence::collect_with_store(
+    let evidence = crate::evidence::collect_with_store_and_normalized_facts(
         &root,
         evidence_options,
         evidence_extensions,
@@ -1372,6 +1372,88 @@ mod tests {
                 .unwrap(),
             source_bytes
         );
+    }
+
+    #[test]
+    fn snapshot_reads_revision_bound_facts_without_adding_graph_topology() {
+        let (repo, _index_dir, index_path) = fixture();
+        let writable = Store::open(&index_path).unwrap();
+        let contract = crate::facts::contract(&writable).unwrap();
+        let source = fs::read(repo.path().join("src/lib.rs")).unwrap();
+        let source_sha256 = crate::hex::encode(&Sha256::digest(&source));
+        let manifest_path = repo.path().join("facts.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "api_version": crate::facts::API_VERSION,
+                "capabilities": ["annotations", "relationships"],
+                "repository": {
+                    "identity": contract.repository.identity,
+                    "revision": contract.repository.revision
+                },
+                "producer": {"name": "com.example.lens", "version": "1.0.0"},
+                "dataset": "review",
+                "provenance": {"kind": "static-analysis", "artifacts": []},
+                "files": [{
+                    "path": "src/lib.rs",
+                    "sha256": source_sha256,
+                    "bytes": source.len()
+                }],
+                "artifacts": [],
+                "facts": [
+                    {
+                        "kind": "annotation",
+                        "id": "review.seed",
+                        "path": "src/lib.rs",
+                        "line": 1,
+                        "severity": "warning",
+                        "category": "architecture.review",
+                        "title": "Seed changed",
+                        "message": "Review the changed seed contract."
+                    },
+                    {
+                        "kind": "relationship",
+                        "id": "review.seed-caller",
+                        "relation": "calls",
+                        "from": {"path": "src/lib.rs", "line": 2},
+                        "to": {"path": "src/lib.rs", "line": 1},
+                        "confidence": "high",
+                        "label": "Caller reaches the changed seed"
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        crate::facts::import(&writable, &manifest_path).unwrap();
+        drop(writable);
+
+        let store = Store::open_read_only(&index_path).unwrap();
+        let snapshot = build_snapshot(&store, repo.path(), &options()).unwrap();
+        let json = serde_json::to_value(snapshot).unwrap();
+        let source = json["evidence"]["sources"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["kind"] == "facts")
+            .unwrap();
+        assert_eq!(source["status"], "loaded");
+        assert!(source["id"].as_str().unwrap().starts_with("facts:sha256:"));
+        let source_id = source["id"].clone();
+        let file = json["evidence"]["files"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["path"] == "src/lib.rs")
+            .unwrap();
+        assert!(file["findings"].as_array().unwrap().iter().any(|finding| {
+            finding["source_id"] == source_id && finding["rule_id"] == "architecture.review"
+        }));
+        assert_eq!(
+            json["evidence"]["fact_relationships"]["items"][0]["fact_id"],
+            "review.seed-caller"
+        );
+        assert_eq!(json["impact"]["impact"]["returned"], 1);
     }
 
     #[test]

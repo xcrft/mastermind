@@ -1035,6 +1035,140 @@ def validate_review_package_contract() -> list[Issue]:
     return issues
 
 
+# ----- declarative fact-ingestion SDK -----------------------------------
+
+def validate_fact_ingestion_sdk_contract() -> list[Issue]:
+    """Keep the public fact schema and its non-executable ingestion boundary aligned."""
+    issues: list[Issue] = []
+    schema_path = REPO_ROOT / "schemas/mastermind-facts-v1.schema.json"
+    try:
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        return [Issue(schema_path, "error", f"invalid fact manifest schema: {error}")]
+
+    required = {
+        "api_version",
+        "capabilities",
+        "repository",
+        "producer",
+        "dataset",
+        "provenance",
+        "files",
+        "artifacts",
+        "facts",
+    }
+    if schema.get("additionalProperties") is not False:
+        issues.append(Issue(schema_path, "error", "fact schema must reject unknown root fields"))
+    if set(schema.get("required", [])) != required:
+        issues.append(Issue(schema_path, "error", "fact schema required fields drifted"))
+    properties = schema.get("properties", {})
+    if properties.get("api_version", {}).get("const") != "mastermind-facts/v1":
+        issues.append(Issue(schema_path, "error", "fact schema must pin mastermind-facts/v1"))
+    capabilities = properties.get("capabilities", {}).get("items", {}).get("enum", [])
+    if capabilities != ["annotations", "relationships"]:
+        issues.append(Issue(schema_path, "error", "fact capability allowlist drifted"))
+    definitions = schema.get("$defs", {})
+    for name in (
+        "repository",
+        "producer",
+        "provenance",
+        "file",
+        "artifact",
+        "location",
+        "annotation",
+        "relationship",
+    ):
+        if definitions.get(name, {}).get("additionalProperties") is not False:
+            issues.append(
+                Issue(schema_path, "error", f"fact schema definition {name!r} must reject unknown fields")
+            )
+
+    facts_path = REPO_ROOT / "mcp/servers/mmcg/src/facts.rs"
+    try:
+        rust = facts_path.read_text(encoding="utf-8")
+    except OSError as error:
+        issues.append(Issue(facts_path, "error", f"cannot read fact ingestion module: {error}"))
+    else:
+        for token in (
+            'API_VERSION: &str = "mastermind-facts/v1"',
+            'SUPPORTED_CAPABILITIES: [&str; 2] = ["annotations", "relationships"]',
+            "deny_unknown_fields",
+            "from_json_strict",
+            "run_bounded_git_with_limit",
+            "validate_index_root",
+            "current_head_oid",
+            "MAX_MANIFEST_BYTES",
+            "replace_fact_dataset",
+            "snapshot_for_paths",
+            "fact_source_stale",
+        ):
+            if token not in rust:
+                issues.append(Issue(facts_path, "error", f"fact ingestion contract missing {token!r}"))
+        production = rust.split("#[cfg(test)]", 1)[0]
+        for forbidden in ("Command::new(", "CREATE TABLE", "libloading", "dlopen"):
+            if forbidden in production:
+                issues.append(
+                    Issue(facts_path, "error", f"fact ingestion boundary contains forbidden {forbidden!r}")
+                )
+
+    store_path = REPO_ROOT / "mcp/servers/mmcg/src/store.rs"
+    try:
+        store = store_path.read_text(encoding="utf-8")
+    except OSError as error:
+        issues.append(Issue(store_path, "error", f"cannot read normalized fact store: {error}"))
+    else:
+        for token in (
+            "fact_sources",
+            "fact_files",
+            "fact_artifacts",
+            "fact_annotations",
+            "fact_relationships",
+            "replace_fact_dataset",
+            "transaction()",
+        ):
+            if token not in store:
+                issues.append(Issue(store_path, "error", f"normalized fact store missing {token!r}"))
+
+    surface_paths = {
+        "mcp/servers/mmcg/src/main.rs": ("facts: Option<PathBuf>", "QueryCmd::Facts"),
+        "mcp/servers/mmcg/src/mcp.rs": (
+            'read_only_tool("mmcg_facts"',
+            "crate::facts::snapshot",
+        ),
+        "mcp/servers/mmcg/src/evidence.rs": (
+            "snapshot_for_paths",
+            "fact_artifacts",
+            "fact_relationships",
+        ),
+        "mcp/servers/mmcg/src/review_package.rs": (
+            "normalized_fact_revision_binding",
+            "fact_artifacts",
+            'kind: "facts".into()',
+        ),
+        "mcp/servers/mmcg/assets/lens/app.js": (
+            "factMatchesGraphEdge",
+            "factEvidence",
+        ),
+        "docs/fact-ingestion-sdk.md": (
+            "mastermind-facts/v1",
+            "mastermind enrich --facts",
+            "no direct SQLite access",
+        ),
+    }
+    for relative, tokens in surface_paths.items():
+        path = REPO_ROOT / relative
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as error:
+            issues.append(Issue(path, "error", f"cannot read fact SDK surface: {error}"))
+            continue
+        for token in tokens:
+            if token not in text:
+                issues.append(Issue(path, "error", f"fact SDK surface missing {token!r}"))
+
+    return issues
+
+
 # ----- repository workflow supply-chain contract -----------------------
 
 def validate_repository_workflow_pins() -> list[Issue]:
@@ -1524,6 +1658,7 @@ def main(argv: list[str]) -> int:
     issues.extend(validate_workflow_eval_contract())
     issues.extend(validate_executor_report_schema_contract())
     issues.extend(validate_review_package_contract())
+    issues.extend(validate_fact_ingestion_sdk_contract())
     issues.extend(validate_repository_workflow_pins())
     issues.extend(validate_audit_action_security())
 

@@ -5,8 +5,13 @@
 //!   edges(id, from_id, to_id?, to_name, kind, line)
 //!   files(path, indexed_at, symbol_count)
 //!   semantic_* (optional compiler-resolved overlay; never rewrites the graph)
+//!   fact_* (validated declarative evidence; never rewrites the graph)
 //!   meta(key, value)
 
+use crate::facts::{
+    source_public_id, FactAnnotation, FactArtifact, FactFileRecord, FactImportBatch,
+    FactQueryFilter, FactRelationship, FactSourceRecord,
+};
 use crate::scip_overlay::{SemanticDefinition, SemanticEdge, SemanticImportBatch, SemanticSource};
 use rusqlite::{
     params, types::Value as SqlValue, Connection, OpenFlags, OptionalExtension, Result as SqlResult,
@@ -24,6 +29,11 @@ const SCHEMA_VERSION: &str = "7";
 const READ_ONLY_SNAPSHOT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const READ_ONLY_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(60);
 const SNAPSHOT_COPY_BUFFER_BYTES: usize = 1024 * 1024;
+
+fn row_u64(row: &rusqlite::Row<'_>, index: usize) -> SqlResult<u64> {
+    let value = row.get::<_, i64>(index)?;
+    u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
+}
 
 /// A per-request work-budget: a wall-clock deadline and/or a cap on SQLite
 /// progress-handler ticks (each tick fires every 1,000 VM instructions).
@@ -1253,6 +1263,86 @@ impl Store {
                 ON semantic_edges(to_file);
             CREATE INDEX IF NOT EXISTS idx_semantic_edges_kind
                 ON semantic_edges(kind);
+
+            -- Declarative community facts. Producers never receive SQLite
+            -- access: Mastermind validates a v1 manifest, normalizes every
+            -- record, and atomically owns these tables.
+            CREATE TABLE IF NOT EXISTS fact_sources (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                api_version          TEXT NOT NULL,
+                producer_name        TEXT NOT NULL,
+                producer_version     TEXT NOT NULL,
+                dataset              TEXT NOT NULL,
+                provenance_kind      TEXT NOT NULL,
+                capabilities         TEXT NOT NULL,
+                repository_identity  TEXT NOT NULL,
+                revision             TEXT NOT NULL,
+                manifest_sha256      TEXT NOT NULL,
+                manifest_bytes       INTEGER NOT NULL,
+                imported_at          INTEGER NOT NULL,
+                file_count           INTEGER NOT NULL,
+                annotation_count     INTEGER NOT NULL,
+                relationship_count   INTEGER NOT NULL,
+                UNIQUE (producer_name, dataset)
+            );
+            CREATE INDEX IF NOT EXISTS idx_fact_sources_revision
+                ON fact_sources(repository_identity, revision);
+            CREATE TABLE IF NOT EXISTS fact_files (
+                source_id  INTEGER NOT NULL REFERENCES fact_sources(id) ON DELETE CASCADE,
+                path       TEXT NOT NULL,
+                sha256     TEXT NOT NULL,
+                bytes      INTEGER NOT NULL,
+                PRIMARY KEY (source_id, path)
+            );
+            CREATE INDEX IF NOT EXISTS idx_fact_files_path ON fact_files(path);
+            CREATE TABLE IF NOT EXISTS fact_artifacts (
+                source_id    INTEGER NOT NULL REFERENCES fact_sources(id) ON DELETE CASCADE,
+                artifact_id  TEXT NOT NULL,
+                path         TEXT NOT NULL,
+                sha256       TEXT NOT NULL,
+                bytes        INTEGER NOT NULL,
+                PRIMARY KEY (source_id, artifact_id)
+            );
+            CREATE TABLE IF NOT EXISTS fact_annotations (
+                source_id   INTEGER NOT NULL REFERENCES fact_sources(id) ON DELETE CASCADE,
+                fact_id     TEXT NOT NULL,
+                path        TEXT NOT NULL,
+                line        INTEGER NOT NULL,
+                column_no   INTEGER,
+                end_line    INTEGER,
+                end_column  INTEGER,
+                severity    TEXT NOT NULL,
+                category    TEXT NOT NULL,
+                title       TEXT NOT NULL,
+                message     TEXT NOT NULL,
+                PRIMARY KEY (source_id, fact_id),
+                FOREIGN KEY (source_id, path)
+                    REFERENCES fact_files(source_id, path) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_fact_annotations_path
+                ON fact_annotations(path, line);
+            CREATE TABLE IF NOT EXISTS fact_relationships (
+                source_id    INTEGER NOT NULL REFERENCES fact_sources(id) ON DELETE CASCADE,
+                fact_id      TEXT NOT NULL,
+                relation     TEXT NOT NULL,
+                from_path    TEXT NOT NULL,
+                from_line    INTEGER NOT NULL,
+                from_column  INTEGER,
+                to_path      TEXT NOT NULL,
+                to_line      INTEGER NOT NULL,
+                to_column    INTEGER,
+                confidence   TEXT NOT NULL,
+                label        TEXT NOT NULL,
+                PRIMARY KEY (source_id, fact_id),
+                FOREIGN KEY (source_id, from_path)
+                    REFERENCES fact_files(source_id, path) ON DELETE CASCADE,
+                FOREIGN KEY (source_id, to_path)
+                    REFERENCES fact_files(source_id, path) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_fact_relationships_from
+                ON fact_relationships(from_path, from_line);
+            CREATE INDEX IF NOT EXISTS idx_fact_relationships_to
+                ON fact_relationships(to_path, to_line);
             "#,
         )?;
 
@@ -1603,6 +1693,418 @@ impl Store {
             }
         }
         Ok(hashes)
+    }
+
+    fn fact_tables_exist(&self) -> SqlResult<bool> {
+        self.conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'fact_sources'",
+                [],
+                |_| Ok(true),
+            )
+            .optional()
+            .map(|value| value.unwrap_or(false))
+    }
+
+    pub(crate) fn fact_source_count(&self) -> SqlResult<u32> {
+        if !self.fact_tables_exist()? {
+            return Ok(0);
+        }
+        self.conn
+            .query_row("SELECT count(*) FROM fact_sources", [], |row| row.get(0))
+    }
+
+    pub(crate) fn fact_source_exists(&self, producer: &str, dataset: &str) -> SqlResult<bool> {
+        if !self.fact_tables_exist()? {
+            return Ok(false);
+        }
+        self.conn
+            .query_row(
+                "SELECT 1 FROM fact_sources
+                 WHERE producer_name = ?1 AND dataset = ?2",
+                params![producer, dataset],
+                |_| Ok(true),
+            )
+            .optional()
+            .map(|value| value.unwrap_or(false))
+    }
+
+    /// Replace exactly one producer dataset after the facts module has fully
+    /// validated the manifest in memory. A failed insert rolls back to the
+    /// previous known-good dataset.
+    pub(crate) fn replace_fact_dataset(&self, batch: &FactImportBatch) -> SqlResult<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for file in &batch.files {
+            let indexed = tx
+                .query_row(
+                    "SELECT content_sha256 FROM files WHERE path = ?1",
+                    params![file.path],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten();
+            if indexed.as_deref().filter(|value| !value.is_empty()) != Some(file.sha256.as_str()) {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        }
+        tx.execute(
+            "DELETE FROM fact_sources WHERE producer_name = ?1 AND dataset = ?2",
+            params![batch.source.producer_name, batch.source.dataset],
+        )?;
+        tx.execute(
+            "INSERT INTO fact_sources(
+                api_version, producer_name, producer_version, dataset,
+                provenance_kind, capabilities, repository_identity, revision,
+                manifest_sha256, manifest_bytes, imported_at, file_count,
+                annotation_count, relationship_count
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                batch.source.api_version,
+                batch.source.producer_name,
+                batch.source.producer_version,
+                batch.source.dataset,
+                batch.source.provenance_kind,
+                batch.source.capabilities,
+                batch.source.repository_identity,
+                batch.source.revision,
+                batch.source.manifest_sha256,
+                i64::try_from(batch.source.manifest_bytes).unwrap_or(i64::MAX),
+                batch.source.imported_at,
+                batch.source.file_count,
+                batch.source.annotation_count,
+                batch.source.relationship_count,
+            ],
+        )?;
+        let source_id = tx.last_insert_rowid();
+        {
+            let mut statement = tx.prepare(
+                "INSERT INTO fact_files(source_id, path, sha256, bytes)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for file in &batch.files {
+                statement.execute(params![
+                    source_id,
+                    file.path,
+                    file.sha256,
+                    i64::try_from(file.bytes).unwrap_or(i64::MAX),
+                ])?;
+            }
+        }
+        {
+            let mut statement = tx.prepare(
+                "INSERT INTO fact_artifacts(source_id, artifact_id, path, sha256, bytes)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for artifact in &batch.artifacts {
+                statement.execute(params![
+                    source_id,
+                    artifact.id,
+                    artifact.path,
+                    artifact.sha256,
+                    i64::try_from(artifact.bytes).unwrap_or(i64::MAX),
+                ])?;
+            }
+        }
+        {
+            let mut statement = tx.prepare(
+                "INSERT INTO fact_annotations(
+                    source_id, fact_id, path, line, column_no, end_line,
+                    end_column, severity, category, title, message
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            )?;
+            for fact in &batch.annotations {
+                statement.execute(params![
+                    source_id,
+                    fact.fact_id,
+                    fact.path,
+                    fact.line,
+                    fact.column,
+                    fact.end_line,
+                    fact.end_column,
+                    fact.severity,
+                    fact.category,
+                    fact.title,
+                    fact.message,
+                ])?;
+            }
+        }
+        {
+            let mut statement = tx.prepare(
+                "INSERT INTO fact_relationships(
+                    source_id, fact_id, relation, from_path, from_line,
+                    from_column, to_path, to_line, to_column, confidence, label
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            )?;
+            for fact in &batch.relationships {
+                statement.execute(params![
+                    source_id,
+                    fact.fact_id,
+                    fact.relation,
+                    fact.from_path,
+                    fact.from_line,
+                    fact.from_column,
+                    fact.to_path,
+                    fact.to_line,
+                    fact.to_column,
+                    fact.confidence,
+                    fact.label,
+                ])?;
+            }
+        }
+        tx.commit()
+    }
+
+    pub(crate) fn fact_sources(&self, limit: usize) -> SqlResult<Vec<FactSourceRecord>> {
+        if !self.fact_tables_exist()? {
+            return Ok(Vec::new());
+        }
+        let limit = limit.clamp(1, 1_000);
+        let mut statement = self.conn.prepare(
+            "SELECT id, api_version, producer_name, producer_version, dataset,
+                    provenance_kind, capabilities, repository_identity, revision,
+                    manifest_sha256, manifest_bytes, imported_at, file_count,
+                    annotation_count, relationship_count
+             FROM fact_sources
+             ORDER BY producer_name, dataset
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map(params![limit as i64], |row| {
+            Ok(FactSourceRecord {
+                id: row.get(0)?,
+                api_version: row.get(1)?,
+                producer_name: row.get(2)?,
+                producer_version: row.get(3)?,
+                dataset: row.get(4)?,
+                provenance_kind: row.get(5)?,
+                capabilities: row.get(6)?,
+                repository_identity: row.get(7)?,
+                revision: row.get(8)?,
+                manifest_sha256: row.get(9)?,
+                manifest_bytes: row_u64(row, 10)?,
+                imported_at: row.get(11)?,
+                file_count: row.get(12)?,
+                annotation_count: row.get(13)?,
+                relationship_count: row.get(14)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub(crate) fn fact_files(
+        &self,
+        source_id: i64,
+        limit: usize,
+    ) -> SqlResult<Vec<FactFileRecord>> {
+        if !self.fact_tables_exist()? {
+            return Ok(Vec::new());
+        }
+        let mut statement = self.conn.prepare(
+            "SELECT path, sha256, bytes FROM fact_files
+             WHERE source_id = ?1 ORDER BY path LIMIT ?2",
+        )?;
+        let rows =
+            statement.query_map(params![source_id, limit.clamp(1, 20_000) as i64], |row| {
+                Ok(FactFileRecord {
+                    path: row.get(0)?,
+                    sha256: row.get(1)?,
+                    bytes: row_u64(row, 2)?,
+                })
+            })?;
+        rows.collect()
+    }
+
+    pub(crate) fn fact_artifacts(
+        &self,
+        source_ids: &[i64],
+        limit: usize,
+    ) -> SqlResult<(Vec<FactArtifact>, bool)> {
+        if !self.fact_tables_exist()? || source_ids.is_empty() {
+            return Ok((Vec::new(), false));
+        }
+        let limit = limit.clamp(1, 1_000);
+        let mut values = Vec::<SqlValue>::new();
+        let predicate = Self::fact_source_filter_sql(source_ids, &mut values);
+        let sql = format!(
+            "SELECT fs.producer_name, fs.dataset, fa.artifact_id, fa.path,
+                    fa.sha256, fa.bytes
+             FROM fact_artifacts fa
+             JOIN fact_sources fs ON fs.id = fa.source_id
+             WHERE {predicate}
+             ORDER BY fs.producer_name, fs.dataset, fa.artifact_id
+             LIMIT ?"
+        );
+        values.push((limit.saturating_add(1) as i64).into());
+        let mut statement = self.conn.prepare(&sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(values.iter()), |row| {
+            let producer: String = row.get(0)?;
+            let dataset: String = row.get(1)?;
+            Ok(FactArtifact {
+                source_id: source_public_id(&producer, &dataset),
+                id: row.get(2)?,
+                path: row.get(3)?,
+                sha256: row.get(4)?,
+                bytes: row_u64(row, 5)?,
+            })
+        })?;
+        let mut items = rows.collect::<SqlResult<Vec<_>>>()?;
+        let truncated = items.len() > limit;
+        items.truncate(limit);
+        Ok((items, truncated))
+    }
+
+    fn fact_source_filter_sql(source_ids: &[i64], values: &mut Vec<SqlValue>) -> String {
+        let placeholders = std::iter::repeat_n("?", source_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        values.extend(source_ids.iter().copied().map(SqlValue::Integer));
+        format!("source_id IN ({placeholders})")
+    }
+
+    fn fact_path_filter_sql(
+        filter: &FactQueryFilter,
+        path_columns: &[&str],
+        values: &mut Vec<SqlValue>,
+    ) -> Option<String> {
+        match filter {
+            FactQueryFilter::Scope(scope) if scope == "." => None,
+            FactQueryFilter::Scope(scope) => {
+                let predicates = path_columns
+                    .iter()
+                    .map(|column| {
+                        values.push(scope.clone().into());
+                        values.push(scope.clone().into());
+                        values.push(scope.clone().into());
+                        format!("({column} = ? OR substr({column}, 1, length(?) + 1) = ? || '/')")
+                    })
+                    .collect::<Vec<_>>();
+                Some(format!("({})", predicates.join(" OR ")))
+            }
+            FactQueryFilter::Paths(paths) if paths.is_empty() => Some("0 = 1".into()),
+            FactQueryFilter::Paths(paths) => {
+                let placeholders = std::iter::repeat_n("?", paths.len())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let predicates = path_columns
+                    .iter()
+                    .map(|column| {
+                        values.extend(paths.iter().cloned().map(SqlValue::Text));
+                        format!("{column} IN ({placeholders})")
+                    })
+                    .collect::<Vec<_>>();
+                let joiner = if path_columns.len() > 1 {
+                    " AND "
+                } else {
+                    " OR "
+                };
+                Some(format!("({})", predicates.join(joiner)))
+            }
+        }
+    }
+
+    pub(crate) fn fact_annotations(
+        &self,
+        source_ids: &[i64],
+        filter: &FactQueryFilter,
+        limit: usize,
+    ) -> SqlResult<(Vec<FactAnnotation>, bool)> {
+        if !self.fact_tables_exist()? || source_ids.is_empty() {
+            return Ok((Vec::new(), false));
+        }
+        let limit = limit.clamp(1, 10_000);
+        let mut values = Vec::<SqlValue>::new();
+        let mut predicates = vec![Self::fact_source_filter_sql(source_ids, &mut values)];
+        if let Some(predicate) = Self::fact_path_filter_sql(filter, &["fa.path"], &mut values) {
+            predicates.push(predicate);
+        }
+        let sql = format!(
+            "SELECT fs.producer_name, fs.dataset, fa.fact_id, fa.path, fa.line,
+                    fa.column_no, fa.end_line, fa.end_column, fa.severity,
+                    fa.category, fa.title, fa.message
+             FROM fact_annotations fa
+             JOIN fact_sources fs ON fs.id = fa.source_id
+             WHERE {}
+             ORDER BY fa.path, fa.line, fa.fact_id, fs.producer_name, fs.dataset
+             LIMIT ?",
+            predicates.join(" AND ")
+        );
+        values.push((limit.saturating_add(1) as i64).into());
+        let mut statement = self.conn.prepare(&sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(values.iter()), |row| {
+            let producer: String = row.get(0)?;
+            let dataset: String = row.get(1)?;
+            Ok(FactAnnotation {
+                source_id: source_public_id(&producer, &dataset),
+                fact_id: row.get(2)?,
+                path: row.get(3)?,
+                line: row.get(4)?,
+                column: row.get(5)?,
+                end_line: row.get(6)?,
+                end_column: row.get(7)?,
+                severity: row.get(8)?,
+                category: row.get(9)?,
+                title: row.get(10)?,
+                message: row.get(11)?,
+            })
+        })?;
+        let mut items = rows.collect::<SqlResult<Vec<_>>>()?;
+        let truncated = items.len() > limit;
+        items.truncate(limit);
+        Ok((items, truncated))
+    }
+
+    pub(crate) fn fact_relationships(
+        &self,
+        source_ids: &[i64],
+        filter: &FactQueryFilter,
+        limit: usize,
+    ) -> SqlResult<(Vec<FactRelationship>, bool)> {
+        if !self.fact_tables_exist()? || source_ids.is_empty() {
+            return Ok((Vec::new(), false));
+        }
+        let limit = limit.clamp(1, 10_000);
+        let mut values = Vec::<SqlValue>::new();
+        let mut predicates = vec![Self::fact_source_filter_sql(source_ids, &mut values)];
+        if let Some(predicate) =
+            Self::fact_path_filter_sql(filter, &["fr.from_path", "fr.to_path"], &mut values)
+        {
+            predicates.push(predicate);
+        }
+        let sql = format!(
+            "SELECT fs.producer_name, fs.dataset, fr.fact_id, fr.relation,
+                    fr.from_path, fr.from_line, fr.from_column, fr.to_path,
+                    fr.to_line, fr.to_column, fr.confidence, fr.label
+             FROM fact_relationships fr
+             JOIN fact_sources fs ON fs.id = fr.source_id
+             WHERE {}
+             ORDER BY fr.from_path, fr.from_line, fr.to_path, fr.to_line,
+                      fr.fact_id, fs.producer_name, fs.dataset
+             LIMIT ?",
+            predicates.join(" AND ")
+        );
+        values.push((limit.saturating_add(1) as i64).into());
+        let mut statement = self.conn.prepare(&sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(values.iter()), |row| {
+            let producer: String = row.get(0)?;
+            let dataset: String = row.get(1)?;
+            Ok(FactRelationship {
+                source_id: source_public_id(&producer, &dataset),
+                fact_id: row.get(2)?,
+                relation: row.get(3)?,
+                from_path: row.get(4)?,
+                from_line: row.get(5)?,
+                from_column: row.get(6)?,
+                to_path: row.get(7)?,
+                to_line: row.get(8)?,
+                to_column: row.get(9)?,
+                confidence: row.get(10)?,
+                label: row.get(11)?,
+            })
+        })?;
+        let mut items = rows.collect::<SqlResult<Vec<_>>>()?;
+        let truncated = items.len() > limit;
+        items.truncate(limit);
+        Ok((items, truncated))
     }
 
     /// Wipe everything related to a single file before re-indexing it.

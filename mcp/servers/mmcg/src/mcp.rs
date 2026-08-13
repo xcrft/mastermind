@@ -218,6 +218,7 @@ static TOOLS: &[ToolDef] = &[
     read_only_tool("mmcg_history", schema_history, handle_history),
     read_only_tool("mmcg_centrality", schema_centrality, handle_centrality),
     read_only_tool("mmcg_semantic", schema_semantic, handle_semantic),
+    read_only_tool("mmcg_facts", schema_facts, handle_facts),
     read_only_tool("mmcg_map", schema_map, handle_map),
     read_only_tool("mmcg_temporal", schema_temporal, handle_temporal),
     read_only_tool(
@@ -1413,6 +1414,20 @@ fn schema_semantic() -> Value {
     })
 }
 
+fn schema_facts() -> Value {
+    json!({
+        "name": "mmcg_facts",
+        "description": "Read bounded normalized facts imported from strict mastermind-facts/v1 manifests. The response includes the fixed API/capability contract and exact repository/revision binding. Extensions cannot register handlers or mutate SQLite directly.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "default": ".", "description": "Repository-relative file or directory scope" },
+                "top": { "type": "integer", "minimum": 1, "maximum": 400, "default": 100 }
+            }
+        }
+    })
+}
+
 fn impact_input_schema(name: &str, description: &str) -> Value {
     json!({
         "name": name,
@@ -1825,6 +1840,32 @@ fn handle_semantic(store: &mut Store, args: &Value) -> Result<Value, HandlerErro
     };
     let result = crate::scip_overlay::query(store, symbol, top)
         .map_err(|error| HandlerError::internal("semantic_query", error))?;
+    serde_json::to_value(result)
+        .map_err(|error| HandlerError::internal("serialize_response", error))
+}
+
+fn handle_facts(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
+    let path = match args.get("path") {
+        None => ".",
+        Some(Value::String(value)) => value,
+        Some(_) => {
+            return Err(HandlerError::InvalidArguments(
+                "Invalid argument: path".into(),
+            ))
+        }
+    };
+    crate::facts::normalize_query_path(path)
+        .map_err(|_| HandlerError::InvalidArguments("Invalid argument: path".into()))?;
+    let top = match args.get("top") {
+        None => 100,
+        Some(value) => value
+            .as_u64()
+            .filter(|value| (1..=400).contains(value))
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| HandlerError::InvalidArguments("Invalid argument: top".into()))?,
+    };
+    let result = crate::facts::snapshot(store, path, top)
+        .map_err(|error| HandlerError::internal("fact_query", error))?;
     serde_json::to_value(result)
         .map_err(|error| HandlerError::internal("serialize_response", error))
 }
@@ -2538,7 +2579,7 @@ mod tests {
     #[test]
     fn tool_annotations_match_behavior_table() {
         let legacy = tools_list(ProtocolVersion::Legacy);
-        assert_eq!(legacy["tools"].as_array().unwrap().len(), 26);
+        assert_eq!(legacy["tools"].as_array().unwrap().len(), 27);
         assert!(legacy["tools"]
             .as_array()
             .unwrap()
@@ -2547,7 +2588,7 @@ mod tests {
 
         let current = tools_list(ProtocolVersion::Current);
         let tools = current["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 26);
+        assert_eq!(tools.len(), 27);
         let mut readers = 0;
         for tool in tools {
             let annotations = &tool["annotations"];
@@ -2566,7 +2607,7 @@ mod tests {
                 readers += 1;
             }
         }
-        assert_eq!(readers, 25);
+        assert_eq!(readers, 26);
     }
 
     #[test]
@@ -2590,6 +2631,37 @@ mod tests {
         assert_eq!(payload["fallback_active"], true);
         assert_eq!(payload["resolution"]["default_graph"], "tree-sitter");
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn facts_tool_is_fixed_read_only_and_exposes_capability_negotiation() {
+        let (root, mut store) = impact_fixture("facts-contract");
+        let before = store.source_index_state().unwrap();
+        let result = handle_facts(&mut store, &json!({ "path": ".", "top": 25 })).unwrap();
+        assert_eq!(result["available"], false);
+        assert_eq!(result["contract"]["api_version"], crate::facts::API_VERSION);
+        assert_eq!(
+            result["contract"]["supported_capabilities"],
+            json!(["annotations", "relationships"])
+        );
+        assert_eq!(store.source_index_state().unwrap(), before);
+        assert!(matches!(
+            handle_facts(&mut store, &json!({ "path": "../outside" })),
+            Err(HandlerError::InvalidArguments(message)) if message == "Invalid argument: path"
+        ));
+        assert!(matches!(
+            handle_facts(&mut store, &json!({ "top": 401 })),
+            Err(HandlerError::InvalidArguments(message)) if message == "Invalid argument: top"
+        ));
+        let listed = tools_list(ProtocolVersion::Current);
+        let facts = listed["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "mmcg_facts")
+            .unwrap();
+        assert_eq!(facts["annotations"], json!({ "readOnlyHint": true }));
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -3224,7 +3296,7 @@ mod tests {
     #[test]
     fn tools_list_covers_every_handler() {
         let listed: Vec<&str> = TOOLS.iter().map(|t| t.name).collect();
-        assert_eq!(listed.len(), 26, "expected 26 tools, got {}", listed.len());
+        assert_eq!(listed.len(), 27, "expected 27 tools, got {}", listed.len());
         for name in &listed {
             assert!(
                 TOOLS.iter().any(|t| &t.name == name),

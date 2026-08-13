@@ -90,6 +90,19 @@ Tree-sitter evidence, keeps runtime traces as `observed`, and falls back to the
 syntactic graph when the overlay is absent or stale. Imports are bound to the
 indexed repository through SCIP `project_root` or exact embedded document text.
 
+Community analyzers can add bounded annotations and relationship evidence
+through the declarative [`mastermind-facts/v1` SDK](docs/fact-ingestion-sdk.md):
+
+```bash
+mastermind query facts --top 1          # capability and revision contract
+mastermind enrich --facts facts.json    # validate, then atomically normalize
+mastermind query facts --path src
+```
+
+Producers never run inside Mastermind and never receive SQLite, MCP-handler,
+policy-engine, or graph-mutation access. Lens reads current normalized facts;
+relationships only corroborate an existing exact file-and-line graph edge.
+
 ## Core workflows
 
 ### Map a project
@@ -140,8 +153,8 @@ monorepo review.
 Lens evidence overlays correlate the returned static trace with SARIF findings,
 LCOV/Cobertura line coverage, JUnit results, explicit OpenTelemetry code paths,
 CODEOWNERS, bounded Git churn/contributors, and exact changed-file mentions in
-indexed specs, ADRs, audits, lessons, and context. An imported SCIP overlay is
-loaded automatically and decorates only exact symbol/file endpoint matches.
+indexed specs, ADRs, audits, lessons, and context. Imported SCIP and declarative
+fact overlays are loaded automatically and decorate only exact endpoints.
 The graph topology stays unchanged: overlays add source-labelled marks and
 inspector facts rather than an opaque risk score. Lens auto-discovers
 `.github/CODEOWNERS`, `CODEOWNERS`, or `docs/CODEOWNERS`; use `--codeowners` to
@@ -173,6 +186,8 @@ the same Lens snapshot and runs offline under a hash-only CSP. The manifest
 records baseline/head OIDs, working-tree state, exact SHA-256 digests for every
 payload and external evidence input, plus every returned partial, truncated,
 or unavailable analysis state. Existing output paths are never overwritten.
+Valid declarative fact datasets carry their already-verified manifest and
+provenance digests into this package as producer-attested head bindings.
 
 Use the same repeatable `--sarif`, `--coverage`, `--junit`, and `--otel`
 options as Lens. Exact artifact bytes are always bound to the exported head.

@@ -1279,6 +1279,13 @@ impl Store {
                 revision             TEXT NOT NULL,
                 manifest_sha256      TEXT NOT NULL,
                 manifest_bytes       INTEGER NOT NULL,
+                signature_status     TEXT NOT NULL DEFAULT 'unsigned',
+                signing_key_id       TEXT,
+                signature_sha256     TEXT,
+                signature_bytes      INTEGER,
+                signing_public_key   TEXT,
+                signature_value      TEXT,
+                signed_manifest_digest TEXT,
                 imported_at          INTEGER NOT NULL,
                 file_count           INTEGER NOT NULL,
                 annotation_count     INTEGER NOT NULL,
@@ -1359,6 +1366,34 @@ impl Store {
         );
         let _ = self.conn.execute(
             "ALTER TABLE semantic_sources ADD COLUMN repository_verified INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = self.conn.execute(
+            "ALTER TABLE fact_sources ADD COLUMN signature_status TEXT NOT NULL DEFAULT 'unsigned'",
+            [],
+        );
+        let _ = self.conn.execute(
+            "ALTER TABLE fact_sources ADD COLUMN signing_key_id TEXT",
+            [],
+        );
+        let _ = self.conn.execute(
+            "ALTER TABLE fact_sources ADD COLUMN signature_sha256 TEXT",
+            [],
+        );
+        let _ = self.conn.execute(
+            "ALTER TABLE fact_sources ADD COLUMN signature_bytes INTEGER",
+            [],
+        );
+        let _ = self.conn.execute(
+            "ALTER TABLE fact_sources ADD COLUMN signing_public_key TEXT",
+            [],
+        );
+        let _ = self.conn.execute(
+            "ALTER TABLE fact_sources ADD COLUMN signature_value TEXT",
+            [],
+        );
+        let _ = self.conn.execute(
+            "ALTER TABLE fact_sources ADD COLUMN signed_manifest_digest TEXT",
             [],
         );
 
@@ -1756,9 +1791,12 @@ impl Store {
             "INSERT INTO fact_sources(
                 api_version, producer_name, producer_version, dataset,
                 provenance_kind, capabilities, repository_identity, revision,
-                manifest_sha256, manifest_bytes, imported_at, file_count,
+                manifest_sha256, manifest_bytes, signature_status,
+                signing_key_id, signature_sha256, signature_bytes,
+                signing_public_key, signature_value, signed_manifest_digest,
+                imported_at, file_count,
                 annotation_count, relationship_count
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 batch.source.api_version,
                 batch.source.producer_name,
@@ -1770,6 +1808,15 @@ impl Store {
                 batch.source.revision,
                 batch.source.manifest_sha256,
                 i64::try_from(batch.source.manifest_bytes).unwrap_or(i64::MAX),
+                batch.source.signature_status,
+                batch.source.signing_key_id,
+                batch.source.signature_sha256,
+                batch.source
+                    .signature_bytes
+                    .and_then(|value| i64::try_from(value).ok()),
+                batch.source.signing_public_key,
+                batch.source.signature_value,
+                batch.source.signed_manifest_digest,
                 batch.source.imported_at,
                 batch.source.file_count,
                 batch.source.annotation_count,
@@ -1860,15 +1907,31 @@ impl Store {
             return Ok(Vec::new());
         }
         let limit = limit.clamp(1, 1_000);
-        let mut statement = self.conn.prepare(
+        let signature_columns = self
+            .conn
+            .prepare("SELECT signature_status FROM fact_sources LIMIT 0")
+            .is_ok();
+        let sql = if signature_columns {
             "SELECT id, api_version, producer_name, producer_version, dataset,
                     provenance_kind, capabilities, repository_identity, revision,
-                    manifest_sha256, manifest_bytes, imported_at, file_count,
+                    manifest_sha256, manifest_bytes, signature_status,
+                    signing_key_id, signature_sha256, signature_bytes,
+                    signing_public_key, signature_value, signed_manifest_digest,
+                    imported_at, file_count,
                     annotation_count, relationship_count
              FROM fact_sources
              ORDER BY producer_name, dataset
-             LIMIT ?1",
-        )?;
+             LIMIT ?1"
+        } else {
+            "SELECT id, api_version, producer_name, producer_version, dataset,
+                    provenance_kind, capabilities, repository_identity, revision,
+                    manifest_sha256, manifest_bytes, 'unsigned', NULL, NULL, NULL,
+                    NULL, NULL, NULL, imported_at, file_count, annotation_count, relationship_count
+             FROM fact_sources
+             ORDER BY producer_name, dataset
+             LIMIT ?1"
+        };
+        let mut statement = self.conn.prepare(sql)?;
         let rows = statement.query_map(params![limit as i64], |row| {
             Ok(FactSourceRecord {
                 id: row.get(0)?,
@@ -1882,10 +1945,19 @@ impl Store {
                 revision: row.get(8)?,
                 manifest_sha256: row.get(9)?,
                 manifest_bytes: row_u64(row, 10)?,
-                imported_at: row.get(11)?,
-                file_count: row.get(12)?,
-                annotation_count: row.get(13)?,
-                relationship_count: row.get(14)?,
+                signature_status: row.get(11)?,
+                signing_key_id: row.get(12)?,
+                signature_sha256: row.get(13)?,
+                signature_bytes: row
+                    .get::<_, Option<i64>>(14)?
+                    .and_then(|value| value.try_into().ok()),
+                signing_public_key: row.get(15)?,
+                signature_value: row.get(16)?,
+                signed_manifest_digest: row.get(17)?,
+                imported_at: row.get(18)?,
+                file_count: row.get(19)?,
+                annotation_count: row.get(20)?,
+                relationship_count: row.get(21)?,
             })
         })?;
         rows.collect()
@@ -2372,6 +2444,18 @@ impl Store {
         let mut stmt = self.conn.prepare("SELECT path FROM files ORDER BY path")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         rows.collect()
+    }
+
+    pub(crate) fn indexed_paths_bounded(&self, limit: usize) -> SqlResult<(Vec<String>, bool)> {
+        let requested = limit.saturating_add(1).min(1_000_001);
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path FROM files ORDER BY path LIMIT ?1")?;
+        let rows = stmt.query_map(params![requested as i64], |row| row.get::<_, String>(0))?;
+        let mut paths = rows.collect::<SqlResult<Vec<_>>>()?;
+        let truncated = paths.len() > limit;
+        paths.truncate(limit);
+        Ok((paths, truncated))
     }
 
     /// Find symbols whose name matches exactly. Optional `kind` and `language` filters.

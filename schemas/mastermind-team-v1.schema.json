@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/xcrft/mastermind/schemas/mastermind-team-v1.schema.json",
+  "title": "Mastermind local team graph manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["api_version", "repositories", "relationships"],
+  "properties": {
+    "api_version": { "const": "mastermind-team/v1" },
+    "repositories": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": { "$ref": "#/$defs/repository" }
+    },
+    "relationships": {
+      "type": "array",
+      "maxItems": 500,
+      "items": { "$ref": "#/$defs/relationship" }
+    }
+  },
+  "$defs": {
+    "token": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._/:-]+$"
+    },
+    "repository_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "component": {
+      "allOf": [
+        { "$ref": "#/$defs/path" },
+        { "pattern": "^[^/\\u0000-\\u001f\\u007f]+(?:/[^/\\u0000-\\u001f\\u007f]+)?$" },
+        { "not": { "pattern": "(^|/)\\.\\.($|/)" } }
+      ]
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "root", "index"],
+      "properties": {
+        "id": { "$ref": "#/$defs/repository_id" },
+        "root": { "$ref": "#/$defs/path" },
+        "index": { "$ref": "#/$defs/path" },
+        "repository_identity": {
+          "type": "string",
+          "pattern": "^git-(?:remote|worktree):sha256:[0-9a-f]{64}$"
+        },
+        "revision": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "index_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    },
+    "endpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository"],
+      "properties": {
+        "repository": { "$ref": "#/$defs/repository_id" },
+        "component": { "$ref": "#/$defs/component" }
+      }
+    },
+    "relationship": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "relation", "from", "to", "label"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[A-Za-z0-9._/:-]+$",
+          "not": { "pattern": "^team:internal:" }
+        },
+        "relation": { "$ref": "#/$defs/token" },
+        "from": { "$ref": "#/$defs/endpoint" },
+        "to": { "$ref": "#/$defs/endpoint" },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        }
+      }
+    }
+  }
+}

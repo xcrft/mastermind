@@ -1397,6 +1397,19 @@
           "evidence-source__facts",
           artifactCount + " provenance artifact" + (artifactCount === 1 ? "" : "s")
         ));
+        const signatureStatus = text(source.signature_status, "unsigned");
+        const signingKey = text(source.signing_key_id, "");
+        const trust = createElement(
+          "span",
+          "evidence-source__facts",
+          signatureStatus === "verified"
+            ? "verified producer signature · key " + signingKey.slice(0, 19) + "…"
+            : "unsigned producer attestation"
+        );
+        if (signingKey) {
+          trust.setAttribute("title", signingKey);
+        }
+        card.appendChild(trust);
       }
       const digest = text(source.artifact_sha256, "");
       if (digest) {

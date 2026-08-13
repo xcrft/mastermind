@@ -95,6 +95,8 @@
           "enum": [
             "not-applicable",
             "digest-bound-at-export",
+            "partially-producer-signed",
+            "producer-signed",
             "partially-producer-attested",
             "producer-attested"
           ]
@@ -135,6 +137,34 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["id", "kind", "label", "repository_relative", "sha256", "bytes", "analysis_status", "revision_binding"],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "revision_binding": { "const": "producer-signed" } },
+            "required": ["revision_binding"]
+          },
+          "then": {
+            "required": [
+              "signing_key_id",
+              "signature_sha256",
+              "signing_public_key",
+              "signature",
+              "signed_manifest_digest"
+            ]
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                { "required": ["signing_key_id"] },
+                { "required": ["signature_sha256"] },
+                { "required": ["signing_public_key"] },
+                { "required": ["signature"] },
+                { "required": ["signed_manifest_digest"] }
+              ]
+            }
+          }
+        }
+      ],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "kind": { "enum": ["sarif", "coverage", "junit", "otel", "codeowners", "facts"] },
@@ -143,7 +173,24 @@
         "sha256": { "$ref": "#/$defs/sha256" },
         "bytes": { "type": "integer", "minimum": 0, "maximum": 33554432 },
         "analysis_status": { "enum": ["loaded", "partial", "error"] },
-        "revision_binding": { "enum": ["digest-bound-at-export", "producer-attested"] }
+        "revision_binding": { "enum": ["digest-bound-at-export", "producer-attested", "producer-signed"] },
+        "signing_key_id": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "signature_sha256": { "$ref": "#/$defs/sha256" },
+        "signing_public_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9+/]{43}=$"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9+/]{86}==$"
+        },
+        "signed_manifest_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
       }
     },
     "attestation": {

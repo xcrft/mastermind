@@ -10,6 +10,36 @@ The public v1 schema is
 Its API identifier is `mastermind-facts/v1`, with two capabilities:
 `annotations` and `relationships`.
 
+## Built-in adapters
+
+Mastermind can turn common inert reports into the same strict manifest without
+requiring each producer to implement the schema. The adapter reads one bounded
+artifact, matches every emitted fact to the current index, records its exact
+digest and size, and refuses to write an output when parsing is partial or any
+fact cannot be mapped to an indexed repository file.
+
+```bash
+mastermind facts adapt --format sarif \
+  --input reports/semgrep.sarif --output reports/semgrep.facts.json \
+  --producer semgrep --producer-version 1.82.0 --dataset pr-security
+
+mastermind facts adapt --format coverage \
+  --input coverage/lcov.info --output coverage.facts.json \
+  --producer vitest --producer-version 3.2.0 --dataset unit-coverage
+
+mastermind facts adapt --format junit \
+  --input test-results/junit.xml --output junit.facts.json \
+  --producer pytest --producer-version 8.4.0 --dataset unit-tests
+
+mastermind facts adapt --format otel \
+  --input traces/otlp.json --output runtime.facts.json \
+  --producer otel-collector --producer-version 0.130.0 --dataset review-traces
+```
+
+`coverage` auto-detects LCOV and Cobertura XML. OTLP runtime parent-child
+relationships use `confidence=observed`; they still only decorate matching
+static endpoints in Lens and never create codegraph topology.
+
 ## Producer flow
 
 Index the repository, then ask Mastermind for the exact contract that the
@@ -93,6 +123,59 @@ mastermind enrich --facts mastermind-facts.json
 mastermind query facts --path src --top 400
 ```
 
+## Signed producer provenance
+
+For a producer-controlled trust boundary, sign the strict manifest with a
+local Ed25519 seed and verify it against an explicit trusted-key allowlist. The
+private-key file is a single base64-encoded 32-byte seed and must be owned by
+the current user with mode `0600` on Unix. The public-key file contains the
+base64-encoded 32-byte public key.
+
+```bash
+mastermind facts keygen \
+  --private-key producer.seed \
+  --public-key producer.pub
+
+mastermind facts sign mastermind-facts.json \
+  --private-key producer.seed \
+  --signature mastermind-facts.sig.json
+
+mastermind facts verify mastermind-facts.json \
+  --signature mastermind-facts.sig.json \
+  --public-key producer.pub \
+  --trusted-key-id sha256:<public-key-digest> \
+  --json
+
+mastermind enrich --facts mastermind-facts.json \
+  --signature mastermind-facts.sig.json \
+  --public-key producer.pub \
+  --trusted-key-id sha256:<public-key-digest> \
+  --require-signature
+```
+
+`facts keygen` uses the operating system CSPRNG, writes the seed with private
+permissions on Unix, prints the derived `sha256:<public-key-digest>`, and
+refuses to replace either key file.
+
+The detached format is defined by
+[`mastermind-fact-signature-v1.schema.json`](../schemas/mastermind-fact-signature-v1.schema.json).
+It signs a domain-separated canonical statement over the validated manifest,
+including its repository identity, revision, source files, provenance
+artifacts, and facts. Revocation wins over trust; pass `--revoked-key-id`
+during verify/import to reject a compromised key. A partial signature policy
+(for example a signature without a public key or trusted key ID) fails closed.
+
+The import stores the verified key ID and reproducible public-key/signature
+proof with the normalized facts. Lens and `mmcg_facts` expose the result as
+`signature_status=verified`; unsigned imports remain explicitly `unsigned`.
+Trust and revocation are evaluated at import time. Rotate or revoke a producer
+by updating the allowlist and re-importing that dataset under the new policy.
+
+Ed25519 proves control of the allowlisted key. It does not by itself prove a
+human or organization identity, signing time, transparency-log inclusion, or
+whether a signature predates key compromise. Those claims require an external
+identity and timestamp/transparency policy.
+
 The MCP equivalent is the built-in, read-only `mmcg_facts` tool with `path`
 and `top` arguments. Its bounded response includes the verified provenance
 artifact paths, sizes, and SHA-256 digests. Lens loads current facts
@@ -102,9 +185,11 @@ codegraph edge only when both file and line endpoints match. Facts never create
 or remove graph topology.
 
 `mastermind review export` carries the same normalized facts into its autonomous
-HTML and records the loaded fact-manifest and provenance-artifact digests as
-an unsigned `producer-attested` claim for the exported Git head. A surrounding
-workflow must supply any stronger identity or signature trust anchor.
+HTML. Unsigned datasets remain `producer-attested`; verified datasets and their
+provenance artifacts are `producer-signed`, with the key ID, public key,
+signature, detached-signature digest, and signed manifest digest recorded in
+the package manifest. Mixed packages are explicitly
+`partially-producer-signed`.
 
 ## Validation and replacement
 

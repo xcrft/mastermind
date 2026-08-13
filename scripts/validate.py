@@ -8,6 +8,7 @@ code 0 means clean; errors return 1, while warnings remain non-blocking.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -1169,6 +1170,111 @@ def validate_fact_ingestion_sdk_contract() -> list[Issue]:
     return issues
 
 
+def validate_extension_lifecycle_contract() -> list[Issue]:
+    """Keep adapters, signed provenance, team federation, and registry smoke closed."""
+    issues: list[Issue] = []
+    schemas = (
+        (
+            REPO_ROOT / "schemas/mastermind-fact-signature-v1.schema.json",
+            "fact signature",
+            {
+                "schema_version",
+                "domain",
+                "algorithm",
+                "canonicalization",
+                "key_id",
+                "manifest_digest",
+                "signature",
+            },
+        ),
+        (
+            REPO_ROOT / "schemas/mastermind-team-v1.schema.json",
+            "team graph",
+            {"api_version", "repositories", "relationships"},
+        ),
+    )
+    for path, label, required in schemas:
+        try:
+            schema = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            issues.append(Issue(path, "error", f"invalid {label} schema: {error}"))
+            continue
+        if schema.get("additionalProperties") is not False:
+            issues.append(Issue(path, "error", f"{label} schema must reject unknown root fields"))
+        if set(schema.get("required", [])) != required:
+            issues.append(Issue(path, "error", f"{label} schema required fields drifted"))
+
+    surfaces = {
+        "mcp/servers/mmcg/src/fact_adapter.rs": (
+            "collect_for_fact_adapter",
+            "facts_total != Some(source.facts_returned)",
+            "validate_generated_manifest",
+            "indexed_paths_bounded",
+        ),
+        "mcp/servers/mmcg/src/fact_signature.rs": (
+            'SIGNATURE_DOMAIN: &str = "mastermind/fact-manifest-signature/v1"',
+            "generate_keypair",
+            "verify_stored_proof",
+            "trusted_key_ids",
+            "revoked_key_ids",
+        ),
+        "mcp/servers/mmcg/src/team.rs": (
+            'API_VERSION: &str = "mastermind-team/v1"',
+            "open_read_only_with_deadline",
+            "validate_index_snapshot",
+            'provenance: "team-manifest"',
+            "manifest_sha256",
+            "MAX_REPOSITORIES",
+            "MAX_INDEX_TOTAL_BYTES",
+        ),
+        "mcp/servers/mmcg/src/mcp.rs": (
+            'read_only_tool("mmcg_team_map"',
+            "schema_team_map",
+            "handle_team_map",
+            "MMCG_TEAM_MANIFEST",
+            "MMCG_TEAM_MANIFEST_SHA256",
+        ),
+        "mcp/servers/mmcg/src/main.rs": (
+            "Facts(FactCmd)",
+            "Team(TeamCmd)",
+            "FactCmd::Keygen",
+            "FactTrustPolicy",
+        ),
+        "mcp/servers/mmcg/src/review_package.rs": (
+            "producer-signed",
+            "signing_public_key",
+            "signed_manifest_digest",
+        ),
+        ".github/workflows/publish-npm.yml": (
+            "smoke-installed-npm-release.sh",
+            "Publish or verify all 8 packages",
+        ),
+        ".github/workflows/publish-mmcg.yml": (
+            "smoke-installed-crate-release.sh",
+            "Publish exact verified crate bytes",
+        ),
+    }
+    for relative, tokens in surfaces.items():
+        path = REPO_ROOT / relative
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as error:
+            issues.append(Issue(path, "error", f"cannot read extension lifecycle surface: {error}"))
+            continue
+        for token in tokens:
+            if token not in text:
+                issues.append(Issue(path, "error", f"extension lifecycle surface missing {token!r}"))
+
+    for relative in (
+        "scripts/smoke-installed-npm-release.sh",
+        "scripts/smoke-installed-crate-release.sh",
+    ):
+        path = REPO_ROOT / relative
+        if not os.access(path, os.X_OK):
+            issues.append(Issue(path, "error", "registry smoke helper must be executable"))
+    return issues
+
+
 # ----- repository workflow supply-chain contract -----------------------
 
 def validate_repository_workflow_pins() -> list[Issue]:
@@ -1659,6 +1765,7 @@ def main(argv: list[str]) -> int:
     issues.extend(validate_executor_report_schema_contract())
     issues.extend(validate_review_package_contract())
     issues.extend(validate_fact_ingestion_sdk_contract())
+    issues.extend(validate_extension_lifecycle_contract())
     issues.extend(validate_repository_workflow_pins())
     issues.extend(validate_audit_action_security())
 

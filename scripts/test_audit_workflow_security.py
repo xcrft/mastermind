@@ -709,6 +709,59 @@ class RepositoryDeliveryContractTests(unittest.TestCase):
         self.assertRegex(publish_runs, r'publish-crate-artifact\.py"? publish')
         self.assertNotRegex(publish_runs, r"\bcargo\s+publish\b")
 
+    def test_release_registry_smoke_runs_after_publish_without_publish_credentials(self):
+        cases = (
+            (
+                "publish-npm.yml",
+                "Publish or verify all 8 packages",
+                "Install from npm registry and run functional smoke",
+                "scripts/smoke-installed-npm-release.sh",
+            ),
+            (
+                "publish-mmcg.yml",
+                "Publish exact verified crate bytes",
+                "Install from crates.io and run shipped binary smoke",
+                "scripts/smoke-installed-crate-release.sh",
+            ),
+        )
+        for workflow_name, publish_name, smoke_name, helper in cases:
+            with self.subTest(workflow=workflow_name):
+                workflow = yaml.safe_load(
+                    (ROOT / ".github/workflows" / workflow_name).read_text(encoding="utf-8")
+                )
+                publish_steps = workflow["jobs"]["publish"]["steps"]
+                self.assertIn(publish_name, [step.get("name") for step in publish_steps])
+                smoke_job = workflow["jobs"]["registry-smoke"]
+                self.assertEqual(smoke_job["needs"], "publish")
+                self.assertEqual(smoke_job["permissions"], {"contents": "read"})
+                self.assertEqual(smoke_job["timeout-minutes"], 30)
+                self.assertNotIn("environment", smoke_job)
+                checkout = next(
+                    step
+                    for step in smoke_job["steps"]
+                    if str(step.get("uses", "")).startswith("actions/checkout@")
+                )
+                self.assertEqual(checkout.get("with", {}).get("persist-credentials"), False)
+                smoke = next(
+                    step for step in smoke_job["steps"] if step.get("name") == smoke_name
+                )
+                self.assertIn(helper, smoke["run"])
+                self.assertNotIn("env", smoke, "registry smoke must use public reads only")
+
+        npm_smoke = (ROOT / "scripts/smoke-installed-npm-release.sh").read_text(
+            encoding="utf-8"
+        )
+        crate_smoke = (ROOT / "scripts/smoke-installed-crate-release.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("NPM_CONFIG_USERCONFIG", npm_smoke)
+        for token in ("facts keygen", "--require-signature", "team lock", "team map"):
+            self.assertIn(token, npm_smoke)
+        self.assertIn('CARGO_HOME="$SMOKE_ROOT/cargo-home"', crate_smoke)
+        for text in (npm_smoke, crate_smoke):
+            self.assertNotIn("NPM_TOKEN", text)
+            self.assertNotIn("CARGO_REGISTRY_TOKEN", text)
+
     def test_distributed_package_surfaces_advertise_vue(self):
         missing = validator.distributed_vue_metadata_errors()
         self.assertEqual(missing, [])

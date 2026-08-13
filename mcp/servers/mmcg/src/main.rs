@@ -17,6 +17,7 @@ mod templates;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use mmcg::store::Store;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -73,6 +74,26 @@ pub enum PolicyFormat {
     Text,
     Json,
     Sarif,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum FactAdapterFormat {
+    Sarif,
+    Coverage,
+    Junit,
+    Otel,
+}
+
+impl From<FactAdapterFormat> for mmcg::fact_adapter::AdapterFormat {
+    fn from(value: FactAdapterFormat) -> Self {
+        match value {
+            FactAdapterFormat::Sarif => Self::Sarif,
+            FactAdapterFormat::Coverage => Self::Coverage,
+            FactAdapterFormat::Junit => Self::Junit,
+            FactAdapterFormat::Otel => Self::Otel,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -143,7 +164,28 @@ enum Cmd {
             conflicts_with = "scip"
         )]
         facts: Option<PathBuf>,
+        /// Detached mastermind fact-manifest signature.
+        #[arg(long, value_name = "PATH", requires = "facts", conflicts_with = "scip")]
+        signature: Option<PathBuf>,
+        /// Ed25519 public key used to authenticate the fact manifest.
+        #[arg(long, value_name = "PATH", requires = "facts", conflicts_with = "scip")]
+        public_key: Option<PathBuf>,
+        /// Reject unsigned fact manifests.
+        #[arg(long, requires = "facts", conflicts_with = "scip")]
+        require_signature: bool,
+        /// Trusted Ed25519 key ID. Repeatable for rotation windows.
+        #[arg(long = "trusted-key-id", requires = "facts", conflicts_with = "scip")]
+        trusted_key_ids: Vec<String>,
+        /// Revoked Ed25519 key ID. Revocation wins over trust.
+        #[arg(long = "revoked-key-id", requires = "facts", conflicts_with = "scip")]
+        revoked_key_ids: Vec<String>,
     },
+    /// Adapt, sign, and verify revision-bound declarative fact manifests.
+    #[command(subcommand)]
+    Facts(FactCmd),
+    /// Lock and inspect a bounded local graph across multiple repositories.
+    #[command(subcommand)]
+    Team(TeamCmd),
     /// Build a compact deterministic architecture briefing from the codegraph.
     Map {
         /// Repository-relative file or directory scope. Defaults to the index root.
@@ -534,6 +576,68 @@ enum Cmd {
     /// code-shape style). Output lives under `~/.mastermind/`, not the project.
     #[command(subcommand)]
     Miner(MinerCmd),
+}
+
+#[derive(Subcommand)]
+enum FactCmd {
+    /// Convert one bounded third-party report into mastermind-facts/v1.
+    Adapt {
+        #[arg(long, value_enum)]
+        format: FactAdapterFormat,
+        #[arg(long, value_name = "PATH")]
+        input: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
+        #[arg(long)]
+        producer: String,
+        #[arg(long)]
+        producer_version: String,
+        #[arg(long)]
+        dataset: String,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+    },
+    /// Generate a local Ed25519 producer keypair without exposing the seed.
+    Keygen {
+        #[arg(long)]
+        private_key: PathBuf,
+        #[arg(long)]
+        public_key: PathBuf,
+    },
+    /// Write a domain-separated Ed25519 detached fact-manifest signature.
+    Sign {
+        manifest: PathBuf,
+        #[arg(long)]
+        private_key: PathBuf,
+        #[arg(long)]
+        signature: PathBuf,
+    },
+    /// Verify a fact manifest against an explicit local trust policy.
+    Verify {
+        manifest: PathBuf,
+        #[arg(long)]
+        signature: PathBuf,
+        #[arg(long)]
+        public_key: PathBuf,
+        #[arg(long = "trusted-key-id", required = true)]
+        trusted_key_ids: Vec<String>,
+        #[arg(long = "revoked-key-id")]
+        revoked_key_ids: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum TeamCmd {
+    /// Resolve repository roots/indexes and pin identity, revision, and DB+WAL digest.
+    Lock {
+        manifest: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
+    },
+    /// Read a locked team manifest and emit its local, read-only graph.
+    Map { manifest: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -1024,7 +1128,15 @@ fn run_cli_inner(
                 eprintln!("extractor contract changed: rebuilt all structural data");
             }
         }
-        Cmd::Enrich { scip, facts } => {
+        Cmd::Enrich {
+            scip,
+            facts,
+            signature,
+            public_key,
+            require_signature,
+            trusted_key_ids,
+            revoked_key_ids,
+        } => {
             if !index_path.is_file() {
                 return Err(format!(
                     "codegraph index {} does not exist; run `mastermind index .` first",
@@ -1037,11 +1149,105 @@ fn run_cli_inner(
                 (Some(scip), None) => {
                     serde_json::to_value(mmcg::scip_overlay::import(&store, &scip)?)?
                 }
-                (None, Some(facts)) => serde_json::to_value(mmcg::facts::import(&store, &facts)?)?,
+                (None, Some(facts)) => {
+                    let policy = mmcg::fact_signature::FactTrustPolicy {
+                        signature,
+                        public_key,
+                        require_signature,
+                        trusted_key_ids: trusted_key_ids.into_iter().collect(),
+                        revoked_key_ids: revoked_key_ids.into_iter().collect(),
+                    };
+                    serde_json::to_value(mmcg::facts::import_with_trust(&store, &facts, &policy)?)?
+                }
                 _ => unreachable!("clap requires exactly one enrichment input"),
             };
             println!("{}", serde_json::to_string_pretty(&summary)?);
         }
+        Cmd::Facts(command) => match command {
+            FactCmd::Adapt {
+                format,
+                input,
+                output,
+                producer,
+                producer_version,
+                dataset,
+                root,
+            } => {
+                let selected_index = index_path_for_root(index_override.as_deref(), &root);
+                if !selected_index.is_file() {
+                    return Err(format!(
+                        "codegraph index {} does not exist; run `mastermind index .` first",
+                        selected_index.display()
+                    )
+                    .into());
+                }
+                let store = Store::open_read_only(&selected_index)?;
+                let summary = mmcg::fact_adapter::adapt(
+                    &store,
+                    &mmcg::fact_adapter::AdaptOptions {
+                        format: format.into(),
+                        input: &input,
+                        output: &output,
+                        producer: &producer,
+                        producer_version: &producer_version,
+                        dataset: &dataset,
+                        root: &root,
+                    },
+                )?;
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+            }
+            FactCmd::Keygen {
+                private_key,
+                public_key,
+            } => {
+                let summary = mmcg::fact_signature::generate_keypair(&private_key, &public_key)?;
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+            }
+            FactCmd::Sign {
+                manifest,
+                private_key,
+                signature,
+            } => {
+                let signed = mmcg::fact_signature::sign(&manifest, &private_key, &signature)?;
+                println!("{}", serde_json::to_string_pretty(&signed)?);
+            }
+            FactCmd::Verify {
+                manifest,
+                signature,
+                public_key,
+                trusted_key_ids,
+                revoked_key_ids,
+                json,
+            } => {
+                let policy = mmcg::fact_signature::FactTrustPolicy {
+                    signature: Some(signature),
+                    public_key: Some(public_key),
+                    require_signature: true,
+                    trusted_key_ids: trusted_key_ids.into_iter().collect::<BTreeSet<_>>(),
+                    revoked_key_ids: revoked_key_ids.into_iter().collect::<BTreeSet<_>>(),
+                };
+                let report = mmcg::fact_signature::verify(&manifest, &policy)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    println!(
+                        "fact manifest verified: {} ({})",
+                        report.manifest_digest,
+                        report.key_id.as_deref().unwrap_or("unsigned")
+                    );
+                }
+            }
+        },
+        Cmd::Team(command) => match command {
+            TeamCmd::Lock { manifest, output } => {
+                let summary = mmcg::team::lock(&manifest, &output)?;
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+            }
+            TeamCmd::Map { manifest } => {
+                let graph = mmcg::team::map(&manifest, None)?;
+                println!("{}", serde_json::to_string_pretty(&graph)?);
+            }
+        },
         Cmd::Map {
             path,
             format,
@@ -1659,7 +1865,7 @@ mod tests {
         ])
         .unwrap();
         assert!(
-            matches!(enrich.cmd, Cmd::Enrich { scip: Some(scip), facts: None } if scip == std::path::Path::new("index.scip"))
+            matches!(enrich.cmd, Cmd::Enrich { scip: Some(scip), facts: None, .. } if scip == std::path::Path::new("index.scip"))
         );
 
         let query = Cli::try_parse_from([
@@ -1691,7 +1897,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             enrich.cmd,
-            Cmd::Enrich { scip: None, facts: Some(path) }
+            Cmd::Enrich { scip: None, facts: Some(path), .. }
                 if path == std::path::Path::new("mastermind-facts.json")
         ));
 
@@ -1720,6 +1926,95 @@ mod tests {
             Cmd::Query(QueryCmd::Facts { path, top }) if path == "src" && top == 250
         ));
         assert!(Cli::try_parse_from(["mastermind", "query", "facts", "--top", "401",]).is_err());
+    }
+
+    #[test]
+    fn fact_lifecycle_and_team_graph_cli_contracts_are_explicit() {
+        let adapt = Cli::try_parse_from([
+            "mastermind",
+            "facts",
+            "adapt",
+            "--format",
+            "otel",
+            "--input",
+            "traces.json",
+            "--output",
+            "facts.json",
+            "--producer",
+            "collector",
+            "--producer-version",
+            "1.2.3",
+            "--dataset",
+            "runtime",
+        ])
+        .unwrap();
+        assert!(matches!(
+            adapt.cmd,
+            Cmd::Facts(FactCmd::Adapt {
+                format: FactAdapterFormat::Otel,
+                ..
+            })
+        ));
+
+        let keygen = Cli::try_parse_from([
+            "mastermind",
+            "facts",
+            "keygen",
+            "--private-key",
+            "producer.seed",
+            "--public-key",
+            "producer.pub",
+        ])
+        .unwrap();
+        assert!(matches!(keygen.cmd, Cmd::Facts(FactCmd::Keygen { .. })));
+
+        let signed_import = Cli::try_parse_from([
+            "mastermind",
+            "enrich",
+            "--facts",
+            "facts.json",
+            "--signature",
+            "facts.sig.json",
+            "--public-key",
+            "facts.pub",
+            "--trusted-key-id",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--require-signature",
+        ])
+        .unwrap();
+        assert!(matches!(
+            signed_import.cmd,
+            Cmd::Enrich {
+                facts: Some(_),
+                require_signature: true,
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from([
+            "mastermind",
+            "enrich",
+            "--scip",
+            "index.scip",
+            "--signature",
+            "facts.sig.json",
+        ])
+        .is_err());
+
+        let team = Cli::try_parse_from([
+            "mastermind",
+            "team",
+            "lock",
+            "team.json",
+            "--output",
+            "team.lock.json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            team.cmd,
+            Cmd::Team(TeamCmd::Lock { manifest, output })
+                if manifest == std::path::Path::new("team.json")
+                    && output == std::path::Path::new("team.lock.json")
+        ));
     }
 
     #[test]

@@ -1022,7 +1022,7 @@ fn contained_file(root: &Path, relative: &str) -> Result<PathBuf, BundleError> {
     Ok(canonical)
 }
 
-fn read_bounded_regular(
+pub(crate) fn read_bounded_regular(
     path: &Path,
     private: bool,
     forbid_shared_write: bool,
@@ -1124,6 +1124,8 @@ where
             .map_err(|e| BundleError::Io(e.to_string()))?
             .join(path)
     };
+    #[cfg(target_os = "macos")]
+    let absolute = normalize_macos_system_alias(&absolute);
     let mut options = OpenOptions::new();
     options.read(true);
     use std::os::unix::fs::OpenOptionsExt;
@@ -1148,6 +1150,23 @@ where
     before_leaf();
     let file = open_file_at(&directory, leaf)?;
     read_opened_file(file, private, forbid_shared_write)
+}
+
+#[cfg(target_os = "macos")]
+fn normalize_macos_system_alias(path: &Path) -> PathBuf {
+    // macOS exposes these immutable root aliases as symlinks. Normalize only
+    // the OS-owned aliases; arbitrary caller-controlled symlink parents remain
+    // rejected by the descriptor-relative O_NOFOLLOW walk below.
+    for (alias, target) in [
+        (Path::new("/var"), Path::new("/private/var")),
+        (Path::new("/tmp"), Path::new("/private/tmp")),
+        (Path::new("/etc"), Path::new("/private/etc")),
+    ] {
+        if let Ok(relative) = path.strip_prefix(alias) {
+            return target.join(relative);
+        }
+    }
+    path.to_path_buf()
 }
 
 #[cfg(unix)]
@@ -1215,7 +1234,7 @@ fn read_bounded_regular_portable(
     Ok(bytes)
 }
 
-fn read_key(path: &Path, private: bool) -> Result<[u8; 32], BundleError> {
+pub(crate) fn read_key(path: &Path, private: bool) -> Result<[u8; 32], BundleError> {
     let bytes = read_bounded_regular(path, private, true)?;
     let text =
         std::str::from_utf8(&bytes).map_err(|_| BundleError::Crypto("key is not UTF-8".into()))?;

@@ -10,13 +10,16 @@
 #   Optional but recommended: add a "Required reviewers" rule on the `prod`
 #   environment so a human approves before the exact artifact upload runs.
 #
-# Layout: two jobs.
+# Layout: three jobs.
 #   `verify` runs always (tag check, validator, tests, package). It prepares
 #     Cargo registry metadata beside the verified `.crate` and seals both with
 #     SHA-256. No secrets, no environment — tests don't wait on approval gates.
 #   `publish` only runs if verify passes, downloads those exact bytes, checks
 #     their hashes, and uploads the verified `.crate` through Cargo's documented
 #     registry Web API. It never asks `cargo publish` to package the source again.
+#   `registry-smoke` has no release environment, token, or OIDC permission. It
+#     installs the public crates.io version into an isolated Cargo home and runs
+#     the shipped binary after publication.
 #
 # Release procedure:
 #   1. Bump version in mcp/servers/mmcg/Cargo.toml (+ README frontmatter)
@@ -189,6 +192,26 @@ jobs:
             --crate "$crate" \
             --metadata "$crate.publish.json" \
             --expected-sha256 "$expected_sha256"
+
+  registry-smoke:
+    name: Public crates.io install smoke
+    needs: publish
+    if: github.repository == 'xcrft/mastermind' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - name: Install from crates.io and run shipped binary smoke
+        run: bash scripts/smoke-installed-crate-release.sh mcp/servers/mmcg/Cargo.toml
 
   dry-run-notice:
     name: Dry-run notice

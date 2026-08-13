@@ -1,18 +1,28 @@
 # Code of Conduct
 
-This project follows the [Contributor Covenant v2.1](https://www.contributor-covenant.org/version/2/1/code_of_conduct/).
+This project follows the
+[Contributor Covenant v2.1](https://www.contributor-covenant.org/version/2/1/code_of_conduct/).
+The full linked text is the governing policy.
 
-## In short
+## Expected conduct
 
-- Be respectful. Critique ideas, not people.
-- Assume good intent.
-- No harassment, no discrimination, no personal attacks.
-- Disagreements happen — keep them technical and concrete.
+- Critique code and ideas, not people.
+- Keep technical disagreements specific and evidence-based.
+- Do not harass, discriminate, threaten, or publish another person's private
+  information.
+- Respect a maintainer's decision to close or moderate a discussion.
 
-## Reporting
+## Report a violation
 
-If you experience or witness behavior that violates this code, open a private issue or email the maintainers. Reports are handled confidentially.
+Do not put sensitive details in a public issue. Contact the repository owner
+through the [xcrft GitHub profile](https://github.com/xcrft) and request a
+private reporting channel. Include links or screenshots, dates, participants,
+and the behavior that violated the policy. Reports are shared only with the
+people required to investigate and respond.
 
 ## Enforcement
 
-Maintainers may remove comments, commits, or contributors who violate this code. Repeated or serious violations result in a permanent ban.
+Maintainers may edit or remove content, lock discussions, reject contributions,
+issue a warning, or temporarily or permanently exclude a participant. The
+response depends on impact, context, and repeated behavior. Retaliation against
+a reporter is itself a violation.

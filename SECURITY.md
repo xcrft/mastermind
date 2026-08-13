@@ -1,38 +1,74 @@
 # Security policy
 
-## Reporting a vulnerability
+## Supported versions
 
-**Do not open a public issue for security problems.** Use GitHub's private vulnerability reporting:
+| Version | Security fixes |
+|---|---|
+| 2.x | Supported |
+| 1.x and earlier | Upgrade required |
 
-1. Go to <https://github.com/xcrft/mastermind/security/advisories/new>
-2. Describe the issue with enough detail to reproduce — the more concrete, the faster the fix
-3. Include affected versions if you know them (e.g. `mmcg 0.6.0`, plugin `mastermind-workflow 0.6.0`)
+## Report a vulnerability
 
-If GitHub's private reporting is unavailable to you, reach the maintainer via their GitHub profile.
+Do not open a public issue. Use
+[GitHub private vulnerability reporting](https://github.com/xcrft/mastermind/security/advisories/new).
 
-## What we consider in scope
+Include:
 
-- **`mmcg` (Rust crate):** parser bugs that crash on malformed input, SQL injection via crafted file paths, path traversal during `mmcg index` or `mmcg init`, MCP protocol handling bugs
-- **Workflow artifacts:** skills/subagents that instruct an LLM to take dangerous actions (delete files, exfil data, bypass user approval) when invoked normally
-- **Plugin manifests / build scripts:** anything that runs untrusted code at install or build time
+- affected Mastermind version and installation method;
+- operating system and relevant client/runtime versions;
+- minimal reproduction or proof of concept;
+- expected and actual security boundary;
+- impact, required attacker access, and whether untrusted repository content is
+  involved;
+- logs with credentials, tokens, private source, and personal data removed.
 
-## What we do NOT consider in scope
+If private reporting is unavailable, contact the maintainer through the GitHub
+profile and request a private channel. Do not send exploit details in a public
+comment.
 
-- LLM jailbreaks against the subagents — the workflow assumes the user trusts the model
-- Vulnerabilities in upstream dependencies (`tree-sitter-*`, `rusqlite`, `notify`, etc.) — report to those projects; we'll bump versions
-- Self-induced issues (e.g. running `mmcg index` on a path you don't trust, then complaining about what the indexer wrote there)
-- Findings from automated scanners with no proof of exploitability
+## In scope
 
-## Response expectations
+- path traversal, unsafe overwrite, or command execution in indexing, setup,
+  install, export, or workflow commands;
+- SQL injection or database corruption through crafted repository paths or
+  imported evidence;
+- MCP protocol or tool-permission defects that cross the documented read-only
+  and additive-write boundary;
+- Lens binding, same-origin, script-injection, CSP, or source-index mutation
+  defects;
+- fact, SARIF, coverage, JUnit, OTLP, SCIP, signature, revision, provenance,
+  size, or path validation bypasses;
+- workflow artifacts that instruct an agent to expose secrets, bypass explicit
+  approval, or perform destructive actions during normal documented use;
+- npm, Cargo, Docker Action, GitHub Actions, or release-provenance defects that
+  can replace or publish unverified artifacts;
+- setup/uninstall ownership bugs that modify unrelated client configuration or
+  user files.
 
-This is a small-team OSS project. Response timing is best-effort:
+## Usually out of scope
 
-- Acknowledgement: within 1 week
-- Triage / first reply: within 2 weeks
-- Fix shipped: depends on severity (sev0 days, sev1 weeks, lower handled in next normal release)
+- an upstream dependency advisory without a demonstrated Mastermind impact;
+- generic model jailbreaks that do not bypass a Mastermind-enforced boundary;
+- denial of service that requires the local user to index an intentionally
+  hostile repository, unless it bypasses a documented size/work limit or causes
+  persistent data loss;
+- scanner output without a reproducible path and impact;
+- social engineering, account compromise, or GitHub/npm/crates.io platform
+  issues outside this repository's control.
 
-If a fix is non-trivial we may publish a GitHub Security Advisory with a CVE. Reporters who want credit get attribution in the advisory.
+We still welcome a private report when scope is uncertain.
 
-## Disclosure
+## Response and disclosure
 
-We follow coordinated disclosure: please give us a reasonable window (default 90 days) before public disclosure. We'll work with you on the timeline if a quick fix isn't possible.
+This is a small-maintainer open-source project. Targets are best effort:
+
+| Stage | Target |
+|---|---|
+| Acknowledgement | 7 days |
+| Initial triage | 14 days |
+| Remediation | Based on severity and release safety |
+
+We use coordinated disclosure. Please allow up to 90 days by default and avoid
+publishing details while a fix or registry release is in progress. Material
+issues may receive a GitHub Security Advisory and CVE. Reporter credit is
+included when requested.

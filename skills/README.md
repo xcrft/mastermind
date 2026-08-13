@@ -1,11 +1,13 @@
 # Skills
 
-Skills used by the Mastermind workflow. Every skill in this tree is included in
-the installable workflow bundle.
+Portable workflow capabilities installed by Mastermind. Every `SKILL.md` in
+this tree is staged into the npm workflow bundle; `scripts/validate.py` fails if
+this index or the staged copy drifts.
 
-## Index
+Skills define task behavior. Claude Code-specific spawnable roles live under
+[`agents/`](../agents/).
 
-### workflow/
+## Workflow
 | Skill | Description |
 |---|---|
 | [`mastermind-task-planning`](workflow/mastermind-task-planning/SKILL.md) | Chooses Direct, Verified, or Strict and creates the lightest evidence-grounded delegation contract that fits the risk. |
@@ -25,40 +27,40 @@ the installable workflow bundle.
 | [`mastermind-audit-attestation`](workflow/mastermind-audit-attestation/SKILL.md) | Separates content integrity, signer provenance, and policy acceptance for audit evidence. |
 | [`mastermind-style-deep`](workflow/mastermind-style-deep/SKILL.md) | Adds a grounded qualitative coding portrait consumed as advisory planner/executor input. |
 
-### coding/
+## Coding
 | Skill | Description |
 |---|---|
 | [`no-ai-slop-comments`](coding/no-ai-slop-comments/SKILL.md) | Keeps useful comments and removes narration introduced by the current change without widening scope. |
 
-### code-review/
+## Code review
 | Skill | Description |
 |---|---|
 | [`mastermind-comment-audit`](code-review/mastermind-comment-audit/SKILL.md) | Reviews the comment delta of a finished change with quoted evidence, names what it kept, and reports deleted rationale. |
 | [`mastermind-test-audit`](code-review/mastermind-test-audit/SKILL.md) | Checks whether a change's tests prove its behaviour: uncovered symbols, a test on the wrong path, an assertion moved with the code, and non-asserting tests. |
 | [`mastermind-frontend-audit`](code-review/mastermind-frontend-audit/SKILL.md) | Checks a finished UI change against the codegraph: unrendered components, props contracts changed without their callers, duplicates, and raw values shadowing tokens. |
 
-### design/
+## Design
 | Skill | Description |
 |---|---|
 | [`mastermind-design-intake`](design/mastermind-design-intake/SKILL.md) | Converts a design handoff into named components, token names, and criteria that can fail, parking visual fidelity explicitly. |
 
-### testing/
+## Testing
 | Skill | Description |
 |---|---|
 | [`mastermind-browser-verification`](testing/mastermind-browser-verification/SKILL.md) | Records browser checks as evidence — accessibility tree over screenshot, console and network errors, viewports as a checklist, unchecked marked unchecked. |
 
-### debugging/
+## Debugging
 | Skill | Description |
 |---|---|
 | [`mastermind-investigation-ledger`](debugging/mastermind-investigation-ledger/SKILL.md) | Diagnoses unknown bugs with competing hypotheses, evidence for/against, and bounded decision-changing probes. |
 
-### security/
+## Security
 | Skill | Description |
 |---|---|
 | [`mastermind-security-research`](security/mastermind-security-research/SKILL.md) | Enumerates reachable privileged operations, the sites that statically apply a guard, and secret readers — reporting the difference as unestablished rather than as a verdict. |
 | [`mastermind-agent-security-review`](security/mastermind-agent-security-review/SKILL.md) | Portable security review protocol for agent/tool trust boundaries, with optional evidence-based OWASP mapping. |
 
-### prompt-engineering/
+## Prompt engineering
 | Skill | Description |
 |---|---|
 | [`mastermind-prompt-refiner`](prompt-engineering/mastermind-prompt-refiner/SKILL.md) | Rewrites explicit prompts or cold-agent handoffs while preserving the original request verbatim. |

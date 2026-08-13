@@ -447,14 +447,17 @@ MMCG_MCP_SRC = "mcp/servers/mmcg/src/mcp.rs"
 # but mmcg_xxx names are sufficiently distinctive.)
 MMCG_TOOL_LIST_DOCS: list[str] = [
     "docs/reference/mmcg.md",
+    "docs/integrations/generic-mcp.md",
 ]
 
 # Files that quote a tool *count* like "16 structural query tools" / "15 tools".
 # We extract counts and assert they all match the count derived from mcp.rs.
 MMCG_TOOL_COUNT_DOCS: list[str] = [
     "docs/reference/mmcg.md",
+    "docs/integrations/generic-mcp.md",
     "mcp/README.md",
     "mcp/servers/mmcg/README.md",
+    "npm/mastermind/README.md",
     "README.md",
 ]
 
@@ -1460,6 +1463,15 @@ def validate_portable_skill_semantics() -> list[Issue]:
         slug = skill_path.parent.name
         if f"[`{slug}`]" not in readme:
             issues.append(Issue(readme_path, "error", f"installed skill is missing from index: {slug}"))
+
+    agent_readme_path = REPO_ROOT / "agents/README.md"
+    agent_readme = agent_readme_path.read_text(encoding="utf-8")
+    for agent_path in sorted((REPO_ROOT / "agents/subagents").glob("*.md")):
+        slug = agent_path.stem
+        if f"[`{slug}`]" not in agent_readme:
+            issues.append(
+                Issue(agent_readme_path, "error", f"installed agent is missing from index: {slug}")
+            )
     return issues
 
 

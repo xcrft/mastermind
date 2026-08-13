@@ -1,256 +1,168 @@
-# How the Mastermind workflow works
+# Workflow
 
-Mastermind separates structural evidence from agent judgment. The codegraph
-answers what exists and what a change can affect; the workflow adds only as
-much ceremony as the risk justifies.
+Mastermind separates repository facts from agent judgment. The codegraph
+establishes what exists and what a diff can affect; task artifacts record scope,
+claims, checks, and review decisions. Use only the depth justified by the risk.
 
-## Choose one mode
+## Choose a mode
 
-| Mode | Use it for | Required artifact |
+| Mode | Use for | Required artifacts |
 |---|---|---|
-| **Direct** | Small, reversible, clearly scoped work | None. Use `map`, `impact`, and tests as needed. |
-| **Verified** | Normal multi-file or delegated work | A compact task spec with goals, scope, acceptance criteria, and verification. |
-| **Strict** | Auth, billing, migrations, public APIs, data-loss, supply-chain, or difficult rollback | A verified spec plus risk, evidence, rollback, and independent review. |
+| **Direct** | Small, reversible, clearly scoped work | None |
+| **Verified** | Normal multi-file or delegated work | Spec, executor report, audit, task state |
+| **Strict** | Auth, billing, migrations, public API, data loss, supply chain, hard rollback | Verified artifacts plus risk, rollback, and independent review evidence |
 
-Direct mode works after `mastermind index .`; it does not require
-`mastermind init` or a task folder. `lite` and `standard` task modes remain
-readable for compatibility, but new tasks should use `verified` or `strict`.
+`lite` and `standard` remain readable for compatibility. New task specs should
+use `verified` or `strict`.
 
-## Direct workflow
+## Direct
 
 ```bash
 mastermind index .
-mastermind map .
 mastermind impact --since main
-mastermind temporal --since main
-# implement the change
+# implement the change and run focused + repository-required checks
 mastermind impact --since main
-# run focused tests and the repository-required gate
-# review the comment delta with `mastermind-comment-audit`
 ```
 
-This is the normal path for a small fix. Mastermind supplies structural facts;
-your coding client performs the edit and reports the checks it actually ran.
+Direct work has no task folder or controller state. The implementation and
+verification record live in the normal commit/PR. Use this path when rollback
+is easy and the change does not need delegated ownership.
 
-## Verified workflow
+## Verified
 
-Create the contract:
+### 1. Create and verify the contract
 
 ```bash
-mastermind new-spec "Add account recovery"        # verified is the default
+mastermind new-spec "Add account recovery"
 mastermind verify-spec .mastermind/tasks/001-add-account-recovery/spec.md
-# review Scope and Acceptance Criteria, then approve the task
+```
+
+Review the scope, acceptance criteria, and verification commands before
+approval. Then record the baseline:
+
+```bash
 mastermind run-task .mastermind/tasks/001-add-account-recovery/spec.md --pre-only
 ```
 
-The task folder owns five workflow artifacts:
+### 2. Implement against the approved spec
 
-| Artifact | Owner | Purpose |
-|---|---|---|
-| `spec.md` | Planner | Goals, scope, acceptance criteria, and verification contract |
-| `executor-report.md` | Executor | Files changed, claims, defects, and observed command results |
-| `audit.md` | Controller | Mechanical comparison of the report, spec, index, and real diff |
-| `state.json` | Controller | One task-local lifecycle record |
-| `history-review.md` | Controller, then planner | Explicit Context/Lesson disposition after semantic review |
+Give `spec.md` to the implementation agent. The executor may change only the
+approved product files and must write `executor-report.md`. It must not edit
+`state.json`, `audit.md`, or controller-owned history files.
 
-`verify-spec` is read-only. `run-task --pre-only` is intentionally later: it
-records that the contract was approved and captures the git baseline. After
-that transition, hand `spec.md` to the implementation agent in any coding
-client. The executor must write `executor-report.md`; it must not update
-`state.json`. Then run:
+### 3. Audit the real diff
 
 ```bash
 mastermind run-task .mastermind/tasks/001-add-account-recovery/spec.md --post-only
 ```
 
-Post-flight fails closed when the report is missing or malformed. A `held`
-verdict writes `audit.md`, marks the task complete, writes release notes under
-`.mastermind/releases/`, and creates a pending `history-review.md` without
-inventing a decision or lesson.
-`drift` or `broken` keeps the task blocked for planner review. A completed task
-is idempotent unless `--post-only` explicitly requests another audit.
+Post-flight compares the approved spec, executor claims, current index, and Git
+diff. Uncommitted and untracked files count because this gate normally runs
+before commit.
 
-Mechanical `drift` and `broken` findings create a lesson `candidate` with
-provenance and evidence — **one per task**, keyed on the task alone. A later
-failure on the same task refreshes that entry to the newest observation and
-raises its `Occurrences` count rather than filing a sibling, so an
-iterate-until-green loop leaves one reviewable record instead of a pile of
-near-identical ones. It becomes reusable guidance only after semantic review
-supplies the actual lesson and changes its status to `active`, `resolved`, or
-`superseded`; once reviewed, later mechanical noise never rewrites it. A successful task may still produce a
-durable lesson; a failed audit does not automatically prove one.
+| Verdict | Meaning | Next action |
+|---|---|---|
+| `held` | Mechanical contract is satisfied | Perform semantic review and delivery gates |
+| `drift` | Work differs from the approved contract | Planner reviews and updates or rejects the drift |
+| `broken` | Required evidence or behavior is missing | Executor fixes the change before another audit |
 
-`run-task --exec` is a legacy convenience that shells out to `claude -p`.
-Normal handoff plus `--post-only` is client-neutral and works with Claude Code,
-Codex, Cursor, Continue, or another client.
+Post-flight fails closed when the executor report is absent or malformed.
 
-## Strict workflow
+## Strict
 
 ```bash
 mastermind new-spec "Rotate signing keys" --mode strict
 ```
 
-Strict mode uses the same controller and artifacts, but adds only material
-risk controls: alternatives, evidence ledger, rollback/migration, a design
-critic, and a read-only independent auditor. Security review is required when
-the change crosses auth, secrets, permissions, agent/tool boundaries, or the
-supply chain.
+Strict uses the same state machine and adds the evidence that high-risk work
+needs: explicit alternatives, threat/failure cases, rollback or migration,
+design criticism, and independent review. A security review is required when
+the change crosses authentication, authorization, secrets, tool permissions,
+agent delegation, or the supply chain.
 
-## Review the comment delta
+Strict is not a larger template for ordinary work. If no material failure mode
+or difficult rollback exists, Verified is the clearer contract.
 
-Comment discipline is asked of the implementation agent, but an agent optimizing
-for acceptance criteria drops it first, and the mechanical contract cannot see
-it: post-flight proves that a file changed, not that the change stopped
-narrating itself. So the rule is verified by a reader.
+## Task artifacts and ownership
 
-`mastermind-comment-audit` (skill, portable) and `mastermind-comment-auditor`
-(Claude subagent) review only the comments a change added, modified, or deleted.
-They are read-only: findings carry the comment verbatim, the code line that
-already says it, and what would be lost — and the report names what it kept, so
-a reviewer that flags nothing is reporting a clean result rather than failing.
-Deleted rationale is reported too; a rename that takes a non-obvious `why` with
-it is a regression no write-time rule catches.
+Each canonical task lives under `.mastermind/tasks/<NNN>-<slug>/`.
 
-Two entry points, because Direct work has no controller:
+| Artifact | Writer | Contract |
+|---|---|---|
+| `spec.md` | Planner | Goal, scope, acceptance criteria, verification, mode-specific risk evidence |
+| `executor-report.md` | Executor | Changed files, observed checks, claims, defects, and gaps |
+| `audit.md` | Controller | Mechanical comparison of spec, report, index, and diff |
+| `state.json` | Controller | One task-local lifecycle record |
+| `history-review.md` | Controller, then planner | Explicit Context and Lesson disposition after semantic review |
 
-- **Verified and strict:** after `run-task --post-only`, as input to semantic
-  review. Post-flight prints the reminder with the recorded baseline on `held`
-  and `drift`, and withholds it on `broken` — the executor still has to iterate,
-  so that comment delta is not the one a reviewer would judge.
-- **Direct:** invoke it against the branch point once the change is finished.
-  This is the only review Direct work gets.
+A held audit may also write a release-note candidate under
+`.mastermind/releases/`. Markdown remains the durable source of truth;
+`state.json` and the SQLite history index are coordination/retrieval layers.
 
-A comment audit produces no `held` / `drift` / `broken` verdict and never
-substitutes for the contract audit.
+## What the gates prove
 
-## Review a UI change
+Pre-flight checks:
 
-The codegraph indexes React components (including arrow and `memo`/`forwardRef`
-forms) and Vue single-file components, and treats `<Button />` and
-`<base-button />` as call edges. That makes two frontend questions structural
-rather than a matter of opinion: does this component already exist and who
-renders it, and did a props contract change without its callers.
+- mandatory sections and mode requirements;
+- referenced files and indexed symbols;
+- pre-edit caller-count snapshots;
+- literal FIND blocks when supplied;
+- declared verification commands.
 
-`mastermind-component-research` answers them before the change is written —
-reinvention is the most expensive frontend mistake, and it is invisible in a
-diff. `mastermind-frontend-audit` (skill) and `mastermind-frontend-auditor`
-(Claude subagent) check the finished change: a component nothing renders, a
-required prop added while callers stay on the old contract, a duplicate of an
-existing component, and a raw value shadowing a design token.
+Post-flight checks:
 
-Neither judges whether the result looks right. That half is handled by naming
-it instead of pretending to check it.
+- actual changed files against approved scope;
+- required report shape and executed-command claims;
+- planned tests and zero-test/vacuous claims;
+- symbol removal or signature drift;
+- index and snapshot consistency.
 
-`mastermind-design-intake` converts a handoff into a contract that can fail:
-the design source is recorded, mapped components are confirmed against the
-repository, and acceptance criteria carry token names rather than resolved
-values. An element missing from a design tool's code mapping is not evidence the
-component is missing from the codebase — coverage is partial, and assuming
-otherwise is how a fourth `Button` gets written. Whatever stays a visual
-judgement is parked in its own section rather than smuggled into criteria a
-mechanical gate would wave through.
+They do not prove runtime behavior, product quality, visual correctness,
+security, or architectural soundness. Those require tests and human/domain
+review.
 
-`mastermind-browser-verification` decides what a browser check leaves behind.
-The accessibility tree is evidence because it is text that can be quoted and
-compared; a screenshot is for a human to look at. Console errors and failed
-requests are mechanical failures. Viewports and colour scheme are a recorded
-checklist, and an item that was not checked is written as not checked — an
-omitted line reads as a pass.
+## Optional review disciplines
 
-## Review whether the tests prove the change
+Load a discipline because the changed paths or risk require it, not because a
+large checklist looks thorough.
 
-A green suite proves the assertions present passed. It does not prove the change
-is covered, and it does not prove those assertions were checking what changed —
-different claims, and only the first runs automatically.
+| Need | Before implementation | After implementation |
+|---|---|---|
+| Unknown code structure | `mastermind-codegraph-research` | — |
+| Service/state/retry boundary | `mastermind-runtime-research` | `mastermind-architecture-review` |
+| UI component reuse and callers | `mastermind-component-research` | `mastermind-frontend-audit` + browser verification |
+| Test relevance | `mastermind-test-impact` | `mastermind-test-audit` |
+| Security/tool boundary | `mastermind-security-research` | `mastermind-agent-security-review` |
+| Changed comments | — | `mastermind-comment-audit` |
+| Product prose to task contract | `mastermind-product-intake` | — |
 
-The controller already establishes part of this: `vacuous_test_claim` means a
-verification command provably ran zero tests, and `missing_test` means a planned
-test is absent. `mastermind-test-audit` (skill) and `mastermind-test-auditor`
-(Claude subagent) cover what it cannot. `mmcg_test_impact` classifies candidates
-as `direct`, `transitive`, or `heuristic`, and the classification is the point:
-a `heuristic` candidate is a filename that matched, not evidence the code ran.
-A changed symbol with no `direct` candidate is uncovered behaviour.
+The installed [skill catalog](../skills/README.md) defines each contract. These
+reviews are read-only and do not replace the controller audit.
 
-Two findings need reading rather than a query. A test can be green, on-topic,
-and still exercise a wrapper or a retired entry point the real caller no longer
-uses — that is a pass about a path nobody runs. And an assertion edited in the
-same diff as the implementation it checks has stopped being an independent check;
-sometimes the contract genuinely moved, sometimes that is how a regression ships
-green, and the review reports the pair rather than deciding silently.
+## History and lessons
 
-Coverage is still not correctness. A `direct` test proves the code ran, not that
-the expected value is right, and flakiness and ordering are invisible here.
+Mechanical drift may create one lesson candidate per task. A candidate records
+the observed failure; it is not reusable guidance until semantic review writes
+the actual lesson and changes its status. Repeated failures refresh the same
+candidate instead of creating duplicates.
 
-## Research a service change before designing it
+After a held audit, review `history-review.md` and mark Context and Lesson as
+`updated` or `not applicable` with a concrete reason. This prevents a successful
+diff from silently becoming an invented architectural decision.
 
-`mastermind-architecture-review` reconstructs the runtime path and judges the
-design. `mastermind-runtime-research` runs first and answers something narrower:
-who already depends on what is about to change, who writes the state it touches,
-and which boundaries it crosses.
+## Client model
 
-Its most important output is the gap list. The graph is syntactic, so a queue
-producer and its consumer are two static islands with no edge between them, a
-framework-registered handler has no caller, and a DI-resolved implementation is
-reached by a name the source never spells. `mmcg_callers` returning nothing on a
-handler means no static caller was found — not that nothing calls it. An
-architecture review built on "the graph showed no other callers", without the
-list of what the graph could not see, is confident about a question nobody asked.
+Planning, implementation, and post-flight are client-neutral. Claude Code and
+Codex can install the complete workflow bundle. Cursor, Continue, and generic
+MCP clients receive the graph tools but do not have a Mastermind-owned native
+workflow-extension format.
 
-`mmcg_api_surface` carries the other half: it reports the symbols under a prefix
-that the rest of the codebase actually reaches, independent of what is declared
-public. A module can export twenty symbols and have three real consumers. Those
-three are the contract a change has to keep working.
+`run-task --exec` is a legacy Claude CLI convenience. The portable path is an
+explicit handoff followed by `--post-only`.
 
-## Convert product writing into a contract
+## Related documentation
 
-A PRD is written to decide whether to build something; a task contract is
-written to check whether it was built. `mastermind-product-intake` converts the
-first into the second by sorting every statement into behaviour, constraint, and
-outcome.
-
-Only behaviour becomes acceptance criteria. A constraint qualifies once its
-measurement is named — unmeasured, it reads like rigour and checks nothing. An
-outcome never qualifies: "reduce support tickets by 30%" cannot fail on the day
-the change lands, and leaving it in the contract means a mechanical gate marks
-it satisfied while nobody has measured anything. Outcomes get their own section
-with the metric, the instrument, and who reads it.
-
-The intake also resolves product nouns to symbols — a feature that reads as new
-is usually mostly existing surface — and surfaces the cases the document never
-mentions: in-flight items, the empty state, partial failure, who is allowed.
-Answering those silently is how an executor's invention ships under a held
-audit.
-
-It does not write the PRD or validate the product assumption. There is no
-repository fact against which "users want this" can be checked, and this
-workflow does not pretend otherwise.
-
-## What the checks prove
-
-Pre-flight checks required sections, referenced paths, indexed symbols,
-snapshot drift, literal FIND blocks when present, and verification commands.
-Post-flight checks changed-file scope, removed or changed symbols, snapshot
-drift, planned tests, and executor claims.
-
-The graph is syntactic and bounded. Dynamic dispatch, reflection, re-exports,
-overloads, and cross-language calls can reduce precision. A held mechanical
-contract therefore still needs a short semantic check: did the implementation
-solve the original request, and do the tests demonstrate the acceptance
-criteria?
-
-## Client capabilities
-
-`mastermind install --client all` installs portable skills for Claude Code and
-Codex, plus spawnable subagent definitions for Claude Code. Codex receives the
-same workflow guidance as skills, but not Claude's native subagent runtime.
-Cursor and Continue use Mastermind through MCP; they do not receive a claimed
-native workflow bundle.
-
-Verify installed ownership and content hashes with:
-
-```bash
-mastermind doctor --workflow --client all
-```
-
-For signed, policy-bound CI evidence, see [Verifiable audits and GitHub
-Action](github-action.md).
+- [Getting started](getting-started.md)
+- [CLI and MCP reference](reference/mmcg.md)
+- [Verifiable GitHub Action](github-action.md)
+- [Contributing](../CONTRIBUTING.md)

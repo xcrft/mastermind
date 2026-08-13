@@ -1,16 +1,23 @@
 # Local team graph
 
-Mastermind can federate several existing local indexes into one bounded,
-read-only architecture view. It does not copy repositories into a central
-database and it does not infer cross-repository calls. Each repository remains
-independently indexed; the team manifest declares the relationships that are
-known outside source-level static analysis.
+A team graph combines several existing local indexes into one bounded,
+read-only architecture view. Each repository stays independently indexed.
+Mastermind neither copies repositories into a central database nor infers
+cross-repository calls; the manifest declares those relationships.
 
 The public v1 schema is
 [`schemas/mastermind-team-v1.schema.json`](../schemas/mastermind-team-v1.schema.json),
 with API identifier `mastermind-team/v1`.
 
-## Lock and query
+## Prerequisites
+
+Each member repository must have:
+
+- a clean, current Git revision;
+- a fresh `.mastermind/mmcg.db` created by `mastermind index .`;
+- a stable local root and index path available to the querying process.
+
+## Define, lock, and query
 
 Create a draft manifest. Paths may be absolute or relative to the manifest.
 
@@ -48,7 +55,7 @@ mastermind team lock team.json --output team.lock.json
 mastermind team map team.lock.json > team-map.json
 ```
 
-`team lock` writes canonical roots/index paths plus the credential-free
+`team lock` writes canonical root and index paths plus the credential-free
 repository identity, exact Git revision, and a domain-separated digest of the
 SQLite database and active WAL bytes. Its JSON result also prints the exact
 `manifest_sha256` value to use as `MMCG_TEAM_MANIFEST_SHA256`. `team map`
@@ -97,6 +104,5 @@ declared edge is evidence supplied by the manifest owner, not compiler- or
 runtime-resolved proof. Keep the lock file under normal code-review ownership
 and regenerate it whenever a member repository or its index changes.
 
-This is the local-first foundation for a future shared/team service. It does
-not yet provide remote repository discovery, distributed locking, access
-control, or a hosted graph.
+Version 1 does not provide remote repository discovery, distributed locking,
+access control, or a hosted graph.

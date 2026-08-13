@@ -1,6 +1,8 @@
 # Generic MCP client integration
 
-`mastermind serve` is a standard [MCP](https://modelcontextprotocol.io) stdio server. Any MCP-capable client can connect to it.
+`mastermind serve` is an [MCP](https://modelcontextprotocol.io) stdio server.
+Use this guide when a client is not covered by the dedicated Claude Code,
+Codex, Cursor, or Continue setup commands.
 
 ## Server spec
 
@@ -9,27 +11,28 @@
 | transport | stdio |
 | command | `mastermind serve` |
 | protocol | MCP 2025-11-25; legacy 2024-11-05 |
-| tools | 27: 26 read-only, 1 additive local write (see below) |
+| tools | 28: 27 read-only, 1 additive local write (see below) |
 | resources | none |
 | prompts | none |
 
-Current clients receive behavior annotations and structured results after the initialized notification; legacy clients retain content-only results. Input frames are limited to 1 MiB and serialized result payloads to 8 MiB.
+Current clients receive behavior annotations and structured results after the
+initialized notification; legacy clients retain content-only results. Input
+frames are limited to 1 MiB and serialized result payloads to 8 MiB.
 
-## Safe setup
+## Preview and apply
 
-```text
-mastermind setup <claude|cursor|codex|continue|generic> \
-  --scope <project|user> [--root .] [--config PATH] [--write] [--remove] [--force]
-```
-
-Generic setup always requires an explicit JSON path:
+Generic setup requires an explicit JSON path:
 
 ```bash
 mastermind setup generic --scope project --config ./mcp.json        # dry-run
 mastermind setup generic --scope project --config ./mcp.json --write
 ```
 
-The command preserves unrelated root fields and MCP servers. Customized replacement or removal requires `--force`; `--force` never implies `--write`, and old bytes are backed up privately under `~/.mastermind/setup-backups/` before a forced mutation. `mastermind doctor` treats configuration as bounded data and never executes a configured command.
+The command preserves unrelated root fields and MCP servers. Customized
+replacement or removal requires `--force`; `--force` never implies `--write`.
+Before a forced mutation, Mastermind stores previous bytes under
+`~/.mastermind/setup-backups/`. `mastermind doctor` treats configuration as
+bounded data and does not execute a configured command.
 
 ## Config snippet
 
@@ -68,7 +71,7 @@ The `--index` flag is global and must come before `serve`.
 - Relationships and architecture: `mmcg_callers`, `mmcg_callees`,
   `mmcg_imports`, `mmcg_imported_by`, `mmcg_impact`, `mmcg_api_surface`,
   `mmcg_centrality`, `mmcg_dependency_cycles`, `mmcg_unreferenced`,
-  `mmcg_semantic`, `mmcg_facts`, `mmcg_map`, `mmcg_temporal`.
+  `mmcg_semantic`, `mmcg_facts`, `mmcg_team_map`, `mmcg_map`, `mmcg_temporal`.
 - Change analysis: `mmcg_symbols_changed_since`, `mmcg_change_class`,
   `mmcg_change_impact`, `mmcg_test_impact`, `mmcg_recent_changes`.
 - Workflow state: `mmcg_tasks`, `mmcg_history`, `mmcg_status`, `mmcg_scratchpad_read`, and the
@@ -78,7 +81,7 @@ The standard MCP `tools/list` response is the schema source of truth. See the
 [technical reference](../reference/mmcg.md#mcp-tools) for arguments, limits,
 and precision caveats.
 
-## Starting the server manually
+## Start the server manually
 
 ```bash
 mastermind serve

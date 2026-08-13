@@ -1,10 +1,33 @@
 # mmcg — Mastermind Codegraph
 
-This is the exhaustive technical reference for the mmcg engine. For the shortest path to a working installation, start with [Getting started](../getting-started.md); for the product overview, return to the [Mastermind README](../../README.md).
+This is the exhaustive contract for the `mmcg` engine. Start with
+[Getting started](../getting-started.md) for installation or the
+[project README](../../README.md) for the product overview.
 
-A small Rust binary that builds a structural index of a codebase (Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, C/C++). It serves the graph over **MCP** (26 read-only tools plus one additive local scratchpad write), but MCP is only one surface. The same binary provides spec gates (`verify-spec` / `audit-spec`), project setup (`init` / `doctor`), and the user-global style miner.
+`mmcg` is a Rust binary that builds a local structural index for Python,
+TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, and C/C++.
+It exposes the same indexed state through CLI, Lens, and MCP. The MCP surface
+contains 28 tools: 27 read-only queries and one additive local scratchpad write.
+The binary also provides spec gates, client setup, evidence ingestion, review
+export, and style mining.
 
-> Installed via npm (`@xcraftmind/mastermind`)? The command is **`mastermind`** — the same binary. The `mmcg` name used throughout this doc is the cargo-installed alias (`cargo install mmcg`).
+> npm installs the command as both `mastermind` and `mmcg`. Cargo installs
+> `mmcg`. Examples below use `mmcg`; the command surface is identical.
+
+## Reference map
+
+| Need | Section |
+|---|---|
+| Supported syntax and known extraction gaps | [What it indexes](#what-it-indexes) |
+| Installation and commands | [Build from source](#build-from-source), [CLI usage](#cli-usage) |
+| Compiler-resolved enrichment | [SCIP semantic overlay](#optional-scip-semantic-overlay) |
+| External revision-bound evidence | [Fact-ingestion SDK](#declarative-fact-ingestion-sdk) |
+| Multi-repository local view | [Local team graph](#local-team-graph) |
+| Base-versus-head architecture | [Temporal graph](#temporal-graph-mmcg-temporal) |
+| Local review UI and portable evidence | [Lens](#mastermind-lens-mmcg-ui), [review package](#pr-evidence-package-mmcg-review-export) |
+| Architecture rules | [Policy as code](#architecture-policy-as-code-mmcg-policy-check) |
+| MCP protocol and tool schemas | [MCP server](#mcp-server-usage), [MCP tools](#mcp-tools) |
+| Bounds and precision caveats | [Work budgets](#work-budgets-timeouts-and-cancellation), [limitations](#limitations) |
 
 ## What it indexes
 
@@ -63,13 +86,20 @@ These directories are always skipped: `.git`, `.mastermind`, `.venv`, `venv`,
 `__pycache__`, `node_modules`, `target`, `dist`, `build`, `.tox`, `.pytest_cache`,
 `.mypy_cache`, `.ruff_cache`, `.next`, `.turbo`, `.cache`.
 
-## Why a custom indexer
+## Design scope
 
-The Mastermind workflow needs structural queries every few seconds (planner deciding blast radius, executor checking callers before edits). Grep/Read each costs hundreds of tokens; mmcg returns the same info in dozens. Multiplied across a workflow run, the difference is between affordable and not.
+The default index is intentionally smaller than a compiler database. It uses
+Tree-sitter so a mixed-language repository can be indexed locally without
+installing each language toolchain. SQLite gives CLI, MCP, and Lens a shared
+bounded query surface instead of repeatedly rescanning source text.
 
-mmcg is intentionally narrow:
-- Supports Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, and C/C++ — extend by adding a parser, not by depending on multi-language toolchains
-- 27 MCP tools: 26 read-only structural/semantic/evidence tools plus `mmcg_scratchpad_append`, which makes an additive write to the gitignored local index
+- Ten language families share one source-discovery and storage contract.
+- Optional SCIP facts add compiler-resolved evidence without replacing the
+  syntactic graph.
+- External producers submit validated facts; they cannot execute inside the
+  process or write SQLite.
+- MCP exposes 28 bounded tools: 27 read-only queries and the additive,
+  gitignored `mmcg_scratchpad_append` write.
 
 ## Performance model
 
@@ -84,7 +114,9 @@ is incremental. Use `mmcg index . --force` for a cold parse measurement and
 record the emitted file/symbol/edge counts with the timing; do not compare a
 cold run with an incremental no-op. Maintainers can run `just benchmark-index`
 for a reproducible synthetic cold/warm/incremental report including peak process
-RSS. It is an evidence tool, not a machine-independent CI threshold.
+RSS. See [Indexing benchmarks](../benchmarks.md) for current measurements,
+parameters, ranges, and limitations. The benchmark is a regression aid, not a
+machine-independent CI threshold.
 
 ## Build from source
 
@@ -891,25 +923,79 @@ subprocess never reaches it. The watchdog is what covers those paths.
   and possibly inaccurate", never just "more available"; narrow with
   `language` and retry.
 
-## Limitations (honest)
+## Limitations
 
-- **Ten language families.** Python (`.py`, `.pyi`), TS/TSX (`.ts`, `.tsx`), JS/JSX (`.js`, `.jsx`, `.mjs`, `.cjs`), Vue SFC (`.vue`), Rust (`.rs`), C# (`.cs`), Go (`.go`), Java (`.java`), PHP (`.php`, `.phtml`), C/C++ (`.c`, `.cc`, `.cpp`, `.cxx`, `.h`, `.hpp`, `.hh`, `.hxx`, `.ipp`, `.tpp`). Extension matching is case-insensitive. Other extensions are skipped and appear in the bounded diagnostics sample.
-- **Call resolution is name-based, not type-based.** `obj.foo()` records a call to "foo" with literal path "obj.foo" — but `obj` isn't resolved to a type, so cross-file precision is best-effort.
-- **No cross-file symbol resolution.** Edges store `to_name` and `to_path` (strings), not `to_id`. Searching "callers of foo" finds *every* call to "foo" anywhere — even unrelated ones in different modules. The `to_path` column reduces ambiguity for imports specifically (use `mmcg_imported_by` with `match: path`).
-- **Default path-based queries reflect literal source text, not semantic FQN.** When you index code with `use foo::bar::Baz` and `mmcg_imported_by --query "foo::bar::Baz" --match path` you'll get that file. But if another file imports the same type via `use crate::Baz` (re-exported), it stores `to_path = "crate::Baz"` and won't match the FQN query. **Use `match: name` for "find all syntactic consumers"**; reserve `match: path` for "find this exact import spelling". When the language's SCIP producer resolves the re-export, import its artifact and use `mmcg_semantic` for the compiler identity; this does not rewrite the literal Tree-sitter import edge.
-- **`to_type` for member-call detection uses a capital-letter heuristic in TS/JS/Python.** `Class.method()`, `JSON.parse()`, `Foo.bar.baz()` correctly emit `to_type = "Class"` / `"JSON"` / `"Foo"` (rightmost capitalized receiver). For Rust, `to_type` is unambiguous via the `scoped_identifier` AST node — no heuristic needed. The heuristic misses calls on uppercase-named variables (e.g. `const FOO = new Bar(); FOO.method()` won't emit `to_type=FOO`) but matches the common convention used in idiomatic JS/TS/Python code.
-- **JSX component usage is resolved by the uppercase-tag convention.** `<Button />` and `<Select.Option />` emit `calls` edges from the containing component; `<div>` and `<section>` do not, because a syntactic parser cannot otherwise tell a component from a host element. A component deliberately named in lowercase is invisible, and a capitalized host element in a custom renderer would be counted. `mmcg_callers` on a component therefore answers "who renders this", which is the frontend equivalent of "who calls this".
-- **Variable-declared functions are named after their binding.** `const Card = () => …`, `const Card = function () {…}`, and one level of wrapper call (`memo(…)`, `forwardRef(…)`, `styled(…)`) become `function` symbols named `Card`, with the inner parameters as the signature so a changed props contract still reports as `signature_changed`. Wrapper unwrapping stops at one level: `memo(forwardRef(() => …))` finds no inner function and produces no symbol. A non-function value that merely receives a callback (`const x = compute(() => 1)`) is captured as a function symbol — a known over-capture of the same heuristic.
-- **A Vue SFC is indexed as one component named after its file.** `MyCard.vue` defines `MyCard` (kind `component`), owning every symbol from its `<script>` block with `.vue`-absolute line numbers — the script is re-parsed with the real TypeScript or JavaScript grammar, chosen by `lang`, so it is not a weaker approximation. Template usage emits `calls` edges from the component. Both `<my-widget />` and `<MyWidget />` normalize to `MyWidget`, matching Vue's own resolution, so a search for the kebab spelling finds nothing. What stays invisible: expressions inside template attributes, and components auto-imported by build tooling rather than by an `import` statement.
-- **`disciplines` classifies only what a path can establish.** `mmcg_change_impact` reports `frontend` for component and stylesheet file types (`.tsx`, `.jsx`, `.vue`, `.css`, `.scss`, `.sass`, `.less`), `qa` for the same test-file naming convention the test projection already uses, and `migration` for a `.sql` file or a path component named `migrations`, `migration`, or `migrate` — which covers the Django, Rails, Prisma, and Flyway layouts without guessing at a repository that keeps them elsewhere. A detected `migration` is a strict-mode trigger, not a statement about whether the migration is destructive. A file can belong to both. Everything else is returned under `unclassified` rather than guessed — a queue consumer, a migration, or an auth boundary in a plain `.ts` file has no path-level signal, and inventing one would be a confident answer without evidence. The block proposes an evidence set for routing; it is not a statement about what the change does.
-- **Watcher doesn't index brand-new directories deeply on the first event.** If you `mkdir -p foo/bar/baz` and add files inside, the watcher catches each file event individually. No special handling — just slower for big batch additions.
-- **Schema migration rebuilds derived graph tables.** When mmcg's schema version changes (v1→v2, etc.), symbols/files/edges and task-spec search are dropped on open; repository identity, project-history search, and scratchpad entries are retained so an in-place `mmcg index .` can safely repopulate the graph.
-- **`mmcg_unreferenced` filters known framework patterns since 0.7.0.** The query excludes symbols decorated with pytest fixtures / parametrize / mark, web-framework route decorators (`.route` / `.get` / `.post` / `.put` / `.delete` / `.patch` / `.websocket`), JIT decorators (`triton.jit` / `numba.jit` / `nb.njit`), task queues (`celery.task` / `shared_task`), CLI (`click.command` / `click.group`), Rust attributes (`#[test]`, `#[tokio::main]`, `#[async_std::test]`), C# test/web/benchmark attributes (xUnit `[Fact]`/`[Theory]`, NUnit `[Test]`/`[SetUp]`, MSTest `[TestMethod]`, ASP.NET `[HttpGet]`/`[HttpPost]`/`[Route]`, BenchmarkDotNet `[Benchmark]`), and (since 0.9.0) Java/PHP frameworks: JUnit `@Test`/`@ParameterizedTest`/`@BeforeEach`, Spring `@GetMapping`/`@PostMapping`/`@Bean`/`@Scheduled`, PHPUnit `#[Test]`/`#[DataProvider]`, Symfony `#[Route]`/`#[AsCommand]`, Livewire `#[On]`. Also filters `test_*` functions in `*test*` / `*spec*` paths (pytest convention). Remaining false-positive classes that mmcg can't see: (a) entry points like `main` or framework-registered handlers without a recognized decorator; (b) dynamic dispatch — trait objects, duck-typed calls, JS reflection; (c) cross-language calls (TS subprocess invoking Python); (d) runtime registration via dict / list (`HANDLERS = {"foo": foo}`); (e) gtest-style C++ macro tests (`TEST(Suite, Name)` — macros invisible to tree-sitter); (f) Go test functions (`TestXxx(*testing.T)` convention — `testing` import is the closest signal, but we don't filter on imports). Review every hit manually before deleting. The tool is "candidates to investigate", not "safe to delete".
-- **`mmcg_api_surface` is empirical, not declared.** It returns symbols that are *currently* called from outside the prefix — independent of language-level visibility (`pub`/`export`/no-underscore). A symbol declared `pub` with no external callers won't appear; a private symbol leaked through a public re-export and called externally will. Useful for "what does the rest of the codebase actually rely on?", not for "what's the public API contract?".
-- **`mmcg_recent_changes` reflects index mtime, not git history.** If you re-index after rewriting history (rebase, amend, force-push) every touched file appears as "recent". Use `git log --since=...` for git truth; use this tool for "what has my watcher seen lately".
-- **C# partial classes** are stored as one symbol per file under an indexed namespace parent. `mmcg_search` collapses declarations only when name, kind, and namespace identity all match, returning a `locations` array; set `collapse_partials: false` to opt out. Legacy/malformed rows without namespace identity remain separate rather than risk merging unrelated types. `mmcg_callers` / `mmcg_callees` / `mmcg_impact` / `mmcg_outline` are unaffected: they resolve by name. Non-partial classes with colliding names across namespaces are *not* collapsed.
-- **Python module-level constants** (`MAX_RETRIES = 5`, `__all__ = [...]`, `HOST, PORT = ...`) are captured as `kind="constant"` since 0.14.0. Scoping is strict — only DIRECT children of the module node count; assignments inside `if` / `for` / `try` / class bodies / function bodies are not constants. `mmcg_unreferenced` **excludes constants by default** because the call/import graph doesn't track value-reads — every constant would otherwise appear as dead. Opt-in with `kind=constant` to surface unused constants explicitly. `mmcg_callers MAX_RETRIES` still works for the cases where a constant is referenced via `import` (`from foo import MAX_RETRIES` produces an `imports` edge) or attribute access (`foo.MAX_RETRIES` produces a `calls` edge to leaf `MAX_RETRIES`). Other languages: not extracted (TS/Rust/Go/etc. constants are typed declarations through different AST shapes — file a request if you need them).
-- **C/C++ Tree-sitter is best-effort.** The default C/C++ extractor has no preprocessor, template instantiation, or semantic analysis. Concretely: (a) **macros are invisible** — `TEST(Suite, Name) { ... }` is seen as a call to `TEST`, not as a function definition, so gtest/Catch2 test bodies don't appear in `mmcg_search` and calls inside macro arguments may be lost; (b) **templates** record the template name but not instantiations (`vector<int>` doesn't create a `vector<int>` symbol); (c) **header/source split** produces two symbol rows (`void Foo::bar()` declared in `.h` and defined in `.cpp` = two `bar` hits); (d) **ADL/overload resolution** isn't performed (`swap(a, b)` records `swap` without knowing which namespace it resolves to); (e) **`#include` file resolution** tries exact repository-relative, source-relative, then deterministic suffix matches for map/cycle edges. It can over-approximate when several headers share a basename and it does not parse the included contents. A `scip-clang` artifact imported through `mmcg enrich --scip` can add compiler-resolved identities and references, while the syntactic graph remains the fallback. mmcg uses one `tree-sitter-cpp` grammar for both `.c` and `.cpp` files — rare C-only code that uses C++ keywords as identifiers (e.g. a variable named `new`) may mis-parse.
+### Language and extraction coverage
+
+- Supported extensions are listed in [Language coverage](#language-coverage).
+  Matching is case-insensitive. Other extensions are skipped and reported in a
+  bounded diagnostics sample.
+- A Vue SFC becomes one component named after the file. Its script uses the
+  TypeScript or JavaScript grammar and retains `.vue`-absolute lines. Template
+  tags emit calls, but template expressions and build-tool auto-imports do not.
+  Kebab-case and PascalCase tags normalize to PascalCase.
+- Python module constants are direct module-child assignments only. Assignments
+  inside control flow, classes, or functions are not constants. Constants are
+  excluded from `mmcg_unreferenced` by default because value reads are not a
+  general edge type; request `kind=constant` explicitly.
+- C/C++ parsing has no preprocessor, template instantiation, ADL, or overload
+  resolution. Macros such as `TEST(Suite, Name)` are calls, not definitions.
+  Header declarations and source definitions remain separate rows. Include
+  resolution tries exact repository-relative, source-relative, then
+  deterministic suffix matches and may over-approximate duplicate basenames.
+  One `tree-sitter-cpp` grammar handles C and C++; unusual C identifiers that
+  are C++ keywords can mis-parse. SCIP can add resolved evidence separately.
+
+### Symbol and edge identity
+
+- Calls resolve by name, not receiver type. `obj.foo()` records `to_name=foo`
+  and literal `to_path=obj.foo`; it does not establish the type of `obj`.
+- Default edges store `to_name` and `to_path`, not a resolved cross-file
+  `to_id`. A callers query can therefore combine unrelated same-name symbols.
+- Import `match: path` compares literal source spelling. A re-exported
+  `crate::Baz` does not match `foo::bar::Baz`. Use `match: name` for broad
+  syntactic consumers or a SCIP overlay for compiler identity.
+- TS, JS, and Python member calls use the rightmost capitalized receiver as
+  `to_type`. Rust scoped identifiers do not need this heuristic. Uppercase
+  variable names can produce false type hints.
+- JSX calls follow the uppercase component convention. `<Button />` is a call;
+  `<div>` is not. Lowercase custom components are missed and capitalized host
+  elements in custom renderers can be counted.
+- Variable-declared functions use their binding name. One wrapper layer such as
+  `memo(...)`, `forwardRef(...)`, or `styled(...)` is unwrapped. Nested wrappers
+  can be missed; a non-function assignment that receives a callback can be
+  over-captured.
+- C# partial declarations collapse only when name, kind, and full namespace
+  identity match. Legacy rows without namespace identity stay separate.
+  Callers, callees, impact, and outline remain name-based.
+
+### Heuristic query semantics
+
+- `disciplines` derives only path-level signals. Frontend extensions, test
+  naming, and migration paths can trigger a discipline; everything else is
+  `unclassified`. A migration signal indicates review depth, not destructive
+  behavior.
+- `mmcg_api_surface` is empirical: it returns symbols currently referenced from
+  outside a prefix, regardless of declared visibility. It is not a language
+  public-API declaration query.
+- `mmcg_recent_changes` reports index timestamps, not Git history. After a
+  rebase or forced re-index, use `git log --since=...` for Git truth.
+- `mmcg_unreferenced` suppresses recognized framework entry points:
+  pytest fixtures/marks, common web routes, JIT/task/CLI decorators, Rust test
+  attributes, C# test/web/benchmark attributes, JUnit/Spring annotations, and
+  PHPUnit/Symfony/Livewire attributes. It also filters `test_*` functions in
+  test/spec paths. It cannot reliably see undecorated entry points, dynamic
+  dispatch, cross-language calls, runtime registries, C++ macro tests, or Go's
+  `TestXxx` convention. Treat every result as a candidate to inspect, never as
+  authorization to delete code.
+
+### Operational behavior
+
+- A watcher observes files created inside a new deep directory individually;
+  it does not rescan the entire new subtree as one special event.
+- A schema-version change rebuilds derived graph and task-search tables.
+  Repository identity, project-history search, and scratchpad entries are
+  retained so `mmcg index .` can repopulate the graph in place.
 
 ## CI
 

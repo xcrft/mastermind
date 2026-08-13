@@ -1,6 +1,19 @@
 # Scripts
 
-Repo-level scripts, each documented at the top of its source.
+Repository validation, packaging, release, and smoke-test scripts. Run scripts
+from the repository root unless a section says otherwise.
+
+## Common entry points
+
+| Goal | Command |
+|---|---|
+| Full deterministic gate | `just check` |
+| Repository contracts only | `just validate` |
+| Native npm tarball smoke | `just npm-smoke-native` |
+| Index benchmark | `just benchmark-index` |
+
+The `just` recipes are the canonical developer interface. Call an individual
+script directly when diagnosing that script.
 
 ## `validate.py` — repository contract validator
 
@@ -19,7 +32,7 @@ npm, or model-backed test suites. CI executes it on every change.
 - npm package/version/platform shape, README badge alignment, and workflow-bundle staging parity;
 - answer-leak clues in adversarial eval fixture source trees.
 
-### Run locally
+### Run directly
 
 ```bash
 # One-time setup
@@ -30,7 +43,8 @@ python3 -m venv .venv
 .venv/bin/python scripts/validate.py
 ```
 
-Exit code is `0` on clean, `1` if any errors. Warnings don't fail the run.
+Exit code is `0` on clean and `1` when errors exist. Warnings do not fail the
+run.
 
 ### Boundaries
 
@@ -100,5 +114,5 @@ registries, not the workspace build:
   and `review` command surfaces.
 
 Both scripts retry registry propagation for a bounded period and fail the
-release workflow if the published version cannot be installed or exercised.
-They are release gates only: local validation never publishes a package.
+release workflow if the public version cannot be installed or exercised. They
+are release gates only; local validation never publishes a package.

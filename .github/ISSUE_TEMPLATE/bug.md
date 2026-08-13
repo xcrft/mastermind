@@ -1,35 +1,38 @@
 ---
 name: Bug report
-about: An artifact doesn't work as documented
-title: "[bug] <artifact-path>: <short summary>"
+about: Report reproducible incorrect behavior
+title: "[bug] "
 labels: bug
 ---
 
-## Artifact
+## Summary
 
-Path: `<e.g., skills/code-review/pr-review/SKILL.md>`
+<!-- One sentence describing the incorrect behavior. -->
 
-## What you tried
+## Reproduction
 
-<What did you do? What prompt did you give? What was the setup?>
+```text
+# Minimal commands, configuration, or repository shape
+```
 
-## What you expected
+## Expected behavior
 
-<What should have happened, based on the artifact's description and docs?>
+<!-- What should happen? Link the relevant contract when possible. -->
 
-## What actually happened
+## Actual behavior
 
-<What did happen? Include error output, agent response, or unexpected behavior.>
+```text
+# Exact error, bounded log, or incorrect result
+```
 
 ## Environment
 
-- Tool: <Claude Code / claude.ai / API / other>
-- Model: <opus 4.7 / sonnet 4.6 / …>
-- OS: <macOS 15 / Ubuntu 24.04 / …>
-- Anything else relevant: <plugins, MCP servers, custom settings>
+- Mastermind version (`mastermind --version`):
+- Installation method: npm / Cargo / source / GitHub Action
+- Operating system and architecture:
+- Git version:
+- Client, if MCP-related:
 
-## Reproducible?
+## Additional evidence
 
-- [ ] Yes, every time
-- [ ] Yes, sometimes (flaky)
-- [ ] Saw it once
+<!-- Minimal fixture, redacted manifest, screenshot, or trace. Do not include secrets. -->

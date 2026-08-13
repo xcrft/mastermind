@@ -160,6 +160,27 @@ Lens also renders the same Temporal Graph response below the blast trace. A
 temporal failure is isolated and labelled instead of turning missing evidence
 into a clean architecture verdict; snapshot races still fail the whole refresh.
 
+### Export a PR evidence package
+
+```bash
+mastermind review export --since main --out mastermind-review
+```
+
+The command writes one autonomous `index.html`, a combined
+`mastermind.sarif`, a bounded `summary.md`, a strict `manifest.json`, and a
+ready-to-copy `mastermind-review.yml` GitHub Actions workflow. The HTML embeds
+the same Lens snapshot and runs offline under a hash-only CSP. The manifest
+records baseline/head OIDs, working-tree state, exact SHA-256 digests for every
+payload and external evidence input, plus every returned partial, truncated,
+or unavailable analysis state. Existing output paths are never overwritten.
+
+Use the same repeatable `--sarif`, `--coverage`, `--junit`, and `--otel`
+options as Lens. Exact artifact bytes are always bound to the exported head.
+For producer-to-revision binding, pass a strict v1 attestation with
+`--evidence-attestation`; digest and head mismatches fail the export. See the
+[review-package contract](docs/reference/mmcg.md#pr-evidence-package-mmcg-review-export)
+and [GitHub Actions example](docs/examples/mastermind-review-pr.yml).
+
 ### Understand change and test impact
 
 ```bash

@@ -16,6 +16,7 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::File;
@@ -23,9 +24,9 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
-const MAX_ARTIFACT_BYTES: u64 = 32 * 1024 * 1024;
-const MAX_CODEOWNERS_BYTES: u64 = 3 * 1024 * 1024;
-const MAX_ARTIFACT_SOURCES: usize = 64;
+pub(crate) const MAX_ARTIFACT_BYTES: u64 = 32 * 1024 * 1024;
+pub(crate) const MAX_CODEOWNERS_BYTES: u64 = 3 * 1024 * 1024;
+pub(crate) const MAX_ARTIFACT_SOURCES: usize = 64;
 const MAX_RELEVANT_FILES: usize = 1_000;
 const MAX_FINDINGS: usize = 5_000;
 const MAX_FINDINGS_PER_FILE: usize = 100;
@@ -94,6 +95,10 @@ pub struct EvidenceSource {
     pub facts_total: Option<u32>,
     pub facts_returned: u32,
     pub files_matched: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_bytes: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -320,6 +325,7 @@ struct Collector<'a> {
     runtime_edges_truncated: bool,
     knowledge_match_count: usize,
     deadline: Option<Instant>,
+    artifact_identities: HashMap<String, (String, u64)>,
 }
 
 #[derive(Default)]
@@ -459,6 +465,7 @@ fn collect_internal(
         runtime_edges_truncated: false,
         knowledge_match_count: 0,
         deadline,
+        artifact_identities: HashMap::new(),
     };
 
     if !options.sarif.is_empty()
@@ -675,6 +682,7 @@ impl Collector<'_> {
         failure: SourceFailure,
     ) {
         self.diagnostic(id.clone(), failure.code(), failure.message());
+        let artifact = self.artifact_identities.remove(&id);
         self.sources.push(EvidenceSource {
             id,
             kind,
@@ -683,11 +691,14 @@ impl Collector<'_> {
             facts_total: None,
             facts_returned: 0,
             files_matched: 0,
+            artifact_sha256: artifact.as_ref().map(|value| value.0.clone()),
+            artifact_bytes: artifact.map(|value| value.1),
         });
     }
 
     fn source_done(&mut self, id: String, kind: &'static str, label: String, stats: SourceStats) {
         self.partial |= stats.partial;
+        let artifact = self.artifact_identities.remove(&id);
         self.sources.push(EvidenceSource {
             id,
             kind,
@@ -696,7 +707,19 @@ impl Collector<'_> {
             facts_total: (!stats.partial).then(|| saturating_u32(stats.facts_total)),
             facts_returned: saturating_u32(stats.facts_returned),
             files_matched: saturating_u32(stats.files.len()),
+            artifact_sha256: artifact.as_ref().map(|value| value.0.clone()),
+            artifact_bytes: artifact.map(|value| value.1),
         });
+    }
+
+    fn register_artifact(&mut self, id: &str, input: &SourceInput) {
+        self.artifact_identities.insert(
+            id.to_string(),
+            (
+                crate::hex::encode(&Sha256::digest(&input.bytes)),
+                input.bytes.len() as u64,
+            ),
+        );
     }
 
     fn read_source(&self, path: &Path) -> Result<SourceInput, SourceFailure> {
@@ -897,6 +920,7 @@ impl Collector<'_> {
             Ok(input) => input,
             Err(error) => return self.source_error(id, "sarif", fallback, error),
         };
+        self.register_artifact(&id, &input);
         let label = input.label;
         let value: Value = match serde_json::from_slice(strip_utf8_bom(&input.bytes)) {
             Ok(value) => value,
@@ -1059,6 +1083,7 @@ impl Collector<'_> {
             Ok(input) => input,
             Err(error) => return self.source_error(id, "coverage", fallback, error),
         };
+        self.register_artifact(&id, &input);
         let label = input.label;
         let coverage_bytes = strip_utf8_bom(&input.bytes);
         let first = coverage_bytes
@@ -1120,6 +1145,7 @@ impl Collector<'_> {
             Ok(input) => input,
             Err(error) => return self.source_error(id, "junit", fallback, error),
         };
+        self.register_artifact(&id, &input);
         let label = input.label;
         let parsed = match junit::parse(strip_utf8_bom(&input.bytes), self.deadline) {
             Ok(parsed) => parsed,
@@ -1195,6 +1221,7 @@ impl Collector<'_> {
             Ok(input) => input,
             Err(error) => return self.source_error(id, "otel", fallback, error),
         };
+        self.register_artifact(&id, &input);
         let label = input.label;
         let parsed = match otel::parse(strip_utf8_bom(&input.bytes), self.deadline) {
             Ok(parsed) => parsed,
@@ -1424,6 +1451,7 @@ impl Collector<'_> {
             Ok(input) => input,
             Err(error) => return self.source_error(id, "codeowners", fallback, error),
         };
+        self.register_artifact(&id, &input);
         let label = input.label;
         if input.bytes.len() as u64 >= MAX_CODEOWNERS_BYTES {
             return self.source_error(id, "codeowners", label, SourceFailure::CodeownersTooLarge);
@@ -2525,6 +2553,7 @@ mod tests {
             root,
             relevant: paths.iter().map(|path| (*path).to_string()).collect(),
             sources: Vec::new(),
+            artifact_identities: HashMap::new(),
             files: BTreeMap::new(),
             diagnostics: Vec::new(),
             notes: Vec::new(),
@@ -2601,6 +2630,16 @@ mod tests {
         let snapshot = collector.finish(0);
 
         assert!(!snapshot.partial);
+        let artifact = fs::read(root.path().join("findings.sarif")).unwrap();
+        let artifact_digest = crate::hex::encode(&Sha256::digest(&artifact));
+        assert_eq!(
+            snapshot.sources.items[0].artifact_sha256.as_deref(),
+            Some(artifact_digest.as_str())
+        );
+        assert_eq!(
+            snapshot.sources.items[0].artifact_bytes,
+            Some(artifact.len() as u64)
+        );
         assert_eq!(snapshot.sources.items[0].facts_total, Some(2));
         assert_eq!(snapshot.sources.items[0].facts_returned, 1);
         assert_eq!(snapshot.files.items.len(), 1);

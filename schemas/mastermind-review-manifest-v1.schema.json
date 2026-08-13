@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/xcrft/mastermind/blob/main/schemas/mastermind-review-manifest-v1.schema.json",
+  "title": "Mastermind review package manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "package_format",
+    "generator",
+    "repository",
+    "scope",
+    "analysis",
+    "evidence_binding",
+    "artifacts",
+    "content_sha256"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "package_format": { "const": "mastermind-review" },
+    "generator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "Mastermind" },
+        "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$" }
+      }
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "root_label",
+        "requested_ref",
+        "baseline_oid",
+        "head_oid",
+        "includes_worktree",
+        "includes_untracked",
+        "snapshot_token_sha256"
+      ],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "root_label": { "type": "string" },
+        "requested_ref": { "type": "string", "minLength": 1 },
+        "baseline_oid": { "$ref": "#/$defs/git_oid" },
+        "head_oid": { "$ref": "#/$defs/git_oid" },
+        "includes_worktree": { "type": "boolean" },
+        "includes_untracked": { "type": "boolean" },
+        "snapshot_token_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "depth", "top", "production_only"],
+      "properties": {
+        "path": { "type": "string" },
+        "depth": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "top": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "production_only": { "type": "boolean" }
+      }
+    },
+    "analysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["partial", "temporal_status", "semantic_available", "evidence_partial", "states"],
+      "properties": {
+        "partial": { "type": "boolean" },
+        "temporal_status": { "enum": ["available", "unavailable"] },
+        "semantic_available": { "type": "boolean" },
+        "evidence_partial": { "type": "boolean" },
+        "states": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "state"],
+            "properties": {
+              "path": { "type": "string", "pattern": "^\\$(?:$|\\.|\\[)" },
+              "state": { "enum": ["partial", "truncated", "unavailable"] },
+              "reason": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+    "evidence_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "head_oid", "sources"],
+      "properties": {
+        "status": {
+          "enum": [
+            "not-applicable",
+            "digest-bound-at-export",
+            "partially-producer-attested",
+            "producer-attested"
+          ]
+        },
+        "head_oid": { "$ref": "#/$defs/git_oid" },
+        "sources": {
+          "type": "array",
+          "maxItems": 65,
+          "items": { "$ref": "#/$defs/evidence_source" }
+        },
+        "attestation": { "$ref": "#/$defs/attestation" }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": { "$ref": "#/$defs/package_artifact" },
+      "allOf": [
+        { "$ref": "#/$defs/contains_index_html" },
+        { "$ref": "#/$defs/contains_sarif" },
+        { "$ref": "#/$defs/contains_summary" },
+        { "$ref": "#/$defs/contains_workflow" }
+      ]
+    },
+    "content_sha256": { "$ref": "#/$defs/sha256" }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "git_oid": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "evidence_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "label", "repository_relative", "sha256", "bytes", "analysis_status", "revision_binding"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["sarif", "coverage", "junit", "otel", "codeowners"] },
+        "label": { "type": "string", "minLength": 1 },
+        "repository_relative": { "type": "boolean" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "bytes": { "type": "integer", "minimum": 0, "maximum": 33554432 },
+        "analysis_status": { "enum": ["loaded", "partial", "error"] },
+        "revision_binding": { "enum": ["digest-bound-at-export", "producer-attested"] }
+      }
+    },
+    "attestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "sha256", "head_oid", "artifacts", "trust"],
+      "properties": {
+        "label": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "head_oid": { "$ref": "#/$defs/git_oid" },
+        "artifacts": { "type": "integer", "minimum": 0, "maximum": 65 },
+        "trust": { "const": "unsigned-digest-attestation" }
+      }
+    },
+    "package_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "media_type", "sha256", "bytes"],
+      "properties": {
+        "path": {
+          "enum": ["index.html", "mastermind.sarif", "summary.md", "mastermind-review.yml"]
+        },
+        "media_type": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "bytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "contains_index_html": {
+      "type": "array",
+      "contains": { "type": "object", "required": ["path"], "properties": { "path": { "const": "index.html" } } },
+      "minContains": 1,
+      "maxContains": 1
+    },
+    "contains_sarif": {
+      "type": "array",
+      "contains": { "type": "object", "required": ["path"], "properties": { "path": { "const": "mastermind.sarif" } } },
+      "minContains": 1,
+      "maxContains": 1
+    },
+    "contains_summary": {
+      "type": "array",
+      "contains": { "type": "object", "required": ["path"], "properties": { "path": { "const": "summary.md" } } },
+      "minContains": 1,
+      "maxContains": 1
+    },
+    "contains_workflow": {
+      "type": "array",
+      "contains": { "type": "object", "required": ["path"], "properties": { "path": { "const": "mastermind-review.yml" } } },
+      "minContains": 1,
+      "maxContains": 1
+    }
+  }
+}

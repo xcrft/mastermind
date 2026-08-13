@@ -25,6 +25,7 @@ pub mod mcp;
 pub mod miner;
 pub mod policy;
 pub mod queries;
+pub mod review_package;
 pub mod run_task;
 pub mod sarif_export;
 pub mod scip_overlay;

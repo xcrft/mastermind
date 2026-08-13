@@ -165,6 +165,27 @@ pub fn change_impact(response: &ChangeImpactResponse) -> Value {
     )
 }
 
+/// Combine the bounded project-map and change-impact projections into the one
+/// SARIF document shipped by a review package. Each analysis keeps its own run
+/// identity, rule metadata, and partial-state properties.
+pub(crate) fn review_package(map: &ProjectMapResponse, impact: &ChangeImpactResponse) -> Value {
+    merge_documents([project_map(map), change_impact(impact)])
+}
+
+fn merge_documents<const N: usize>(documents: [Value; N]) -> Value {
+    let mut runs = Vec::new();
+    for document in documents {
+        if let Some(items) = document.get("runs").and_then(Value::as_array) {
+            runs.extend(items.iter().cloned());
+        }
+    }
+    json!({
+        "$schema": SARIF_SCHEMA,
+        "version": "2.1.0",
+        "runs": runs
+    })
+}
+
 pub fn architecture_policy(report: &PolicyReport) -> Value {
     let mut rules = report
         .rules
@@ -526,5 +547,18 @@ mod tests {
     fn messages_remove_controls_and_are_bounded() {
         assert_eq!(safe_message_text("auth\n\tboundary", 100), "auth boundary");
         assert_eq!(safe_message_text("abcdef", 3), "abc…");
+    }
+
+    #[test]
+    fn review_package_keeps_each_analysis_as_a_distinct_run() {
+        let merged = merge_documents([
+            json!({"runs": [{"automationDetails": {"id": "map"}}]}),
+            json!({"runs": [{"automationDetails": {"id": "impact"}}]}),
+        ]);
+
+        assert_eq!(merged["version"], "2.1.0");
+        assert_eq!(merged["runs"].as_array().unwrap().len(), 2);
+        assert_eq!(merged["runs"][0]["automationDetails"]["id"], "map");
+        assert_eq!(merged["runs"][1]["automationDetails"]["id"], "impact");
     }
 }

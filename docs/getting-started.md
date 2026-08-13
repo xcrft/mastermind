@@ -103,7 +103,12 @@ Analyze the current worktree against a baseline:
 ```bash
 mastermind impact --since main
 mastermind temporal --since main
+mastermind review export --since main --out mastermind-review
 ```
+
+The review export is a portable PR artifact: open `mastermind-review/index.html`
+without a server, upload `mastermind-review/mastermind.sarif` to code scanning,
+or copy its pinned `mastermind-review.yml` into `.github/workflows/`.
 
 ## Build a personal style profile without project initialization
 

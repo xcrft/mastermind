@@ -1,4 +1,4 @@
-FROM rust:1.96-bookworm@sha256:a339861ae23e9abb272cea45dfafde21760d2ce6577a70f8a926153677902663 AS builder
+FROM rust:1.97-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97 AS builder
 WORKDIR /source
 COPY mcp/servers/mmcg/Cargo.toml mcp/servers/mmcg/Cargo.lock ./mcp/servers/mmcg/
 COPY mcp/servers/mmcg/build.rs ./mcp/servers/mmcg/build.rs

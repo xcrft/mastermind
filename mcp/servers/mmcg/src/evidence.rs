@@ -126,6 +126,7 @@ pub struct EvidenceSource {
 #[derive(Debug, Serialize)]
 pub struct FileEvidence {
     pub path: String,
+    pub production: bool,
     pub findings: Vec<EvidenceFinding>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coverage: Option<CoverageEvidence>,
@@ -1989,6 +1990,7 @@ impl Collector<'_> {
                     || runtime.is_some()
                     || !accumulator.knowledge.is_empty();
                 has_evidence.then_some(FileEvidence {
+                    production: crate::store::is_production_path(&path),
                     path,
                     findings: accumulator.findings,
                     coverage,

@@ -1,6 +1,8 @@
 //! TypeScript / TSX extractor — declarations, methods, classes, interfaces, calls, imports.
 
-use super::common::{line_of, node_text, push_call_with_type, push_def, push_import};
+use super::common::{
+    line_of, node_text, push_call_with_type, push_def, push_import, signature_until_body,
+};
 use super::LanguageExtractor;
 use crate::store::PendingFile;
 use tree_sitter::{Node, Tree};
@@ -360,43 +362,16 @@ fn find_child_of_kind<'tree>(node: &Node<'tree>, target_kind: &str) -> Option<No
     None
 }
 
-fn signature_until_body(node: &Node, source: &[u8]) -> Option<String> {
-    let body = node.child_by_field_name("body")?;
-    let header_end = body.start_byte();
-    let start = node.start_byte();
-    if header_end <= start {
-        return None;
-    }
-    let text = std::str::from_utf8(&source[start..header_end]).ok()?;
-    let trimmed = text
-        .trim_end_matches(|c: char| c == '{' || c.is_whitespace())
-        .to_string();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::indexer::common;
     use crate::indexer::parse_one;
-    use std::env;
-    use std::path::PathBuf;
-
-    fn write_tmp(name: &str, content: &str) -> PathBuf {
-        let mut dir = env::temp_dir();
-        dir.push(format!("mmcg-ts-test-{}-{name}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(name);
-        std::fs::write(&path, content).unwrap();
-        path
-    }
 
     #[test]
     fn extracts_function_and_class_method() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "ts",
             "functions.ts",
             "function hello(x: number): string { return String(x); }\n\
              class Foo { bar(): void { this.baz(); } baz() {} }\n",
@@ -415,7 +390,8 @@ mod tests {
 
     #[test]
     fn extracts_imports() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "ts",
             "imports.ts",
             "import foo from 'a';\n\
              import { bar, baz as qux } from 'b';\n\
@@ -437,7 +413,8 @@ mod tests {
 
     #[test]
     fn extracts_variable_declared_functions_with_parameter_signatures() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "ts",
             "declared.tsx",
             "export const Card = ({ title }: Props) => <div />;\n\
              const Plain = function (a: number) { return a; };\n\
@@ -457,7 +434,8 @@ mod tests {
 
     #[test]
     fn jsx_usage_becomes_a_call_edge_and_host_elements_do_not() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "ts",
             "usage.tsx",
             "export function Screen() {\n\
                 return <section><Button /><Select.Option /><div /></section>;\n\
@@ -480,7 +458,8 @@ mod tests {
 
     #[test]
     fn extracts_calls_and_new() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "ts",
             "calls.ts",
             "function main() {\n\
                 console.log('hi');\n\

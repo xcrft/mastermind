@@ -10,13 +10,6 @@ pub const CONTEXT_TEMPLATE: &str = include_str!("../templates/context.md");
 /// Mastermind workflow CLAUDE.md template.
 pub const WORKFLOW_TEMPLATE: &str = include_str!("../templates/workflow.md");
 
-/// CONTEXT is deliberately stack-agnostic. Stack facts and commands are
-/// derivable and belong in CLAUDE.md; duplicating profile templates caused
-/// unverified assumptions and schema drift in durable project memory.
-pub fn for_profile(_profile: crate::Profile) -> &'static str {
-    CONTEXT_TEMPLATE
-}
-
 /// Strip the HTML-comment "instructions to the user" block from a template so
 /// the written file contains only what the adopter uses. Looks for
 /// `<!-- ─── COPY FROM HERE ─── -->` … `<!-- ─── COPY TO HERE ─── -->`; returns
@@ -40,36 +33,27 @@ pub fn strip_comment(text: &str) -> String {
 mod tests {
     use super::*;
 
+    /// CONTEXT stays stack-agnostic: one scaffold for every detected stack.
+    /// Stack facts and commands are derivable and belong in CLAUDE.md;
+    /// per-stack templates caused unverified assumptions and schema drift in
+    /// durable project memory.
     #[test]
-    fn every_detected_stack_uses_the_same_lean_context_contract() {
-        for profile in [
-            crate::Profile::Generic,
-            crate::Profile::TypescriptApi,
-            crate::Profile::ReactNative,
-            crate::Profile::PythonFastapi,
-            crate::Profile::Rust,
-            crate::Profile::Monorepo,
-        ] {
-            let template = for_profile(profile);
-            for heading in ["## Identity", "## Active goals", "## Decision log"] {
-                assert!(
-                    template.contains(heading),
-                    "missing {heading} in {profile:?}"
-                );
-            }
-            for field in [
-                "Status",
-                "Supersedes",
-                "Provenance",
-                "Evidence",
-                "Reusable lesson",
-            ] {
-                assert!(template.contains(field), "missing {field} in {profile:?}");
-            }
-            assert!(
-                !template.contains("Pre-seeded with"),
-                "generic gotchas in {profile:?}"
-            );
+    fn context_template_carries_the_lean_contract() {
+        for heading in ["## Identity", "## Active goals", "## Decision log"] {
+            assert!(CONTEXT_TEMPLATE.contains(heading), "missing {heading}");
         }
+        for field in [
+            "Status",
+            "Supersedes",
+            "Provenance",
+            "Evidence",
+            "Reusable lesson",
+        ] {
+            assert!(CONTEXT_TEMPLATE.contains(field), "missing {field}");
+        }
+        assert!(
+            !CONTEXT_TEMPLATE.contains("Pre-seeded with"),
+            "generic gotchas"
+        );
     }
 }

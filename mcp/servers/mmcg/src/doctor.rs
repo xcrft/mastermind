@@ -124,7 +124,7 @@ impl Report {
         out.push_str(&format!("  binary        {}\n", binary.display()));
         out.push_str(&format!("  index         {}\n", index_path.display()));
 
-        let home = dirs::home_dir();
+        let home = std::env::home_dir();
         let user_cfg = home
             .as_ref()
             .map(|h| h.join(".claude.json"))
@@ -520,7 +520,7 @@ fn check_mcp_config(root: &Path) -> Check {
     let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     check_mcp_config_at(
         &canonical_root,
-        dirs::home_dir().as_deref(),
+        std::env::home_dir().as_deref(),
         &crate::setup::canonical_entry(&trusted_binary),
     )
 }
@@ -892,7 +892,7 @@ fn format_bytes(n: u64) -> String {
 fn registered_servers(root: &Path) -> std::collections::BTreeSet<String> {
     let mut set = std::collections::BTreeSet::new();
     let candidates: Vec<PathBuf> = std::iter::once(root.join(".mcp.json"))
-        .chain(dirs::home_dir().map(|h| h.join(".claude.json")))
+        .chain(std::env::home_dir().map(|h| h.join(".claude.json")))
         .collect();
     for path in candidates {
         let Ok(body) = std::fs::read_to_string(&path) else {
@@ -983,7 +983,7 @@ fn unregistered_subagent_servers(
 fn check_subagent_mcp_servers(root: &Path) -> Check {
     let registered = registered_servers(root);
     let mut agent_dirs: Vec<PathBuf> = vec![root.join(".claude").join("agents")];
-    if let Some(h) = dirs::home_dir() {
+    if let Some(h) = std::env::home_dir() {
         agent_dirs.push(h.join(".claude").join("agents"));
     }
     let (declared, missing) = unregistered_subagent_servers(&agent_dirs, &registered);

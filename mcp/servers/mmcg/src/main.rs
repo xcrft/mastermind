@@ -23,26 +23,6 @@ use std::process::ExitCode;
 
 static BUILD_VERSION_MARKER: &str = concat!("MMCG_BUILD_VERSION=[", env!("CARGO_PKG_VERSION"), "]");
 
-/// Stack classifications used to inform drafting and diagnostics. CONTEXT.md
-/// itself stays stack-agnostic so derivable commands and layouts do not become
-/// duplicated project memory.
-#[derive(Copy, Clone, Debug, ValueEnum)]
-#[clap(rename_all = "kebab-case")]
-pub enum Profile {
-    /// Generic CONTEXT.md — no stack-specific seeding.
-    Generic,
-    /// TypeScript HTTP/REST/GraphQL API service.
-    TypescriptApi,
-    /// React Native mobile app (Expo or bare).
-    ReactNative,
-    /// Python FastAPI async API service.
-    PythonFastapi,
-    /// Rust project (CLI, service, or library).
-    Rust,
-    /// Polyglot monorepo — no single root stack; manifests live per-package.
-    Monorepo,
-}
-
 /// Which parts of a Mastermind setup `uninstall` should remove.
 #[derive(Copy, Clone, Debug, ValueEnum)]
 #[clap(rename_all = "kebab-case")]
@@ -432,7 +412,7 @@ enum Cmd {
         #[arg(long)]
         executor_report: Option<PathBuf>,
         /// Write a portable audit bundle JSON to this path. Contains verdict,
-        /// files_diff, discrepancies, snapshot_drift, executor_report_path.
+        /// changed_files, discrepancies, snapshot_drift, executor_report_path.
         #[arg(long)]
         bundle: Option<PathBuf>,
     },

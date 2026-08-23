@@ -665,7 +665,7 @@ pub(crate) fn stale_paths(root: &Path, db: &Path, cap: usize) -> Option<Vec<Stri
 
 fn scan_install(root: &Path) -> InstallInfo {
     let claude_md_present = root.join("CLAUDE.md").is_file();
-    let (agents_count, skills_count) = match dirs::home_dir() {
+    let (agents_count, skills_count) = match std::env::home_dir() {
         None => (0, 0),
         Some(home) => {
             let agents_dir = home.join(".claude").join("agents");

@@ -721,12 +721,13 @@ fn has_files_matching(dir: &Path, suffix: &str) -> bool {
 }
 
 fn has_files_matching_pattern(dir: &Path, contains: &str, ends: &str) -> bool {
-    walkdir::WalkDir::new(dir)
-        .max_depth(5)
-        .into_iter()
+    ignore::WalkBuilder::new(dir)
+        .standard_filters(false)
+        .max_depth(Some(5))
+        .build()
         .filter_map(|e| e.ok())
         .any(|e| {
-            if !e.file_type().is_file() {
+            if !e.file_type().is_some_and(|kind| kind.is_file()) {
                 return false;
             }
             let name = e.file_name().to_string_lossy();
@@ -735,12 +736,13 @@ fn has_files_matching_pattern(dir: &Path, contains: &str, ends: &str) -> bool {
 }
 
 fn has_test_attr_in_dir(dir: &Path) -> bool {
-    walkdir::WalkDir::new(dir)
-        .max_depth(6)
-        .into_iter()
+    ignore::WalkBuilder::new(dir)
+        .standard_filters(false)
+        .max_depth(Some(6))
+        .build()
         .filter_map(|e| e.ok())
         .any(|e| {
-            if !e.file_type().is_file() {
+            if !e.file_type().is_some_and(|kind| kind.is_file()) {
                 return false;
             }
             if e.path().extension().and_then(|s| s.to_str()) != Some("rs") {
@@ -764,9 +766,8 @@ fn file_has_test_attr(text: &str) -> bool {
 
 /// Portable proof artifact written by `audit-spec --bundle`.
 ///
-/// v2 adds: `head`, `spec_files`, `changed_files`, `verified_claims`,
-/// `failed_claims`, `mmcg_queries`, `commands`, `human_summary`. Legacy fields
-/// (`files_diff`, `discrepancies`, `snapshot_drift`) kept for back-compat.
+/// `discrepancies` and `snapshot_drift` keep their pre-v2 names because the
+/// signed manifest carries them under those keys.
 #[derive(Debug, Serialize)]
 pub struct Bundle {
     pub verdict: String,
@@ -790,14 +791,13 @@ pub struct Bundle {
     pub commands: Vec<String>,
     /// One-line verdict summary suitable for a PR comment title.
     pub human_summary: String,
-    /// All findings (superset of `snapshot_drift`). Legacy field name kept.
+    /// All findings (superset of `snapshot_drift`).
     pub discrepancies: Vec<Finding>,
-    /// Snapshot-drift findings only. Legacy field kept.
+    /// Snapshot-drift findings only.
     pub snapshot_drift: Vec<Finding>,
-    /// Legacy alias for `changed_files`, kept for back-compat.
+    /// Legacy alias for `changed_files`.
     pub files_diff: Vec<String>,
-    /// Legacy alias for `baseline`, kept for consumers parsing the pre-v2
-    /// bundle format.
+    /// Legacy alias for `baseline`.
     pub git_ref: String,
     pub executor_report_path: Option<String>,
 }
@@ -946,10 +946,10 @@ impl Bundle {
             verdict: format!("{:?}", report.verdict).to_lowercase(),
             spec: report.spec.clone(),
             baseline: report.git_ref.clone(),
-            git_ref: report.git_ref.clone(),
             head,
             spec_files,
-            changed_files: changed_files.clone(),
+            files_diff: changed_files.clone(),
+            changed_files,
             verified_claims,
             failed_claims,
             mmcg_queries,
@@ -957,7 +957,7 @@ impl Bundle {
             human_summary,
             discrepancies: report.findings.clone(),
             snapshot_drift,
-            files_diff: changed_files,
+            git_ref: report.git_ref.clone(),
             executor_report_path: executor_report_path.map(str::to_string),
         }
     }
@@ -1466,6 +1466,21 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(p, body).unwrap();
+    }
+
+    #[test]
+    fn bundle_preserves_legacy_aliases_and_constructor() {
+        let report = Report {
+            spec: "spec.md".into(),
+            git_ref: "main".into(),
+            verdict: Verdict::Held,
+            findings: Vec::new(),
+            symbol_diff: None,
+        };
+
+        let value = serde_json::to_value(Bundle::from_report(&report, None)).unwrap();
+        assert_eq!(value["git_ref"], value["baseline"]);
+        assert_eq!(value["files_diff"], value["changed_files"]);
     }
 
     #[test]

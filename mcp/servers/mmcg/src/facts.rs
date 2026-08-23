@@ -685,12 +685,20 @@ fn canonical_remote_host_path(host: &str, path: &str) -> Option<String> {
     Some(format!("{}/{}", host.to_ascii_lowercase(), path))
 }
 
-fn repository_identity(root: &Path) -> Result<String, FactError> {
-    let output = crate::diff::run_bounded_git_with_limit(
+pub(crate) fn repository_identity(root: &Path) -> Result<String, FactError> {
+    repository_identity_until(root, None)
+}
+
+pub(crate) fn repository_identity_until(
+    root: &Path,
+    deadline: Option<Instant>,
+) -> Result<String, FactError> {
+    let output = crate::diff::run_bounded_git_with_limit_until(
         root,
         &["config", "--get", "remote.origin.url"],
         None,
         4 * 1024,
+        deadline,
     )
     .map_err(|error| FactError::Git(format!("read bounded origin identity: {error}")))?;
     let canonical = if output.success {

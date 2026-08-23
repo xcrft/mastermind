@@ -538,8 +538,10 @@ fn embedded_text_matches_file(
                     path.display()
                 )));
             }
-            let units = body
-                .chunks_exact(2)
+            let (pairs, remainder) = body.as_chunks::<2>();
+            debug_assert!(remainder.is_empty());
+            let units = pairs
+                .iter()
                 .map(|pair| {
                     if little_endian {
                         u16::from_le_bytes([pair[0], pair[1]])

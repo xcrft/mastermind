@@ -33,22 +33,13 @@ impl LanguageExtractor for JavascriptExtractor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::indexer::common;
     use crate::indexer::parse_one;
-    use std::env;
-    use std::path::PathBuf;
-
-    fn write_tmp(name: &str, content: &str) -> PathBuf {
-        let mut dir = env::temp_dir();
-        dir.push(format!("mmcg-js-test-{}-{name}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(name);
-        std::fs::write(&path, content).unwrap();
-        path
-    }
 
     #[test]
     fn extracts_function_and_class() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "js",
             "lib.js",
             "function hello(x) { return String(x); }\n\
              class Foo {\n  bar() { this.baz(); }\n  baz() {}\n}\n",
@@ -64,7 +55,8 @@ mod tests {
 
     #[test]
     fn extracts_imports_with_paths() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "js",
             "imp.js",
             "import foo from 'pkg-a';\n\
              import { bar, baz as qux } from './local';\n\
@@ -87,7 +79,8 @@ mod tests {
 
     #[test]
     fn extracts_calls() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "js",
             "calls.js",
             "function main() {\n  console.log('hi');\n  const x = new Foo();\n}\n",
         );

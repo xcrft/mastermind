@@ -460,22 +460,16 @@ fn extract_signature(node: &Node, source: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::indexer::common;
     use crate::indexer::parse_one;
-    use std::env;
-    use std::path::PathBuf;
-
-    fn write_tmp(name: &str, content: &str) -> PathBuf {
-        let mut dir = env::temp_dir();
-        dir.push(format!("mmcg-py-test-{}-{name}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(name);
-        std::fs::write(&path, content).unwrap();
-        path
-    }
 
     #[test]
     fn extracts_function_with_module_symbol() {
-        let path = write_tmp("f1.py", "def hello(x: int) -> str:\n    return str(x)\n");
+        let path = common::write_tmp(
+            "py",
+            "f1.py",
+            "def hello(x: int) -> str:\n    return str(x)\n",
+        );
         let root = path.parent().unwrap();
         let pending = parse_one(&path, root, &PythonExtractor).unwrap();
         assert_eq!(pending.symbols[0].kind, "module");
@@ -485,7 +479,7 @@ mod tests {
 
     #[test]
     fn extracts_class_with_methods() {
-        let path = write_tmp(
+        let path = common::write_tmp("py",
             "f2.py",
             "class Foo:\n    def bar(self):\n        self.baz()\n    def baz(self):\n        pass\n",
         );
@@ -498,7 +492,8 @@ mod tests {
 
     #[test]
     fn imports_capture_fully_qualified_path() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "py",
             "f3.py",
             "import os\n\
              import pathlib as pl\n\
@@ -527,7 +522,8 @@ mod tests {
 
     #[test]
     fn extracts_decorators_into_symbol_field() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "py",
             "f5.py",
             "import pytest\n\
              from fastapi import APIRouter\n\
@@ -575,7 +571,8 @@ mod tests {
 
     #[test]
     fn calls_capture_full_attribute_path() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "py",
             "f4.py",
             "def main():\n    logger.info('hi')\n    pkg.mod.helper()\n    print('there')\n",
         );
@@ -594,7 +591,8 @@ mod tests {
 
     #[test]
     fn extracts_module_level_constants() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "py",
             "constants.py",
             "MAX_RETRIES = 5\n\
              TIMEOUT_SECS: float = 30.0\n\
@@ -658,7 +656,7 @@ mod tests {
     fn long_multibyte_constant_does_not_panic_on_signature_truncation() {
         // Japanese sentence ~360 bytes (120+ chars × 3 bytes each).
         let body = "WYNTXT_JA = \"はい、ウィンダムリワードに登録して無料宿泊ポイントを獲得したいと思います。[ウィンダムホテルグループLLC](https://example.com)、[追加開示事項](https://example.com)、および[利用規約](https://example.com)を読み、同意します。\"\n";
-        let path = write_tmp("multibyte.py", body);
+        let path = common::write_tmp("py", "multibyte.py", body);
         let root = path.parent().unwrap();
         // Must NOT panic. Pre-fix: panicked at python.rs:80 with
         // "end byte index 120 is not a char boundary; it is inside 'す'".

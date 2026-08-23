@@ -49,7 +49,7 @@ pub struct ProfileStore {
 impl ProfileStore {
     /// `~/.mastermind/style.db`.
     pub fn db_path() -> Option<PathBuf> {
-        dirs::home_dir().map(|h| h.join(".mastermind").join("style.db"))
+        std::env::home_dir().map(|h| h.join(".mastermind").join("style.db"))
     }
 
     pub fn open(path: &Path) -> SqlResult<Self> {

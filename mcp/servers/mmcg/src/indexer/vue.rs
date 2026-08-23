@@ -200,21 +200,11 @@ fn find_first<'tree>(node: &Node<'tree>, kind: &str) -> Option<Node<'tree>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::indexer::common;
     use crate::indexer::parse_one;
-    use std::env;
-    use std::path::PathBuf;
-
-    fn write_tmp(name: &str, content: &str) -> PathBuf {
-        let mut dir = env::temp_dir();
-        dir.push(format!("mmcg-vue-test-{}-{name}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(name);
-        std::fs::write(&path, content).unwrap();
-        path
-    }
 
     fn parse(name: &str, content: &str) -> PendingFile {
-        let path = write_tmp(name, content);
+        let path = common::write_tmp("vue", name, content);
         let root = path.parent().unwrap();
         parse_one(&path, root, &VueExtractor).unwrap()
     }

@@ -272,7 +272,7 @@ pub fn run(
 
 /// `~/.mastermind/style.md` — the user-global, cross-repo profile location.
 fn profile_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let home = dirs::home_dir().ok_or("could not resolve home directory")?;
+    let home = std::env::home_dir().ok_or("could not resolve home directory")?;
     Ok(home.join(".mastermind").join("style.md"))
 }
 

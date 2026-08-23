@@ -2139,7 +2139,7 @@ fn map_language(path: &str) -> String {
     lang_from_ext(ext).to_string()
 }
 
-fn component_for_file(scope: &str, kind: &str, file: &str, depth: u8) -> String {
+pub(crate) fn component_for_file(scope: &str, kind: &str, file: &str, depth: u8) -> String {
     if kind == "file" {
         return file.to_string();
     }
@@ -2603,7 +2603,13 @@ pub fn project_map_with_options(
             total: (!paths_truncated).then_some(component_total as u32),
             returned: components.len() as u32,
             truncated: paths_truncated || component_total > components.len(),
-            truncation_reason: paths_truncated.then_some("path_work_limit"),
+            truncation_reason: if paths_truncated {
+                Some("path_work_limit")
+            } else if component_total > components.len() {
+                Some("top_limit")
+            } else {
+                None
+            },
             items: components,
         },
         entry_points: MapSection {
@@ -3200,6 +3206,21 @@ mod tests {
         assert_eq!(value["files"]["total"], 2);
         assert_eq!(value["files"]["returned"], 2);
         assert_eq!(value["files"]["truncated"], false);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn project_map_reports_component_top_limit() {
+        let path = tmp_db("project_map_component_top_limit");
+        let store = Store::open(&path).unwrap();
+        for file in ["alpha/lib.rs", "beta/lib.rs", "gamma/lib.rs"] {
+            store.upsert_file(file, 1, 1).unwrap();
+        }
+
+        let value = serde_json::to_value(project_map(&store, ".", 1, 1).unwrap()).unwrap();
+        assert_eq!(value["components"]["returned"], 1);
+        assert_eq!(value["components"]["truncated"], true);
+        assert_eq!(value["components"]["truncation_reason"], "top_limit");
         std::fs::remove_file(&path).ok();
     }
 

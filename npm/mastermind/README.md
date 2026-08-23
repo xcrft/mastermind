@@ -1,48 +1,98 @@
-# @xcraftmind/mastermind
+<p align="center">
+  <img src="https://raw.githubusercontent.com/xcrft/mastermind/main/docs/assets/brand/mastermind-mark.svg" alt="Mastermind logo" width="88">
+</p>
 
-[![npm](https://img.shields.io/badge/npm-v2.0.1-CB3837?logo=npm)](https://www.npmjs.com/package/@xcraftmind/mastermind)
-[![CI](https://github.com/xcrft/mastermind/actions/workflows/ci-mmcg.yml/badge.svg)](https://github.com/xcrft/mastermind/actions/workflows/ci-mmcg.yml)
-[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/xcrft/mastermind/blob/main/LICENSE)
+<h1 align="center">@xcraftmind/mastermind</h1>
 
-Local codegraph and evidence-backed architecture review for AI coding agents.
+<p align="center">
+  <strong>Know what your code change can break before production tells you.</strong>
+</p>
 
-Mastermind indexes a repository into SQLite, connects a Git diff to affected
-callers, tests, components, policies, and external evidence, and exposes the
-same bounded snapshot through CLI, MCP, Lens, SARIF, and a standalone review
-package.
+<p align="center">
+  Local codegraph and evidence-backed architecture review for developers and coding agents.
+</p>
 
-## Install
+<p align="center">
+  <a href="https://www.npmjs.com/package/@xcraftmind/mastermind"><img src="https://img.shields.io/badge/npm-v2.0.1-CB3837?logo=npm" alt="npm version 2.0.1"></a>
+  <a href="https://github.com/xcrft/mastermind/actions/workflows/ci-mmcg.yml"><img src="https://github.com/xcrft/mastermind/actions/workflows/ci-mmcg.yml/badge.svg" alt="CI status"></a>
+  <a href="https://github.com/xcrft/mastermind/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-4f46e5.svg" alt="MIT license"></a>
+</p>
 
-Requires Node.js 24 or newer. The package selects a prebuilt native binary for
-macOS, Linux, or Windows; Rust is not required.
+<p align="center">
+  <img src="https://raw.githubusercontent.com/xcrft/mastermind/main/docs/assets/brand/mastermind-hero.webp" alt="A bounded code graph flowing through the Mastermind lens from change to impact and test evidence" width="900">
+</p>
+
+## Stop reviewing isolated lines
+
+A diff tells you what changed. Mastermind shows what the change reaches:
+downstream callers, architecture boundaries, candidate tests, ownership,
+security findings, runtime evidence, and repository policy.
+
+One local snapshot powers the CLI, 28 bounded MCP tools, the read-only Lens UI,
+SARIF output, and a standalone review package.
+
+## Your first review
+
+Requires Node.js 24+. The package selects a prebuilt native binary for macOS,
+Linux, or Windows. Rust is not required.
 
 ```bash
 npm install -g @xcraftmind/mastermind
-mastermind --version
-```
 
-## First review
-
-```bash
 cd your-repository
 mastermind index .
 mastermind impact --since main
 mastermind ui --since main
 ```
 
-`index` writes `.mastermind/mmcg.db`. The Lens server binds to loopback, reads
-the index without mutating it, and loads no remote frontend resources.
+`index` writes a local graph to `.mastermind/mmcg.db`. Lens binds to loopback,
+reads the index without mutating it, and loads no remote frontend resources.
 
-Export a review that works without an installed binary:
+<p align="center">
+  <img src="https://raw.githubusercontent.com/xcrft/mastermind/main/docs/images/lens/mastermind-lens-live-desktop.png" alt="Mastermind Lens showing changed symbols, downstream impact, boundary crossings, test candidates, and explicit partial evidence" width="900">
+</p>
+
+## What you get
+
+| Job | Surface |
+|---|---|
+| Review a branch | Changed symbols → downstream reach → boundary crossings → candidate tests |
+| Audit a codebase | Components, entry points, cycles, centrality, ownership concentration, and hotspots |
+| Guard architecture | Policy checks with text, JSON, and SARIF output |
+| Ground an agent | Bounded MCP queries over the same local graph |
+| Share the result | Standalone offline Lens, SARIF, summary, and revision/evidence manifest |
+
+Mastermind keeps uncertainty visible. Stale indexes, repository drift, work
+limits, truncation, unavailable analysis, and partial evidence are result
+states, not footnotes hidden behind a clean badge.
+
+## Bring your existing evidence
+
+```bash
+mastermind ui --since main \
+  --sarif semgrep.sarif --sarif codeql.sarif \
+  --coverage lcov.info --coverage cobertura.xml \
+  --junit junit.xml --otel traces.json
+```
+
+Lens correlates exact returned trace files with SARIF, LCOV/Cobertura, JUnit,
+OpenTelemetry, CODEOWNERS, Git churn, specs, ADRs, audits, lessons, and imported
+facts. Provenance and completeness survive the join.
+
+Runtime evidence may corroborate an exact structural edge. It never silently
+creates graph topology.
+
+## Export a portable review
 
 ```bash
 mastermind review export --since main --out mastermind-review
 ```
 
-The output contains standalone HTML, SARIF, a short Markdown summary, a
-revision/evidence manifest, and a pinned GitHub Actions workflow.
+The output contains standalone HTML, SARIF, a bounded Markdown summary, a
+revision/evidence manifest, and a pinned GitHub Actions workflow. The reviewer
+does not need Mastermind installed.
 
-## AI client setup
+## Connect your coding agent
 
 ```bash
 mastermind install --client all
@@ -51,64 +101,42 @@ mastermind setup continue --scope user --write
 mastermind doctor --workflow --client all
 ```
 
-Setup commands preview by default and write only with `--write`. Mastermind
-supports Claude Code, Codex, Cursor, Continue, and generic MCP stdio clients.
-The MCP server exposes 28 bounded tools: 27 read-only queries and one additive
-write to the local gitignored scratchpad.
+Mastermind supports Claude Code, Codex, Cursor, Continue, and generic MCP stdio
+clients. Setup previews changes unless `--write` is present. The MCP server
+exposes 27 read-only tools and one additive write to the local gitignored
+scratchpad.
 
-## Capabilities
+## Supported stack
 
-- component maps, entry points, hotspots, centrality, and dependency cycles;
-- Git-aware changed symbols, blast radius, API drift, and candidate tests;
-- base-versus-head architecture, ownership, cycle, and hotspot drift;
-- architecture policy checks with text, JSON, or SARIF output;
-- SARIF, LCOV/Cobertura, JUnit, OpenTelemetry, CODEOWNERS, churn, and project
-  decision overlays;
-- optional compiler-resolved SCIP definitions and references;
-- revision-bound declarative facts with optional Ed25519 provenance;
-- bounded, pinned maps across several local repositories;
-- Direct, Verified, and Strict spec-driven workflow modes.
-
-Supported languages: Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust,
-C#, Go, Java, PHP, and C/C++.
-
-Supported binaries: macOS arm64/x64; Linux glibc and musl arm64/x64; Windows
-x64.
-
-## Evidence model
+- **Languages:** Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#,
+  Go, Java, PHP, and C/C++.
+- **Platforms:** macOS arm64/x64, Linux glibc and musl arm64/x64, Windows x64.
+- **Evidence:** SARIF, LCOV/Cobertura, JUnit, OTLP JSON, CODEOWNERS, Git, SCIP,
+  and signed declarative facts.
 
 The default Tree-sitter graph is syntactic and toolchain-free. Optional SCIP
-facts are compiler-resolved; imported runtime relationships are observed;
-team-manifest relationships are declared. Mastermind keeps that provenance
-visible and does not turn external evidence into unproven graph topology.
+adds compiler-resolved definitions and references. Dynamic dispatch,
+reflection, generated code, dependency injection, re-exports, overloads, and
+cross-language calls may be incomplete. Candidate tests and unreferenced
+symbols are review inputs, not authorization to skip tests or delete code.
 
-Dynamic dispatch, reflection, generated code, dependency injection, re-exports,
-overloads, and cross-language calls may be incomplete. Candidate tests and
-unreferenced symbols are review inputs, not permission to skip tests or delete
-code. Stale indexes, collisions, work limits, and truncation are explicit.
-
-Deterministic indexing, MCP, Lens, policy checks, fact ingestion, and review
-export are local. Explicit agent-assisted initialization and deep style mining
-can send repository content through the configured AI client.
-
-## Performance
+## Measured performance
 
 On the published synthetic Rust benchmark, an Apple M3 Pro indexed 1,000 files
-and 20,000 functions in a 310 ms median cold run; an unchanged scan took 41 ms.
+and 20,000 functions in a 310 ms median cold run. An unchanged scan took 41 ms.
 A 10,000-file, 200,000-function corpus took 3.20 s cold and 353 ms unchanged.
 
-These are release-mode medians on one machine, not portable guarantees or
-competitor comparisons. See the
-[full methodology, ranges, and reproduction command](https://github.com/xcrft/mastermind/blob/main/docs/benchmarks.md).
+These are measurements on one machine, not portable guarantees. See the
+[methodology, ranges, and reproduction command](https://github.com/xcrft/mastermind/blob/main/docs/benchmarks.md).
 
 ## Documentation
 
+- [Product README](https://github.com/xcrft/mastermind)
 - [Getting started](https://github.com/xcrft/mastermind/blob/main/docs/getting-started.md)
-- [Client integrations](https://github.com/xcrft/mastermind/tree/main/docs/integrations)
 - [CLI and MCP reference](https://github.com/xcrft/mastermind/blob/main/docs/reference/mmcg.md)
-- [Workflow](https://github.com/xcrft/mastermind/blob/main/docs/workflow.md)
+- [Client integrations](https://github.com/xcrft/mastermind/tree/main/docs/integrations)
+- [Review workflow](https://github.com/xcrft/mastermind/blob/main/docs/workflow.md)
 - [Fact-ingestion SDK](https://github.com/xcrft/mastermind/blob/main/docs/fact-ingestion-sdk.md)
-- [Benchmarks](https://github.com/xcrft/mastermind/blob/main/docs/benchmarks.md)
 
 The same binary is available from crates.io as
 [`mmcg`](https://crates.io/crates/mmcg). npm installs it as both `mastermind`

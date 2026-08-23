@@ -11,7 +11,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
-use crate::{templates, Profile};
+use crate::templates;
 
 /// Options for [`do_init`].
 pub struct InitOpts {
@@ -97,7 +97,7 @@ pub fn do_init(root: &Path, opts: InitOpts) -> Result<(), Box<dyn std::error::Er
     }
 
     let context_path = root.join("CONTEXT.md");
-    let context_body = templates::strip_comment(templates::for_profile(stack.template));
+    let context_body = templates::strip_comment(templates::CONTEXT_TEMPLATE);
     if force && context_path.is_file() {
         let backup = backup_existing(&context_path)?;
         created.push(format!(
@@ -296,14 +296,12 @@ fn refresh_project_history(root: &Path, db_path: &Path) -> Result<u32, String> {
 /// one, else the generic scaffold).
 struct Stack {
     label: String,
-    template: Profile,
 }
 
 impl Stack {
-    fn new(label: impl Into<String>, template: Profile) -> Self {
+    fn new(label: impl Into<String>) -> Self {
         Stack {
             label: label.into(),
-            template,
         }
     }
 }
@@ -322,18 +320,18 @@ fn detect_stack(root: &Path) -> Stack {
 
     if exists("Cargo.toml") {
         if read("Cargo.toml").contains("tauri") {
-            return Stack::new("rust (tauri desktop)", Profile::Rust);
+            return Stack::new("rust (tauri desktop)");
         }
-        return Stack::new("rust", Profile::Rust);
+        return Stack::new("rust");
     }
 
     let pkg = read("package.json");
     if exists("package.json") {
         if pkg.contains("\"react-native\"") || pkg.contains("\"expo\"") {
-            return Stack::new("react native", Profile::ReactNative);
+            return Stack::new("react native");
         }
         if pkg.contains("\"electron\"") {
-            return Stack::new("node (electron desktop)", Profile::Generic);
+            return Stack::new("node (electron desktop)");
         }
         // Frameworks, most-specific first (Next wraps React, Nuxt wraps Vue).
         let frontend = if pkg.contains("\"next\"") {
@@ -352,15 +350,15 @@ fn detect_stack(root: &Path) -> Stack {
             None
         };
         if let Some(fw) = frontend {
-            return Stack::new(format!("node ({fw})"), Profile::Generic);
+            return Stack::new(format!("node ({fw})"));
         }
         let api = [
             "express", "fastify", "@nestjs", "koa", "graphql", "apollo", "hapi",
         ];
         if api.iter().any(|f| pkg.contains(f)) {
-            return Stack::new("node (api)", Profile::TypescriptApi);
+            return Stack::new("node (api)");
         }
-        return Stack::new("node", Profile::Generic);
+        return Stack::new("node");
     }
 
     if exists("pyproject.toml")
@@ -373,29 +371,29 @@ fn detect_stack(root: &Path) -> Stack {
             + &read("Pipfile")
             + &read("setup.py");
         if py.contains("fastapi") {
-            return Stack::new("python (fastapi)", Profile::PythonFastapi);
+            return Stack::new("python (fastapi)");
         }
         if py.contains("django") {
-            return Stack::new("python (django)", Profile::Generic);
+            return Stack::new("python (django)");
         }
         if py.contains("flask") {
-            return Stack::new("python (flask)", Profile::Generic);
+            return Stack::new("python (flask)");
         }
-        return Stack::new("python", Profile::Generic);
+        return Stack::new("python");
     }
 
     if exists("go.mod") {
-        return Stack::new("go", Profile::Generic);
+        return Stack::new("go");
     }
 
     if !root_has_manifest(root) {
         let ecos = monorepo_ecosystems(root);
         if ecos.len() >= 2 {
-            return Stack::new(format!("monorepo ({})", ecos.join(", ")), Profile::Monorepo);
+            return Stack::new(format!("monorepo ({})", ecos.join(", ")));
         }
     }
 
-    Stack::new("generic", Profile::Generic)
+    Stack::new("generic")
 }
 
 /// Any root-level manifest means the repo has its own stack (one package), so it
@@ -600,7 +598,6 @@ mod tests {
     fn detect_stack_empty_is_generic() {
         let d = tempfile::tempdir().unwrap();
         let s = detect_stack(d.path());
-        assert!(matches!(s.template, Profile::Generic));
         assert_eq!(s.label, "generic");
     }
 
@@ -609,7 +606,6 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         fs::write(d.path().join("Cargo.toml"), "[package]\nname = \"x\"").unwrap();
         let s = detect_stack(d.path());
-        assert!(matches!(s.template, Profile::Rust));
         assert_eq!(s.label, "rust");
 
         let d2 = tempfile::tempdir().unwrap();
@@ -630,10 +626,7 @@ mod tests {
             r#"{"dependencies":{"react-native":"0.74","react":"18","express":"4"}}"#,
         )
         .unwrap();
-        assert!(matches!(
-            detect_stack(d.path()).template,
-            Profile::ReactNative
-        ));
+        assert_eq!(detect_stack(d.path()).label, "react native");
     }
 
     #[test]
@@ -659,25 +652,21 @@ mod tests {
             r#"{"dependencies":{"fastify":"4"}}"#,
         )
         .unwrap();
-        assert!(matches!(
-            detect_stack(d.path()).template,
-            Profile::TypescriptApi
-        ));
+        assert_eq!(detect_stack(d.path()).label, "node (api)");
     }
 
     #[test]
     fn detect_stack_python_frameworks() {
-        for (req, want, fastapi) in [
-            ("fastapi==0.110\nuvicorn", "python (fastapi)", true),
-            ("django==5.0", "python (django)", false),
-            ("flask==3", "python (flask)", false),
-            ("requests==2", "python", false),
+        for (req, want) in [
+            ("fastapi==0.110\nuvicorn", "python (fastapi)"),
+            ("django==5.0", "python (django)"),
+            ("flask==3", "python (flask)"),
+            ("requests==2", "python"),
         ] {
             let d = tempfile::tempdir().unwrap();
             fs::write(d.path().join("requirements.txt"), req).unwrap();
             let s = detect_stack(d.path());
             assert_eq!(s.label, want);
-            assert_eq!(matches!(s.template, Profile::PythonFastapi), fastapi);
         }
     }
 
@@ -687,7 +676,6 @@ mod tests {
         fs::write(d.path().join("go.mod"), "module x\n\ngo 1.22").unwrap();
         let s = detect_stack(d.path());
         assert_eq!(s.label, "go");
-        assert!(matches!(s.template, Profile::Generic));
     }
 
     #[test]
@@ -714,7 +702,6 @@ mod tests {
                 .unwrap();
         }
         let s = detect_stack(root);
-        assert!(matches!(s.template, Profile::Monorepo));
         assert_eq!(s.label, "monorepo (go, javascript, python)");
     }
 
@@ -733,7 +720,7 @@ mod tests {
                 .output()
                 .unwrap();
         }
-        assert!(matches!(detect_stack(root).template, Profile::Generic));
+        assert_eq!(detect_stack(root).label, "generic");
     }
 
     #[test]

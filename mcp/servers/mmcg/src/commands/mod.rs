@@ -1,8 +1,8 @@
 //! Command handlers for the `mastermind` CLI.
 //!
 //! Each submodule owns one command's full logic so `main.rs` stays a thin
-//! dispatcher. Shared types (`Profile`, `UninstallScope`) live in `main.rs`
-//! because they are `ValueEnum` variants embedded in the clap CLI spec.
+//! dispatcher. `UninstallScope` lives in `main.rs` because it is a
+//! `ValueEnum` embedded in the clap CLI spec.
 
 pub mod audit;
 pub mod ci;

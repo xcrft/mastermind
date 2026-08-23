@@ -1124,6 +1124,22 @@ fn opt_bool_arg(args: &Value, name: &str) -> Option<bool> {
     args.get(name).and_then(|v| v.as_bool())
 }
 
+/// Every language the indexer can parse. One list so a new extractor cannot
+/// reach the index while staying invisible in the tool schemas.
+const LANGUAGES: [&str; 11] = [
+    "python",
+    "typescript",
+    "tsx",
+    "javascript",
+    "vue",
+    "rust",
+    "csharp",
+    "go",
+    "java",
+    "php",
+    "cpp",
+];
+
 fn schema_search() -> Value {
     json!({
         "name": "mmcg_search",
@@ -1133,7 +1149,7 @@ fn schema_search() -> Value {
             "properties": {
                 "name": { "type": "string", "description": "Symbol name (exact match)" },
                 "kind": { "type": "string", "description": "Optional kind filter (function, class, method, struct, enum, trait, interface, record, property, etc.)" },
-                "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "vue", "rust", "csharp", "go", "java", "php", "cpp"], "description": "Optional language filter" },
+                "language": { "type": "string", "enum": LANGUAGES, "description": "Optional language filter" },
                 "collapse_partials": { "type": "boolean", "default": true, "description": "When true (default), C# `partial class Foo` declarations across N files return one hit with a `locations` array of all N declarations. Set false to see each declaration as a separate row." }
             },
             "required": ["name"]
@@ -1149,7 +1165,7 @@ fn schema_callers() -> Value {
             "type": "object",
             "properties": {
                 "name": { "type": "string", "description": "Name or type to look up" },
-                "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "vue", "rust", "csharp", "go", "java", "php", "cpp"] },
+                "language": { "type": "string", "enum": LANGUAGES },
                 "edge_kind": { "type": "string", "enum": ["calls", "imports", "inherits"], "default": "calls", "description": "Which kind of incoming edge to consider" }
             },
             "required": ["name"]
@@ -1165,7 +1181,7 @@ fn schema_callees() -> Value {
             "type": "object",
             "properties": {
                 "name": { "type": "string", "description": "Symbol whose outgoing edges you want to inspect" },
-                "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "vue", "rust", "csharp", "go", "java", "php", "cpp"] },
+                "language": { "type": "string", "enum": LANGUAGES },
                 "edge_kind": { "type": "string", "enum": ["calls", "imports", "inherits"], "default": "calls" }
             },
             "required": ["name"]
@@ -1182,7 +1198,7 @@ fn schema_impact() -> Value {
             "properties": {
                 "name": { "type": "string" },
                 "max_depth": { "type": "integer", "minimum": 1, "maximum": 10, "default": 2 },
-                "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "vue", "rust", "csharp", "go", "java", "php", "cpp"] }
+                "language": { "type": "string", "enum": LANGUAGES }
             },
             "required": ["name"]
         }
@@ -1225,7 +1241,7 @@ fn schema_files() -> Value {
             "type": "object",
             "properties": {
                 "prefix": { "type": "string", "description": "Optional path prefix" },
-                "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "vue", "rust", "csharp", "go", "java", "php", "cpp"], "description": "Optional language filter" }
+                "language": { "type": "string", "enum": LANGUAGES, "description": "Optional language filter" }
             }
         }
     })
@@ -1254,7 +1270,7 @@ fn schema_imported_by() -> Value {
             "properties": {
                 "query": { "type": "string", "description": "Name or path to look up" },
                 "match": { "type": "string", "enum": ["name", "path"], "default": "name", "description": "How to match the query — by leaf binding name or fully-qualified path" },
-                "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "vue", "rust", "csharp", "go", "java", "php", "cpp"], "description": "Optional language filter" }
+                "language": { "type": "string", "enum": LANGUAGES, "description": "Optional language filter" }
             },
             "required": ["query"]
         }
@@ -1269,7 +1285,7 @@ fn schema_unreferenced() -> Value {
             "type": "object",
             "properties": {
                 "kind": { "type": "string", "description": "Filter by symbol kind (function / class / method / struct / etc.)" },
-                "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "vue", "rust", "csharp", "go", "java", "php", "cpp"] }
+                "language": { "type": "string", "enum": LANGUAGES }
             }
         }
     })
@@ -1283,7 +1299,7 @@ fn schema_api_surface() -> Value {
             "type": "object",
             "properties": {
                 "prefix": { "type": "string", "description": "Path prefix (e.g. 'src/runtime/'). LIKE-matched." },
-                "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "vue", "rust", "csharp", "go", "java", "php", "cpp"] }
+                "language": { "type": "string", "enum": LANGUAGES }
             },
             "required": ["prefix"]
         }
@@ -1312,7 +1328,7 @@ fn schema_dependency_cycles() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "vue", "rust", "csharp", "go", "java", "php", "cpp"], "description": "Optional language filter" },
+                "language": { "type": "string", "enum": LANGUAGES, "description": "Optional language filter" },
                 "min_size": { "type": "integer", "minimum": 2, "maximum": 100, "default": 2, "description": "Smallest SCC to report. 2 = any cycle. 3 hides trivial A↔B pairs." }
             }
         }
@@ -1358,7 +1374,7 @@ fn schema_centrality() -> Value {
             "type": "object",
             "properties": {
                 "prefix": { "type": "string", "description": "Optional path prefix to limit ranking scope (e.g. 'src/auth/'). LIKE-matched." },
-                "language": { "type": "string", "enum": ["python", "typescript", "tsx", "javascript", "vue", "rust", "csharp", "go", "java", "php", "cpp"] },
+                "language": { "type": "string", "enum": LANGUAGES },
                 "kind": { "type": "string", "description": "Optional kind filter (function, class, method, struct, etc.)" },
                 "top": { "type": "integer", "minimum": 1, "maximum": 200, "default": 20, "description": "How many results to return" }
             }

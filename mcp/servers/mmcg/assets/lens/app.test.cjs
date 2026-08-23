@@ -201,6 +201,13 @@ const ELEMENT_IDS = [
   "metric-files", "metric-files-note", "metric-symbols", "metric-symbols-note", "metric-impact",
   "metric-impact-note", "metric-crossings", "metric-crossings-note", "metric-tests",
   "metric-tests-note", "method-ledger", "method-ledger-disclosure", "method-ledger-toggle",
+  "audit-board", "audit-summary", "audit-explain", "audit-structural", "audit-health", "audit-security",
+  "audit-change", "audit-production",
+  "audit-verdict", "audit-verdict-word", "audit-lede", "audit-pillars", "audit-treemap", "audit-map-mobile",
+  "audit-map-note",
+  "audit-explain-sev", "audit-structural-sev", "audit-health-sev", "audit-change-sev", "audit-security-sev",
+  "audit-bugs", "audit-bus", "audit-bugs-sev", "audit-bus-sev",
+  "audit-domain-card", "audit-domain", "audit-domain-sev", "audit-redteam", "audit-redteam-body",
 ];
 
 function createDocument() {
@@ -227,10 +234,20 @@ function createDocument() {
     button.setAttribute("aria-pressed", "true");
     return button;
   });
+  const modeButtons = ["review", "audit"].map((mode) => {
+    const button = new MockElement("button");
+    button.dataset.mode = mode;
+    button.setAttribute("data-mode", mode);
+    button.setAttribute("aria-pressed", mode === "review" ? "true" : "false");
+    return button;
+  });
+  nodes.set("mode-review", modeButtons[0]);
+  nodes.set("mode-audit", modeButtons[1]);
   return {
     nodes: nodes,
     scopeButtons: scopeButtons,
     overlayButtons: overlayButtons,
+    modeButtons: modeButtons,
     document: {
       body: new MockElement("body"),
       getElementById(id) {
@@ -239,6 +256,9 @@ function createDocument() {
       querySelectorAll(selector) {
         if (selector === "[data-scope]") {
           return scopeButtons;
+        }
+        if (selector === "[data-mode]") {
+          return modeButtons;
         }
         return selector === "[data-overlay]" ? overlayButtons : [];
       },
@@ -365,6 +385,7 @@ function fixture() {
         items: [
           {
             path: "src/auth.rs",
+            production: true,
             findings: [
               { source_id: "sarif:0", tool: "Semgrep", rule_id: "auth.bypass", level: "error", message: "Authorization result is ignored", line: 42, column: 3 },
               { source_id: FACT_SOURCE_ID, tool: "com.example.arch-lint", rule_id: "architecture.boundary", level: "warning", message: "Payment boundary crossed", line: 42, column: 3 },
@@ -386,6 +407,7 @@ function fixture() {
           },
           {
             path: "src/target.rs",
+            production: true,
             findings: [],
             ownership: { codeowners_source_id: "codeowners", codeowners: [], contributors: [] },
             runtime: { source_ids: ["otel:0"], spans: 1, traces: 1 },
@@ -393,6 +415,7 @@ function fixture() {
           },
           {
             path: "tests/auth.rs",
+            production: false,
             findings: [],
             ownership: { codeowners_source_id: "codeowners", codeowners: [], contributors: [{ name: "Bob", commits: 1 }] },
             churn: { commits: 1, lines_added: 4, lines_deleted: 0 },
@@ -457,19 +480,19 @@ function fixture() {
     },
     map: {
       scope: { aggregation_paths_truncated: false },
-      files: { total: 2, returned: 2, truncated: false, items: [] },
-      languages: { total: 1, returned: 1, truncated: false, items: [] },
+      files: { total: 4, returned: 4, truncated: false, items: [] },
+      languages: { total: 1, returned: 1, truncated: false, items: [{ language: "rust", file_count: 3 }] },
       components: {
         total: 2,
         returned: 2,
         truncated: false,
         items: [
-          { path: "src", file_count: 1, languages: [], boundaries: { total: 0, returned: 0, truncated: false, items: [] } },
+          { path: "src", file_count: 3, languages: [], boundaries: { total: 0, returned: 0, truncated: false, items: [] } },
           { path: "tests", file_count: 1, languages: [], boundaries: { total: 0, returned: 0, truncated: false, items: [] } },
         ],
       },
-      entry_points: { total: 0, returned: 0, truncated: false, items: [] },
-      hotspots: { total: 0, returned: 0, truncated: false, items: [] },
+      entry_points: { total: 1, returned: 1, truncated: false, items: [{ file: "src/main.rs", classification: "direct", evidence: { kind: "filename", matched: "main.rs" } }] },
+      hotspots: { total: 1, returned: 1, truncated: false, items: [{ name: "authorize", kind: "function", file: "src/auth.rs", line: 42, in_degree: 5, name_collision: 1, edge_precision: [] }] },
       cycles: { total: 0, returned: 0, truncated: false, items: [] },
       limits: {},
       precision_notes: [],
@@ -522,6 +545,50 @@ function fixture() {
       },
       limits: {},
       precision_notes: [],
+    },
+    audit: {
+      dead_code: {
+        total: 3,
+        returned: 3,
+        truncated: true,
+        items: [
+          { name: "unused_helper", kind: "function", file: "src/dead.rs", line: 9 },
+          { name: "OldWidget", kind: "class", file: "src/old.rs", line: 2 },
+          { name: "unused_fixture", kind: "function", file: "tests/fixtures/dead.rs", line: 4 },
+        ],
+      },
+      change_hotspots: {
+        status: "available",
+        window_commits: 500,
+        returned: 2,
+        truncated: false,
+        items: [
+          { file: "src/auth.rs", commits: 9, in_degree: 5, score: 45 },
+          { file: "tests/auth.rs", commits: 4, in_degree: 2, score: 8 },
+        ],
+      },
+      largest_files: {
+        status: "available",
+        returned: 4,
+        truncated: false,
+        items: [
+          { file: "frontend/scripts/highstock.min.js", lines: 60000 },
+          { file: "src/report.rs", lines: 4200 },
+          { file: "src/auth.rs", lines: 900 },
+          { file: "tests/fixtures/big.rs", lines: 5000 },
+        ],
+      },
+      bus_factor: {
+        status: "available",
+        window_commits: 2000,
+        returned: 3,
+        truncated: false,
+        items: [
+          { component: "src/core", authors: 1, touches: 40, top_author_pct: 100 },
+          { component: "src", authors: 6, touches: 50, top_author_pct: 62 },
+          { component: "tests/e2e", authors: 1, touches: 30, top_author_pct: 100 },
+        ],
+      },
     },
   };
 }
@@ -695,6 +762,8 @@ async function main() {
   assert.doesNotMatch(HTML_SOURCE, /<(?:script|style)[^>]*>\s*[^<\s]/i, "Lens must not add inline executable content");
   assert.doesNotMatch(HTML_SOURCE, /https?:\/\//i, "Lens must remain offline and dependency-free");
   assert.match(HTML_SOURCE, /class="scope-control__hint"[^>]*>Emphasizes the graph · filters the mobile list</i);
+  assert.match(HTML_SOURCE, /lane-key__serious[\s\S]*?Serious signal/, "Legend must name the serious tier");
+  assert.match(HTML_SOURCE, /lane-key__warning[\s\S]*?Attention/, "Legend must name the attention tier");
   assert.match(HTML_SOURCE, /<summary role="button" aria-label="Evidence overlay filters"/i);
   assert.match(HTML_SOURCE, /<summary[^>]*role="button"[^>]*aria-label="Open the full precision and limits ledger"/i);
   assert.match(
@@ -804,8 +873,210 @@ async function main() {
   assert.match(harness.nodes.get("completeness-status").textContent, /No truncation reported/i);
   assert.ok(harness.nodes.get("completeness-status").classList.contains("is-complete"));
   assert.match(harness.nodes.get("status-region").textContent, /9 evidence sources were evaluated/i);
+  assert.match(
+    harness.nodes.get("instrument-summary").textContent,
+    /Widest blast: authorize → 1 symbol across 1 component/i,
+    "The headline must name the widest-blast changed symbol"
+  );
+  assert.match(
+    harness.nodes.get("instrument-summary").textContent,
+    /1 changed symbol reaches downstream code with no returned test path/i,
+    "The headline must count changed symbols with no test path"
+  );
   assert.match(harness.nodes.get("evidence-summary").textContent, /9 sources · 3 matched trace files/i);
   assert.equal(harness.nodes.get("evidence-source-list").querySelectorAll(".evidence-source").length, 9);
+
+  const auditHarness = await renderFixture(fixture(), { width: 1200 });
+  assert.match(auditHarness.nodes.get("audit-summary").textContent, /2 components across 1 language/i, "Audit summary must explain the codebase shape");
+  assert.match(auditHarness.nodes.get("audit-summary").textContent, /3 dead-code candidates/i, "Audit summary must count dead-code candidates from the true total");
+  assert.match(auditHarness.nodes.get("audit-explain").textContent, /Largest components/i);
+  assert.match(auditHarness.nodes.get("audit-explain").textContent, /src[\s\S]*3 files/i, "Explain must rank components by file count");
+  assert.match(auditHarness.nodes.get("audit-structural").textContent, /No dependency cycles/i, "Structural must show the acyclic clean state");
+  assert.match(auditHarness.nodes.get("audit-structural").textContent, /Most depended-on symbols/i);
+  assert.match(auditHarness.nodes.get("audit-structural").textContent, /authorize · src\/auth\.rs[\s\S]*5 in/i, "Structural must rank hotspots by in-degree");
+  assert.match(auditHarness.nodes.get("audit-health").textContent, /Dead-code candidates/i);
+  assert.match(auditHarness.nodes.get("audit-health").textContent, /unused_helper · function/i, "Health must list dead-code candidates");
+  assert.match(auditHarness.nodes.get("audit-health").textContent, /Showing 3 of 3 candidates/i, "Health must be honest about truncation");
+
+  assert.match(auditHarness.nodes.get("audit-change").textContent, /Churn × centrality/i);
+  assert.match(auditHarness.nodes.get("audit-change").textContent, /src\/auth\.rs[\s\S]*9 commits × 5 in/i, "Change card must show both axes");
+  assert.match(auditHarness.nodes.get("audit-change").textContent, /last 500 commits/i, "Change card must state the churn window");
+
+  assert.match(auditHarness.nodes.get("audit-verdict-word").textContent, /Risk/i, "Fixture has an error-level finding -> Risk posture");
+  assert.ok(auditHarness.nodes.get("audit-verdict").classList.contains("audit-verdict--risk"), "Verdict badge carries the posture class");
+  assert.match(auditHarness.nodes.get("audit-lede").textContent, /2 components · 4 mapped files · 1 language/i, "Lede states the codebase shape from facts");
+  assert.match(auditHarness.nodes.get("audit-lede").textContent, /No dependency cycles/i, "Lede states the acyclic structure");
+  assert.equal(auditHarness.nodes.get("audit-pillars").querySelectorAll(".audit-pillar").length, 3, "Three posture pillars");
+  assert.match(auditHarness.nodes.get("audit-pillars").textContent, /Structure[\s\S]*Healthy/i, "Structure pillar is healthy at 0 cycles");
+
+  var tiles = auditHarness.nodes.get("audit-treemap").querySelectorAll(".tm-rect");
+  assert.ok(tiles.length >= 2, "Treemap draws a tile per component");
+  assert.ok(auditHarness.nodes.get("audit-treemap").querySelectorAll(".tm-rect--risk").length >= 1, "a component holding a change-hotspot is tinted risk");
+  assert.ok(auditHarness.nodes.get("audit-map-mobile").querySelectorAll(".audit-row").length >= 2, "Mobile map falls back to ranked bars");
+
+  assert.match(auditHarness.nodes.get("audit-structural-sev").textContent, /Acyclic/i, "Structural chip is Acyclic at 0 cycles");
+  assert.match(auditHarness.nodes.get("audit-change-sev").textContent, /Watch/i, "Change chip is Watch with hotspots present");
+  assert.match(auditHarness.nodes.get("audit-security-sev").textContent, /Findings|Review/i, "Security chip reflects loaded findings");
+
+  assert.match(auditHarness.nodes.get("audit-bugs").textContent, /Largest files/i);
+  assert.match(auditHarness.nodes.get("audit-bugs").textContent, /highstock\.min\.js[\s\S]*60,000 lines/i, "Largest-files output is not silently post-filtered after the backend cap");
+  assert.match(auditHarness.nodes.get("audit-bugs-sev").textContent, /Very large/i, "A very large line-span proxy is surfaced without claiming a defect");
+
+  assert.match(auditHarness.nodes.get("audit-bus").textContent, /knowledge-concentrated/i);
+  assert.match(auditHarness.nodes.get("audit-bus").textContent, /src\/core[\s\S]*100% · 1 author/i, "Bus card shows single-owner concentration");
+  assert.match(auditHarness.nodes.get("audit-bus-sev").textContent, /Concentrated/i, "Single-author history is reported as concentrated");
+  assert.match(auditHarness.nodes.get("audit-map-note").textContent, /All 2 returned components/i, "Map states how much of the returned component set it represents");
+
+  var auditUnavailablePayload = fixture();
+  auditUnavailablePayload.evidence.files.items.forEach((file) => { file.findings = []; });
+  auditUnavailablePayload.audit.change_hotspots = { status: "unavailable", window_commits: 500, returned: 0, items: [] };
+  auditUnavailablePayload.audit.largest_files = { status: "unavailable", returned: 0, items: [] };
+  auditUnavailablePayload.audit.bus_factor = { status: "unavailable", window_commits: 2000, returned: 0, items: [] };
+  var auditUnavailableHarness = await renderFixture(auditUnavailablePayload, { width: 1200 });
+  assert.equal(auditUnavailableHarness.nodes.get("audit-verdict-word").textContent, "Incomplete", "Missing audit inputs cannot produce a Healthy verdict");
+  assert.equal(auditUnavailableHarness.nodes.get("audit-change-sev").textContent, "No data", "Unavailable churn is not labelled Clear");
+  assert.equal(auditUnavailableHarness.nodes.get("audit-bugs-sev").textContent, "No data", "Unavailable size data is explicit");
+  assert.equal(auditUnavailableHarness.nodes.get("audit-bus-sev").textContent, "No data", "Unavailable authorship data is explicit");
+
+  var boundedPayload = fixture();
+  boundedPayload.evidence.files.items.forEach((file) => { file.findings = []; });
+  boundedPayload.audit.change_hotspots.items = boundedPayload.audit.change_hotspots.items.slice(0, 1);
+  boundedPayload.audit.change_hotspots.returned = 1;
+  boundedPayload.audit.change_hotspots.truncated = true;
+  boundedPayload.audit.largest_files.truncated = true;
+  boundedPayload.audit.bus_factor.truncated = true;
+  boundedPayload.map.cycles = { total: null, returned: 0, truncated: true, truncation_reason: "cycle_limit", items: [] };
+  var boundedHarness = await renderFixture(boundedPayload, { width: 1200 });
+  assert.equal(boundedHarness.nodes.get("audit-verdict-word").textContent, "Incomplete", "Available but capped audit inputs cannot produce a Healthy verdict");
+  assert.match(boundedHarness.nodes.get("audit-summary").textContent, /partial or unavailable/i);
+  assert.match(boundedHarness.nodes.get("audit-change").textContent, /bounded subset/i);
+  assert.match(boundedHarness.nodes.get("audit-bugs").textContent, /bounded ranking/i);
+  assert.match(boundedHarness.nodes.get("audit-bus").textContent, /bounded subset/i);
+  assert.match(boundedHarness.nodes.get("audit-structural").textContent, /cycle analysis is partial/i);
+  assert.doesNotMatch(boundedHarness.nodes.get("audit-structural").textContent, /acyclic/i, "A partial zero-cycle window is not presented as acyclic");
+  assert.equal(boundedHarness.nodes.get("audit-structural-sev").textContent, "Partial");
+
+  var truncatedMapPayload = fixture();
+  truncatedMapPayload.map.components = {
+    total: 12,
+    returned: 10,
+    truncated: true,
+    truncation_reason: "top_limit",
+    items: Array.from({ length: 10 }, (_, index) => ({
+      path: "component-" + index,
+      file_count: 10 - index,
+      languages: [],
+      boundaries: { total: 0, returned: 0, truncated: false, items: [] },
+    })),
+  };
+  truncatedMapPayload.map.files = { total: 55, returned: 55, truncated: false, items: [] };
+  truncatedMapPayload.audit.narrative = {
+    red_team: [
+      { title: "Returned tail", vector: ["component-9"] },
+      { title: "Unknown route", vector: ["ghost"] },
+    ],
+  };
+  var truncatedMapHarness = await renderFixture(truncatedMapPayload, { width: 1200 });
+  assert.match(truncatedMapHarness.nodes.get("audit-map-note").textContent, /Showing 10 of 12 components; omitted components are not represented/i);
+  assert.match(truncatedMapHarness.nodes.get("audit-treemap").textContent, /Other returned components/i, "Visual tail grouping names only returned components");
+  assert.doesNotMatch(truncatedMapHarness.nodes.get("audit-redteam-body").textContent, /Unknown route/i, "Unknown components cannot fall through to the visual tail tile");
+  var returnedTail = truncatedMapHarness.nodes.get("audit-redteam-body").querySelectorAll(".audit-rt")[0];
+  returnedTail.dispatch("click");
+  assert.equal(truncatedMapHarness.nodes.get("audit-treemap").querySelectorAll(".tm-rect--traced").length, 1, "A known collapsed component traces to its returned-components tile");
+
+  var nf = fixture();
+  nf.audit.narrative = {
+    summary: "AI executive summary of the codebase.",
+    lenses: { bugs: "Review the largest indexed files.", security: "Guard the assistant's DB tools." },
+    domains: [
+      { name: "Auth & tenancy", severity: "risk", note: "Compliance-critical isolation.", components: ["src", "tests"] },
+      { name: "Reporting", severity: "attention", note: "Large surface.", components: ["ghost"] }
+    ],
+    red_team: [
+      { title: "AI tool reaches the DB", severity: "attention", scenario: "A user coerces the assistant into fetching another system.", evidence: "MultiAgentBot + GetSystemIDTool", vector: ["src", "tests"] },
+      { title: "Partially unknown", severity: "attention", vector: ["src", "ghost"] },
+      { title: "Ungrounded guess", severity: "risk", scenario: "unknown component", vector: ["ghost"] }
+    ]
+  };
+  var narrHarness = await renderFixture(nf, { width: 1200 });
+  assert.match(narrHarness.nodes.get("audit-lede").textContent, /AI executive summary of the codebase/i, "Narrative summary supersedes the factual lede");
+  assert.ok(narrHarness.nodes.get("audit-lede").classList.contains("audit-lede--ai"), "Narrative lede is marked as AI interpretation");
+  assert.match(narrHarness.nodes.get("audit-bugs").textContent, /Review the largest indexed files/i, "Per-lens AI reading renders on the bug card");
+  assert.match(narrHarness.nodes.get("audit-bugs").textContent, /AI/i, "Per-lens reading carries an AI label");
+  assert.equal(narrHarness.nodes.get("audit-domain-card").hidden, false, "Domain card shows when the narrative maps domains");
+  assert.match(narrHarness.nodes.get("audit-domain").textContent, /Auth & tenancy[\s\S]*Compliance-critical/i, "Domain card renders domain + note");
+  assert.match(narrHarness.nodes.get("audit-domain").textContent, /src · tests/i, "Domain card lists exact returned components");
+  assert.equal(narrHarness.nodes.get("audit-redteam").hidden, false, "Red-team panel shows when hypotheses are present");
+  assert.match(narrHarness.nodes.get("audit-redteam-body").textContent, /AI tool reaches the DB[\s\S]*coerces the assistant/i, "Red-team item renders title + scenario");
+  assert.match(narrHarness.nodes.get("audit-redteam-body").textContent, /Claimed route[\s\S]*src → tests/i, "Red-team hypothesis labels its component route as a claim");
+  assert.match(narrHarness.nodes.get("audit-redteam-body").textContent, /AI evidence note[\s\S]*MultiAgentBot \+ GetSystemIDTool/i, "AI prose is not presented as proof");
+  assert.doesNotMatch(narrHarness.nodes.get("audit-redteam-body").textContent, /Ungrounded guess/i, "A hypothesis with an unknown component is never shown");
+  assert.doesNotMatch(narrHarness.nodes.get("audit-redteam-body").textContent, /Partially unknown/i, "A mixed valid and unknown route is rejected as a whole");
+  assert.match(narrHarness.nodes.get("audit-domain").textContent, /Bound components[\s\S]*src · tests/i, "Domain risk distinguishes component binding from a proven path");
+  assert.doesNotMatch(narrHarness.nodes.get("audit-domain").textContent, /Reporting/i, "A domain with no returned component is dropped");
+
+  var rtItem = narrHarness.nodes.get("audit-redteam-body").querySelectorAll(".audit-rt")[0];
+  assert.equal(rtItem.getAttribute("role"), "button", "A hypothesis with a vector is traceable");
+  assert.equal(rtItem.getAttribute("aria-pressed"), "false");
+  rtItem.dispatch("click");
+  assert.equal(rtItem.getAttribute("aria-pressed"), "true", "Activating a hypothesis marks it pressed");
+  assert.ok(narrHarness.nodes.get("audit-treemap").querySelectorAll(".tm-rect--traced").length >= 1, "The vector highlights its component tiles on the map");
+  rtItem.dispatch("click");
+  assert.equal(rtItem.getAttribute("aria-pressed"), "false", "Clicking again clears the trace");
+  assert.equal(narrHarness.nodes.get("audit-treemap").querySelectorAll(".tm-rect--traced").length, 0, "Clearing removes the map highlight");
+
+  assert.equal(auditHarness.nodes.get("audit-domain-card").hidden, true, "Domain card is hidden without a narrative");
+  assert.equal(auditHarness.nodes.get("audit-redteam").hidden, true, "Red-team panel is hidden without a narrative");
+  assert.doesNotMatch(auditHarness.nodes.get("audit-lede").textContent, /AI executive/i, "Facts-only lede when no narrative");
+
+  assert.match(HTML_SOURCE, /id="audit-redteam"/i, "Red-team section must exist");
+  assert.match(HTML_SOURCE, /to verify/i, "Red-team panel is labelled as hypotheses to verify");
+  assert.match(CSS_SOURCE, /\.tm-rect--traced/, "The map has a traced-tile style for vector highlighting");
+
+  assert.match(HTML_SOURCE, /id="audit-treemap"/i, "Treemap element must exist");
+  assert.match(HTML_SOURCE, /id="audit-verdict"/i, "Verdict badge must exist");
+  assert.match(CSS_SOURCE, /\.tm-rect--risk\s*\{[^}]*fill:\s*var\(--coral\)/s, "Treemap risk fill is a theme token, not a hardcoded color");
+  assert.match(CSS_SOURCE, /\.audit-lede--ai::before[\s\S]*?AI interpretation/s, "AI-sourced lede carries a visible AI label");
+  assert.match(auditHarness.nodes.get("audit-security").textContent, /Static findings/i);
+  assert.match(auditHarness.nodes.get("audit-security").textContent, /auth\.bypass/i, "Security must surface loaded static findings");
+  assert.match(auditHarness.nodes.get("audit-security").textContent, /Attack surface/i);
+  assert.match(auditHarness.nodes.get("audit-security").textContent, /src\/main\.rs/i, "Security must list entry points as attack surface");
+
+  assert.equal(auditHarness.nodes.get("audit-board").hidden, true, "Audit board starts hidden in review mode");
+  assert.equal(auditHarness.nodes.get("mode-review").getAttribute("aria-pressed"), "true");
+  auditHarness.nodes.get("mode-audit").dispatch("click");
+  assert.equal(auditHarness.nodes.get("audit-board").hidden, false, "Switching to audit reveals the board");
+  assert.equal(auditHarness.nodes.get("mode-audit").getAttribute("aria-pressed"), "true", "Audit button becomes pressed");
+  assert.equal(auditHarness.nodes.get("mode-review").getAttribute("aria-pressed"), "false", "Review button releases");
+  assert.equal(auditHarness.document.body.getAttribute("data-mode"), "audit", "Body mode attribute drives the CSS show/hide");
+
+  assert.equal(auditHarness.nodes.get("audit-production").textContent, "All indexed paths", "Audit reports the backend-selected path policy");
+  assert.match(auditHarness.nodes.get("audit-change").textContent, /tests\/auth\.rs/i, "Unfiltered change card includes test paths");
+  assert.match(auditHarness.nodes.get("audit-health").textContent, /unused_fixture/i, "Unfiltered health card includes fixture paths");
+
+  var productionPayload = fixture();
+  productionPayload.options.production_only = true;
+  productionPayload.map.files = { total: 3, returned: 3, truncated: false, items: [] };
+  productionPayload.map.components = { total: 1, returned: 1, truncated: false, items: [productionPayload.map.components.items[0]] };
+  productionPayload.audit.dead_code = { total: 2, returned: 2, truncated: false, items: productionPayload.audit.dead_code.items.slice(0, 2) };
+  productionPayload.audit.change_hotspots.items = productionPayload.audit.change_hotspots.items.slice(0, 1);
+  productionPayload.audit.change_hotspots.returned = 1;
+  productionPayload.audit.largest_files.items = productionPayload.audit.largest_files.items.filter((item) => item.file.startsWith("src/"));
+  productionPayload.audit.largest_files.returned = productionPayload.audit.largest_files.items.length;
+  productionPayload.audit.bus_factor.items = productionPayload.audit.bus_factor.items.filter((item) => item.component.startsWith("src"));
+  productionPayload.audit.bus_factor.returned = productionPayload.audit.bus_factor.items.length;
+  var productionHarness = await renderFixture(productionPayload, { width: 1200 });
+  assert.equal(productionHarness.nodes.get("audit-production").textContent, "Production paths only");
+  assert.doesNotMatch(productionHarness.nodes.get("audit-change").textContent, /tests\/auth\.rs/i, "Backend-filtered change data stays production-only");
+  assert.doesNotMatch(productionHarness.nodes.get("audit-health").textContent, /unused_fixture/i, "Backend-filtered dead-code data stays production-only");
+  assert.doesNotMatch(productionHarness.nodes.get("audit-bus").textContent, /tests\/e2e/i, "Backend-filtered authorship stays production-only");
+
+  assert.match(HTML_SOURCE, /<span[^>]*id="audit-production"/i, "Selected audit scope must be visible and noninteractive");
+  assert.doesNotMatch(APP_SOURCE, /NON_PRODUCTION_SEGMENTS|auditFilter\s*\(/, "The browser must not duplicate backend path classification");
+
+  assert.match(HTML_SOURCE, /<button[^>]*id="mode-audit"[^>]*data-mode="audit"/i, "Audit mode button must exist");
+  assert.match(HTML_SOURCE, /id="audit-board"[^>]*hidden/i, "Audit board must ship hidden");
+  assert.match(CSS_SOURCE, /body\[data-mode="audit"\][\s\S]*?\.review-workbench[\s\S]*?display:\s*none/s, "Audit mode must hide the diff workbench");
   assert.match(harness.nodes.get("evidence-source-list").textContent, /repository verified/i);
   assert.match(harness.nodes.get("temporal-summary").textContent, /Architecture drift detected/i);
   assert.equal(harness.nodes.get("temporal-components").textContent, "+1 −1 ~0");
@@ -926,9 +1197,21 @@ async function main() {
   assert.ok(clusterLayerIndex >= 0 && edgeControlIndex > clusterLayerIndex, "Keyboard order must reach graph claims before edge controls");
   const cluster = keyboardHarness.nodes.get("trace-graph").querySelectorAll("[data-cluster-id]")[0];
   assert.ok(cluster, "Desktop overview must expose keyboard-expandable clusters");
+  assert.ok(
+    keyboardHarness.nodes.get("trace-graph").querySelectorAll(".graph-cluster--risk-serious").length >= 1,
+    "Cluster overview must surface the risk tier before expanding"
+  );
+  assert.match(cluster.textContent, /1 serious/, "Cluster meta must count serious claims in text");
   cluster.dispatch("keydown", { key: "Enter" });
   const node = keyboardHarness.nodes.get("trace-graph").querySelectorAll("[data-node-id]")[0];
   assert.ok(node, "Expanded cluster must expose keyboard-selectable claims");
+  assert.ok(
+    node.classList.contains("graph-node--risk-serious"),
+    "A changed claim with findings, a failing test, and no test path must carry the serious tier"
+  );
+  assert.match(node.textContent, /UNTESTED/, "A changed claim with no returned test path must be flagged in text, not color alone");
+  assert.match(node.textContent, /1 fail · 2 findings · untested/i, "Evidence marks must be human-readable, risk first");
+  assert.match(node.textContent, /→ 1 sym · 1 comp/, "Changed claims must state their blast reach");
   node.dispatch("keydown", { key: " " });
   assert.doesNotMatch(keyboardHarness.nodes.get("inspector-body").textContent, /Select a trace claim/i);
 

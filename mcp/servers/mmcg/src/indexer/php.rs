@@ -3,6 +3,7 @@
 
 use super::common::{
     line_of, node_text, push_call_with_type, push_def_with_decorators, push_import,
+    signature_until_body,
 };
 use super::LanguageExtractor;
 use crate::store::PendingFile;
@@ -362,43 +363,16 @@ fn first_named_child<'tree>(node: &Node<'tree>) -> Option<Node<'tree>> {
     None
 }
 
-fn signature_until_body(node: &Node, source: &[u8]) -> Option<String> {
-    let body = node.child_by_field_name("body")?;
-    let header_end = body.start_byte();
-    let start = node.start_byte();
-    if header_end <= start {
-        return None;
-    }
-    let text = std::str::from_utf8(&source[start..header_end]).ok()?;
-    let trimmed = text
-        .trim_end_matches(|c: char| c == '{' || c.is_whitespace())
-        .to_string();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::indexer::common;
     use crate::indexer::parse_one;
-    use std::env;
-    use std::path::PathBuf;
-
-    fn write_tmp(name: &str, content: &str) -> PathBuf {
-        let mut dir = env::temp_dir();
-        dir.push(format!("mmcg-php-test-{}-{name}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(name);
-        std::fs::write(&path, content).unwrap();
-        path
-    }
 
     #[test]
     fn extracts_classes_traits_and_methods() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "php",
             "Foo.php",
             "<?php\nnamespace App;\n\
              class Foo {\n\
@@ -424,7 +398,8 @@ mod tests {
 
     #[test]
     fn extracts_use_declarations() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "php",
             "Usings.php",
             "<?php\n\
              use App\\Foo;\n\
@@ -456,7 +431,7 @@ mod tests {
 
     #[test]
     fn captures_php8_attributes() {
-        let path = write_tmp(
+        let path = common::write_tmp("php",
             "Attrs.php",
             "<?php\n\
              use PHPUnit\\Framework\\Attributes\\Test;\n\
@@ -479,7 +454,8 @@ mod tests {
 
     #[test]
     fn extracts_calls_static_and_new() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "php",
             "Calls.php",
             "<?php\n\
              class Main {\n\

@@ -9,9 +9,9 @@ use crate::queries::{self, ChangeImpactError, ChangeImpactResponse, ProjectMapRe
 use crate::store::{query_budget_ms_from_env, Store, WorkBudget, DEFAULT_CLI_BUDGET_MS};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -57,6 +57,124 @@ pub struct LensSnapshot {
     pub temporal: LensTemporalSnapshot,
     pub semantic: crate::scip_overlay::SemanticOverlaySnapshot,
     pub evidence: crate::evidence::EvidenceSnapshot,
+    /// Audit facts for the selected map scope.
+    pub audit: LensAudit,
+}
+
+/// Bounded audit facts for the selected map scope.
+#[derive(Debug, Serialize)]
+pub struct LensAudit {
+    /// Unreferenced candidates retain `Store::unreferenced` false positives.
+    pub dead_code: LensDeadCode,
+    pub change_hotspots: LensChangeHotspots,
+    pub largest_files: LensLargestFiles,
+    pub bus_factor: LensBusFactor,
+    pub narrative_binding: AuditNarrativeBinding,
+    /// Optional bounded sidecar interpretation; mmcg never calls a model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub narrative: Option<AuditNarrative>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditNarrativeBinding {
+    pub repository_identity: String,
+    pub baseline_oid: String,
+    pub head_oid: String,
+    pub snapshot_token_sha256: String,
+    pub map_sha256: String,
+}
+
+/// Bounded, validated AI narrative rendered only through DOM text nodes.
+#[derive(Debug, Serialize)]
+pub struct AuditNarrative {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub lenses: std::collections::BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub domains: Vec<AuditDomain>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub red_team: Vec<AuditRedTeam>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuditDomain {
+    pub name: String,
+    pub severity: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuditRedTeam {
+    pub title: String,
+    pub severity: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scenario: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    /// Non-empty component path list required at ingestion.
+    pub vector: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LensLargestFiles {
+    pub status: &'static str,
+    pub returned: u32,
+    pub truncated: bool,
+    pub items: Vec<crate::store::FileSize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LensBusFactor {
+    /// `"available"`, or `"unavailable"` when git history could not be read.
+    pub status: &'static str,
+    pub window_commits: u32,
+    pub returned: u32,
+    pub truncated: bool,
+    pub items: Vec<LensComponentAuthors>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LensComponentAuthors {
+    pub component: String,
+    pub authors: u32,
+    pub touches: u32,
+    pub top_author_pct: u32,
+}
+
+/// Change-hotspot ranking: churn (recent commits touching a file) crossed with
+/// centrality (incoming edges into symbols the file declares).
+#[derive(Debug, Serialize)]
+pub struct LensChangeHotspots {
+    /// `"available"`, or `"unavailable"` when git history could not be read.
+    pub status: &'static str,
+    /// Commits inspected in the churn window (0 when unavailable).
+    pub window_commits: u32,
+    pub returned: u32,
+    pub truncated: bool,
+    pub items: Vec<LensChangeHotspot>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LensChangeHotspot {
+    pub file: String,
+    pub commits: u32,
+    pub in_degree: u32,
+    /// `commits * in_degree` — the ranking key, exposed so the UI can explain
+    /// the ordering instead of asserting it.
+    pub score: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LensDeadCode {
+    pub total: u32,
+    pub returned: u32,
+    pub truncated: bool,
+    pub items: Vec<crate::queries::SymbolHit>,
 }
 
 #[derive(Debug, Serialize)]
@@ -379,6 +497,14 @@ pub(crate) fn validate_index_snapshot(
     root: &Path,
     deadline: Option<Instant>,
 ) -> Result<(), LensError> {
+    validated_index_paths(store, root, deadline).map(|_| ())
+}
+
+fn validated_index_paths(
+    store: &Store,
+    root: &Path,
+    deadline: Option<Instant>,
+) -> Result<HashSet<String>, LensError> {
     if !store.schema_current().unwrap_or(false)
         || !store.extractor_contract_current().unwrap_or(false)
     {
@@ -468,7 +594,350 @@ pub(crate) fn validate_index_snapshot(
             Err(_) => return Err(LensError::IndexStale),
         }
     }
-    Ok(())
+    Ok(indexed_paths)
+}
+
+/// Invalid, unsupported, or oversized sidecars degrade to facts-only output.
+fn read_audit_narrative(
+    root: &Path,
+    expected_binding: &AuditNarrativeBinding,
+    valid_components: &HashSet<String>,
+) -> Option<AuditNarrative> {
+    const MAX_BYTES: u64 = 256 * 1024;
+    const CAP_SUMMARY: usize = 2000;
+    const CAP_LENS: usize = 600;
+    const CAP_LENSES: usize = 12;
+    const CAP_DOMAINS: usize = 16;
+    const CAP_DOMAIN_NAME: usize = 80;
+    const CAP_DOMAIN_NOTE: usize = 400;
+    const CAP_DOMAIN_COMPONENTS: usize = 24;
+    const CAP_COMPONENT: usize = 200;
+    const CAP_RED_TEAM: usize = 16;
+    const CAP_TITLE: usize = 140;
+    const CAP_SCENARIO: usize = 600;
+    const CAP_EVIDENCE: usize = 500;
+
+    let path = std::env::var("MMCG_AUDIT_NARRATIVE")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join(".mastermind").join("audit-narrative.json"));
+    let metadata = std::fs::symlink_metadata(&path).ok()?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > MAX_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(&path).ok()?;
+    let raw: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    if raw
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        != Some(1)
+    {
+        return None;
+    }
+    let binding: AuditNarrativeBinding =
+        serde_json::from_value(raw.get("binding")?.clone()).ok()?;
+    if &binding != expected_binding {
+        return None;
+    }
+
+    // Truncate on a char boundary so a byte cap never splits a multibyte glyph.
+    let clip = |value: &str, cap: usize| -> String {
+        if value.chars().count() <= cap {
+            value.trim().to_string()
+        } else {
+            value
+                .chars()
+                .take(cap)
+                .collect::<String>()
+                .trim()
+                .to_string()
+        }
+    };
+    let sev = |value: Option<&str>| -> String {
+        let value = value.unwrap_or("info");
+        match value {
+            "healthy" | "attention" | "risk" | "info" => value.to_string(),
+            _ => "info".to_string(),
+        }
+    };
+    let opt_str = |value: Option<&serde_json::Value>, cap: usize| -> Option<String> {
+        value
+            .and_then(serde_json::Value::as_str)
+            .map(|text| clip(text, cap))
+            .filter(|text| !text.is_empty())
+    };
+    let component_vector = |value: Option<&serde_json::Value>| -> Option<Vec<String>> {
+        let values = value?.as_array()?;
+        if values.is_empty() || values.len() > CAP_DOMAIN_COMPONENTS {
+            return None;
+        }
+        let mut seen = HashSet::new();
+        let mut components = Vec::with_capacity(values.len());
+        for value in values {
+            let raw_component = value.as_str()?;
+            if raw_component.is_empty()
+                || raw_component.trim() != raw_component
+                || raw_component.chars().count() > CAP_COMPONENT
+                || !valid_components.contains(raw_component)
+            {
+                return None;
+            }
+            let component = raw_component.to_string();
+            if seen.insert(component.clone()) {
+                components.push(component);
+            }
+        }
+        (!components.is_empty()).then_some(components)
+    };
+
+    let summary = opt_str(raw.get("summary"), CAP_SUMMARY);
+
+    let mut lenses = std::collections::BTreeMap::new();
+    if let Some(map) = raw.get("lenses").and_then(serde_json::Value::as_object) {
+        const KNOWN: &[&str] = &[
+            "bugs",
+            "bus",
+            "structural",
+            "change",
+            "health",
+            "security",
+            "domain",
+            "explain",
+        ];
+        for (key, value) in map.iter().take(CAP_LENSES) {
+            if KNOWN.contains(&key.as_str()) {
+                if let Some(text) = value
+                    .as_str()
+                    .map(|t| clip(t, CAP_LENS))
+                    .filter(|t| !t.is_empty())
+                {
+                    lenses.insert(key.clone(), text);
+                }
+            }
+        }
+    }
+
+    let mut domains = Vec::new();
+    if let Some(list) = raw.get("domains").and_then(serde_json::Value::as_array) {
+        for item in list.iter().take(CAP_DOMAINS) {
+            let name = opt_str(item.get("name"), CAP_DOMAIN_NAME);
+            let Some(name) = name else { continue };
+            let Some(components) = component_vector(item.get("components")) else {
+                continue;
+            };
+            domains.push(AuditDomain {
+                name,
+                severity: sev(item.get("severity").and_then(serde_json::Value::as_str)),
+                note: opt_str(item.get("note"), CAP_DOMAIN_NOTE),
+                components,
+            });
+        }
+    }
+
+    let mut red_team = Vec::new();
+    if let Some(list) = raw.get("red_team").and_then(serde_json::Value::as_array) {
+        for item in list.iter().take(CAP_RED_TEAM) {
+            let Some(title) = opt_str(item.get("title"), CAP_TITLE) else {
+                continue;
+            };
+            let Some(vector) = component_vector(item.get("vector")) else {
+                continue;
+            };
+            red_team.push(AuditRedTeam {
+                title,
+                severity: sev(item.get("severity").and_then(serde_json::Value::as_str)),
+                scenario: opt_str(item.get("scenario"), CAP_SCENARIO),
+                evidence: opt_str(item.get("evidence"), CAP_EVIDENCE),
+                vector,
+            });
+        }
+    }
+
+    if summary.is_none() && lenses.is_empty() && domains.is_empty() && red_team.is_empty() {
+        return None;
+    }
+    Some(AuditNarrative {
+        summary,
+        lenses,
+        domains,
+        red_team,
+    })
+}
+
+fn audit_narrative_binding(
+    root: &Path,
+    impact: &ChangeImpactResponse,
+    map: &ProjectMapResponse,
+    deadline: Option<Instant>,
+) -> Result<AuditNarrativeBinding, LensError> {
+    let repository_identity = crate::facts::repository_identity_until(root, deadline)
+        .unwrap_or_else(|_| {
+            format!(
+                "git-worktree:sha256:{}",
+                crate::hex::encode(&Sha256::digest(root.to_string_lossy().as_bytes()))
+            )
+        });
+    let map_bytes = serde_json::to_vec(map).map_err(|_| LensError::Serialization)?;
+    Ok(AuditNarrativeBinding {
+        repository_identity,
+        baseline_oid: impact.baseline.baseline_oid.clone(),
+        head_oid: impact.baseline.head_oid.clone(),
+        snapshot_token_sha256: impact.snapshot_token.clone(),
+        map_sha256: crate::hex::encode(&Sha256::digest(map_bytes)),
+    })
+}
+
+fn audit_scope(map: &ProjectMapResponse) -> &str {
+    if map.scope.path == "." {
+        ""
+    } else {
+        &map.scope.path
+    }
+}
+
+fn audit_path_in_scope(path: &str, map: &ProjectMapResponse) -> bool {
+    let scope = audit_scope(map);
+    match map.scope.kind.as_str() {
+        "root" => true,
+        "file" => path == scope,
+        "directory" => path
+            .strip_prefix(scope)
+            .is_some_and(|suffix| suffix.starts_with('/')),
+        _ => false,
+    }
+}
+
+/// Distinct authors by selected map component over bounded git history.
+/// Renames are not followed; git failure makes this advisory section unavailable.
+fn authors_by_component(
+    root: &Path,
+    window_commits: u32,
+    map: &ProjectMapResponse,
+    production_only: bool,
+    indexed_paths: &HashSet<String>,
+    deadline: Option<Instant>,
+) -> Option<Vec<LensComponentAuthors>> {
+    const OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
+    let max_count = window_commits.to_string();
+    let output = crate::diff::run_bounded_git_with_limit_until(
+        root,
+        &[
+            "log",
+            "--no-merges",
+            "--format=%x00%an",
+            "--name-only",
+            "-n",
+            &max_count,
+        ],
+        None,
+        OUTPUT_LIMIT,
+        deadline,
+    )
+    .ok()?;
+    if !output.success {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut components: HashMap<String, HashMap<String, u32>> = HashMap::new();
+    let mut author = String::new();
+    for line in text.lines() {
+        if let Some(name) = line.strip_prefix('\u{0}') {
+            author = name.to_string();
+            continue;
+        }
+        let path = line.trim();
+        if path.is_empty()
+            || author.is_empty()
+            || !audit_path_in_scope(path, map)
+            || !indexed_paths.contains(path)
+            || production_only && !crate::store::is_production_path(path)
+        {
+            continue;
+        }
+        let component =
+            queries::component_for_file(audit_scope(map), &map.scope.kind, path, map.scope.depth);
+        *components
+            .entry(component)
+            .or_default()
+            .entry(author.clone())
+            .or_insert(0) += 1;
+    }
+    let mut rows: Vec<LensComponentAuthors> = components
+        .into_iter()
+        .map(|(component, authors)| {
+            let touches: u32 = authors.values().sum();
+            let top = authors.values().copied().max().unwrap_or(0);
+            let top_author_pct = if touches > 0 {
+                ((u64::from(top) * 100) / u64::from(touches)) as u32
+            } else {
+                0
+            };
+            LensComponentAuthors {
+                component,
+                authors: authors.len() as u32,
+                touches,
+                top_author_pct,
+            }
+        })
+        .collect();
+    // Prefer concentrated ownership, then use activity as the tie-breaker.
+    rows.sort_by(|a, b| {
+        let a_solo = a.authors == 1;
+        let b_solo = b.authors == 1;
+        b_solo
+            .cmp(&a_solo)
+            .then_with(|| b.top_author_pct.cmp(&a.top_author_pct))
+            .then_with(|| b.touches.cmp(&a.touches))
+            .then_with(|| a.component.cmp(&b.component))
+    });
+    Some(rows)
+}
+
+/// Commits per file over bounded git history. Renames are intentionally not followed.
+fn churn_by_file(
+    root: &Path,
+    window_commits: u32,
+    map: &ProjectMapResponse,
+    production_only: bool,
+    indexed_paths: &HashSet<String>,
+    deadline: Option<Instant>,
+) -> Option<HashMap<String, u32>> {
+    const CHURN_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
+    let max_count = window_commits.to_string();
+    let output = crate::diff::run_bounded_git_with_limit_until(
+        root,
+        &[
+            "log",
+            "--no-renames",
+            "--no-merges",
+            "--pretty=format:",
+            "--name-only",
+            "-n",
+            &max_count,
+        ],
+        None,
+        CHURN_OUTPUT_LIMIT,
+        deadline,
+    )
+    .ok()?;
+    if !output.success {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    for line in text.lines() {
+        let path = line.trim();
+        if path.is_empty()
+            || !audit_path_in_scope(path, map)
+            || !indexed_paths.contains(path)
+            || production_only && !crate::store::is_production_path(path)
+        {
+            continue;
+        }
+        *counts.entry(path.to_string()).or_insert(0) += 1;
+    }
+    Some(counts)
 }
 
 fn build_snapshot_until(
@@ -494,7 +963,7 @@ fn build_snapshot_until(
     let source_index_state = store
         .source_index_state()
         .map_err(|_| LensError::ImpactUnavailable(ChangeImpactError::SnapshotChanged))?;
-    validate_index_snapshot(store, &root, deadline)?;
+    let indexed_paths = validated_index_paths(store, &root, deadline)?;
 
     let impact = queries::change_impact(
         store,
@@ -619,6 +1088,179 @@ fn build_snapshot_until(
         ));
     }
 
+    const AUDIT_DEAD_CODE_CAP: usize = 100;
+    let (dead_total, dead_symbols) = store
+        .unreferenced_bounded(
+            None,
+            None,
+            audit_scope(&map),
+            &map.scope.kind,
+            options.production_only,
+            AUDIT_DEAD_CODE_CAP,
+        )
+        .map_err(|_| LensError::ImpactUnavailable(ChangeImpactError::SnapshotChanged))?;
+    let dead_items = dead_symbols
+        .into_iter()
+        .map(crate::queries::SymbolHit::from)
+        .collect::<Vec<_>>();
+    let dead_truncated = dead_total > dead_items.len() as u32;
+    const CHURN_WINDOW_COMMITS: u32 = 500;
+    const CENTRALITY_ROWS: usize = 2000;
+    const CHANGE_HOTSPOT_CAP: usize = 20;
+    let change_hotspots = match churn_by_file(
+        &root,
+        CHURN_WINDOW_COMMITS,
+        &map,
+        options.production_only,
+        &indexed_paths,
+        deadline,
+    ) {
+        None => LensChangeHotspots {
+            status: "unavailable",
+            window_commits: 0,
+            returned: 0,
+            truncated: false,
+            items: Vec::new(),
+        },
+        Some(churn) => match store.file_in_degrees_scoped(
+            audit_scope(&map),
+            &map.scope.kind,
+            options.production_only,
+            CENTRALITY_ROWS.saturating_add(1),
+        ) {
+            Err(_) => LensChangeHotspots {
+                status: "unavailable",
+                window_commits: 0,
+                returned: 0,
+                truncated: false,
+                items: Vec::new(),
+            },
+            Ok(mut degrees) => {
+                let centrality_truncated = degrees.len() > CENTRALITY_ROWS;
+                degrees.truncate(CENTRALITY_ROWS);
+                let mut ranked: Vec<LensChangeHotspot> = degrees
+                    .into_iter()
+                    .filter_map(|row| {
+                        let commits = *churn.get(&row.file)?;
+                        (commits > 0 && row.in_degree > 0).then(|| LensChangeHotspot {
+                            score: u64::from(commits) * u64::from(row.in_degree),
+                            file: row.file,
+                            commits,
+                            in_degree: row.in_degree,
+                        })
+                    })
+                    .collect();
+                ranked.sort_by(|left, right| {
+                    right
+                        .score
+                        .cmp(&left.score)
+                        .then_with(|| left.file.cmp(&right.file))
+                });
+                let result_truncated = ranked.len() > CHANGE_HOTSPOT_CAP;
+                ranked.truncate(CHANGE_HOTSPOT_CAP);
+                LensChangeHotspots {
+                    status: "available",
+                    window_commits: CHURN_WINDOW_COMMITS,
+                    returned: ranked.len() as u32,
+                    truncated: centrality_truncated || result_truncated,
+                    items: ranked,
+                }
+            }
+        },
+    };
+
+    const LARGEST_FILES_CAP: usize = 20;
+    let largest_files = match store.largest_files_scoped(
+        audit_scope(&map),
+        &map.scope.kind,
+        options.production_only,
+        LARGEST_FILES_CAP.saturating_add(1),
+    ) {
+        Ok(mut items) => {
+            let truncated = items.len() > LARGEST_FILES_CAP;
+            items.truncate(LARGEST_FILES_CAP);
+            LensLargestFiles {
+                status: "available",
+                returned: items.len() as u32,
+                truncated,
+                items,
+            }
+        }
+        Err(_) => LensLargestFiles {
+            status: "unavailable",
+            returned: 0,
+            truncated: false,
+            items: Vec::new(),
+        },
+    };
+
+    const BUS_FACTOR_WINDOW_COMMITS: u32 = 2000;
+    const BUS_FACTOR_CAP: usize = 20;
+    let bus_factor = match authors_by_component(
+        &root,
+        BUS_FACTOR_WINDOW_COMMITS,
+        &map,
+        options.production_only,
+        &indexed_paths,
+        deadline,
+    ) {
+        None => LensBusFactor {
+            status: "unavailable",
+            window_commits: 0,
+            returned: 0,
+            truncated: false,
+            items: Vec::new(),
+        },
+        Some(mut rows) => {
+            let truncated = rows.len() > BUS_FACTOR_CAP;
+            rows.truncate(BUS_FACTOR_CAP);
+            LensBusFactor {
+                status: "available",
+                window_commits: BUS_FACTOR_WINDOW_COMMITS,
+                returned: rows.len() as u32,
+                truncated,
+                items: rows,
+            }
+        }
+    };
+
+    let narrative_binding = audit_narrative_binding(&root, &impact, &map, deadline)?;
+    let valid_components = map
+        .components
+        .items
+        .iter()
+        .map(|component| component.path.clone())
+        .collect::<HashSet<_>>();
+    let narrative = read_audit_narrative(&root, &narrative_binding, &valid_components);
+
+    let audit = LensAudit {
+        dead_code: LensDeadCode {
+            total: dead_total,
+            returned: dead_items.len() as u32,
+            truncated: dead_truncated,
+            items: dead_items,
+        },
+        change_hotspots,
+        largest_files,
+        bus_factor,
+        narrative_binding,
+        narrative,
+    };
+
+    if store
+        .data_version()
+        .map_err(|_| LensError::ImpactUnavailable(ChangeImpactError::SnapshotChanged))?
+        != index_version
+        || store
+            .source_index_state()
+            .map_err(|_| LensError::ImpactUnavailable(ChangeImpactError::SnapshotChanged))?
+            != source_index_state
+    {
+        return Err(LensError::ImpactUnavailable(
+            ChangeImpactError::SnapshotChanged,
+        ));
+    }
+
     Ok(LensSnapshot {
         schema_version: 1,
         repository: LensRepository { name, root_label },
@@ -628,6 +1270,7 @@ fn build_snapshot_until(
         temporal,
         semantic,
         evidence,
+        audit,
     })
 }
 
@@ -1250,6 +1893,297 @@ mod tests {
             json["impact"]["changes"]["files"]["items"][0]["path"],
             "src/lib.rs"
         );
+    }
+
+    #[test]
+    fn snapshot_carries_selected_scope_dead_code_candidates() {
+        let (repo, _index_dir, index_path) = fixture();
+        let store = Store::open_read_only(&index_path).unwrap();
+        let snapshot = build_snapshot(&store, repo.path(), &options()).unwrap();
+        let json = serde_json::to_value(snapshot).unwrap();
+
+        let dead = &json["audit"]["dead_code"];
+        assert!(
+            dead["total"].as_u64().unwrap() >= 1,
+            "expected a dead-code candidate"
+        );
+        assert_eq!(
+            dead["returned"],
+            dead["items"].as_array().unwrap().len() as u64
+        );
+        assert_eq!(dead["truncated"], false);
+        let names: Vec<&str> = dead["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            names.contains(&"caller"),
+            "unreferenced caller must be listed, got {names:?}"
+        );
+        assert!(
+            !names.contains(&"seed"),
+            "a referenced symbol must not be listed as dead"
+        );
+    }
+
+    #[test]
+    fn snapshot_applies_scope_and_production_policy_before_audit_caps() {
+        let (repo, _index_dir, index_path) = fixture();
+        fs::create_dir(repo.path().join("tests")).unwrap();
+        fs::write(
+            repo.path().join("tests/dead.rs"),
+            format!(
+                "{}pub fn test_only_helper() -> i32 {{ 7 }}\n",
+                "\n".repeat(50)
+            ),
+        )
+        .unwrap();
+        for index in 0..21 {
+            fs::write(
+                repo.path().join(format!("src/extra_{index:02}.rs")),
+                format!("pub fn extra_{index:02}() -> i32 {{ {index} }}\n"),
+            )
+            .unwrap();
+        }
+        let mut writable = Store::open(&index_path).unwrap();
+        Indexer::new(repo.path())
+            .index_all(&mut writable, false)
+            .unwrap();
+        drop(writable);
+        let store = Store::open_read_only(&index_path).unwrap();
+
+        let all =
+            serde_json::to_value(build_snapshot(&store, repo.path(), &options()).unwrap()).unwrap();
+        assert_eq!(all["audit"]["largest_files"]["returned"], 20);
+        assert_eq!(all["audit"]["largest_files"]["truncated"], true);
+        assert!(all["audit"]["largest_files"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["file"] == "tests/dead.rs"));
+
+        let mut production = options();
+        production.production_only = true;
+        let production =
+            serde_json::to_value(build_snapshot(&store, repo.path(), &production).unwrap())
+                .unwrap();
+        for section in ["dead_code", "largest_files"] {
+            assert!(production["audit"][section]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| !item["file"].as_str().unwrap().starts_with("tests/")));
+        }
+        assert!(production["map"]["components"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["path"] != "tests"));
+
+        let mut selected = options();
+        selected.path = "tests".to_string();
+        let selected =
+            serde_json::to_value(build_snapshot(&store, repo.path(), &selected).unwrap()).unwrap();
+        for section in ["dead_code", "largest_files"] {
+            assert!(selected["audit"][section]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["file"].as_str().unwrap().starts_with("tests/")));
+        }
+    }
+
+    #[test]
+    fn snapshot_ranks_change_hotspots_by_churn_times_centrality() {
+        let (repo, _index_dir, index_path) = fixture();
+        let store = Store::open_read_only(&index_path).unwrap();
+        let snapshot = build_snapshot(&store, repo.path(), &options()).unwrap();
+        let json = serde_json::to_value(snapshot).unwrap();
+
+        let hotspots = &json["audit"]["change_hotspots"];
+        assert_eq!(
+            hotspots["status"], "available",
+            "the fixture has git history"
+        );
+        let items = hotspots["items"].as_array().unwrap();
+        assert_eq!(hotspots["returned"], items.len() as u64);
+        let entry = items
+            .iter()
+            .find(|item| item["file"] == "src/lib.rs")
+            .expect("src/lib.rs is both changed and depended on");
+        let commits = entry["commits"].as_u64().unwrap();
+        let in_degree = entry["in_degree"].as_u64().unwrap();
+        assert!(commits >= 1 && in_degree >= 1, "both axes must be non-zero");
+        assert_eq!(entry["score"].as_u64().unwrap(), commits * in_degree);
+        let scores: Vec<u64> = items
+            .iter()
+            .map(|item| item["score"].as_u64().unwrap())
+            .collect();
+        assert!(
+            scores.windows(2).all(|pair| pair[0] >= pair[1]),
+            "change hotspots must be ranked by score, got {scores:?}"
+        );
+    }
+
+    #[test]
+    fn snapshot_requires_a_bound_and_grounded_ai_narrative_sidecar() {
+        let (repo, _index_dir, index_path) = fixture();
+        let mastermind = repo.path().join(".mastermind");
+        fs::create_dir_all(&mastermind).unwrap();
+        let store = Store::open_read_only(&index_path).unwrap();
+        let initial =
+            serde_json::to_value(build_snapshot(&store, repo.path(), &options()).unwrap()).unwrap();
+        let binding = initial["audit"]["narrative_binding"].clone();
+        let component = initial["map"]["components"]["items"][0]["path"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            binding["map_sha256"].as_str().unwrap().len(),
+            64,
+            "the sidecar contract binds the exact returned map"
+        );
+        let long = "x".repeat(9000);
+        let sidecar = serde_json::json!({
+            "schema_version": 1,
+            "binding": binding,
+            "summary": long,
+            "lenses": { "bugs": "Review the largest indexed files.", "bogus": "ignored key" },
+            "domains": [
+                { "name": "Auth & tenancy", "note": "compliance-critical", "components": [component] },
+                { "name": "Unknown domain", "severity": "risk", "components": ["ghost"] }
+            ],
+            "red_team": [
+                { "title": "AI tool reaches the DB", "scenario": "s", "evidence": "MultiAgentBot", "vector": [component] },
+                { "title": "Ungrounded guess", "severity": "risk", "scenario": "unknown component", "vector": ["ghost"] }
+            ]
+        });
+        fs::write(
+            mastermind.join("audit-narrative.json"),
+            serde_json::to_vec(&sidecar).unwrap(),
+        )
+        .unwrap();
+
+        let json =
+            serde_json::to_value(build_snapshot(&store, repo.path(), &options()).unwrap()).unwrap();
+        let n = &json["audit"]["narrative"];
+        assert!(!n.is_null(), "a valid sidecar must be ingested");
+        assert_eq!(
+            n["summary"].as_str().unwrap().chars().count(),
+            2000,
+            "summary is capped"
+        );
+        assert_eq!(n["lenses"]["bugs"], "Review the largest indexed files.");
+        assert!(
+            n["lenses"].get("bogus").is_none(),
+            "unknown lens keys are dropped"
+        );
+        assert_eq!(n["domains"].as_array().unwrap().len(), 1);
+        assert_eq!(n["domains"][0]["name"], "Auth & tenancy");
+        assert_eq!(
+            n["domains"][0]["severity"], "info",
+            "missing severity must safely default to info"
+        );
+        assert_eq!(
+            n["red_team"].as_array().unwrap().len(),
+            1,
+            "a hypothesis with an unknown component is dropped"
+        );
+        assert_eq!(n["red_team"][0]["title"], "AI tool reaches the DB");
+        assert_eq!(n["red_team"][0]["severity"], "info");
+        assert_eq!(n["red_team"][0]["evidence"], "MultiAgentBot");
+        assert_eq!(
+            n["red_team"][0]["vector"][0], initial["map"]["components"]["items"][0]["path"],
+            "only an exact returned component path is traceable"
+        );
+
+        let mut stale_binding = initial["audit"]["narrative_binding"].clone();
+        stale_binding["head_oid"] = serde_json::Value::String("0".repeat(40));
+        fs::write(
+            mastermind.join("audit-narrative.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "binding": stale_binding,
+                "summary": "stale"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let stale =
+            serde_json::to_value(build_snapshot(&store, repo.path(), &options()).unwrap()).unwrap();
+        assert!(
+            stale["audit"].get("narrative").is_none(),
+            "a sidecar for another snapshot must be rejected"
+        );
+
+        fs::write(
+            mastermind.join("audit-narrative.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 7,
+                "binding": initial["audit"]["narrative_binding"],
+                "summary": "nope"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let json2 =
+            serde_json::to_value(build_snapshot(&store, repo.path(), &options()).unwrap()).unwrap();
+        assert!(
+            json2["audit"].get("narrative").is_none(),
+            "unknown schema yields no narrative"
+        );
+    }
+
+    #[test]
+    fn audit_narrative_schema_requires_the_runtime_binding() {
+        let schema_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../schemas/mastermind-audit-narrative-v1.schema.json");
+        if !schema_path.is_file() {
+            return;
+        }
+        let schema: serde_json::Value =
+            serde_json::from_slice(&fs::read(schema_path).unwrap()).unwrap();
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["properties"]["schema_version"]["const"], 1);
+        assert!(schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "binding"));
+        assert_eq!(schema["$defs"]["binding"]["additionalProperties"], false);
+    }
+
+    #[test]
+    fn snapshot_reports_largest_files_and_bus_factor() {
+        let (repo, _index_dir, index_path) = fixture();
+        let store = Store::open_read_only(&index_path).unwrap();
+        let snapshot = build_snapshot(&store, repo.path(), &options()).unwrap();
+        let json = serde_json::to_value(snapshot).unwrap();
+
+        assert_eq!(json["audit"]["largest_files"]["status"], "available");
+        let files: Vec<&str> = json["audit"]["largest_files"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["file"].as_str().unwrap())
+            .collect();
+        assert!(
+            files.contains(&"src/lib.rs"),
+            "largest files must list the indexed file, got {files:?}"
+        );
+
+        let bus = &json["audit"]["bus_factor"];
+        assert_eq!(bus["status"], "available", "the fixture has git history");
+        let src = bus["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["component"] == "src")
+            .expect("the src component must appear");
+        assert_eq!(src["authors"].as_u64().unwrap(), 1);
+        assert_eq!(src["top_author_pct"].as_u64().unwrap(), 100);
     }
 
     #[test]

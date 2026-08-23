@@ -63,6 +63,10 @@
 
     <main class="shell">
       <div class="evidence-canvas">
+        <div class="mode-switch" role="group" aria-label="Lens view">
+          <button type="button" id="mode-review" data-mode="review" aria-pressed="true">Review change</button>
+          <button type="button" id="mode-audit" data-mode="audit" aria-pressed="false">Audit codebase</button>
+        </div>
         <section class="review-brief" aria-labelledby="instrument-heading">
         <div class="review-brief__conclusion">
           <p class="section-index">Current review</p>
@@ -125,7 +129,7 @@
         <header class="review-workbench__header">
           <div>
             <p class="section-index">Blast radius</p>
-            <h2 id="trace-heading">Follow each claim to its proof</h2>
+            <h2 id="trace-heading">Follow each claim to its evidence</h2>
           </div>
           <p class="trace-count" id="trace-count">0 visible / 0 returned</p>
         </header>
@@ -204,6 +208,8 @@
                 <span class="lane-key__impact"><i aria-hidden="true"></i>Impacted</span>
                 <span class="lane-key__test"><i aria-hidden="true"></i>Tests</span>
                 <span class="lane-key__crossing"><i aria-hidden="true"></i>Boundary</span>
+                <span class="lane-key__serious"><i aria-hidden="true"></i>Serious signal</span>
+                <span class="lane-key__warning"><i aria-hidden="true"></i>Attention</span>
               </div>
             </div>
 
@@ -250,13 +256,140 @@
           </aside>
         </div>
         </section>
+
+        <section class="audit-board" id="audit-board" aria-labelledby="audit-heading" hidden>
+          <header class="audit-board__intro">
+            <p class="section-index">Selected-scope audit</p>
+            <h2 id="audit-heading">Review the selected code scope</h2>
+            <p class="audit-board__summary" id="audit-summary">Reading the indexed architecture.</p>
+            <div class="audit-filter">
+              <span class="audit-scope-badge" id="audit-production">All indexed paths</span>
+              <small>Scope is fixed by the CLI or exported review package.</small>
+            </div>
+          </header>
+
+          <div class="audit-exec">
+            <div class="audit-verdict" id="audit-verdict" role="img" aria-label="Overall posture">
+              <span class="audit-verdict__word" id="audit-verdict-word">—</span>
+              <span class="audit-verdict__lab">Posture</span>
+            </div>
+            <div class="audit-exec__body">
+              <p class="audit-exec__lede" id="audit-lede">Reading the indexed architecture.</p>
+              <div class="audit-pillars" id="audit-pillars"></div>
+            </div>
+          </div>
+
+          <section class="audit-mapwrap" aria-labelledby="audit-map-heading">
+            <div class="audit-card__head">
+              <h3 id="audit-map-heading">Selected code map — where the code is, and where the risk is</h3>
+              <p>Each tile is a returned component, sized by file count and tinted by a change-risk heuristic.</p>
+            </div>
+            <svg class="audit-treemap" id="audit-treemap" role="img" aria-label="Treemap of components sized by file count and colored by risk"></svg>
+            <div class="audit-map-mobile" id="audit-map-mobile" hidden></div>
+            <p class="audit-map-note" id="audit-map-note">Returned component coverage will appear after the scan.</p>
+            <div class="audit-map-legend">
+              <span class="k"><b>Size</b> = files</span>
+              <span class="k"><i class="sw sw--neutral"></i>low change-risk</span>
+              <span class="k"><i class="sw sw--attention"></i>attention</span>
+              <span class="k"><i class="sw sw--risk"></i>high risk</span>
+            </div>
+          </section>
+
+          <div class="audit-grid">
+            <section class="audit-card" aria-labelledby="audit-explain-heading">
+              <div class="audit-card__head">
+                <h3 id="audit-explain-heading">What this scope contains</h3><span class="audit-sev" id="audit-explain-sev" hidden></span>
+                <p>Components, entry points, and languages from the index.</p>
+              </div>
+              <div class="audit-card__body" id="audit-explain">
+                <p class="audit-empty">Architecture will appear after the scan.</p>
+              </div>
+            </section>
+
+            <section class="audit-card audit-card--structural" aria-labelledby="audit-structural-heading">
+              <div class="audit-card__head">
+                <h3 id="audit-structural-heading">Structural problems</h3><span class="audit-sev" id="audit-structural-sev" hidden></span>
+                <p>Dependency cycles and incoming-edge hotspots identify high-coupling review targets.</p>
+              </div>
+              <div class="audit-card__body" id="audit-structural">
+                <p class="audit-empty">Cycles and hotspots will appear after the scan.</p>
+              </div>
+            </section>
+
+            <section class="audit-card audit-card--bugs" aria-labelledby="audit-bugs-heading">
+              <div class="audit-card__head">
+                <h3 id="audit-bugs-heading">Large-file risk</h3><span class="audit-sev" id="audit-bugs-sev" hidden></span>
+                <p>Largest indexed files are a maintainability signal. Line span alone is not proof of defects.</p>
+              </div>
+              <div class="audit-card__body" id="audit-bugs">
+                <p class="audit-empty">Largest files will appear after the scan.</p>
+              </div>
+            </section>
+
+            <section class="audit-card audit-card--bus" aria-labelledby="audit-bus-heading">
+              <div class="audit-card__head">
+                <h3 id="audit-bus-heading">Bus factor — knowledge concentration</h3><span class="audit-sev" id="audit-bus-sev" hidden></span>
+                <p>Distinct commit authors and touch concentration over bounded Git history.</p>
+              </div>
+              <div class="audit-card__body" id="audit-bus">
+                <p class="audit-empty">Authorship concentration will appear after the scan.</p>
+              </div>
+            </section>
+
+            <section class="audit-card audit-card--health" aria-labelledby="audit-health-heading">
+              <div class="audit-card__head">
+                <h3 id="audit-health-heading">Code health</h3><span class="audit-sev" id="audit-health-sev" hidden></span>
+                <p>Symbols with no matching static edge. Entry points, reflection, and dynamic dispatch remain false-positive sources.</p>
+              </div>
+              <div class="audit-card__body" id="audit-health">
+                <p class="audit-empty">Dead-code candidates will appear after the scan.</p>
+              </div>
+            </section>
+
+            <section class="audit-card audit-card--change" aria-labelledby="audit-change-heading">
+              <div class="audit-card__head">
+                <h3 id="audit-change-heading">Change hotspots</h3><span class="audit-sev" id="audit-change-sev" hidden></span>
+                <p>Commit churn crossed with incoming-edge count as a bounded review-priority heuristic.</p>
+              </div>
+              <div class="audit-card__body" id="audit-change">
+                <p class="audit-empty">Change hotspots will appear after the scan.</p>
+              </div>
+            </section>
+
+            <section class="audit-card audit-card--security" aria-labelledby="audit-security-heading">
+              <div class="audit-card__head">
+                <h3 id="audit-security-heading">Change-scoped security evidence</h3><span class="audit-sev" id="audit-security-sev" hidden></span>
+                <p>Entry points cover the selected map scope. SARIF findings cover only files in the change-review trace.</p>
+              </div>
+              <div class="audit-card__body" id="audit-security">
+                <p class="audit-empty">Attack surface will appear after the scan.</p>
+              </div>
+            </section>
+
+            <section class="audit-card audit-card--domain" id="audit-domain-card" aria-labelledby="audit-domain-heading" hidden>
+              <div class="audit-card__head">
+                <h3 id="audit-domain-heading">Business-domain &amp; logic risk</h3><span class="audit-sev audit-sev--ai" id="audit-domain-sev" hidden></span>
+                <p>AI interpretation of possible high-impact domain areas from the returned component map.</p>
+              </div>
+              <div class="audit-card__body" id="audit-domain"></div>
+            </section>
+          </div>
+
+          <section class="audit-redteam" id="audit-redteam" aria-labelledby="audit-redteam-heading" hidden>
+            <div class="audit-card__head">
+              <h3 id="audit-redteam-heading">Red-team hypotheses</h3><span class="audit-sev audit-sev--ai">✦ AI · to verify</span>
+              <p>AI scenarios bound to returned components — hypotheses to verify, not confirmed vulnerabilities or proven routes.</p>
+            </div>
+            <div id="audit-redteam-body"></div>
+          </section>
+        </section>
       </div>
 
       <section class="evidence-deck" aria-labelledby="evidence-heading">
         <div class="evidence-deck__heading">
           <div>
             <p class="section-index">Evidence provenance</p>
-            <h2 id="evidence-heading">Where the proof came from</h2>
+            <h2 id="evidence-heading">Where the evidence came from</h2>
           </div>
           <p>Every source stays inspectable down to status, matched files, digest, and trust.</p>
         </div>

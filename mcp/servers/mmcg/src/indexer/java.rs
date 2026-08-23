@@ -3,6 +3,7 @@
 
 use super::common::{
     line_of, node_text, push_call_with_type, push_def_with_decorators, push_import,
+    signature_until_body,
 };
 use super::LanguageExtractor;
 use crate::store::PendingFile;
@@ -253,43 +254,16 @@ fn collect_annotations(decl: &Node, source: &[u8]) -> Option<String> {
     }
 }
 
-fn signature_until_body(node: &Node, source: &[u8]) -> Option<String> {
-    let body = node.child_by_field_name("body")?;
-    let header_end = body.start_byte();
-    let start = node.start_byte();
-    if header_end <= start {
-        return None;
-    }
-    let text = std::str::from_utf8(&source[start..header_end]).ok()?;
-    let trimmed = text
-        .trim_end_matches(|c: char| c == '{' || c.is_whitespace())
-        .to_string();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::indexer::common;
     use crate::indexer::parse_one;
-    use std::env;
-    use std::path::PathBuf;
-
-    fn write_tmp(name: &str, content: &str) -> PathBuf {
-        let mut dir = env::temp_dir();
-        dir.push(format!("mmcg-java-test-{}-{name}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(name);
-        std::fs::write(&path, content).unwrap();
-        path
-    }
 
     #[test]
     fn extracts_class_method_and_constructor() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "java",
             "Foo.java",
             "package app;\n\
              public class Foo {\n\
@@ -313,7 +287,8 @@ mod tests {
 
     #[test]
     fn extracts_imports() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "java",
             "Imports.java",
             "package app;\n\
              import java.util.List;\n\
@@ -342,7 +317,8 @@ mod tests {
 
     #[test]
     fn captures_annotations_into_decorators() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "java",
             "Tests.java",
             "package app;\n\
              import org.junit.jupiter.api.Test;\n\
@@ -366,7 +342,8 @@ mod tests {
 
     #[test]
     fn extracts_calls_and_new() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "java",
             "Calls.java",
             "package app;\n\
              public class Main {\n\

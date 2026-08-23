@@ -384,7 +384,7 @@ fn setup_home_dir() -> Option<PathBuf> {
     if let Some(home) = TEST_HOME_DIR.with(|slot| slot.borrow().clone()) {
         return Some(home);
     }
-    dirs::home_dir()
+    std::env::home_dir()
 }
 
 fn target_for(request: &Request) -> Result<Target, &'static str> {
@@ -1741,12 +1741,6 @@ fn render_line_diff(before: &str, after: &str) -> String {
         out.push_str(&format!("  {line}\n"));
     }
     out
-}
-
-/// Compatibility wrapper for callers that do not need conflict metadata.
-#[allow(dead_code)]
-fn write_atomic(path: &Path, body: &str) -> std::io::Result<()> {
-    safe_replace(path, None, body.as_bytes()).map_err(std::io::Error::other)
 }
 
 #[cfg(test)]

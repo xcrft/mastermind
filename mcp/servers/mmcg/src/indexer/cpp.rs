@@ -29,6 +29,7 @@
 
 use super::common::{
     line_of, node_text, push_call_with_type, push_def_with_decorators, push_import,
+    signature_until_body,
 };
 use super::LanguageExtractor;
 use crate::store::PendingFile;
@@ -443,24 +444,6 @@ fn emit_using(decl: &Node, source: &[u8], pending: &mut PendingFile, module_inde
     push_import(pending, module_index, leaf, Some(path.to_string()), line);
 }
 
-fn signature_until_body(node: &Node, source: &[u8]) -> Option<String> {
-    let body = node.child_by_field_name("body")?;
-    let header_end = body.start_byte();
-    let start = node.start_byte();
-    if header_end <= start {
-        return None;
-    }
-    let text = std::str::from_utf8(&source[start..header_end]).ok()?;
-    let trimmed = text
-        .trim_end_matches(|c: char| c == '{' || c.is_whitespace())
-        .to_string();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
-}
-
 fn declaration_signature(node: &Node, source: &[u8]) -> Option<String> {
     let text = node_text(node, source)?;
     let trimmed = text.trim().trim_end_matches(';').trim();
@@ -470,22 +453,13 @@ fn declaration_signature(node: &Node, source: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::indexer::common;
     use crate::indexer::parse_one;
-    use std::env;
-    use std::path::PathBuf;
-
-    fn write_tmp(name: &str, content: &str) -> PathBuf {
-        let mut dir = env::temp_dir();
-        dir.push(format!("mmcg-cpp-test-{}-{name}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(name);
-        std::fs::write(&path, content).unwrap();
-        path
-    }
 
     #[test]
     fn extracts_class_and_method_definitions() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "cpp",
             "Foo.cpp",
             "namespace app {\n\
                  class Foo {\n\
@@ -510,7 +484,8 @@ mod tests {
 
     #[test]
     fn extracts_function_and_method_declarations_from_headers() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "cpp",
             "Provider.h",
             "class Provider {\n\
              public:\n\
@@ -534,7 +509,8 @@ mod tests {
 
     #[test]
     fn extracts_every_function_declarator_from_a_single_declaration() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "cpp",
             "MultipleDeclarators.h",
             "class Provider {\n\
              public:\n\
@@ -558,7 +534,8 @@ mod tests {
 
     #[test]
     fn does_not_treat_local_direct_initializers_as_function_declarations() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "cpp",
             "LocalInitializers.cpp",
             "void Run(Path run_dir, Pointer pin) {\n\
                  for (DirectoryIterator end, it(run_dir); it != end; ++it) {}\n\
@@ -581,7 +558,8 @@ mod tests {
 
     #[test]
     fn extracts_struct_union_enum() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "cpp",
             "Types.c",
             "struct Point { int x; int y; };\n\
              union Value { int i; float f; };\n\
@@ -601,7 +579,8 @@ mod tests {
 
     #[test]
     fn extracts_includes_and_using() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "cpp",
             "Includes.cpp",
             "#include <vector>\n\
              #include \"local.h\"\n\
@@ -637,7 +616,8 @@ mod tests {
 
     #[test]
     fn extracts_calls_and_new() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "cpp",
             "Calls.cpp",
             "#include <iostream>\n\
              struct Foo {};\n\

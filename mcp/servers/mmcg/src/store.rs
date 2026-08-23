@@ -212,7 +212,23 @@ const SYMBOL_COLS: &str =
     "id, name, kind, file_path, line_start, line_end, signature, parent_id, decorators";
 const SYMBOL_COLS_S: &str = "s.id, s.name, s.kind, s.file_path, s.line_start, s.line_end, s.signature, s.parent_id, s.decorators";
 
-fn is_production_path(path: &str) -> bool {
+/// One file and how many incoming edges resolve into it. See
+/// [`Store::file_in_degrees`].
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FileInDegree {
+    pub file: String,
+    pub in_degree: u32,
+}
+
+/// One file and its size (last symbol's end line — a proxy for line count).
+/// See [`Store::largest_files`].
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FileSize {
+    pub file: String,
+    pub lines: u32,
+}
+
+pub(crate) fn is_production_path(path: &str) -> bool {
     const SEGMENTS: &[&str] = &[
         "test",
         "tests",
@@ -250,6 +266,125 @@ fn is_production_path(path: &str) -> bool {
         || name
             .rsplit_once('.')
             .is_some_and(|(stem, _)| stem.ends_with("Test") || stem.ends_with("Tests")))
+}
+
+fn unreferenced_candidates_sql() -> String {
+    format!(
+        "WITH referenced_names AS (
+             SELECT DISTINCT to_name AS nm FROM edges
+             UNION
+             SELECT DISTINCT to_type AS nm FROM edges
+               WHERE to_type IS NOT NULL AND to_type <> ''
+         ),
+         candidates AS (
+             SELECT {SYMBOL_COLS_S}
+             FROM symbols s
+             LEFT JOIN referenced_names r ON r.nm = s.name
+             WHERE r.nm IS NULL
+               AND (?1 IS NULL OR s.kind = ?1)
+               AND (?2 IS NULL OR s.language = ?2)
+               AND s.kind != 'module'
+               AND (?1 IS NOT NULL OR s.kind != 'constant')
+               AND NOT (
+                   s.name LIKE 'test_%'
+                   AND (s.file_path LIKE '%test%' OR s.file_path LIKE '%spec%')
+               )
+               AND (s.decorators IS NULL OR (
+                   s.decorators NOT LIKE '%,fixture,%'
+                   AND s.decorators NOT LIKE '%,pytest.fixture,%'
+                   AND s.decorators NOT LIKE '%,parametrize,%'
+                   AND s.decorators NOT LIKE '%,pytest.mark.parametrize,%'
+                   AND s.decorators NOT LIKE '%,pytest.mark.%'
+                   AND s.decorators NOT LIKE '%.route,%'
+                   AND s.decorators NOT LIKE '%.get,%'
+                   AND s.decorators NOT LIKE '%.post,%'
+                   AND s.decorators NOT LIKE '%.put,%'
+                   AND s.decorators NOT LIKE '%.delete,%'
+                   AND s.decorators NOT LIKE '%.patch,%'
+                   AND s.decorators NOT LIKE '%.websocket,%'
+                   AND s.decorators NOT LIKE '%triton.jit,%'
+                   AND s.decorators NOT LIKE '%numba.jit,%'
+                   AND s.decorators NOT LIKE '%numba.njit,%'
+                   AND s.decorators NOT LIKE '%nb.njit,%'
+                   AND s.decorators NOT LIKE '%,jit,%'
+                   AND s.decorators NOT LIKE '%,njit,%'
+                   AND s.decorators NOT LIKE '%celery.task,%'
+                   AND s.decorators NOT LIKE '%shared_task,%'
+                   AND s.decorators NOT LIKE '%,task,%'
+                   AND s.decorators NOT LIKE '%click.command,%'
+                   AND s.decorators NOT LIKE '%click.group,%'
+                   AND s.decorators NOT LIKE '%,command,%'
+                   AND s.decorators NOT LIKE '%,callback,%'
+                   AND s.decorators NOT LIKE '%,test,%'
+                   AND s.decorators NOT LIKE '%,tokio::test,%'
+                   AND s.decorators NOT LIKE '%,tokio::main,%'
+                   AND s.decorators NOT LIKE '%,async_std::main,%'
+                   AND s.decorators NOT LIKE '%,async_std::test,%'
+                   AND s.decorators NOT LIKE '%,Fact,%'
+                   AND s.decorators NOT LIKE '%,Theory,%'
+                   AND s.decorators NOT LIKE '%,Test,%'
+                   AND s.decorators NOT LIKE '%,TestMethod,%'
+                   AND s.decorators NOT LIKE '%,TestCase,%'
+                   AND s.decorators NOT LIKE '%,TestFixture,%'
+                   AND s.decorators NOT LIKE '%,SetUp,%'
+                   AND s.decorators NOT LIKE '%,TearDown,%'
+                   AND s.decorators NOT LIKE '%,OneTimeSetUp,%'
+                   AND s.decorators NOT LIKE '%,OneTimeTearDown,%'
+                   AND s.decorators NOT LIKE '%,TestInitialize,%'
+                   AND s.decorators NOT LIKE '%,TestCleanup,%'
+                   AND s.decorators NOT LIKE '%,ClassInitialize,%'
+                   AND s.decorators NOT LIKE '%,ClassCleanup,%'
+                   AND s.decorators NOT LIKE '%,HttpGet,%'
+                   AND s.decorators NOT LIKE '%,HttpPost,%'
+                   AND s.decorators NOT LIKE '%,HttpPut,%'
+                   AND s.decorators NOT LIKE '%,HttpDelete,%'
+                   AND s.decorators NOT LIKE '%,HttpPatch,%'
+                   AND s.decorators NOT LIKE '%,Route,%'
+                   AND s.decorators NOT LIKE '%,Benchmark,%'
+                   AND s.decorators NOT LIKE '%,GlobalSetup,%'
+                   AND s.decorators NOT LIKE '%,GlobalCleanup,%'
+                   AND s.decorators NOT LIKE '%,Override,%'
+                   AND s.decorators NOT LIKE '%,ParameterizedTest,%'
+                   AND s.decorators NOT LIKE '%,RepeatedTest,%'
+                   AND s.decorators NOT LIKE '%,TestFactory,%'
+                   AND s.decorators NOT LIKE '%,BeforeEach,%'
+                   AND s.decorators NOT LIKE '%,AfterEach,%'
+                   AND s.decorators NOT LIKE '%,BeforeAll,%'
+                   AND s.decorators NOT LIKE '%,AfterAll,%'
+                   AND s.decorators NOT LIKE '%,Before,%'
+                   AND s.decorators NOT LIKE '%,After,%'
+                   AND s.decorators NOT LIKE '%,BeforeMethod,%'
+                   AND s.decorators NOT LIKE '%,AfterMethod,%'
+                   AND s.decorators NOT LIKE '%,BeforeClass,%'
+                   AND s.decorators NOT LIKE '%,AfterClass,%'
+                   AND s.decorators NOT LIKE '%,RequestMapping,%'
+                   AND s.decorators NOT LIKE '%,GetMapping,%'
+                   AND s.decorators NOT LIKE '%,PostMapping,%'
+                   AND s.decorators NOT LIKE '%,PutMapping,%'
+                   AND s.decorators NOT LIKE '%,DeleteMapping,%'
+                   AND s.decorators NOT LIKE '%,PatchMapping,%'
+                   AND s.decorators NOT LIKE '%,Bean,%'
+                   AND s.decorators NOT LIKE '%,Scheduled,%'
+                   AND s.decorators NOT LIKE '%,EventListener,%'
+                   AND s.decorators NOT LIKE '%,DataProvider,%'
+                   AND s.decorators NOT LIKE '%,TestDox,%'
+                   AND s.decorators NOT LIKE '%,Group,%'
+                   AND s.decorators NOT LIKE '%,AsCommand,%'
+                   AND s.decorators NOT LIKE '%,AsController,%'
+                   AND s.decorators NOT LIKE '%,AsEventListener,%'
+                   AND s.decorators NOT LIKE '%,On,%'
+               ))
+               AND (
+                   ?4 = 'root'
+                   OR (?4 = 'file' AND s.file_path = ?3)
+                   OR (
+                       ?4 = 'directory'
+                       AND substr(s.file_path, 1, length(?3) + 1) = ?3 || '/'
+                   )
+               )
+               AND (?5 = 0 OR s.production = 1)
+         )"
+    )
 }
 
 fn maybe_production_symbol_filter(enabled: bool, alias: &str) -> String {
@@ -2268,18 +2403,6 @@ impl Store {
         Ok(())
     }
 
-    /// Wipe the entire index.
-    pub fn purge_all(&self) -> SqlResult<()> {
-        self.conn.execute_batch(
-            r#"
-            DELETE FROM edges;
-            DELETE FROM symbols;
-            DELETE FROM files;
-            "#,
-        )?;
-        Ok(())
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub fn insert_symbol(
         &self,
@@ -2789,6 +2912,98 @@ impl Store {
         rows.collect()
     }
 
+    /// Incoming-edge count per file: for every defining file, how many
+    /// call/import/inherit edges resolve (by leaf name or type prefix) to a
+    /// symbol declared there. This is the file-level centrality signal — the
+    /// most depended-on files. Name-based like `callers`/`impact`, so it pools
+    /// across same-named symbols in different files; a ranking heuristic, not an
+    /// exact reference count. Bounded by `limit`; `module` synthetics excluded.
+    pub fn file_in_degrees(
+        &self,
+        production_only: bool,
+        limit: usize,
+    ) -> SqlResult<Vec<FileInDegree>> {
+        self.file_in_degrees_scoped("", "root", production_only, limit)
+    }
+
+    pub(crate) fn file_in_degrees_scoped(
+        &self,
+        scope: &str,
+        kind: &str,
+        production_only: bool,
+        limit: usize,
+    ) -> SqlResult<Vec<FileInDegree>> {
+        let sql = "WITH refs AS (
+                 SELECT to_name AS nm FROM edges WHERE to_name <> ''
+                 UNION ALL
+                 SELECT to_type AS nm FROM edges
+                   WHERE to_type IS NOT NULL AND to_type <> ''
+             )
+             SELECT s.file_path AS file, COUNT(*) AS deg
+             FROM refs r
+             JOIN symbols s ON s.name = r.nm
+             WHERE s.kind != 'module'
+               AND (
+                   ?2 = 'root'
+                   OR (?2 = 'file' AND s.file_path = ?1)
+                   OR (
+                       ?2 = 'directory'
+                       AND substr(s.file_path, 1, length(?1) + 1) = ?1 || '/'
+                   )
+               )
+               AND (?3 = 0 OR s.production = 1)
+             GROUP BY s.file_path
+             ORDER BY deg DESC, s.file_path
+             LIMIT ?4";
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map(params![scope, kind, production_only, limit as i64], |r| {
+            Ok(FileInDegree {
+                file: r.get(0)?,
+                in_degree: r.get::<_, i64>(1)? as u32,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Largest files by their last symbol's end line. Exact line count is not
+    /// stored, so this is a maintainability ranking proxy. Honors
+    /// `production_only`; bounded by `limit`.
+    pub fn largest_files(&self, production_only: bool, limit: usize) -> SqlResult<Vec<FileSize>> {
+        self.largest_files_scoped("", "root", production_only, limit)
+    }
+
+    pub(crate) fn largest_files_scoped(
+        &self,
+        scope: &str,
+        kind: &str,
+        production_only: bool,
+        limit: usize,
+    ) -> SqlResult<Vec<FileSize>> {
+        let sql = "SELECT file_path AS file, MAX(line_end) AS lines
+             FROM symbols
+             WHERE line_end > 0
+               AND (
+                   ?2 = 'root'
+                   OR (?2 = 'file' AND file_path = ?1)
+                   OR (
+                       ?2 = 'directory'
+                       AND substr(file_path, 1, length(?1) + 1) = ?1 || '/'
+                   )
+               )
+               AND (?3 = 0 OR production = 1)
+             GROUP BY file_path
+             ORDER BY lines DESC, file_path
+             LIMIT ?4";
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map(params![scope, kind, production_only, limit as i64], |r| {
+            Ok(FileSize {
+                file: r.get(0)?,
+                lines: r.get::<_, i64>(1)? as u32,
+            })
+        })?;
+        rows.collect()
+    }
+
     /// Symbols no edge references by `to_name` or `to_type`. Excludes synthetic
     /// `<module>` rows (never "called") and symbols with framework-registered
     /// decorators (pytest, FastAPI/Flask routes, Triton/Numba JIT, Click
@@ -2807,137 +3022,54 @@ impl Store {
         kind: Option<&str>,
         language: Option<&str>,
     ) -> SqlResult<Vec<Symbol>> {
+        let candidates = unreferenced_candidates_sql();
         let sql = format!(
-            "WITH referenced_names AS (
-                 SELECT DISTINCT to_name AS nm FROM edges
-                 UNION
-                 SELECT DISTINCT to_type AS nm FROM edges
-                   WHERE to_type IS NOT NULL AND to_type <> ''
-             )
-             SELECT {SYMBOL_COLS_S}
-             FROM symbols s
-             LEFT JOIN referenced_names r ON r.nm = s.name
-             WHERE r.nm IS NULL
-               AND (?1 IS NULL OR s.kind = ?1)
-               AND (?2 IS NULL OR s.language = ?2)
-               AND s.kind != 'module'
-               -- Module-level constants are referenced by VALUE-READ, not
-               -- call/import edges, so they'd dominate the default output as
-               -- false positives. Exclude unless caller asked for `kind=constant`
-               -- (then the kind filter controls the slice).
-               AND (?1 IS NOT NULL OR s.kind != 'constant')
-               -- pytest test functions by convention (test_* in *test*/*spec* files)
-               AND NOT (
-                   s.name LIKE 'test_%'
-                   AND (s.file_path LIKE '%test%' OR s.file_path LIKE '%spec%')
-               )
-               -- Symbols decorated by framework registries
-               AND (s.decorators IS NULL OR (
-                   -- pytest
-                   s.decorators NOT LIKE '%,fixture,%'
-                   AND s.decorators NOT LIKE '%,pytest.fixture,%'
-                   AND s.decorators NOT LIKE '%,parametrize,%'
-                   AND s.decorators NOT LIKE '%,pytest.mark.parametrize,%'
-                   AND s.decorators NOT LIKE '%,pytest.mark.%'
-                   -- web frameworks (FastAPI, Flask, Quart, etc.)
-                   AND s.decorators NOT LIKE '%.route,%'
-                   AND s.decorators NOT LIKE '%.get,%'
-                   AND s.decorators NOT LIKE '%.post,%'
-                   AND s.decorators NOT LIKE '%.put,%'
-                   AND s.decorators NOT LIKE '%.delete,%'
-                   AND s.decorators NOT LIKE '%.patch,%'
-                   AND s.decorators NOT LIKE '%.websocket,%'
-                   -- JIT compilers
-                   AND s.decorators NOT LIKE '%triton.jit,%'
-                   AND s.decorators NOT LIKE '%numba.jit,%'
-                   AND s.decorators NOT LIKE '%numba.njit,%'
-                   AND s.decorators NOT LIKE '%nb.njit,%'
-                   AND s.decorators NOT LIKE '%,jit,%'
-                   AND s.decorators NOT LIKE '%,njit,%'
-                   -- Celery / task queues
-                   AND s.decorators NOT LIKE '%celery.task,%'
-                   AND s.decorators NOT LIKE '%shared_task,%'
-                   AND s.decorators NOT LIKE '%,task,%'
-                   -- CLI (Click, Typer)
-                   AND s.decorators NOT LIKE '%click.command,%'
-                   AND s.decorators NOT LIKE '%click.group,%'
-                   AND s.decorators NOT LIKE '%,command,%'
-                   AND s.decorators NOT LIKE '%,callback,%'
-                   -- Rust attributes
-                   AND s.decorators NOT LIKE '%,test,%'
-                   AND s.decorators NOT LIKE '%,tokio::test,%'
-                   AND s.decorators NOT LIKE '%,tokio::main,%'
-                   AND s.decorators NOT LIKE '%,async_std::main,%'
-                   AND s.decorators NOT LIKE '%,async_std::test,%'
-                   -- C# test frameworks (xUnit / NUnit / MSTest) — leaf only, Attribute suffix stripped
-                   AND s.decorators NOT LIKE '%,Fact,%'
-                   AND s.decorators NOT LIKE '%,Theory,%'
-                   AND s.decorators NOT LIKE '%,Test,%'
-                   AND s.decorators NOT LIKE '%,TestMethod,%'
-                   AND s.decorators NOT LIKE '%,TestCase,%'
-                   AND s.decorators NOT LIKE '%,TestFixture,%'
-                   AND s.decorators NOT LIKE '%,SetUp,%'
-                   AND s.decorators NOT LIKE '%,TearDown,%'
-                   AND s.decorators NOT LIKE '%,OneTimeSetUp,%'
-                   AND s.decorators NOT LIKE '%,OneTimeTearDown,%'
-                   AND s.decorators NOT LIKE '%,TestInitialize,%'
-                   AND s.decorators NOT LIKE '%,TestCleanup,%'
-                   AND s.decorators NOT LIKE '%,ClassInitialize,%'
-                   AND s.decorators NOT LIKE '%,ClassCleanup,%'
-                   -- ASP.NET routing
-                   AND s.decorators NOT LIKE '%,HttpGet,%'
-                   AND s.decorators NOT LIKE '%,HttpPost,%'
-                   AND s.decorators NOT LIKE '%,HttpPut,%'
-                   AND s.decorators NOT LIKE '%,HttpDelete,%'
-                   AND s.decorators NOT LIKE '%,HttpPatch,%'
-                   AND s.decorators NOT LIKE '%,Route,%'
-                   -- BenchmarkDotNet
-                   AND s.decorators NOT LIKE '%,Benchmark,%'
-                   AND s.decorators NOT LIKE '%,GlobalSetup,%'
-                   AND s.decorators NOT LIKE '%,GlobalCleanup,%'
-                   -- Java polymorphic dispatch — `@Override` means a parent's
-                   -- callsites resolve here, invisible to mmcg's call graph.
-                   AND s.decorators NOT LIKE '%,Override,%'
-                   -- Java test frameworks (JUnit 4/5, TestNG)
-                   AND s.decorators NOT LIKE '%,Test,%'
-                   AND s.decorators NOT LIKE '%,ParameterizedTest,%'
-                   AND s.decorators NOT LIKE '%,RepeatedTest,%'
-                   AND s.decorators NOT LIKE '%,TestFactory,%'
-                   AND s.decorators NOT LIKE '%,BeforeEach,%'
-                   AND s.decorators NOT LIKE '%,AfterEach,%'
-                   AND s.decorators NOT LIKE '%,BeforeAll,%'
-                   AND s.decorators NOT LIKE '%,AfterAll,%'
-                   AND s.decorators NOT LIKE '%,Before,%'
-                   AND s.decorators NOT LIKE '%,After,%'
-                   AND s.decorators NOT LIKE '%,BeforeMethod,%'
-                   AND s.decorators NOT LIKE '%,AfterMethod,%'
-                   AND s.decorators NOT LIKE '%,BeforeClass,%'
-                   AND s.decorators NOT LIKE '%,AfterClass,%'
-                   -- Spring routing / DI
-                   AND s.decorators NOT LIKE '%,RequestMapping,%'
-                   AND s.decorators NOT LIKE '%,GetMapping,%'
-                   AND s.decorators NOT LIKE '%,PostMapping,%'
-                   AND s.decorators NOT LIKE '%,PutMapping,%'
-                   AND s.decorators NOT LIKE '%,DeleteMapping,%'
-                   AND s.decorators NOT LIKE '%,PatchMapping,%'
-                   AND s.decorators NOT LIKE '%,Bean,%'
-                   AND s.decorators NOT LIKE '%,Scheduled,%'
-                   AND s.decorators NOT LIKE '%,EventListener,%'
-                   -- PHP test / web (PHP 8 attributes — same leaf-name convention)
-                   AND s.decorators NOT LIKE '%,DataProvider,%'
-                   AND s.decorators NOT LIKE '%,TestDox,%'
-                   AND s.decorators NOT LIKE '%,Group,%'
-                   AND s.decorators NOT LIKE '%,Route,%'
-                   AND s.decorators NOT LIKE '%,AsCommand,%'
-                   AND s.decorators NOT LIKE '%,AsController,%'
-                   AND s.decorators NOT LIKE '%,AsEventListener,%'
-                   AND s.decorators NOT LIKE '%,On,%'
-               ))
-             ORDER BY s.file_path, s.line_start"
+            "{candidates} SELECT {SYMBOL_COLS} FROM candidates
+             ORDER BY file_path, line_start, name, kind, id"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![kind, language], Self::row_to_symbol)?;
+        let rows = stmt.query_map(
+            params![kind, language, "", "root", false],
+            Self::row_to_symbol,
+        )?;
         rows.collect()
+    }
+
+    pub(crate) fn unreferenced_bounded(
+        &self,
+        kind: Option<&str>,
+        language: Option<&str>,
+        scope: &str,
+        scope_kind: &str,
+        production_only: bool,
+        limit: usize,
+    ) -> SqlResult<(u32, Vec<Symbol>)> {
+        let candidates = unreferenced_candidates_sql();
+        let count_sql = format!("{candidates} SELECT COUNT(*) FROM candidates");
+        let count: i64 = self.conn.query_row(
+            &count_sql,
+            params![kind, language, scope, scope_kind, production_only],
+            |row| row.get(0),
+        )?;
+        let rows_sql = format!(
+            "{candidates} SELECT {SYMBOL_COLS} FROM candidates
+             ORDER BY file_path, line_start, name, kind, id
+             LIMIT ?6"
+        );
+        let mut stmt = self.conn.prepare(&rows_sql)?;
+        let rows = stmt.query_map(
+            params![
+                kind,
+                language,
+                scope,
+                scope_kind,
+                production_only,
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
+            Self::row_to_symbol,
+        )?;
+        let symbols = rows.collect::<SqlResult<Vec<_>>>()?;
+        Ok((count.clamp(0, i64::from(u32::MAX)) as u32, symbols))
     }
 
     /// Symbols defined under `path_prefix` referenced from at least one file
@@ -4257,6 +4389,76 @@ mod tests {
     }
 
     #[test]
+    fn largest_files_rank_by_size_and_honor_production() {
+        let path = tmp_db("largest_files");
+        let store = Store::open(&path).unwrap();
+        for f in ["src/god.rs", "src/small.rs", "tests/big_test.rs"] {
+            store.upsert_file(f, 1, 1).unwrap();
+        }
+        store
+            .insert_symbol("g", "function", "src/god.rs", 1, 900, None, None)
+            .unwrap();
+        store
+            .insert_symbol("s", "function", "src/small.rs", 1, 20, None, None)
+            .unwrap();
+        store
+            .insert_symbol("t", "function", "tests/big_test.rs", 1, 2000, None, None)
+            .unwrap();
+
+        let all = store.largest_files(false, 10).unwrap();
+        assert_eq!(all[0].file, "tests/big_test.rs");
+        assert_eq!(all[0].lines, 2000);
+        assert!(all.iter().any(|r| r.file == "src/god.rs" && r.lines == 900));
+
+        let prod = store.largest_files(true, 10).unwrap();
+        assert_eq!(prod[0].file, "src/god.rs");
+        assert!(!prod.iter().any(|r| r.file == "tests/big_test.rs"));
+
+        assert_eq!(store.largest_files(false, 1).unwrap().len(), 1);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn file_in_degrees_rank_by_incoming_edges_and_honor_production() {
+        let path = tmp_db("file_in_degrees");
+        let store = Store::open(&path).unwrap();
+        for f in ["src/core.rs", "src/caller.rs", "tests/helper.rs"] {
+            store.upsert_file(f, 1, 1).unwrap();
+        }
+        let hub = store
+            .insert_symbol("hub", "function", "src/core.rs", 1, 2, None, None)
+            .unwrap();
+        let helper = store
+            .insert_symbol("helper", "function", "tests/helper.rs", 1, 2, None, None)
+            .unwrap();
+        let a = store
+            .insert_symbol("a", "function", "src/caller.rs", 3, 4, None, None)
+            .unwrap();
+        let b = store
+            .insert_symbol("b", "function", "src/caller.rs", 5, 6, None, None)
+            .unwrap();
+        store.insert_edge(a, Some(hub), "hub", "calls", 3).unwrap();
+        store.insert_edge(b, Some(hub), "hub", "calls", 5).unwrap();
+        store
+            .insert_edge(a, Some(helper), "helper", "calls", 4)
+            .unwrap();
+
+        let all = store.file_in_degrees(false, 10).unwrap();
+        assert_eq!(all[0].file, "src/core.rs");
+        assert_eq!(all[0].in_degree, 2);
+        assert!(all
+            .iter()
+            .any(|r| r.file == "tests/helper.rs" && r.in_degree == 1));
+
+        let prod = store.file_in_degrees(true, 10).unwrap();
+        assert!(prod.iter().any(|r| r.file == "src/core.rs"));
+        assert!(!prod.iter().any(|r| r.file == "tests/helper.rs"));
+
+        assert_eq!(store.file_in_degrees(false, 1).unwrap().len(), 1);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn schema_initializes() {
         let path = tmp_db("schema_initializes");
         let store = Store::open(&path).unwrap();
@@ -4726,6 +4928,41 @@ mod tests {
         // Filter by kind
         let funcs_only = store.unreferenced(Some("function"), None).unwrap();
         assert_eq!(funcs_only.len(), 2); // foo, orphan
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn bounded_unreferenced_applies_scope_production_and_limit_in_sql() {
+        let path = tmp_db("bounded_unreferenced");
+        let store = Store::open(&path).unwrap();
+        for (name, file) in [
+            ("alpha", "src/core/a.rs"),
+            ("beta", "src/core/b.rs"),
+            ("gamma", "src/core/c.rs"),
+            ("fixture_one", "src/core/tests/one.rs"),
+            ("fixture_two", "src/core/fixtures/two.rs"),
+            ("outside", "src/other.rs"),
+        ] {
+            store
+                .insert_symbol(name, "function", file, 1, 2, None, None)
+                .unwrap();
+        }
+
+        let (all_total, all_rows) = store
+            .unreferenced_bounded(None, None, "src/core", "directory", false, 2)
+            .unwrap();
+        assert_eq!(all_total, 5);
+        assert_eq!(all_rows.len(), 2);
+
+        let (production_total, production_rows) = store
+            .unreferenced_bounded(None, None, "src/core", "directory", true, 2)
+            .unwrap();
+        assert_eq!(production_total, 3);
+        assert_eq!(production_rows.len(), 2);
+        assert!(production_rows
+            .iter()
+            .all(|symbol| symbol.file_path.starts_with("src/core/")
+                && is_production_path(&symbol.file_path)));
         std::fs::remove_file(&path).ok();
     }
 

@@ -482,6 +482,45 @@ source-content or mutation routes.
 `--production-only` bound the initial review. Run `mmcg index .` first; Lens
 will report a missing or stale index rather than create or update one.
 
+### Selected-scope audit
+
+The audit view is a deterministic projection of the same selected map scope,
+not a separate whole-repository scan. Component structure, dead-code
+candidates, centrality, largest-file line-span proxies, Git churn, and
+authorship concentration all apply `--path` and `--production-only` in the
+backend before their result caps. The browser displays that fixed policy and
+does not reclassify or post-filter capped results. Dead-code, centrality,
+change-hotspot, largest-file, and authorship windows expose truncation instead
+of presenting a capped page as complete.
+
+SQLite or Git failures stay explicit. A failed audit query is reported as
+unavailable and cannot produce a `Healthy` or `Clear` presentation. Component
+map truncation is also visible; omitted components are not represented by the
+visual `Other returned components` tile. Static findings in the security card
+remain change-scoped evidence because evidence overlays are correlated only to
+the returned change, impact, and candidate-test trace. They are not a
+repository-wide clean result.
+
+### Optional AI audit narrative
+
+mmcg never invokes a model. It can read an optional bounded interpretation from
+`.mastermind/audit-narrative.json`, or from the path in
+`MMCG_AUDIT_NARRATIVE`. Start from `audit.narrative_binding` in the current
+`/api/lens` response and copy that object unchanged into the sidecar's required
+`binding` field. The binding covers repository identity, baseline and HEAD,
+the working-tree snapshot, and the exact returned map. A stale or foreign
+binding is rejected and Lens falls back to facts-only output. The default
+sidecar path is treated as Mastermind runtime state, so writing it does not
+invalidate the snapshot it describes.
+
+Validate producers against
+[`schemas/mastermind-audit-narrative-v1.schema.json`](../../schemas/mastermind-audit-narrative-v1.schema.json).
+Domain component lists and red-team routes must contain only exact component
+paths returned by the bound map; unknown or omitted components are rejected.
+The UI labels narrative prose as AI interpretation and routes as claims to
+verify. Neither text nor a straight line between component tiles is topology
+proof, runtime evidence, or a confirmed vulnerability.
+
 ### Evidence overlays
 
 Lens can correlate the returned change/impact trace with additional read-only

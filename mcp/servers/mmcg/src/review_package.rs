@@ -875,6 +875,18 @@ fn collect_analysis_states(value: &Value, path: &str, states: &mut BTreeSet<Anal
                 .get("truncation_reason")
                 .and_then(Value::as_str)
                 .map(str::to_string);
+            if object.get("status").and_then(Value::as_str) == Some("unavailable") {
+                states.insert(AnalysisState {
+                    path: path.into(),
+                    state: "unavailable",
+                    reason: object
+                        .get("diagnostic")
+                        .and_then(Value::as_object)
+                        .and_then(|diagnostic| diagnostic.get("code"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                });
+            }
             for (key, child) in object {
                 let state = if key == "partial" {
                     Some("partial")
@@ -1723,7 +1735,8 @@ mod tests {
                     "names_truncated": true,
                     "failures_truncated": true,
                     "contributors_truncated": true
-                }}
+                }},
+                "audit": {"largest_files": {"status": "unavailable"}}
             }),
             "$",
             &mut states,
@@ -1747,6 +1760,9 @@ mod tests {
                     && state.reason.as_deref() == Some(reason)
             }));
         }
+        assert!(states.iter().any(|state| {
+            state.path == "$.audit.largest_files" && state.state == "unavailable"
+        }));
     }
 
     #[test]

@@ -436,22 +436,13 @@ fn signature_until_body_or_semi(node: &Node, source: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::indexer::common;
     use crate::indexer::parse_one;
-    use std::env;
-    use std::path::PathBuf;
-
-    fn write_tmp(name: &str, content: &str) -> PathBuf {
-        let mut dir = env::temp_dir();
-        dir.push(format!("mmcg-rs-test-{}-{name}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(name);
-        std::fs::write(&path, content).unwrap();
-        path
-    }
 
     #[test]
     fn extracts_function_and_struct() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "rs",
             "lib.rs",
             "pub fn hello(x: i32) -> String { x.to_string() }\n\
              pub struct Foo { pub bar: i32 }\n",
@@ -465,7 +456,8 @@ mod tests {
 
     #[test]
     fn extracts_impl_methods() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "rs",
             "impl.rs",
             "struct Foo;\n\
              impl Foo {\n\
@@ -492,7 +484,11 @@ mod tests {
 
     #[test]
     fn extracts_macro_invocation_as_call() {
-        let path = write_tmp("m.rs", "fn main() { println!(\"hi\"); vec![1, 2, 3]; }\n");
+        let path = common::write_tmp(
+            "rs",
+            "m.rs",
+            "fn main() { println!(\"hi\"); vec![1, 2, 3]; }\n",
+        );
         let root = path.parent().unwrap();
         let pending = parse_one(&path, root, &RustExtractor).unwrap();
         let calls: Vec<&str> = pending
@@ -507,7 +503,8 @@ mod tests {
 
     #[test]
     fn extracts_use_declarations() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "rs",
             "u.rs",
             "use std::path::PathBuf;\n\
              use std::collections::{HashMap, BTreeMap};\n\

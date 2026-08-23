@@ -459,21 +459,11 @@ fn merge_decorators(a: Option<String>, b: Option<String>) -> Option<String> {
 }
 
 fn signature_until_body(node: &Node, source: &[u8]) -> Option<String> {
-    let body = node.child_by_field_name("body")?;
-    let header_end = body.start_byte();
-    let start = node.start_byte();
-    if header_end <= start {
-        return None;
-    }
-    let text = std::str::from_utf8(&source[start..header_end]).ok()?;
-    let trimmed = text
-        .trim_end_matches(|c: char| c == '{' || c == '=' || c == '>' || c.is_whitespace())
-        .to_string();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
+    // Expression-bodied members (`public int X => expr;`) keep the arrow after
+    // the shared trim, so strip it here rather than widening the shared rule.
+    let signature = super::common::signature_until_body(node, source)?;
+    let trimmed = signature.trim_end_matches(|c: char| c == '=' || c == '>' || c.is_whitespace());
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 fn property_signature(node: &Node, source: &[u8]) -> Option<String> {
@@ -500,22 +490,13 @@ fn property_signature(node: &Node, source: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::indexer::common;
     use crate::indexer::parse_one;
-    use std::env;
-    use std::path::PathBuf;
-
-    fn write_tmp(name: &str, content: &str) -> PathBuf {
-        let mut dir = env::temp_dir();
-        dir.push(format!("mmcg-cs-test-{}-{name}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(name);
-        std::fs::write(&path, content).unwrap();
-        path
-    }
 
     #[test]
     fn extracts_class_method_and_property() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "cs",
             "Foo.cs",
             "namespace App {\n\
                  public class Foo {\n\
@@ -538,7 +519,8 @@ mod tests {
 
     #[test]
     fn extracts_file_scoped_namespace() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "cs",
             "Scoped.cs",
             "namespace App.Sub;\n\
              public class Service { public void Run() {} }\n",
@@ -564,7 +546,8 @@ mod tests {
 
     #[test]
     fn extracts_using_directives() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "cs",
             "Usings.cs",
             "using System;\n\
              using System.Collections.Generic;\n\
@@ -588,7 +571,8 @@ mod tests {
 
     #[test]
     fn extracts_calls_and_new() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "cs",
             "Calls.cs",
             "using System;\n\
              class Main {\n\
@@ -623,7 +607,8 @@ mod tests {
 
     #[test]
     fn captures_partial_modifier() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "cs",
             "Partial.cs",
             "namespace App;\n\
              public partial class User { public string Name { get; set; } = \"\"; }\n\
@@ -645,7 +630,8 @@ mod tests {
 
     #[test]
     fn captures_attributes_into_decorators() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "cs",
             "Tests.cs",
             "using Xunit;\n\
              public class FooTests {\n\

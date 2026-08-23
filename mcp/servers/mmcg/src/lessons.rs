@@ -6,7 +6,6 @@
 //! after semantic review. Stable IDs and an exclusive file lock make repeated
 //! or concurrent audit invocations idempotent.
 
-use fs2::FileExt;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
@@ -118,7 +117,7 @@ fn append_candidate(repo_root: &Path, candidate: Candidate) -> std::io::Result<b
         .write(true)
         .truncate(false)
         .open(&lock_path)?;
-    lock.lock_exclusive()?;
+    lock.lock()?;
 
     let result = (|| {
         let body = match fs::read_to_string(&lessons_path) {
@@ -133,7 +132,7 @@ fn append_candidate(repo_root: &Path, candidate: Candidate) -> std::io::Result<b
             .map_err(|error| std::io::Error::other(error.to_string()))?;
         Ok(true)
     })();
-    FileExt::unlock(&lock)?;
+    lock.unlock()?;
     result
 }
 

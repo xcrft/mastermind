@@ -1,7 +1,7 @@
 //! Go extractor — functions, methods, types (struct/interface), imports, calls.
 
 use super::common::{
-    line_of, node_text, push_call_with_type, push_def, push_def_with_decorators, push_import,
+    line_of, node_text, push_call_with_type, push_def, push_import, signature_until_body,
 };
 use super::LanguageExtractor;
 use crate::store::PendingFile;
@@ -218,58 +218,16 @@ fn starts_uppercase(s: &str) -> bool {
     s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
 }
 
-fn signature_until_body(node: &Node, source: &[u8]) -> Option<String> {
-    let body = node.child_by_field_name("body")?;
-    let header_end = body.start_byte();
-    let start = node.start_byte();
-    if header_end <= start {
-        return None;
-    }
-    let text = std::str::from_utf8(&source[start..header_end]).ok()?;
-    let trimmed = text
-        .trim_end_matches(|c: char| c == '{' || c.is_whitespace())
-        .to_string();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
-}
-
-// Unused — Go has no decorator/attribute syntax. Kept for future build-tag /
-// directive capture (`//go:build`, `//go:generate`).
-#[allow(dead_code)]
-fn push_def_with_build_tags(
-    pending: &mut PendingFile,
-    name: String,
-    kind: &str,
-    node: &Node,
-    signature: Option<String>,
-    parent_index: Option<usize>,
-    tags: Option<String>,
-) -> usize {
-    push_def_with_decorators(pending, name, kind, node, signature, parent_index, tags)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::indexer::common;
     use crate::indexer::parse_one;
-    use std::env;
-    use std::path::PathBuf;
-
-    fn write_tmp(name: &str, content: &str) -> PathBuf {
-        let mut dir = env::temp_dir();
-        dir.push(format!("mmcg-go-test-{}-{name}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(name);
-        std::fs::write(&path, content).unwrap();
-        path
-    }
 
     #[test]
     fn extracts_functions_methods_and_types() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "go",
             "main.go",
             "package main\n\
              type Server struct { addr string }\n\
@@ -297,7 +255,8 @@ mod tests {
 
     #[test]
     fn extracts_imports_with_alias_and_grouped() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "go",
             "imports.go",
             "package main\n\
              import \"fmt\"\n\
@@ -336,7 +295,8 @@ mod tests {
 
     #[test]
     fn extracts_calls_and_composite_literals() {
-        let path = write_tmp(
+        let path = common::write_tmp(
+            "go",
             "calls.go",
             "package main\n\
              import \"fmt\"\n\

@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/xcrft/mastermind/schemas/mastermind-audit-narrative-v1.schema.json",
+  "title": "Mastermind Lens audit narrative v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "binding"],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "binding": {
+      "$ref": "#/$defs/binding"
+    },
+    "summary": {
+      "$ref": "#/$defs/summary"
+    },
+    "lenses": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 12,
+      "properties": {
+        "bugs": { "$ref": "#/$defs/lens_note" },
+        "bus": { "$ref": "#/$defs/lens_note" },
+        "structural": { "$ref": "#/$defs/lens_note" },
+        "change": { "$ref": "#/$defs/lens_note" },
+        "health": { "$ref": "#/$defs/lens_note" },
+        "security": { "$ref": "#/$defs/lens_note" },
+        "domain": { "$ref": "#/$defs/lens_note" },
+        "explain": { "$ref": "#/$defs/lens_note" }
+      }
+    },
+    "domains": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "$ref": "#/$defs/domain"
+      }
+    },
+    "red_team": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "$ref": "#/$defs/red_team"
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "git_oid": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "component": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "components": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 24,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/component"
+      }
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["healthy", "attention", "risk", "info"],
+      "default": "info"
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "lens_note": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 600
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository_identity",
+        "baseline_oid",
+        "head_oid",
+        "snapshot_token_sha256",
+        "map_sha256"
+      ],
+      "properties": {
+        "repository_identity": {
+          "type": "string",
+          "pattern": "^git-(?:remote|worktree):sha256:[0-9a-f]{64}$"
+        },
+        "baseline_oid": {
+          "$ref": "#/$defs/git_oid"
+        },
+        "head_oid": {
+          "$ref": "#/$defs/git_oid"
+        },
+        "snapshot_token_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "map_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "domain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "components"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "severity": {
+          "$ref": "#/$defs/severity"
+        },
+        "note": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 400
+        },
+        "components": {
+          "$ref": "#/$defs/components"
+        }
+      }
+    },
+    "red_team": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "vector"],
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 140
+        },
+        "severity": {
+          "$ref": "#/$defs/severity"
+        },
+        "scenario": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 600
+        },
+        "evidence": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "vector": {
+          "$ref": "#/$defs/components"
+        }
+      }
+    }
+  }
+}

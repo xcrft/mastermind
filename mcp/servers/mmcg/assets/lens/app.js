@@ -33,6 +33,10 @@
     mobilePage: 0,
     returnCandidateId: null,
     overlays: new Set(OVERLAY_KEYS),
+    mode: "review",
+    auditTiles: null,
+    auditTrace: null,
+    auditTraceEl: null,
   };
 
   const elements = {};
@@ -196,10 +200,6 @@
       node.textContent = content;
     }
     return node;
-  }
-
-  function clearNode(node) {
-    node.replaceChildren();
   }
 
   function setEnabled(enabled) {
@@ -387,38 +387,79 @@
     return signals;
   }
 
-  function evidenceMark(node) {
+  // Keep risk derivation on the same evidence gates used by the overlays.
+  function nodeRisk(node) {
+    const serious = [];
+    const warning = [];
     const evidence = node.evidence;
-    if (!evidence) {
-      return "";
+    if (evidence && overlayEnabled("tests") && evidence.testResults) {
+      const failed = (finiteNumber(evidence.testResults.failed) || 0) + (finiteNumber(evidence.testResults.errors) || 0);
+      if (failed > 0) {
+        serious.push(failed + " fail" + (failed === 1 ? "" : "s"));
+      }
     }
-    const marks = [];
-    if (overlayEnabled("findings") && evidence.findings.length > 0) {
-      marks.push("S" + evidence.findings.length);
+    if (evidence && overlayEnabled("findings") && evidence.findings.length > 0) {
+      serious.push(evidence.findings.length + " finding" + (evidence.findings.length === 1 ? "" : "s"));
     }
-    if (overlayEnabled("coverage") && evidence.coverage) {
+    // Self-contained or work-limited changes do not prove missing test reach.
+    if (node.type === "changed" && node.blast && node.blast.symbols > 0 && node.blast.testPaths === 0) {
+      warning.push("untested");
+    }
+    if (node.crossings.length > 0) {
+      warning.push(node.crossings.length + " crossing" + (node.crossings.length === 1 ? "" : "s"));
+    }
+    const collisions = finiteNumber(node.item.name_collision_count);
+    if (node.type === "impacted" && collisions !== null && collisions > 1) {
+      warning.push("name pooled ×" + collisions);
+    }
+    if (evidence && overlayEnabled("coverage") && evidence.coverage) {
       const found = finiteNumber(evidence.coverage.lines_found);
       const hit = finiteNumber(evidence.coverage.lines_hit);
-      marks.push(found && hit !== null ? "C" + Math.round((hit / found) * 100) : "C?");
+      if (found !== null && found > 0 && hit !== null && hit < found) {
+        warning.push("cov " + Math.round((hit / found) * 100) + "%");
+      }
     }
-    if (overlayEnabled("ownership") && hasCodeownersEvidence(evidence)) {
-      marks.push(ownerNames(evidence).length > 0 ? "O" : "O0");
-    }
-    if (overlayEnabled("churn") && evidence.churn) {
-      marks.push("G" + displayNumber(finiteNumber(evidence.churn.commits)));
-    }
-    if (overlayEnabled("tests") && evidence.testResults) {
-      const failed = (finiteNumber(evidence.testResults.failed) || 0) + (finiteNumber(evidence.testResults.errors) || 0);
-      marks.push("T" + displayNumber(failed) + "F");
-    }
-    if (overlayEnabled("runtime") && evidence.runtime) {
-      marks.push("R" + displayNumber(finiteNumber(evidence.runtime.spans)));
-    }
-    if (overlayEnabled("knowledge") && evidence.knowledge.length > 0) {
-      marks.push("K" + evidence.knowledge.length);
+    return {
+      tier: serious.length > 0 ? "serious" : warning.length > 0 ? "warning" : null,
+      serious: serious,
+      warning: warning,
+    };
+  }
+
+  function riskRank(node) {
+    const tier = nodeRisk(node).tier;
+    return tier === "serious" ? 2 : tier === "warning" ? 1 : 0;
+  }
+
+  function evidenceMark(node) {
+    const risk = nodeRisk(node);
+    const marks = risk.serious.concat(risk.warning);
+    const evidence = node.evidence;
+    if (evidence) {
+      if (overlayEnabled("coverage") && evidence.coverage && risk.warning.every(function (label) { return label.indexOf("cov ") !== 0; })) {
+        const found = finiteNumber(evidence.coverage.lines_found);
+        const hit = finiteNumber(evidence.coverage.lines_hit);
+        marks.push(found && hit !== null ? "cov " + Math.round((hit / found) * 100) + "%" : "cov ?");
+      }
+      if (overlayEnabled("ownership") && hasCodeownersEvidence(evidence)) {
+        const owners = ownerNames(evidence);
+        marks.push(owners.length === 0 ? "no owner" : owners.length === 1 ? owners[0] : owners.length + " owners");
+      }
+      if (overlayEnabled("churn") && evidence.churn) {
+        const commits = finiteNumber(evidence.churn.commits);
+        marks.push(displayNumber(commits) + " commit" + (commits === 1 ? "" : "s"));
+      }
+      if (overlayEnabled("runtime") && evidence.runtime) {
+        const spans = finiteNumber(evidence.runtime.spans);
+        marks.push(displayNumber(spans) + " span" + (spans === 1 ? "" : "s"));
+      }
+      if (overlayEnabled("knowledge") && evidence.knowledge.length > 0) {
+        marks.push(evidence.knowledge.length + " note" + (evidence.knowledge.length === 1 ? "" : "s"));
+      }
     }
     return marks.join(" · ");
   }
+
 
   function normalizePayload(payload) {
     const raw = record(payload);
@@ -555,6 +596,29 @@
         });
       });
     });
+    nodes.filter(function (node) {
+      return node.type === "changed";
+    }).forEach(function (node) {
+      const reached = new Set();
+      const components = new Set();
+      let testPaths = 0;
+      edges.forEach(function (edge) {
+        if (edge.from !== node) {
+          return;
+        }
+        if (edge.type === "impact") {
+          reached.add(edge.to.id);
+          components.add(edge.to.component.name);
+        } else if (edge.type === "test") {
+          testPaths += 1;
+        }
+      });
+      node.blast = { symbols: reached.size, components: components.size, testPaths: testPaths };
+    });
+    const maxBlast = nodes.reduce(function (maximum, node) {
+      return node.blast ? Math.max(maximum, node.blast.symbols) : maximum;
+    }, 1);
+
     edges.forEach(function (edge) {
       edge.ownershipBoundary = ownershipBoundary(edge.from.evidence, edge.to.evidence);
       const fromFile = text(edge.from.symbol.file, "");
@@ -628,6 +692,8 @@
       evidenceByPath: evidenceByPath,
       nodes: nodes,
       edges: edges,
+      maxBlast: maxBlast,
+      audit: record(raw.audit),
       components: componentRows,
       precisionNotes: precisionNotes,
       truncations: truncations,
@@ -925,11 +991,38 @@
       crossings: { value: byId("metric-crossings"), note: byId("metric-crossings-note") },
       tests: { value: byId("metric-tests"), note: byId("metric-tests-note") },
     };
+    elements.modeButtons = Array.from(document.querySelectorAll("[data-mode]"));
+    elements.auditBoard = byId("audit-board");
+    elements.auditSummary = byId("audit-summary");
+    elements.auditExplain = byId("audit-explain");
+    elements.auditStructural = byId("audit-structural");
+    elements.auditHealth = byId("audit-health");
+    elements.auditChange = byId("audit-change");
+    elements.auditProduction = byId("audit-production");
+    elements.auditVerdict = byId("audit-verdict");
+    elements.auditVerdictWord = byId("audit-verdict-word");
+    elements.auditLede = byId("audit-lede");
+    elements.auditPillars = byId("audit-pillars");
+    elements.auditTreemap = byId("audit-treemap");
+    elements.auditMapNote = byId("audit-map-note");
+    elements.auditMapMobile = byId("audit-map-mobile");
+    elements.auditBugs = byId("audit-bugs");
+    elements.auditBus = byId("audit-bus");
+    elements.auditDomainCard = byId("audit-domain-card");
+    elements.auditDomain = byId("audit-domain");
+    elements.auditRedteam = byId("audit-redteam");
+    elements.auditRedteamBody = byId("audit-redteam-body");
+    elements.auditSecurity = byId("audit-security");
   }
 
   function bindEvents() {
     elements.refresh.addEventListener("click", function () {
       loadSnapshot(false);
+    });
+    elements.modeButtons.forEach(function (button) {
+      button.addEventListener("click", function () {
+        setMode(button.getAttribute("data-mode"));
+      });
     });
     elements.search.addEventListener("input", function () {
       state.search = elements.search.value.trim().toLocaleLowerCase();
@@ -1105,9 +1198,849 @@
     renderComponents();
     renderTemporal();
     renderMethodLedger();
+    renderAudit();
     setEnabled(true);
     renderGraph();
     renderInspector();
+  }
+
+  function setMode(mode) {
+    var next = mode === "audit" ? "audit" : "review";
+    state.mode = next;
+    document.body.setAttribute("data-mode", next);
+    if (elements.auditBoard) {
+      elements.auditBoard.hidden = next !== "audit";
+    }
+    elements.modeButtons.forEach(function (button) {
+      button.setAttribute("aria-pressed", button.getAttribute("data-mode") === next ? "true" : "false");
+    });
+    announce(next === "audit" ? "Showing the selected-scope audit." : "Showing the change review.");
+  }
+
+  function auditRow(label, value, fraction) {
+    var row = createElement("li", "audit-row");
+    row.appendChild(createElement("span", "audit-row__label", label));
+    row.appendChild(createElement("span", "audit-row__value", value));
+    var meter = createElement("span", "audit-row__meter");
+    var pct = Math.max(2, Math.round((finiteNumber(fraction) || 0) * 100));
+    meter.setAttribute("style", "width:" + pct + "%");
+    row.appendChild(meter);
+    return row;
+  }
+
+  function auditRows(node, entries) {
+    var list = createElement("ul", "audit-rows");
+    entries.forEach(function (entry) {
+      list.appendChild(auditRow(entry.label, entry.value, entry.fraction));
+    });
+    node.appendChild(list);
+  }
+
+  function renderAuditExplain(map) {
+    var node = elements.auditExplain;
+    clearNodeSafe(node);
+    var components = collection(map.components);
+    var entryPoints = collection(map.entry_points);
+    var languages = collection(map.languages);
+    var files = collection(map.files);
+    var fileTotal = totalOrReturned(files);
+
+    var stats = createElement("div", "audit-stats");
+    [
+      { value: displayNumber(components.total === null ? components.items.length : components.total), label: "Components" },
+      { value: displayNumber(entryPoints.total === null ? entryPoints.items.length : entryPoints.total), label: "Entry points" },
+      { value: displayNumber(languages.items.length), label: "Languages" },
+      { value: displayNumber(fileTotal), label: "Files (mapped)" },
+    ].forEach(function (stat) {
+      var cell = createElement("div", "audit-stat");
+      cell.appendChild(createElement("strong", "", stat.value));
+      cell.appendChild(createElement("span", "", stat.label));
+      stats.appendChild(cell);
+    });
+    node.appendChild(stats);
+
+    var ranked = components.items.map(record).sort(function (left, right) {
+      return (finiteNumber(right.file_count) || 0) - (finiteNumber(left.file_count) || 0);
+    });
+    if (ranked.length === 0) {
+      node.appendChild(createElement("p", "audit-empty", "No components were indexed in this scope."));
+      return;
+    }
+    var maxFiles = Math.max.apply(null, ranked.map(function (item) { return finiteNumber(item.file_count) || 0; }).concat([1]));
+    node.appendChild(createElement("p", "audit-subhead", "Largest components"));
+    auditRows(node, ranked.slice(0, 6).map(function (item) {
+      var files = finiteNumber(item.file_count) || 0;
+      return {
+        label: text(item.path, "unknown"),
+        value: displayNumber(files) + " files",
+        fraction: files / maxFiles,
+      };
+    }));
+  }
+
+  function renderAuditStructural(map) {
+    var node = elements.auditStructural;
+    clearNodeSafe(node);
+    var cycles = collection(map.cycles);
+    var hotspots = collection(map.hotspots);
+    var cycleIncomplete = cycles.truncated || cycles.totalUnknown;
+
+    var cycleHead = createElement("p", "audit-subhead");
+    cycleHead.appendChild(document.createTextNode("Dependency cycles"));
+    var cycleCount = cycles.total === null ? cycles.items.length : cycles.total;
+    var cycleBadge = createElement("span", "audit-count" + (cycleCount > 0 ? " audit-count--serious" : cycleIncomplete ? "" : " audit-count--clean"), String(cycleCount));
+    cycleHead.appendChild(cycleBadge);
+    node.appendChild(cycleHead);
+    if (cycleCount === 0) {
+      node.appendChild(createElement("p", "audit-empty", cycleIncomplete
+        ? "No dependency cycle was returned, but cycle analysis is partial."
+        : "No dependency cycles detected — the selected module graph is acyclic."));
+    } else {
+      var cycleList = createElement("ul", "audit-list");
+      cycles.items.slice(0, 6).forEach(function (cycle) {
+        var members = array(cycle).map(function (member) { return text(member, "?"); });
+        var item = createElement("li", "audit-item audit-item--serious");
+        item.appendChild(createElement("span", "audit-item__label", members.join(" → ") + (members.length > 1 ? " → " + members[0] : "")));
+        cycleList.appendChild(item);
+      });
+      node.appendChild(cycleList);
+      if (cycleIncomplete) {
+        node.appendChild(createElement("p", "audit-empty", "Showing a bounded subset of dependency cycles."));
+      }
+    }
+
+    if (hotspots.items.length === 0) {
+      if (hotspots.truncated || hotspots.totalUnknown) {
+        node.appendChild(createElement("p", "audit-empty", "No centrality hotspot was returned, but the hotspot window is partial."));
+      }
+      return;
+    }
+    var ranked = hotspots.items.map(record).sort(function (left, right) {
+      return (finiteNumber(right.in_degree) || 0) - (finiteNumber(left.in_degree) || 0);
+    });
+    if (ranked.length === 0) {
+      return;
+    }
+    var maxDeg = Math.max.apply(null, ranked.map(function (item) { return finiteNumber(item.in_degree) || 0; }).concat([1]));
+    node.appendChild(createElement("p", "audit-subhead", "Most depended-on symbols"));
+    auditRows(node, ranked.slice(0, 6).map(function (item) {
+      var deg = finiteNumber(item.in_degree) || 0;
+      return {
+        label: text(item.name, "unnamed") + " · " + text(item.file, "?"),
+        value: displayNumber(deg) + " in",
+        fraction: deg / maxDeg,
+      };
+    }));
+    if (hotspots.truncated || hotspots.totalUnknown) {
+      node.appendChild(createElement("p", "audit-empty", "Showing a bounded subset of centrality hotspots."));
+    }
+  }
+
+  function renderAuditHealth(model) {
+    var node = elements.auditHealth;
+    clearNodeSafe(node);
+    var dead = record(model.audit).dead_code;
+    var deadCollection = collection(dead);
+    var total = deadCollection.total === null ? deadCollection.items.length : deadCollection.total;
+
+    var head = createElement("p", "audit-subhead");
+    head.appendChild(document.createTextNode("Dead-code candidates"));
+    head.appendChild(createElement("span", "audit-count" + (total === 0 ? " audit-count--clean" : ""), displayNumber(total)));
+    node.appendChild(head);
+
+    var deadItems = deadCollection.items;
+    if (deadItems.length === 0) {
+      node.appendChild(createElement("p", "audit-empty", "Nothing reads back as unreferenced — no dead-code candidates."));
+      return;
+    }
+    var list = createElement("ul", "audit-list");
+    deadItems.slice(0, 8).forEach(function (value) {
+      var item = record(value);
+      var entry = createElement("li", "audit-item");
+      entry.appendChild(createElement("span", "audit-item__title", text(item.name, "unnamed") + " · " + text(item.kind, "symbol")));
+      entry.appendChild(createElement("span", "audit-item__label", text(item.file, "?") + formatLine(item.line)));
+      list.appendChild(entry);
+    });
+    node.appendChild(list);
+    if (deadCollection.truncated || total > deadItems.length) {
+      node.appendChild(createElement("p", "audit-empty", "Showing " + Math.min(deadItems.length, 8) + " of " + displayNumber(total) + " candidates."));
+    }
+  }
+
+  function renderAuditChange(model) {
+    var node = elements.auditChange;
+    clearNodeSafe(node);
+    var hotspots = record(record(model.audit).change_hotspots);
+    if (text(hotspots.status, "") !== "available") {
+      node.appendChild(createElement("p", "audit-empty", "Churn or centrality could not be read, so change-hotspot ranking is unavailable."));
+      return;
+    }
+    var items = array(hotspots.items).map(record);
+    var head = createElement("p", "audit-subhead");
+    head.appendChild(document.createTextNode("Churn × centrality"));
+    head.appendChild(createElement("span", "audit-count" + (items.length === 0 ? " audit-count--clean" : ""), String(items.length)));
+    node.appendChild(head);
+    if (items.length === 0) {
+      node.appendChild(createElement("p", "audit-empty", "No file is both heavily changed and heavily depended on in the returned window."));
+      if (hotspots.truncated === true) {
+        node.appendChild(createElement("p", "audit-empty", "The centrality candidate window was bounded, so this is not a complete zero."));
+      }
+      return;
+    }
+    var maxScore = Math.max.apply(null, items.map(function (item) { return finiteNumber(item.score) || 0; }).concat([1]));
+    auditRows(node, items.slice(0, 6).map(function (item) {
+      var commits = finiteNumber(item.commits) || 0;
+      var degree = finiteNumber(item.in_degree) || 0;
+      return {
+        label: text(item.file, "?"),
+        value: commits + " commits × " + displayNumber(degree) + " in",
+        fraction: (finiteNumber(item.score) || 0) / maxScore,
+      };
+    }));
+    node.appendChild(createElement("p", "audit-empty",
+      "Ranked by commits × incoming edges over the last " + displayNumber(finiteNumber(hotspots.window_commits) || 0) + " commits."));
+    if (hotspots.truncated === true) {
+      node.appendChild(createElement("p", "audit-empty", "Showing a bounded subset of change-hotspot candidates."));
+    }
+  }
+
+  function auditSecurityFindings(model) {
+    var findings = [];
+    var productionOnly = record(model.options).production_only === true;
+    collection(record(model.evidence).files).items.forEach(function (value) {
+      var file = record(value);
+      if (productionOnly && file.production !== true) {
+        return;
+      }
+      array(file.findings).forEach(function (findingValue) {
+        var finding = record(findingValue);
+        findings.push({
+          tool: text(finding.tool, "static analysis"),
+          rule: text(finding.rule_id, ""),
+          level: text(finding.level, "note"),
+          message: text(finding.message, ""),
+          file: text(file.path, "?"),
+        });
+      });
+    });
+    return findings;
+  }
+
+  function renderAuditSecurity(model) {
+    var node = elements.auditSecurity;
+    clearNodeSafe(node);
+    var findings = auditSecurityFindings(model);
+
+    var findHead = createElement("p", "audit-subhead");
+    findHead.appendChild(document.createTextNode("Static findings on the review trace"));
+    findHead.appendChild(createElement("span", "audit-count" + (findings.length === 0 ? "" : " audit-count--serious"), String(findings.length)));
+    node.appendChild(findHead);
+    if (findings.length === 0) {
+      node.appendChild(createElement("p", "audit-empty", "No static findings were loaded for the review trace. This is not a repository-wide clean result."));
+    } else {
+      var list = createElement("ul", "audit-list");
+      findings.slice(0, 6).forEach(function (finding) {
+        var cls = finding.level === "error" ? " audit-item--serious" : finding.level === "warning" ? " audit-item--warning" : "";
+        var item = createElement("li", "audit-item" + cls);
+        item.appendChild(createElement("span", "audit-item__title", finding.tool + (finding.rule ? " / " + finding.rule : "")));
+        item.appendChild(createElement("span", "audit-item__label", finding.file + " — " + finding.message));
+        list.appendChild(item);
+      });
+      node.appendChild(list);
+    }
+    if (record(model.evidence).partial === true) {
+      node.appendChild(createElement("p", "audit-empty", "One or more evidence inputs are partial, so the finding count is incomplete."));
+    }
+
+    var entryPoints = collection(record(model.map).entry_points);
+    var entryHead = createElement("p", "audit-subhead");
+    entryHead.appendChild(document.createTextNode("Attack surface — entry points"));
+    entryHead.appendChild(createElement("span", "audit-count", displayNumber(entryPoints.total === null ? entryPoints.items.length : entryPoints.total)));
+    node.appendChild(entryHead);
+    if (entryPoints.items.length === 0) {
+      node.appendChild(createElement("p", "audit-empty", entryPoints.truncated || entryPoints.totalUnknown
+        ? "No entry point was returned, but entry-point analysis is partial."
+        : "No entry points classified in this scope."));
+      return;
+    }
+    var entryItems = entryPoints.items;
+    if (entryItems.length === 0) {
+      node.appendChild(createElement("p", "audit-empty", "No entry points in the returned set."));
+      return;
+    }
+    var list2 = createElement("ul", "audit-list");
+    entryItems.slice(0, 6).forEach(function (value) {
+      var entry = record(value);
+      var item = createElement("li", "audit-item");
+      item.appendChild(createElement("span", "audit-item__title", text(entry.classification, "entry")));
+      item.appendChild(createElement("span", "audit-item__label", text(entry.file, "?")));
+      list2.appendChild(item);
+    });
+    node.appendChild(list2);
+    if (entryPoints.truncated || entryPoints.totalUnknown) {
+      node.appendChild(createElement("p", "audit-empty", "Showing a bounded subset of classified entry points."));
+    }
+  }
+
+  function clearNodeSafe(node) {
+    if (node) {
+      node.replaceChildren();
+    }
+  }
+
+  function auditSetSev(id, sev, label) {
+    var el = byId(id);
+    if (!el) { return; }
+    el.hidden = false;
+    el.className = "audit-sev audit-sev--" + sev;
+    el.textContent = label;
+  }
+
+  function auditComponentRisk(map, audit) {
+    var risk = {}, attn = {};
+    array(record(record(audit).change_hotspots).items).forEach(function (v) {
+      var f = text(record(v).file, "");
+      collection(map.components).items.forEach(function (c) {
+        var path = text(record(c).path, "");
+        if (path && (f === path || f.indexOf(path + "/") === 0)) { risk[path] = true; }
+      });
+    });
+    collection(map.hotspots).items.forEach(function (v) {
+      var f = text(record(v).file, "");
+      collection(map.components).items.forEach(function (c) {
+        var path = text(record(c).path, "");
+        if (path && (f === path || f.indexOf(path + "/") === 0)) { attn[path] = true; }
+      });
+    });
+    return function (path) { return risk[path] ? "risk" : attn[path] ? "attention" : "neutral"; };
+  }
+
+  function auditIsIncomplete(model) {
+    var map = record(model.map);
+    var audit = record(model.audit);
+    var impact = record(model.impact);
+    var changes = record(impact.changes);
+    var sections = [
+      map.files, map.languages, map.components, map.entry_points, map.hotspots, map.cycles,
+      changes.files, changes.symbols, impact.impact, impact.api_crossings, impact.tests,
+      audit.dead_code, audit.change_hotspots, audit.largest_files, audit.bus_factor,
+    ];
+    return record(model.evidence).partial === true
+      || record(map.scope).aggregation_paths_truncated === true
+      || sections.some(function (section) { return record(section).truncated === true; })
+      || text(record(audit.change_hotspots).status, "") !== "available"
+      || text(record(audit.largest_files).status, "") !== "available"
+      || text(record(audit.bus_factor).status, "") !== "available";
+  }
+
+  function renderAuditExec(model) {
+    var map = record(model.map);
+    var components = collection(map.components);
+    var languages = collection(map.languages);
+    var cycles = collection(map.cycles);
+    var audit = record(model.audit);
+    var changeSource = record(audit.change_hotspots);
+    var change = collection(changeSource);
+    var fileTotal = totalOrReturned(collection(map.files));
+    var compCount = components.total === null ? components.items.length : components.total;
+    var cycleCount = cycles.total === null ? cycles.items.length : cycles.total;
+    var cycleIncomplete = cycles.truncated || cycles.totalUnknown;
+    var changeCount = change.returned === null ? change.items.length : change.returned;
+
+    var incomplete = auditIsIncomplete(model);
+    var findings = auditSecurityFindings(model);
+    var hasError = findings.some(function (f) { return f.level === "error"; });
+    var posture = cycleCount > 0 || hasError ? "risk"
+      : (incomplete || changeCount > 0 || findings.length > 0) ? "attention" : "healthy";
+    var word = posture === "risk" ? "Risk" : incomplete ? "Incomplete" : posture === "attention" ? "Attention" : "Healthy";
+    if (elements.auditVerdict) {
+      elements.auditVerdict.className = "audit-verdict audit-verdict--" + posture;
+      elements.auditVerdict.setAttribute("aria-label", "Overall posture: " + word);
+    }
+    if (elements.auditVerdictWord) { elements.auditVerdictWord.textContent = word; }
+    if (elements.auditLede) {
+      var narrative = text(record(record(model.audit).narrative).summary, "");
+      elements.auditLede.className = narrative ? "audit-exec__lede audit-lede--ai" : "audit-exec__lede";
+      elements.auditLede.textContent = narrative || (
+        displayNumber(compCount) + " components · " + displayNumber(fileTotal) + " mapped files · " +
+        languages.items.length + " language" + (languages.items.length === 1 ? "" : "s") + ". " +
+        (cycleIncomplete
+          ? "Cycle analysis is partial. "
+          : cycleCount === 0 ? "No dependency cycles — the selected module graph is acyclic. " : cycleCount + " dependency cycles — refactors carry structural risk. ") +
+        (text(changeSource.status, "") === "available"
+          ? changeCount + " change-hotspot" + (changeCount === 1 ? "" : "s") + " concentrate the regression risk."
+          : "Change-hotspot history is unavailable.")
+      );
+    }
+    if (elements.auditPillars) {
+      elements.auditPillars.replaceChildren();
+      [
+        { lab: "Scale", big: displayNumber(fileTotal), sub: compCount + " components · " + languages.items.length + " languages", sev: "attention" },
+        { lab: "Structure", big: cycleIncomplete ? "≥" + String(cycleCount) : String(cycleCount), sub: cycleIncomplete ? "dependency-cycle window is partial" : cycleCount === 0 ? "dependency cycles — acyclic" : "dependency cycles", sev: cycleIncomplete ? "attention" : cycleCount === 0 ? "healthy" : "risk" },
+        { lab: "Change safety", big: text(changeSource.status, "") === "available" ? String(changeCount) : "—", sub: text(changeSource.status, "") === "available" ? "change-hotspots — churn × dependence" : "history unavailable", sev: text(changeSource.status, "") === "available" && changeCount === 0 ? "healthy" : "attention" }
+      ].forEach(function (p) {
+        var el = createElement("article", "audit-pillar audit-pillar--" + p.sev);
+        var top = createElement("div", "p-top");
+        top.appendChild(createElement("span", "p-lab", p.lab));
+        top.appendChild(createElement("span", "audit-sev audit-sev--" + p.sev, p.sev === "healthy" ? "Healthy" : p.sev === "risk" ? "Risk" : "Watch"));
+        el.appendChild(top);
+        el.appendChild(createElement("p", "p-big", p.big));
+        el.appendChild(createElement("p", "p-sub", p.sub));
+        elements.auditPillars.appendChild(el);
+      });
+    }
+  }
+
+  function auditSquarify(items, x, y, w, h) {
+    var total = items.reduce(function (s, i) { return s + i.files; }, 0) || 1;
+    var scale = (w * h) / total;
+    var nodes = items.map(function (i) { return { d: i, area: i.files * scale }; });
+    var out = [], row = [], rx = x, ry = y, rw = w, rh = h;
+    function worst(r, len) {
+      var s = r.reduce(function (a, b) { return a + b.area; }, 0);
+      var mx = Math.max.apply(null, r.map(function (v) { return v.area; }));
+      var mn = Math.min.apply(null, r.map(function (v) { return v.area; }));
+      return Math.max((len * len * mx) / (s * s), (s * s) / (len * len * mn));
+    }
+    function layout(r, horizontal) {
+      var s = r.reduce(function (a, b) { return a + b.area; }, 0);
+      if (horizontal) { var rowH = s / rw, cx = rx;
+        r.forEach(function (v) { var cw = v.area / rowH; out.push({ d: v.d, x: cx, y: ry, w: cw, h: rowH }); cx += cw; });
+        ry += rowH; rh -= rowH;
+      } else { var rowW = s / rh, cy = ry;
+        r.forEach(function (v) { var ch = v.area / rowW; out.push({ d: v.d, x: rx, y: cy, w: rowW, h: ch }); cy += ch; });
+        rx += rowW; rw -= rowW;
+      }
+    }
+    var i = 0;
+    while (i < nodes.length) {
+      var horizontal = rw >= rh, len = horizontal ? rw : rh, next = nodes[i];
+      if (row.length === 0 || worst(row, len) >= worst(row.concat([next]), len)) { row.push(next); i++; }
+      else { layout(row, horizontal); row = []; }
+    }
+    if (row.length) { layout(row, rw >= rh); }
+    return out;
+  }
+
+  function renderAuditMap(model) {
+    var map = record(model.map);
+    var riskOf = auditComponentRisk(map, model.audit);
+    var componentCollection = collection(map.components);
+    var comps = componentCollection.items.map(record)
+      .map(function (c) { return { name: text(c.path, "?"), files: finiteNumber(c.file_count) || 0, risk: riskOf(text(c.path, "")) }; })
+      .filter(function (c) { return c.files > 0; })
+      .sort(function (a, b) { return b.files - a.files; });
+    var HEAD = 9;
+    if (comps.length > HEAD) {
+      var tail = comps.slice(HEAD - 1);
+      var other = {
+        name: "Other returned components",
+        files: tail.reduce(function (s, c) { return s + c.files; }, 0),
+        risk: "neutral",
+        members: tail.map(function (c) { return c.name; }),
+      };
+      comps = comps.slice(0, HEAD - 1).concat([other]);
+    }
+
+    if (elements.auditMapNote) {
+      var returned = returnedCount(componentCollection);
+      var total = componentCollection.total;
+      elements.auditMapNote.textContent = componentCollection.truncated
+        ? "Showing " + displayNumber(returned) + " of " + (total === null ? "an unknown total of" : displayNumber(total)) + " components; omitted components are not represented."
+        : "All " + displayNumber(returned) + " returned components are represented.";
+    }
+
+    state.auditTiles = [];
+    state.auditTrace = null;
+    var svg = elements.auditTreemap;
+    if (svg) {
+      clearNodeSafe(svg);
+      var W = svg.clientWidth || 900, H = 340;
+      svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+      var tiles = auditSquarify(comps.slice(), 3, 3, W - 6, H - 6);
+      tiles.forEach(function (t) {
+        var g = createSvg("g", {});
+        var rect = createSvg("rect", { x: t.x, y: t.y, width: Math.max(0, t.w - 2), height: Math.max(0, t.h - 2), rx: 6, class: "tm-rect tm-rect--" + t.d.risk });
+        rect.setAttribute("data-component", t.d.name);
+        g.appendChild(rect);
+        var title = t.d.name + " — " + displayNumber(t.d.files) + " files · " + t.d.risk + " change-risk";
+        g.appendChild(createSvg("title", {}, title));
+        g.setAttribute("aria-label", title);
+        if (t.w > 74 && t.h > 34) {
+          g.appendChild(createSvg("text", { x: t.x + 10, y: t.y + 21, class: "tm-label", "font-size": t.w > 150 ? 14 : 12 }, t.d.name.split("/").pop()));
+          g.appendChild(createSvg("text", { x: t.x + 10, y: t.y + 37, class: "tm-sub" }, displayNumber(t.d.files) + " files"));
+        }
+        svg.appendChild(g);
+        state.auditTiles.push({ name: t.d.name, members: array(t.d.members), rect: rect, cx: t.x + t.w / 2, cy: t.y + t.h / 2 });
+      });
+      elements.auditTraceLayer = createSvg("g", { class: "tm-trace-layer", "aria-hidden": "true" });
+      svg.appendChild(elements.auditTraceLayer);
+    }
+    if (elements.auditMapMobile) {
+      clearNodeSafe(elements.auditMapMobile);
+      var max = comps.reduce(function (m, c) { return Math.max(m, c.files); }, 1);
+      comps.forEach(function (c) {
+        var row = createElement("div", "audit-row");
+        row.appendChild(createElement("span", "audit-row__label", c.name));
+        row.appendChild(createElement("span", "audit-row__value", displayNumber(c.files) + " files"));
+        var bar = createElement("span", "audit-row__meter");
+        bar.setAttribute("style", "width:" + Math.max(3, Math.round(100 * c.files / max)) + "%;background:var(--" + (c.risk === "risk" ? "coral" : c.risk === "attention" ? "amber" : "indigo") + ")");
+        row.appendChild(bar);
+        elements.auditMapMobile.appendChild(row);
+      });
+    }
+  }
+
+  function auditTileForPath(path) {
+    var tiles = state.auditTiles || [];
+    var name = text(path, "");
+    if (!name) { return null; }
+    for (var i = 0; i < tiles.length; i += 1) {
+      if (tiles[i].name === name || tiles[i].members.indexOf(name) !== -1) {
+        return tiles[i];
+      }
+    }
+    return null;
+  }
+
+  function clearAuditTrace() {
+    (state.auditTiles || []).forEach(function (tile) { tile.rect.classList.remove("tm-rect--traced"); });
+    if (elements.auditTraceLayer) { clearNodeSafe(elements.auditTraceLayer); }
+    if (state.auditTraceEl) {
+      state.auditTraceEl.classList.remove("is-active");
+      state.auditTraceEl.setAttribute("aria-pressed", "false");
+      state.auditTraceEl = null;
+    }
+    state.auditTrace = null;
+  }
+
+  function traceVectorOnMap(paths, label, key, sourceEl) {
+    if (state.auditTrace === key) { clearAuditTrace(); return; }
+    clearAuditTrace();
+    var pts = [], seen = {};
+    array(paths).forEach(function (p) {
+      var tile = auditTileForPath(p);
+      if (tile) {
+        tile.rect.classList.add("tm-rect--traced");
+        if (!seen[tile.name]) { seen[tile.name] = 1; pts.push(tile); }
+      }
+    });
+    if (elements.auditTraceLayer && pts.length) {
+      if (pts.length >= 2) {
+        var d = pts.map(function (t, i) { return (i ? "L" : "M") + t.cx + " " + t.cy; }).join(" ");
+        elements.auditTraceLayer.appendChild(createSvg("path", { d: d, class: "tm-trace-path" }));
+      }
+      pts.forEach(function (t, i) {
+        elements.auditTraceLayer.appendChild(createSvg("circle", { cx: t.cx, cy: t.cy, r: 9, class: "tm-trace-dot" }));
+        elements.auditTraceLayer.appendChild(createSvg("text", { x: t.cx, y: t.cy + 3, class: "tm-trace-num", "text-anchor": "middle" }, String(i + 1)));
+      });
+    }
+    state.auditTrace = key;
+    if (sourceEl) { sourceEl.classList.add("is-active"); sourceEl.setAttribute("aria-pressed", "true"); state.auditTraceEl = sourceEl; }
+    if (elements.auditTreemap && elements.auditTreemap.scrollIntoView) {
+      elements.auditTreemap.scrollIntoView({ block: "center" });
+    }
+    announce("Showing the claimed route for " + label + " across " + pts.length + " component" + (pts.length === 1 ? "" : "s") + " on the code map.");
+  }
+
+  function auditMakeTraceable(el, paths, label, key) {
+    if (!array(paths).length) { return; }
+    el.classList.add("audit-traceable");
+    el.setAttribute("role", "button");
+    el.setAttribute("tabindex", "0");
+    el.setAttribute("aria-pressed", "false");
+    var hint = createElement("span", "audit-trace-hint", "Show claimed route →");
+    el.appendChild(hint);
+    var fire = function () { traceVectorOnMap(paths, label, key, el); };
+    el.addEventListener("click", fire);
+    el.addEventListener("keydown", function (event) {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); fire(); }
+    });
+  }
+
+  function renderAuditBugs(model) {
+    var node = elements.auditBugs;
+    if (!node) { return; }
+    clearNodeSafe(node);
+    var largest = record(record(model.audit).largest_files);
+    if (text(largest.status, "") !== "available") {
+      node.appendChild(createElement("p", "audit-empty", "Indexed file sizes are unavailable because the index query failed."));
+      return;
+    }
+    var files = collection(largest).items.map(record)
+      .sort(function (a, b) { return (finiteNumber(b.lines) || 0) - (finiteNumber(a.lines) || 0); });
+    if (files.length === 0) {
+      node.appendChild(createElement("p", "audit-empty", "No indexed files were sized in this scope."));
+      return;
+    }
+    var max = files.reduce(function (m, f) { return Math.max(m, finiteNumber(f.lines) || 0); }, 1);
+    node.appendChild(createElement("p", "audit-subhead", "Largest files (line-span proxy)"));
+    var list = createElement("ul", "audit-rows");
+    files.slice(0, 6).forEach(function (f) {
+      var lines = finiteNumber(f.lines) || 0;
+      var bar = lines >= 2000 ? "risk" : lines >= 800 ? "attention" : "neutral";
+      var row = createElement("li", "audit-row");
+      row.appendChild(createElement("span", "audit-row__label", text(f.file, "?")));
+      row.appendChild(createElement("span", "audit-row__value", "≈ " + displayNumber(lines) + " lines"));
+      var meter = createElement("span", "audit-row__meter bar-" + bar);
+      meter.setAttribute("style", "width:" + Math.max(3, Math.round(100 * lines / max)) + "%");
+      row.appendChild(meter);
+      list.appendChild(row);
+    });
+    node.appendChild(list);
+    if (largest.truncated === true) {
+      node.appendChild(createElement("p", "audit-empty", "Showing the largest returned files from a bounded ranking."));
+    }
+  }
+
+  function renderAuditBus(model) {
+    var node = elements.auditBus;
+    if (!node) { return; }
+    clearNodeSafe(node);
+    var bus = record(record(model.audit).bus_factor);
+    if (text(bus.status, "") !== "available") {
+      node.appendChild(createElement("p", "audit-empty", "Git history could not be read, so authorship concentration is unavailable."));
+      return;
+    }
+    var rows = array(bus.items).map(record).filter(function (r) {
+      return (finiteNumber(r.touches) || 0) >= 5;
+    });
+    if (rows.length === 0) {
+      node.appendChild(createElement("p", "audit-empty", "No component carries enough history to judge concentration."));
+      return;
+    }
+    node.appendChild(createElement("p", "audit-subhead", "Most knowledge-concentrated components"));
+    var list = createElement("ul", "audit-rows");
+    rows.slice(0, 6).forEach(function (r) {
+      var pct = finiteNumber(r.top_author_pct) || 0;
+      var authors = finiteNumber(r.authors) || 0;
+      var bar = (authors === 1 || pct >= 80) ? "risk" : (authors === 2 || pct >= 60) ? "attention" : "neutral";
+      var row = createElement("li", "audit-row");
+      row.appendChild(createElement("span", "audit-row__label", text(r.component, "?")));
+      row.appendChild(createElement("span", "audit-row__value", pct + "% · " + authors + " author" + (authors === 1 ? "" : "s")));
+      var meter = createElement("span", "audit-row__meter bar-" + bar);
+      meter.setAttribute("style", "width:" + Math.max(3, pct) + "%");
+      row.appendChild(meter);
+      list.appendChild(row);
+    });
+    node.appendChild(list);
+    if (bus.truncated === true) {
+      node.appendChild(createElement("p", "audit-empty", "Showing a bounded subset of components with Git authorship history."));
+    }
+  }
+
+  function auditNarrative(model) { return record(record(model.audit).narrative); }
+
+  function auditGroundedComponents(model, values) {
+    var known = {};
+    collection(record(model.map).components).items.forEach(function (value) {
+      known[text(record(value).path, "")] = true;
+    });
+    var grounded = [], seen = {};
+    var candidates = array(values);
+    for (var i = 0; i < candidates.length; i += 1) {
+      var component = text(candidates[i], "");
+      if (!component || known[component] !== true) {
+        return [];
+      }
+      if (!seen[component]) {
+        seen[component] = true;
+        grounded.push(component);
+      }
+    }
+    return grounded;
+  }
+
+  function auditLensNote(bodyEl, key, model) {
+    if (!bodyEl) { return; }
+    var note = text(record(auditNarrative(model).lenses)[key], "");
+    if (!note) { return; }
+    var box = createElement("div", "audit-ai");
+    box.appendChild(createElement("span", "audit-ai__mk", "AI"));
+    box.appendChild(createElement("p", "", note));
+    bodyEl.appendChild(box);
+  }
+
+  function auditLensNotes(model) {
+    auditLensNote(elements.auditExplain, "explain", model);
+    auditLensNote(elements.auditStructural, "structural", model);
+    auditLensNote(elements.auditBugs, "bugs", model);
+    auditLensNote(elements.auditBus, "bus", model);
+    auditLensNote(elements.auditChange, "change", model);
+    auditLensNote(elements.auditHealth, "health", model);
+    auditLensNote(elements.auditSecurity, "security", model);
+  }
+
+  function renderAuditDomain(model) {
+    var card = elements.auditDomainCard, node = elements.auditDomain;
+    if (!card || !node) { return; }
+    clearNodeSafe(node);
+    var domains = array(auditNarrative(model).domains).map(record).filter(function (domain) {
+      return auditGroundedComponents(model, domain.components).length > 0;
+    });
+    if (domains.length === 0) {
+      card.hidden = true;
+      return;
+    }
+    card.hidden = false;
+    var worst = domains.reduce(function (w, d) {
+      var s = text(d.severity, "info");
+      return s === "risk" ? "risk" : (s === "attention" && w !== "risk") ? "attention" : w;
+    }, "info");
+    auditSetSev("audit-domain-sev", worst === "info" ? "ai" : worst, worst === "risk" ? "High-stakes" : worst === "attention" ? "Watch" : "Mapped");
+    var list = createElement("div", "audit-domains");
+    domains.forEach(function (d, idx) {
+      var sev = text(d.severity, "info");
+      var el = createElement("div", "audit-domain sev-" + sev);
+      var top = createElement("div", "audit-domain__top");
+      top.appendChild(createElement("b", "", text(d.name, "domain")));
+      top.appendChild(createElement("span", "audit-sev audit-sev--" + (sev === "info" ? "info" : sev), sev === "risk" ? "High-stakes" : sev === "attention" ? "Watch" : sev === "healthy" ? "OK" : "Info"));
+      el.appendChild(top);
+      var comps = auditGroundedComponents(model, d.components);
+      if (comps.length === 0) { return; }
+      var note = text(d.note, "");
+      if (note) { el.appendChild(createElement("p", "", note)); }
+      var vec = createElement("div", "audit-domain__comp");
+      vec.appendChild(createElement("span", "audit-veclab", "Bound components"));
+      vec.appendChild(document.createTextNode(" " + comps.join(" · ")));
+      el.appendChild(vec);
+      auditMakeTraceable(el, comps, text(d.name, "domain"), "dom:" + idx);
+      list.appendChild(el);
+    });
+    node.appendChild(list);
+  }
+
+  function renderAuditRedteam(model) {
+    var section = elements.auditRedteam, body = elements.auditRedteamBody;
+    if (!section || !body) { return; }
+    clearNodeSafe(body);
+    var items = array(auditNarrative(model).red_team).map(record).filter(function (item) {
+      return auditGroundedComponents(model, item.vector).length > 0;
+    });
+    if (items.length === 0) { section.hidden = true; return; }
+    section.hidden = false;
+    var list = createElement("div", "audit-redteam__list");
+    items.forEach(function (it, idx) {
+      var vector = auditGroundedComponents(model, it.vector);
+      if (vector.length === 0) { return; }
+      var sev = text(it.severity, "info");
+      var el = createElement("article", "audit-rt sev-" + sev);
+      var top = createElement("div", "audit-rt__top");
+      top.appendChild(createElement("b", "", text(it.title, "hypothesis")));
+      top.appendChild(createElement("span", "audit-sev audit-sev--" + (sev === "info" ? "info" : sev), sev === "risk" ? "Risk" : sev === "attention" ? "Attention" : "Info"));
+      el.appendChild(top);
+      var scenario = text(it.scenario, "");
+      if (scenario) { el.appendChild(createElement("p", "", scenario)); }
+      var ev = text(it.evidence, "");
+      if (ev) {
+        var evidenceNote = createElement("div", "audit-rt__ev");
+        evidenceNote.appendChild(createElement("span", "audit-veclab", "AI evidence note"));
+        evidenceNote.appendChild(document.createTextNode(" " + ev));
+        el.appendChild(evidenceNote);
+      }
+      var vec = createElement("div", "audit-rt__ev");
+      vec.appendChild(createElement("span", "audit-veclab", "Claimed route"));
+      vec.appendChild(document.createTextNode(" " + vector.join(" → ")));
+      el.appendChild(vec);
+      auditMakeTraceable(el, vector, text(it.title, "hypothesis"), "rt:" + idx);
+      list.appendChild(el);
+    });
+    body.appendChild(list);
+  }
+
+  function auditCardSeverities(model) {
+    var map = record(model.map);
+    var cycles = collection(map.cycles);
+    var cycleCount = cycles.total === null ? cycles.items.length : cycles.total;
+    var changeSource = record(record(model.audit).change_hotspots);
+    var change = collection(changeSource);
+    var changeCount = change.returned === null ? change.items.length : change.returned;
+    var findings = auditSecurityFindings(model);
+    var hasErr = findings.some(function (f) { return f.level === "error"; });
+    var hasWarn = findings.some(function (f) { return f.level === "warning"; });
+    var largest = record(record(model.audit).largest_files);
+    var big = collection(largest).items.map(record)
+      .reduce(function (m, f) { return Math.max(m, finiteNumber(f.lines) || 0); }, 0);
+    if (text(largest.status, "") !== "available") {
+      auditSetSev("audit-bugs-sev", "info", "No data");
+    } else {
+      auditSetSev("audit-bugs-sev", big >= 2000 ? "risk" : big >= 800 ? "attention" : "info",
+        big >= 2000 ? "Very large" : big >= 800 ? "Large files" : "Sized");
+    }
+    var bus = record(record(model.audit).bus_factor);
+    if (text(bus.status, "") !== "available") {
+      auditSetSev("audit-bus-sev", "info", "No data");
+    } else {
+      var judged = array(bus.items).map(record).filter(function (r) {
+        return (finiteNumber(r.touches) || 0) >= 5;
+      });
+      var concentrated = judged.filter(function (r) {
+        return (finiteNumber(r.touches) || 0) >= 5 && ((finiteNumber(r.authors) || 0) === 1 || (finiteNumber(r.top_author_pct) || 0) >= 80);
+      });
+      if (judged.length === 0) {
+        auditSetSev("audit-bus-sev", "info", "No signal");
+      } else {
+        auditSetSev("audit-bus-sev", concentrated.length > 0 ? "risk" : "attention",
+          concentrated.length > 0 ? "Concentrated" : "Distributed");
+      }
+    }
+    auditSetSev("audit-explain-sev", "info", "Overview");
+    if (cycles.truncated || cycles.totalUnknown) {
+      auditSetSev("audit-structural-sev", "info", "Partial");
+    } else {
+      auditSetSev("audit-structural-sev", cycleCount > 0 ? "risk" : "healthy", cycleCount > 0 ? "Cycles" : "Acyclic");
+    }
+    auditSetSev("audit-health-sev", "info", "Candidates");
+    if (text(changeSource.status, "") !== "available") {
+      auditSetSev("audit-change-sev", "info", "No data");
+    } else {
+      auditSetSev("audit-change-sev", changeCount > 0 ? "attention" : "healthy", changeCount > 0 ? "Watch" : "Clear");
+    }
+    auditSetSev("audit-security-sev", hasErr ? "risk" : (hasWarn || findings.length > 0) ? "attention" : "info",
+      hasErr ? "Findings" : (hasWarn || findings.length > 0) ? "Review" : "Surface");
+  }
+
+  function renderAudit() {
+    if (!elements.auditExplain) {
+      return;
+    }
+    var model = state.model;
+    var map = record(model.map);
+    if (elements.auditProduction) {
+      elements.auditProduction.textContent = record(model.options).production_only === true
+        ? "Production paths only"
+        : "All indexed paths";
+    }
+    renderAuditExplain(map);
+    renderAuditStructural(map);
+    renderAuditExec(model);
+    renderAuditMap(model);
+    renderAuditBugs(model);
+    renderAuditBus(model);
+    renderAuditHealth(model);
+    renderAuditChange(model);
+    renderAuditSecurity(model);
+    renderAuditDomain(model);
+    renderAuditRedteam(model);
+    auditCardSeverities(model);
+    auditLensNotes(model);
+
+    var components = collection(map.components);
+    var cycles = collection(map.cycles);
+    var hotspots = collection(map.hotspots);
+    var languages = collection(map.languages);
+    var dead = collection(record(model.audit).dead_code);
+    var cycleCount = cycles.total === null ? cycles.items.length : cycles.total;
+    var deadCount = dead.total === null ? dead.items.length : dead.total;
+    if (elements.auditSummary) {
+      elements.auditSummary.textContent =
+        displayNumber(components.total === null ? components.items.length : components.total) + " components across " +
+        languages.items.length + " language" + (languages.items.length === 1 ? "" : "s") + " · " +
+        (hotspots.total === null ? hotspots.items.length : hotspots.total) + " hotspots · " +
+        cycleCount + " cycle" + (cycleCount === 1 ? "" : "s") + " · " +
+        displayNumber(deadCount) + " dead-code candidate" + (deadCount === 1 ? "" : "s") + "." +
+        (auditIsIncomplete(model) ? " Some audit sections are partial or unavailable." : "");
+    }
   }
 
   function renderHeader() {
@@ -1175,6 +2108,20 @@
     } else {
       summary = "The returned change set is contained; no downstream symbol impact was reported.";
     }
+    if (files > 0 || symbols > 0) {
+      const widest = model.nodes.filter(function (node) {
+        return node.type === "changed" && node.blast && node.blast.symbols > 0;
+      }).sort(function (left, right) { return right.blast.symbols - left.blast.symbols; })[0];
+      if (widest) {
+        summary += " Widest blast: " + text(widest.symbol.name, "unnamed") + " → " + widest.blast.symbols + " symbol" + (widest.blast.symbols === 1 ? "" : "s") + " across " + widest.blast.components + " component" + (widest.blast.components === 1 ? "" : "s") + ".";
+      }
+      const untested = model.nodes.filter(function (node) {
+        return node.type === "changed" && node.blast && node.blast.symbols > 0 && node.blast.testPaths === 0;
+      }).length;
+      if (untested > 0) {
+        summary += " " + untested + " changed symbol" + (untested === 1 ? "" : "s") + " reach" + (untested === 1 ? "es" : "") + " downstream code with no returned test path.";
+      }
+    }
     elements.instrumentSummary.textContent = summary;
   }
 
@@ -1201,7 +2148,7 @@
   }
 
   function renderNotices() {
-    clearNode(elements.noticeStack);
+    elements.noticeStack.replaceChildren();
     if (state.stale && state.error) {
       appendNotice(
         "error",
@@ -1319,7 +2266,7 @@
   }
 
   function renderTemporal() {
-    clearNode(elements.temporalEvents);
+    elements.temporalEvents.replaceChildren();
     const envelope = state.model.temporalEnvelope;
     const temporal = state.model.temporal;
     if (text(envelope.status, "unavailable") !== "available" || Object.keys(temporal).length === 0) {
@@ -1427,7 +2374,7 @@
   }
 
   function renderEvidenceSources() {
-    clearNode(elements.evidenceSourceList);
+    elements.evidenceSourceList.replaceChildren();
     const sources = state.model.evidenceSources.items.map(record);
     const factArtifacts = state.model.factArtifacts.items.map(record);
     const semantic = record(state.model.semantic);
@@ -1575,7 +2522,7 @@
   }
 
   function renderComponents() {
-    clearNode(elements.componentList);
+    elements.componentList.replaceChildren();
     const allCounts = "Δ " + state.model.changedSymbols.items.length
       + " / I " + state.model.impactedSymbols.items.length
       + " / T " + state.model.tests.items.length;
@@ -1591,7 +2538,7 @@
 
   function renderMethodLedger() {
     const notes = state.model.precisionNotes;
-    clearNode(elements.precisionList);
+    elements.precisionList.replaceChildren();
     if (notes.length === 0) {
       elements.precisionList.appendChild(createElement("li", "", "No precision notes were returned."));
     } else {
@@ -1602,7 +2549,7 @@
     }
     elements.precisionCount.textContent = notes.length + " note" + (notes.length === 1 ? "" : "s");
 
-    clearNode(elements.limitsList);
+    elements.limitsList.replaceChildren();
     const status = state.model.truncations.length > 0 ? "Partial" : "No truncation reported";
     appendLimitRow("Snapshot", status);
     state.model.limits.forEach(function (entry) {
@@ -1695,8 +2642,8 @@
     if (!state.model) {
       return;
     }
-    clearNode(elements.graph);
-    clearNode(elements.mobileTraceList);
+    elements.graph.replaceChildren();
+    elements.mobileTraceList.replaceChildren();
     elements.graphFrame.classList.remove("has-graph-state");
     elements.workspace.classList.remove("is-zero-change");
     elements.mobileTraceList.hidden = true;
@@ -1779,7 +2726,7 @@
   }
 
   function renderTraceContext(mode, summary, actions) {
-    clearNode(elements.traceContext);
+    elements.traceContext.replaceChildren();
     const copy = document.createElement("div");
     copy.appendChild(createElement("p", "trace-context__mode", mode));
     copy.appendChild(createElement("p", "trace-context__summary", summary));
@@ -2210,8 +3157,11 @@
         grouped.push(node);
         groups.set(key, grouped);
       });
+      const weight = function (grouped) {
+        return grouped.reduce(function (sum, node) { return sum + riskRank(node); }, 0);
+      };
       const ordered = Array.from(groups.entries()).sort(function (left, right) {
-        return right[1].length - left[1].length || left[0].localeCompare(right[0]);
+        return weight(right[1]) - weight(left[1]) || right[1].length - left[1].length || left[0].localeCompare(right[0]);
       });
       const retained = ordered.length > CLUSTERS_PER_LANE
         ? ordered.slice(0, CLUSTERS_PER_LANE - 1).concat([["Other components", ordered.slice(CLUSTERS_PER_LANE - 1).flatMap(function (entry) { return entry[1]; })]])
@@ -2225,6 +3175,8 @@
         const evidenceCount = groupedNodes.reduce(function (sum, node) {
           return sum + (evidenceSignals(node).length > 0 ? 1 : 0);
         }, 0);
+        const seriousCount = groupedNodes.filter(function (node) { return nodeRisk(node).tier === "serious"; }).length;
+        const warningCount = groupedNodes.filter(function (node) { return nodeRisk(node).tier === "warning"; }).length;
         const cluster = {
           id: "cluster:" + type + ":" + index,
           type: type,
@@ -2236,6 +3188,8 @@
           fileCount: files.size,
           crossingCount: crossings,
           evidenceCount: evidenceCount,
+          seriousCount: seriousCount,
+          warningCount: warningCount,
         };
         clusters.push(cluster);
         groupedNodes.forEach(function (node) { clusterByNodeId.set(node.id, cluster); });
@@ -2320,7 +3274,14 @@
     if (state.scope !== "all" && state.scope !== cluster.type) {
       classes.push("is-scope-muted");
     }
-    const label = cluster.count + " " + cluster.type + " claims in " + cluster.label + ", across " + cluster.fileCount + " files, " + cluster.evidenceCount + " with visible overlays. Activate to browse individual claims.";
+    if (cluster.seriousCount > 0) {
+      classes.push("graph-cluster--risk-serious");
+    } else if (cluster.warningCount > 0) {
+      classes.push("graph-cluster--risk-warning");
+    }
+    const riskLabel = (cluster.seriousCount > 0 ? ", " + cluster.seriousCount + " serious signal" + (cluster.seriousCount === 1 ? "" : "s") : "")
+      + (cluster.warningCount > 0 ? ", " + cluster.warningCount + " needing attention" : "");
+    const label = cluster.count + " " + cluster.type + " claims in " + cluster.label + ", across " + cluster.fileCount + " files" + riskLabel + ", " + cluster.evidenceCount + " with visible overlays. Activate to browse individual claims.";
     const group = createSvg("g", {
       class: classes.join(" "),
       transform: "translate(" + position.x + " " + position.y + ")",
@@ -2365,7 +3326,10 @@
       x: 11,
       y: 54,
       class: "graph-cluster__meta",
-    }, cluster.fileCount + " file" + (cluster.fileCount === 1 ? "" : "s") + (cluster.crossingCount > 0 ? " · " + cluster.crossingCount + " crossings" : "") + (cluster.evidenceCount > 0 ? " · E " + cluster.evidenceCount : "")));
+    }, cluster.fileCount + " file" + (cluster.fileCount === 1 ? "" : "s")
+      + (cluster.seriousCount > 0 ? " · " + cluster.seriousCount + " serious" : "")
+      + (cluster.warningCount > 0 ? " · " + cluster.warningCount + " attention" : "")
+      + (cluster.crossingCount > 0 ? " · " + cluster.crossingCount + " crossings" : "")));
     activateSvgCluster(group, cluster);
     layer.appendChild(group);
   }
@@ -2411,6 +3375,8 @@
       "aria-label": label,
     });
     const classes = ["graph-edge", "graph-edge--" + edge.type, "graph-edge--aggregate"];
+    // Link count stays visible without changing graph topology.
+    classes.push("graph-edge--w" + (edge.count <= 1 ? 1 : edge.count <= 4 ? 2 : edge.count <= 9 ? 3 : 4));
     if (edge.crossingCount > 0) {
       classes.push("graph-edge--crossing");
     }
@@ -2517,10 +3483,20 @@
   }
 
   function groupNodes(nodes) {
+    // Stable sorting preserves snapshot order after risk-specific tie-breakers.
+    const lane = function (type, tieBreak) {
+      return nodes.filter(function (node) { return node.type === type; }).sort(function (left, right) {
+        return riskRank(right) - riskRank(left) || (tieBreak ? tieBreak(left, right) : 0);
+      });
+    };
     return {
-      changed: nodes.filter(function (node) { return node.type === "changed"; }),
-      impacted: nodes.filter(function (node) { return node.type === "impacted"; }),
-      test: nodes.filter(function (node) { return node.type === "test"; }),
+      changed: lane("changed", function (left, right) {
+        return (right.blast ? right.blast.symbols : 0) - (left.blast ? left.blast.symbols : 0);
+      }),
+      impacted: lane("impacted", function (left, right) {
+        return (finiteNumber(left.item.minimum_depth) || 0) - (finiteNumber(right.item.minimum_depth) || 0);
+      }),
+      test: lane("test", null),
     };
   }
 
@@ -2657,7 +3633,14 @@
 
   function nodeMetadata(node) {
     if (node.type === "changed") {
-      return text(node.item.change, "change not classified");
+      const change = text(node.item.change, "change not classified");
+      if (!node.blast) {
+        return change;
+      }
+      const reach = node.blast.symbols > 0
+        ? "→ " + node.blast.symbols + " sym · " + node.blast.components + " comp"
+        : "no downstream";
+      return reach + " · " + change;
     }
     if (node.type === "impacted") {
       const depth = finiteNumber(node.item.minimum_depth);
@@ -2683,16 +3666,9 @@
     if (node.crossings.length > 0) {
       classes.push("graph-node--crossing");
     }
-    const visibleFindings = node.evidence && overlayEnabled("findings") ? node.evidence.findings : [];
-    if (visibleFindings.length > 0) {
-      classes.push("graph-node--finding");
-    }
-    if (node.evidence && node.evidence.coverage && overlayEnabled("coverage")) {
-      const found = finiteNumber(node.evidence.coverage.lines_found);
-      const hit = finiteNumber(node.evidence.coverage.lines_hit);
-      if (found !== null && found > 0 && hit !== null && hit < found) {
-        classes.push("graph-node--coverage-gap");
-      }
+    const risk = nodeRisk(node);
+    if (risk.tier) {
+      classes.push("graph-node--risk-" + risk.tier);
     }
     if (state.selectedId === node.id) {
       classes.push("is-selected");
@@ -2734,13 +3710,32 @@
       y: 15,
       class: "graph-node__kind",
     }, compact(text(node.symbol.kind, "unknown kind") + " / " + node.type, textWidth)));
+    const flags = [];
     if (node.crossings.length > 0) {
+      flags.push("CROSSING");
+    }
+    if (node.type === "changed" && node.blast && node.blast.symbols > 0 && node.blast.testPaths === 0) {
+      flags.push("UNTESTED");
+    }
+    if (flags.length > 0) {
       group.appendChild(createSvg("text", {
         x: position.width - 11,
         y: 15,
         class: "graph-node__flag",
         "text-anchor": "end",
-      }, "CROSSING"));
+      }, flags.join(" · ")));
+    }
+    if (node.type === "changed" && node.blast && node.blast.symbols > 0) {
+      const maxBlast = state.model ? state.model.maxBlast : 1;
+      const barSpan = Math.max(6, Math.round((position.width - 28) * (node.blast.symbols / Math.max(1, maxBlast))));
+      group.appendChild(createSvg("rect", {
+        x: 14,
+        y: position.height - 3,
+        width: barSpan,
+        height: 3,
+        class: "graph-node__blast",
+        "aria-hidden": "true",
+      }));
     }
     const mark = evidenceMark(node);
     if (mark) {
@@ -2748,7 +3743,7 @@
         x: 14,
         y: position.height - 6,
         class: "graph-node__evidence-mark",
-      }, compact(mark, Math.max(8, Math.floor(textWidth * 0.38)))));
+      }, compact(mark, textWidth)));
     }
     group.appendChild(createSvg("text", {
       x: 14,
@@ -2761,13 +3756,13 @@
       x: 14,
       y: 45,
       class: "graph-node__file",
-    }, compact(path, textWidth)));
+    }, compact(path, Math.max(10, Math.floor(textWidth * 0.46)))));
     group.appendChild(createSvg("text", {
       x: position.width - 11,
-      y: position.height - 6,
+      y: 45,
       class: "graph-node__meta",
       "text-anchor": "end",
-    }, compact(nodeMetadata(node), Math.max(8, Math.floor(textWidth * 0.45)))));
+    }, compact(nodeMetadata(node), Math.max(8, Math.floor(textWidth * 0.52)))));
     activateSvgClaim(group, node);
     layer.appendChild(group);
   }
@@ -2816,7 +3811,7 @@
   function showGraphState(title, message, action) {
     elements.graphFrame.classList.add("has-graph-state");
     elements.mobileTraceList.hidden = true;
-    clearNode(elements.graphState);
+    elements.graphState.replaceChildren();
     elements.graphState.appendChild(createElement("p", "graph-state__eyebrow", "Blast trace aperture"));
     elements.graphState.appendChild(createElement("h3", "", title));
     elements.graphState.appendChild(createElement("p", "", message));
@@ -2831,13 +3826,13 @@
 
   function renderLoadingState() {
     elements.workspace.classList.remove("has-selection");
-    clearNode(elements.graph);
-    clearNode(elements.mobileTraceList);
+    elements.graph.replaceChildren();
+    elements.mobileTraceList.replaceChildren();
     elements.mobileTraceList.hidden = true;
     setGraphVisible(true);
     elements.graphFrame.classList.add("has-graph-state");
     renderTraceContext("Loading snapshot", "Resolving the bounded claim aperture from the local repository.", []);
-    clearNode(elements.graphState);
+    elements.graphState.replaceChildren();
     const calibration = createElement("div", "loading-calibration");
     calibration.setAttribute("aria-hidden", "true");
     calibration.appendChild(document.createElement("span"));
@@ -2856,14 +3851,14 @@
 
   function renderInitialError(error) {
     elements.workspace.classList.remove("is-zero-change", "has-selection");
-    clearNode(elements.graph);
+    elements.graph.replaceChildren();
     renderTraceContext("Snapshot error", "No repository claims are available until the local endpoint succeeds.", []);
     showGraphState(
       "Snapshot unavailable",
       error.message + " Error code: " + text(error.code, "unknown") + ".",
       { label: "Retry local scan", handler: function () { loadSnapshot(false); } }
     );
-    clearNode(elements.noticeStack);
+    elements.noticeStack.replaceChildren();
     appendNotice(
       "error",
       "Snapshot unavailable · " + text(error.code, "unknown"),
@@ -2888,7 +3883,7 @@
   }
 
   function renderInspector() {
-    clearNode(elements.inspector);
+    elements.inspector.replaceChildren();
     const claim = selectedClaim();
     elements.workspace.classList.toggle("has-selection", Boolean(claim));
     if (!claim) {
@@ -3306,6 +4301,7 @@
   function boot() {
     initializeElements();
     bindEvents();
+    setMode("review");
     renderLoadingState();
     window.setInterval(updateSnapshotAge, 30000);
     loadSnapshot(true);

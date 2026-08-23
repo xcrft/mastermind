@@ -958,8 +958,10 @@ fn source_for_parser(source: &[u8]) -> Result<Cow<'_, [u8]>, IndexError> {
     if body.len() % 2 != 0 {
         return Err(IndexError::Parse("odd-length UTF-16 source".to_string()));
     }
-    let units = body
-        .chunks_exact(2)
+    let (pairs, remainder) = body.as_chunks::<2>();
+    debug_assert!(remainder.is_empty());
+    let units = pairs
+        .iter()
         .map(|pair| {
             if little_endian {
                 u16::from_le_bytes([pair[0], pair[1]])
@@ -1758,5 +1760,37 @@ pub(crate) mod common {
 
     pub fn line_of(node: &Node) -> u32 {
         (node.start_position().row + 1) as u32
+    }
+    /// Declaration text from the node start up to its body — the signature as
+    /// written, minus the opening brace. Languages whose declarations can end
+    /// in something other than a body (Rust `;`, C# `=>`) specialise this.
+    pub fn signature_until_body(node: &Node, source: &[u8]) -> Option<String> {
+        let body = node.child_by_field_name("body")?;
+        let header_end = body.start_byte();
+        let start = node.start_byte();
+        if header_end <= start {
+            return None;
+        }
+        let text = std::str::from_utf8(&source[start..header_end]).ok()?;
+        let trimmed = text
+            .trim_end_matches(|c: char| c == '{' || c.is_whitespace())
+            .to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    }
+
+    /// Per-language temp file for extractor tests. `lang` keeps concurrently
+    /// running language suites from sharing a directory within one test binary.
+    #[cfg(test)]
+    pub fn write_tmp(lang: &str, name: &str, content: &str) -> std::path::PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("mmcg-{lang}-test-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, content).unwrap();
+        path
     }
 }

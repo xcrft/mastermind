@@ -95,11 +95,19 @@ does not need Mastermind installed.
 ## Connect your coding agent
 
 ```bash
-mastermind install --client all
+mastermind install --client all --profile core
 mastermind setup cursor --scope user --write
 mastermind setup continue --scope user --write
 mastermind doctor --workflow --client all
 ```
+
+Fresh installs default to `core` (14 portable skills). `frontend` installs 19,
+`security` installs 17, and `full` installs all 26. Every profile keeps the
+complete Claude subagent set; only portable skill discovery is narrowed.
+Updates preserve each client's installed profile unless `--profile` explicitly
+changes it. Legacy schema-v1 manifests migrate as `full`. Older installers
+reject the schema-v2 manifest without replacing managed files, so use the
+current package for later updates.
 
 Mastermind supports Claude Code, Codex, Cursor, Continue, and generic MCP stdio
 clients. Setup previews changes unless `--write` is present. The MCP server

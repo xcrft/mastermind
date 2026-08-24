@@ -27,6 +27,7 @@ Prerequisites:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -36,6 +37,8 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 
 try:
@@ -47,6 +50,8 @@ except ImportError:
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EVALS_DIR = Path(__file__).resolve().parent
 FIXTURES_DIR = EVALS_DIR / "fixtures"
+REPORT_KIND = "mastermind-eval-report"
+REPORT_SCHEMA_VERSION = 1
 
 # Prefer the in-tree build (matches the current SCHEMA_VERSION) over whatever
 # version is installed in ~/.cargo/bin — avoids "schema mismatch — rebuilding"
@@ -60,6 +65,12 @@ SUITES = {
         "cases": EVALS_DIR / "critic.jsonl",
         "renderer": "render_critic_input",
         "uses_fixture": False,
+    },
+    "researcher": {
+        "subagent": REPO_ROOT / "agents/subagents/mastermind-researcher.md",
+        "cases": EVALS_DIR / "researcher.jsonl",
+        "renderer": "render_researcher_input",
+        "uses_fixture": True,
     },
     "auditor": {
         "subagent": REPO_ROOT / "agents/subagents/mastermind-auditor.md",
@@ -168,6 +179,22 @@ class Result:
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
     cost_usd: float = 0.0
+    telemetry_complete: bool = False
+    telemetry_issues: list[str] = field(default_factory=list)
+    resolved_models: list[str] = field(default_factory=list)
+    tool_calls: list[str] = field(default_factory=list)
+
+    @property
+    def context_tokens(self) -> int:
+        return (
+            self.input_tokens
+            + self.cache_creation_input_tokens
+            + self.cache_read_input_tokens
+        )
+
+    @property
+    def total_tokens(self) -> int:
+        return self.context_tokens + self.output_tokens
 
     def add_attempt(self, prior: "Result") -> None:
         """Aggregate usage from an earlier attempt into this final result."""
@@ -179,6 +206,12 @@ class Result:
         self.cache_creation_input_tokens += prior.cache_creation_input_tokens
         self.cache_read_input_tokens += prior.cache_read_input_tokens
         self.cost_usd += prior.cost_usd
+        self.telemetry_complete = self.telemetry_complete and prior.telemetry_complete
+        self.telemetry_issues = [*prior.telemetry_issues, *self.telemetry_issues]
+        self.resolved_models = list(
+            dict.fromkeys([*prior.resolved_models, *self.resolved_models])
+        )
+        self.tool_calls = [*prior.tool_calls, *self.tool_calls]
 
 
 def strip_frontmatter(text: str) -> str:
@@ -269,6 +302,12 @@ def auditor_allowed_tools() -> tuple[str, ...]:
     )
 
 
+def researcher_allowed_tools() -> tuple[str, ...]:
+    return ("Read", "Glob", "Grep") + subagent_mcp_tools(
+        SUITES["researcher"]["subagent"]
+    )
+
+
 def _nonnegative_int(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         return 0
@@ -282,23 +321,871 @@ def _nonnegative_float(value: object) -> float:
     return result if math.isfinite(result) and result >= 0 else 0.0
 
 
-def telemetry_from_payload(payload: dict) -> dict[str, int | float]:
+def telemetry_from_payload(payload: dict) -> dict[str, object]:
+    issues: list[str] = []
+
+    def required_int(container: dict, key: str, label: str) -> int:
+        value = container.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            issues.append(f"{label} must be a non-negative integer")
+            return 0
+        return value
+
+    def required_float(container: dict, key: str, label: str) -> float:
+        value = container.get(key)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) < 0
+        ):
+            issues.append(f"{label} must be a non-negative finite number")
+            return 0.0
+        return float(value)
+
     usage = payload.get("usage")
     if not isinstance(usage, dict):
+        issues.append("usage must be an object")
         usage = {}
+    model_usage = payload.get("modelUsage")
+    if (
+        not isinstance(model_usage, dict)
+        or not model_usage
+        or any(not isinstance(name, str) or not name for name in model_usage)
+    ):
+        issues.append("modelUsage must identify at least one usage model")
+    resolved_model = payload.get("_resolved_model")
+    if not isinstance(resolved_model, str) or not resolved_model:
+        issues.append("stream init must identify the resolved primary model")
+        resolved_models: list[str] = []
+    else:
+        resolved_models = [resolved_model]
     return {
-        "duration_api_ms": _nonnegative_int(payload.get("duration_api_ms")),
-        "num_turns": _nonnegative_int(payload.get("num_turns")),
-        "input_tokens": _nonnegative_int(usage.get("input_tokens")),
-        "output_tokens": _nonnegative_int(usage.get("output_tokens")),
-        "cache_creation_input_tokens": _nonnegative_int(
-            usage.get("cache_creation_input_tokens")
+        "duration_ms": required_int(payload, "duration_ms", "duration_ms"),
+        "duration_api_ms": required_int(
+            payload, "duration_api_ms", "duration_api_ms"
         ),
-        "cache_read_input_tokens": _nonnegative_int(
-            usage.get("cache_read_input_tokens")
+        "num_turns": required_int(payload, "num_turns", "num_turns"),
+        "input_tokens": required_int(usage, "input_tokens", "usage.input_tokens"),
+        "output_tokens": required_int(
+            usage, "output_tokens", "usage.output_tokens"
         ),
-        "cost_usd": _nonnegative_float(payload.get("total_cost_usd")),
+        "cache_creation_input_tokens": required_int(
+            usage,
+            "cache_creation_input_tokens",
+            "usage.cache_creation_input_tokens",
+        ),
+        "cache_read_input_tokens": required_int(
+            usage,
+            "cache_read_input_tokens",
+            "usage.cache_read_input_tokens",
+        ),
+        "cost_usd": required_float(payload, "total_cost_usd", "total_cost_usd"),
+        "resolved_models": resolved_models,
+        "complete": not issues,
+        "issues": issues,
     }
+
+
+def parse_claude_output(stdout: str, *, streamed: bool) -> tuple[dict, list[str]]:
+    if not streamed:
+        payload = json.loads(stdout)
+        if not isinstance(payload, dict):
+            raise ValueError("Claude JSON result is not an object")
+        model_usage = payload.get("modelUsage")
+        if isinstance(model_usage, dict) and len(model_usage) == 1:
+            payload["_resolved_model"] = next(iter(model_usage))
+        return payload, []
+
+    events: list[dict] = []
+    for line_number, line in enumerate(stdout.splitlines(), start=1):
+        if not line.strip():
+            continue
+        event = json.loads(line)
+        if not isinstance(event, dict):
+            raise ValueError(f"Claude stream event {line_number} is not an object")
+        events.append(event)
+    payload = next(
+        (event for event in reversed(events) if event.get("type") == "result"),
+        None,
+    )
+    if payload is None:
+        raise ValueError("Claude stream has no final result event")
+    init_models = {
+        event.get("model")
+        for event in events
+        if event.get("type") == "system"
+        and event.get("subtype") == "init"
+        and isinstance(event.get("model"), str)
+        and event.get("model")
+    }
+    if len(init_models) != 1:
+        raise ValueError(
+            f"Claude stream must identify one primary model, got {sorted(init_models)!r}"
+        )
+    payload["_resolved_model"] = next(iter(init_models))
+
+    tool_calls: list[str] = []
+    for event in events:
+        if event.get("type") != "assistant":
+            continue
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            name = block.get("name")
+            if isinstance(name, str) and name:
+                tool_calls.append(name)
+    return payload, tool_calls
+
+
+def usage_budget_reasons(expect: dict, telemetry: dict[str, object]) -> list[str]:
+    reasons: list[str] = []
+    turns = int(telemetry["num_turns"])
+    output_tokens = int(telemetry["output_tokens"])
+    minimum_turns = expect.get("min_turns")
+    maximum_turns = expect.get("max_turns")
+    maximum_output = expect.get("max_output_tokens")
+    if isinstance(minimum_turns, int) and turns < minimum_turns:
+        reasons.append(f"used {turns} turn(s), expected at least {minimum_turns}")
+    if isinstance(maximum_turns, int) and turns > maximum_turns:
+        reasons.append(f"used {turns} turn(s), expected at most {maximum_turns}")
+    if isinstance(maximum_output, int) and output_tokens > maximum_output:
+        reasons.append(
+            f"used {output_tokens} output token(s), expected at most {maximum_output}"
+        )
+    return reasons
+
+
+def tool_usage_reasons(expect: dict, tool_calls: list[str]) -> list[str]:
+    policy = expect.get("tools")
+    if policy is None:
+        return []
+    if not isinstance(policy, dict):
+        return ["tool policy must be an object"]
+
+    reasons: list[str] = []
+    first = policy.get("first")
+    if first is not None:
+        if not isinstance(first, str) or not first:
+            reasons.append("tool policy first must be a non-empty string")
+        elif not tool_calls or tool_calls[0] != first:
+            observed = tool_calls[0] if tool_calls else None
+            reasons.append(f"first tool {observed!r} != expected {first!r}")
+
+    required = policy.get("contains", [])
+    if not isinstance(required, list) or any(
+        not isinstance(name, str) or not name for name in required
+    ):
+        reasons.append("tool policy contains must be a list of tool names")
+    else:
+        for name in required:
+            if name not in tool_calls:
+                reasons.append(f"required tool was not called: {name!r}")
+
+    alternatives = policy.get("contains_any", [])
+    if not isinstance(alternatives, list):
+        reasons.append("tool policy contains_any must be a list")
+    else:
+        for group in alternatives:
+            if (
+                not isinstance(group, list)
+                or not group
+                or any(not isinstance(name, str) or not name for name in group)
+            ):
+                reasons.append(f"invalid tool alternative group: {group!r}")
+            elif not any(name in tool_calls for name in group):
+                reasons.append(f"none of the alternative tools were called: {group!r}")
+
+    maximum = policy.get("max")
+    if maximum is not None:
+        if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 0:
+            reasons.append("tool policy max must be a non-negative integer")
+        elif len(tool_calls) > maximum:
+            reasons.append(
+                f"used {len(tool_calls)} tool call(s), expected at most {maximum}"
+            )
+    maximum_counts = policy.get("max_counts", {})
+    if not isinstance(maximum_counts, dict) or any(
+        not isinstance(name, str)
+        or not name
+        or isinstance(limit, bool)
+        or not isinstance(limit, int)
+        or limit < 0
+        for name, limit in maximum_counts.items()
+    ):
+        reasons.append("tool policy max_counts must map tool names to limits")
+    else:
+        for name, limit in maximum_counts.items():
+            observed = tool_calls.count(name)
+            if observed > limit:
+                reasons.append(
+                    f"called {name!r} {observed} time(s), expected at most {limit}"
+                )
+    return reasons
+
+
+def nearest_rank(values: list[int | float], percentile: int) -> int | float:
+    if not values:
+        raise ValueError("cannot calculate a percentile for an empty sample")
+    if not 1 <= percentile <= 100:
+        raise ValueError("percentile must be between 1 and 100")
+    ordered = sorted(values)
+    index = max(0, math.ceil(percentile / 100 * len(ordered)) - 1)
+    return ordered[index]
+
+
+def metric_summary(values: list[int | float]) -> dict[str, int | float]:
+    if not values:
+        raise ValueError("cannot summarize an empty metric")
+    return {
+        "total": sum(values),
+        "p50": nearest_rank(values, 50),
+        "p95": nearest_rank(values, 95),
+    }
+
+
+def result_report(result: Result) -> dict:
+    return {
+        "id": result.case_id,
+        "suite": result.suite,
+        "passed": result.passed,
+        "reasons": result.reasons,
+        "retry_used": result.retry_used,
+        "retry_attempted": result.retry_attempted,
+        "duration_ms": result.duration_ms,
+        "duration_api_ms": result.duration_api_ms,
+        "turns": result.num_turns,
+        "telemetry": {
+            "complete": result.telemetry_complete,
+            "issues": result.telemetry_issues,
+        },
+        "usage": {
+            "input_tokens": result.input_tokens,
+            "output_tokens": result.output_tokens,
+            "cache_creation_input_tokens": result.cache_creation_input_tokens,
+            "cache_read_input_tokens": result.cache_read_input_tokens,
+            "context_tokens": result.context_tokens,
+            "total_tokens": result.total_tokens,
+        },
+        "cost_usd": result.cost_usd,
+        "resolved_models": result.resolved_models,
+        "tool_calls": result.tool_calls,
+    }
+
+
+def fixture_tree_definition(root: Path) -> list[dict[str, str]]:
+    if not root.is_dir():
+        raise FileNotFoundError(f"fixture tree missing: {root}")
+    records: list[dict[str, str]] = []
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise ValueError(f"fixture tree contains a symbolic link: {path}")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise ValueError(f"fixture tree contains an unsupported artifact: {path}")
+        records.append(
+            {
+                "path": path.relative_to(root).as_posix(),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+        )
+    return records
+
+
+def case_definition_digest(suite_name: str, case_ids: list[str]) -> str | None:
+    suite = SUITES.get(suite_name)
+    if not suite:
+        return None
+    try:
+        records = [
+            json.loads(line)
+            for line in suite["cases"].read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("//")
+        ]
+    except (OSError, json.JSONDecodeError):
+        return None
+    by_id = {record.get("id"): record for record in records if isinstance(record, dict)}
+    if len(by_id) != len(records) or any(case_id not in by_id for case_id in case_ids):
+        return None
+    selected = [by_id[case_id] for case_id in case_ids]
+    canonical = json.dumps(
+        selected,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    if suite.get("uses_fixture"):
+        fixtures: list[dict[str, object]] = []
+        try:
+            for record in selected:
+                fixture_name = record["fixture"]
+                after_ref = record["after_ref"]
+                if not isinstance(fixture_name, str) or not isinstance(after_ref, str):
+                    raise ValueError("fixture names and refs must be strings")
+                fixture_root = (FIXTURES_DIR / fixture_name).resolve()
+                fixture_root.relative_to(FIXTURES_DIR.resolve())
+                fixtures.append(
+                    {
+                        "case_id": record["id"],
+                        "baseline": fixture_tree_definition(fixture_root / "baseline"),
+                        "after": fixture_tree_definition(
+                            fixture_root / "changes" / after_ref
+                        ),
+                    }
+                )
+        except (KeyError, OSError, ValueError):
+            return None
+        canonical += b"\0fixture-trees\0" + json.dumps(
+            fixtures,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def suite_report(results: list[Result]) -> dict:
+    if not results:
+        raise ValueError("cannot build a suite report without cases")
+    passed = sum(result.passed for result in results)
+    first_pass = sum(result.passed and not result.retry_used for result in results)
+    usage_fields = (
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "context_tokens",
+        "total_tokens",
+    )
+    case_ids = [result.case_id for result in results]
+    return {
+        "case_ids": case_ids,
+        "case_definition_digest": case_definition_digest(results[0].suite, case_ids),
+        "quality": {
+            "passed": passed,
+            "total": len(results),
+            "pass_rate": passed / len(results),
+            "first_pass": first_pass,
+            "first_pass_rate": first_pass / len(results),
+        },
+        "telemetry": {
+            "complete": all(result.telemetry_complete for result in results),
+            "incomplete_cases": [
+                result.case_id for result in results if not result.telemetry_complete
+            ],
+        },
+        "duration_ms": metric_summary([result.duration_ms for result in results]),
+        "duration_api_ms": metric_summary(
+            [result.duration_api_ms for result in results]
+        ),
+        "turns": metric_summary([result.num_turns for result in results]),
+        "usage": {
+            field: metric_summary([getattr(result, field) for result in results])
+            for field in usage_fields
+        },
+        "cost_usd": metric_summary([result.cost_usd for result in results]),
+    }
+
+
+def git_revision() -> str | None:
+    proc = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO_ROOT,
+        env=_PROC_ENV,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    revision = proc.stdout.strip()
+    return revision if proc.returncode == 0 and revision else None
+
+
+@lru_cache(maxsize=1)
+def claude_cli_version() -> str | None:
+    try:
+        proc = subprocess.run(
+            ["claude", "--version"],
+            env=_PROC_ENV,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    version = proc.stdout.strip()
+    return version if proc.returncode == 0 and version else None
+
+
+def build_report(
+    results: list[Result],
+    *,
+    model: str,
+    suite_filter: str | None,
+    case_filter: str | None,
+) -> dict:
+    suites: dict[str, list[Result]] = {}
+    for result in results:
+        suites.setdefault(result.suite, []).append(result)
+    return {
+        "kind": REPORT_KIND,
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "git_revision": git_revision(),
+        "model": model,
+        "resolved_models": sorted(
+            {name for result in results for name in result.resolved_models}
+        ),
+        "claude_cli_version": claude_cli_version(),
+        "filters": {"suite": suite_filter, "case": case_filter},
+        "suites": {
+            name: suite_report(suite_results)
+            for name, suite_results in suites.items()
+        },
+        "cases": [result_report(result) for result in results],
+    }
+
+
+def _non_negative_integer(value: object) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and value >= 0
+
+
+def _non_negative_number(value: object) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(float(value))
+        and float(value) >= 0
+    )
+
+
+def _string_list(
+    value: object, *, allow_empty: bool, unique: bool = True
+) -> bool:
+    return (
+        isinstance(value, list)
+        and (allow_empty or bool(value))
+        and all(isinstance(item, str) and item for item in value)
+        and (not unique or len(value) == len(set(value)))
+    )
+
+
+def raw_suite_gate_metrics(report: dict, suite_name: str) -> dict[str, object]:
+    cases = [case for case in report["cases"] if case["suite"] == suite_name]
+    context_values = [case["usage"]["context_tokens"] for case in cases]
+    return {
+        "pass_rate": sum(case["passed"] for case in cases) / len(cases),
+        "passed": {case["id"]: case["passed"] for case in cases},
+        "context_tokens": {
+            "p50": nearest_rank(context_values, 50),
+            "p95": nearest_rank(context_values, 95),
+        },
+        "incomplete_cases": [
+            case["id"]
+            for case in cases
+            if case["telemetry"]["complete"] is not True
+        ],
+    }
+
+
+def report_comparison_issues(report: object, label: str) -> list[str]:
+    issues: list[str] = []
+    if not isinstance(report, dict):
+        return [f"{label} report must be a JSON object"]
+    if report.get("kind") != REPORT_KIND:
+        issues.append(f"{label} report has an unsupported kind")
+    if report.get("schema_version") != REPORT_SCHEMA_VERSION:
+        issues.append(f"{label} report has an unsupported schema version")
+    if not isinstance(report.get("model"), str) or not report["model"]:
+        issues.append(f"{label} report has no model")
+    report_models = report.get("resolved_models")
+    if (
+        not _string_list(report_models, allow_empty=False)
+        or report_models != sorted(report_models)
+    ):
+        issues.append(f"{label} report has invalid resolved model ids")
+    if (
+        not isinstance(report.get("claude_cli_version"), str)
+        or not report["claude_cli_version"]
+    ):
+        issues.append(f"{label} report has no Claude CLI version")
+
+    filters = report.get("filters")
+    if (
+        not isinstance(filters, dict)
+        or set(filters) != {"suite", "case"}
+        or any(value is not None and not isinstance(value, str) for value in filters.values())
+    ):
+        issues.append(f"{label} report has invalid filters")
+
+    suites = report.get("suites")
+    cases = report.get("cases")
+    if not isinstance(suites, dict) or not suites:
+        issues.append(f"{label} report has no suite summaries")
+    if not isinstance(cases, list) or not cases:
+        issues.append(f"{label} report has no cases")
+    if not isinstance(suites, dict) or not suites or not isinstance(cases, list):
+        return issues
+
+    case_ids_by_suite: dict[str, list[str]] = {}
+    cases_by_suite: dict[str, list[dict]] = {}
+    seen_case_ids: set[str] = set()
+    raw_models: set[str] = set()
+    usage_fields = (
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "context_tokens",
+        "total_tokens",
+    )
+    for index, case in enumerate(cases):
+        if not isinstance(case, dict):
+            issues.append(f"{label} case {index} must be an object")
+            continue
+        case_id = case.get("id")
+        suite_name = case.get("suite")
+        if not isinstance(case_id, str) or not case_id:
+            issues.append(f"{label} case {index} has no id")
+            continue
+        if case_id in seen_case_ids:
+            issues.append(f"{label} report repeats case id {case_id!r}")
+        seen_case_ids.add(case_id)
+        if not isinstance(suite_name, str) or not suite_name:
+            issues.append(f"{label} case {case_id!r} has no suite")
+            continue
+        case_ids_by_suite.setdefault(suite_name, []).append(case_id)
+        cases_by_suite.setdefault(suite_name, []).append(case)
+
+        for field_name in ("passed", "retry_used", "retry_attempted"):
+            if not isinstance(case.get(field_name), bool):
+                issues.append(
+                    f"{label} case {case_id!r} has invalid {field_name}"
+                )
+        if not isinstance(case.get("reasons"), list) or any(
+            not isinstance(reason, str) for reason in case.get("reasons", [])
+        ):
+            issues.append(f"{label} case {case_id!r} has invalid reasons")
+        for field_name in ("duration_ms", "duration_api_ms", "turns"):
+            if not _non_negative_integer(case.get(field_name)):
+                issues.append(
+                    f"{label} case {case_id!r} has invalid {field_name}"
+                )
+        if not _non_negative_number(case.get("cost_usd")):
+            issues.append(f"{label} case {case_id!r} has invalid cost_usd")
+
+        telemetry = case.get("telemetry")
+        if (
+            not isinstance(telemetry, dict)
+            or not isinstance(telemetry.get("complete"), bool)
+            or not isinstance(telemetry.get("issues"), list)
+            or any(not isinstance(issue, str) for issue in telemetry.get("issues", []))
+        ):
+            issues.append(f"{label} case {case_id!r} has invalid telemetry status")
+
+        case_models = case.get("resolved_models")
+        if not _string_list(case_models, allow_empty=False):
+            issues.append(f"{label} case {case_id!r} has invalid resolved model ids")
+        else:
+            raw_models.update(case_models)
+        if not _string_list(
+            case.get("tool_calls"), allow_empty=True, unique=False
+        ):
+            issues.append(f"{label} case {case_id!r} has invalid tool calls")
+
+        usage = case.get("usage")
+        if not isinstance(usage, dict):
+            issues.append(f"{label} case {case_id!r} has invalid usage")
+            continue
+        invalid_usage = [
+            field_name
+            for field_name in usage_fields
+            if not _non_negative_integer(usage.get(field_name))
+        ]
+        if invalid_usage:
+            issues.append(
+                f"{label} case {case_id!r} has invalid usage fields {invalid_usage!r}"
+            )
+            continue
+        expected_context = (
+            usage["input_tokens"]
+            + usage["cache_creation_input_tokens"]
+            + usage["cache_read_input_tokens"]
+        )
+        if usage["context_tokens"] != expected_context:
+            issues.append(
+                f"{label} case {case_id!r} context tokens do not match raw usage"
+            )
+        if usage["total_tokens"] != expected_context + usage["output_tokens"]:
+            issues.append(
+                f"{label} case {case_id!r} total tokens do not match raw usage"
+            )
+
+    if _string_list(report_models, allow_empty=False) and sorted(raw_models) != report_models:
+        issues.append(f"{label} resolved model ids do not match raw cases")
+
+    for suite_name, summary in suites.items():
+        if not isinstance(suite_name, str) or not isinstance(summary, dict):
+            issues.append(f"{label} report has an invalid suite summary")
+            continue
+        case_ids = summary.get("case_ids")
+        valid_case_ids = (
+            isinstance(case_ids, list)
+            and bool(case_ids)
+            and all(isinstance(case_id, str) and case_id for case_id in case_ids)
+            and len(case_ids) == len(set(case_ids))
+        )
+        if not valid_case_ids:
+            issues.append(f"{label} suite {suite_name!r} has invalid case ids")
+        elif case_ids != case_ids_by_suite.get(suite_name, []):
+            issues.append(
+                f"{label} suite {suite_name!r} case ids do not match its case records"
+            )
+        digest = summary.get("case_definition_digest")
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            issues.append(
+                f"{label} suite {suite_name!r} has no valid case definition digest"
+            )
+
+        suite_cases = cases_by_suite.get(suite_name, [])
+        can_recompute = (
+            valid_case_ids
+            and case_ids == case_ids_by_suite.get(suite_name, [])
+            and suite_cases
+            and all(
+                isinstance(case.get("passed"), bool)
+                and isinstance(case.get("retry_used"), bool)
+                and isinstance(case.get("telemetry"), dict)
+                and isinstance(case["telemetry"].get("complete"), bool)
+                and isinstance(case.get("usage"), dict)
+                and all(
+                    _non_negative_integer(case["usage"].get(field_name))
+                    for field_name in usage_fields
+                )
+                for case in suite_cases
+            )
+        )
+        if not can_recompute:
+            continue
+        passed = sum(case["passed"] for case in suite_cases)
+        first_pass = sum(
+            case["passed"] and not case["retry_used"] for case in suite_cases
+        )
+        expected_quality = {
+            "passed": passed,
+            "total": len(suite_cases),
+            "pass_rate": passed / len(suite_cases),
+            "first_pass": first_pass,
+            "first_pass_rate": first_pass / len(suite_cases),
+        }
+        if summary.get("quality") != expected_quality:
+            issues.append(
+                f"{label} suite {suite_name!r} quality summary does not match raw cases"
+            )
+        usage = summary.get("usage")
+        context_summary = usage.get("context_tokens") if isinstance(usage, dict) else None
+        expected_context_summary = metric_summary(
+            [case["usage"]["context_tokens"] for case in suite_cases]
+        )
+        if context_summary != expected_context_summary:
+            issues.append(
+                f"{label} suite {suite_name!r} context summary does not match raw cases"
+            )
+        expected_telemetry = {
+            "complete": all(
+                case["telemetry"]["complete"] for case in suite_cases
+            ),
+            "incomplete_cases": [
+                case["id"]
+                for case in suite_cases
+                if not case["telemetry"]["complete"]
+            ],
+        }
+        if summary.get("telemetry") != expected_telemetry:
+            issues.append(
+                f"{label} suite {suite_name!r} telemetry summary does not match raw cases"
+            )
+    extra_case_suites = set(case_ids_by_suite) - set(suites)
+    if extra_case_suites:
+        issues.append(
+            f"{label} cases reference missing suites: {sorted(extra_case_suites)!r}"
+        )
+    return issues
+
+
+def load_report(path: Path) -> dict:
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"cannot read eval report {path}: {error}") from error
+    issues = report_comparison_issues(report, f"eval report {path}")
+    if issues:
+        raise ValueError("; ".join(issues))
+    return report
+
+
+def compare_to_baseline(current: dict, baseline: dict) -> dict:
+    checks: list[dict] = []
+    failures = [
+        *report_comparison_issues(current, "current"),
+        *report_comparison_issues(baseline, "baseline"),
+    ]
+    if failures:
+        return {"passed": False, "checks": checks, "failures": failures}
+    if current["model"] != baseline["model"]:
+        failures.append(
+            f"model mismatch: current {current['model']!r}, "
+            f"baseline {baseline['model']!r}"
+        )
+    if current["resolved_models"] != baseline["resolved_models"]:
+        failures.append(
+            "resolved model mismatch: "
+            f"current {current['resolved_models']!r}, "
+            f"baseline {baseline['resolved_models']!r}"
+        )
+    if current.get("claude_cli_version") != baseline.get("claude_cli_version"):
+        failures.append(
+            "Claude CLI version mismatch: "
+            f"current {current.get('claude_cli_version')!r}, "
+            f"baseline {baseline.get('claude_cli_version')!r}"
+        )
+
+    if current.get("filters") != baseline.get("filters"):
+        failures.append("current filters differ from baseline filters")
+
+    current_suites = set(current["suites"])
+    baseline_suites = set(baseline["suites"])
+    if current_suites != baseline_suites:
+        failures.append(
+            "suite set differs from baseline: "
+            f"current {sorted(current_suites)!r}, baseline {sorted(baseline_suites)!r}"
+        )
+
+    for suite_name, current_suite in current["suites"].items():
+        baseline_suite = baseline["suites"].get(suite_name)
+        if not isinstance(baseline_suite, dict):
+            failures.append(f"suite {suite_name!r} is missing from baseline")
+            continue
+        current_ids = current_suite.get("case_ids")
+        baseline_ids = baseline_suite.get("case_ids")
+        if current_ids != baseline_ids:
+            failures.append(
+                f"suite {suite_name!r} case set/order differs from baseline"
+            )
+            continue
+        current_digest = current_suite.get("case_definition_digest")
+        baseline_digest = baseline_suite.get("case_definition_digest")
+        if (
+            not isinstance(current_digest, str)
+            or not isinstance(baseline_digest, str)
+            or current_digest != baseline_digest
+        ):
+            failures.append(
+                f"suite {suite_name!r} case definitions differ from baseline"
+            )
+            continue
+        current_raw = raw_suite_gate_metrics(current, suite_name)
+        baseline_raw = raw_suite_gate_metrics(baseline, suite_name)
+        incomplete = current_raw["incomplete_cases"]
+        if incomplete:
+            failures.append(
+                f"suite {suite_name!r} has incomplete telemetry for {incomplete!r}"
+            )
+            continue
+        try:
+            current_quality = current_raw["pass_rate"]
+            baseline_quality = baseline_raw["pass_rate"]
+            quality_passed = current_quality >= baseline_quality
+            checks.append(
+                {
+                    "suite": suite_name,
+                    "metric": "pass_rate",
+                    "statistic": "value",
+                    "operator": ">=",
+                    "baseline": baseline_quality,
+                    "current": current_quality,
+                    "passed": quality_passed,
+                }
+            )
+            if not quality_passed:
+                failures.append(
+                    f"{suite_name} pass rate regressed: "
+                    f"{current_quality:.3f} < {baseline_quality:.3f}"
+                )
+            for case_id in current_ids:
+                baseline_passed = baseline_raw["passed"][case_id]
+                current_passed = current_raw["passed"][case_id]
+                case_passed = not baseline_passed or current_passed
+                checks.append(
+                    {
+                        "suite": suite_name,
+                        "case": case_id,
+                        "metric": "quality",
+                        "statistic": "baseline_pass_preserved",
+                        "operator": "implies",
+                        "baseline": baseline_passed,
+                        "current": current_passed,
+                        "passed": case_passed,
+                    }
+                )
+                if not case_passed:
+                    failures.append(
+                        f"{suite_name} baseline-passing case regressed: {case_id}"
+                    )
+            for statistic in ("p50", "p95"):
+                current_tokens = current_raw["context_tokens"][statistic]
+                baseline_tokens = baseline_raw["context_tokens"][statistic]
+                tokens_passed = current_tokens < baseline_tokens
+                checks.append(
+                    {
+                        "suite": suite_name,
+                        "metric": "context_tokens",
+                        "statistic": statistic,
+                        "operator": "<",
+                        "baseline": baseline_tokens,
+                        "current": current_tokens,
+                        "passed": tokens_passed,
+                    }
+                )
+                if not tokens_passed:
+                    failures.append(
+                        f"{suite_name} {statistic} context tokens did not decrease: "
+                        f"{current_tokens} >= {baseline_tokens}"
+                    )
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError) as error:
+            failures.append(
+                f"suite {suite_name!r} has malformed comparison data: {error}"
+            )
+
+    return {"passed": not failures, "checks": checks, "failures": failures}
+
+
+def write_report(path: Path, report: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            json.dump(report, handle, indent=2, sort_keys=True, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+    except Exception:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+        raise
 
 
 # ----- fixture lifecycle ----------------------------------------------------
@@ -441,10 +1328,49 @@ def render_critic_input(inp: dict) -> str:
     )
 
 
+def render_researcher_input(
+    inp: dict,
+    *,
+    fixture_path: Path | None = None,
+    has_mmcg: bool = False,
+) -> str:
+    if fixture_path is None:
+        boundary = (
+            "no repository checkout or tools are available. Use only the quoted "
+            "evidence and keep missing facts explicit."
+        )
+    else:
+        boundary = (
+            f"work only in the disposable repository at `{fixture_path}`. "
+            f"mmcg is {'available from a freshly built index' if has_mmcg else 'unavailable'}; "
+            "start with the requested query, not a status probe, and cite the "
+            "source you verify."
+        )
+    evidence = inp.get("evidence", "")
+    evidence_block = f"\n\n**Quoted evidence:**\n{evidence}" if evidence else ""
+    return (
+        f"**Evaluation boundary:** {boundary}\n\n"
+        f"**Research question:** {inp.get('question', '')}\n\n"
+        f"**Scope:** {inp.get('scope', '')}{evidence_block}"
+    )
+
+
 def isolated_cli_args(suite_name: str) -> list[str]:
     """Deny repository tools to suites whose fixtures exist only in prompts."""
     if suite_name in {"critic", "intake", "workflow"}:
         return ["--safe-mode", "--tools", ""]
+    if suite_name == "researcher":
+        return [
+            "--tools",
+            "Read,Glob,Grep",
+            "--allowedTools",
+            ",".join(researcher_allowed_tools()),
+            "--setting-sources",
+            "",
+            "--strict-mcp-config",
+            "--disable-slash-commands",
+            "--no-chrome",
+        ]
     if suite_name == "auditor":
         return [
             "--tools",
@@ -471,7 +1397,7 @@ def evaluation_cwd(
     fixture_path: Path | None,
     prompt_sandbox: tempfile.TemporaryDirectory[str] | None,
 ) -> Path | None:
-    if suite_name == "auditor":
+    if suite_name in {"auditor", "researcher"}:
         return fixture_path
     if prompt_sandbox is not None:
         return Path(prompt_sandbox.name)
@@ -701,7 +1627,7 @@ def evaluate_case(
 
             db_path = fixture_path / ".mastermind" / "mmcg.db"
             has_mmcg = db_path.is_file()
-            if suite_name == "auditor" and not has_mmcg and not case.get("allow_no_mmcg"):
+            if suite_name in {"auditor", "researcher"} and not has_mmcg and not case.get("allow_no_mmcg"):
                 return Result(
                     case_id=case_id,
                     suite=suite_name,
@@ -712,18 +1638,24 @@ def evaluate_case(
                     ],
                     fixture_path=fixture_path,
                 )
-            user_message = render_auditor_input(
-                case["input"],
-                fixture_path=fixture_path,
-                baseline_ref=baseline_ref,
-                after_ref=after_ref,
-                has_mmcg=has_mmcg,
-            )
+            if suite_name == "auditor":
+                user_message = render_auditor_input(
+                    case["input"],
+                    fixture_path=fixture_path,
+                    baseline_ref=baseline_ref,
+                    after_ref=after_ref,
+                    has_mmcg=has_mmcg,
+                )
+            else:
+                user_message = render_researcher_input(
+                    case["input"],
+                    fixture_path=fixture_path,
+                    has_mmcg=has_mmcg,
+                )
             extra_cmd = ["--add-dir", str(fixture_path)]
             if has_mmcg:
                 # Spawn an mmcg MCP stdio server pointed at the fixture's index.
-                # This matches the production wiring — auditor calls mmcg_callers
-                # via MCP, not via CLI subprocess.
+                # This matches the production custom-agent wiring.
                 mcp_cfg = json.dumps({
                     "mcpServers": {
                         "mmcg": {
@@ -743,7 +1675,7 @@ def evaluate_case(
         # Pass the user message via stdin — passing it as a positional arg
         # collides with `--add-dir <directories...>` (variadic), which would
         # swallow the message as another directory.
-        if suite_name == "auditor":
+        if suite_name in {"auditor", "researcher"}:
             prompt_args: list[str] = []
             agent_args = subagent_cli_args(prompt_path, model_override=model)
         else:
@@ -762,13 +1694,15 @@ def evaluate_case(
             fixture_path=fixture_path,
             prompt_sandbox=prompt_sandbox,
         )
+        streamed_output = True
         cmd = [
             "claude",
             "-p",
             "--model", model,
             *prompt_args,
             *agent_args,
-            "--output-format", "json",
+            "--output-format", "stream-json" if streamed_output else "json",
+            *(["--verbose"] if streamed_output else []),
             "--no-session-persistence",
             "--permission-mode", "dontAsk",
             *workflow_safety,
@@ -805,16 +1739,17 @@ def evaluate_case(
             )
 
         permission_denials: list[dict] = []
-        telemetry: dict[str, int | float] = telemetry_from_payload({})
+        tool_calls: list[str] = []
+        telemetry: dict[str, object] = telemetry_from_payload({})
         try:
-            payload = json.loads(proc.stdout)
-            if not isinstance(payload, dict):
-                raise ValueError("Claude JSON result is not an object")
+            payload, tool_calls = parse_claude_output(
+                proc.stdout, streamed=streamed_output
+            )
             output = payload.get("result", "")
             if not isinstance(output, str):
                 output = json.dumps(output, sort_keys=True, ensure_ascii=False)
-            duration_ms = _nonnegative_int(payload.get("duration_ms"))
             telemetry = telemetry_from_payload(payload)
+            duration_ms = int(telemetry["duration_ms"])
             raw_denials = payload.get("permission_denials", [])
             if isinstance(raw_denials, list):
                 permission_denials = [
@@ -827,6 +1762,22 @@ def evaluate_case(
         expect = case.get("expect", {})
         reasons: list[str] = []
         passed = True
+
+        if telemetry["complete"] is not True:
+            passed = False
+            reasons.append(
+                "incomplete Claude telemetry: " + "; ".join(telemetry["issues"])
+            )
+
+        usage_reasons = usage_budget_reasons(expect, telemetry)
+        if usage_reasons:
+            passed = False
+            reasons.extend(usage_reasons)
+
+        tool_reasons = tool_usage_reasons(expect, tool_calls)
+        if tool_reasons:
+            passed = False
+            reasons.extend(tool_reasons)
 
         expected_action = expect.get("action")
         if expected_action and suite_name == "intake":
@@ -930,6 +1881,10 @@ def evaluate_case(
             ),
             cache_read_input_tokens=int(telemetry["cache_read_input_tokens"]),
             cost_usd=float(telemetry["cost_usd"]),
+            telemetry_complete=bool(telemetry["complete"]),
+            telemetry_issues=list(telemetry["issues"]),
+            resolved_models=list(telemetry["resolved_models"]),
+            tool_calls=tool_calls,
         )
     finally:
         if prompt_sandbox is not None:
@@ -955,6 +1910,19 @@ def main() -> int:
     parser.add_argument(
         "--verbose-failures", action="store_true",
         help="print up to 4000 characters of model output for failed cases",
+    )
+    parser.add_argument(
+        "--report",
+        type=Path,
+        help="atomically write a schema-versioned JSON telemetry report",
+    )
+    parser.add_argument(
+        "--baseline-report",
+        type=Path,
+        help=(
+            "compare the same model and case set; require non-regressed quality "
+            "and lower p50/p95 context tokens"
+        ),
     )
     args = parser.parse_args()
 
@@ -1027,7 +1995,7 @@ def main() -> int:
 
     if not results:
         print("\nno cases matched filter")
-        return 0
+        return 2
 
     n_pass = sum(r.passed for r in results)
     n_fail = len(results) - n_pass
@@ -1057,7 +2025,45 @@ def main() -> int:
         f"{total_cache_creation} cache write, {total_cache_read} cache read"
     )
     print(f"  reported cost: ${total_cost:.4f}")
-    return 0 if n_fail == 0 else 1
+
+    report = build_report(
+        results,
+        model=args.model,
+        suite_filter=args.suite,
+        case_filter=args.case,
+    )
+    for suite_name, summary in report["suites"].items():
+        context = summary["usage"]["context_tokens"]
+        print(
+            f"  {suite_name} context tokens: "
+            f"p50 {context['p50']}, p95 {context['p95']}"
+        )
+
+    gate_failed = False
+    if args.baseline_report is not None:
+        try:
+            baseline = load_report(args.baseline_report)
+            gate = compare_to_baseline(report, baseline)
+        except ValueError as error:
+            gate = {"passed": False, "checks": [], "failures": [str(error)]}
+        report["baseline_gate"] = {
+            "baseline": str(args.baseline_report),
+            **gate,
+        }
+        gate_failed = not gate["passed"]
+        print(f"  baseline gate: {'pass' if gate['passed'] else 'FAIL'}")
+        for failure in gate["failures"]:
+            print(f"      → {failure}")
+
+    if args.report is not None:
+        try:
+            write_report(args.report, report)
+        except OSError as error:
+            print(f"error: writing eval report {args.report}: {error}", file=sys.stderr)
+            return 2
+        print(f"  report: {args.report}")
+
+    return 0 if n_fail == 0 and not gate_failed else 1
 
 
 if __name__ == "__main__":

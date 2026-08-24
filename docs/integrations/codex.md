@@ -4,7 +4,7 @@ Give Codex the bounded local graph plus Mastermind's portable delivery skills.
 Mastermind registers through `codex mcp` at user scope; Codex does not currently
 have a project-scope setup path.
 
-## Install the complete Codex bundle
+## Install the Codex workflow
 
 ```bash
 npm install -g @xcraftmind/mastermind
@@ -13,10 +13,11 @@ cd your-project
 mastermind index .
 ```
 
-The install command copies the portable skill bundle under `~/.codex/skills`
-and registers the MCP server. It does not require `mastermind init` or a
-repository. To preview MCP registration without installing skills, use
-`mastermind setup codex --scope user`.
+The install command defaults to the `core` portable skill profile under
+`~/.codex/skills` and registers the MCP server. Pass `--profile full` for every
+shipped portable skill. It does not require `mastermind init` or a repository.
+To preview MCP registration without installing skills, use `mastermind setup
+codex --scope user`.
 
 Codex receives the portable planning, execution, project-map, impact, test,
 setup, review, and audit skills. It does not receive Claude Code's native

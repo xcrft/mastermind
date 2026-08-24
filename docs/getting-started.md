@@ -112,6 +112,35 @@ one setup path:
 | Continue | `mastermind setup continue --scope user --write` |
 | Generic stdio client | [Generic MCP guide](integrations/generic-mcp.md) |
 
+Fresh installs use `core`. Select a larger portable-skill catalog only when the
+repository needs it:
+
+| Profile | Skills | Focus |
+|---|---:|---|
+| `core` | 14 | Planning, codegraph research, change/test impact, execution, and comment/test audit |
+| `frontend` | 19 | `core` plus component, design, browser, frontend, and runtime research |
+| `security` | 17 | `core` plus security research, agent review, and audit attestation |
+| `full` | 26 | Every shipped portable skill |
+
+```bash
+mastermind install --client all --profile frontend
+mastermind list --profile frontend
+```
+
+Profiles narrow skill discovery, not Claude's named subagent routes. All Claude
+subagents remain installed. An existing installation keeps its recorded
+profile when `install`, `update`, or `doctor --workflow` omits `--profile`.
+Legacy manifests from before profiles are treated as `full`, then upgraded
+without silently retiring skills.
+Manifest schema downgrades are unsupported. An older installer rejects a
+schema-v2 manifest before replacing managed files, so use the current package
+for later updates.
+
+If final cleanup fails after a committed install, the command succeeds with a
+`cleanup pending` warning. The reported staging directory keeps the pre-update
+backups. Keep it until `mastermind doctor --workflow` passes, then remove that
+exact directory.
+
 `mastermind setup` previews a redacted plan when `--write` is absent. Client
 guides describe project scope, config ownership, backups, updates, and removal:
 
@@ -186,6 +215,10 @@ npm install -g @xcraftmind/mastermind@latest
 mastermind update --client all
 mastermind doctor --workflow --client all
 ```
+
+Pass `--profile core|frontend|security|full` to `update` only when you intend to
+switch profiles. Profile changes reconcile Mastermind-owned artifacts and leave
+unrelated client files untouched.
 
 Removal is scope-specific and dry-run-first. Read the relevant client guide and
 inspect the printed plan before adding a destructive flag.

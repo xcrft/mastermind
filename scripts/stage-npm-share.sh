@@ -7,7 +7,8 @@
 #   - in the publish workflow (assemble) and the ci-npm smoke, before `npm pack`
 #   - locally, before testing `init`'s global install
 #
-# Every skill under `skills/` ships in the default install.
+# Every skill under `skills/` is staged. The installer selects a profile;
+# `--profile full` installs the complete staged catalog.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -19,7 +20,8 @@ mkdir -p "$SHARE/agents" "$SHARE/skills"
 # Subagents — flat `.md` files.
 cp "$REPO_ROOT"/agents/subagents/*.md "$SHARE/agents/"
 
-# Every skill under `skills/` ships automatically — no allowlist to forget.
+# Stage every skill automatically so profile definitions cannot hide a missing
+# package artifact.
 while IFS= read -r skill_md; do
   src="$(dirname "$skill_md")"
   cp -R "$src" "$SHARE/skills/$(basename "$src")"

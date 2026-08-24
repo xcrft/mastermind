@@ -82,6 +82,11 @@ reports bounded path samples for skipped inputs. It automatically rebuilds when
 stored extractor semantics are incompatible. Use `mmcg watch` to keep it
 refreshed while editing.
 
+Structural MCP queries refresh the managed `.mastermind/mmcg.db` on demand
+before querying. The canonical database path, not mutable SQLite metadata,
+selects the repository root. Custom external indexes remain manual-refresh-only;
+failed or unavailable refreshes return a structured `index_stale` result.
+
 Run the stdio MCP server directly:
 
 ```bash
@@ -111,9 +116,10 @@ See the [client integration guides](https://github.com/xcrft/mastermind/tree/mai
 | Workflow gates | `verify-spec`, `audit-spec`, and `run-task` |
 | Local coordination | Bounded additive scratchpad and indexed project history |
 
-The MCP surface contains 27 read-only tools and one additive local scratchpad
-write. Results are bounded and return precision or truncation notes when the
-engine cannot prove completeness.
+The MCP surface contains 19 non-destructive queries that may refresh the managed
+derived index, 8 read-only tools, and one additive local scratchpad write.
+Results are bounded and return precision or truncation notes when the engine
+cannot prove completeness.
 
 ## Supported languages
 

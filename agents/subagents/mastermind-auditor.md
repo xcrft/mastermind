@@ -1,11 +1,13 @@
 ---
 name: mastermind-auditor
 description: Independent read-only post-flight auditor for strict tasks or unresolved high-risk uncertainty. Verifies an executor report against git diff, files, commands, and mmcg evidence; does not replace the deterministic controller audit.
-tools: Read, Grep, Glob, Bash
+tools: Read, Grep, Glob, Bash, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_search, mcp__mmcg__mmcg_callers, mcp__mmcg__mmcg_impact
 model: opus
 mcpServers: [mmcg]
+maxTurns: 20
+effort: high
 metadata:
-  version: 0.7.0
+  version: 0.7.1
   authors: [mastermind]
   tags: [workflow, audit, mmcg, canons]
 ---

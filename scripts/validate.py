@@ -498,7 +498,7 @@ def _extract_mmcg_tools_from_source(src: str) -> list[str]:
     body = src[start:end] if start != -1 and end != -1 else src
     pattern = re.compile(
         r'name:\s*"(mmcg_[a-z_]+)"'
-        r'|(?:read_only_tool|additive_tool)\s*\(\s*"(mmcg_[a-z_]+)"'
+        r'|(?:read_only_tool|refreshable_tool|additive_tool)\s*\(\s*"(mmcg_[a-z_]+)"'
     )
     tools: list[str] = []
     seen: set[str] = set()
@@ -647,11 +647,12 @@ def validate_mmcg_tool_extractor_fixture() -> list[Issue]:
 static TOOLS: &[ToolDef] = &[
     ToolDef { name: "mmcg_legacy", schema: schema_legacy, handler: handle_legacy },
     read_only_tool("mmcg_reader", schema_reader, handle_reader),
+    refreshable_tool("mmcg_refresher", schema_refresher, handle_refresher),
     additive_tool("mmcg_writer", schema_writer, handle_writer),
     read_only_tool("mmcg_reader", schema_reader, handle_reader),
 ];
 '''
-    expected = ["mmcg_legacy", "mmcg_reader", "mmcg_writer"]
+    expected = ["mmcg_legacy", "mmcg_reader", "mmcg_refresher", "mmcg_writer"]
     actual = _extract_mmcg_tools_from_source(fixture)
     if actual == expected:
         return []

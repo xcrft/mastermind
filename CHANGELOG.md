@@ -19,10 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and carry bounded `maxTurns` and `effort` settings. Auditor evals exercise the
   shipped custom-agent runtime contract instead of a separate handwritten MCP
   allowlist.
-- Structural MCP tools now fail closed with a structured `index_stale` result
-  when source files or the extractor contract drift from the index. Diagnostic,
-  revision-bound, history, scratchpad, and change-classification tools remain
-  available for recovery.
+- Structural MCP tools backed by the managed `.mastermind/mmcg.db` now refresh
+  the derived index automatically when source files or the extractor contract
+  drift before a query. Custom external indexes remain manual-refresh-only. If
+  a refresh is unavailable or cannot produce a fresh graph, the tool returns a
+  structured `index_stale` result. Diagnostic, revision-bound, history,
+  scratchpad, and change-classification tools remain available for recovery.
 - Comment-audit routing now spawns the specialist only when the finished diff
   contains an added, modified, or deleted comment.
 - `mastermind doctor` treats Claude's native `type: stdio` and empty `env`

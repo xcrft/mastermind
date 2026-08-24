@@ -249,6 +249,7 @@ impl Indexer {
     /// Files in the index but gone from disk are purged at the end. Writes to `store`.
     pub fn index_all(&self, store: &mut Store, force_full: bool) -> Result<IndexStats, IndexError> {
         let start = SystemTime::now();
+        ensure_indexing_active(store)?;
         self.bind_or_validate_index_root(store)?;
         let stored_extractor_contract = store
             .meta_value(EXTRACTOR_CONTRACT_META_KEY)
@@ -264,6 +265,7 @@ impl Indexer {
 
         // Phase 1: walk filesystem
         let candidates = source_candidates(&self.root);
+        ensure_indexing_active(store)?;
 
         let mut stats = IndexStats {
             files_scanned: candidates.len() as u32,
@@ -277,6 +279,7 @@ impl Indexer {
             std::collections::HashSet::with_capacity(candidates.len());
 
         for path in &candidates {
+            ensure_indexing_active(store)?;
             let rel = path
                 .strip_prefix(&self.root)
                 .unwrap_or(path)
@@ -329,6 +332,7 @@ impl Indexer {
         // SQLite's single writer before parsing the next batch. The old all-at-once
         // collection retained every PendingFile until parsing the whole repository.
         for batch in to_parse.chunks(PARSE_BATCH_SIZE) {
+            ensure_indexing_active(store)?;
             let parsed: Vec<(PathBuf, Result<PendingFile, IndexError>)> = batch
                 .par_iter()
                 .filter_map(|path| {
@@ -339,8 +343,10 @@ impl Indexer {
                     ))
                 })
                 .collect();
+            ensure_indexing_active(store)?;
 
             for (path, outcome) in parsed {
+                ensure_indexing_active(store)?;
                 let rel = path
                     .strip_prefix(&self.root)
                     .unwrap_or(&path)
@@ -373,8 +379,10 @@ impl Indexer {
 
         // Phase 5: purge orphans (in index, no longer on disk). Safe only after a
         // FULL root scan — a partial scan would wrongly purge the unscanned subtree.
+        ensure_indexing_active(store)?;
         if let Ok(indexed) = store.indexed_paths() {
             for path in indexed {
+                ensure_indexing_active(store)?;
                 if !current_paths.contains(&path) && store.purge_file(&path).is_ok() {
                     stats.files_purged += 1;
                 }
@@ -387,15 +395,18 @@ impl Indexer {
         // layout, both excluded). Whole-corpus replace — spec sets are small
         // (<100 files), so atomic replace beats delta tracking and avoids stale
         // entries on rename/delete.
+        ensure_indexing_active(store)?;
         if let Ok(count) = self.index_task_specs(store) {
             stats.task_specs_indexed = count;
         }
+        ensure_indexing_active(store)?;
         let history = self.index_project_history(store)?;
         stats.history_entries_indexed = history.indexed;
         stats.history_entries_skipped = history.skipped;
         stats.history_entries_truncated = history.truncated;
 
         if stats.files_failed == 0 {
+            ensure_indexing_active(store)?;
             store
                 .set_meta(EXTRACTOR_CONTRACT_META_KEY, EXTRACTOR_CONTRACT_VERSION)
                 .map_err(|error| IndexError::Other(error.to_string()))?;
@@ -415,6 +426,7 @@ impl Indexer {
     /// `_`-prefixed files (e.g. `_lessons.md`) are shared assets, excluded from
     /// search.
     pub fn index_task_specs(&self, store: &mut Store) -> Result<u32, IndexError> {
+        ensure_indexing_active(store)?;
         let tasks_dir = self.root.join(".mastermind").join("tasks");
         if !tasks_dir.is_dir() {
             // No `.mastermind/tasks/` — clear any stale entries from a prior run too.
@@ -426,6 +438,7 @@ impl Indexer {
 
         let mut entries: Vec<crate::store::TaskSpecEntry> = Vec::new();
         for dirent in std::fs::read_dir(&tasks_dir).map_err(|e| IndexError::Io(e.to_string()))? {
+            ensure_indexing_active(store)?;
             let dirent = dirent.map_err(|e| IndexError::Io(e.to_string()))?;
             let path = dirent.path();
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
@@ -453,6 +466,7 @@ impl Indexer {
             });
         }
         let count = entries.len() as u32;
+        ensure_indexing_active(store)?;
         store
             .replace_task_specs(&entries)
             .map_err(|e| IndexError::Other(e.to_string()))?;
@@ -466,6 +480,7 @@ impl Indexer {
         &self,
         store: &mut Store,
     ) -> Result<ProjectHistoryIndexStats, IndexError> {
+        ensure_indexing_active(store)?;
         self.bind_or_validate_index_root(store)?;
         let mut candidates: Vec<(PathBuf, &'static str)> = Vec::new();
         {
@@ -477,6 +492,7 @@ impl Indexer {
             add_if_present(self.root.join("CONTEXT.md"), "context");
             if let Ok(entries) = std::fs::read_dir(&self.root) {
                 for entry in entries.flatten() {
+                    ensure_indexing_active(store)?;
                     let path = entry.path();
                     let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
                         continue;
@@ -493,6 +509,7 @@ impl Indexer {
                 for dirent in std::fs::read_dir(&tasks_dir)
                     .map_err(|error| IndexError::Io(error.to_string()))?
                 {
+                    ensure_indexing_active(store)?;
                     let dirent = dirent.map_err(|error| IndexError::Io(error.to_string()))?;
                     let path = dirent.path();
                     let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
@@ -518,6 +535,7 @@ impl Indexer {
             let releases_dir = self.root.join(".mastermind").join("releases");
             if let Ok(entries) = std::fs::read_dir(&releases_dir) {
                 for entry in entries.flatten() {
+                    ensure_indexing_active(store)?;
                     let path = entry.path();
                     let is_markdown =
                         path.extension().and_then(|value| value.to_str()) == Some("md");
@@ -540,6 +558,7 @@ impl Indexer {
         let mut decision_directories = 0usize;
         let mut decision_truncated = false;
         for decision_root in decision_roots {
+            ensure_indexing_active(store)?;
             decision_truncated |= add_markdown_tree_candidates(
                 &decision_root,
                 "architecture_decision",
@@ -555,6 +574,7 @@ impl Indexer {
         let mut entries = Vec::new();
         let mut skipped = 0_u32;
         for (path, kind) in candidates {
+            ensure_indexing_active(store)?;
             let Ok(metadata) = std::fs::symlink_metadata(&path) else {
                 skipped += 1;
                 continue;
@@ -588,6 +608,7 @@ impl Indexer {
             });
         }
         let count = entries.len() as u32;
+        ensure_indexing_active(store)?;
         store
             .replace_project_history(&entries)
             .map_err(|error| IndexError::Other(error.to_string()))?;
@@ -609,9 +630,11 @@ impl Indexer {
 
     /// Re-index a single file. Used by the watcher.
     pub fn index_one(&self, store: &mut Store, path: &Path) -> Result<(), IndexError> {
+        ensure_indexing_active(store)?;
         let extractor = extractor_for_path(path)
             .ok_or_else(|| IndexError::Parse(format!("no extractor for {path:?}")))?;
         let pending = parse_one(path, &self.root, extractor.as_ref())?;
+        ensure_indexing_active(store)?;
         store
             .commit_file(pending)
             .map_err(|e| IndexError::Other(e.to_string()))
@@ -1033,6 +1056,14 @@ pub enum IndexError {
     Skipped(IndexSkipReason),
 }
 
+fn ensure_indexing_active(store: &Store) -> Result<(), IndexError> {
+    if store.work_interrupted() {
+        Err(IndexError::Other("indexing interrupted".to_string()))
+    } else {
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexSkipReason {
     Binary,
@@ -1109,6 +1140,28 @@ mod incremental_tests {
             second.files_unchanged, 2,
             "both files should be marked unchanged"
         );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cancellation_stops_indexing_before_derived_state_changes() {
+        let (dir, db) = setup("cancel_before_index");
+        fs::write(dir.join("a.py"), "def foo(): pass\n").unwrap();
+
+        let mut store = Store::open(&db).unwrap();
+        let indexer = Indexer::new(&dir);
+        indexer.index_all(&mut store, false).unwrap();
+        fs::write(dir.join("b.py"), "def bar(): pass\n").unwrap();
+
+        store.cancel_handle().cancel();
+        let error = indexer.index_all(&mut store, false).unwrap_err();
+        assert!(error.to_string().contains("indexing interrupted"));
+        assert_eq!(
+            store.take_interrupt_source(),
+            Some(crate::store::InterruptSource::Cancel)
+        );
+        assert_eq!(store.file_count().unwrap(), 1);
 
         fs::remove_dir_all(&dir).ok();
     }

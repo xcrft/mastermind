@@ -107,6 +107,7 @@ enum HandlerError {
     IndexStale {
         stale_files: usize,
         extractor_contract_current: bool,
+        refresh_attempted: bool,
     },
     Internal {
         class: &'static str,
@@ -155,6 +156,7 @@ enum RequestMetaError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ToolBehavior {
     ReadOnly,
+    RefreshableQuery,
     AdditiveNonIdempotent,
 }
 
@@ -191,51 +193,64 @@ const fn additive_tool(
     }
 }
 
+const fn refreshable_tool(
+    name: &'static str,
+    schema: fn() -> Value,
+    handler: fn(&mut Store, &Value) -> Result<Value, HandlerError>,
+) -> ToolDef {
+    ToolDef {
+        name,
+        schema,
+        handler,
+        behavior: ToolBehavior::RefreshableQuery,
+    }
+}
+
 /// Authoritative tool list — order matches `tools/list` output.
 static TOOLS: &[ToolDef] = &[
-    read_only_tool("mmcg_search", schema_search, handle_search),
-    read_only_tool("mmcg_callers", schema_callers, handle_callers),
-    read_only_tool("mmcg_callees", schema_callees, handle_callees),
-    read_only_tool("mmcg_impact", schema_impact, handle_impact),
-    read_only_tool(
+    refreshable_tool("mmcg_search", schema_search, handle_search),
+    refreshable_tool("mmcg_callers", schema_callers, handle_callers),
+    refreshable_tool("mmcg_callees", schema_callees, handle_callees),
+    refreshable_tool("mmcg_impact", schema_impact, handle_impact),
+    refreshable_tool(
         "mmcg_symbols_in_file",
         schema_symbols_in_file,
         handle_symbols_in_file,
     ),
-    read_only_tool("mmcg_outline", schema_outline, handle_outline),
-    read_only_tool("mmcg_files", schema_files, handle_files),
-    read_only_tool("mmcg_imports", schema_imports, handle_imports),
-    read_only_tool("mmcg_imported_by", schema_imported_by, handle_imported_by),
-    read_only_tool(
+    refreshable_tool("mmcg_outline", schema_outline, handle_outline),
+    refreshable_tool("mmcg_files", schema_files, handle_files),
+    refreshable_tool("mmcg_imports", schema_imports, handle_imports),
+    refreshable_tool("mmcg_imported_by", schema_imported_by, handle_imported_by),
+    refreshable_tool(
         "mmcg_unreferenced",
         schema_unreferenced,
         handle_unreferenced,
     ),
-    read_only_tool("mmcg_api_surface", schema_api_surface, handle_api_surface),
-    read_only_tool(
+    refreshable_tool("mmcg_api_surface", schema_api_surface, handle_api_surface),
+    refreshable_tool(
         "mmcg_symbols_changed_since",
         schema_symbols_changed_since,
         handle_symbols_changed_since,
     ),
-    read_only_tool(
+    refreshable_tool(
         "mmcg_dependency_cycles",
         schema_dependency_cycles,
         handle_dependency_cycles,
     ),
     read_only_tool("mmcg_tasks", schema_tasks, handle_tasks),
     read_only_tool("mmcg_history", schema_history, handle_history),
-    read_only_tool("mmcg_centrality", schema_centrality, handle_centrality),
-    read_only_tool("mmcg_semantic", schema_semantic, handle_semantic),
+    refreshable_tool("mmcg_centrality", schema_centrality, handle_centrality),
+    refreshable_tool("mmcg_semantic", schema_semantic, handle_semantic),
     read_only_tool("mmcg_facts", schema_facts, handle_facts),
     read_only_tool("mmcg_team_map", schema_team_map, handle_team_map),
-    read_only_tool("mmcg_map", schema_map, handle_map),
-    read_only_tool("mmcg_temporal", schema_temporal, handle_temporal),
-    read_only_tool(
+    refreshable_tool("mmcg_map", schema_map, handle_map),
+    refreshable_tool("mmcg_temporal", schema_temporal, handle_temporal),
+    refreshable_tool(
         "mmcg_change_impact",
         schema_change_impact,
         handle_change_impact,
     ),
-    read_only_tool("mmcg_test_impact", schema_test_impact, handle_test_impact),
+    refreshable_tool("mmcg_test_impact", schema_test_impact, handle_test_impact),
     read_only_tool(
         "mmcg_recent_changes",
         schema_recent_changes,
@@ -266,7 +281,6 @@ pub(crate) fn is_known_tool(name: &str) -> bool {
 /// Structural graph answers are trustworthy only while the index matches the
 /// repository. A small set of diagnostic, revision-bound, and additive tools
 /// remains available so clients can inspect or recover from stale state.
-#[cfg(test)]
 fn tool_requires_fresh_index(name: &str) -> bool {
     !matches!(
         name,
@@ -948,6 +962,11 @@ fn tools_list(version: ProtocolVersion) -> Value {
             if version.is_current() {
                 let annotations = match tool.behavior {
                     ToolBehavior::ReadOnly => json!({ "readOnlyHint": true }),
+                    ToolBehavior::RefreshableQuery => json!({
+                        "readOnlyHint": false,
+                        "destructiveHint": false,
+                        "idempotentHint": true
+                    }),
                     ToolBehavior::AdditiveNonIdempotent => json!({
                         "readOnlyHint": false,
                         "destructiveHint": false,
@@ -975,6 +994,49 @@ fn handle_tools_call(
     params: &Value,
 ) -> Result<Value, ToolCallError> {
     handle_tools_call_inner(version, store, params, None)
+}
+
+fn invoke_tool(
+    tool: &ToolDef,
+    tool_name: &str,
+    store: &mut Store,
+    arguments: &Value,
+    impact_engine: Option<&queries::ImpactEngine<'_>>,
+) -> Result<Value, HandlerError> {
+    match (tool_name, impact_engine) {
+        ("mmcg_change_impact", Some(engine)) => {
+            handle_change_impact_with_engine(store, arguments, engine)
+        }
+        ("mmcg_test_impact", Some(engine)) => {
+            handle_test_impact_with_engine(store, arguments, engine)
+        }
+        _ => (tool.handler)(store, arguments),
+    }
+}
+
+fn invoke_tool_with_budget(
+    tool: &ToolDef,
+    tool_name: &str,
+    store: &mut Store,
+    arguments: &Value,
+    impact_engine: Option<&queries::ImpactEngine<'_>>,
+    budget: WorkBudget,
+) -> (Option<Result<Value, HandlerError>>, Option<InterruptSource>) {
+    let already_expired = store.push_work_budget(budget);
+    let handled = if already_expired {
+        None
+    } else {
+        Some(invoke_tool(
+            tool,
+            tool_name,
+            store,
+            arguments,
+            impact_engine,
+        ))
+    };
+    let interrupt = store.take_interrupt_source();
+    store.pop_work_budget();
+    (handled, interrupt)
 }
 
 fn handle_tools_call_inner(
@@ -1010,22 +1072,47 @@ fn handle_tools_call_inner(
     // ever runs, so coverage doesn't depend on a query being slow enough to
     // trip the in-flight progress-handler check.
     let budget = store.default_work_budget();
-    let already_expired = store.push_work_budget(budget);
-    let handled = if already_expired {
-        None
+    let (mut handled, mut interrupt) =
+        invoke_tool_with_budget(tool, tool_name, store, &arguments, impact_engine, budget);
+
+    // Argument parsing happens before each structural handler checks
+    // freshness, preserving precise invalid-argument errors without indexing.
+    // A validated stale call gets one refresh outside the narrow query budget,
+    // then one retry. The request watchdog and client cancellation still bound
+    // both indexing and the retried query.
+    let stale_index = if interrupt.is_none() && tool_requires_fresh_index(tool_name) {
+        match handled.as_ref() {
+            Some(Err(HandlerError::IndexStale {
+                stale_files,
+                extractor_contract_current,
+                ..
+            })) => Some((*stale_files, *extractor_contract_current)),
+            _ => None,
+        }
     } else {
-        Some(match (tool_name, impact_engine) {
-            ("mmcg_change_impact", Some(engine)) => {
-                handle_change_impact_with_engine(store, &arguments, engine)
-            }
-            ("mmcg_test_impact", Some(engine)) => {
-                handle_test_impact_with_engine(store, &arguments, engine)
-            }
-            _ => (tool.handler)(store, &arguments),
-        })
+        None
     };
-    let interrupt = store.take_interrupt_source();
-    store.pop_work_budget();
+    let mut refresh_completed = false;
+    if let Some((stale_files, extractor_contract_current)) = stale_index {
+        let refresh = refresh_stale_index(store, stale_files, extractor_contract_current);
+        interrupt = store.take_interrupt_source();
+        if interrupt.is_none() {
+            match refresh {
+                Ok(()) => {
+                    refresh_completed = true;
+                    (handled, interrupt) = invoke_tool_with_budget(
+                        tool,
+                        tool_name,
+                        store,
+                        &arguments,
+                        impact_engine,
+                        budget,
+                    );
+                }
+                Err(error) => handled = Some(Err(error)),
+            }
+        }
+    }
 
     match handled {
         Some(Ok(payload)) => tool_result(version, payload, false),
@@ -1039,9 +1126,14 @@ fn handle_tools_call_inner(
                 HandlerError::IndexStale {
                     stale_files,
                     extractor_contract_current,
+                    refresh_attempted,
                 } => tool_result(
                     version,
-                    index_stale_payload(stale_files, extractor_contract_current),
+                    index_stale_payload(
+                        stale_files,
+                        extractor_contract_current,
+                        refresh_attempted || refresh_completed,
+                    ),
                     true,
                 ),
                 HandlerError::Internal { class } => Err(ToolCallError::Internal { class }),
@@ -1051,23 +1143,104 @@ fn handle_tools_call_inner(
     }
 }
 
-fn index_stale_payload(stale_files: usize, extractor_contract_current: bool) -> Value {
+fn index_stale_payload(
+    stale_files: usize,
+    extractor_contract_current: bool,
+    refresh_attempted: bool,
+) -> Value {
+    let guidance = if refresh_attempted {
+        "automatic refresh did not produce a fresh index; run `mastermind index .` and inspect indexing errors"
+    } else {
+        "automatic refresh is unavailable for this index; run `mastermind index .` before using structural mmcg tools"
+    };
     json!({
         "code": "index_stale",
         "stale_files": stale_files,
         "extractor_contract_current": extractor_contract_current,
-        "guidance": "run `mastermind index .` before using structural mmcg tools"
+        "refresh_attempted": refresh_attempted,
+        "guidance": guidance
     })
 }
 
+fn index_stale_error(
+    stale_files: usize,
+    extractor_contract_current: bool,
+    refresh_attempted: bool,
+) -> HandlerError {
+    HandlerError::IndexStale {
+        stale_files,
+        extractor_contract_current,
+        refresh_attempted,
+    }
+}
+
+fn safe_index_status(store: &Store) -> Result<queries::StatusResponse, HandlerError> {
+    if let Some(root) = managed_auto_refresh_root(store) {
+        if crate::indexer::validate_index_root(store, &root).is_err() {
+            return Ok(queries::StatusResponse {
+                db_path: store.db_path().to_string_lossy().to_string(),
+                symbol_count: store
+                    .symbol_count()
+                    .map_err(|error| HandlerError::internal("symbol_count_query", error))?,
+                file_count: store
+                    .file_count()
+                    .map_err(|error| HandlerError::internal("file_count_query", error))?,
+                stale_files: 1,
+                extractor_contract_current: store
+                    .extractor_contract_current()
+                    .map_err(|error| HandlerError::internal("extractor_contract_query", error))?,
+            });
+        }
+    }
+    queries::status(store).map_err(|error| HandlerError::internal("index_freshness_query", error))
+}
+
 fn ensure_fresh_index(store: &Store) -> Result<(), HandlerError> {
-    let status = queries::status(store)
-        .map_err(|error| HandlerError::internal("index_freshness_query", error))?;
+    let status = safe_index_status(store)?;
     if status.stale_files > 0 || !status.extractor_contract_current {
-        return Err(HandlerError::IndexStale {
-            stale_files: status.stale_files,
-            extractor_contract_current: status.extractor_contract_current,
-        });
+        return Err(index_stale_error(
+            status.stale_files,
+            status.extractor_contract_current,
+            false,
+        ));
+    }
+    Ok(())
+}
+
+/// Derive refresh authority from the canonical managed database location, not
+/// from mutable index metadata that could redirect automatic filesystem reads.
+fn managed_auto_refresh_root(store: &Store) -> Option<PathBuf> {
+    let db_path = store.db_path().canonicalize().ok()?;
+    if db_path.file_name()? != OsStr::new("mmcg.db") {
+        return None;
+    }
+    let state_dir = db_path.parent()?;
+    if state_dir.file_name()? != OsStr::new(".mastermind") {
+        return None;
+    }
+    state_dir.parent()?.canonicalize().ok()
+}
+
+fn refresh_stale_index(
+    store: &mut Store,
+    stale_files: usize,
+    extractor_contract_current: bool,
+) -> Result<(), HandlerError> {
+    let Some(root) = managed_auto_refresh_root(store) else {
+        return Err(index_stale_error(
+            stale_files,
+            extractor_contract_current,
+            false,
+        ));
+    };
+
+    let refresh = crate::indexer::Indexer::new(root).index_all(store, false);
+    if !matches!(refresh, Ok(stats) if stats.files_failed == 0) {
+        return Err(index_stale_error(
+            stale_files,
+            extractor_contract_current,
+            true,
+        ));
     }
     Ok(())
 }
@@ -1601,7 +1774,7 @@ fn schema_recent_changes() -> Value {
 fn schema_status() -> Value {
     json!({
         "name": "mmcg_status",
-        "description": "Show index health — file count, symbol count, db path, extractor-contract compatibility, and `stale_files`: the number of added, deleted, or newer indexable source paths relative to their stored snapshot (capped at 100). If `extractor_contract_current` is false or `stale_files` is non-zero, re-index before trusting structural answers.",
+        "description": "Show index health — file count, symbol count, db path, extractor-contract compatibility, and `stale_files`: the number of added, deleted, or newer indexable source paths relative to their stored snapshot (capped at 100). Structural tools automatically refresh a stale managed `.mastermind/mmcg.db` before querying. Custom external indexes remain manual-refresh-only; unavailable or failed refreshes return `index_stale`.",
         "inputSchema": { "type": "object", "properties": {} }
     })
 }
@@ -2149,8 +2322,7 @@ fn handle_recent_changes(store: &mut Store, args: &Value) -> Result<Value, Handl
 }
 
 fn handle_status(store: &mut Store, _args: &Value) -> Result<Value, HandlerError> {
-    let r =
-        queries::status(store).map_err(|error| HandlerError::internal("status_query", error))?;
+    let r = safe_index_status(store)?;
     serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
@@ -2768,6 +2940,7 @@ mod tests {
         let tools = current["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 28);
         let mut readers = 0;
+        let mut refreshers = 0;
         for tool in tools {
             let annotations = &tool["annotations"];
             assert!(annotations.get("openWorldHint").is_none());
@@ -2780,12 +2953,23 @@ mod tests {
                         "idempotentHint": false
                     })
                 );
+            } else if tool_requires_fresh_index(tool["name"].as_str().unwrap()) {
+                assert_eq!(
+                    annotations,
+                    &json!({
+                        "readOnlyHint": false,
+                        "destructiveHint": false,
+                        "idempotentHint": true
+                    })
+                );
+                refreshers += 1;
             } else {
                 assert_eq!(annotations, &json!({ "readOnlyHint": true }));
                 readers += 1;
             }
         }
-        assert_eq!(readers, 27);
+        assert_eq!(readers, 8);
+        assert_eq!(refreshers, 19);
     }
 
     #[test]
@@ -2983,7 +3167,14 @@ mod tests {
             .iter()
             .find(|tool| tool["name"] == "mmcg_map")
             .unwrap();
-        assert_eq!(map["annotations"], json!({ "readOnlyHint": true }));
+        assert_eq!(
+            map["annotations"],
+            json!({
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": true
+            })
+        );
     }
 
     fn impact_fixture(name: &str) -> (std::path::PathBuf, crate::store::Store) {
@@ -3011,9 +3202,7 @@ mod tests {
         run(&["add", "-A"]);
         run(&["commit", "-q", "-m", "baseline"]);
         std::fs::write(root.join("src/app.py"), "def value():\n    return 2\n").unwrap();
-        let db =
-            std::env::temp_dir().join(format!("mmcg-mcp-impact-{}-{name}.db", std::process::id()));
-        let _ = std::fs::remove_file(&db);
+        let db = root.join(".mastermind/mmcg.db");
         let mut store = crate::store::Store::open(db).unwrap();
         crate::indexer::Indexer::new(&root)
             .index_all(&mut store, true)
@@ -3037,7 +3226,7 @@ mod tests {
     }
 
     #[test]
-    fn temporal_tool_returns_schema_v1_and_is_read_only() {
+    fn temporal_tool_returns_schema_v1_and_is_non_destructive() {
         let (root, mut store) = impact_fixture("temporal");
         let actual = handle_temporal(
             &mut store,
@@ -3062,7 +3251,14 @@ mod tests {
             .iter()
             .find(|tool| tool["name"] == "mmcg_temporal")
             .unwrap();
-        assert_eq!(temporal["annotations"], json!({ "readOnlyHint": true }));
+        assert_eq!(
+            temporal["annotations"],
+            json!({
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": true
+            })
+        );
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -3482,8 +3678,159 @@ mod tests {
     }
 
     #[test]
-    fn structural_tools_fail_closed_when_index_is_stale() {
+    fn structural_tool_refreshes_stale_index_before_query() {
         let (root, mut store) = impact_fixture("stale-structural-tool");
+        std::fs::write(
+            root.join("src/unindexed.py"),
+            "def unindexed():\n    return 1\n",
+        )
+        .unwrap();
+
+        let stale_status = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({ "name": "mmcg_status", "arguments": {} }),
+        )
+        .unwrap();
+        assert_eq!(stale_status["isError"], false);
+        assert!(
+            unwrap_content(&stale_status)["stale_files"]
+                .as_u64()
+                .unwrap()
+                >= 1
+        );
+
+        let refreshed = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({
+                "name": "mmcg_search",
+                "arguments": { "name": "unindexed" }
+            }),
+        )
+        .unwrap();
+        assert_eq!(refreshed["isError"], false);
+        let payload = unwrap_content(&refreshed);
+        assert_eq!(payload["results"][0]["name"], "unindexed");
+        assert_eq!(payload["results"][0]["file"], "src/unindexed.py");
+
+        let fresh_status = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({ "name": "mmcg_status", "arguments": {} }),
+        )
+        .unwrap();
+        assert_eq!(unwrap_content(&fresh_status)["stale_files"], 0);
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn structural_tool_rebuilds_an_outdated_extractor_contract() {
+        let (root, mut store) = impact_fixture("stale-extractor-contract");
+        store
+            .set_meta(
+                crate::indexer::EXTRACTOR_CONTRACT_META_KEY,
+                "outdated-contract",
+            )
+            .unwrap();
+
+        let stale_status = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({ "name": "mmcg_status", "arguments": {} }),
+        )
+        .unwrap();
+        assert_eq!(
+            unwrap_content(&stale_status)["extractor_contract_current"],
+            false
+        );
+
+        let rebuilt = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({ "name": "mmcg_search", "arguments": { "name": "value" } }),
+        )
+        .unwrap();
+        assert_eq!(rebuilt["isError"], false);
+        assert_eq!(unwrap_content(&rebuilt)["results"][0]["name"], "value");
+
+        let fresh_status = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({ "name": "mmcg_status", "arguments": {} }),
+        )
+        .unwrap();
+        assert_eq!(
+            unwrap_content(&fresh_status)["extractor_contract_current"],
+            true
+        );
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn structural_tool_does_not_refresh_from_tampered_index_root() {
+        let (root, mut store) = impact_fixture("tampered-index-root");
+        let untrusted_root =
+            std::env::temp_dir().join(format!("mmcg-mcp-untrusted-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&untrusted_root);
+        std::fs::create_dir_all(&untrusted_root).unwrap();
+        std::fs::write(
+            untrusted_root.join("secret.py"),
+            "def secret_symbol():\n    return 1\n",
+        )
+        .unwrap();
+        store
+            .set_meta(
+                "index_root",
+                &untrusted_root.canonicalize().unwrap().to_string_lossy(),
+            )
+            .unwrap();
+
+        let status = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({ "name": "mmcg_status", "arguments": {} }),
+        )
+        .unwrap();
+        assert_eq!(status["isError"], false);
+        assert_eq!(unwrap_content(&status)["stale_files"], 1);
+
+        let result = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({ "name": "mmcg_search", "arguments": { "name": "secret_symbol" } }),
+        )
+        .unwrap();
+        let payload = unwrap_content(&result);
+        assert_eq!(result["isError"], true);
+        assert_eq!(payload["code"], "index_stale");
+        assert_eq!(payload["refresh_attempted"], true);
+        assert!(payload["guidance"]
+            .as_str()
+            .unwrap()
+            .contains("automatic refresh did not produce a fresh index"));
+        assert_eq!(result["structuredContent"], payload);
+        assert!(queries::search(&store, "secret_symbol", None, None, true)
+            .unwrap()
+            .results
+            .is_empty());
+
+        std::fs::remove_dir_all(untrusted_root).ok();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn external_index_queries_remain_compatible_but_refresh_manually() {
+        let (root, managed_store) = impact_fixture("external-index");
+        drop(managed_store);
+        let external_dir = tempfile::tempdir().unwrap();
+        let mut store = crate::store::Store::open(external_dir.path().join("index.db")).unwrap();
+        crate::indexer::Indexer::new(&root)
+            .index_all(&mut store, true)
+            .unwrap();
+
         let fresh = handle_tools_call(
             ProtocolVersion::Current,
             &mut store,
@@ -3497,6 +3844,33 @@ mod tests {
             "def unindexed():\n    return 1\n",
         )
         .unwrap();
+        let stale = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({ "name": "mmcg_search", "arguments": { "name": "unindexed" } }),
+        )
+        .unwrap();
+        let payload = unwrap_content(&stale);
+        assert_eq!(stale["isError"], true);
+        assert_eq!(payload["code"], "index_stale");
+        assert_eq!(payload["refresh_attempted"], false);
+        assert!(queries::search(&store, "unindexed", None, None, true)
+            .unwrap()
+            .results
+            .is_empty());
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn every_structural_handler_enforces_freshness_before_query() {
+        let (root, mut store) = impact_fixture("handler-freshness-invariant");
+        std::fs::write(
+            root.join("src/unindexed.py"),
+            "def unindexed():\n    return 1\n",
+        )
+        .unwrap();
+
         for tool in TOOLS
             .iter()
             .filter(|tool| tool_requires_fresh_index(tool.name))
@@ -3524,43 +3898,13 @@ mod tests {
                 }
                 name => panic!("missing valid-argument fixture for structural tool {name}"),
             };
-            let stale = handle_tools_call(
-                ProtocolVersion::Current,
-                &mut store,
-                &json!({ "name": tool.name, "arguments": arguments }),
-            )
-            .unwrap();
-            let payload = unwrap_content(&stale);
-            assert_eq!(stale["isError"], true, "{} did not fail", tool.name);
-            assert_eq!(
-                payload["code"], "index_stale",
-                "{} did not fail closed",
+            let error = (tool.handler)(&mut store, &arguments).unwrap_err();
+            assert!(
+                matches!(error, HandlerError::IndexStale { .. }),
+                "{} queried without enforcing freshness: {error:?}",
                 tool.name
             );
-            assert!(payload["stale_files"].as_u64().unwrap() >= 1);
-            assert_eq!(payload["extractor_contract_current"], true);
-            assert_eq!(stale["structuredContent"], payload);
         }
-
-        let status = handle_tools_call(
-            ProtocolVersion::Current,
-            &mut store,
-            &json!({ "name": "mmcg_status", "arguments": {} }),
-        )
-        .unwrap();
-        assert_eq!(status["isError"], false);
-        assert!(unwrap_content(&status)["stale_files"].as_u64().unwrap() >= 1);
-
-        let scratchpad = handle_tools_call(
-            ProtocolVersion::Current,
-            &mut store,
-            &json!({
-                "name": "mmcg_scratchpad_append",
-                "arguments": { "agent": "test", "kind": "note", "body": "stale recovery" }
-            }),
-        )
-        .unwrap();
-        assert_eq!(scratchpad["isError"], false);
 
         std::fs::remove_dir_all(root).ok();
     }
@@ -3583,6 +3927,12 @@ mod tests {
                 tool_requires_fresh_index(tool.name),
                 !exempt.contains(&tool.name),
                 "unexpected freshness policy for {}",
+                tool.name
+            );
+            assert_eq!(
+                tool.behavior == ToolBehavior::RefreshableQuery,
+                tool_requires_fresh_index(tool.name),
+                "freshness and MCP behavior drifted for {}",
                 tool.name
             );
         }

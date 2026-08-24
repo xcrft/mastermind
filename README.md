@@ -5,12 +5,12 @@
 <h1 align="center">Mastermind</h1>
 
 <p align="center">
-  <strong>Know what your code change can break before production tells you.</strong>
+  <strong>Review the blast radius, not just the patch.</strong>
 </p>
 
 <p align="center">
   A local, diff-first codegraph for architecture review.<br>
-  Trace a change through callers, components, tests, policies, and evidence without uploading your repository.
+  See what changed, what it reaches, and which evidence supports the review—without uploading your repository.
 </p>
 
 <p align="center">
@@ -21,7 +21,7 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick start</a> ·
+  <a href="#quick-start">5-minute start</a> ·
   <a href="#the-review-surface-your-diff-is-missing">Product tour</a> ·
   <a href="docs/getting-started.md">Documentation</a> ·
   <a href="docs/reference/mmcg.md#mcp-server-usage">MCP tools</a>
@@ -48,7 +48,7 @@ changed symbols  →  downstream reach  →  boundary crossings  →  candidate 
 
 Every claim keeps its source. If the index is stale, a query hits its limit, or
 evidence is incomplete, Mastermind says so instead of manufacturing a green
-check.
+check. You get a review another engineer can inspect, challenge, and replay.
 
 ## Quick start
 
@@ -66,7 +66,8 @@ mastermind ui --since main
 
 That is the whole first run. `index` creates a local SQLite graph at
 `.mastermind/mmcg.db`. `ui` opens Lens on loopback with embedded assets, no
-repository upload, and no CDN.
+repository upload, and no CDN. Start with `impact` in the terminal; open Lens
+when you want the complete review surface.
 
 <p align="center">
   <img src="docs/images/lens/mastermind-lens-live-desktop.png" alt="Mastermind Lens reviewing the current change with changed symbols, downstream impact, boundary crossings, test candidates, and explicit partial-evidence state" width="1000">
@@ -271,14 +272,18 @@ review export remain local.
 
 ## Documentation
 
-- [Start here](docs/getting-started.md)
-- [CLI and MCP reference](docs/reference/mmcg.md)
-- [Review workflow](docs/workflow.md)
-- [Client integrations](docs/integrations)
-- [Fact-ingestion SDK](docs/fact-ingestion-sdk.md)
-- [Verifiable GitHub Action](docs/github-action.md)
-- [Benchmarks](docs/benchmarks.md)
-- [Changelog](CHANGELOG.md)
+Pick the shortest path to the answer you need:
+
+| I want to… | Go here |
+|---|---|
+| See my first impact report | [Getting started](docs/getting-started.md) |
+| Look up a command, limit, schema, or MCP tool | [CLI and MCP reference](docs/reference/mmcg.md) |
+| Connect Claude Code, Codex, Cursor, Continue, or another client | [Client integrations](docs/integrations) |
+| Run Direct, Verified, or Strict delivery | [Review workflow](docs/workflow.md) |
+| Import external evidence safely | [Fact-ingestion SDK](docs/fact-ingestion-sdk.md) |
+| Publish verifiable audit evidence | [GitHub Action](docs/github-action.md) |
+| Reproduce performance numbers | [Benchmarks](docs/benchmarks.md) |
+| See what changed between releases | [Changelog](CHANGELOG.md) |
 
 ## Build and contribute
 

@@ -1,5 +1,8 @@
 # Security policy
 
+Found a way to cross a documented trust boundary? Tell us privately so we can
+verify it without exposing users or working exploit details.
+
 ## Supported versions
 
 | Version | Security fixes |
@@ -7,9 +10,9 @@
 | 2.x | Supported |
 | 1.x and earlier | Upgrade required |
 
-## Report a vulnerability
+## Report privately
 
-Do not open a public issue. Use
+Do not open a public issue or discussion. Use
 [GitHub private vulnerability reporting](https://github.com/xcrft/mastermind/security/advisories/new).
 
 Include:

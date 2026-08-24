@@ -1,7 +1,9 @@
 # MCP servers
 
-Mastermind ships one [Model Context Protocol](https://modelcontextprotocol.io)
-server.
+One local graph, one bounded [Model Context Protocol](https://modelcontextprotocol.io)
+server, no arbitrary SQL surface.
+
+Mastermind currently ships one server:
 
 | Server | Transport | Surface |
 |---|---|---|
@@ -12,5 +14,7 @@ Go, Java, PHP, and C/C++. It exposes structural, semantic, evidence, history,
 and workflow-state queries; it does not expose arbitrary SQL or executable
 plugin hooks.
 
-Start with the [generic MCP guide](../docs/integrations/generic-mcp.md) or the
+Want to connect a client? Start with the
+[generic MCP guide](../docs/integrations/generic-mcp.md). Need exact schemas,
+limits, and precision notes? Use the
 [complete technical reference](../docs/reference/mmcg.md#mcp-tools).

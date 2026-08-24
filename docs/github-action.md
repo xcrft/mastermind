@@ -1,8 +1,11 @@
 # Mastermind verifiable audit Action
 
+Turn a Mastermind audit into evidence GitHub can verify and publish without giving
+pull-request code an OIDC token or write permission.
+
 The Docker Action creates schema-v3 audit envelopes for an exact repository
-snapshot. The recommended deployment separates untrusted pull-request analysis
-from privileged publication.
+snapshot. The secure deployment splits untrusted analysis from privileged
+verification, attestation, and publication.
 
 | Stage | Trigger | Authority | Executes PR code |
 |---|---|---|---|
@@ -11,11 +14,13 @@ from privileged publication.
 | Attest | verified result | OIDC and attestations write only | No |
 | Publish | verified result | Pull-request comment write only | No |
 
-Start from
+Do not assemble that privilege split from memory. Start from the pinned,
+repository-validated examples:
+
 [`mastermind-audit-pr.yml`](examples/mastermind-audit-pr.yml) and
 [`mastermind-audit-publish.yml`](examples/mastermind-audit-publish.yml).
 
-## What each proof means
+## Read the proof correctly
 
 - **Content integrity:** the Mastermind Canonical JSON v1 bytes match their
   SHA-256 digest. Replacing both the manifest and digest can still create a

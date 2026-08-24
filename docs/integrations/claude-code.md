@@ -1,9 +1,10 @@
 # Claude Code integration
 
-Claude Code supports project-local `.mcp.json` configuration and user-scope
-registration through `claude mcp`.
+Give Claude Code the local graph without hand-editing its MCP configuration.
+Use user scope for one installation across repositories or project scope when
+the repository should carry its own `.mcp.json` entry.
 
-## User scope
+## Fastest path: user scope
 
 Install Mastermind, index the repository, and preview registration:
 
@@ -26,7 +27,7 @@ output, and rechecks executable identity before later inspection or mutation.
 The process runs without a shell, has a ten-second limit, and does not print raw
 output.
 
-## Project scope
+## Repository-owned path: project scope
 
 ```bash
 npm install -D @xcraftmind/mastermind
@@ -38,7 +39,7 @@ Project scope merges the canonical `mmcg` entry into `.mcp.json` while
 preserving unrelated root fields and servers. The legacy spelling
 `--project . --write-mcp` remains compatible.
 
-## Update or remove
+## Change or undo safely
 
 A matching entry is an idempotent no-op. A customized entry requires `--force`;
 `--force` never implies `--write`. Before forced file-backed replacement or
@@ -50,7 +51,7 @@ mastermind setup claude --scope project --root . --remove          # dry-run
 mastermind setup claude --scope project --root . --remove --write
 ```
 
-## Verify
+## Verify the result
 
 ```bash
 mastermind doctor

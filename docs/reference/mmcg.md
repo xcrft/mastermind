@@ -1,6 +1,7 @@
 # mmcg — Mastermind Codegraph
 
-This is the exhaustive contract for the `mmcg` engine. Start with
+Need the exact command, limit, schema, precision caveat, or MCP shape? This is
+the source of truth for the `mmcg` engine. Start with
 [Getting started](../getting-started.md) for installation or the
 [project README](../../README.md) for the product overview.
 
@@ -14,9 +15,9 @@ export, and style mining.
 > npm installs the command as both `mastermind` and `mmcg`. Cargo installs
 > `mmcg`. Examples below use `mmcg`; the command surface is identical.
 
-## Reference map
+## Find the exact contract
 
-| Need | Section |
+| You need to verify… | Section |
 |---|---|
 | Supported syntax and known extraction gaps | [What it indexes](#what-it-indexes) |
 | Installation and commands | [Build from source](#build-from-source), [CLI usage](#cli-usage) |

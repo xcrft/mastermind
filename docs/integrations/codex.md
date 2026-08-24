@@ -1,9 +1,10 @@
 # Codex CLI integration
 
-Mastermind registers with Codex at user scope through `codex mcp`. Project
-scope is not supported.
+Give Codex the bounded local graph plus Mastermind's portable delivery skills.
+Mastermind registers through `codex mcp` at user scope; Codex does not currently
+have a project-scope setup path.
 
-## Install and register
+## Install the complete Codex bundle
 
 ```bash
 npm install -g @xcraftmind/mastermind
@@ -23,7 +24,7 @@ spawnable subagent files because Codex has a different agent runtime. This is
 workflow-contract compatibility, not a claim that both clients expose identical
 role orchestration.
 
-The normal task handoff is client-neutral:
+Once installed, the normal task handoff stays client-neutral:
 
 ```bash
 mastermind verify-spec .mastermind/tasks/001-example/spec.md
@@ -49,7 +50,7 @@ must contain the exact stdio command and ordered arguments. Truncated output is
 rejected, and executable identity is rechecked before every inspection or
 mutation within the ten-second bound.
 
-## Update or remove
+## Change or undo safely
 
 A matching native entry is an idempotent no-op. A customized entry requires
 `--force`; `--force` never implies `--write`.
@@ -59,7 +60,7 @@ mastermind setup codex --scope user --remove          # dry-run
 mastermind setup codex --scope user --remove --write
 ```
 
-## Verify
+## Verify the result
 
 ```bash
 mastermind doctor

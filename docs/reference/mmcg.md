@@ -467,6 +467,14 @@ does not maintain a second analysis engine: `/api/lens` wraps the existing
 schema-v1 project-map and change-impact responses, including their truncation,
 precision, collision, and work-limit notes.
 
+If the shared changed-file collection has already hit its 10,000-file cap,
+Lens serializes at most 200 of those file records. The Lens-only collection
+fields keep the distinction explicit: `returned` is the displayed item count,
+`observed` is the impact engine's lower bound, and `projection_truncated` with
+`projection_reason: lens_payload_limit` identifies the transport projection.
+Impact analysis, SARIF, summaries, and manifests continue to use the full
+bounded collection in memory.
+
 The server binds only to `127.0.0.1`; port `0` is the default and lets the OS
 choose a free port. It accepts same-origin `GET`/`HEAD` requests, serves embedded
 offline assets under a restrictive content-security policy, and opens the
@@ -561,6 +569,11 @@ pairs, project knowledge at 500 exact matches, and combined artifact inputs at
 owners per rule, contributor details at five recent names per file, and
 diagnostics at 100. Churn totals stay complete when contributor names are
 truncated. Git output is capped at 8 MiB.
+
+When the changed-file inventory is already truncated, evidence selects symbol,
+impact, and candidate-test paths first, then admits at most 200 file-only paths.
+The response remains partial and reports `relevant_file_limit`; the cap cannot
+be mistaken for complete evidence.
 
 Repository-relative artifact paths match exactly. Reports produced under a
 different absolute build root may use a unique repository-path suffix match;

@@ -1704,7 +1704,7 @@ def validate_audit_action_security() -> list[Issue]:
         issues.append(Issue(docker_path, "error", f"cannot read Dockerfile: {error}"))
     else:
         expected_from = [
-            "rust:1.96-bookworm@sha256:a339861ae23e9abb272cea45dfafde21760d2ce6577a70f8a926153677902663",
+            "rust:1.98-bookworm@sha256:e70e2eec3d495fd5c8e0be74adda86507dfac7f51a724fbf9813ff59b2b247c7",
             "buildpack-deps:bookworm-scm@sha256:de4e518f98c6533eceeee6f8b14a77a918856fa8282a1b711c0292d089157c0c",
         ]
         actual_from = dockerfile_from_images(docker_text)

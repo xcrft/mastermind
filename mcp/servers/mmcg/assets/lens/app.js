@@ -81,14 +81,19 @@
 
   function collection(value) {
     const source = record(value);
+    const returned = finiteNumber(source.returned);
+    const observed = finiteNumber(source.observed);
     return {
       source: source,
       items: array(source.items),
       total: finiteNumber(source.total),
       totalUnknown: Object.prototype.hasOwnProperty.call(source, "total") && source.total === null,
-      returned: finiteNumber(source.returned),
+      returned: returned,
+      observed: observed === null ? returned : observed,
       truncated: source.truncated === true,
       reason: text(source.truncation_reason, ""),
+      projectionTruncated: source.projection_truncated === true,
+      projectionReason: text(source.projection_reason, ""),
     };
   }
 
@@ -96,11 +101,16 @@
     return value.returned === null ? value.items.length : value.returned;
   }
 
+  function observedCount(value) {
+    const returned = returnedCount(value);
+    return value.observed === null ? returned : Math.max(returned, value.observed);
+  }
+
   function totalOrReturned(value) {
     if (value.total !== null) {
       return value.total;
     }
-    return returnedCount(value);
+    return observedCount(value);
   }
 
   function symbolIdentity(value) {
@@ -870,7 +880,8 @@
         results.push({
           label: candidate[0],
           reason: value.reason || (value.totalUnknown ? "incomplete count" : "unspecified limit"),
-          returned: returnedCount(value),
+          returned: observedCount(value),
+          displayed: value.projectionTruncated ? returnedCount(value) : null,
           total: value.total,
         });
       }
@@ -2056,20 +2067,24 @@
 
   function metricPresentation(value) {
     const returned = returnedCount(value);
+    const observed = observedCount(value);
     const partial = value.truncated || value.totalUnknown;
     let metricValue;
     if (value.total !== null) {
       metricValue = displayNumber(value.total);
     } else if (value.totalUnknown) {
-      metricValue = "≥" + displayNumber(returned);
+      metricValue = "≥" + displayNumber(observed);
     } else {
-      metricValue = displayNumber(returned);
+      metricValue = displayNumber(observed);
     }
     let note = displayNumber(returned) + " returned";
     if (value.truncated) {
       note = "Partial · " + (value.reason || "bounded result");
+      if (value.projectionTruncated) {
+        note += " · " + displayNumber(returned) + " shown";
+      }
     } else if (value.totalUnknown) {
-      note = "Count incomplete · " + displayNumber(returned) + " returned";
+      note = "Count incomplete · " + displayNumber(observed) + " observed";
     }
     return { value: metricValue, note: note, partial: partial };
   }
@@ -2102,24 +2117,24 @@
         ? "No returned change evidence. The snapshot is partial; inspect its limits."
         : "No changes were captured against the requested baseline.";
     } else if (crossings > 0) {
-      summary = crossings + " boundary crossing" + (crossings === 1 ? "" : "s") + " observed; " + tests + " test candidate" + (tests === 1 ? "" : "s") + " returned.";
+      summary = crossings + " API crossing" + (crossings === 1 ? "" : "s") + " · " + tests + " test candidate" + (tests === 1 ? "" : "s") + ".";
     } else if (impacts > 0) {
-      summary = "The diff reaches " + impacts + " impacted symbol" + (impacts === 1 ? "" : "s") + " without a returned API crossing.";
+      summary = impacts + " impacted symbol" + (impacts === 1 ? "" : "s") + " · no returned API crossing.";
     } else {
-      summary = "The returned change set is contained; no downstream symbol impact was reported.";
+      summary = "No returned downstream symbol impact.";
     }
     if (files > 0 || symbols > 0) {
       const widest = model.nodes.filter(function (node) {
         return node.type === "changed" && node.blast && node.blast.symbols > 0;
       }).sort(function (left, right) { return right.blast.symbols - left.blast.symbols; })[0];
       if (widest) {
-        summary += " Widest blast: " + text(widest.symbol.name, "unnamed") + " → " + widest.blast.symbols + " symbol" + (widest.blast.symbols === 1 ? "" : "s") + " across " + widest.blast.components + " component" + (widest.blast.components === 1 ? "" : "s") + ".";
+        summary += " Widest: " + text(widest.symbol.name, "unnamed") + " → " + widest.blast.symbols + " symbol" + (widest.blast.symbols === 1 ? "" : "s") + " / " + widest.blast.components + " component" + (widest.blast.components === 1 ? "" : "s") + ".";
       }
       const untested = model.nodes.filter(function (node) {
         return node.type === "changed" && node.blast && node.blast.symbols > 0 && node.blast.testPaths === 0;
       }).length;
       if (untested > 0) {
-        summary += " " + untested + " changed symbol" + (untested === 1 ? "" : "s") + " reach" + (untested === 1 ? "es" : "") + " downstream code with no returned test path.";
+        summary += " " + untested + " changed symbol" + (untested === 1 ? " lacks" : "s lack") + " a returned test path.";
       }
     }
     elements.instrumentSummary.textContent = summary;
@@ -2182,7 +2197,7 @@
         appendNotice(
           "warning",
           state.model.truncations.length + " bounded section" + (state.model.truncations.length === 1 ? "" : "s"),
-          "Review " + causes + suffix + " before approval.",
+          "Review: " + causes + suffix + ".",
           { label: "Open precision & limits", handler: openMethodLedger }
         );
       }
@@ -2556,9 +2571,12 @@
       appendLimitRow(entry[0], entry[1]);
     });
     state.model.truncations.forEach(function (item) {
+      const displayed = finiteNumber(item.displayed);
       const counts = item.returned === null
         ? item.reason
-        : displayNumber(item.returned) + " returned" + (item.total === null ? "" : " / " + displayNumber(item.total) + " total") + " · " + item.reason;
+        : displayed === null
+          ? displayNumber(item.returned) + " returned" + (item.total === null ? "" : " / " + displayNumber(item.total) + " total") + " · " + item.reason
+          : displayNumber(item.returned) + " observed · " + displayNumber(displayed) + " shown · " + item.reason;
       appendLimitRow("Limited / " + item.label, counts);
     });
     const rowCount = elements.limitsList.childElementCount;

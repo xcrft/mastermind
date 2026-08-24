@@ -15,7 +15,47 @@ const PACKAGE_JSON = path.join(HERE, "..", "package.json");
 const PKG = "@xcraftmind/mastermind";
 const REPO = "github.com/xcrft/mastermind";
 const MANIFEST = ".mastermind-workflow.json";
-const MANIFEST_SCHEMA = 1;
+const MANIFEST_SCHEMA = 2;
+const LEGACY_MANIFEST_SCHEMA = 1;
+const DEFAULT_PROFILE = "core";
+
+const CORE_SKILLS = [
+  "mastermind-architecture-review",
+  "mastermind-change-impact",
+  "mastermind-codegraph-research",
+  "mastermind-comment-audit",
+  "mastermind-critical-review",
+  "mastermind-investigation-ledger",
+  "mastermind-project-history",
+  "mastermind-project-map",
+  "mastermind-structured-report-contract",
+  "mastermind-task-executor",
+  "mastermind-task-planning",
+  "mastermind-test-audit",
+  "mastermind-test-impact",
+  "no-ai-slop-comments",
+];
+const FRONTEND_SKILLS = [
+  ...CORE_SKILLS,
+  "mastermind-browser-verification",
+  "mastermind-component-research",
+  "mastermind-design-intake",
+  "mastermind-frontend-audit",
+  "mastermind-runtime-research",
+].sort();
+const SECURITY_SKILLS = [
+  ...CORE_SKILLS,
+  "mastermind-agent-security-review",
+  "mastermind-audit-attestation",
+  "mastermind-security-research",
+].sort();
+
+export const PROFILE_NAMES = Object.freeze(["core", "frontend", "security", "full"]);
+const PROFILE_SKILLS = Object.freeze({
+  core: Object.freeze(CORE_SKILLS),
+  frontend: Object.freeze(FRONTEND_SKILLS),
+  security: Object.freeze(SECURITY_SKILLS),
+});
 
 const tty = process.stdout.isTTY && !process.env.NO_COLOR;
 const paint = (code, value) => (tty ? `\x1b[${code}m${value}\x1b[0m` : value);
@@ -100,6 +140,42 @@ export function bundled(share = DEFAULT_SHARE) {
   return { subagents, skills };
 }
 
+function assertProfile(profile) {
+  if (!PROFILE_NAMES.includes(profile)) {
+    throw new Error(`unsupported workflow profile ${JSON.stringify(profile)}; use ${PROFILE_NAMES.join(", ")}`);
+  }
+  return profile;
+}
+
+function linkedSkills(skillPath) {
+  const text = fs.readFileSync(path.join(skillPath, "SKILL.md"), "utf8");
+  return [...text.matchAll(/\[\[([a-z0-9-]+)\]\]/g)].map((match) => match[1]);
+}
+
+export function profileBundle(bundle, profile, share = DEFAULT_SHARE) {
+  assertProfile(profile);
+  const skills = profile === "full" ? bundle.skills : [...PROFILE_SKILLS[profile]];
+  const available = new Set(bundle.skills);
+  const selected = new Set(skills);
+  const missing = skills.filter((skill) => !available.has(skill));
+  if (missing.length > 0) {
+    throw new Error(`workflow profile ${profile} references missing skill(s): ${missing.join(", ")}`);
+  }
+  for (const skill of skills) {
+    for (const linked of linkedSkills(path.join(share, "skills", skill))) {
+      if (available.has(linked) && !selected.has(linked)) {
+        throw new Error(`workflow profile ${profile} is not closed: ${skill} links to ${linked}`);
+      }
+    }
+  }
+  return { subagents: bundle.subagents, skills };
+}
+
+function manifestProfile(manifest) {
+  if (!manifest) return DEFAULT_PROFILE;
+  return manifest.schema_version === LEGACY_MANIFEST_SCHEMA ? "full" : manifest.profile;
+}
+
 function expandClients(client) {
   if (client === "all") return Object.keys(CLIENTS);
   if (!Object.hasOwn(CLIENTS, client)) {
@@ -130,8 +206,10 @@ export function readManifest(manifestPath) {
   } catch (error) {
     throw new Error(`invalid workflow manifest at ${manifestPath}: ${error.message}`);
   }
+  const schema = value?.schema_version;
+  const validSchema = schema === LEGACY_MANIFEST_SCHEMA || schema === MANIFEST_SCHEMA;
   const valid =
-    value?.schema_version === MANIFEST_SCHEMA &&
+    validSchema &&
     value?.package === PKG &&
     typeof value?.version === "string" &&
     Object.hasOwn(CLIENTS, value?.client) &&
@@ -141,14 +219,17 @@ export function readManifest(manifestPath) {
     typeof value.digests === "object" &&
     !Array.isArray(value.digests);
   if (!valid) throw new Error(`unsupported workflow manifest at ${manifestPath}`);
+  const expectedFields = schema === MANIFEST_SCHEMA
+    ? ["artifacts", "client", "digests", "package", "profile", "schema_version", "version"]
+    : ["artifacts", "client", "digests", "package", "schema_version", "version"];
   if (
-    JSON.stringify(Object.keys(value).sort()) !==
-      JSON.stringify(["artifacts", "client", "digests", "package", "schema_version", "version"]) ||
+    JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(expectedFields) ||
     JSON.stringify(Object.keys(value.artifacts).sort()) !==
       JSON.stringify(["agents", "skills"])
   ) {
     throw new Error(`unsupported workflow manifest fields at ${manifestPath}`);
   }
+  if (schema === MANIFEST_SCHEMA) assertProfile(value.profile);
   for (const name of value.artifacts.agents) safeName(name, "manifest agent");
   for (const name of value.artifacts.skills) safeName(name, "manifest skill");
   const owned = [
@@ -175,19 +256,11 @@ function removePath(target) {
   fs.rmSync(target, { recursive: true, force: true });
 }
 
-function installClient({ home, share, client, version }) {
-  const bundle = bundled(share);
-  const target = targetFor(home, client);
+function beginClientInstall({ share, target, client, version, profile, previous, desired }) {
   fs.mkdirSync(target.root, { recursive: true });
-  const previous = readManifest(target.manifestPath);
   if (previous && previous.client !== client) {
     throw new Error(`workflow manifest client mismatch at ${target.manifestPath}`);
   }
-
-  const desired = {
-    agents: target.config.agents ? bundle.subagents : [],
-    skills: bundle.skills,
-  };
   const digests = Object.fromEntries([
     ...desired.agents.map((name) => [
       `agents/${name}`,
@@ -203,6 +276,7 @@ function installClient({ home, share, client, version }) {
     package: PKG,
     version,
     client,
+    profile,
     artifacts: desired,
     digests,
   };
@@ -213,6 +287,18 @@ function installClient({ home, share, client, version }) {
   const stagedManifest = path.join(stage, MANIFEST);
   const installed = [];
   const backups = [];
+
+  const rollback = () => {
+    for (const destination of installed.reverse()) removePath(destination);
+    for (const { destination, backup } of backups.reverse()) {
+      if (fs.existsSync(destination)) removePath(destination);
+      if (fs.existsSync(backup)) {
+        fs.mkdirSync(path.dirname(destination), { recursive: true });
+        fs.renameSync(backup, destination);
+      }
+    }
+    removePath(stage);
+  };
 
   try {
     if (target.config.agents) {
@@ -272,24 +358,30 @@ function installClient({ home, share, client, version }) {
     }
 
     replace(stagedManifest, target.manifestPath, "manifest.json");
-    removePath(stage);
     return {
-      client,
-      root: target.root,
-      skills: desired.skills.length,
-      subagents: desired.agents.length,
-      version,
+      result: {
+        client,
+        root: target.root,
+        profile,
+        skills: desired.skills.length,
+        subagents: desired.agents.length,
+        version,
+      },
+      finalize: () => {
+        try {
+          removePath(stage);
+          return null;
+        } catch (error) {
+          return {
+            cleanup_pending: fs.existsSync(stage) ? stage : null,
+            cleanup_error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      },
+      rollback,
     };
   } catch (error) {
-    for (const destination of installed.reverse()) removePath(destination);
-    for (const { destination, backup } of backups.reverse()) {
-      if (fs.existsSync(destination)) removePath(destination);
-      if (fs.existsSync(backup)) {
-        fs.mkdirSync(path.dirname(destination), { recursive: true });
-        fs.renameSync(backup, destination);
-      }
-    }
-    removePath(stage);
+    rollback();
     throw error;
   }
 }
@@ -299,13 +391,59 @@ export function copyAll({
   share = DEFAULT_SHARE,
   client = "claude",
   version = packageVersion(),
+  profile = null,
 } = {}) {
+  if (profile !== null) assertProfile(profile);
   const names = expandClients(client);
   const bundle = bundled(share);
-  for (const name of names) readManifest(targetFor(home, name).manifestPath);
-  for (const agent of bundle.subagents) artifactDigest(path.join(share, "agents", agent));
-  for (const skill of bundle.skills) artifactDigest(path.join(share, "skills", skill));
-  return names.map((name) => installClient({ home, share, client: name, version }));
+  const installs = names.map((name) => {
+    const target = targetFor(home, name);
+    const previous = readManifest(target.manifestPath);
+    const selectedProfile = profile ?? manifestProfile(previous);
+    const selected = profileBundle(bundle, selectedProfile, share);
+    return {
+      client: name,
+      target,
+      previous,
+      profile: selectedProfile,
+      desired: {
+        agents: target.config.agents ? selected.subagents : [],
+        skills: selected.skills,
+      },
+    };
+  });
+
+  for (const install of installs) {
+    for (const agent of install.desired.agents) {
+      artifactDigest(path.join(share, "agents", agent));
+    }
+    for (const skill of install.desired.skills) {
+      artifactDigest(path.join(share, "skills", skill));
+    }
+  }
+
+  const transactions = [];
+  try {
+    for (const install of installs) {
+      transactions.push(beginClientInstall({
+        share,
+        version,
+        ...install,
+      }));
+    }
+  } catch (error) {
+    for (const transaction of transactions.reverse()) transaction.rollback();
+    throw error;
+  }
+  for (const transaction of transactions) {
+    const cleanup = transaction.finalize();
+    if (cleanup !== null) Object.assign(transaction.result, cleanup);
+  }
+  return transactions.map((transaction) => transaction.result);
+}
+
+function installClient({ home, share, client, version }) {
+  return copyAll({ home, share, client, version, profile: "full" })[0];
 }
 
 export function workflowStatus({
@@ -313,7 +451,9 @@ export function workflowStatus({
   share = DEFAULT_SHARE,
   client = "claude",
   version = packageVersion(),
+  profile = null,
 } = {}) {
+  if (profile !== null) assertProfile(profile);
   const bundle = bundled(share);
   return expandClients(client).map((name) => {
     const target = targetFor(home, name);
@@ -324,9 +464,11 @@ export function workflowStatus({
     } catch (error) {
       manifestError = error.message;
     }
+    const selectedProfile = profile ?? manifestProfile(manifest);
+    const selected = profileBundle(bundle, selectedProfile, share);
     const expected = {
-      agents: target.config.agents ? bundle.subagents : [],
-      skills: bundle.skills,
+      agents: target.config.agents ? selected.subagents : [],
+      skills: selected.skills,
     };
     const missing = [];
     const drifted = [];
@@ -350,14 +492,17 @@ export function workflowStatus({
       }
     }
     const manifestMatches =
+      manifest?.schema_version === MANIFEST_SCHEMA &&
       manifest?.version === version &&
       manifest?.client === name &&
+      manifest?.profile === selectedProfile &&
       JSON.stringify(manifest?.artifacts) === JSON.stringify(expected) &&
       JSON.stringify(manifest?.digests) === JSON.stringify(expectedDigests);
     return {
       client: name,
       root: target.root,
       version,
+      profile: selectedProfile,
       installed_version: manifest?.version ?? null,
       manifest: manifestError ? "invalid" : manifest ? "present" : "missing",
       manifest_error: manifestError,
@@ -393,8 +538,13 @@ function completionBox(results, { updated, mcp }) {
   ];
   for (const result of results) {
     lines.push(
-      `${indent}${result.client}: ${green(`${result.skills} skills`)} + ${green(`${result.subagents} subagents`)} → ${result.root}`,
+      `${indent}${result.client}: ${green(result.profile)} profile, ${green(`${result.skills} skills`)} + ${green(`${result.subagents} subagents`)} → ${result.root}`,
     );
+    if (result.cleanup_pending) {
+      lines.push(
+        `${indent}${yellow("⚠")} cleanup pending at ${result.cleanup_pending}: ${result.cleanup_error}`,
+      );
+    }
     if (!updated && mcp) {
       lines.push(
         `${indent}${mcp[result.client] ? green("✓") : yellow("⚠")} ${result.client} MCP ${mcp[result.client] ? "registered" : "registration failed"}`,
@@ -412,9 +562,10 @@ function completionBox(results, { updated, mcp }) {
   console.log(lines.join("\n"));
 }
 
-function listBundled(share = DEFAULT_SHARE) {
-  const { subagents, skills } = bundled(share);
-  console.log(bold(`\n  ${PKG} — ${skills.length} skills + ${subagents.length} Claude subagents\n`));
+function listBundled(share = DEFAULT_SHARE, profile = DEFAULT_PROFILE) {
+  const selected = profileBundle(bundled(share), profile, share);
+  const { subagents, skills } = selected;
+  console.log(bold(`\n  ${PKG} — ${profile} profile: ${skills.length} skills + ${subagents.length} Claude subagents\n`));
   console.log(dim("  skills (Claude + Codex)"));
   for (const skill of skills) console.log(`    ${skill}`);
   console.log(dim("\n  subagents (Claude adapter)"));
@@ -434,11 +585,17 @@ export function parseArgs(argv) {
   const command = argv[0] ?? "install";
   let client = "claude";
   let json = false;
+  let profile = null;
   for (let index = 1; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--client") {
       client = argv[index + 1];
       if (!client) throw new Error("--client requires claude, codex, or all");
+      index += 1;
+    } else if (arg === "--profile") {
+      profile = argv[index + 1];
+      if (!profile) throw new Error(`--profile requires ${PROFILE_NAMES.join(", ")}`);
+      assertProfile(profile);
       index += 1;
     } else if (arg === "--json") {
       json = true;
@@ -447,25 +604,29 @@ export function parseArgs(argv) {
     }
   }
   expandClients(client);
-  return { command, client, json };
+  return { command, client, json, profile };
 }
 
 export async function main(argv = process.argv.slice(2)) {
   try {
-    const { command, client, json } = parseArgs(argv);
+    const { command, client, json, profile } = parseArgs(argv);
     if (command === "list") {
-      listBundled();
+      listBundled(DEFAULT_SHARE, profile ?? DEFAULT_PROFILE);
       return 0;
     }
     if (command === "doctor") {
-      const statuses = workflowStatus({ client, home: process.env.MASTERMIND_WORKFLOW_HOME });
+      const statuses = workflowStatus({
+        client,
+        profile,
+        home: process.env.MASTERMIND_WORKFLOW_HOME,
+      });
       if (json) {
         console.log(JSON.stringify({ schema_version: 1, clients: statuses }, null, 2));
       } else {
         console.log("\nMastermind workflow parity\n");
         for (const status of statuses) {
           console.log(`  ${status.parity ? green("✓") : yellow("⚠")} ${status.client} — ${status.parity ? "current" : "drifted"}`);
-          console.log(`    bundle ${status.version}; installed ${status.installed_version ?? "unknown"}; manifest ${status.manifest}`);
+          console.log(`    profile ${status.profile}; bundle ${status.version}; installed ${status.installed_version ?? "unknown"}; manifest ${status.manifest}`);
           for (const item of status.missing) console.log(`    missing ${item}`);
           for (const item of status.drifted) console.log(`    drifted ${item}`);
           if (status.manifest_error) console.log(`    ${status.manifest_error}`);
@@ -480,8 +641,9 @@ export async function main(argv = process.argv.slice(2)) {
 
     if (command === "install") {
       const names = expandClients(client).join(" + ");
+      const profileLabel = profile ?? "installed profile (core when new)";
       const ok = await confirm(
-        `\n  Install the Mastermind workflow for ${green(names)} and register MCP? ${dim("[Y/n]")} `,
+        `\n  Install the ${green(profileLabel)} Mastermind workflow for ${green(names)} and register MCP? ${dim("[Y/n]")} `,
       );
       if (!ok) {
         console.log(dim("  Aborted — nothing written."));
@@ -489,7 +651,11 @@ export async function main(argv = process.argv.slice(2)) {
       }
     }
 
-    const results = copyAll({ client, home: process.env.MASTERMIND_WORKFLOW_HOME });
+    const results = copyAll({
+      client,
+      profile,
+      home: process.env.MASTERMIND_WORKFLOW_HOME,
+    });
     const mcp = {};
     if (command === "install") {
       for (const result of results) mcp[result.client] = registerMcp(result.client);

@@ -191,11 +191,17 @@ provenance into the package.
 ### Give coding agents bounded context
 
 ```bash
-mastermind install --client all
+mastermind install --client all --profile core
 mastermind setup cursor --scope user --write
 mastermind setup continue --scope user --write
 mastermind doctor --workflow --client all
 ```
+
+Fresh workflow installs default to the 14-skill `core` profile. Use `frontend`
+or `security` for a focused extension, or `full` for all 26 portable skills.
+Profiles reduce skill discovery; Claude keeps the complete named-subagent set so
+workflow routes do not dangle. `mastermind update` preserves each client's
+installed profile unless `--profile` explicitly switches it.
 
 Mastermind supports Claude Code, Codex, Cursor, Continue, and generic MCP stdio
 clients. Setup is dry-run-first unless `--write` is present. The MCP surface has

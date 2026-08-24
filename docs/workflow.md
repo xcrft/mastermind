@@ -153,9 +153,10 @@ diff from silently becoming an invented architectural decision.
 ## Client model
 
 Planning, implementation, and post-flight are client-neutral. Claude Code and
-Codex can install the complete workflow bundle. Cursor, Continue, and generic
-MCP clients receive the graph tools but do not have a Mastermind-owned native
-workflow-extension format.
+Codex can install the same selected skill profile; fresh installs default to
+`core`, while `--profile full` selects the complete portable bundle. Cursor,
+Continue, and generic MCP clients receive the graph tools but do not have a
+Mastermind-owned native workflow-extension format.
 
 `run-task --exec` is a legacy Claude CLI convenience. The portable path is an
 explicit handoff followed by `--post-only`.

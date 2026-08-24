@@ -1,0 +1,255 @@
+{
+  "capture": {
+    "limitations": [
+      "Per-case duration_api_ms was not printed by the pre-report runner; only the suite total was observed.",
+      "The pre-report runner did not persist modelUsage; the opus alias resolved to claude-opus-5 when verified immediately afterward with the same Claude CLI."
+    ],
+    "mode": "pre-report-console"
+  },
+  "cases": [
+    {
+      "cost_usd": 0.1403,
+      "duration_api_ms": 0,
+      "duration_ms": 36225,
+      "id": "c-001-slop-rethink",
+      "passed": true,
+      "reasons": [],
+      "retry_attempted": false,
+      "retry_used": false,
+      "resolved_models": [
+        "claude-opus-5"
+      ],
+      "suite": "critic",
+      "telemetry": {
+        "complete": false,
+        "issues": [
+          "duration_api_ms unavailable in pre-report console capture"
+        ]
+      },
+      "tool_calls": [],
+      "turns": 1,
+      "usage": {
+        "cache_creation_input_tokens": 7487,
+        "cache_read_input_tokens": 0,
+        "context_tokens": 7489,
+        "input_tokens": 2,
+        "output_tokens": 2589,
+        "total_tokens": 10078
+      }
+    },
+    {
+      "cost_usd": 0.1412,
+      "duration_api_ms": 0,
+      "duration_ms": 35867,
+      "id": "c-002-clean-ship-with-caveats",
+      "passed": true,
+      "reasons": [],
+      "retry_attempted": false,
+      "retry_used": false,
+      "resolved_models": [
+        "claude-opus-5"
+      ],
+      "suite": "critic",
+      "telemetry": {
+        "complete": false,
+        "issues": [
+          "duration_api_ms unavailable in pre-report console capture"
+        ]
+      },
+      "tool_calls": [],
+      "turns": 1,
+      "usage": {
+        "cache_creation_input_tokens": 7641,
+        "cache_read_input_tokens": 0,
+        "context_tokens": 7643,
+        "input_tokens": 2,
+        "output_tokens": 2556,
+        "total_tokens": 10199
+      }
+    },
+    {
+      "cost_usd": 0.1949,
+      "duration_api_ms": 0,
+      "duration_ms": 67009,
+      "id": "c-003-missing-mmcg-fails-dim7",
+      "passed": true,
+      "reasons": [],
+      "retry_attempted": false,
+      "retry_used": false,
+      "resolved_models": [
+        "claude-opus-5"
+      ],
+      "suite": "critic",
+      "telemetry": {
+        "complete": false,
+        "issues": [
+          "duration_api_ms unavailable in pre-report console capture"
+        ]
+      },
+      "tool_calls": [],
+      "turns": 1,
+      "usage": {
+        "cache_creation_input_tokens": 7415,
+        "cache_read_input_tokens": 0,
+        "context_tokens": 7417,
+        "input_tokens": 2,
+        "output_tokens": 4802,
+        "total_tokens": 12219
+      }
+    },
+    {
+      "cost_usd": 0.2351,
+      "duration_api_ms": 0,
+      "duration_ms": 90182,
+      "id": "c-004-single-alternative-concern",
+      "passed": true,
+      "reasons": [],
+      "retry_attempted": false,
+      "retry_used": false,
+      "resolved_models": [
+        "claude-opus-5"
+      ],
+      "suite": "critic",
+      "telemetry": {
+        "complete": false,
+        "issues": [
+          "duration_api_ms unavailable in pre-report console capture"
+        ]
+      },
+      "tool_calls": [],
+      "turns": 1,
+      "usage": {
+        "cache_creation_input_tokens": 7495,
+        "cache_read_input_tokens": 0,
+        "context_tokens": 7497,
+        "input_tokens": 2,
+        "output_tokens": 6373,
+        "total_tokens": 13870
+      }
+    },
+    {
+      "cost_usd": 0.1981,
+      "duration_api_ms": 0,
+      "duration_ms": 68163,
+      "id": "c-005-perf-no-observability",
+      "passed": true,
+      "reasons": [],
+      "retry_attempted": false,
+      "retry_used": false,
+      "resolved_models": [
+        "claude-opus-5"
+      ],
+      "suite": "critic",
+      "telemetry": {
+        "complete": false,
+        "issues": [
+          "duration_api_ms unavailable in pre-report console capture"
+        ]
+      },
+      "tool_calls": [],
+      "turns": 1,
+      "usage": {
+        "cache_creation_input_tokens": 7563,
+        "cache_read_input_tokens": 0,
+        "context_tokens": 7565,
+        "input_tokens": 2,
+        "output_tokens": 4866,
+        "total_tokens": 12431
+      }
+    }
+  ],
+  "claude_cli_version": "2.1.231 (Claude Code)",
+  "filters": {
+    "case": null,
+    "suite": "critic"
+  },
+  "generated_at": "2026-08-24T22:16:56+00:00",
+  "git_revision": "caf8b06c9de3168ffef59333be1578eac919b1d2",
+  "kind": "mastermind-eval-report",
+  "model": "opus",
+  "resolved_models": [
+    "claude-opus-5"
+  ],
+  "schema_version": 1,
+  "suites": {
+    "critic": {
+      "case_ids": [
+        "c-001-slop-rethink",
+        "c-002-clean-ship-with-caveats",
+        "c-003-missing-mmcg-fails-dim7",
+        "c-004-single-alternative-concern",
+        "c-005-perf-no-observability"
+      ],
+      "case_definition_digest": "56392553f8a37df2c3f76c225c494495bce52970d856816c8a097301a2598f02",
+      "cost_usd": {
+        "p50": 0.1949,
+        "p95": 0.2351,
+        "total": 0.9097
+      },
+      "duration_api_ms": {
+        "p50": null,
+        "p95": null,
+        "total": 302400
+      },
+      "duration_ms": {
+        "p50": 67009,
+        "p95": 90182,
+        "total": 297446
+      },
+      "quality": {
+        "first_pass": 5,
+        "first_pass_rate": 1.0,
+        "pass_rate": 1.0,
+        "passed": 5,
+        "total": 5
+      },
+      "telemetry": {
+        "complete": false,
+        "incomplete_cases": [
+          "c-001-slop-rethink",
+          "c-002-clean-ship-with-caveats",
+          "c-003-missing-mmcg-fails-dim7",
+          "c-004-single-alternative-concern",
+          "c-005-perf-no-observability"
+        ]
+      },
+      "turns": {
+        "p50": 1,
+        "p95": 1,
+        "total": 5
+      },
+      "usage": {
+        "cache_creation_input_tokens": {
+          "p50": 7495,
+          "p95": 7641,
+          "total": 37601
+        },
+        "cache_read_input_tokens": {
+          "p50": 0,
+          "p95": 0,
+          "total": 0
+        },
+        "context_tokens": {
+          "p50": 7497,
+          "p95": 7643,
+          "total": 37611
+        },
+        "input_tokens": {
+          "p50": 2,
+          "p95": 2,
+          "total": 10
+        },
+        "output_tokens": {
+          "p50": 4802,
+          "p95": 6373,
+          "total": 21186
+        },
+        "total_tokens": {
+          "p50": 12219,
+          "p95": 13870,
+          "total": 58797
+        }
+      }
+    }
+  }
+}

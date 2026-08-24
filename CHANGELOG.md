@@ -11,8 +11,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The artifact validator and `mastermind doctor` now detect Claude subagents
   that scope an MCP server but block all of its tools with an explicit
   frontmatter allowlist.
-- Behavioral eval output now reports turns, input/output tokens, prompt-cache
-  writes and reads, API time, and reported cost, including every retry attempt.
+- Behavioral evals can atomically persist schema-versioned JSON reports with
+  turns, duration, input/output and prompt-cache tokens, reported cost, quality,
+  resolved model and tool identities, and nearest-rank p50/p95 summaries.
+  Same-model baseline gates recompute metrics from raw cases, bind referenced
+  fixtures, fail closed on incomparable evidence, preserve every previously
+  passing case, and require lower p50/p95 context tokens.
+- A live-codegraph researcher suite exercises the shipped custom-agent boundary,
+  source cross-checking, static/runtime uncertainty, and planner handoff.
+- Workflow installation profiles expose `core`, `frontend`, `security`, and
+  `full` portable-skill catalogs. Fresh installs default to `core`; updates and
+  doctor preserve the installed profile, and legacy manifests migrate as
+  `full` without dropping owned skills. Committed updates report recoverable
+  staging backups if final cleanup fails.
+
+### Changed
+- Researcher and critic runtime prompts are compact evidence contracts without
+  repeated examples or companion sections. Their behavioral and size ceilings
+  are covered by deterministic and model-backed evals.
 
 ### Fixed
 - Shipped Claude subagents grant only the exact `mmcg` tools each role needs

@@ -5,12 +5,17 @@ environment and trust note with every score: it is not a model leaderboard or
 a coverage percentage, case sets differ by suite, and elapsed time depends on
 the model, machine, and fixture setup.
 
-Latest complete runs: 2026-07-31, all four suites. The 2026-08-11 rerun did
-not reach inference because the local Claude Code OAuth session had expired;
-those infrastructure exits are not recorded as model failures.
+The latest complete run across the four legacy suites remains 2026-07-31. On
+2026-08-25, the current critic contract and the new researcher suite completed
+against Claude Code 2.1.231. The 2026-08-11 rerun did not reach inference
+because the local OAuth session had expired; infrastructure exits are not model
+failures.
 
 | suite | model | date | result | first pass | elapsed | evidence |
 |---|---|---|---:|---:|---:|---|
+| researcher | haiku | 2026-08-25 | 3/3 | 3/3 | 36.3 s | Disposable Git fixture and live mmcg; 10 turns total; mmcg-first/source-read tool checks held; context-token p50/p95 16,569/35,274; output 2,772; reported cost $0.0325 |
+| critic | opus | 2026-08-25 | 5/5 | 5/5 | 172.0 s | Current compact prompt; pre-lean baseline gate passed; context-token p50/p95 3,891/4,037 |
+| critic (pre-lean baseline) | opus | 2026-08-25 | 5/5 | 5/5 | 297.4 s | Same case definitions and Claude Code 2.1.231; context-token p50/p95 7,497/7,643; console-captured baseline records its API-duration limitation |
 | auditor | opus | 2026-07-31 | 9/9 | 8/9 | 2,097.0 s | Real Git fixtures and live mmcg against a release build of this branch; `a-007` needed one sentinel retry |
 | critic | opus | 2026-07-31 | 5/5 | 5/5 | 283.0 s | Historical full suite; `c-002` predates the prompt-isolation repair below and is not current verification |
 | intake | sonnet | 2026-07-31 | 5/5 | 5/5 | 98.4 s | Full suite |
@@ -18,9 +23,35 @@ those infrastructure exits are not recorded as model failures.
 | workflow | sonnet | 2026-07-30 | 45/47 | 45/47 | 778.9 s | Superseded snapshot |
 | workflow | sonnet | 2026-07-19 | 36/36 | 36/36 | 525.6 s | Superseded snapshot, kept for comparison |
 
-**Every failure was an assertion defect; none was a behaviour.** All nine cases
-added since the previous run passed on first attempt, and the five workflow
-failures were all pre-existing cases in three now-familiar classes:
+### Token-budget gate, 2026-08-25
+
+The current critic run used the same model alias, resolved `claude-opus-5`
+identity, Claude CLI version, filters, case order, and case-definition digest as
+the checked-in baseline. Every case remained passing and both nearest-rank
+context-token gates decreased:
+
+| metric | pre-lean | current | change |
+|---|---:|---:|---:|
+| Quality | 5/5 | 5/5 | held |
+| Context tokens p50 | 7,497 | 3,891 | -48.1% |
+| Context tokens p95 | 7,643 | 4,037 | -47.2% |
+| Output tokens, total | 21,186 | 12,231 | -42.3% |
+| Elapsed | 297.4 s | 172.0 s | -42.2% |
+| Claude CLI reported cost | $0.9097 | $0.5050 | -44.5% |
+
+The executable gate covers quality plus context p50/p95. Output, elapsed, and
+reported cost are observations, not additional pass criteria. The researcher
+row is a current behavioral run, not a before/after claim; no pre-lean
+researcher report was persisted.
+
+This is a smoke gate, not a variance estimate. With five critic cases,
+nearest-rank p95 is the observed maximum; a durable performance claim needs
+repeated runs under the same model and CLI identity.
+
+In the 2026-07-31 four-suite run, **every failure was an assertion defect; none
+was a behaviour.** All nine cases added since the previous run passed on first
+attempt, and the five workflow failures were all pre-existing cases in three
+now-familiar classes:
 
 - **A proposition quoted in order to reject it.** `w-027` assigned *low
   confidence* to the proposition `"BillingRouter does not exist"` and `w-029`

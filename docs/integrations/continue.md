@@ -1,13 +1,15 @@
 # Continue integration
 
-Mastermind owns one standalone Continue YAML document:
+Connect Continue without merging into its general configuration. Mastermind
+owns one small, standalone MCP document, so setup and removal have an exact
+boundary:
 
 | Scope | Path |
 |---|---|
 | Project | `.continue/mcpServers/mastermind.yaml` |
 | User | `~/.continue/mcpServers/mastermind.yaml` |
 
-## Preview and apply
+## Preview first, then apply
 
 ```bash
 npm install -g @xcraftmind/mastermind
@@ -41,7 +43,7 @@ npx, and project-local npm launchers use `cmd.exe /d /s /c` so Continue can
 execute npm's `.cmd` shims. Mastermind does not merge this entry into Continue's
 general JSON configuration.
 
-## Update or remove
+## Change or undo safely
 
 A canonical owned document is an idempotent no-op and can be removed safely.
 Customized content requires `--force`; `--force` never implies `--write`.
@@ -53,7 +55,7 @@ mastermind setup continue --scope project --root . --remove          # dry-run
 mastermind setup continue --scope project --root . --remove --write
 ```
 
-## Verify
+## Verify the result
 
 ```bash
 mastermind doctor

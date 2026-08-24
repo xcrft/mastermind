@@ -1,9 +1,10 @@
 # Scripts
 
-Repository validation, packaging, release, and smoke-test scripts. Run scripts
-from the repository root unless a section says otherwise.
+Find the gate that matches your change, run it from the repository root, and
+keep the result replayable. This directory owns repository validation,
+packaging, release controls, and registry smoke tests.
 
-## Common entry points
+## Start with the narrowest useful gate
 
 | Goal | Command |
 |---|---|
@@ -12,15 +13,15 @@ from the repository root unless a section says otherwise.
 | Native npm tarball smoke | `just npm-smoke-native` |
 | Index benchmark | `just benchmark-index` |
 
-The `just` recipes are the canonical developer interface. Call an individual
-script directly when diagnosing that script.
+The `just` recipes are the canonical developer interface. Reach for an
+individual script only when you are diagnosing that script or its contract.
 
-## `validate.py` — repository contract validator
+## `validate.py`: catch cross-surface drift
 
 Runs the deterministic repository-level checks that do not belong in the Rust,
 npm, or model-backed test suites. CI executes it on every change.
 
-### What it checks
+### Contracts it protects
 
 - artifact frontmatter, names, versions, domains, links, and template mirrors;
 - exact MCP tool count plus read/write annotations, and parity of the public
@@ -32,7 +33,7 @@ npm, or model-backed test suites. CI executes it on every change.
 - npm package/version/platform shape, README badge alignment, and workflow-bundle staging parity;
 - answer-leak clues in adversarial eval fixture source trees.
 
-### Run directly
+### Run it directly
 
 ```bash
 # One-time setup
@@ -46,7 +47,7 @@ python3 -m venv .venv
 Exit code is `0` on clean and `1` when errors exist. Warnings do not fail the
 run.
 
-### Boundaries
+### What it cannot prove
 
 - It does not compile Rust, execute npm, or call a model.
 - It cannot prove that a prompt behaves correctly; `evals/runner.py` covers

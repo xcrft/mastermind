@@ -1,16 +1,20 @@
 # Declarative fact-ingestion SDK
 
+Bring SARIF, coverage, tests, traces, or your own analysis into the same review
+without loading producer code into Mastermind.
+
 The extension boundary is data ingestion, not plugin execution. A producer
-emits a revision-bound JSON manifest. Mastermind validates the complete input,
-then atomically replaces that producer's normalized dataset in private SQLite
-tables. Lens, CLI, and the fixed read-only `mmcg_facts` tool read the result.
+emits a revision-bound JSON manifest; Mastermind validates the complete input
+before atomically replacing that producer's normalized dataset in private
+SQLite tables. Lens, CLI, and the fixed read-only `mmcg_facts` tool read the
+result.
 
 The public v1 schema is
 [`schemas/mastermind-facts-v1.schema.json`](../schemas/mastermind-facts-v1.schema.json).
 Its API identifier is `mastermind-facts/v1`, with two capabilities:
 `annotations` and `relationships`.
 
-## Contract at a glance
+## The contract in one screen
 
 | Property | v1 behavior |
 |---|---|

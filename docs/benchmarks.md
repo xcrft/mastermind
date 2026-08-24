@@ -1,11 +1,18 @@
 # Indexing benchmarks
 
-This page reports the repository's synthetic indexing benchmark. It measures
-cold indexing, an unchanged incremental scan, and a 10% incremental update.
-It does **not** compare Mastermind with another tool: no shared corpus and
-equivalent query contract currently exist for a defensible comparison.
+How quickly does the graph become useful, and what does an incremental refresh
+cost? This reproducible synthetic benchmark measures cold indexing, an
+unchanged scan, and a 10% update. It is a regression baseline, not a universal
+speed claim.
+
+There is no competitor table here. Without a shared corpus and equivalent
+query contract, the comparison would look precise and mean very little.
 
 ## Results
+
+On the recorded machine, the 1,000-file corpus became queryable in a 310 ms
+median cold run; the 10,000-file corpus took 3.20 s. Keep the machine, corpus,
+range, and contract attached to those numbers.
 
 Measurements were taken on 2026-08-13 at commit
 `2ee0807e4aab480d95d8b9199e703f9408ab21d5` with the release profile.

@@ -1,8 +1,11 @@
 # Behavioral evaluations
 
-Adversarial regression cases for Mastermind agents and workflow skills. One case
-proves one expected behavior; suite pass rate is not a coverage or correctness
-metric.
+Can the shipped instruction still produce the behavior it promises under one
+focused adversarial scenario? These suites make that question replayable for
+Mastermind agents and workflow skills.
+
+One case probes one expected behavior. A pass rate is not coverage, product
+correctness, or evidence that the behavior survives a long real-world task.
 
 ## Suite map
 
@@ -18,7 +21,7 @@ metric.
 `runner.py` invokes `claude -p`. `test_runner.py` tests the deterministic
 parser, isolation, allowlist, and fixture machinery without calling a model.
 
-## Run
+## Run the right layer
 
 Model-backed runs require authenticated `claude` and `git` executables:
 
@@ -130,7 +133,7 @@ Workflow artifacts are allowlisted and loaded from the repository. Cases run
 from the system temporary directory in Claude safe mode with no tools, so the
 prompt under evaluation cannot operate on the maintainer checkout.
 
-## Case rules
+## Keep cases honest
 
 - One adversarial or golden behavior per case.
 - Explain the regression in `why`; do not leak the expected answer into source

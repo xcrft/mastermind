@@ -1,8 +1,10 @@
 # Generic MCP client integration
 
-`mastermind serve` is an [MCP](https://modelcontextprotocol.io) stdio server.
-Use this guide when a client is not covered by the dedicated Claude Code,
-Codex, Cursor, or Continue setup commands.
+If your client can launch a stdio MCP server, it can use Mastermind. This guide
+gives you the smallest safe config and the exact protocol boundary when no
+dedicated Claude Code, Codex, Cursor, or Continue setup command applies.
+
+`mastermind serve` is the server process.
 
 ## Server spec
 
@@ -19,7 +21,7 @@ Current clients receive behavior annotations and structured results after the
 initialized notification; legacy clients retain content-only results. Input
 frames are limited to 1 MiB and serialized result payloads to 8 MiB.
 
-## Preview and apply
+## Preview first, then apply
 
 Generic setup requires an explicit JSON path:
 
@@ -34,7 +36,7 @@ Before a forced mutation, Mastermind stores previous bytes under
 `~/.mastermind/setup-backups/`. `mastermind doctor` treats configuration as
 bounded data and does not execute a configured command.
 
-## Config snippet
+## Minimal config
 
 The standard MCP client config format:
 
@@ -64,7 +66,7 @@ To target a specific index file (useful when running multiple projects):
 
 The `--index` flag is global and must come before `serve`.
 
-## Available tools
+## What the client receives
 
 - Symbol discovery: `mmcg_search`, `mmcg_outline`, `mmcg_files`,
   `mmcg_symbols_in_file`.

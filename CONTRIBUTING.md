@@ -1,8 +1,9 @@
 # Contributing
 
-Mastermind combines a Rust codegraph engine with installable workflow artifacts.
-Keep changes focused, preserve local-first behavior, and attach the exact checks
-you ran.
+Ship one focused change, make its evidence easy to replay, and leave unrelated
+local state alone. Mastermind combines a Rust codegraph engine, a browser review
+surface, and installable workflow contracts, so a small edit can cross more
+than one distribution boundary.
 
 ## Repository layout
 
@@ -13,7 +14,7 @@ you ran.
 | `skills/`, `agents/` | Installed workflow and agent contracts |
 | `schemas/` | Public, versioned JSON contracts |
 | `npm/` | npm wrapper and platform packages |
-| `action.yml`, `Dockerfile` | GitHub Action runtime |
+| `action.yml`, `Dockerfile.audit-action` | GitHub Action runtime |
 | `docs/` | User and maintainer documentation |
 | `scripts/` | Validation, packaging, release, and smoke-test tooling |
 | `evals/` | Deterministic harness tests and optional model-backed evaluations |
@@ -33,7 +34,7 @@ python3 -m venv .venv
 .venv/bin/pip install --require-hashes -r scripts/requirements.txt
 ```
 
-## Canonical check
+## The ship gate
 
 Run this before opening a pull request:
 
@@ -41,10 +42,10 @@ Run this before opening a pull request:
 just check
 ```
 
-It runs the locked Rust tests, formatting and Clippy checks, npm tests, Lens
-tests, workflow-security tests, deterministic eval-harness tests, repository
-validation, and `cargo deny` policy checks. A passing subset is useful while
-developing but does not replace this gate.
+`just check` runs the locked Rust tests, formatting and Clippy checks, npm
+tests, Lens tests, workflow-security tests, deterministic eval-harness tests,
+repository validation, and `cargo deny` policy checks. A passing subset is
+useful while developing but does not replace this gate.
 
 ## Focused checks
 
@@ -72,14 +73,17 @@ See [evals/README.md](evals/README.md) for suites and limitations.
 
 ## Documentation changes
 
-- Put task-oriented guides in `docs/`; keep the root README as a short product
-  and onboarding page.
+- Lead with the outcome, then give the shortest copyable path to it.
+- Put task-oriented guides in `docs/`; keep the root README as the product and
+  onboarding page.
 - Put exhaustive CLI and MCP details in
   [docs/reference/mmcg.md](docs/reference/mmcg.md).
 - Use commands that run from the repository root unless a section says
   otherwise.
 - Label syntactic, compiler-resolved, declared, and observed evidence
   separately.
+- Delete filler and narration. Keep rationale, trust boundaries, failure modes,
+  and the facts a reader cannot recover from the command itself.
 - Do not publish speed or accuracy comparisons without a reproducible corpus,
   command, environment, and correctness boundary.
 - Run `.venv/bin/python scripts/validate.py`; it checks internal links, mirrors,

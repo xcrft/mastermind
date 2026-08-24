@@ -1,10 +1,12 @@
 # Code of Conduct
 
-This project follows the
+Strong technical disagreement is welcome. Personal attacks are not.
+
+Mastermind follows the
 [Contributor Covenant v2.1](https://www.contributor-covenant.org/version/2/1/code_of_conduct/).
 The full linked text is the governing policy.
 
-## Expected conduct
+## The standard
 
 - Critique code and ideas, not people.
 - Keep technical disagreements specific and evidence-based.
@@ -12,9 +14,9 @@ The full linked text is the governing policy.
   information.
 - Respect a maintainer's decision to close or moderate a discussion.
 
-## Report a violation
+## Report something safely
 
-Do not put sensitive details in a public issue. Contact the repository owner
+Keep sensitive details out of public issues. Contact the repository owner
 through the [xcrft GitHub profile](https://github.com/xcrft) and request a
 private reporting channel. Include links or screenshots, dates, participants,
 and the behavior that violated the policy. Reports are shared only with the

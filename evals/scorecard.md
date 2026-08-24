@@ -1,8 +1,9 @@
 # Eval scorecard
 
-This file records behavioral regression runs. It is not a model benchmark or a
-coverage percentage: case sets differ by suite, and elapsed time depends on the
-model, machine, and fixture setup.
+This is the evidence ledger for complete behavioral regression runs. Read the
+environment and trust note with every score: it is not a model leaderboard or
+a coverage percentage, case sets differ by suite, and elapsed time depends on
+the model, machine, and fixture setup.
 
 Latest complete runs: 2026-07-31, all four suites. The 2026-08-11 rerun did
 not reach inference because the local Claude Code OAuth session had expired;
@@ -165,7 +166,7 @@ honor superseded decisions and failed approaches, separate approval from proof,
 require explicit lesson-candidate review, and prevent style evidence from
 crossing author, language, repository, or authority boundaries.
 
-## Reading the result
+## What a row does—and does not—prove
 
 - Report only complete suite runs in the table. A targeted rerun can diagnose a
   case, but it does not change the suite pass rate.

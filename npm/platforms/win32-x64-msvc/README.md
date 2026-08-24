@@ -1,5 +1,7 @@
 # @xcraftmind/mmcg-win32-x64-msvc
 
-Prebuilt mmcg binary for Windows x86_64 (MSVC). Internal — installed automatically as an optional dependency of @xcraftmind/mastermind.
+The native Mastermind engine for **Windows x64 with the MSVC runtime**.
 
-See [`@xcraftmind/mastermind`](https://www.npmjs.com/package/@xcraftmind/mastermind) for usage.
+You normally never install this package directly. npm selects it automatically
+for [`@xcraftmind/mastermind`](https://www.npmjs.com/package/@xcraftmind/mastermind),
+which provides the `mastermind` and `mmcg` commands.

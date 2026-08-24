@@ -1,8 +1,12 @@
 # Getting started
 
-This guide takes a clean machine to a local index, a change-impact report, and
-an optional MCP connection. For exact flags and schemas, use the
-[technical reference](reference/mmcg.md).
+In a few minutes you will have a local codegraph, a blast-radius report for the
+current change, and—if you want it—an MCP connection for your coding agent.
+Your repository stays on the machine.
+
+For exact flags, schemas, and limits, use the
+[technical reference](reference/mmcg.md). This page is the shortest path to a
+useful result.
 
 ## Requirements
 
@@ -17,6 +21,9 @@ The npm package includes native binaries for supported macOS, Linux, and
 Windows targets. It does not compile Rust during installation.
 
 ## 1. Install the CLI
+
+Choose one installation path. npm is the fastest route because it ships a
+prebuilt native binary.
 
 Global installation:
 
@@ -51,6 +58,9 @@ The index is `.mastermind/mmcg.db`. Source discovery follows Git and `.ignore`
 rules and skips build/vendor directories. The first run parses supported files;
 later runs skip unchanged files.
 
+You are ready when `mastermind status` reports the repository and indexed file
+counts without stale-file warnings.
+
 ```bash
 mastermind index .          # incremental refresh
 mastermind index . --force  # full reparse
@@ -79,6 +89,10 @@ mastermind ui --since main
   component crossings, and candidate tests.
 - `temporal` compares architecture at the baseline and indexed worktree.
 - `ui` serves the same bounded snapshot in local read-only Mastermind Lens.
+
+For a first review, run `impact`, then open `ui`. Use `map` when you need the
+architecture around the change and `temporal` when you need base-versus-head
+drift.
 
 Refresh the index before trusting a result after source changes. Stale,
 truncated, or work-limited analysis fails closed or is labelled partial; it is

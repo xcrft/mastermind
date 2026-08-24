@@ -24,6 +24,9 @@ metadata:
 
 # mmcg — Mastermind Codegraph
 
+Ask architecture questions against the repository on your machine, not against
+a pasted fragment or a remote black box.
+
 mmcg is the local structural engine inside
 [Mastermind](https://github.com/xcrft/mastermind). It indexes symbols, calls,
 imports, and evidence into SQLite, then exposes the same state through CLI,
@@ -58,7 +61,7 @@ mmcg --version
 
 SQLite and tree-sitter are bundled. No system SQLite or parser libraries are required.
 
-## Quick start
+## See your first result
 
 ```bash
 cd your-project
@@ -94,7 +97,7 @@ mastermind setup claude --scope user --write  # apply
 
 See the [client integration guides](https://github.com/xcrft/mastermind/tree/main/docs/integrations) for Claude Code, Codex, Cursor, Continue, and generic MCP clients.
 
-## Capabilities
+## What one graph can answer
 
 | Area | Examples |
 |---|---|
@@ -125,7 +128,7 @@ engine cannot prove completeness.
 - PHP
 - C and C++
 
-## Precision model
+## Know the evidence boundary
 
 The default mmcg graph is syntactic, not a compiler or language server:
 

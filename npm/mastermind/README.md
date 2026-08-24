@@ -5,11 +5,11 @@
 <h1 align="center">@xcraftmind/mastermind</h1>
 
 <p align="center">
-  <strong>Know what your code change can break before production tells you.</strong>
+  <strong>Review the blast radius, not just the patch.</strong>
 </p>
 
 <p align="center">
-  Local codegraph and evidence-backed architecture review for developers and coding agents.
+  Local codegraph and evidence-backed architecture review for developers and coding agents—without uploading the repository.
 </p>
 
 <p align="center">
@@ -22,7 +22,7 @@
   <img src="https://raw.githubusercontent.com/xcrft/mastermind/main/docs/assets/brand/mastermind-hero.webp" alt="A bounded code graph flowing through the Mastermind lens from change to impact and test evidence" width="900">
 </p>
 
-## Stop reviewing isolated lines
+## See the consequences behind the diff
 
 A diff tells you what changed. Mastermind shows what the change reaches:
 downstream callers, architecture boundaries, candidate tests, ownership,
@@ -31,7 +31,7 @@ security findings, runtime evidence, and repository policy.
 One local snapshot powers the CLI, 28 bounded MCP tools, the read-only Lens UI,
 SARIF output, and a standalone review package.
 
-## Your first review
+## Your first review in three commands
 
 Requires Node.js 24+. The package selects a prebuilt native binary for macOS,
 Linux, or Windows. Rust is not required.
@@ -52,7 +52,7 @@ reads the index without mutating it, and loads no remote frontend resources.
   <img src="https://raw.githubusercontent.com/xcrft/mastermind/main/docs/images/lens/mastermind-lens-live-desktop.png" alt="Mastermind Lens showing changed symbols, downstream impact, boundary crossings, test candidates, and explicit partial evidence" width="900">
 </p>
 
-## What you get
+## One graph, five useful surfaces
 
 | Job | Surface |
 |---|---|
@@ -131,12 +131,14 @@ These are measurements on one machine, not portable guarantees. See the
 
 ## Documentation
 
-- [Product README](https://github.com/xcrft/mastermind)
-- [Getting started](https://github.com/xcrft/mastermind/blob/main/docs/getting-started.md)
-- [CLI and MCP reference](https://github.com/xcrft/mastermind/blob/main/docs/reference/mmcg.md)
-- [Client integrations](https://github.com/xcrft/mastermind/tree/main/docs/integrations)
-- [Review workflow](https://github.com/xcrft/mastermind/blob/main/docs/workflow.md)
-- [Fact-ingestion SDK](https://github.com/xcrft/mastermind/blob/main/docs/fact-ingestion-sdk.md)
+| I want to… | Go here |
+|---|---|
+| Understand the product | [Product README](https://github.com/xcrft/mastermind) |
+| Run my first review | [Getting started](https://github.com/xcrft/mastermind/blob/main/docs/getting-started.md) |
+| Look up a command, limit, or MCP tool | [CLI and MCP reference](https://github.com/xcrft/mastermind/blob/main/docs/reference/mmcg.md) |
+| Connect an AI client | [Client integrations](https://github.com/xcrft/mastermind/tree/main/docs/integrations) |
+| Use the delivery workflow | [Review workflow](https://github.com/xcrft/mastermind/blob/main/docs/workflow.md) |
+| Import external evidence safely | [Fact-ingestion SDK](https://github.com/xcrft/mastermind/blob/main/docs/fact-ingestion-sdk.md) |
 
 The same binary is available from crates.io as
 [`mmcg`](https://crates.io/crates/mmcg). npm installs it as both `mastermind`

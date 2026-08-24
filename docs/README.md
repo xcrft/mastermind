@@ -1,9 +1,10 @@
 # Documentation
 
-Use this page as the documentation index. The root [README](../README.md) is the
-product overview; this directory contains guides and contracts.
+Start with the job you need to finish. The root [README](../README.md) is the
+product tour; these pages take you from a first local review to exact protocol,
+security, and extension contracts.
 
-## Start here
+## Get a useful result
 
 | Goal | Document |
 |---|---|
@@ -12,7 +13,7 @@ product overview; this directory contains guides and contracts.
 | Use Direct, Verified, or Strict delivery | [Workflow](workflow.md) |
 | Look up a command, schema, limit, or MCP tool | [CLI and MCP reference](reference/mmcg.md) |
 
-## Review and CI
+## Review a change or enforce a boundary
 
 | Goal | Document |
 |---|---|
@@ -22,7 +23,7 @@ product overview; this directory contains guides and contracts.
 | Enforce architecture rules | [Policy CLI](reference/mmcg.md#architecture-policy-as-code-mmcg-policy-check) |
 | Review architecture drift over time | [Temporal graph](reference/mmcg.md#temporal-graph-mmcg-temporal) |
 
-## Extensions
+## Bring in more evidence
 
 | Goal | Document |
 |---|---|
@@ -42,7 +43,8 @@ product overview; this directory contains guides and contracts.
 
 ## Documentation rules
 
-- Guides explain a task. Reference pages define exact behavior and limits.
+- Guides get a reader to an outcome. Reference pages define exact behavior and
+  limits. Landing pages point to both instead of duplicating them.
 - Commands must be copyable from the repository root unless a different
   working directory is stated.
 - Performance claims must link to [methodology and raw parameters](benchmarks.md).

@@ -1,9 +1,12 @@
 # Local team graph
 
-A team graph combines several existing local indexes into one bounded,
-read-only architecture view. Each repository stays independently indexed.
-Mastermind neither copies repositories into a central database nor infers
-cross-repository calls; the manifest declares those relationships.
+See several services as one architecture without centralizing their source or
+pretending a naming heuristic proves a network call.
+
+A team graph combines existing local indexes into one bounded, read-only view.
+Each repository stays independently indexed. Mastermind neither copies
+repositories into a central database nor infers cross-repository calls; the
+manifest declares those relationships.
 
 The public v1 schema is
 [`schemas/mastermind-team-v1.schema.json`](../schemas/mastermind-team-v1.schema.json),
@@ -17,7 +20,7 @@ Each member repository must have:
 - a fresh `.mastermind/mmcg.db` created by `mastermind index .`;
 - a stable local root and index path available to the querying process.
 
-## Define, lock, and query
+## From manifest to pinned graph
 
 Create a draft manifest. Paths may be absolute or relative to the manifest.
 

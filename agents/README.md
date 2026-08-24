@@ -1,17 +1,17 @@
 # Agents
 
-Agent definitions are Claude Code-specific orchestration roles. Portable
-capabilities live under [`skills/`](../skills/); do not copy an agent file into
-another client and assume equivalent delegation behavior.
+These are the Claude Code roles that turn a broad task into bounded research,
+execution, and review. Portable behavior lives under [`skills/`](../skills/);
+copying an agent file into another client does not reproduce Claude Code's
+delegation runtime.
 
 | Directory | Contents |
 |---|---|
 | [`subagents/`](subagents/) | Spawnable Claude Code subagents with bounded responsibilities |
 | [`claude-md/`](claude-md/) | Project-level `CLAUDE.md` and `CONTEXT.md` templates |
 
-## Index
+## Choose a role
 
-## Subagents
 | Subagent | Description |
 |---|---|
 | [`mastermind-prompt-refiner`](subagents/mastermind-prompt-refiner.md) | Normalizes explicit prompt rewrites or cold-agent handoffs while preserving the original request. |
@@ -25,7 +25,8 @@ another client and assume equivalent delegation behavior.
 | [`mastermind-test-auditor`](subagents/mastermind-test-auditor.md) | Post-implementation test reviewer. Uses `mmcg_test_impact` classifications to separate real coverage from a filename match. |
 | [`mastermind-security-auditor`](subagents/mastermind-security-auditor.md) | Independent security reviewer. Spawned only on security-sensitive scope (auth, tools, secrets, delegation, supply chain, prompt injection); optional OWASP ASI mode. |
 
-## Project templates
+## Give a project durable context
+
 | Template | Description |
 |---|---|
 | [`mastermind-workflow`](claude-md/mastermind-workflow.md) | `CLAUDE.md` contract for Direct, Verified, and Strict task delivery. |

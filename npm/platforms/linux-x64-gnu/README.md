@@ -1,5 +1,7 @@
 # @xcraftmind/mmcg-linux-x64-gnu
 
-Prebuilt mmcg binary for Linux x86_64 glibc. Internal — installed automatically as an optional dependency of @xcraftmind/mastermind.
+The native Mastermind engine for **Linux x64 with glibc**.
 
-See [`@xcraftmind/mastermind`](https://www.npmjs.com/package/@xcraftmind/mastermind) for usage.
+You normally never install this package directly. npm selects it automatically
+for [`@xcraftmind/mastermind`](https://www.npmjs.com/package/@xcraftmind/mastermind),
+which provides the `mastermind` and `mmcg` commands.

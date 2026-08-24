@@ -3,8 +3,10 @@ name: mastermind-prompt-refiner
 description: Read-only handoff normalizer for explicit prompt rewrites or rough requests being sent to a cold agent. Preserves the original request verbatim and does not execute it.
 tools: Read
 model: sonnet
+maxTurns: 4
+effort: low
 metadata:
-  version: 0.4.0
+  version: 0.4.1
   authors: [mastermind]
   tags: [prompt-engineering, workflow]
 ---

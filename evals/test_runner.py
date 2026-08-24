@@ -60,6 +60,65 @@ action: passthrough
         result = runner.Result("case", "workflow", False, output_excerpt="x" * 4000)
         self.assertEqual(len(result.output_excerpt), 4000)
 
+    def test_cli_usage_telemetry_is_parsed_without_guessing(self):
+        telemetry = runner.telemetry_from_payload(
+            {
+                "duration_api_ms": 1234,
+                "num_turns": 3,
+                "total_cost_usd": 0.0125,
+                "usage": {
+                    "input_tokens": 101,
+                    "output_tokens": 202,
+                    "cache_creation_input_tokens": 303,
+                    "cache_read_input_tokens": 404,
+                },
+            }
+        )
+        self.assertEqual(telemetry["duration_api_ms"], 1234)
+        self.assertEqual(telemetry["num_turns"], 3)
+        self.assertEqual(telemetry["input_tokens"], 101)
+        self.assertEqual(telemetry["output_tokens"], 202)
+        self.assertEqual(telemetry["cache_creation_input_tokens"], 303)
+        self.assertEqual(telemetry["cache_read_input_tokens"], 404)
+        self.assertEqual(telemetry["cost_usd"], 0.0125)
+
+    def test_retry_usage_is_aggregated_across_both_attempts(self):
+        first = runner.Result(
+            "case",
+            "auditor",
+            False,
+            duration_ms=100,
+            duration_api_ms=80,
+            num_turns=2,
+            input_tokens=10,
+            output_tokens=20,
+            cache_creation_input_tokens=30,
+            cache_read_input_tokens=40,
+            cost_usd=0.01,
+        )
+        second = runner.Result(
+            "case",
+            "auditor",
+            True,
+            duration_ms=200,
+            duration_api_ms=160,
+            num_turns=3,
+            input_tokens=11,
+            output_tokens=21,
+            cache_creation_input_tokens=31,
+            cache_read_input_tokens=41,
+            cost_usd=0.02,
+        )
+        second.add_attempt(first)
+        self.assertEqual(second.duration_ms, 300)
+        self.assertEqual(second.duration_api_ms, 240)
+        self.assertEqual(second.num_turns, 5)
+        self.assertEqual(second.input_tokens, 21)
+        self.assertEqual(second.output_tokens, 41)
+        self.assertEqual(second.cache_creation_input_tokens, 61)
+        self.assertEqual(second.cache_read_input_tokens, 81)
+        self.assertAlmostEqual(second.cost_usd, 0.03)
+
     def test_alternative_phrases_accept_equivalent_wording(self):
         self.assertTrue(
             runner.contains_any_phrase("No spec file is needed.", ["no task spec", "no spec file"])
@@ -114,6 +173,7 @@ class PromptIsolationTests(unittest.TestCase):
             "Bash(git diff *)",
             "Bash(git status *)",
             "Bash(cargo test --locked *)",
+            "mcp__mmcg__mmcg_status",
             "mcp__mmcg__mmcg_search",
             "mcp__mmcg__mmcg_callers",
             "mcp__mmcg__mmcg_impact",
@@ -123,6 +183,37 @@ class PromptIsolationTests(unittest.TestCase):
         self.assertNotIn("Bash(cargo *)", allowed)
         self.assertNotIn("Bash(cargo test *)", allowed)
         self.assertFalse(runner.requires_prompt_sandbox("auditor"))
+
+    def test_auditor_eval_uses_the_shipped_agent_runtime_contract(self):
+        path = runner.SUITES["auditor"]["subagent"]
+        name, definition = runner.subagent_runtime_definition(
+            path, model_override="sonnet"
+        )
+        self.assertEqual(name, "mastermind-auditor")
+        self.assertEqual(definition["model"], "sonnet")
+        self.assertEqual(definition["mcpServers"], ["mmcg"])
+        self.assertEqual(definition["maxTurns"], 20)
+        self.assertEqual(definition["effort"], "high")
+        self.assertIn("mcp__mmcg__mmcg_search", definition["tools"])
+        self.assertNotIn("mcp__mmcg__*", definition["tools"])
+        self.assertIn("# Mastermind auditor", definition["prompt"])
+
+        args = runner.subagent_cli_args(path, model_override="sonnet")
+        self.assertEqual(args[-2:], ["--agent", "mastermind-auditor"])
+        payload = json.loads(args[args.index("--agents") + 1])
+        self.assertEqual(payload["mastermind-auditor"]["maxTurns"], 20)
+
+    def test_every_scoped_shipped_agent_grants_exact_mmcg_tools(self):
+        for path in (runner.REPO_ROOT / "agents/subagents").glob("*.md"):
+            _, definition = runner.subagent_runtime_definition(path)
+            if "mmcg" not in definition.get("mcpServers", []):
+                continue
+            tools = definition.get("tools", [])
+            self.assertTrue(
+                any(tool.startswith("mcp__mmcg__mmcg_") for tool in tools),
+                path.name,
+            )
+            self.assertNotIn("mcp__mmcg__*", tools, path.name)
 
     def test_auditor_runs_inside_its_disposable_fixture(self):
         fixture = runner.REPO_ROOT / "evals/fixtures/fake-session"

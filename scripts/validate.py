@@ -50,6 +50,8 @@ WIKILINK_RE = re.compile(r"\[\[([a-z][a-z0-9-]*)\]\]")
 # is external/anchor-only.
 RELATIVE_LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
+MMCG_REFERENCE_RE = re.compile(r"\bmmcg_[a-z_]+\b")
+SUBAGENT_EFFORT_LEVELS = {"low", "medium", "high", "xhigh", "max"}
 
 
 @dataclass
@@ -204,7 +206,14 @@ def validate_artifact(a: Artifact) -> list[Issue]:
     # inherits every tool and the parent's model. Catch the
     # regression at lint time so it can't ship again.
     if a.path.parent.name == "subagents" and isinstance(metadata, dict):
-        for field in ("tools", "model", "mcpServers", "disallowedTools"):
+        for field in (
+            "tools",
+            "model",
+            "mcpServers",
+            "disallowedTools",
+            "maxTurns",
+            "effort",
+        ):
             if field in metadata:
                 issues.append(
                     Issue(
@@ -214,6 +223,27 @@ def validate_artifact(a: Artifact) -> list[Issue]:
                         "Claude Code reads it only at the top level; move it up",
                     )
                 )
+
+    if a.path.parent.name == "subagents":
+        max_turns = a.frontmatter.get("maxTurns")
+        if max_turns is not None and (
+            isinstance(max_turns, bool) or not isinstance(max_turns, int) or max_turns < 1
+        ):
+            issues.append(
+                Issue(a.path, "error", "subagent 'maxTurns' must be a positive integer")
+            )
+
+        effort = a.frontmatter.get("effort")
+        if effort is not None and (
+            not isinstance(effort, str) or effort not in SUBAGENT_EFFORT_LEVELS
+        ):
+            issues.append(
+                Issue(
+                    a.path,
+                    "error",
+                    f"subagent 'effort' must be one of {sorted(SUBAGENT_EFFORT_LEVELS)}, got {effort!r}",
+                )
+            )
 
     return issues
 
@@ -468,7 +498,7 @@ def _extract_mmcg_tools_from_source(src: str) -> list[str]:
     body = src[start:end] if start != -1 and end != -1 else src
     pattern = re.compile(
         r'name:\s*"(mmcg_[a-z_]+)"'
-        r'|(?:read_only_tool|additive_tool)\s*\(\s*"(mmcg_[a-z_]+)"'
+        r'|(?:read_only_tool|refreshable_tool|additive_tool)\s*\(\s*"(mmcg_[a-z_]+)"'
     )
     tools: list[str] = []
     seen: set[str] = set()
@@ -486,16 +516,143 @@ def extract_mmcg_tools() -> list[str]:
     return _extract_mmcg_tools_from_source(src)
 
 
+def _runtime_tool_names(value: object) -> list[str]:
+    """Normalize Claude Code's scalar or YAML-list `tools` frontmatter."""
+    if isinstance(value, str):
+        return [entry.strip() for entry in value.split(",") if entry.strip()]
+    if isinstance(value, list) and all(isinstance(entry, str) for entry in value):
+        return [entry.strip() for entry in value if entry.strip()]
+    return []
+
+
+def _mcp_server_names(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [entry for entry in value if isinstance(entry, str)]
+    if isinstance(value, dict):
+        return [entry for entry in value if isinstance(entry, str)]
+    return []
+
+
+def _subagent_mmcg_contract_messages(
+    frontmatter: dict, body: str, known_tools: set[str]
+) -> list[str]:
+    """Return deterministic Claude Code MCP allowlist violations."""
+    servers = _mcp_server_names(frontmatter.get("mcpServers"))
+    runtime_tools = _runtime_tool_names(frontmatter.get("tools"))
+    grants = sorted(
+        tool for tool in runtime_tools if tool.startswith("mcp__mmcg__")
+    )
+    messages: list[str] = []
+
+    if "mmcg" not in servers:
+        if grants:
+            messages.append(
+                "grants mmcg MCP tools but does not declare `mcpServers: [mmcg]`"
+            )
+        return messages
+
+    if not grants:
+        messages.append(
+            "declares `mcpServers: [mmcg]` but its `tools` allowlist grants no "
+            "`mcp__mmcg__mmcg_*` tools"
+        )
+        return messages
+
+    wildcard = "mcp__mmcg__*"
+    if wildcard in grants:
+        messages.append(
+            "uses broad `mcp__mmcg__*`; grant only the mmcg tools this role needs"
+        )
+
+    granted_mmcg = {
+        grant.removeprefix("mcp__mmcg__")
+        for grant in grants
+        if grant != wildcard
+    }
+    for granted in sorted(granted_mmcg - known_tools):
+        messages.append(f"grants unknown mmcg tool `{granted}`")
+
+    all_referenced = set(MMCG_REFERENCE_RE.findall(body))
+    for unknown in sorted(all_referenced - known_tools):
+        messages.append(f"prompt references unknown mmcg tool `{unknown}`")
+    referenced = all_referenced & known_tools
+    for required in sorted(referenced - granted_mmcg):
+        messages.append(
+            f"prompt references `{required}` but `tools` omits "
+            f"`mcp__mmcg__{required}`"
+        )
+    return messages
+
+
+def validate_subagent_mmcg_fixture(known_tools: set[str]) -> list[Issue]:
+    broken = {
+        "mcpServers": ["mmcg"],
+        "tools": "Read, Grep",
+    }
+    missing_reference = {
+        "mcpServers": ["mmcg"],
+        "tools": "Read, mcp__mmcg__mmcg_status",
+    }
+    valid = {
+        "mcpServers": ["mmcg"],
+        "tools": "Read, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_search",
+    }
+    checks = (
+        bool(_subagent_mmcg_contract_messages(broken, "mmcg_search", known_tools)),
+        any(
+            "prompt references `mmcg_search`" in message
+            for message in _subagent_mmcg_contract_messages(
+                missing_reference, "Use mmcg_search.", known_tools
+            )
+        ),
+        not _subagent_mmcg_contract_messages(valid, "Use mmcg_search.", known_tools),
+    )
+    if all(checks):
+        return []
+    return [
+        Issue(
+            REPO_ROOT / "scripts/validate.py",
+            "error",
+            "subagent mmcg allowlist validator fixture failed",
+        )
+    ]
+
+
+def validate_subagent_mmcg_access(artifacts: list[Artifact]) -> list[Issue]:
+    source = REPO_ROOT / MMCG_MCP_SRC
+    if not source.is_file():
+        return [Issue(source, "error", "mcp.rs missing — cannot validate agent tools")]
+    known_tools = set(extract_mmcg_tools())
+    issues = validate_subagent_mmcg_fixture(known_tools)
+    if issues:
+        return issues
+    for artifact in artifacts:
+        if artifact.path.parent.name != "subagents":
+            continue
+        try:
+            text = artifact.path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        match = FRONTMATTER_RE.match(text)
+        body = text[match.end() :] if match else text
+        for message in _subagent_mmcg_contract_messages(
+            artifact.frontmatter, body, known_tools
+        ):
+            issues.append(Issue(artifact.path, "error", message))
+    return issues
+
+
 def validate_mmcg_tool_extractor_fixture() -> list[Issue]:
     fixture = '''
 static TOOLS: &[ToolDef] = &[
     ToolDef { name: "mmcg_legacy", schema: schema_legacy, handler: handle_legacy },
     read_only_tool("mmcg_reader", schema_reader, handle_reader),
+    refreshable_tool("mmcg_refresher", schema_refresher, handle_refresher),
     additive_tool("mmcg_writer", schema_writer, handle_writer),
     read_only_tool("mmcg_reader", schema_reader, handle_reader),
 ];
 '''
-    expected = ["mmcg_legacy", "mmcg_reader", "mmcg_writer"]
+    expected = ["mmcg_legacy", "mmcg_reader", "mmcg_refresher", "mmcg_writer"]
     actual = _extract_mmcg_tools_from_source(fixture)
     if actual == expected:
         return []
@@ -1757,6 +1914,7 @@ def main(argv: list[str]) -> int:
     issues: list[Issue] = []
     for a in artifacts:
         issues.extend(validate_artifact(a))
+    issues.extend(validate_subagent_mmcg_access(artifacts))
     issues.extend(validate_openai_skill_adapters(artifacts))
     issues.extend(validate_workflow_role_contracts())
     issues.extend(validate_portable_skill_semantics())

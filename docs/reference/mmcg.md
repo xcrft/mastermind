@@ -8,7 +8,8 @@ the source of truth for the `mmcg` engine. Start with
 `mmcg` is a Rust binary that builds a local structural index for Python,
 TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, and C/C++.
 It exposes the same indexed state through CLI, Lens, and MCP. The MCP surface
-contains 28 tools: 27 read-only queries and one additive local scratchpad write.
+contains 28 tools: 19 non-destructive queries that may refresh the managed
+derived index, 8 read-only queries, and one additive local scratchpad write.
 The binary also provides spec gates, client setup, evidence ingestion, review
 export, and style mining.
 
@@ -99,8 +100,9 @@ bounded query surface instead of repeatedly rescanning source text.
   syntactic graph.
 - External producers submit validated facts; they cannot execute inside the
   process or write SQLite.
-- MCP exposes 28 bounded tools: 27 read-only queries and the additive,
-  gitignored `mmcg_scratchpad_append` write.
+- MCP exposes 28 bounded tools: 19 non-destructive queries that may refresh the
+  managed derived index, 8 read-only queries, and the additive, gitignored
+  `mmcg_scratchpad_append` write.
 
 ## Performance model
 
@@ -340,8 +342,9 @@ not prove that every reference is a call. The resolution contract is explicit:
 - OpenTelemetry remains observed runtime corroboration and never creates
   topology.
 
-Use `mmcg query semantic SYMBOL` or the read-only `mmcg_semantic` MCP tool to
-inspect definitions and relationships directly. Lens loads a valid imported
+Use `mmcg query semantic SYMBOL` or the non-destructive `mmcg_semantic` MCP tool
+to inspect definitions and relationships directly. The MCP call may refresh the
+managed derived index first. Lens loads a valid imported
 overlay automatically, shows its producer and precision diagnostics, and only
 decorates exact returned endpoint and display-name pairs. `mmcg map`, callers,
 impact, and all existing tools continue to work unchanged without SCIP.
@@ -455,8 +458,9 @@ and SQLite phases cooperatively observe the request budget/cancel signal.
 Temporal topology is Tree-sitter syntactic evidence in v1; SCIP, runtime,
 coverage, and test overlays keep their separate provenance in Lens.
 
-The same response is available through read-only `mmcg_temporal` and appears in
-Lens below the blast trace. Lens renders bounded identities for component,
+The same response is available through non-destructive `mmcg_temporal`, which
+may refresh the managed derived index first, and appears in Lens below the blast
+trace. Lens renders bounded identities for component,
 boundary/API, cycle, hotspot, ownership, and history events. It isolates a
 bounded temporal-unavailable result so ordinary impact evidence remains usable,
 but a repository, Git, or SQLite snapshot race still fails the refresh.
@@ -839,6 +843,13 @@ The equivalent generic MCP JSON shape is:
 
 Run `mmcg watch` in a separate terminal so the index stays current while you work.
 
+Structural MCP queries also refresh the managed `.mastermind/mmcg.db` on demand
+when source files or the extractor contract drift. The repository root is
+derived from the canonical database path and checked against the stored index
+identity before any refresh. A custom external `--index` remains query-compatible
+when fresh but requires an explicit `mmcg index` when stale. Failed or unavailable
+refreshes return the structured `index_stale` result.
+
 ## MCP tools
 
 | Tool | Args | What it returns |
@@ -870,7 +881,7 @@ Run `mmcg watch` in a separate terminal so the index stays current while you wor
 | `mmcg_history` | `query`, optional `kind`, `top` (default 10) | Searches `CONTEXT.md`, `CONTEXT-archive-*.md`, canonical task specs, executor reports, audits, `.mastermind/releases/*.md`, legacy task-local release notes, lessons, and Markdown architecture decisions under conventional ADR directories. `architecture_decision` is an exact `kind` filter. `candidate` lessons are unresolved signals, not active guidance. Returns observed matches, `skipped_artifacts`, `truncated`, and an explicit retrieval-only epistemic contract. Markdown remains authoritative; re-index after Markdown changes. Each artifact is capped at 1 MiB and the corpus at 5,000 files. |
 | `mmcg_dependency_cycles` | optional `language`, `min_size` (default 2) | Detect circular imports — strongly-connected components in the file-level import graph (Tarjan's algorithm). Each result is a cycle = a list of files. Pre-merge guard ("does this PR introduce a new cycle?") and architectural-hygiene survey. Resolves edges by leaf-name match — over-approximates (two unrelated `Logger` symbols cross-link) so verify before refactoring. Bump `min_size` to hide trivial A↔B and surface only larger structural problems. Work-capped at 50,000 file-pair edges: above that, `truncated: true` with an empty `cycles` list — incomplete and possibly inaccurate, not "more available"; narrow with `language` and retry. |
 | `mmcg_symbols_changed_since` | `git_ref`, optional `root` | Symbol-level diff between a git ref and the current index. Returns `{added, removed, signature_changed}` symbol sets for files in `git diff --name-only <ref>..HEAD`. Re-parses old blobs from `git show <ref>:<path>` using the same extractor. Different from `mmcg_recent_changes` (watcher mtime) — this is git-ref-based, answering "what symbols did THIS PR/branch touch?". PR-review pre-flight, auditor verification, "what new public API appeared in v2.3?". Git subprocesses are killed after `MMCG_GIT_TIMEOUT_MS`; the per-file loop is capped at 10,000 files with `truncated: true` marking a partial diff. |
-| `mmcg_status` | — | Index path, file/symbol counts, and bounded `stale_files`. A non-zero value means re-index before trusting structural answers. |
+| `mmcg_status` | — | Index path, file/symbol counts, and bounded `stale_files`. A non-zero value means the next structural query will refresh a managed index, or that a custom external index needs an explicit `mmcg index`. |
 
 Tool responses are bounded JSON. Collection responses expose their own count or
 collection metadata; status and workflow responses use named fields.

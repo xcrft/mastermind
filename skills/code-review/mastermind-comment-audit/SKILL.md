@@ -1,8 +1,8 @@
 ---
 name: mastermind-comment-audit
-description: Read-only post-implementation review of the comments a change added, modified, or deleted. Flags narration with evidence, names what it deliberately kept, and reports removed rationale. Use after implementation is complete — triggers "check the comments", "audit the slop", "review comment discipline", or a finished diff awaiting review.
+description: Read-only review of a non-empty comment delta. Flags narration with evidence, names what it deliberately kept, and reports removed rationale. Use when the user asks to check comments or a finished diff's pre-gate found added, modified, or deleted comments; skip automatic routing when no comment changed.
 metadata:
-  version: 0.1.0
+  version: 0.1.1
   authors:
     - mastermind
   tags:

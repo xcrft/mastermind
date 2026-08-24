@@ -199,7 +199,8 @@ mastermind doctor --workflow --client all
 
 Mastermind supports Claude Code, Codex, Cursor, Continue, and generic MCP stdio
 clients. Setup is dry-run-first unless `--write` is present. The MCP surface has
-27 read-only tools and one additive write to the local gitignored scratchpad.
+19 non-destructive queries that may refresh the managed derived index, 8
+read-only tools, and one additive write to the local gitignored scratchpad.
 
 ## How it works
 

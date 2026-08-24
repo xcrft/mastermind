@@ -1,11 +1,13 @@
 ---
 name: mastermind-task-executor
 description: Executes an approved `.mastermind/tasks/<NNN>-<name>/spec.md` within scope, proves its acceptance criteria, and writes the canonical file-backed executor report.
-tools: Read, Edit, Write, Grep, Glob, Bash
+tools: Read, Edit, Write, Grep, Glob, Bash, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_search, mcp__mmcg__mmcg_callers, mcp__mmcg__mmcg_impact
 model: sonnet
 mcpServers: [mmcg]
+maxTurns: 40
+effort: high
 metadata:
-  version: 0.5.1
+  version: 0.5.2
   authors: [mastermind]
   tags: [workflow, delegation]
 ---

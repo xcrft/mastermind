@@ -13,7 +13,7 @@ dedicated Claude Code, Codex, Cursor, or Continue setup command applies.
 | transport | stdio |
 | command | `mastermind serve` |
 | protocol | MCP 2025-11-25; legacy 2024-11-05 |
-| tools | 28: 27 read-only, 1 additive local write (see below) |
+| tools | 28: 19 refreshable non-destructive queries, 8 read-only queries, 1 additive local write (see below) |
 | resources | none |
 | prompts | none |
 

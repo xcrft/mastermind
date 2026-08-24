@@ -18,8 +18,15 @@ correctness, or evidence that the behavior survives a long real-world task.
 | `fixtures/` | Real Git histories for auditor cases | Exact planted change |
 | `scorecard.md` | Dated full-suite results | Environment and trust notes |
 
-`runner.py` invokes `claude -p`. `test_runner.py` tests the deterministic
-parser, isolation, allowlist, and fixture machinery without calling a model.
+`runner.py` invokes `claude -p`. Auditor cases load the shipped agent through
+Claude's `--agents` / `--agent` runtime contract, so frontmatter tool scoping is
+part of the eval instead of a separate handwritten allowlist. `test_runner.py`
+tests the deterministic parser, isolation, runtime contract, allowlist, and
+fixture machinery without calling a model.
+
+Every case and suite summary reports turns, input/output tokens, prompt-cache
+creation/read tokens, API time, and Claude CLI reported cost. Retries aggregate
+both attempts, so a recovered flaky case does not hide its token spend.
 
 ## Run the right layer
 

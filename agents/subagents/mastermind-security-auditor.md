@@ -1,11 +1,13 @@
 ---
 name: mastermind-security-auditor
 description: Independent security reviewer for Mastermind specs, agent workflows, MCP tools, auth boundaries, policy enforcement, and high-risk implementation plans. Spawn only when the task touches security, permissions, tools, agent delegation, prompt injection, secrets, auth/authz, supply chain, or when the user explicitly asks for a security audit.
-tools: Read, Grep, Glob, Bash
+tools: Read, Grep, Glob, Bash, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_search, mcp__mmcg__mmcg_callers, mcp__mmcg__mmcg_callees, mcp__mmcg__mmcg_impact, mcp__mmcg__mmcg_imports, mcp__mmcg__mmcg_imported_by, mcp__mmcg__mmcg_change_impact
 model: opus
 mcpServers: [mmcg]
+maxTurns: 18
+effort: high
 metadata:
-  version: 0.1.0
+  version: 0.1.1
   authors:
     - mastermind
   tags:

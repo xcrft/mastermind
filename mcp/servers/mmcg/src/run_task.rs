@@ -1268,7 +1268,9 @@ fn run_post(
 
 fn comment_audit_hint(outcome: Outcome, baseline_ref: &str) -> Option<String> {
     matches!(outcome, Outcome::PostHeld | Outcome::PostDrift).then(|| {
-        format!("  next: review the comment delta vs `{baseline_ref}` — `mastermind-comment-audit`")
+        format!(
+            "  next: inspect the comment delta vs `{baseline_ref}`; run `mastermind-comment-audit` only when it is non-empty"
+        )
     })
 }
 
@@ -1317,6 +1319,7 @@ mod tests {
             let hint = comment_audit_hint(outcome, "main")
                 .unwrap_or_else(|| panic!("expected a hint for {outcome:?}"));
             assert!(hint.contains("mastermind-comment-audit"), "{hint}");
+            assert!(hint.contains("only when it is non-empty"), "{hint}");
             assert!(hint.contains("main"), "{hint}");
         }
     }

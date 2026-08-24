@@ -1,11 +1,13 @@
 ---
 name: mastermind-researcher
 description: Read-only Haiku-tier subagent that explores the codebase, reads documentation, and returns structured fact summaries without making decisions. Spawn from a planner when you need to gather facts before designing — bulk grep/read/glob work that doesn't deserve Opus time. Use when you'd otherwise burn the main agent's context on "find all callsites of X" or "list all configs under Y".
-tools: Read, Grep, Glob, Bash
+tools: Read, Grep, Glob, Bash, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_search, mcp__mmcg__mmcg_callers, mcp__mmcg__mmcg_callees, mcp__mmcg__mmcg_impact, mcp__mmcg__mmcg_imports, mcp__mmcg__mmcg_imported_by
 model: haiku
 mcpServers: [mmcg]
+maxTurns: 12
+effort: low
 metadata:
-  version: 0.2.1
+  version: 0.2.2
   authors:
     - mastermind
   tags:

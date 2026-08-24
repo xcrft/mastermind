@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -130,7 +131,7 @@ GIT_ENV = {
 # when available so color hints still work in interactive mode.
 _PROC_ENV: dict[str, str] = {**os.environ, "TERM": os.environ.get("TERM") or "dumb"}
 
-AUDITOR_ALLOWED_TOOLS = (
+AUDITOR_SAFE_ALLOWED_TOOLS = (
     "Read",
     "Glob",
     "Grep",
@@ -146,29 +147,6 @@ AUDITOR_ALLOWED_TOOLS = (
     "Bash(git ls-files *)",
     "Bash(git grep *)",
     "Bash(cargo test --locked *)",
-    "mcp__mmcg__mmcg_search",
-    "mcp__mmcg__mmcg_callers",
-    "mcp__mmcg__mmcg_callees",
-    "mcp__mmcg__mmcg_impact",
-    "mcp__mmcg__mmcg_symbols_in_file",
-    "mcp__mmcg__mmcg_outline",
-    "mcp__mmcg__mmcg_files",
-    "mcp__mmcg__mmcg_imports",
-    "mcp__mmcg__mmcg_imported_by",
-    "mcp__mmcg__mmcg_unreferenced",
-    "mcp__mmcg__mmcg_api_surface",
-    "mcp__mmcg__mmcg_symbols_changed_since",
-    "mcp__mmcg__mmcg_dependency_cycles",
-    "mcp__mmcg__mmcg_tasks",
-    "mcp__mmcg__mmcg_history",
-    "mcp__mmcg__mmcg_centrality",
-    "mcp__mmcg__mmcg_map",
-    "mcp__mmcg__mmcg_change_impact",
-    "mcp__mmcg__mmcg_test_impact",
-    "mcp__mmcg__mmcg_recent_changes",
-    "mcp__mmcg__mmcg_status",
-    "mcp__mmcg__mmcg_scratchpad_read",
-    "mcp__mmcg__mmcg_change_class",
 )
 
 
@@ -183,6 +161,24 @@ class Result:
     retry_used: bool = False
     retry_attempted: bool = False
     output_excerpt: str = ""
+    duration_api_ms: int = 0
+    num_turns: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    cost_usd: float = 0.0
+
+    def add_attempt(self, prior: "Result") -> None:
+        """Aggregate usage from an earlier attempt into this final result."""
+        self.duration_ms += prior.duration_ms
+        self.duration_api_ms += prior.duration_api_ms
+        self.num_turns += prior.num_turns
+        self.input_tokens += prior.input_tokens
+        self.output_tokens += prior.output_tokens
+        self.cache_creation_input_tokens += prior.cache_creation_input_tokens
+        self.cache_read_input_tokens += prior.cache_read_input_tokens
+        self.cost_usd += prior.cost_usd
 
 
 def strip_frontmatter(text: str) -> str:
@@ -191,6 +187,118 @@ def strip_frontmatter(text: str) -> str:
         if end != -1:
             return text[end + 5 :].lstrip()
     return text
+
+
+def subagent_runtime_definition(
+    path: Path, *, model_override: str | None = None
+) -> tuple[str, dict]:
+    """Translate shipped YAML frontmatter into Claude's `--agents` contract."""
+    if not _YAML_AVAILABLE:
+        raise RuntimeError("PyYAML is required to load subagent frontmatter")
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith("---\n"):
+        raise ValueError(f"subagent has no YAML frontmatter: {path}")
+    end = text.find("\n---\n", 4)
+    if end == -1:
+        raise ValueError(f"subagent frontmatter is not terminated: {path}")
+    loaded = _yaml.safe_load(text[4:end])
+    if not isinstance(loaded, dict):
+        raise ValueError(f"subagent frontmatter is not a mapping: {path}")
+    name = loaded.get("name")
+    description = loaded.get("description")
+    if not isinstance(name, str) or not isinstance(description, str):
+        raise ValueError(f"subagent name/description is invalid: {path}")
+
+    definition: dict = {
+        "description": description,
+        "prompt": text[end + 5 :].lstrip(),
+    }
+    for key in (
+        "tools",
+        "disallowedTools",
+        "model",
+        "mcpServers",
+        "permissionMode",
+        "maxTurns",
+        "skills",
+        "hooks",
+        "memory",
+        "effort",
+    ):
+        if key in loaded:
+            definition[key] = loaded[key]
+    if isinstance(definition.get("tools"), str):
+        definition["tools"] = [
+            tool.strip()
+            for tool in definition["tools"].split(",")
+            if tool.strip()
+        ]
+    if model_override is not None:
+        definition["model"] = model_override
+    return name, definition
+
+
+def subagent_cli_args(path: Path, *, model_override: str) -> list[str]:
+    """Run the eval through the same custom-agent boundary as production."""
+    name, definition = subagent_runtime_definition(
+        path, model_override=model_override
+    )
+    return [
+        "--agents",
+        json.dumps({name: definition}, sort_keys=True),
+        "--agent",
+        name,
+    ]
+
+
+def subagent_mcp_tools(path: Path) -> tuple[str, ...]:
+    _, definition = subagent_runtime_definition(path)
+    tools = definition.get("tools", [])
+    if not isinstance(tools, list):
+        return ()
+    return tuple(
+        tool
+        for tool in tools
+        if isinstance(tool, str) and tool.startswith("mcp__mmcg__")
+    )
+
+
+def auditor_allowed_tools() -> tuple[str, ...]:
+    return AUDITOR_SAFE_ALLOWED_TOOLS + subagent_mcp_tools(
+        SUITES["auditor"]["subagent"]
+    )
+
+
+def _nonnegative_int(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(0, value)
+
+
+def _nonnegative_float(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    result = float(value)
+    return result if math.isfinite(result) and result >= 0 else 0.0
+
+
+def telemetry_from_payload(payload: dict) -> dict[str, int | float]:
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        usage = {}
+    return {
+        "duration_api_ms": _nonnegative_int(payload.get("duration_api_ms")),
+        "num_turns": _nonnegative_int(payload.get("num_turns")),
+        "input_tokens": _nonnegative_int(usage.get("input_tokens")),
+        "output_tokens": _nonnegative_int(usage.get("output_tokens")),
+        "cache_creation_input_tokens": _nonnegative_int(
+            usage.get("cache_creation_input_tokens")
+        ),
+        "cache_read_input_tokens": _nonnegative_int(
+            usage.get("cache_read_input_tokens")
+        ),
+        "cost_usd": _nonnegative_float(payload.get("total_cost_usd")),
+    }
 
 
 # ----- fixture lifecycle ----------------------------------------------------
@@ -342,7 +450,7 @@ def isolated_cli_args(suite_name: str) -> list[str]:
             "--tools",
             "Read,Glob,Grep,Bash",
             "--allowedTools",
-            ",".join(AUDITOR_ALLOWED_TOOLS),
+            ",".join(auditor_allowed_tools()),
             "--setting-sources",
             "",
             "--strict-mcp-config",
@@ -595,9 +703,14 @@ def evaluate_case(
             has_mmcg = db_path.is_file()
             if suite_name == "auditor" and not has_mmcg and not case.get("allow_no_mmcg"):
                 return Result(
-                    case_id, suite_name, False,
-                    ["mmcg index unavailable — build the mmcg binary first (`cargo build --release`)"],
-                    0, fixture_path,
+                    case_id=case_id,
+                    suite=suite_name,
+                    passed=False,
+                    reasons=[
+                        "mmcg index unavailable — build the mmcg binary first "
+                        "(`cargo build --release`)"
+                    ],
+                    fixture_path=fixture_path,
                 )
             user_message = render_auditor_input(
                 case["input"],
@@ -630,7 +743,17 @@ def evaluate_case(
         # Pass the user message via stdin — passing it as a positional arg
         # collides with `--add-dir <directories...>` (variadic), which would
         # swallow the message as another directory.
-        prompt_flag = "--system-prompt" if suite_name == "workflow" else "--append-system-prompt"
+        if suite_name == "auditor":
+            prompt_args: list[str] = []
+            agent_args = subagent_cli_args(prompt_path, model_override=model)
+        else:
+            prompt_flag = (
+                "--system-prompt"
+                if suite_name == "workflow"
+                else "--append-system-prompt"
+            )
+            prompt_args = [prompt_flag, system_prompt]
+            agent_args = []
         workflow_safety = isolated_cli_args(suite_name)
         if requires_prompt_sandbox(suite_name):
             prompt_sandbox = tempfile.TemporaryDirectory(prefix="mastermind-eval-")
@@ -643,7 +766,8 @@ def evaluate_case(
             "claude",
             "-p",
             "--model", model,
-            prompt_flag, system_prompt,
+            *prompt_args,
+            *agent_args,
             "--output-format", "json",
             "--no-session-persistence",
             "--permission-mode", "dontAsk",
@@ -663,27 +787,40 @@ def evaluate_case(
             )
         except subprocess.TimeoutExpired:
             return Result(
-                case_id, suite_name, False, ["timeout after 480s"], 0, fixture_path
+                case_id=case_id,
+                suite=suite_name,
+                passed=False,
+                reasons=["timeout after 480s"],
+                fixture_path=fixture_path,
             )
 
         if proc.returncode != 0:
             err = (proc.stderr or proc.stdout or "").strip()[:300]
             return Result(
-                case_id, suite_name, False,
-                [f"claude exit {proc.returncode}: {err}"], 0, fixture_path,
+                case_id=case_id,
+                suite=suite_name,
+                passed=False,
+                reasons=[f"claude exit {proc.returncode}: {err}"],
+                fixture_path=fixture_path,
             )
 
         permission_denials: list[dict] = []
+        telemetry: dict[str, int | float] = telemetry_from_payload({})
         try:
             payload = json.loads(proc.stdout)
+            if not isinstance(payload, dict):
+                raise ValueError("Claude JSON result is not an object")
             output = payload.get("result", "")
-            duration_ms = int(payload.get("duration_ms", 0))
+            if not isinstance(output, str):
+                output = json.dumps(output, sort_keys=True, ensure_ascii=False)
+            duration_ms = _nonnegative_int(payload.get("duration_ms"))
+            telemetry = telemetry_from_payload(payload)
             raw_denials = payload.get("permission_denials", [])
             if isinstance(raw_denials, list):
                 permission_denials = [
                     denial for denial in raw_denials if isinstance(denial, dict)
                 ]
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, TypeError, ValueError):
             output = proc.stdout
             duration_ms = 0
 
@@ -777,13 +914,22 @@ def evaluate_case(
             )
 
         return Result(
-            case_id,
-            suite_name,
-            passed,
-            reasons,
-            duration_ms,
-            fixture_path,
+            case_id=case_id,
+            suite=suite_name,
+            passed=passed,
+            reasons=reasons,
+            duration_ms=duration_ms,
+            fixture_path=fixture_path,
             output_excerpt=output[:4000],
+            duration_api_ms=int(telemetry["duration_api_ms"]),
+            num_turns=int(telemetry["num_turns"]),
+            input_tokens=int(telemetry["input_tokens"]),
+            output_tokens=int(telemetry["output_tokens"]),
+            cache_creation_input_tokens=int(
+                telemetry["cache_creation_input_tokens"]
+            ),
+            cache_read_input_tokens=int(telemetry["cache_read_input_tokens"]),
+            cost_usd=float(telemetry["cost_usd"]),
         )
     finally:
         if prompt_sandbox is not None:
@@ -852,20 +998,24 @@ def main() -> int:
                     and _SENTINEL_MISSING in r.reasons[0]
                 ):
                     print(f"retry (sentinel missing) ...", end=" ", flush=True)
-                    first_duration_ms = r.duration_ms
                     r2 = evaluate_case(
                         args.model, suite_name, suite_cfg, case,
                         keep_fixtures=args.keep_fixtures,
                     )
                     r2.retry_attempted = True
-                    r2.duration_ms += first_duration_ms
+                    r2.add_attempt(r)
                     if r2.passed:
                         r2.retry_used = True
                     r = r2
                 results.append(r)
                 status = "✓ pass" if r.passed else "✗ FAIL"
                 retry_tag = " [retry]" if r.retry_used else ""
-                print(f"{status}{retry_tag}  ({r.duration_ms}ms)")
+                print(
+                    f"{status}{retry_tag}  ({r.duration_ms}ms, {r.num_turns} turns, "
+                    f"tokens {r.input_tokens} in/{r.output_tokens} out, "
+                    f"cache {r.cache_creation_input_tokens} write/"
+                    f"{r.cache_read_input_tokens} read, ${r.cost_usd:.4f})"
+                )
                 if args.keep_fixtures and r.fixture_path is not None:
                     print(f"      fixture: {r.fixture_path}")
                 for reason in r.reasons:
@@ -885,6 +1035,13 @@ def main() -> int:
     n_retry_attempted = sum(r.retry_attempted for r in results)
     n_retry_pass = sum(r.passed and r.retry_used for r in results)
     total_ms = sum(r.duration_ms for r in results)
+    total_api_ms = sum(r.duration_api_ms for r in results)
+    total_turns = sum(r.num_turns for r in results)
+    total_input = sum(r.input_tokens for r in results)
+    total_output = sum(r.output_tokens for r in results)
+    total_cache_creation = sum(r.cache_creation_input_tokens for r in results)
+    total_cache_read = sum(r.cache_read_input_tokens for r in results)
+    total_cost = sum(r.cost_usd for r in results)
     print(f"\n=== summary ===")
     print(f"  passed: {n_pass}/{len(results)}")
     print(f"  first_pass: {n_first_pass}/{len(results)}")
@@ -893,6 +1050,13 @@ def main() -> int:
     if n_retry_pass:
         print(f"  after_retry: {n_first_pass + n_retry_pass}/{len(results)} ({n_retry_pass} case(s) passed on retry)")
     print(f"  total time: {total_ms / 1000:.1f}s")
+    print(f"  API time: {total_api_ms / 1000:.1f}s across {total_turns} turns")
+    print(
+        "  tokens: "
+        f"{total_input} input, {total_output} output, "
+        f"{total_cache_creation} cache write, {total_cache_read} cache read"
+    )
+    print(f"  reported cost: ${total_cost:.4f}")
     return 0 if n_fail == 0 else 1
 
 

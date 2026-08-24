@@ -34,15 +34,16 @@ Use the lightest mode that fits the risk:
 
 | Mode | Use | Flow |
 |---|---|---|
-| **Direct** | Small, reversible, clear work | inspect → impact if useful → implement → tests → comment audit |
+| **Direct** | Small, reversible, clear work | inspect → impact if useful → implement → tests → comment-delta gate |
 | **Verified** | Normal multi-file or delegated work | compact task contract → deterministic pre/post gates → semantic review |
 | **Strict** | Auth, billing, migration, public API, data loss, supply chain | verified flow + critic/security/rollback evidence + independent auditor |
 
 Do not create a spec for Direct work.
 
 Direct work has no controller and no post-flight, so the only review it gets is
-the one you run. Use `mastermind-comment-auditor` on the branch point once the
-change is finished.
+the one you run. Once the change is finished, inspect `git diff -U0 <baseline>`
+and untracked files for added, modified, or deleted comments. Spawn
+`mastermind-comment-auditor` only when that comment delta is non-empty.
 
 ### Grounding
 
@@ -77,8 +78,10 @@ and truncation caveats; source reads and tests remain authoritative for runtime 
    mastermind run-task .mastermind/tasks/<task>/spec.md --post-only
    ```
 
-7. Spawn `mastermind-comment-auditor` on the post-flight baseline. Its findings
-   are input to your semantic review, not a verdict.
+7. Inspect the post-flight baseline diff and untracked files for a comment
+   delta. Spawn `mastermind-comment-auditor` only when at least one comment was
+   added, modified, or deleted. Its findings are input to your semantic review,
+   not a verdict.
 8. Perform semantic review. Strict work additionally requires the read-only
    `mastermind-auditor`.
 
@@ -124,7 +127,8 @@ Pre-flight, before a diff exists, route on the paths named in the spec's Scope.
   supply chain, or audit policy.
 - Executor: implementation within approved scope.
 - Auditor: independent read-only review for Strict work.
-- Comment auditor: comment delta of a finished change, in every mode.
+- Comment auditor: non-empty comment delta of a finished change, in every mode;
+  skip the spawn when the gate finds no changed comments.
 - Runtime research: who already consumes a service, who writes the state, which
   boundaries the change crosses — and which invocations the graph cannot see at
   all. Zero static callers on a handler is a gap, not an absence.

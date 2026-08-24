@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- The artifact validator and `mastermind doctor` now detect Claude subagents
+  that scope an MCP server but block all of its tools with an explicit
+  frontmatter allowlist.
+- Behavioral eval output now reports turns, input/output tokens, prompt-cache
+  writes and reads, API time, and reported cost, including every retry attempt.
+
+### Fixed
+- Shipped Claude subagents grant only the exact `mmcg` tools each role needs
+  and carry bounded `maxTurns` and `effort` settings. Auditor evals exercise the
+  shipped custom-agent runtime contract instead of a separate handwritten MCP
+  allowlist.
+- Structural MCP tools now fail closed with a structured `index_stale` result
+  when source files or the extractor contract drift from the index. Diagnostic,
+  revision-bound, history, scratchpad, and change-classification tools remain
+  available for recovery.
+- Comment-audit routing now spawns the specialist only when the finished diff
+  contains an added, modified, or deleted comment.
+- `mastermind doctor` treats Claude's native `type: stdio` and empty `env`
+  fields as canonical MCP defaults while still flagging meaningful overrides.
+
 ## [2.0.1] - 2026-08-13
 
 ### Fixed

@@ -13,12 +13,13 @@
 //! | 3 | `index repository`     | selected index belongs to the requested repository     |
 //! | 4 | `symbols indexed`      | non-empty index (catches "I ran init but not index")   |
 //! | 5 | `index freshness`      | no source file newer than the index                    |
-//! | 5 | `gitignore`            | `.mastermind/` is excluded from VCS                    |
-//! | 6 | `CLAUDE.md`            | exists and references the workflow                     |
-//! | 7 | `MCP config`           | mmcg registered in `~/.claude.json` (user) or `./.mcp.json` (project) |
-//! | 8 | `MCP serve handshake`  | spawning `mastermind serve` responds to `initialize` + `tools/list` |
-//! | 9 | `subagent MCP scoping` | every subagent `mcpServers:` entry names a registered server |
-//! | 10 | `style profile`       | author's `~/.mastermind/style.md` has fallen behind their commits |
+//! | 6 | `gitignore`            | `.mastermind/` is excluded from VCS                    |
+//! | 7 | `CLAUDE.md`            | exists and references the workflow                     |
+//! | 8 | `MCP config`           | mmcg registered in `~/.claude.json` (user) or `./.mcp.json` (project) |
+//! | 9 | `MCP serve handshake`  | spawning `mastermind serve` responds to `initialize` + `tools/list` |
+//! | 10 | `subagent MCP scoping` | every subagent `mcpServers:` entry names a registered server |
+//! | 11 | `subagent MCP tools`   | scoped agents' explicit tool allowlists grant mmcg access |
+//! | 12 | `style profile`        | author's `~/.mastermind/style.md` has fallen behind their commits |
 //!
 //! Human-readable by default; `--json` switches to a machine-parseable format.
 
@@ -196,6 +197,7 @@ pub fn run_with_index(root: &Path, mmcg_binary: &Path, index_path: &Path) -> Rep
         check_mcp_config(root),
         check_mcp_handshake(index_path, mmcg_binary),
         check_subagent_mcp_servers(root),
+        check_subagent_mcp_tools(root),
         check_style_profile(root),
     ];
     Report::from_checks(root, checks)
@@ -525,6 +527,33 @@ fn check_mcp_config(root: &Path) -> Check {
     )
 }
 
+/// Native client registrars may materialize protocol defaults that are
+/// semantically identical to the compact entry emitted by `setup`. Claude's
+/// CLI currently adds `type = "stdio"` and an empty `env` object. Ignore only
+/// those two exact defaults; any command, argument, environment, transport, or
+/// unknown-field change remains customized.
+fn mcp_entries_equivalent(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    fn without_native_defaults(value: &serde_json::Value) -> serde_json::Value {
+        let mut normalized = value.clone();
+        let Some(object) = normalized.as_object_mut() else {
+            return normalized;
+        };
+        if object.get("type").and_then(serde_json::Value::as_str) == Some("stdio") {
+            object.remove("type");
+        }
+        if object
+            .get("env")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(serde_json::Map::is_empty)
+        {
+            object.remove("env");
+        }
+        normalized
+    }
+
+    without_native_defaults(left) == without_native_defaults(right)
+}
+
 fn check_mcp_config_at(root: &Path, home: Option<&Path>, canonical: &serde_json::Value) -> Check {
     let mut statuses = Vec::new();
     let mut canonical_found = false;
@@ -544,7 +573,7 @@ fn check_mcp_config_at(root: &Path, home: Option<&Path>, canonical: &serde_json:
             config_found = true;
         }
         let status = match crate::setup::read_json_mmcg(&path) {
-            Ok(Some(entry)) if entry == *canonical => {
+            Ok(Some(entry)) if mcp_entries_equivalent(&entry, canonical) => {
                 canonical_found = true;
                 "canonical"
             }
@@ -607,7 +636,7 @@ fn check_mcp_config_at(root: &Path, home: Option<&Path>, canonical: &serde_json:
                 .transpose()
                 .map(Option::flatten)
         }) {
-            Ok(Some(entry)) if entry == *canonical => {
+            Ok(Some(entry)) if mcp_entries_equivalent(&entry, canonical) => {
                 canonical_found = true;
                 "canonical"
             }
@@ -943,6 +972,36 @@ fn subagent_mcp_refs(md: &str) -> Vec<String> {
     }
 }
 
+/// Claude Code's explicit subagent `tools:` allowlist. `None` means the field
+/// is absent and the runtime inherits the parent tool surface. A malformed
+/// value becomes an empty explicit allowlist so doctor fails safe.
+fn subagent_tool_allowlist(md: &str) -> Option<Vec<String>> {
+    let fm = frontmatter_block(md)?;
+    let Ok(v) = serde_norway::from_str::<serde_norway::Value>(fm) else {
+        return Some(vec![]);
+    };
+    match v.get("tools") {
+        None => None,
+        Some(serde_norway::Value::String(value)) => Some(
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(String::from)
+                .collect(),
+        ),
+        Some(serde_norway::Value::Sequence(values)) => Some(
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::trim))
+                .filter(|value| !value.is_empty())
+                .map(String::from)
+                .collect(),
+        ),
+        Some(_) => Some(vec![]),
+    }
+}
+
 /// Pure core of `check_subagent_mcp_servers`: scan `agent_dirs` for subagent
 /// `.md` files; return `(any_declared, sorted unregistered "server (in file)"
 /// descriptions)`. Split out so tests use a controlled directory, not the real
@@ -1013,6 +1072,85 @@ fn check_subagent_mcp_servers(root: &Path) -> Check {
         ),
         hint: Some(
             "register it (project `.mcp.json` / `mastermind setup claude --write-mcp`) or drop the `mcpServers:` entry"
+                .into(),
+        ),
+    }
+}
+
+/// Return scoped mmcg agents whose explicit `tools:` allowlist makes every
+/// mmcg tool unavailable. This is separate from server registration: a server
+/// can be configured correctly while Claude silently filters all its tools.
+fn subagent_mmcg_tool_issues(agent_dirs: &[PathBuf]) -> (bool, Vec<String>) {
+    let mut scoped = false;
+    let mut inaccessible = Vec::new();
+    for dir in agent_dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("md") {
+                continue;
+            }
+            let body = std::fs::read_to_string(&path).unwrap_or_default();
+            if !subagent_mcp_refs(&body)
+                .iter()
+                .any(|server| server == "mmcg")
+            {
+                continue;
+            }
+            scoped = true;
+            let Some(tools) = subagent_tool_allowlist(&body) else {
+                continue;
+            };
+            if !tools.iter().any(|tool| {
+                tool.strip_prefix("mcp__mmcg__")
+                    .is_some_and(crate::mcp::is_known_tool)
+            }) {
+                let filename = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("?");
+                inaccessible.push(filename.to_string());
+            }
+        }
+    }
+    inaccessible.sort();
+    inaccessible.dedup();
+    (scoped, inaccessible)
+}
+
+fn check_subagent_mcp_tools(root: &Path) -> Check {
+    let mut agent_dirs = vec![root.join(".claude").join("agents")];
+    if let Some(home) = std::env::home_dir() {
+        agent_dirs.push(home.join(".claude").join("agents"));
+    }
+    let (scoped, inaccessible) = subagent_mmcg_tool_issues(&agent_dirs);
+    if !scoped {
+        return Check {
+            name: "subagent MCP tools",
+            status: Status::Ok,
+            message: "no subagent scopes mmcg — nothing to verify".into(),
+            hint: None,
+        };
+    }
+    if inaccessible.is_empty() {
+        return Check {
+            name: "subagent MCP tools",
+            status: Status::Ok,
+            message: "scoped subagent allowlists grant mmcg tools".into(),
+            hint: None,
+        };
+    }
+    Check {
+        name: "subagent MCP tools",
+        status: Status::Warn,
+        message: format!(
+            "explicit `tools:` blocks mmcg in {}",
+            inaccessible.join(", ")
+        ),
+        hint: Some(
+            "add exact `mcp__mmcg__mmcg_*` permissions to each agent's top-level `tools:` allowlist"
                 .into(),
         ),
     }
@@ -1211,10 +1349,20 @@ mod tests {
                 )
                 .unwrap();
             } else {
+                let entry = if label == "claude-user" {
+                    serde_json::json!({
+                        "type": "stdio",
+                        "command": "/trusted/mmcg",
+                        "args": ["serve"],
+                        "env": {},
+                    })
+                } else {
+                    canonical.clone()
+                };
                 fs::write(
                     &path,
                     serde_json::to_vec(&serde_json::json!({
-                        "mcpServers": {"mmcg": canonical.clone()}
+                        "mcpServers": {"mmcg": entry}
                     }))
                     .unwrap(),
                 )
@@ -1226,6 +1374,40 @@ mod tests {
             fs::remove_dir_all(root).ok();
             fs::remove_dir_all(home).ok();
         }
+    }
+
+    #[test]
+    fn mcp_entry_equivalence_ignores_only_native_stdio_defaults() {
+        let canonical = serde_json::json!({
+            "command": "/trusted/mmcg",
+            "args": ["serve"],
+        });
+        assert!(mcp_entries_equivalent(
+            &serde_json::json!({
+                "type": "stdio",
+                "command": "/trusted/mmcg",
+                "args": ["serve"],
+                "env": {},
+            }),
+            &canonical,
+        ));
+        assert!(!mcp_entries_equivalent(
+            &serde_json::json!({
+                "type": "stdio",
+                "command": "/trusted/mmcg",
+                "args": ["serve"],
+                "env": {"TOKEN": "changed"},
+            }),
+            &canonical,
+        ));
+        assert!(!mcp_entries_equivalent(
+            &serde_json::json!({
+                "type": "sse",
+                "command": "/trusted/mmcg",
+                "args": ["serve"],
+            }),
+            &canonical,
+        ));
     }
 
     #[test]
@@ -1436,6 +1618,59 @@ mod tests {
         assert!(subagent_mcp_refs(none).is_empty());
         let no_fm = "# heading only\n";
         assert!(subagent_mcp_refs(no_fm).is_empty());
+    }
+
+    #[test]
+    fn subagent_tool_allowlist_parses_scalar_list_and_inheritance() {
+        let scalar = "---\nname: r\ntools: Read, mcp__mmcg__mmcg_search\n---\nbody";
+        assert_eq!(
+            subagent_tool_allowlist(scalar),
+            Some(vec![
+                "Read".to_string(),
+                "mcp__mmcg__mmcg_search".to_string()
+            ])
+        );
+        let list = "---\nname: r\ntools: [Read, mcp__mmcg__mmcg_status]\n---\nbody";
+        assert_eq!(
+            subagent_tool_allowlist(list),
+            Some(vec![
+                "Read".to_string(),
+                "mcp__mmcg__mmcg_status".to_string()
+            ])
+        );
+        let inherited = "---\nname: r\nmcpServers: [mmcg]\n---\nbody";
+        assert_eq!(subagent_tool_allowlist(inherited), None);
+    }
+
+    #[test]
+    fn subagent_mmcg_tool_issues_catches_explicit_allowlist_block() {
+        let root = tmp();
+        let agents = root.join("agents");
+        fs::create_dir_all(&agents).unwrap();
+        fs::write(
+            agents.join("blocked.md"),
+            "---\nname: blocked\ntools: Read, Grep\nmcpServers: [mmcg]\n---\nbody",
+        )
+        .unwrap();
+        fs::write(
+            agents.join("working.md"),
+            "---\nname: working\ntools: Read, mcp__mmcg__mmcg_search\nmcpServers: [mmcg]\n---\nbody",
+        )
+        .unwrap();
+        fs::write(
+            agents.join("unknown.md"),
+            "---\nname: unknown\ntools: Read, mcp__mmcg__mmcg_not_a_tool\nmcpServers: [mmcg]\n---\nbody",
+        )
+        .unwrap();
+
+        let (scoped, inaccessible) = subagent_mmcg_tool_issues(std::slice::from_ref(&agents));
+        assert!(scoped);
+        assert_eq!(
+            inaccessible,
+            vec!["blocked.md".to_string(), "unknown.md".to_string()]
+        );
+
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

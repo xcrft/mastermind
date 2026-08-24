@@ -442,10 +442,6 @@ export function copyAll({
   return transactions.map((transaction) => transaction.result);
 }
 
-function installClient({ home, share, client, version }) {
-  return copyAll({ home, share, client, version, profile: "full" })[0];
-}
-
 export function workflowStatus({
   home = os.homedir(),
   share = DEFAULT_SHARE,

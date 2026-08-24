@@ -1,9 +1,10 @@
 # Cursor integration
 
-Cursor reads `.cursor/mcp.json` at project scope and `~/.cursor/mcp.json` at
-user scope.
+Connect Cursor to the local graph while preserving every unrelated MCP server
+and root setting. Use project scope for `.cursor/mcp.json` or user scope for
+`~/.cursor/mcp.json`.
 
-## Preview and apply
+## Preview first, then apply
 
 ```bash
 npm install -g @xcraftmind/mastermind
@@ -22,7 +23,7 @@ mastermind setup cursor --scope user --write
 The setup engine preserves unrelated root fields and MCP servers, rejects
 duplicate JSON keys and unsafe paths, and does not write without `--write`.
 
-## Update or remove
+## Change or undo safely
 
 A canonical entry is an idempotent no-op. Customized replacement or removal
 requires `--force`, which does not imply `--write`. Forced file-backed changes
@@ -33,7 +34,7 @@ mastermind setup cursor --scope project --root . --remove          # dry-run
 mastermind setup cursor --scope project --root . --remove --write
 ```
 
-## Verify
+## Verify the result
 
 ```bash
 mastermind doctor

@@ -1,5 +1,7 @@
 # @xcraftmind/mmcg-darwin-x64
 
-Prebuilt mmcg binary for macOS x86_64 (Intel). Internal — installed automatically as an optional dependency of @xcraftmind/mastermind.
+The native Mastermind engine for **macOS on Intel**.
 
-See [`@xcraftmind/mastermind`](https://www.npmjs.com/package/@xcraftmind/mastermind) for usage.
+You normally never install this package directly. npm selects it automatically
+for [`@xcraftmind/mastermind`](https://www.npmjs.com/package/@xcraftmind/mastermind),
+which provides the `mastermind` and `mmcg` commands.

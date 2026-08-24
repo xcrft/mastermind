@@ -6,7 +6,7 @@
     <meta name="color-scheme" content="light">
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; connect-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
     >
     <meta name="description" content="Local, read-only change impact review for Mastermind repositories.">
     <title>Mastermind Lens</title>
@@ -19,7 +19,7 @@
     <header class="masthead">
       <div class="masthead__body">
         <div class="identity-block">
-          <span class="wordmark__mark" aria-hidden="true">M</span>
+          <img class="wordmark__mark" src="mastermind-mark.svg" alt="" aria-hidden="true">
           <div class="wordmark">
             <h1><span class="wordmark__full">Mastermind Lens</span><span class="wordmark__compact" aria-hidden="true">Lens</span></h1>
             <p>Local change review</p>
@@ -258,24 +258,26 @@
         </section>
 
         <section class="audit-board" id="audit-board" aria-labelledby="audit-heading" hidden>
-          <header class="audit-board__intro">
-            <p class="section-index">Selected-scope audit</p>
-            <h2 id="audit-heading">Review the selected code scope</h2>
-            <p class="audit-board__summary" id="audit-summary">Reading the indexed architecture.</p>
-            <div class="audit-filter">
-              <span class="audit-scope-badge" id="audit-production">All indexed paths</span>
-              <small>Scope is fixed by the CLI or exported review package.</small>
-            </div>
-          </header>
+          <div class="audit-hero">
+            <header class="audit-board__intro">
+              <p class="section-index">Selected-scope audit</p>
+              <h2 id="audit-heading">Review the selected code scope</h2>
+              <p class="audit-board__summary" id="audit-summary">Reading the indexed architecture.</p>
+              <div class="audit-filter">
+                <span class="audit-scope-badge" id="audit-production">All indexed paths</span>
+                <small>Scope is fixed by the CLI or exported review package.</small>
+              </div>
+            </header>
 
-          <div class="audit-exec">
-            <div class="audit-verdict" id="audit-verdict" role="img" aria-label="Overall posture">
-              <span class="audit-verdict__word" id="audit-verdict-word">—</span>
-              <span class="audit-verdict__lab">Posture</span>
-            </div>
-            <div class="audit-exec__body">
-              <p class="audit-exec__lede" id="audit-lede">Reading the indexed architecture.</p>
-              <div class="audit-pillars" id="audit-pillars"></div>
+            <div class="audit-exec">
+              <div class="audit-verdict" id="audit-verdict" role="img" aria-label="Overall posture">
+                <span class="audit-verdict__word" id="audit-verdict-word">—</span>
+                <span class="audit-verdict__lab">Posture</span>
+              </div>
+              <div class="audit-exec__body">
+                <p class="audit-exec__lede" id="audit-lede">Reading the indexed architecture.</p>
+                <div class="audit-pillars" id="audit-pillars"></div>
+              </div>
             </div>
           </div>
 
@@ -285,7 +287,7 @@
               <p>Each tile is a returned component, sized by file count and tinted by a change-risk heuristic.</p>
             </div>
             <svg class="audit-treemap" id="audit-treemap" role="img" aria-label="Treemap of components sized by file count and colored by risk"></svg>
-            <div class="audit-map-mobile" id="audit-map-mobile" hidden></div>
+            <div class="audit-map-mobile" id="audit-map-mobile"></div>
             <p class="audit-map-note" id="audit-map-note">Returned component coverage will appear after the scan.</p>
             <div class="audit-map-legend">
               <span class="k"><b>Size</b> = files</span>

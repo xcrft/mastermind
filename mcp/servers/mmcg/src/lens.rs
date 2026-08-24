@@ -9,7 +9,8 @@ use crate::queries::{self, ChangeImpactError, ChangeImpactResponse, ProjectMapRe
 use crate::store::{query_budget_ms_from_env, Store, WorkBudget, DEFAULT_CLI_BUDGET_MS};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -27,10 +28,15 @@ const STYLES_CSS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/lens/styles.css"
 ));
+const MASTERMIND_MARK_SVG: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/lens/mastermind-mark.svg"
+));
 
 const MAX_REQUEST_HEADER_BYTES: usize = 16 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
-const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const LENS_CHANGED_FILE_ITEM_LIMIT: usize = 200;
+const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LensOptions {
@@ -47,7 +53,7 @@ pub struct LensRepository {
     pub root_label: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct LensSnapshot {
     pub schema_version: u32,
     pub repository: LensRepository,
@@ -59,6 +65,105 @@ pub struct LensSnapshot {
     pub evidence: crate::evidence::EvidenceSnapshot,
     /// Audit facts for the selected map scope.
     pub audit: LensAudit,
+}
+
+impl Serialize for LensSnapshot {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("LensSnapshot", 9)?;
+        state.serialize_field("schema_version", &self.schema_version)?;
+        state.serialize_field("repository", &self.repository)?;
+        state.serialize_field("options", &self.options)?;
+        state.serialize_field("map", &self.map)?;
+        state.serialize_field("impact", &LensImpactPayload(&self.impact))?;
+        state.serialize_field("temporal", &self.temporal)?;
+        state.serialize_field("semantic", &self.semantic)?;
+        state.serialize_field("evidence", &self.evidence)?;
+        state.serialize_field("audit", &self.audit)?;
+        state.end()
+    }
+}
+
+struct LensImpactPayload<'a>(&'a ChangeImpactResponse);
+
+impl Serialize for LensImpactPayload<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let impact = self.0;
+        let mut state = serializer.serialize_struct("ChangeImpactResponse", 11)?;
+        state.serialize_field("schema_version", &impact.schema_version)?;
+        state.serialize_field("baseline", &impact.baseline)?;
+        state.serialize_field("scope", &impact.scope)?;
+        state.serialize_field("changes", &LensImpactChangesPayload(&impact.changes))?;
+        state.serialize_field("affected_components", &impact.affected_components)?;
+        state.serialize_field("impact", &impact.impact)?;
+        state.serialize_field("api_crossings", &impact.api_crossings)?;
+        state.serialize_field("tests", &impact.tests)?;
+        state.serialize_field("disciplines", &impact.disciplines)?;
+        state.serialize_field("limits", &impact.limits)?;
+        state.serialize_field("precision_notes", &impact.precision_notes)?;
+        state.end()
+    }
+}
+
+struct LensImpactChangesPayload<'a>(&'a queries::ImpactChanges);
+
+impl Serialize for LensImpactChangesPayload<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("ImpactChanges", 2)?;
+        state.serialize_field(
+            "files",
+            &LensProjectedCollection {
+                source: &self.0.files,
+                limit: LENS_CHANGED_FILE_ITEM_LIMIT,
+            },
+        )?;
+        state.serialize_field("symbols", &self.0.symbols)?;
+        state.end()
+    }
+}
+
+struct LensProjectedCollection<'a, T> {
+    source: &'a queries::Collection<T>,
+    limit: usize,
+}
+
+impl<T: Serialize> Serialize for LensProjectedCollection<'_, T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let projected = self.source.truncated && self.source.items.len() > self.limit;
+        let items = if projected {
+            &self.source.items[..self.limit]
+        } else {
+            &self.source.items
+        };
+        let returned = if projected {
+            u32::try_from(items.len()).unwrap_or(u32::MAX)
+        } else {
+            self.source.returned
+        };
+        let mut state = serializer.serialize_struct("Collection", if projected { 8 } else { 5 })?;
+        state.serialize_field("total", &self.source.total)?;
+        state.serialize_field("returned", &returned)?;
+        state.serialize_field("truncated", &self.source.truncated)?;
+        state.serialize_field("truncation_reason", &self.source.truncation_reason)?;
+        if projected {
+            state.serialize_field("observed", &self.source.returned)?;
+            state.serialize_field("projection_truncated", &true)?;
+            state.serialize_field("projection_reason", "lens_payload_limit")?;
+        }
+        state.serialize_field("items", items)?;
+        state.end()
+    }
 }
 
 /// Bounded audit facts for the selected map scope.
@@ -425,9 +530,9 @@ fn standalone_html_from_template(
     let snapshot_hash = inline_hash(escaped_json.as_bytes());
     let style_hash = inline_hash(STYLES_CSS.as_bytes());
     let csp = format!(
-        "default-src 'none'; script-src '{script_hash}' '{snapshot_hash}'; style-src '{style_hash}'; img-src data:; connect-src 'none'; font-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+        "default-src 'none'; script-src '{script_hash}' '{snapshot_hash}'; style-src '{style_hash}'; style-src-attr 'unsafe-inline'; img-src data:; connect-src 'none'; font-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     );
-    let served_csp = "    <meta\n      http-equiv=\"Content-Security-Policy\"\n      content=\"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'\"\n    >\n";
+    let served_csp = "    <meta\n      http-equiv=\"Content-Security-Policy\"\n      content=\"default-src 'self'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; connect-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'\"\n    >\n";
     let template = template.replace("\r\n", "\n");
     let mut html = template.replace(
         served_csp,
@@ -441,6 +546,14 @@ fn standalone_html_from_template(
         &format!("    <style>{STYLES_CSS}</style>"),
     );
     html = html.replace("    <script src=\"app.js\" defer></script>\n", "");
+    replace_standalone_marker(
+        &mut html,
+        "src=\"mastermind-mark.svg\"",
+        &format!(
+            "src=\"data:image/svg+xml;base64,{}\"",
+            BASE64.encode(MASTERMIND_MARK_SVG.as_bytes())
+        ),
+    )?;
     replace_standalone_marker(
         &mut html,
         "<span data-lens-runtime-label><i aria-hidden=\"true\"></i>Local</span>",
@@ -1655,6 +1768,9 @@ fn route(path: &str, state: &ServerState) -> HttpResponse {
         "/" | "/index.html" => HttpResponse::static_asset("text/html; charset=utf-8", INDEX_HTML),
         "/app.js" => HttpResponse::static_asset("text/javascript; charset=utf-8", APP_JS),
         "/styles.css" => HttpResponse::static_asset("text/css; charset=utf-8", STYLES_CSS),
+        "/mastermind-mark.svg" => {
+            HttpResponse::static_asset("image/svg+xml; charset=utf-8", MASTERMIND_MARK_SVG)
+        }
         "/api/lens" => api_response(state),
         "/favicon.ico" => HttpResponse::empty(204, "No Content"),
         _ => HttpResponse::text(404, "Not Found", "not found"),
@@ -1817,7 +1933,10 @@ mod tests {
         assert!(!html.contains("</script><img"));
         assert!(!html.contains("href=\"styles.css\""));
         assert!(!html.contains("src=\"app.js\""));
+        assert!(!html.contains("src=\"mastermind-mark.svg\""));
+        assert!(html.contains("src=\"data:image/svg+xml;base64,"));
         assert!(html.contains("connect-src 'none'"));
+        assert!(html.contains("style-src-attr 'unsafe-inline'"));
         assert!(html.contains("sha256-"));
         assert!(html.contains(
             "<span data-lens-runtime-label><i aria-hidden=\"true\"></i>Offline package</span>"
@@ -1873,7 +1992,8 @@ mod tests {
         let (repo, _index_dir, index_path) = fixture();
         let store = Store::open_read_only(&index_path).unwrap();
         let snapshot = build_snapshot(&store, repo.path(), &options()).unwrap();
-        let json = serde_json::to_value(snapshot).unwrap();
+        let raw_impact = serde_json::to_value(&snapshot.impact).unwrap();
+        let json = serde_json::to_value(&snapshot).unwrap();
 
         assert_eq!(json["schema_version"], 1);
         assert_eq!(json["evidence"]["schema_version"], 1);
@@ -1892,6 +2012,44 @@ mod tests {
         assert_eq!(
             json["impact"]["changes"]["files"]["items"][0]["path"],
             "src/lib.rs"
+        );
+        assert_eq!(json["impact"], raw_impact);
+    }
+
+    #[test]
+    fn serialized_snapshot_projects_an_already_truncated_changed_file_collection() {
+        let (repo, _index_dir, index_path) = fixture();
+        let store = Store::open_read_only(&index_path).unwrap();
+        let mut snapshot = build_snapshot(&store, repo.path(), &options()).unwrap();
+        let sample = snapshot.impact.changes.files.items[0].clone();
+        snapshot.impact.changes.files = queries::Collection {
+            total: None,
+            returned: 10_000,
+            truncated: true,
+            truncation_reason: Some("file_limit".into()),
+            items: vec![sample; 10_000],
+        };
+
+        let bytes = serde_json::to_vec(&snapshot).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let files = &json["impact"]["changes"]["files"];
+
+        assert_eq!(
+            files["items"].as_array().unwrap().len(),
+            LENS_CHANGED_FILE_ITEM_LIMIT
+        );
+        assert_eq!(files["returned"], LENS_CHANGED_FILE_ITEM_LIMIT as u64);
+        assert_eq!(files["observed"], 10_000);
+        assert_eq!(files["total"], serde_json::Value::Null);
+        assert_eq!(files["truncated"], true);
+        assert_eq!(files["truncation_reason"], "file_limit");
+        assert_eq!(files["projection_truncated"], true);
+        assert_eq!(files["projection_reason"], "lens_payload_limit");
+        assert_eq!(snapshot.impact.changes.files.items.len(), 10_000);
+        assert!(
+            bytes.len() < 100_000,
+            "projected payload was {} bytes",
+            bytes.len()
         );
     }
 
@@ -2511,6 +2669,8 @@ mod tests {
     fn embedded_assets_are_offline_and_csp_compatible() {
         assert!(INDEX_HTML.contains("src=\"app.js\""));
         assert!(INDEX_HTML.contains("href=\"styles.css\""));
+        assert!(INDEX_HTML.contains("src=\"mastermind-mark.svg\""));
+        assert!(INDEX_HTML.contains("style-src-attr 'unsafe-inline'"));
         assert!(!INDEX_HTML.contains("<script>"));
         assert!(!INDEX_HTML.contains("<style>"));
         for asset in [INDEX_HTML, STYLES_CSS] {
@@ -2521,6 +2681,8 @@ mod tests {
         assert!(!APP_JS
             .replace("http://www.w3.org/2000/svg", "")
             .contains("http://"));
+        assert!(MASTERMIND_MARK_SVG.contains("<svg"));
+        assert!(!MASTERMIND_MARK_SVG.contains("https://"));
     }
 
     #[test]

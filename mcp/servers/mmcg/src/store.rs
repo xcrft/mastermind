@@ -2933,13 +2933,22 @@ impl Store {
         production_only: bool,
         limit: usize,
     ) -> SqlResult<Vec<FileInDegree>> {
-        let sql = "WITH refs AS (
-                 SELECT to_name AS nm FROM edges WHERE to_name <> ''
+        let sql = "WITH raw_refs AS (
+                 SELECT to_name AS nm, COUNT(*) AS edge_count
+                 FROM edges
+                 WHERE to_name <> ''
+                 GROUP BY to_name
                  UNION ALL
-                 SELECT to_type AS nm FROM edges
-                   WHERE to_type IS NOT NULL AND to_type <> ''
+                 SELECT to_type AS nm, COUNT(*) AS edge_count
+                 FROM edges
+                 WHERE to_type IS NOT NULL AND to_type <> ''
+                 GROUP BY to_type
+             ), refs AS (
+                 SELECT nm, SUM(edge_count) AS edge_count
+                 FROM raw_refs
+                 GROUP BY nm
              )
-             SELECT s.file_path AS file, COUNT(*) AS deg
+             SELECT s.file_path AS file, SUM(r.edge_count) AS deg
              FROM refs r
              JOIN symbols s ON s.name = r.nm
              WHERE s.kind != 'module'
@@ -3045,14 +3054,8 @@ impl Store {
         limit: usize,
     ) -> SqlResult<(u32, Vec<Symbol>)> {
         let candidates = unreferenced_candidates_sql();
-        let count_sql = format!("{candidates} SELECT COUNT(*) FROM candidates");
-        let count: i64 = self.conn.query_row(
-            &count_sql,
-            params![kind, language, scope, scope_kind, production_only],
-            |row| row.get(0),
-        )?;
         let rows_sql = format!(
-            "{candidates} SELECT {SYMBOL_COLS} FROM candidates
+            "{candidates} SELECT {SYMBOL_COLS}, COUNT(*) OVER() AS total FROM candidates
              ORDER BY file_path, line_start, name, kind, id
              LIMIT ?6"
         );
@@ -3064,11 +3067,19 @@ impl Store {
                 scope,
                 scope_kind,
                 production_only,
-                i64::try_from(limit).unwrap_or(i64::MAX)
+                i64::try_from(limit.max(1)).unwrap_or(i64::MAX)
             ],
-            Self::row_to_symbol,
+            |row| Ok((Self::row_to_symbol(row)?, row.get::<_, i64>(9)?)),
         )?;
-        let symbols = rows.collect::<SqlResult<Vec<_>>>()?;
+        let mut count = 0;
+        let mut symbols = Vec::with_capacity(limit);
+        for row in rows {
+            let (symbol, total) = row?;
+            count = total;
+            if symbols.len() < limit {
+                symbols.push(symbol);
+            }
+        }
         Ok((count.clamp(0, i64::from(u32::MAX)) as u32, symbols))
     }
 
@@ -4459,6 +4470,48 @@ mod tests {
     }
 
     #[test]
+    fn file_in_degrees_preaggregation_matches_reference_semantics() {
+        for seed in 0..12u64 {
+            let path = tmp_db(&format!("file_in_degrees_equiv_{seed}"));
+            let store = Store::open(&path).unwrap();
+            let (symbols, edges) = gen_calls_graph(seed, 24, 40);
+            seed_calls_graph(&store, &symbols, &edges);
+
+            for production_only in [false, true] {
+                let actual = store.file_in_degrees(production_only, 1000).unwrap();
+                let mut expected = BTreeMap::<String, u32>::new();
+                for symbol in &symbols {
+                    if symbol.kind == "module"
+                        || production_only && production_excluded(&symbol.file_path)
+                    {
+                        continue;
+                    }
+                    for edge in &edges {
+                        if edge.to_name == symbol.name {
+                            *expected.entry(symbol.file_path.clone()).or_default() += 1;
+                        }
+                        if edge.to_type.as_deref() == Some(symbol.name.as_str()) {
+                            *expected.entry(symbol.file_path.clone()).or_default() += 1;
+                        }
+                    }
+                }
+                let mut expected = expected.into_iter().collect::<Vec<_>>();
+                expected
+                    .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+                let actual = actual
+                    .into_iter()
+                    .map(|row| (row.file, row.in_degree))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    actual, expected,
+                    "seed {seed} production_only={production_only}"
+                );
+            }
+            std::fs::remove_file(&path).ok();
+        }
+    }
+
+    #[test]
     fn schema_initializes() {
         let path = tmp_db("schema_initializes");
         let store = Store::open(&path).unwrap();
@@ -4963,6 +5016,11 @@ mod tests {
             .iter()
             .all(|symbol| symbol.file_path.starts_with("src/core/")
                 && is_production_path(&symbol.file_path)));
+        let (zero_limit_total, zero_limit_rows) = store
+            .unreferenced_bounded(None, None, "src/core", "directory", false, 0)
+            .unwrap();
+        assert_eq!(zero_limit_total, all_total);
+        assert!(zero_limit_rows.is_empty());
         std::fs::remove_file(&path).ok();
     }
 

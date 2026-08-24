@@ -28,6 +28,7 @@ pub(crate) const MAX_ARTIFACT_BYTES: u64 = 32 * 1024 * 1024;
 pub(crate) const MAX_CODEOWNERS_BYTES: u64 = 3 * 1024 * 1024;
 pub(crate) const MAX_ARTIFACT_SOURCES: usize = 64;
 const MAX_RELEVANT_FILES: usize = 1_000;
+const MAX_TRUNCATED_CHANGED_FILES: usize = 200;
 const MAX_FINDINGS: usize = 5_000;
 const MAX_FINDINGS_PER_FILE: usize = 100;
 const MAX_COVERAGE_LINES: usize = 500_000;
@@ -572,7 +573,7 @@ fn collect_internal(
         collector.diagnostic(
             "lens",
             "relevant_file_limit",
-            "Evidence matching was limited to the first 1,000 returned trace files.",
+            "Evidence matching used a bounded, trace-first file set; an already-truncated changed-file inventory contributes at most 200 file-only paths.",
         );
     }
     if sources_truncated {
@@ -752,41 +753,65 @@ pub(crate) fn collect_for_fact_adapter(
 }
 
 fn relevant_paths(impact: &ChangeImpactResponse) -> (BTreeSet<String>, bool) {
-    let mut paths = BTreeSet::new();
-    paths.extend(
-        impact
-            .changes
-            .files
-            .items
-            .iter()
-            .map(|item| item.path.clone()),
-    );
-    paths.extend(
-        impact
-            .changes
-            .symbols
-            .items
-            .iter()
-            .map(|item| item.file.clone()),
-    );
-    paths.extend(
-        impact
-            .impact
-            .items
-            .iter()
-            .map(|item| item.symbol.file.clone()),
-    );
-    paths.extend(
-        impact
-            .tests
-            .items
-            .iter()
-            .map(|item| item.symbol.file.clone()),
-    );
-    let truncated = paths.len() > MAX_RELEVANT_FILES;
-    if truncated {
-        paths = paths.into_iter().take(MAX_RELEVANT_FILES).collect();
-    }
+    let trace_paths = impact
+        .changes
+        .symbols
+        .items
+        .iter()
+        .map(|item| item.file.clone())
+        .chain(
+            impact
+                .impact
+                .items
+                .iter()
+                .map(|item| item.symbol.file.clone()),
+        )
+        .chain(
+            impact
+                .tests
+                .items
+                .iter()
+                .map(|item| item.symbol.file.clone()),
+        );
+    let changed_paths = impact
+        .changes
+        .files
+        .items
+        .iter()
+        .map(|item| item.path.clone());
+    bounded_relevant_paths(trace_paths, changed_paths, impact.changes.files.truncated)
+}
+
+fn bounded_relevant_paths<I, J>(
+    trace_paths: I,
+    changed_paths: J,
+    changed_files_truncated: bool,
+) -> (BTreeSet<String>, bool)
+where
+    I: IntoIterator<Item = String>,
+    J: IntoIterator<Item = String>,
+{
+    let trace_paths = trace_paths.into_iter().collect::<BTreeSet<_>>();
+    let mut paths = trace_paths
+        .iter()
+        .take(MAX_RELEVANT_FILES)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut truncated = trace_paths.len() > paths.len();
+    let changed_paths = changed_paths
+        .into_iter()
+        .filter(|path| !paths.contains(path))
+        .collect::<BTreeSet<_>>();
+    let changed_limit = if changed_files_truncated {
+        MAX_TRUNCATED_CHANGED_FILES
+    } else {
+        MAX_RELEVANT_FILES
+    };
+    let available = MAX_RELEVANT_FILES
+        .saturating_sub(paths.len())
+        .min(changed_limit);
+    truncated |= changed_files_truncated || changed_paths.len() > available;
+    paths.extend(changed_paths.into_iter().take(available));
     (paths, truncated)
 }
 
@@ -2470,10 +2495,10 @@ fn parse_cobertura(
             .map_err(|_| SourceFailure::InvalidFormat)?
         {
             Event::Start(event) => match event.local_name().as_ref() {
-                b"coverage" => saw_coverage = true,
-                b"source" => reading_source = true,
-                b"class" => current_filename = xml_attribute(&event, b"filename"),
-                b"line" => add_cobertura_line(
+                "coverage" => saw_coverage = true,
+                "source" => reading_source = true,
+                "class" => current_filename = xml_attribute(&event, "filename"),
+                "line" => add_cobertura_line(
                     root,
                     relevant,
                     &sources,
@@ -2485,9 +2510,9 @@ fn parse_cobertura(
                 _ => {}
             },
             Event::Empty(event) => {
-                if event.local_name().as_ref() == b"coverage" {
+                if event.local_name().as_ref() == "coverage" {
                     saw_coverage = true;
-                } else if event.local_name().as_ref() == b"line" {
+                } else if event.local_name().as_ref() == "line" {
                     add_cobertura_line(
                         root,
                         relevant,
@@ -2500,13 +2525,11 @@ fn parse_cobertura(
                 }
             }
             Event::Text(event) if reading_source => {
-                let value =
-                    std::str::from_utf8(event.as_ref()).map_err(|_| SourceFailure::InvalidUtf8)?;
-                sources.push(xml_unescape(value)?);
+                sources.push(xml_unescape(event.as_ref())?);
             }
             Event::End(event) => match event.local_name().as_ref() {
-                b"source" => reading_source = false,
-                b"class" => current_filename = None,
+                "source" => reading_source = false,
+                "class" => current_filename = None,
                 _ => {}
             },
             Event::Eof => break,
@@ -2536,13 +2559,13 @@ fn add_cobertura_line(
 ) {
     stats.facts_total += 1;
     let Some(filename) = filename else { return };
-    let Some(line) = xml_attribute(event, b"number").and_then(|value| value.parse::<u32>().ok())
+    let Some(line) = xml_attribute(event, "number").and_then(|value| value.parse::<u32>().ok())
     else {
         stats.partial = true;
         stats.invalid_records = true;
         return;
     };
-    let Some(hits) = xml_attribute(event, b"hits").and_then(|value| value.parse::<u64>().ok())
+    let Some(hits) = xml_attribute(event, "hits").and_then(|value| value.parse::<u64>().ok())
     else {
         stats.partial = true;
         stats.invalid_records = true;
@@ -2567,13 +2590,10 @@ fn add_cobertura_line(
     }
 }
 
-fn xml_attribute(event: &quick_xml::events::BytesStart<'_>, name: &[u8]) -> Option<String> {
+fn xml_attribute(event: &quick_xml::events::BytesStart<'_>, name: &str) -> Option<String> {
     event.attributes().flatten().find_map(|attribute| {
-        (attribute.key.local_name().as_ref() == name).then(|| {
-            std::str::from_utf8(attribute.value.as_ref())
-                .ok()
-                .and_then(|value| xml_unescape(value).ok())
-        })?
+        (attribute.key.local_name().as_ref() == name)
+            .then(|| xml_unescape(attribute.value.as_ref()).ok())?
     })
 }
 
@@ -2823,6 +2843,25 @@ mod tests {
             knowledge_match_count: 0,
             deadline: None,
         }
+    }
+
+    #[test]
+    fn relevant_path_projection_prioritizes_trace_files_in_large_changes() {
+        let trace = "zz/important_trace.rs".to_string();
+        let changed = (0..10_000).map(|index| format!("generated/{index:05}.rs"));
+
+        let (paths, truncated) = bounded_relevant_paths([trace.clone()], changed, true);
+
+        assert!(truncated);
+        assert!(paths.contains(&trace));
+        assert_eq!(paths.len(), MAX_TRUNCATED_CHANGED_FILES + 1);
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|path| path.starts_with("generated/"))
+                .count(),
+            MAX_TRUNCATED_CHANGED_FILES
+        );
     }
 
     fn git(root: &Path, args: &[&str]) {

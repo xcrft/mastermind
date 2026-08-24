@@ -756,7 +756,7 @@ async function main() {
   assert.match(refreshTag[0], /aria-label="Refresh Lens snapshot"/, "Refresh needs an explicit mobile-safe accessible name");
   assert.match(
     HTML_SOURCE,
-    /default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'/,
+    /default-src 'self'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; connect-src 'self'/,
     "Lens must keep its strict same-origin CSP"
   );
   assert.doesNotMatch(HTML_SOURCE, /<(?:script|style)[^>]*>\s*[^<\s]/i, "Lens must not add inline executable content");
@@ -875,12 +875,12 @@ async function main() {
   assert.match(harness.nodes.get("status-region").textContent, /9 evidence sources were evaluated/i);
   assert.match(
     harness.nodes.get("instrument-summary").textContent,
-    /Widest blast: authorize → 1 symbol across 1 component/i,
+    /Widest: authorize → 1 symbol \/ 1 component/i,
     "The headline must name the widest-blast changed symbol"
   );
   assert.match(
     harness.nodes.get("instrument-summary").textContent,
-    /1 changed symbol reaches downstream code with no returned test path/i,
+    /1 changed symbol lacks a returned test path/i,
     "The headline must count changed symbols with no test path"
   );
   assert.match(harness.nodes.get("evidence-summary").textContent, /9 sources · 3 matched trace files/i);
@@ -1104,6 +1104,21 @@ async function main() {
       "Exactly one trace representation must be active at " + width + "px"
     );
   }
+  assert.match(
+    HTML_SOURCE,
+    /<img class="wordmark__mark" src="mastermind-mark\.svg" alt="" aria-hidden="true">/i,
+    "Lens must use the packaged Mastermind mark instead of a text placeholder"
+  );
+  assert.match(
+    CSS_SOURCE,
+    /\.metric-strip\s*\{[^}]*grid-template-columns:\s*repeat\(4,\s*minmax\(0,\s*1fr\)\)/s,
+    "Mobile metrics must reserve one column per headline value"
+  );
+  assert.match(
+    CSS_SOURCE,
+    /\.metric-stage:first-child\s*\{[^}]*grid-column:\s*1\s*\/\s*span 2/s,
+    "The changed stage must span both of its mobile metric columns"
+  );
 
   const ageHarness = await renderFixture(fixture(), { now: Date.UTC(2026, 7, 13, 12, 0, 0) });
   assert.match(ageHarness.nodes.get("snapshot-age").textContent, /Snapshot just now/i);
@@ -1171,7 +1186,7 @@ async function main() {
   truncated.impact.impact.truncation_reason = "work_limit";
   const truncatedHarness = await renderFixture(truncated);
   assert.match(truncatedHarness.nodes.get("notice-stack").textContent, /1 bounded section/i);
-  assert.match(truncatedHarness.nodes.get("notice-stack").textContent, /Review impacted symbols before approval/i);
+  assert.match(truncatedHarness.nodes.get("notice-stack").textContent, /Review: Impacted symbols/i);
   assert.doesNotMatch(truncatedHarness.nodes.get("notice-stack").textContent, /work_limit/i);
   assert.match(truncatedHarness.nodes.get("notice-stack").textContent, /Open precision & limits/i);
   assert.match(truncatedHarness.nodes.get("completeness-status").textContent, /Partial evidence/i);
@@ -1180,6 +1195,24 @@ async function main() {
   assert.ok(limitsAction, "Partial notice must provide a direct limits action");
   limitsAction.dispatch("click");
   assert.equal(truncatedHarness.nodes.get("method-ledger-disclosure").open, true);
+
+  const projectedFiles = cloneFixture();
+  projectedFiles.impact.changes.files = {
+    total: null,
+    returned: 200,
+    observed: 10_000,
+    truncated: true,
+    truncation_reason: "file_limit",
+    projection_truncated: true,
+    projection_reason: "lens_payload_limit",
+    items: projectedFiles.impact.changes.files.items,
+  };
+  const projectedFilesHarness = await renderFixture(projectedFiles);
+  assert.equal(projectedFilesHarness.nodes.get("metric-files").textContent, "≥10,000");
+  assert.match(
+    projectedFilesHarness.nodes.get("metric-files-note").textContent,
+    /Partial · file_limit · 200 shown/i
+  );
 
   const empty = emptyFixture();
   const emptyHarness = await renderFixture(empty, { width: 900 });

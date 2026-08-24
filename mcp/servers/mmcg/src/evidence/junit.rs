@@ -42,12 +42,12 @@ struct CaseBuilder {
 impl CaseBuilder {
     fn from_event(event: &quick_xml::events::BytesStart<'_>) -> Self {
         Self {
-            file: xml_attribute(event, b"file"),
-            name: xml_attribute(event, b"name").unwrap_or_else(|| "unnamed testcase".into()),
-            class_name: xml_attribute(event, b"classname"),
+            file: xml_attribute(event, "file"),
+            name: xml_attribute(event, "name").unwrap_or_else(|| "unnamed testcase".into()),
+            class_name: xml_attribute(event, "classname"),
             status: JunitStatus::Passed,
             message: String::new(),
-            duration_ms: xml_attribute(event, b"time")
+            duration_ms: xml_attribute(event, "time")
                 .and_then(|value| value.parse::<f64>().ok())
                 .filter(|value| value.is_finite() && *value >= 0.0)
                 .map(|seconds| (seconds * 1_000.0).round().min(u64::MAX as f64) as u64)
@@ -58,7 +58,7 @@ impl CaseBuilder {
 
     fn start_detail(&mut self, status: JunitStatus, event: &quick_xml::events::BytesStart<'_>) {
         self.status = status;
-        self.message = xml_attribute(event, b"message").unwrap_or_default();
+        self.message = xml_attribute(event, "message").unwrap_or_default();
         self.reading_detail = true;
     }
 
@@ -110,8 +110,8 @@ pub(super) fn parse(bytes: &[u8], deadline: Option<Instant>) -> Result<ParsedJun
             .map_err(|_| SourceFailure::InvalidFormat)?
         {
             Event::Start(event) => match event.local_name().as_ref() {
-                b"testsuites" | b"testsuite" => saw_suite = true,
-                b"testcase" => {
+                "testsuites" | "testsuite" => saw_suite = true,
+                "testcase" => {
                     saw_suite = true;
                     if facts_total >= MAX_SOURCE_FACTS {
                         partial = true;
@@ -121,17 +121,17 @@ pub(super) fn parse(bytes: &[u8], deadline: Option<Instant>) -> Result<ParsedJun
                     facts_total += 1;
                     current = Some(CaseBuilder::from_event(&event));
                 }
-                b"failure" => {
+                "failure" => {
                     if let Some(case) = current.as_mut() {
                         case.start_detail(JunitStatus::Failed, &event);
                     }
                 }
-                b"error" => {
+                "error" => {
                     if let Some(case) = current.as_mut() {
                         case.start_detail(JunitStatus::Error, &event);
                     }
                 }
-                b"skipped" => {
+                "skipped" => {
                     if let Some(case) = current.as_mut() {
                         case.start_detail(JunitStatus::Skipped, &event);
                     }
@@ -139,8 +139,8 @@ pub(super) fn parse(bytes: &[u8], deadline: Option<Instant>) -> Result<ParsedJun
                 _ => {}
             },
             Event::Empty(event) => match event.local_name().as_ref() {
-                b"testsuites" | b"testsuite" => saw_suite = true,
-                b"testcase" => {
+                "testsuites" | "testsuite" => saw_suite = true,
+                "testcase" => {
                     saw_suite = true;
                     if facts_total >= MAX_SOURCE_FACTS {
                         partial = true;
@@ -150,19 +150,19 @@ pub(super) fn parse(bytes: &[u8], deadline: Option<Instant>) -> Result<ParsedJun
                     facts_total += 1;
                     cases.push(CaseBuilder::from_event(&event).finish());
                 }
-                b"failure" => {
+                "failure" => {
                     if let Some(case) = current.as_mut() {
                         case.start_detail(JunitStatus::Failed, &event);
                         case.reading_detail = false;
                     }
                 }
-                b"error" => {
+                "error" => {
                     if let Some(case) = current.as_mut() {
                         case.start_detail(JunitStatus::Error, &event);
                         case.reading_detail = false;
                     }
                 }
-                b"skipped" => {
+                "skipped" => {
                     if let Some(case) = current.as_mut() {
                         case.start_detail(JunitStatus::Skipped, &event);
                         case.reading_detail = false;
@@ -172,21 +172,17 @@ pub(super) fn parse(bytes: &[u8], deadline: Option<Instant>) -> Result<ParsedJun
             },
             Event::Text(event) => {
                 if let Some(case) = current.as_mut().filter(|case| case.reading_detail) {
-                    let text = std::str::from_utf8(event.as_ref())
-                        .map_err(|_| SourceFailure::InvalidUtf8)?;
-                    let text = xml_unescape(text)?;
+                    let text = xml_unescape(event.as_ref())?;
                     case.append_detail(&text);
                 }
             }
             Event::CData(event) => {
                 if let Some(case) = current.as_mut().filter(|case| case.reading_detail) {
-                    let text = std::str::from_utf8(event.as_ref())
-                        .map_err(|_| SourceFailure::InvalidUtf8)?;
-                    case.append_detail(text);
+                    case.append_detail(event.as_ref());
                 }
             }
             Event::End(event) => match event.local_name().as_ref() {
-                b"testcase" => {
+                "testcase" => {
                     if let Some(case) = current.take() {
                         cases.push(case.finish());
                     } else {
@@ -194,7 +190,7 @@ pub(super) fn parse(bytes: &[u8], deadline: Option<Instant>) -> Result<ParsedJun
                         invalid_records = true;
                     }
                 }
-                b"failure" | b"error" | b"skipped" => {
+                "failure" | "error" | "skipped" => {
                     if let Some(case) = current.as_mut() {
                         case.reading_detail = false;
                     }

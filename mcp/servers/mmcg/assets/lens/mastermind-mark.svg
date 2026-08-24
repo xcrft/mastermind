@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title description">
+  <title id="title">Mastermind</title>
+  <desc id="description">A bounded code graph forming an M inside a lens.</desc>
+  <rect x="4" y="4" width="120" height="120" rx="30" fill="#121827"/>
+  <path d="M4 94h120v10c0 11.046-8.954 20-20 20H24C12.954 124 4 115.046 4 104V94Z" fill="#4f46e5"/>
+  <path d="M30 38v42M30 38l34 34 34-34M98 38v42" fill="none" stroke="#a7a1ff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="30" cy="38" r="7" fill="#7166b8" stroke="#f8fafc" stroke-width="3"/>
+  <circle cx="30" cy="80" r="7" fill="#4f46e5" stroke="#f8fafc" stroke-width="3"/>
+  <circle cx="64" cy="72" r="11" fill="#121827" stroke="#f8fafc" stroke-width="4"/>
+  <circle cx="64" cy="72" r="4" fill="#4f46e5"/>
+  <circle cx="98" cy="38" r="7" fill="#7166b8" stroke="#f8fafc" stroke-width="3"/>
+  <circle cx="98" cy="80" r="7" fill="#0f8a61" stroke="#f8fafc" stroke-width="3"/>
+</svg>

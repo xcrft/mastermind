@@ -4,13 +4,17 @@
 //! walks the file tree, picks an extractor per extension, parses with tree-sitter
 //! in parallel via rayon, and serializes writes through one SQLite connection.
 
+use crate::bounded_fs::{
+    inspect_path_kind_with_capability, read_directory_names, read_directory_names_with_capability,
+    read_regular_file, read_regular_file_expected, read_regular_file_with_capability,
+    BoundedPathKind, BoundedReadError, ReadControl, RootCapability, StableFileIdentity,
+};
 use crate::store::{PendingFile, PendingSymbol, Store};
 use ignore::{IncrementalIgnore, WalkBuilder};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tree_sitter::{Parser, Tree};
@@ -78,6 +82,10 @@ const BINARY_SNIFF_BYTES: u64 = 8 * 1024;
 const GIT_TRACKED_PATH_OUTPUT_LIMIT: usize = 64 * 1024 * 1024;
 const MAX_HISTORY_ARTIFACT_SIZE: u64 = 1024 * 1024;
 const MAX_HISTORY_ENTRIES: usize = 5_000;
+const MAX_HISTORY_AGGREGATE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_HISTORY_DIRECTORY_ENTRIES: usize = 50_000;
+pub const AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT: usize = 20_000;
+pub const AUTO_REFRESH_SOURCE_AGGREGATE_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Parsed files waiting for the single SQLite writer at once. This bounds peak
 /// memory without changing the existing parallel-parse/single-writer model.
@@ -193,6 +201,41 @@ pub struct Indexer {
     root: PathBuf,
 }
 
+struct ProjectHistorySnapshot {
+    entries: Vec<crate::store::ProjectHistoryEntry>,
+    stats: ProjectHistoryIndexStats,
+    inventory_token: String,
+}
+
+type HistoryCandidate = (PathBuf, &'static str);
+type HistoryCandidateInventory = (Vec<HistoryCandidate>, bool);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectHistoryFreshness {
+    Fresh,
+    Stale,
+    Incomplete,
+    SnapshotChanged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct IndexLimits {
+    source_candidates: Option<usize>,
+    source_declared_bytes: Option<u64>,
+}
+
+impl IndexLimits {
+    pub(crate) const MANUAL: Self = Self {
+        source_candidates: None,
+        source_declared_bytes: None,
+    };
+
+    pub(crate) const AUTO_REFRESH: Self = Self {
+        source_candidates: Some(AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT),
+        source_declared_bytes: Some(AUTO_REFRESH_SOURCE_AGGREGATE_BYTES),
+    };
+}
+
 impl Indexer {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
@@ -248,6 +291,15 @@ impl Indexer {
     ///
     /// Files in the index but gone from disk are purged at the end. Writes to `store`.
     pub fn index_all(&self, store: &mut Store, force_full: bool) -> Result<IndexStats, IndexError> {
+        self.index_all_with_limits(store, force_full, IndexLimits::MANUAL)
+    }
+
+    pub(crate) fn index_all_with_limits(
+        &self,
+        store: &mut Store,
+        force_full: bool,
+        limits: IndexLimits,
+    ) -> Result<IndexStats, IndexError> {
         let start = SystemTime::now();
         ensure_indexing_active(store)?;
         self.bind_or_validate_index_root(store)?;
@@ -262,9 +314,24 @@ impl Indexer {
                 .map_err(|error| IndexError::Other(error.to_string()))?
                 > 0;
         let force_full = force_full || !extractor_contract_current;
+        let root_capability = if limits == IndexLimits::MANUAL {
+            None
+        } else {
+            Some(RootCapability::open(&self.root).map_err(index_error_from_read)?)
+        };
 
         // Phase 1: walk filesystem
-        let candidates = source_candidates(&self.root);
+        let candidates = {
+            let interrupted = || store.work_interrupted();
+            let control = ReadControl {
+                deadline: store.request_deadline(),
+                interrupted: Some(&interrupted),
+            };
+            match (root_capability.as_ref(), limits.source_candidates) {
+                (Some(root), Some(limit)) => source_candidates_bounded(root, limit, control)?,
+                _ => source_candidates_controlled(&self.root, None, control)?,
+            }
+        };
         ensure_indexing_active(store)?;
 
         let mut stats = IndexStats {
@@ -277,6 +344,8 @@ impl Indexer {
         let mut to_parse: Vec<PathBuf> = Vec::new();
         let mut current_paths: std::collections::HashSet<String> =
             std::collections::HashSet::with_capacity(candidates.len());
+        let mut admitted_identities: HashMap<PathBuf, StableFileIdentity> = HashMap::new();
+        let mut declared_source_bytes = 0_u64;
 
         for path in &candidates {
             ensure_indexing_active(store)?;
@@ -290,8 +359,19 @@ impl Indexer {
                 push_path_sample(&mut stats.skipped_paths, &rel);
                 continue;
             }
-            match source_admission(path) {
-                Ok(()) => {}
+            let admission = {
+                let interrupted = || store.work_interrupted();
+                let control = ReadControl {
+                    deadline: store.request_deadline(),
+                    interrupted: Some(&interrupted),
+                };
+                match root_capability.as_ref() {
+                    Some(root) => source_admission_with_capability(root, path, control),
+                    None => source_admission_controlled(&self.root, path, control),
+                }
+            };
+            let admitted = match admission {
+                Ok(admitted) => admitted,
                 Err(IndexError::Skipped(IndexSkipReason::Binary)) => {
                     stats.files_skipped_binary += 1;
                     push_path_sample(&mut stats.skipped_binary_paths, &rel);
@@ -302,20 +382,32 @@ impl Indexer {
                     push_path_sample(&mut stats.skipped_too_large_paths, &rel);
                     continue;
                 }
+                Err(error @ (IndexError::Cancelled | IndexError::DeadlineExceeded))
+                | Err(error @ IndexError::LimitExceeded { .. }) => return Err(error),
                 Err(_) => {
                     stats.files_failed += 1;
                     continue;
                 }
+            };
+            declared_source_bytes = declared_source_bytes
+                .checked_add(admitted.declared_len)
+                .ok_or(IndexError::LimitExceeded {
+                    dimension: "source_declared_bytes",
+                    cap: limits.source_declared_bytes.unwrap_or(u64::MAX),
+                })?;
+            if limits
+                .source_declared_bytes
+                .is_some_and(|cap| declared_source_bytes > cap)
+            {
+                return Err(IndexError::LimitExceeded {
+                    dimension: "source_declared_bytes",
+                    cap: limits.source_declared_bytes.unwrap_or(u64::MAX),
+                });
             }
             current_paths.insert(rel.clone());
 
             if !force_full {
-                let fs_mtime = path
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_millis() as i64);
+                let fs_mtime = Some(admitted.modified_millis);
 
                 if let (Some(fs_mt), Ok(Some(stored_mt))) = (fs_mtime, store.file_mtime(&rel)) {
                     if fs_mt <= stored_mt {
@@ -325,6 +417,9 @@ impl Indexer {
                 }
             }
 
+            if limits != IndexLimits::MANUAL {
+                admitted_identities.insert(path.clone(), admitted.identity);
+            }
             to_parse.push(path.clone());
         }
 
@@ -333,16 +428,47 @@ impl Indexer {
         // collection retained every PendingFile until parsing the whole repository.
         for batch in to_parse.chunks(PARSE_BATCH_SIZE) {
             ensure_indexing_active(store)?;
-            let parsed: Vec<(PathBuf, Result<PendingFile, IndexError>)> = batch
-                .par_iter()
-                .filter_map(|path| {
-                    let extractor = extractor_for_path(path)?;
-                    Some((
-                        path.clone(),
-                        parse_one(path, &self.root, extractor.as_ref()),
-                    ))
-                })
-                .collect();
+            let parsed: Vec<(PathBuf, Result<PendingFile, IndexError>)> = if limits
+                == IndexLimits::MANUAL
+            {
+                batch
+                    .par_iter()
+                    .filter_map(|path| {
+                        let extractor = extractor_for_path(path)?;
+                        Some((
+                            path.clone(),
+                            parse_one(path, &self.root, extractor.as_ref()),
+                        ))
+                    })
+                    .collect()
+            } else {
+                batch
+                    .iter()
+                    .filter_map(|path| {
+                        let extractor = extractor_for_path(path)?;
+                        let interrupted = || store.work_interrupted();
+                        let Some(expected_identity) = admitted_identities.get(path).copied() else {
+                            return Some((path.clone(), Err(IndexError::SnapshotChanged)));
+                        };
+                        Some((
+                            path.clone(),
+                            parse_one_controlled(
+                                path,
+                                &self.root,
+                                root_capability
+                                    .as_ref()
+                                    .expect("automatic refresh pins its root"),
+                                expected_identity,
+                                extractor.as_ref(),
+                                ReadControl {
+                                    deadline: store.request_deadline(),
+                                    interrupted: Some(&interrupted),
+                                },
+                            ),
+                        ))
+                    })
+                    .collect()
+            };
             ensure_indexing_active(store)?;
 
             for (path, outcome) in parsed {
@@ -372,6 +498,8 @@ impl Indexer {
                         stats.files_skipped_too_large += 1;
                         push_path_sample(&mut stats.skipped_too_large_paths, &rel);
                     }
+                    Err(error @ (IndexError::Cancelled | IndexError::DeadlineExceeded))
+                    | Err(error @ IndexError::LimitExceeded { .. }) => return Err(error),
                     Err(_) => stats.files_failed += 1,
                 }
             }
@@ -428,7 +556,9 @@ impl Indexer {
     pub fn index_task_specs(&self, store: &mut Store) -> Result<u32, IndexError> {
         ensure_indexing_active(store)?;
         let tasks_dir = self.root.join(".mastermind").join("tasks");
-        if !tasks_dir.is_dir() {
+        if !std::fs::symlink_metadata(&tasks_dir).is_ok_and(|metadata| {
+            metadata.file_type().is_dir() && !metadata.file_type().is_symlink()
+        }) {
             // No `.mastermind/tasks/` — clear any stale entries from a prior run too.
             store
                 .replace_task_specs(&[])
@@ -437,20 +567,40 @@ impl Indexer {
         }
 
         let mut entries: Vec<crate::store::TaskSpecEntry> = Vec::new();
-        for dirent in std::fs::read_dir(&tasks_dir).map_err(|e| IndexError::Io(e.to_string()))? {
+        let interrupted = || store.work_interrupted();
+        let control = ReadControl {
+            deadline: store.request_deadline(),
+            interrupted: Some(&interrupted),
+        };
+        let names = read_directory_names(&self.root, &tasks_dir, MAX_HISTORY_ENTRIES, control)
+            .map_err(index_error_from_read)?;
+        for name in names {
             ensure_indexing_active(store)?;
-            let dirent = dirent.map_err(|e| IndexError::Io(e.to_string()))?;
-            let path = dirent.path();
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            let Some(name) = name.to_str() else {
                 continue;
             };
+            let path = tasks_dir.join(name);
             // Per-task folders only. Bare top-level `.md` (legacy 0.6.x) and
             // `_`-prefixed names (shared assets, private scratch) are excluded.
-            if !path.is_dir() || name.starts_with('_') || name.starts_with('.') {
+            if name.starts_with('_')
+                || name.starts_with('.')
+                || !std::fs::symlink_metadata(&path).is_ok_and(|metadata| {
+                    metadata.file_type().is_dir() && !metadata.file_type().is_symlink()
+                })
+            {
                 continue;
             }
             let spec_path = path.join("spec.md");
-            let Ok(body) = std::fs::read_to_string(&spec_path) else {
+            let Ok(read) = read_regular_file(
+                &self.root,
+                &spec_path,
+                MAX_HISTORY_ARTIFACT_SIZE,
+                MAX_HISTORY_ARTIFACT_SIZE,
+                control,
+            ) else {
+                continue;
+            };
+            let Ok(body) = String::from_utf8(read.bytes) else {
                 continue;
             };
             let title = extract_spec_title(&body, name);
@@ -482,149 +632,199 @@ impl Indexer {
     ) -> Result<ProjectHistoryIndexStats, IndexError> {
         ensure_indexing_active(store)?;
         self.bind_or_validate_index_root(store)?;
-        let mut candidates: Vec<(PathBuf, &'static str)> = Vec::new();
+        let snapshot = {
+            let interrupted = || store.work_interrupted();
+            self.project_history_snapshot(ReadControl {
+                deadline: store.request_deadline(),
+                interrupted: Some(&interrupted),
+            })?
+        };
+        ensure_indexing_active(store)?;
+        store
+            .replace_project_history_snapshot(
+                &snapshot.entries,
+                snapshot.stats.skipped,
+                snapshot.stats.truncated,
+                &snapshot.inventory_token,
+            )
+            .map_err(|error| IndexError::Other(error.to_string()))?;
+        Ok(snapshot.stats)
+    }
+
+    pub(crate) fn project_history_freshness(
+        &self,
+        store: &Store,
+    ) -> Result<ProjectHistoryFreshness, IndexError> {
+        self.live_project_history_inventory(store)
+            .map(|(_, freshness)| freshness)
+    }
+
+    pub(crate) fn live_project_history_inventory(
+        &self,
+        store: &Store,
+    ) -> Result<(String, ProjectHistoryFreshness), IndexError> {
+        let interrupted = || store.work_interrupted();
+        let snapshot = match self.project_history_snapshot(ReadControl {
+            deadline: store.request_deadline(),
+            interrupted: Some(&interrupted),
+        }) {
+            Ok(snapshot) => snapshot,
+            Err(IndexError::SnapshotChanged) => {
+                return Ok((String::new(), ProjectHistoryFreshness::SnapshotChanged))
+            }
+            Err(error) => return Err(error),
+        };
+        let stored = store
+            .meta_value("project_history_inventory_token")
+            .map_err(|error| IndexError::Other(error.to_string()))?;
+        let freshness = if stored.as_deref() != Some(snapshot.inventory_token.as_str()) {
+            ProjectHistoryFreshness::Stale
+        } else if snapshot.stats.skipped > 0 || snapshot.stats.truncated {
+            ProjectHistoryFreshness::Incomplete
+        } else {
+            ProjectHistoryFreshness::Fresh
+        };
+        Ok((snapshot.inventory_token, freshness))
+    }
+
+    fn project_history_snapshot(
+        &self,
+        control: ReadControl<'_>,
+    ) -> Result<ProjectHistorySnapshot, IndexError> {
+        let root = RootCapability::open(&self.root).map_err(index_error_from_read)?;
+        let first = self.project_history_snapshot_once(&root, control)?;
+        control.check().map_err(index_error_from_read)?;
+        let second = self.project_history_snapshot_once(&root, control)?;
+        if first.inventory_token != second.inventory_token
+            || first.stats.indexed != second.stats.indexed
+            || first.stats.skipped != second.stats.skipped
+            || first.stats.truncated != second.stats.truncated
         {
-            let mut add_if_present = |path: PathBuf, kind: &'static str| {
-                if std::fs::symlink_metadata(&path).is_ok() {
-                    candidates.push((path, kind));
-                }
-            };
-            add_if_present(self.root.join("CONTEXT.md"), "context");
-            if let Ok(entries) = std::fs::read_dir(&self.root) {
-                for entry in entries.flatten() {
-                    ensure_indexing_active(store)?;
-                    let path = entry.path();
-                    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-                        continue;
-                    };
-                    if name.starts_with("CONTEXT-archive-") && name.ends_with(".md") {
-                        add_if_present(path, "context");
-                    }
-                }
-            }
-
-            let tasks_dir = self.root.join(".mastermind").join("tasks");
-            add_if_present(tasks_dir.join("_lessons.md"), "lesson");
-            if tasks_dir.is_dir() {
-                for dirent in std::fs::read_dir(&tasks_dir)
-                    .map_err(|error| IndexError::Io(error.to_string()))?
-                {
-                    ensure_indexing_active(store)?;
-                    let dirent = dirent.map_err(|error| IndexError::Io(error.to_string()))?;
-                    let path = dirent.path();
-                    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-                        continue;
-                    };
-                    let Ok(metadata) = std::fs::symlink_metadata(&path) else {
-                        continue;
-                    };
-                    if !metadata.file_type().is_dir()
-                        || metadata.file_type().is_symlink()
-                        || name.starts_with('_')
-                        || name.starts_with('.')
-                    {
-                        continue;
-                    }
-                    add_if_present(path.join("spec.md"), "task_spec");
-                    add_if_present(path.join("executor-report.md"), "executor_report");
-                    add_if_present(path.join("audit.md"), "audit");
-                    // Pre-0.39 tasks could keep release notes beside the spec.
-                    add_if_present(path.join("release-notes.md"), "release_notes");
-                }
-            }
-            let releases_dir = self.root.join(".mastermind").join("releases");
-            if let Ok(entries) = std::fs::read_dir(&releases_dir) {
-                for entry in entries.flatten() {
-                    ensure_indexing_active(store)?;
-                    let path = entry.path();
-                    let is_markdown =
-                        path.extension().and_then(|value| value.to_str()) == Some("md");
-                    if is_markdown {
-                        add_if_present(path, "release_notes");
-                    }
-                }
-            }
+            return Err(IndexError::SnapshotChanged);
         }
-        let mut decision_roots = [
-            "docs/adr",
-            "docs/adrs",
-            "docs/decisions",
-            "adr",
-            "adrs",
-            ".mastermind/decisions",
-        ]
-        .map(|relative| self.root.join(relative));
-        decision_roots.sort();
-        let mut decision_directories = 0usize;
-        let mut decision_truncated = false;
-        for decision_root in decision_roots {
-            ensure_indexing_active(store)?;
-            decision_truncated |= add_markdown_tree_candidates(
-                &decision_root,
-                "architecture_decision",
-                &mut candidates,
-                &mut decision_directories,
-            );
-        }
-        candidates.sort_by(|left, right| left.0.cmp(&right.0));
-        candidates.dedup_by(|left, right| left.0 == right.0);
-        let truncated = decision_truncated || candidates.len() > MAX_HISTORY_ENTRIES;
-        candidates.truncate(MAX_HISTORY_ENTRIES);
+        root.verify().map_err(index_error_from_read)?;
+        Ok(second)
+    }
 
+    fn project_history_snapshot_once(
+        &self,
+        root: &RootCapability,
+        control: ReadControl<'_>,
+    ) -> Result<ProjectHistorySnapshot, IndexError> {
+        let (mut candidates, mut truncated) = collect_project_history_candidates(root, control)?;
+        candidates
+            .sort_by(|left, right| (left.0.as_path(), left.1).cmp(&(right.0.as_path(), right.1)));
+        candidates.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
+        if candidates.len() > MAX_HISTORY_ENTRIES {
+            truncated = true;
+            candidates.truncate(MAX_HISTORY_ENTRIES);
+        }
+
+        let mut digest = Sha256::new();
+        digest.update(b"mmcg-project-history-inventory-v1\0");
         let mut entries = Vec::new();
         let mut skipped = 0_u32;
+        let mut aggregate_bytes = 0_u64;
         for (path, kind) in candidates {
-            ensure_indexing_active(store)?;
-            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
-                skipped += 1;
+            control.check().map_err(index_error_from_read)?;
+            let relative = path
+                .strip_prefix(root.canonical_root())
+                .map_err(|_| IndexError::SnapshotChanged)?
+                .to_string_lossy()
+                .replace('\\', "/");
+            digest.update(relative.as_bytes());
+            digest.update([0]);
+            digest.update(kind.as_bytes());
+            digest.update([0]);
+
+            let inspected = match read_regular_file_with_capability(
+                root,
+                &path,
+                MAX_HISTORY_ARTIFACT_SIZE,
+                0,
+                control,
+            ) {
+                Ok(file) => file,
+                Err(BoundedReadError::Interrupted) => return Err(IndexError::Cancelled),
+                Err(BoundedReadError::DeadlineExceeded) => {
+                    return Err(IndexError::DeadlineExceeded)
+                }
+                Err(BoundedReadError::SnapshotChanged) => return Err(IndexError::SnapshotChanged),
+                Err(error) => {
+                    skipped = skipped.saturating_add(1);
+                    digest.update(history_error_class(&error));
+                    digest.update([0]);
+                    continue;
+                }
+            };
+            let Some(next_aggregate) = aggregate_bytes.checked_add(inspected.declared_len) else {
+                truncated = true;
+                digest.update(b"aggregate_overflow\0");
                 continue;
             };
-            if !metadata.file_type().is_file()
-                || metadata.file_type().is_symlink()
-                || metadata.len() > MAX_HISTORY_ARTIFACT_SIZE
-            {
-                skipped += 1;
+            if next_aggregate > MAX_HISTORY_AGGREGATE_BYTES {
+                truncated = true;
+                digest.update(b"aggregate_omitted\0");
                 continue;
             }
-            let Ok(body) = std::fs::read_to_string(&path) else {
-                skipped += 1;
-                continue;
+            let read = match read_regular_file_expected(
+                root,
+                &path,
+                MAX_HISTORY_ARTIFACT_SIZE,
+                MAX_HISTORY_ARTIFACT_SIZE,
+                control,
+                Some(inspected.identity),
+            ) {
+                Ok(file) => file,
+                Err(BoundedReadError::Interrupted) => return Err(IndexError::Cancelled),
+                Err(BoundedReadError::DeadlineExceeded) => {
+                    return Err(IndexError::DeadlineExceeded)
+                }
+                Err(BoundedReadError::SnapshotChanged) => return Err(IndexError::SnapshotChanged),
+                Err(error) => {
+                    skipped = skipped.saturating_add(1);
+                    digest.update(history_error_class(&error));
+                    digest.update([0]);
+                    continue;
+                }
             };
+            let content_digest = Sha256::digest(&read.bytes);
+            digest.update(read.declared_len.to_le_bytes());
+            digest.update(content_digest);
+            digest.update([0]);
+            let body = match String::from_utf8(read.bytes) {
+                Ok(body) => body,
+                Err(_) => {
+                    skipped = skipped.saturating_add(1);
+                    digest.update(b"invalid_utf8\0");
+                    continue;
+                }
+            };
+            aggregate_bytes = next_aggregate;
             let fallback = path
                 .file_stem()
                 .and_then(|value| value.to_str())
                 .unwrap_or(kind);
             let title = extract_spec_title(&body, fallback);
-            let rel = path
-                .strip_prefix(&self.root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
             entries.push(crate::store::ProjectHistoryEntry {
-                path: rel,
+                path: relative,
                 kind: kind.to_string(),
                 title,
                 body,
             });
         }
-        let count = entries.len() as u32;
-        ensure_indexing_active(store)?;
-        store
-            .replace_project_history(&entries)
-            .map_err(|error| IndexError::Other(error.to_string()))?;
-        store
-            .set_meta("project_history_skipped", &skipped.to_string())
-            .map_err(|error| IndexError::Other(error.to_string()))?;
-        store
-            .set_meta(
-                "project_history_truncated",
-                if truncated { "true" } else { "false" },
-            )
-            .map_err(|error| IndexError::Other(error.to_string()))?;
-        Ok(ProjectHistoryIndexStats {
-            indexed: count,
+        digest.update(skipped.to_le_bytes());
+        digest.update([u8::from(truncated)]);
+        digest.update(aggregate_bytes.to_le_bytes());
+        let stats = ProjectHistoryIndexStats {
+            indexed: entries.len() as u32,
             skipped,
             truncated,
+        };
+        Ok(ProjectHistorySnapshot {
+            entries,
+            stats,
+            inventory_token: crate::hex::encode(&digest.finalize()),
         })
     }
 
@@ -641,59 +841,258 @@ impl Indexer {
     }
 }
 
-fn add_markdown_tree_candidates(
-    root: &Path,
-    kind: &'static str,
-    candidates: &mut Vec<(PathBuf, &'static str)>,
-    visited_directories: &mut usize,
-) -> bool {
-    let metadata = match std::fs::symlink_metadata(root) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
-        Err(_) => return true,
-    };
-    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-        return false;
+fn history_error_class(error: &BoundedReadError) -> &'static [u8] {
+    match error {
+        BoundedReadError::InvalidPath => b"invalid_path",
+        BoundedReadError::OutsideRoot => b"outside_root",
+        BoundedReadError::NotRegular => b"not_regular",
+        BoundedReadError::TooLarge { .. } => b"too_large",
+        BoundedReadError::SnapshotChanged => b"snapshot_changed",
+        BoundedReadError::Interrupted => b"cancelled",
+        BoundedReadError::DeadlineExceeded => b"deadline",
+        BoundedReadError::Io(_) => b"io",
     }
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(directory) = pending.pop() {
-        if candidates.len() > MAX_HISTORY_ENTRIES || *visited_directories >= MAX_HISTORY_ENTRIES {
-            return true;
+}
+
+fn history_directory_names(
+    root: &RootCapability,
+    directory: &Path,
+    remaining_entries: usize,
+    control: ReadControl<'_>,
+) -> Result<Option<Vec<std::ffi::OsString>>, IndexError> {
+    match read_directory_names_with_capability(root, directory, remaining_entries, control) {
+        Ok(names) => Ok(Some(names)),
+        Err(BoundedReadError::Interrupted) => Err(IndexError::Cancelled),
+        Err(BoundedReadError::DeadlineExceeded) => Err(IndexError::DeadlineExceeded),
+        Err(BoundedReadError::SnapshotChanged) => Err(IndexError::SnapshotChanged),
+        Err(BoundedReadError::TooLarge { .. }) => Ok(None),
+        Err(_) => Ok(None),
+    }
+}
+
+fn history_path_kind(
+    root: &RootCapability,
+    path: &Path,
+    control: ReadControl<'_>,
+) -> Result<Option<BoundedPathKind>, IndexError> {
+    match inspect_path_kind_with_capability(root, path, control) {
+        Ok(kind) => Ok(Some(kind)),
+        Err(BoundedReadError::Interrupted) => Err(IndexError::Cancelled),
+        Err(BoundedReadError::DeadlineExceeded) => Err(IndexError::DeadlineExceeded),
+        Err(BoundedReadError::SnapshotChanged) => Err(IndexError::SnapshotChanged),
+        Err(BoundedReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(None)
         }
-        *visited_directories += 1;
-        let entries = match std::fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            Err(_) => return true,
-        };
-        let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
-        entries.sort_by_key(std::fs::DirEntry::path);
-        let mut directories = Vec::new();
-        for entry in entries {
-            let path = entry.path();
-            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
-                continue;
-            };
-            if metadata.file_type().is_symlink() {
-                continue;
+        Err(_) => Ok(Some(BoundedPathKind::Other)),
+    }
+}
+
+fn add_history_candidate(
+    root: &RootCapability,
+    candidates: &mut Vec<HistoryCandidate>,
+    path: PathBuf,
+    kind: &'static str,
+    control: ReadControl<'_>,
+) -> Result<(), IndexError> {
+    if history_path_kind(root, &path, control)? == Some(BoundedPathKind::RegularFile) {
+        candidates.push((path, kind));
+    }
+    Ok(())
+}
+
+fn collect_project_history_candidates(
+    root: &RootCapability,
+    control: ReadControl<'_>,
+) -> Result<HistoryCandidateInventory, IndexError> {
+    let root_path = root.canonical_root();
+    let mut candidates = Vec::new();
+    let mut truncated = false;
+    let mut directory_entries = 0usize;
+
+    add_history_candidate(
+        root,
+        &mut candidates,
+        root_path.join("CONTEXT.md"),
+        "context",
+        control,
+    )?;
+    match history_directory_names(
+        root,
+        root_path,
+        MAX_HISTORY_DIRECTORY_ENTRIES.saturating_sub(directory_entries),
+        control,
+    )? {
+        Some(names) => {
+            directory_entries = directory_entries.saturating_add(names.len());
+            for name in names {
+                control.check().map_err(index_error_from_read)?;
+                let Some(name) = name.to_str() else { continue };
+                if name.starts_with("CONTEXT-archive-") && name.ends_with(".md") {
+                    add_history_candidate(
+                        root,
+                        &mut candidates,
+                        root_path.join(name),
+                        "context",
+                        control,
+                    )?;
+                }
             }
-            if metadata.file_type().is_dir() {
-                directories.push(path);
-            } else if metadata.file_type().is_file()
+        }
+        None => truncated = true,
+    }
+
+    let tasks_dir = root_path.join(".mastermind").join("tasks");
+    add_history_candidate(
+        root,
+        &mut candidates,
+        tasks_dir.join("_lessons.md"),
+        "lesson",
+        control,
+    )?;
+    if history_path_kind(root, &tasks_dir, control)? == Some(BoundedPathKind::Directory) {
+        match history_directory_names(
+            root,
+            &tasks_dir,
+            MAX_HISTORY_DIRECTORY_ENTRIES.saturating_sub(directory_entries),
+            control,
+        )? {
+            Some(names) => {
+                directory_entries = directory_entries.saturating_add(names.len());
+                for name in names {
+                    control.check().map_err(index_error_from_read)?;
+                    let Some(name) = name.to_str() else { continue };
+                    if name.starts_with('_') || name.starts_with('.') {
+                        continue;
+                    }
+                    let path = tasks_dir.join(name);
+                    if history_path_kind(root, &path, control)? != Some(BoundedPathKind::Directory)
+                    {
+                        continue;
+                    }
+                    add_history_candidate(
+                        root,
+                        &mut candidates,
+                        path.join("spec.md"),
+                        "task_spec",
+                        control,
+                    )?;
+                    add_history_candidate(
+                        root,
+                        &mut candidates,
+                        path.join("executor-report.md"),
+                        "executor_report",
+                        control,
+                    )?;
+                    add_history_candidate(
+                        root,
+                        &mut candidates,
+                        path.join("audit.md"),
+                        "audit",
+                        control,
+                    )?;
+                    // Tasks created before 0.39 can keep release notes beside the spec.
+                    add_history_candidate(
+                        root,
+                        &mut candidates,
+                        path.join("release-notes.md"),
+                        "release_notes",
+                        control,
+                    )?;
+                }
+            }
+            None => truncated = true,
+        }
+    }
+
+    let releases_dir = root_path.join(".mastermind").join("releases");
+    if history_path_kind(root, &releases_dir, control)? == Some(BoundedPathKind::Directory) {
+        match history_directory_names(
+            root,
+            &releases_dir,
+            MAX_HISTORY_DIRECTORY_ENTRIES.saturating_sub(directory_entries),
+            control,
+        )? {
+            Some(names) => {
+                directory_entries = directory_entries.saturating_add(names.len());
+                for name in names {
+                    control.check().map_err(index_error_from_read)?;
+                    let path = releases_dir.join(name);
+                    if path
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .is_some_and(|value| value.eq_ignore_ascii_case("md"))
+                    {
+                        add_history_candidate(
+                            root,
+                            &mut candidates,
+                            path,
+                            "release_notes",
+                            control,
+                        )?;
+                    }
+                }
+            }
+            None => truncated = true,
+        }
+    }
+
+    let mut decision_roots = [
+        "docs/adr",
+        "docs/adrs",
+        "docs/decisions",
+        "adr",
+        "adrs",
+        ".mastermind/decisions",
+    ]
+    .map(|relative| root_path.join(relative));
+    decision_roots.sort();
+    let mut pending = decision_roots.to_vec();
+    let mut visited_directories = 0usize;
+    while let Some(directory) = pending.pop() {
+        control.check().map_err(index_error_from_read)?;
+        if candidates.len() > MAX_HISTORY_ENTRIES
+            || visited_directories >= MAX_HISTORY_ENTRIES
+            || directory_entries >= MAX_HISTORY_DIRECTORY_ENTRIES
+        {
+            truncated = true;
+            break;
+        }
+        let exists = history_path_kind(root, &directory, control)?;
+        if exists != Some(BoundedPathKind::Directory) {
+            continue;
+        }
+        let Some(names) = history_directory_names(
+            root,
+            &directory,
+            MAX_HISTORY_DIRECTORY_ENTRIES.saturating_sub(directory_entries),
+            control,
+        )?
+        else {
+            truncated = true;
+            continue;
+        };
+        visited_directories = visited_directories.saturating_add(1);
+        directory_entries = directory_entries.saturating_add(names.len());
+        let mut child_directories = Vec::new();
+        for name in names {
+            let path = directory.join(name);
+            let kind = history_path_kind(root, &path, control)?;
+            if kind == Some(BoundedPathKind::Directory) {
+                child_directories.push(path);
+            } else if kind == Some(BoundedPathKind::RegularFile)
                 && path
                     .extension()
                     .and_then(|value| value.to_str())
                     .is_some_and(|value| value.eq_ignore_ascii_case("md"))
             {
-                candidates.push((path, kind));
-                if candidates.len() > MAX_HISTORY_ENTRIES {
-                    return true;
-                }
+                candidates.push((path, "architecture_decision"));
             }
         }
-        directories.reverse();
-        pending.extend(directories);
+        child_directories.sort();
+        child_directories.reverse();
+        pending.extend(child_directories);
     }
-    false
+    Ok((candidates, truncated))
 }
 
 fn push_path_sample(samples: &mut Vec<String>, path: &str) {
@@ -727,11 +1126,20 @@ fn git_tracked_relative_paths(root: &Path) -> Vec<PathBuf> {
 pub(crate) fn tracked_relative_paths(
     root: &Path,
 ) -> Result<Vec<PathBuf>, crate::diff::WorkingTreeDiffError> {
-    let output = crate::diff::run_bounded_git_with_limit(
+    tracked_relative_paths_controlled(root, ReadControl::default())
+}
+
+fn tracked_relative_paths_controlled(
+    root: &Path,
+    control: ReadControl<'_>,
+) -> Result<Vec<PathBuf>, crate::diff::WorkingTreeDiffError> {
+    let output = crate::diff::run_bounded_git_with_control(
         root,
         &["ls-files", "--cached", "-z", "--"],
         None,
         GIT_TRACKED_PATH_OUTPUT_LIMIT,
+        control.deadline,
+        control.interrupted,
     )?;
     if !output.success {
         return Err(crate::diff::WorkingTreeDiffError::GitUnavailable);
@@ -766,26 +1174,127 @@ fn source_walk_builder(root: &Path) -> WalkBuilder {
 /// All non-ignored files below `root`, in deterministic path order. Language
 /// filtering and content admission happen separately so stats stay truthful.
 pub(crate) fn source_candidates(root: &Path) -> Vec<PathBuf> {
-    let tracked = git_tracked_relative_paths(root);
-    let mut tracked_by_identity = HashMap::with_capacity(tracked.len());
-    for relative in &tracked {
-        let absolute = root.join(relative);
-        let identity = absolute.canonicalize().unwrap_or_else(|_| absolute.clone());
-        tracked_by_identity.insert(identity, absolute);
-    }
+    source_candidates_controlled(root, None, ReadControl::default()).unwrap_or_default()
+}
 
-    let mut paths: BTreeSet<PathBuf> = source_walk_builder(root)
-        .build()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
-        .map(|entry| {
-            let path = entry.into_path();
-            let identity = path.canonicalize().unwrap_or_else(|_| path.clone());
-            tracked_by_identity.get(&identity).cloned().unwrap_or(path)
-        })
-        .collect();
-    paths.extend(tracked.into_iter().map(|relative| root.join(relative)));
-    paths.into_iter().collect()
+pub(crate) fn source_candidates_bounded(
+    root: &RootCapability,
+    limit: usize,
+    control: ReadControl<'_>,
+) -> Result<Vec<PathBuf>, IndexError> {
+    control.check().map_err(index_error_from_read)?;
+    root.verify().map_err(index_error_from_read)?;
+    let output = crate::diff::run_bounded_git_with_control(
+        root.canonical_root(),
+        &[
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+        ],
+        None,
+        GIT_TRACKED_PATH_OUTPUT_LIMIT,
+        control.deadline,
+        control.interrupted,
+    )
+    .map_err(|error| match error {
+        crate::diff::WorkingTreeDiffError::GitTimeout
+            if control.interrupted.is_some_and(|check| check()) =>
+        {
+            IndexError::Cancelled
+        }
+        crate::diff::WorkingTreeDiffError::GitTimeout => IndexError::DeadlineExceeded,
+        crate::diff::WorkingTreeDiffError::GitOutputLimit => IndexError::LimitExceeded {
+            dimension: "source_candidates",
+            cap: limit as u64,
+        },
+        error => IndexError::Other(error.to_string()),
+    })?;
+    if !output.success {
+        return Err(IndexError::Other("git source inventory unavailable".into()));
+    }
+    let mut paths = BTreeSet::new();
+    for raw in output.stdout.split(|byte| *byte == 0) {
+        control.check().map_err(index_error_from_read)?;
+        if raw.is_empty() {
+            continue;
+        }
+        let relative = std::str::from_utf8(raw)
+            .map(PathBuf::from)
+            .map_err(|_| IndexError::SnapshotChanged)?;
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+            || has_skipped_component(&relative)
+        {
+            continue;
+        }
+        paths.insert(root.canonical_root().join(relative));
+        if paths.len() > limit {
+            return Err(IndexError::LimitExceeded {
+                dimension: "source_candidates",
+                cap: limit as u64,
+            });
+        }
+    }
+    root.verify().map_err(index_error_from_read)?;
+    Ok(paths.into_iter().collect())
+}
+
+fn source_candidates_controlled(
+    root: &Path,
+    limit: Option<usize>,
+    control: ReadControl<'_>,
+) -> Result<Vec<PathBuf>, IndexError> {
+    if let Some(limit) = limit {
+        let root = RootCapability::open(root).map_err(index_error_from_read)?;
+        return source_candidates_bounded(&root, limit, control);
+    }
+    control.check().map_err(index_error_from_read)?;
+    let tracked = match tracked_relative_paths_controlled(root, control) {
+        Ok(paths) => paths,
+        Err(_) if limit.is_none() => Vec::new(),
+        Err(crate::diff::WorkingTreeDiffError::GitTimeout)
+            if control.interrupted.is_some_and(|check| check()) =>
+        {
+            return Err(IndexError::Cancelled);
+        }
+        Err(crate::diff::WorkingTreeDiffError::GitTimeout) => {
+            return Err(IndexError::DeadlineExceeded);
+        }
+        Err(error) => return Err(IndexError::Other(error.to_string())),
+    };
+    let mut paths = BTreeSet::new();
+    for relative in tracked {
+        control.check().map_err(index_error_from_read)?;
+        paths.insert(root.join(relative));
+        if limit.is_some_and(|cap| paths.len() > cap) {
+            return Err(IndexError::LimitExceeded {
+                dimension: "source_candidates",
+                cap: limit.unwrap_or(usize::MAX) as u64,
+            });
+        }
+    }
+    for entry in source_walk_builder(root).build() {
+        control.check().map_err(index_error_from_read)?;
+        let Ok(entry) = entry else {
+            continue;
+        };
+        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            continue;
+        }
+        paths.insert(entry.into_path());
+        if limit.is_some_and(|cap| paths.len() > cap) {
+            return Err(IndexError::LimitExceeded {
+                dimension: "source_candidates",
+                cap: limit.unwrap_or(usize::MAX) as u64,
+            });
+        }
+    }
+    Ok(paths.into_iter().collect())
 }
 
 /// Stateful ignore matcher for watcher events. It applies the same gitignore
@@ -898,15 +1407,35 @@ pub(crate) fn parse_one(
     root: &Path,
     extractor: &dyn LanguageExtractor,
 ) -> Result<PendingFile, IndexError> {
-    let source = read_source_bounded(path)?;
-    // Milliseconds — second-precision missed edits within the same second as the
-    // previous index run. i64 millis covers ~292M years.
-    let mtime = std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .map_err(|e| IndexError::Io(e.to_string()))?
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
+    let source = read_source_bounded(path, root, ReadControl::default())?;
+    let rel = path
+        .strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    parse_blob(&rel, &source.bytes, source.modified_millis, extractor)
+}
+
+fn parse_one_controlled(
+    path: &Path,
+    root: &Path,
+    root_capability: &RootCapability,
+    expected_identity: StableFileIdentity,
+    extractor: &dyn LanguageExtractor,
+    control: ReadControl<'_>,
+) -> Result<PendingFile, IndexError> {
+    let source = read_regular_file_expected(
+        root_capability,
+        path,
+        MAX_INDEXABLE_FILE_SIZE,
+        MAX_INDEXABLE_FILE_SIZE,
+        control,
+        Some(expected_identity),
+    )
+    .map_err(index_error_from_read)?;
+    if is_binary_content(&source.bytes[..source.bytes.len().min(BINARY_SNIFF_BYTES as usize)]) {
+        return Err(IndexError::Skipped(IndexSkipReason::Binary));
+    }
 
     let rel = path
         .strip_prefix(root)
@@ -914,55 +1443,73 @@ pub(crate) fn parse_one(
         .to_string_lossy()
         .replace('\\', "/");
 
-    parse_blob(&rel, &source, mtime, extractor)
+    parse_blob(&rel, &source.bytes, source.modified_millis, extractor)
 }
 
-pub(crate) fn source_admission(path: &Path) -> Result<(), IndexError> {
-    let metadata = path
-        .metadata()
-        .map_err(|error| IndexError::Io(error.to_string()))?;
-    if metadata.len() > MAX_INDEXABLE_FILE_SIZE {
-        return Err(IndexError::Skipped(IndexSkipReason::TooLarge {
-            size: metadata.len(),
-        }));
-    }
-    let mut file = std::fs::File::open(path).map_err(|error| IndexError::Io(error.to_string()))?;
-    let mut prefix = Vec::with_capacity(BINARY_SNIFF_BYTES as usize);
-    file.by_ref()
-        .take(BINARY_SNIFF_BYTES)
-        .read_to_end(&mut prefix)
-        .map_err(|error| IndexError::Io(error.to_string()))?;
-    if is_binary_content(&prefix) {
+pub(crate) fn source_admission_mtime(root: &Path, path: &Path) -> Result<i64, IndexError> {
+    source_admission_controlled(root, path, ReadControl::default()).map(|file| file.modified_millis)
+}
+
+pub(crate) fn source_admission_controlled(
+    root: &Path,
+    path: &Path,
+    control: ReadControl<'_>,
+) -> Result<crate::bounded_fs::BoundedFile, IndexError> {
+    let root = RootCapability::open(root).map_err(index_error_from_read)?;
+    source_admission_with_capability(&root, path, control)
+}
+
+pub(crate) fn source_admission_with_capability(
+    root: &RootCapability,
+    path: &Path,
+    control: ReadControl<'_>,
+) -> Result<crate::bounded_fs::BoundedFile, IndexError> {
+    let prefix = read_regular_file_with_capability(
+        root,
+        path,
+        MAX_INDEXABLE_FILE_SIZE,
+        BINARY_SNIFF_BYTES,
+        control,
+    )
+    .map_err(index_error_from_read)?;
+    if is_binary_content(&prefix.bytes) {
         return Err(IndexError::Skipped(IndexSkipReason::Binary));
     }
-    Ok(())
+    Ok(prefix)
 }
 
-fn read_source_bounded(path: &Path) -> Result<Vec<u8>, IndexError> {
-    let metadata = path
-        .metadata()
-        .map_err(|error| IndexError::Io(error.to_string()))?;
-    if metadata.len() > MAX_INDEXABLE_FILE_SIZE {
-        return Err(IndexError::Skipped(IndexSkipReason::TooLarge {
-            size: metadata.len(),
-        }));
-    }
-
-    let mut file = std::fs::File::open(path).map_err(|error| IndexError::Io(error.to_string()))?;
-    let mut source = Vec::with_capacity(metadata.len() as usize);
-    file.by_ref()
-        .take(MAX_INDEXABLE_FILE_SIZE + 1)
-        .read_to_end(&mut source)
-        .map_err(|error| IndexError::Io(error.to_string()))?;
-    if source.len() as u64 > MAX_INDEXABLE_FILE_SIZE {
-        return Err(IndexError::Skipped(IndexSkipReason::TooLarge {
-            size: source.len() as u64,
-        }));
-    }
-    if is_binary_content(&source[..source.len().min(BINARY_SNIFF_BYTES as usize)]) {
+fn read_source_bounded(
+    path: &Path,
+    root: &Path,
+    control: ReadControl<'_>,
+) -> Result<crate::bounded_fs::BoundedFile, IndexError> {
+    let source = read_regular_file(
+        root,
+        path,
+        MAX_INDEXABLE_FILE_SIZE,
+        MAX_INDEXABLE_FILE_SIZE,
+        control,
+    )
+    .map_err(index_error_from_read)?;
+    if is_binary_content(&source.bytes[..source.bytes.len().min(BINARY_SNIFF_BYTES as usize)]) {
         return Err(IndexError::Skipped(IndexSkipReason::Binary));
     }
     Ok(source)
+}
+
+pub(crate) fn index_error_from_read(error: BoundedReadError) -> IndexError {
+    match error {
+        BoundedReadError::TooLarge { size, .. } => {
+            IndexError::Skipped(IndexSkipReason::TooLarge { size })
+        }
+        BoundedReadError::Interrupted => IndexError::Cancelled,
+        BoundedReadError::DeadlineExceeded => IndexError::DeadlineExceeded,
+        BoundedReadError::SnapshotChanged
+        | BoundedReadError::OutsideRoot
+        | BoundedReadError::InvalidPath
+        | BoundedReadError::NotRegular => IndexError::SnapshotChanged,
+        BoundedReadError::Io(error) => IndexError::Io(error.to_string()),
+    }
 }
 
 pub(crate) fn is_binary_content(content: &[u8]) -> bool {
@@ -1054,6 +1601,10 @@ pub enum IndexError {
     Parse(String),
     Other(String),
     Skipped(IndexSkipReason),
+    SnapshotChanged,
+    Cancelled,
+    DeadlineExceeded,
+    LimitExceeded { dimension: &'static str, cap: u64 },
 }
 
 fn ensure_indexing_active(store: &Store) -> Result<(), IndexError> {
@@ -1076,6 +1627,12 @@ impl std::fmt::Display for IndexError {
             IndexError::Io(m) => write!(f, "io: {m}"),
             IndexError::Parse(m) => write!(f, "parse: {m}"),
             IndexError::Other(m) => write!(f, "other: {m}"),
+            IndexError::SnapshotChanged => write!(f, "snapshot changed during bounded read"),
+            IndexError::Cancelled => write!(f, "indexing cancelled"),
+            IndexError::DeadlineExceeded => write!(f, "indexing deadline exceeded"),
+            IndexError::LimitExceeded { dimension, cap } => {
+                write!(f, "refresh limit exceeded: {dimension} > {cap}")
+            }
             IndexError::Skipped(IndexSkipReason::Binary) => write!(f, "skipped binary source"),
             IndexError::Skipped(IndexSkipReason::TooLarge { size }) => write!(
                 f,
@@ -1716,6 +2273,154 @@ mod incremental_tests {
         assert_eq!(stats.files_failed, 0);
         assert_eq!(store.indexed_paths().unwrap().len(), PARSE_BATCH_SIZE + 1);
 
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_admission_rejects_symlink_and_fifo_without_following() {
+        use std::os::unix::fs::symlink;
+
+        let (dir, _db) = setup("source_admission_nofollow");
+        let outside = env::temp_dir().join(format!(
+            "mmcg-source-admission-outside-{}",
+            std::process::id()
+        ));
+        fs::write(&outside, "fn secret() {}\n").unwrap();
+        let linked = dir.join("linked.rs");
+        symlink(&outside, &linked).unwrap();
+        assert!(source_admission_controlled(&dir, &linked, ReadControl::default()).is_err());
+
+        let fifo = dir.join("pipe.rs");
+        let status = Command::new("mkfifo").arg(&fifo).status().unwrap();
+        assert!(status.success());
+        assert!(source_admission_controlled(&dir, &fifo, ReadControl::default()).is_err());
+        fs::remove_file(outside).ok();
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn auto_refresh_candidate_limit_is_fail_closed() {
+        let (dir, _db) = setup("auto_refresh_candidate_limit");
+        git(&dir, &["init"]);
+        fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
+        fs::write(dir.join("b.rs"), "fn b() {}\n").unwrap();
+        git(&dir, &["add", "a.rs", "b.rs"]);
+        let db = dir.join(".mastermind/mmcg.db");
+        let mut store = Store::open(&db).unwrap();
+        let error = Indexer::new(&dir)
+            .index_all_with_limits(
+                &mut store,
+                false,
+                IndexLimits {
+                    source_candidates: Some(1),
+                    source_declared_bytes: Some(u64::MAX),
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            IndexError::LimitExceeded {
+                dimension: "source_candidates",
+                cap: 1
+            }
+        ));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn auto_refresh_aggregate_limit_is_fail_closed() {
+        let (dir, _db) = setup("auto_refresh_aggregate_limit");
+        git(&dir, &["init"]);
+        fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
+        git(&dir, &["add", "a.rs"]);
+        let db = dir.join(".mastermind/mmcg.db");
+        let mut store = Store::open(&db).unwrap();
+        let error = Indexer::new(&dir)
+            .index_all_with_limits(
+                &mut store,
+                false,
+                IndexLimits {
+                    source_candidates: Some(100),
+                    source_declared_bytes: Some(1),
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            IndexError::LimitExceeded {
+                dimension: "source_declared_bytes",
+                cap: 1
+            }
+        ));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn automatic_parse_rejects_a_file_replaced_after_aggregate_admission() {
+        let (dir, _db) = setup("aggregate_admission_identity");
+        let path = dir.join("source.rs");
+        fs::write(&path, "pub fn admitted() {}\n").unwrap();
+        let root = RootCapability::open(&dir).unwrap();
+        let admitted =
+            source_admission_with_capability(&root, &path, ReadControl::default()).unwrap();
+
+        fs::write(&path, "pub fn replacement() {\n    let expanded = 1;\n}\n").unwrap();
+        let extractor = extractor_for_path(&path).unwrap();
+        assert!(matches!(
+            parse_one_controlled(
+                &path,
+                &dir,
+                &root,
+                admitted.identity,
+                extractor.as_ref(),
+                ReadControl::default(),
+            ),
+            Err(IndexError::SnapshotChanged)
+        ));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn history_freshness_detects_markdown_only_edit_add_rename_and_delete() {
+        let (dir, _db) = setup("history_freshness");
+        fs::create_dir_all(dir.join(".mastermind/tasks")).unwrap();
+        let context = dir.join("CONTEXT.md");
+        fs::write(&context, "# Context\ninitial\n").unwrap();
+        let db = dir.join(".mastermind/mmcg.db");
+        let mut store = Store::open(&db).unwrap();
+        let indexer = Indexer::new(&dir);
+        indexer.index_project_history(&mut store).unwrap();
+        assert_eq!(
+            indexer.project_history_freshness(&store).unwrap(),
+            ProjectHistoryFreshness::Fresh
+        );
+
+        fs::write(&context, "# Context\nedited\n").unwrap();
+        assert_eq!(
+            indexer.project_history_freshness(&store).unwrap(),
+            ProjectHistoryFreshness::Stale
+        );
+        indexer.index_project_history(&mut store).unwrap();
+        let archive = dir.join("CONTEXT-archive-1.md");
+        fs::write(&archive, "# Archive\nadded\n").unwrap();
+        assert_eq!(
+            indexer.project_history_freshness(&store).unwrap(),
+            ProjectHistoryFreshness::Stale
+        );
+        indexer.index_project_history(&mut store).unwrap();
+        let renamed = dir.join("CONTEXT-archive-2.md");
+        fs::rename(&archive, &renamed).unwrap();
+        assert_eq!(
+            indexer.project_history_freshness(&store).unwrap(),
+            ProjectHistoryFreshness::Stale
+        );
+        indexer.index_project_history(&mut store).unwrap();
+        fs::remove_file(renamed).unwrap();
+        assert_eq!(
+            indexer.project_history_freshness(&store).unwrap(),
+            ProjectHistoryFreshness::Stale
+        );
         fs::remove_dir_all(&dir).ok();
     }
 }

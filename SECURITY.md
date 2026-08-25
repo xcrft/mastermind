@@ -61,6 +61,27 @@ comment.
 
 We still welcome a private report when scope is uncertain.
 
+## Local index and repository boundary
+
+Repository source and durable history are untrusted local inputs. Mastermind
+opens admitted files relative to the selected repository capability without
+following symlinks or Windows reparse points, rejects special files and path
+escapes, enforces per-file and aggregate limits, and compares descriptor
+identity before and after reads. History is derived retrieval evidence;
+Markdown remains authoritative, and its structural freshness is tracked
+separately from the source graph.
+
+One absolute MCP request deadline and cancellation state spans SQLite, Git,
+filesystem inventory and reads, automatic refresh, the single retry, private
+snapshots, and serialization. A cancel reports `cancelled`; deadline expiry
+reports `work_limit_exceeded`. Automatic refresh is limited to 20,000 source
+candidates and 512 MiB of declared source bytes.
+
+Only the canonical `ROOT/.mastermind/mmcg.db` opened by `serve` is eligible for
+automatic writable refresh. A custom `--index` is served through a read-only
+snapshot and is never created, migrated, truncated, or given source-side
+SQLite sidecars; an incompatible schema fails as `schema_incompatible`.
+
 ## Response and disclosure
 
 This is a small-maintainer open-source project. Targets are best effort:

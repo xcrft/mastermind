@@ -109,7 +109,7 @@ bounded query surface instead of repeatedly rescanning source text.
 - **Parsers**: tree-sitter (C, vendored — no system tree-sitter required)
 - **Parallelism**: `rayon` parses files in parallel; writes serialize through a single SQLite connection (WAL mode)
 - **Bounded batching**: at most 64 parsed files are retained before the single SQLite writer commits them; each file uses one transaction via `Store::commit_file`
-- **Source admission**: source-looking files above 5 MiB or containing a NUL byte in the first 8 KiB are skipped before parsing; UTF-16 BOMs are admitted and decoded
+- **Source admission**: repository-relative descriptors are opened without following symlinks or Windows reparse points, every parent component stays beneath the repository capability, and identity is rechecked after the read. Source-looking files above 5 MiB or containing a NUL byte in the first 8 KiB are skipped before parsing; UTF-16 BOMs are admitted and decoded
 - **Storage**: SQLite with indexes on `symbols.name`, `edges.from_id`, and `edges.to_name`
 
 Index time depends on repository size, filesystem, hardware, and whether the run
@@ -571,7 +571,10 @@ repository-wide clean result.
 
 mmcg never invokes a model. It can read an optional bounded interpretation from
 `.mastermind/audit-narrative.json`, or from the path in
-`MMCG_AUDIT_NARRATIVE`. Start from `audit.narrative_binding` in the current
+`MMCG_AUDIT_NARRATIVE`. Relative overrides are repository-relative; absolute
+overrides must still resolve inside the selected repository. The sidecar is
+opened through the same no-follow capability and 256 KiB/deadline limit as
+other repository-owned inputs. Start from `audit.narrative_binding` in the current
 `/api/lens` response and copy that object unchanged into the sidecar's required
 `binding` field. The binding covers repository identity, baseline and HEAD,
 the working-tree snapshot, and the exact returned map. A stale or foreign
@@ -899,9 +902,14 @@ Run `mmcg watch` in a separate terminal so the index stays current while you wor
 Structural MCP queries also refresh the managed `.mastermind/mmcg.db` on demand
 when source files or the extractor contract drift. The repository root is
 derived from the canonical database path and checked against the stored index
-identity before any refresh. A custom external `--index` remains query-compatible
-when fresh but requires an explicit `mmcg index` when stale. Failed or unavailable
-refreshes return the structured `index_stale` result.
+identity before any refresh. Automatic refresh admits at most 20,000 source
+candidates and 512 MiB of declared source bytes; exceeding either cap returns
+`refresh_limit_exceeded` without a partial refresh. A custom external `--index`
+is opened read-only by `serve`: it remains query-compatible when fresh, requires
+an explicit `mmcg index` when stale, and is never created, migrated, truncated,
+or given WAL/SHM sidecars by the server. Incompatible custom schemas return
+`schema_incompatible`. Other failed or unavailable refreshes return
+`index_stale`.
 
 ## MCP tools
 
@@ -931,7 +939,7 @@ refreshes return the structured `index_stale` result.
 | `mmcg_change_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Stable schema-v1 analysis of the resolved baseline against staged, unstaged, and untracked content. Reports added/removed/signature/body-changed symbols, batched transitive callers, component crossings, ranked test candidates, a `disciplines` block routing the change to an evidence set, exact collection metadata, caps, and precision notes. Root, SHA-256 index freshness, Git snapshot, and SQLite snapshot checks fail closed with stable codes. |
 | `mmcg_test_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Exact test-focused projection of `mmcg_change_impact`. Changed tests and depth-1 graph tests are direct, deeper graph tests are transitive, and scoped filename candidates are heuristic. Focused candidates never replace the repository's full required gate. |
 | `mmcg_tasks` | `query`, optional `top` (default 10) | Full-text search past task specs (`.mastermind/tasks/<NNN>-<name>/spec.md`). FTS5 MATCH syntax (bare words AND-joined, `"phrases"`, `OR`/`NOT`). Returns paths, titles, and snippet excerpts with `«match»` highlights ranked by BM25. Use as planner pre-flight: "have we touched this area before?" surfaces past designs and prior verdicts. Top-level files prefixed with `_` (e.g. `_lessons.md`) and bare `.md` files at the top of `tasks/` (legacy 0.6.x layout) are intentionally excluded. |
-| `mmcg_history` | `query`, optional `kind`, `top` (default 10) | Searches `CONTEXT.md`, `CONTEXT-archive-*.md`, canonical task specs, executor reports, audits, `.mastermind/releases/*.md`, legacy task-local release notes, lessons, and Markdown architecture decisions under conventional ADR directories. `architecture_decision` is an exact `kind` filter. `candidate` lessons are unresolved signals, not active guidance. Returns observed matches, `skipped_artifacts`, `truncated`, and an explicit retrieval-only epistemic contract. Markdown remains authoritative; re-index after Markdown changes. Each artifact is capped at 1 MiB and the corpus at 5,000 files. |
+| `mmcg_history` | `query`, optional `kind`, `top` (default 10) | Searches `CONTEXT.md`, `CONTEXT-archive-*.md`, canonical task specs, executor reports, audits, `.mastermind/releases/*.md`, legacy task-local release notes, lessons, and Markdown architecture decisions under conventional ADR directories. `architecture_decision` is an exact `kind` filter. `candidate` lessons are unresolved signals, not active guidance. Returns observed matches, `skipped_artifacts`, `truncated`, `freshness` (`fresh`, `stale`, `incomplete`, or `snapshot_changed`), and an explicit retrieval-only epistemic contract. Markdown remains authoritative. The deterministic inventory binds path, kind, length, content digest, skipped state, and truncation state. Limits are 1 MiB per artifact, 5,000 artifacts, and 32 MiB of admitted text. |
 | `mmcg_dependency_cycles` | optional `language`, `min_size` (default 2) | Detect circular imports — strongly-connected components in the file-level import graph (Tarjan's algorithm). Each result is a cycle = a list of files. Pre-merge guard ("does this PR introduce a new cycle?") and architectural-hygiene survey. Resolves edges by leaf-name match — over-approximates (two unrelated `Logger` symbols cross-link) so verify before refactoring. Bump `min_size` to hide trivial A↔B and surface only larger structural problems. Work-capped at 50,000 file-pair edges: above that, `truncated: true` with an empty `cycles` list — incomplete and possibly inaccurate, not "more available"; narrow with `language` and retry. |
 | `mmcg_symbols_changed_since` | `git_ref`, optional `root` | Symbol-level diff between a git ref and the current index. Returns `{added, removed, signature_changed}` symbol sets for files in `git diff --name-only <ref>..HEAD`. Re-parses old blobs from `git show <ref>:<path>` using the same extractor. Different from `mmcg_recent_changes` (watcher mtime) — this is git-ref-based, answering "what symbols did THIS PR/branch touch?". PR-review pre-flight, auditor verification, "what new public API appeared in v2.3?". Git subprocesses are killed after `MMCG_GIT_TIMEOUT_MS`; the per-file loop is capped at 10,000 files with `truncated: true` marking a partial diff. |
 | `mmcg_status` | — | Index path, file/symbol counts, and bounded `stale_files`. A non-zero value means the next structural query will refresh a managed index, or that a custom external index needs an explicit `mmcg index`. |
@@ -976,13 +984,16 @@ wedge every subsequent call in the session. Two independent mechanisms bound
 that now: a **work budget** enforced inside SQLite, and a **watchdog** that
 bounds the request as a whole.
 
-The distinction matters. The work budget is a SQLite progress handler, so it
-can only interrupt work that is executing *inside* SQLite. A handler that
-spends its time in a Rust graph walk, an indexing pass, or waiting on a `git`
-subprocess never reaches it. The watchdog is what covers those paths.
+The distinction matters. SQLite work is interrupted by its progress handler;
+filesystem walks and reads, managed refresh, Git subprocesses, retries, private
+snapshot work, and response serialization cooperatively observe the same
+absolute request deadline and cancel state. The watchdog remains a final hard
+ceiling for code that cannot cooperate.
 
 - **MCP serve** installs `MMCG_QUERY_BUDGET_MS` (default 10,000 ms; `0` =
-  unlimited) around every `tools/call` dispatch, before the handler runs.
+  unlimited) once around every complete `tools/call`, before the first handler
+  attempt. A stale managed index may receive exactly one refresh and one retry,
+  but neither resets the deadline.
 - **CLI graph queries** (`mmcg query <kind>`, `mmcg map`, and `mmcg impact`) use the same env var with a 60,000 ms
   default — one-shot invocations can afford to wait longer than an
   interactive session.
@@ -1016,6 +1027,10 @@ subprocess never reaches it. The watchdog is what covers those paths.
   `MMCG_GIT_TIMEOUT_MS` (default 30,000 ms). The per-file diff loop is
   additionally capped at 10,000 files; beyond that, `truncated: true` marks
   the response as a prefix, not the full diff.
+- **Git refs** are non-empty and at most 1,024 bytes, cannot begin with `-` or
+  contain NUL, and must resolve through `rev-parse --verify --end-of-options`
+  to one 40-hex commit OID. Later Git commands use that OID and an explicit
+  `--` path separator, never the raw caller-supplied ref.
 - **Serve watchdog.** `mmcg serve` runs a polling thread that measures each
   in-flight request on the wall clock, independent of where the time is being
   spent. It escalates: at `MMCG_REQUEST_SOFT_TIMEOUT_MS` (default 30,000 ms) it

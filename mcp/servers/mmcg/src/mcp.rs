@@ -286,6 +286,7 @@ static TOOLS: &[ToolDef] = &[
         schema_change_class,
         handle_change_class,
     ),
+    refreshable_tool("mmcg_concept", schema_concept, handle_concept),
 ];
 
 pub(crate) fn is_known_tool(name: &str) -> bool {
@@ -1241,7 +1242,9 @@ fn handle_tools_call_inner(
     // A validated stale call gets one refresh outside the narrow query budget,
     // then one retry. The request watchdog and client cancellation still bound
     // both indexing and the retried query.
-    let stale_index = if store.interrupt_source().is_none() && tool_requires_fresh_index(tool_name)
+    let stale_index = if store.interrupt_source().is_none()
+        && tool_requires_fresh_index(tool_name)
+        && tool_name != "mmcg_concept"
     {
         match handled.as_ref() {
             Some(Err(HandlerError::IndexStale {
@@ -2060,6 +2063,32 @@ fn schema_brief() -> Value {
     })
 }
 
+fn schema_concept() -> Value {
+    json!({
+        "name": "mmcg_concept",
+        "description": "Deterministic local concept retrieval over bounded normalized symbol names, repository paths, and declaration shapes. Uses SQLite FTS5 only: no embeddings, model calls, network access, source bodies, comments, literals, or defaults. Results are retrieval candidates, not confidence-ranked answers.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "description": "Plain text only. Terms are normalized, quoted, and joined with fixed AND semantics; raw FTS syntax is never accepted."
+                },
+                "top": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50,
+                    "default": 10
+                }
+            },
+            "required": ["query"],
+            "additionalProperties": false
+        }
+    })
+}
+
 fn schema_test_impact() -> Value {
     impact_input_schema(
         "mmcg_test_impact",
@@ -2716,6 +2745,83 @@ pub fn build_brief_current(
     brief_current_attempt(store, &root, since, role, budget_tokens)
 }
 
+fn concept_current_attempt(
+    store: &Store,
+    query: &str,
+    top: u32,
+) -> Result<queries::ConceptResponse, queries::ConceptError> {
+    let expected_data_version = store
+        .data_version()
+        .map_err(|_| queries::ConceptError::SnapshotChanged)?;
+    match store.schema_current() {
+        Ok(true) => {}
+        Ok(false) => return Err(queries::ConceptError::SchemaIncompatible),
+        Err(_) => return Err(queries::ConceptError::IndexStale),
+    }
+    let status = safe_index_status(store).map_err(|error| match error {
+        HandlerError::SnapshotChanged => queries::ConceptError::SnapshotChanged,
+        HandlerError::WorkLimitExceeded | HandlerError::RefreshLimit { .. } => {
+            queries::ConceptError::WorkLimitExceeded
+        }
+        _ => queries::ConceptError::IndexStale,
+    })?;
+    if status.stale_files > 0 || !status.extractor_contract_current {
+        return Err(queries::ConceptError::IndexStale);
+    }
+    if !store
+        .concept_contract_current()
+        .map_err(|_| queries::ConceptError::IndexStale)?
+    {
+        return Err(queries::ConceptError::IndexStale);
+    }
+    queries::concept_verified(
+        store,
+        query,
+        top,
+        expected_data_version,
+        queries::ConceptFreshness {
+            status: "fresh".to_string(),
+            extractor_contract: crate::indexer::EXTRACTOR_CONTRACT_VERSION.to_string(),
+            normalization_contract: crate::store::CONCEPT_NORMALIZATION_VERSION.to_string(),
+        },
+    )
+}
+
+/// Build concept candidates through the same structural/concept freshness and
+/// one-refresh/one-retry boundary for both MCP and the standalone CLI.
+pub fn build_concept_current(
+    store: &mut Store,
+    query: &str,
+    top: u32,
+) -> Result<queries::ConceptResponse, queries::ConceptError> {
+    queries::validate_concept_request(query, top)?;
+    match concept_current_attempt(store, query, top) {
+        Err(queries::ConceptError::IndexStale) => {}
+        result => return result,
+    }
+    let status = safe_index_status(store).map_err(|error| match error {
+        HandlerError::SnapshotChanged => queries::ConceptError::SnapshotChanged,
+        HandlerError::WorkLimitExceeded | HandlerError::RefreshLimit { .. } => {
+            queries::ConceptError::WorkLimitExceeded
+        }
+        _ => queries::ConceptError::IndexStale,
+    })?;
+    refresh_stale_index(store, status.stale_files, status.extractor_contract_current).map_err(
+        |error| match error {
+            HandlerError::SchemaIncompatible => queries::ConceptError::SchemaIncompatible,
+            HandlerError::SnapshotChanged => queries::ConceptError::SnapshotChanged,
+            HandlerError::WorkLimitExceeded | HandlerError::RefreshLimit { .. } => {
+                queries::ConceptError::WorkLimitExceeded
+            }
+            HandlerError::Internal { .. } if store.interrupt_source().is_some() => {
+                queries::ConceptError::WorkLimitExceeded
+            }
+            _ => queries::ConceptError::IndexStale,
+        },
+    )?;
+    concept_current_attempt(store, query, top)
+}
+
 fn map_brief_error(store: &Store, error: queries::BriefError) -> HandlerError {
     match error {
         queries::BriefError::InvalidArguments => HandlerError::StructuredInvalid {
@@ -2837,6 +2943,62 @@ fn handle_brief_for_version(
 
 fn handle_brief(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     handle_brief_for_version(store, args, ProtocolVersion::Current)
+}
+
+fn map_concept_error(store: &Store, error: queries::ConceptError) -> HandlerError {
+    match error {
+        queries::ConceptError::InvalidArguments => HandlerError::StructuredInvalid {
+            code: "invalid_arguments",
+        },
+        queries::ConceptError::IndexStale => {
+            let status = safe_index_status(store).unwrap_or(queries::StatusResponse {
+                db_path: store.db_path().to_string_lossy().to_string(),
+                symbol_count: 0,
+                file_count: 0,
+                stale_files: 1,
+                extractor_contract_current: true,
+            });
+            let concept_current = store.concept_contract_current().unwrap_or(false);
+            index_stale_error(
+                if concept_current {
+                    status.stale_files
+                } else {
+                    status.stale_files.max(1)
+                },
+                status.extractor_contract_current,
+                store.managed_root().is_some(),
+            )
+        }
+        queries::ConceptError::SchemaIncompatible => HandlerError::SchemaIncompatible,
+        queries::ConceptError::SnapshotChanged => HandlerError::SnapshotChanged,
+        queries::ConceptError::WorkLimitExceeded => HandlerError::WorkLimitExceeded,
+        queries::ConceptError::Internal => HandlerError::Internal {
+            class: "concept_query",
+        },
+    }
+}
+
+fn handle_concept(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
+    let query =
+        args.get("query")
+            .and_then(Value::as_str)
+            .ok_or(HandlerError::StructuredInvalid {
+                code: "invalid_arguments",
+            })?;
+    let top = match args.get("top") {
+        None => queries::CONCEPT_DEFAULT_TOP,
+        Some(value) => value
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| (1..=queries::CONCEPT_MAX_TOP).contains(value))
+            .ok_or(HandlerError::StructuredInvalid {
+                code: "invalid_arguments",
+            })?,
+    };
+    let response = build_concept_current(store, query, top)
+        .map_err(|error| map_concept_error(store, error))?;
+    serde_json::to_value(response)
+        .map_err(|error| HandlerError::internal("serialize_concept", error))
 }
 
 fn handle_change_impact(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
@@ -3519,7 +3681,7 @@ mod tests {
     #[test]
     fn tool_annotations_match_behavior_table() {
         let legacy = tools_list(ProtocolVersion::Legacy);
-        assert_eq!(legacy["tools"].as_array().unwrap().len(), 29);
+        assert_eq!(legacy["tools"].as_array().unwrap().len(), 30);
         assert!(legacy["tools"]
             .as_array()
             .unwrap()
@@ -3528,7 +3690,7 @@ mod tests {
 
         let current = tools_list(ProtocolVersion::Current);
         let tools = current["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 29);
+        assert_eq!(tools.len(), 30);
         let mut readers = 0;
         let mut refreshers = 0;
         for tool in tools {
@@ -3559,7 +3721,7 @@ mod tests {
             }
         }
         assert_eq!(readers, 8);
-        assert_eq!(refreshers, 20);
+        assert_eq!(refreshers, 21);
     }
 
     #[test]
@@ -3795,6 +3957,315 @@ mod tests {
             .index_all(&mut store, true)
             .unwrap();
         (root, store)
+    }
+
+    #[test]
+    fn concept_cli_builder_and_mcp_share_one_fresh_payload() {
+        let (root, mut store) = impact_fixture("concept-shared");
+        std::fs::write(
+            root.join("src/app.py"),
+            "def value(secret: str = 'TOPSECRET', required: ImportantType = None):\n    return required\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/template.js"),
+            r#"export function templateCanary(pattern = `${typeof /[}]`PREFIX,TOPSECRET/}`, required = null) {}
+"#,
+        )
+        .unwrap();
+        crate::indexer::Indexer::new(&root)
+            .index_all(&mut store, true)
+            .unwrap();
+        let expected =
+            serde_json::to_value(build_concept_current(&mut store, "value", 10).unwrap()).unwrap();
+        assert!(!expected.to_string().to_lowercase().contains("topsecret"));
+        assert!(store
+            .search_concepts("\"topsecret\"", 10)
+            .unwrap()
+            .is_empty());
+        let actual = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({ "name": "mmcg_concept", "arguments": { "query": "value", "top": 10 } }),
+        )
+        .unwrap();
+        assert_eq!(actual["isError"], false);
+        assert_eq!(unwrap_content(&actual), expected);
+        assert_eq!(actual["structuredContent"], expected);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn concept_managed_source_staleness_refreshes_once_before_claiming_fresh() {
+        let (root, mut store) = impact_fixture("concept-refresh");
+        std::fs::write(
+            root.join("src/app.py"),
+            "def refreshed_concept_handler():\n    return 3\n",
+        )
+        .unwrap();
+
+        let actual = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({
+                "name": "mmcg_concept",
+                "arguments": { "query": "refreshed concept", "top": 10 }
+            }),
+        )
+        .unwrap();
+        let payload = unwrap_content(&actual);
+        assert_eq!(actual["isError"], false);
+        assert_eq!(payload["freshness"]["status"], "fresh");
+        assert_eq!(
+            payload["freshness"]["extractor_contract"],
+            crate::indexer::EXTRACTOR_CONTRACT_VERSION
+        );
+        assert!(payload["candidates"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn concept_shadow_table_drift_repairs_managed_indexes_and_blocks_custom_indexes() {
+        let (root, store) = impact_fixture("concept-shadow-drift");
+        let db = store.db_path().to_path_buf();
+        drop(store);
+
+        for shadow in ["config", "data", "docsize", "idx"] {
+            let connection = rusqlite::Connection::open(&db).unwrap();
+            connection
+                .execute_batch(&format!("DROP TABLE symbol_concepts_fts_{shadow}"))
+                .unwrap();
+            drop(connection);
+
+            let mut managed = crate::store::Store::open_for_serve(&db, Some(&root)).unwrap();
+            assert!(managed.concept_schema_objects_current().unwrap());
+            assert!(!managed.concept_contract_current().unwrap());
+            let result = handle_tools_call(
+                ProtocolVersion::Current,
+                &mut managed,
+                &json!({ "name": "mmcg_concept", "arguments": { "query": "value" } }),
+            )
+            .unwrap();
+            assert_eq!(result["isError"], false, "shadow table {shadow}");
+            assert!(managed.concept_contract_current().unwrap());
+            drop(managed);
+        }
+
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch("DROP TABLE symbol_concepts_fts_data")
+            .unwrap();
+        drop(connection);
+        let before = std::fs::read(&db).unwrap();
+        let mut custom = crate::store::Store::open_for_serve(&db, None).unwrap();
+        let result = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut custom,
+            &json!({ "name": "mmcg_concept", "arguments": { "query": "value" } }),
+        )
+        .unwrap();
+        assert_eq!(result["isError"], true);
+        assert_eq!(unwrap_content(&result)["code"], "index_stale");
+        assert_eq!(std::fs::read(&db).unwrap(), before);
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn concept_orphan_shadow_tables_repair_only_for_managed_indexes() {
+        let (root, store) = impact_fixture("concept-orphan-shadows");
+        let db = store.db_path().to_path_buf();
+        drop(store);
+        let remove_virtual_table_record = || {
+            let connection = rusqlite::Connection::open(&db).unwrap();
+            connection
+                .execute_batch(
+                    "PRAGMA writable_schema = ON;
+                     DELETE FROM sqlite_master
+                     WHERE type = 'table' AND name = 'symbol_concepts_fts';
+                     PRAGMA writable_schema = OFF;
+                     PRAGMA schema_version = 99;",
+                )
+                .unwrap();
+        };
+
+        remove_virtual_table_record();
+        let mut managed = crate::store::Store::open_for_serve(&db, Some(&root)).unwrap();
+        assert!(managed.concept_schema_objects_current().unwrap());
+        assert!(!managed.concept_contract_current().unwrap());
+        let result = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut managed,
+            &json!({ "name": "mmcg_concept", "arguments": { "query": "value" } }),
+        )
+        .unwrap();
+        assert_eq!(result["isError"], false);
+        assert!(managed.concept_contract_current().unwrap());
+        drop(managed);
+
+        remove_virtual_table_record();
+        let source_paths = [
+            db.clone(),
+            db.with_extension("db-wal"),
+            db.with_extension("db-shm"),
+        ];
+        let before = source_paths
+            .iter()
+            .map(|path| std::fs::read(path).ok())
+            .collect::<Vec<_>>();
+        let mut custom = crate::store::Store::open_for_serve(&db, None).unwrap();
+        let result = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut custom,
+            &json!({ "name": "mmcg_concept", "arguments": { "query": "value" } }),
+        )
+        .unwrap();
+        assert_eq!(result["isError"], true);
+        assert_eq!(unwrap_content(&result)["code"], "index_stale");
+        let after = source_paths
+            .iter()
+            .map(|path| std::fs::read(path).ok())
+            .collect::<Vec<_>>();
+        assert_eq!(after, before);
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn concept_malformed_shadow_view_repairs_only_for_managed_indexes() {
+        let (root, store) = impact_fixture("concept-shadow-view");
+        let db = store.db_path().to_path_buf();
+        drop(store);
+        let replace_shadow_with_view = || {
+            let connection = rusqlite::Connection::open(&db).unwrap();
+            connection
+                .execute_batch(
+                    "DROP TABLE symbol_concepts_fts_data;
+                     CREATE VIEW symbol_concepts_fts_data
+                     AS SELECT 1 AS id, x'' AS block;",
+                )
+                .unwrap();
+        };
+
+        replace_shadow_with_view();
+        let mut managed = crate::store::Store::open_for_serve(&db, Some(&root)).unwrap();
+        assert!(managed.concept_schema_objects_current().unwrap());
+        assert!(!managed.concept_contract_current().unwrap());
+        let result = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut managed,
+            &json!({ "name": "mmcg_concept", "arguments": { "query": "value" } }),
+        )
+        .unwrap();
+        assert_eq!(result["isError"], false);
+        assert!(managed.concept_contract_current().unwrap());
+        drop(managed);
+
+        replace_shadow_with_view();
+        let source_paths = [
+            db.clone(),
+            db.with_extension("db-wal"),
+            db.with_extension("db-shm"),
+        ];
+        let before = source_paths
+            .iter()
+            .map(|path| std::fs::read(path).ok())
+            .collect::<Vec<_>>();
+        let mut custom = crate::store::Store::open_for_serve(&db, None).unwrap();
+        let result = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut custom,
+            &json!({ "name": "mmcg_concept", "arguments": { "query": "value" } }),
+        )
+        .unwrap();
+        assert_eq!(result["isError"], true);
+        assert_eq!(unwrap_content(&result)["code"], "index_stale");
+        let after = source_paths
+            .iter()
+            .map(|path| std::fs::read(path).ok())
+            .collect::<Vec<_>>();
+        assert_eq!(after, before);
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn concept_invalid_arguments_do_not_trigger_managed_refresh() {
+        let (root, mut store) = impact_fixture("concept-invalid-before-refresh");
+        std::fs::write(
+            root.join("src/unindexed.py"),
+            "def should_not_be_indexed():\n    return 1\n",
+        )
+        .unwrap();
+
+        let actual = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({
+                "name": "mmcg_concept",
+                "arguments": { "query": "bad\u{0}query", "top": 10 }
+            }),
+        )
+        .unwrap();
+        assert_eq!(actual["isError"], true);
+        assert_eq!(unwrap_content(&actual)["code"], "invalid_arguments");
+        assert!(
+            queries::search(&store, "should_not_be_indexed", None, None, true)
+                .unwrap()
+                .results
+                .is_empty()
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn missing_custom_concept_corpus_does_not_block_existing_structural_tools() {
+        let (root, store) = impact_fixture("concept-custom-optional");
+        let db = store.db_path().to_path_buf();
+        drop(store);
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch(
+                "DROP TRIGGER IF EXISTS symbol_concepts_graph_ai;
+                 DROP TRIGGER IF EXISTS symbol_concepts_graph_ad;
+                 DROP TRIGGER IF EXISTS symbol_concepts_graph_au;
+                 DROP TRIGGER IF EXISTS symbol_concepts_ai;
+                 DROP TRIGGER IF EXISTS symbol_concepts_ad;
+                 DROP TRIGGER IF EXISTS symbol_concepts_au;
+                 DROP TABLE IF EXISTS symbol_concepts_fts;
+                 DROP TABLE IF EXISTS symbol_concepts;
+                 INSERT INTO meta(key, value)
+                 VALUES ('concept_normalization_version', 'dirty')
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+            )
+            .unwrap();
+        drop(connection);
+        let before = std::fs::read(&db).unwrap();
+        let mut custom = crate::store::Store::open_for_serve(&db, None).unwrap();
+
+        let structural = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut custom,
+            &json!({ "name": "mmcg_search", "arguments": { "name": "value" } }),
+        )
+        .unwrap();
+        assert_eq!(structural["isError"], false);
+        let concept = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut custom,
+            &json!({ "name": "mmcg_concept", "arguments": { "query": "value" } }),
+        )
+        .unwrap();
+        assert_eq!(concept["isError"], true);
+        let payload = unwrap_content(&concept);
+        assert_eq!(payload["code"], "index_stale");
+        assert_eq!(payload["refresh_attempted"], false);
+        assert_eq!(std::fs::read(&db).unwrap(), before);
+        assert!(!db.with_extension("db-wal").exists());
+        assert!(!db.with_extension("db-shm").exists());
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -4528,7 +4999,7 @@ mod tests {
     #[test]
     fn tools_list_covers_every_handler() {
         let listed: Vec<&str> = TOOLS.iter().map(|t| t.name).collect();
-        assert_eq!(listed.len(), 29, "expected 29 tools, got {}", listed.len());
+        assert_eq!(listed.len(), 30, "expected 30 tools, got {}", listed.len());
         for name in &listed {
             assert!(
                 TOOLS.iter().any(|t| &t.name == name),
@@ -4816,9 +5287,17 @@ mod tests {
                     "root": root.to_string_lossy(),
                     "budget_tokens": 2000
                 }),
+                "mmcg_concept" => json!({ "query": "value" }),
                 name => panic!("missing valid-argument fixture for structural tool {name}"),
             };
-            let error = (tool.handler)(&mut store, &arguments).unwrap_err();
+            let result = (tool.handler)(&mut store, &arguments);
+            if tool.name == "mmcg_concept" {
+                let response = result.expect("concept owns its one managed refresh");
+                assert_eq!(response["freshness"]["status"], "fresh");
+                assert!(store.file_mtime("src/unindexed.py").unwrap().is_some());
+                continue;
+            }
+            let error = result.unwrap_err();
             assert!(
                 matches!(error, HandlerError::IndexStale { .. }),
                 "{} queried without enforcing freshness: {error:?}",

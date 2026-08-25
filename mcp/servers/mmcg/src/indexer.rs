@@ -44,7 +44,7 @@ pub use vue::VueExtractor;
 /// Semantic contract for the extractor output stored in SQLite. Bump this when
 /// an extractor or grammar change can alter symbols, edges, ownership, or paths
 /// without requiring a database schema migration.
-pub const EXTRACTOR_CONTRACT_VERSION: &str = "mmcg-extractors-v3";
+pub const EXTRACTOR_CONTRACT_VERSION: &str = "mmcg-extractors-v4";
 pub const EXTRACTOR_CONTRACT_META_KEY: &str = "extractor_contract_version";
 
 /// Bind a persisted codegraph to the repository it was built from.
@@ -187,6 +187,12 @@ pub struct IndexStats {
     pub history_entries_truncated: bool,
     /// True when this run rebuilt an index made by an older extractor contract.
     pub extractor_contract_rebuilt: bool,
+    /// Searchable symbol concepts present after the run; content is never logged.
+    pub concept_rows_indexed: u32,
+    /// Defensive orphan cleanup count. Foreign keys normally keep this at zero.
+    pub concept_orphans_purged: u32,
+    /// True when this run rebuilt an older concept-normalization contract.
+    pub concept_contract_rebuilt: bool,
     pub duration_ms: u128,
 }
 
@@ -199,6 +205,8 @@ pub struct ProjectHistoryIndexStats {
 
 pub struct Indexer {
     root: PathBuf,
+    #[cfg(test)]
+    after_file_commit: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 struct ProjectHistorySnapshot {
@@ -238,7 +246,17 @@ impl IndexLimits {
 
 impl Indexer {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            #[cfg(test)]
+            after_file_commit: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_after_file_commit(mut self, callback: impl Fn() + Send + Sync + 'static) -> Self {
+        self.after_file_commit = Some(Box::new(callback));
+        self
     }
 
     fn bind_or_validate_index_root(&self, store: &Store) -> Result<(), IndexError> {
@@ -303,17 +321,33 @@ impl Indexer {
         let start = SystemTime::now();
         ensure_indexing_active(store)?;
         self.bind_or_validate_index_root(store)?;
+        store
+            .ensure_concept_schema()
+            .map_err(|error| IndexError::Other(error.to_string()))?;
         let stored_extractor_contract = store
             .meta_value(EXTRACTOR_CONTRACT_META_KEY)
             .map_err(|error| IndexError::Other(error.to_string()))?;
         let extractor_contract_current =
             stored_extractor_contract.as_deref() == Some(EXTRACTOR_CONTRACT_VERSION);
-        let extractor_contract_rebuild_required = !extractor_contract_current
-            && store
-                .file_count()
-                .map_err(|error| IndexError::Other(error.to_string()))?
-                > 0;
-        let force_full = force_full || !extractor_contract_current;
+        let concept_contract_current = store
+            .concept_contract_current()
+            .map_err(|error| IndexError::Other(error.to_string()))?;
+        let indexed_file_count = store
+            .file_count()
+            .map_err(|error| IndexError::Other(error.to_string()))?;
+        let extractor_contract_rebuild_required =
+            !extractor_contract_current && indexed_file_count > 0;
+        let concept_contract_rebuild_required = !concept_contract_current && indexed_file_count > 0;
+        let force_full = force_full || !extractor_contract_current || !concept_contract_current;
+        let contracts_need_finalization = force_full;
+        if force_full {
+            // A full rebuild can replace graph rows incrementally. Persist the
+            // derived-corpus dirty marker before the first replacement so an
+            // interruption can never leave a partial corpus stamped current.
+            store
+                .mark_concept_contract_dirty()
+                .map_err(|error| IndexError::Other(error.to_string()))?;
+        }
         let root_capability = if limits == IndexLimits::MANUAL {
             None
         } else {
@@ -486,7 +520,13 @@ impl Indexer {
                             *stats.by_language.entry(lang.to_string()).or_insert(0) += 1;
                         }
                         match store.commit_file(pending) {
-                            Ok(()) => stats.files_indexed += 1,
+                            Ok(()) => {
+                                stats.files_indexed += 1;
+                                #[cfg(test)]
+                                if let Some(callback) = &self.after_file_commit {
+                                    callback();
+                                }
+                            }
                             Err(_) => stats.files_failed += 1,
                         }
                     }
@@ -508,12 +548,16 @@ impl Indexer {
         // Phase 5: purge orphans (in index, no longer on disk). Safe only after a
         // FULL root scan — a partial scan would wrongly purge the unscanned subtree.
         ensure_indexing_active(store)?;
-        if let Ok(indexed) = store.indexed_paths() {
-            for path in indexed {
-                ensure_indexing_active(store)?;
-                if !current_paths.contains(&path) && store.purge_file(&path).is_ok() {
-                    stats.files_purged += 1;
-                }
+        let indexed = store
+            .indexed_paths()
+            .map_err(|error| IndexError::Other(error.to_string()))?;
+        for path in indexed {
+            ensure_indexing_active(store)?;
+            if !current_paths.contains(&path) {
+                store
+                    .purge_file(&path)
+                    .map_err(|error| IndexError::Other(error.to_string()))?;
+                stats.files_purged += 1;
             }
         }
 
@@ -532,13 +576,22 @@ impl Indexer {
         stats.history_entries_indexed = history.indexed;
         stats.history_entries_skipped = history.skipped;
         stats.history_entries_truncated = history.truncated;
-
-        if stats.files_failed == 0 {
+        if stats.files_failed == 0 && contracts_need_finalization {
             ensure_indexing_active(store)?;
-            store
-                .set_meta(EXTRACTOR_CONTRACT_META_KEY, EXTRACTOR_CONTRACT_VERSION)
+            let finalized = store
+                .finalize_index_contracts_current()
                 .map_err(|error| IndexError::Other(error.to_string()))?;
+            stats.concept_orphans_purged = finalized.orphans_purged;
+            stats.concept_rows_indexed = finalized.rows;
             stats.extractor_contract_rebuilt = extractor_contract_rebuild_required;
+            stats.concept_contract_rebuilt = concept_contract_rebuild_required;
+        } else {
+            stats.concept_orphans_purged = store
+                .purge_orphan_concepts()
+                .map_err(|error| IndexError::Other(error.to_string()))?;
+            stats.concept_rows_indexed = store
+                .concept_count()
+                .map_err(|error| IndexError::Other(error.to_string()))?;
         }
 
         stats.duration_ms = start.elapsed().map(|d| d.as_millis()).unwrap_or(0);
@@ -1363,7 +1416,7 @@ fn extract_spec_title(body: &str, filename: &str) -> String {
     filename.trim_end_matches(".md").to_string()
 }
 
-fn guess_language_for(rel_path: &str) -> Option<&'static str> {
+pub(crate) fn guess_language_for(rel_path: &str) -> Option<&'static str> {
     let extension = Path::new(rel_path)
         .extension()
         .and_then(|extension| extension.to_str())?
@@ -1609,7 +1662,11 @@ pub enum IndexError {
 
 fn ensure_indexing_active(store: &Store) -> Result<(), IndexError> {
     if store.work_interrupted() {
-        Err(IndexError::Other("indexing interrupted".to_string()))
+        Err(match store.interrupt_source() {
+            Some(crate::store::InterruptSource::Cancel) => IndexError::Cancelled,
+            Some(crate::store::InterruptSource::Budget) => IndexError::DeadlineExceeded,
+            None => IndexError::Other("indexing interrupted".to_string()),
+        })
     } else {
         Ok(())
     }
@@ -1713,7 +1770,7 @@ mod incremental_tests {
 
         store.cancel_handle().cancel();
         let error = indexer.index_all(&mut store, false).unwrap_err();
-        assert!(error.to_string().contains("indexing interrupted"));
+        assert!(matches!(error, IndexError::Cancelled));
         assert_eq!(
             store.take_interrupt_source(),
             Some(crate::store::InterruptSource::Cancel)
@@ -1735,6 +1792,49 @@ mod incremental_tests {
         let forced = indexer.index_all(&mut store, true).unwrap();
         assert_eq!(forced.files_indexed, 1, "force should re-parse");
         assert_eq!(forced.files_unchanged, 0);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cancelled_forced_rebuild_leaves_concept_contract_dirty() {
+        let (dir, db) = setup("cancel_forced_concept_rebuild");
+        fs::write(dir.join("a.py"), "def alpha_handler(): pass\n").unwrap();
+        fs::write(dir.join("b.py"), "def beta_handler(): pass\n").unwrap();
+
+        let mut store = Store::open(&db).unwrap();
+        Indexer::new(&dir).index_all(&mut store, false).unwrap();
+        assert!(store.concept_contract_current().unwrap());
+        drop(store);
+
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute(
+                "UPDATE symbol_concepts SET name_search = 'corrupted'
+                 WHERE symbol_id = (SELECT MIN(symbol_id) FROM symbol_concepts)",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let mut store = Store::open(&db).unwrap();
+        assert!(store.concept_contract_current().unwrap());
+        let cancel = store.cancel_handle();
+        let indexer = Indexer::new(&dir).with_after_file_commit(move || cancel.cancel());
+        let error = indexer.index_all(&mut store, true).unwrap_err();
+        assert!(matches!(error, IndexError::Cancelled));
+        assert_eq!(
+            store.take_interrupt_source(),
+            Some(crate::store::InterruptSource::Cancel)
+        );
+        assert!(!store.concept_contract_current().unwrap());
+        drop(store);
+
+        let mut custom = Store::open_for_serve(&db, None).unwrap();
+        assert_eq!(
+            crate::mcp::build_concept_current(&mut custom, "handler", 10),
+            Err(crate::queries::ConceptError::IndexStale)
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -2086,6 +2186,113 @@ mod incremental_tests {
         assert_eq!(stats.files_unchanged, 0);
         assert!(stats.extractor_contract_rebuilt);
         assert!(store.extractor_contract_current().unwrap());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn frozen_v3_partial_and_successful_writes_cannot_leave_concepts_falsely_current() {
+        for old_run_completed in [false, true] {
+            let suffix = if old_run_completed {
+                "complete"
+            } else {
+                "cancelled"
+            };
+            let (dir, db) = setup(&format!("concept_old_writer_{suffix}"));
+            fs::write(dir.join("app.py"), "def current_handler(): pass\n").unwrap();
+            let mut store = Store::open(&db).unwrap();
+            let indexer = Indexer::new(&dir);
+            indexer.index_all(&mut store, false).unwrap();
+            assert!(store.concept_contract_current().unwrap());
+            drop(store);
+
+            // Frozen schema-v7/v3 behavior: replace one file's graph rows but
+            // do not know about symbol_concepts. A cancelled run leaves the
+            // future extractor marker untouched; a successful old run stamps
+            // v3. Persistent schema-v7 triggers must dirty concepts in both.
+            let connection = rusqlite::Connection::open(&db).unwrap();
+            connection
+                .execute_batch("PRAGMA foreign_keys = ON; BEGIN")
+                .unwrap();
+            connection
+                .execute("DELETE FROM symbols WHERE file_path = 'app.py'", [])
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO symbols(name, kind, file_path, line_start, line_end)
+                     VALUES ('legacy_secret', 'function', 'app.py', 1, 1)",
+                    [],
+                )
+                .unwrap();
+            if old_run_completed {
+                connection
+                    .execute(
+                        "INSERT INTO meta(key, value) VALUES (?1, 'mmcg-extractors-v3')
+                         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        [EXTRACTOR_CONTRACT_META_KEY],
+                    )
+                    .unwrap();
+            }
+            connection.execute_batch("COMMIT").unwrap();
+            drop(connection);
+
+            let mut store = Store::open(&db).unwrap();
+            assert!(!store.concept_contract_current().unwrap());
+            assert_eq!(
+                store.extractor_contract_current().unwrap(),
+                !old_run_completed
+            );
+            let stats = indexer.index_all(&mut store, false).unwrap();
+            assert!(stats.concept_contract_rebuilt);
+            assert_eq!(stats.extractor_contract_rebuilt, old_run_completed);
+            assert!(store.concept_contract_current().unwrap());
+            assert!(store.extractor_contract_current().unwrap());
+            assert_eq!(
+                store.concept_count().unwrap(),
+                store.symbol_count().unwrap()
+            );
+            assert!(store.search_concepts("\"legacy\"", 10).unwrap().is_empty());
+            assert!(!store.search_concepts("\"current\"", 10).unwrap().is_empty());
+
+            fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn deleted_path_purge_failure_is_fatal_and_cannot_stamp_concepts_current() {
+        let (dir, db) = setup("concept_purge_failure");
+        fs::write(dir.join("keep.py"), "def keep(): pass\n").unwrap();
+        fs::write(dir.join("deleted.py"), "def stale_secret(): pass\n").unwrap();
+        let mut store = Store::open(&db).unwrap();
+        let indexer = Indexer::new(&dir);
+        indexer.index_all(&mut store, false).unwrap();
+        drop(store);
+
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_deleted_file_purge
+                 BEFORE DELETE ON files
+                 WHEN old.path = 'deleted.py' BEGIN
+                     INSERT INTO missing_concept_purge_sink(value)
+                     VALUES (old.path);
+                 END;",
+            )
+            .unwrap();
+        drop(connection);
+        fs::remove_file(dir.join("deleted.py")).unwrap();
+
+        let mut store = Store::open(&db).unwrap();
+        assert!(store.concept_schema_objects_current().unwrap());
+        assert!(store.concept_contract_current().unwrap());
+        let error = indexer.index_all(&mut store, false).unwrap_err();
+        assert!(error.to_string().contains("missing_concept_purge_sink"));
+        assert!(!store.concept_contract_current().unwrap());
+        assert!(store
+            .indexed_paths()
+            .unwrap()
+            .contains(&"deleted.py".to_string()));
+        assert!(!store.search_concepts("\"stale\"", 10).unwrap().is_empty());
 
         fs::remove_dir_all(&dir).ok();
     }

@@ -801,6 +801,206 @@ const BRIEF_HISTORY_LIMIT: usize = 10;
 const BRIEF_HISTORY_TERM_LIMIT: usize = 8;
 const BRIEF_REPOSITORY_STRING_BYTES: usize = 512;
 
+pub const CONCEPT_DEFAULT_TOP: u32 = 10;
+pub const CONCEPT_MAX_TOP: u32 = 50;
+pub const CONCEPT_QUERY_MAX_BYTES: usize = 256;
+pub const CONCEPT_QUERY_TERM_LIMIT: usize = 16;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConceptError {
+    InvalidArguments,
+    IndexStale,
+    SchemaIncompatible,
+    SnapshotChanged,
+    WorkLimitExceeded,
+    Internal,
+}
+
+impl ConceptError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidArguments => "invalid_arguments",
+            Self::IndexStale => "index_stale",
+            Self::SchemaIncompatible => "schema_incompatible",
+            Self::SnapshotChanged => "snapshot_changed",
+            Self::WorkLimitExceeded => "work_limit_exceeded",
+            Self::Internal => "internal_error",
+        }
+    }
+}
+
+impl std::fmt::Display for ConceptError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.code())
+    }
+}
+
+impl std::error::Error for ConceptError {}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ConceptResponse {
+    pub schema_version: u32,
+    pub repository_content_untrusted: bool,
+    pub query_terms: Vec<String>,
+    pub count: u32,
+    pub top: u32,
+    pub freshness: ConceptFreshness,
+    pub limits: ConceptLimits,
+    pub precision_notes: Vec<String>,
+    pub candidates: Vec<ConceptCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ConceptFreshness {
+    pub status: String,
+    pub extractor_contract: String,
+    pub normalization_contract: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ConceptLimits {
+    pub query_bytes: u32,
+    pub query_terms: u32,
+    pub term_bytes: u32,
+    pub top: u32,
+    pub signature_shape_bytes: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ConceptCandidate {
+    pub name: String,
+    pub kind: String,
+    pub language: String,
+    pub path: String,
+    pub line: u32,
+    pub signature_shape: String,
+    pub matched_fields: Vec<String>,
+    pub citation: String,
+    pub score: f64,
+}
+
+pub fn validate_concept_request(query: &str, top: u32) -> Result<Vec<String>, ConceptError> {
+    if query.is_empty()
+        || query.len() > CONCEPT_QUERY_MAX_BYTES
+        || !(1..=CONCEPT_MAX_TOP).contains(&top)
+    {
+        return Err(ConceptError::InvalidArguments);
+    }
+    let terms = crate::store::concept_terms(query).ok_or(ConceptError::InvalidArguments)?;
+    if terms.is_empty()
+        || terms.len() > CONCEPT_QUERY_TERM_LIMIT
+        || terms
+            .iter()
+            .any(|term| term.is_empty() || term.len() > crate::store::CONCEPT_TERM_MAX_BYTES)
+    {
+        return Err(ConceptError::InvalidArguments);
+    }
+    Ok(terms)
+}
+
+fn concept_match_query(terms: &[String]) -> String {
+    terms
+        .iter()
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+
+pub(crate) fn concept_verified(
+    store: &Store,
+    query: &str,
+    top: u32,
+    expected_data_version: u64,
+    freshness: ConceptFreshness,
+) -> Result<ConceptResponse, ConceptError> {
+    let query_terms = validate_concept_request(query, top)?;
+    let match_query = concept_match_query(&query_terms);
+    store
+        .begin_read_snapshot()
+        .map_err(|_| ConceptError::SnapshotChanged)?;
+    let search = store.search_concepts(&match_query, top);
+    let end = store.end_read_snapshot();
+    let data_version_after = store.data_version().map_err(|_| {
+        if store.interrupt_source().is_some() {
+            ConceptError::WorkLimitExceeded
+        } else {
+            ConceptError::SnapshotChanged
+        }
+    })?;
+    end.map_err(|_| ConceptError::SnapshotChanged)?;
+    if data_version_after != expected_data_version {
+        return Err(ConceptError::SnapshotChanged);
+    }
+    let hits = search.map_err(|_| {
+        if store.interrupt_source().is_some() {
+            ConceptError::WorkLimitExceeded
+        } else {
+            ConceptError::Internal
+        }
+    })?;
+
+    let mut unsafe_omitted = 0u32;
+    let mut candidates = Vec::with_capacity(hits.len());
+    for hit in hits {
+        if !hit.score.is_finite() {
+            unsafe_omitted = unsafe_omitted.saturating_add(1);
+            continue;
+        }
+        let language = hit.language.unwrap_or_else(|| "unknown".to_string());
+        let mut matched_fields = Vec::new();
+        for (matched, field) in [
+            (hit.name_matched, "name"),
+            (hit.path_matched, "path"),
+            (hit.signature_matched, "signature"),
+            (hit.documentation_matched, "documentation"),
+        ] {
+            if matched {
+                matched_fields.push(field.to_string());
+            }
+        }
+        if matched_fields.is_empty() {
+            unsafe_omitted = unsafe_omitted.saturating_add(1);
+            continue;
+        }
+        candidates.push(ConceptCandidate {
+            name: hit.name,
+            kind: hit.kind,
+            language,
+            path: hit.path.clone(),
+            line: hit.line,
+            signature_shape: hit.signature_shape,
+            matched_fields,
+            citation: format!("{}:{}", hit.path, hit.line),
+            score: hit.score,
+        });
+    }
+    let mut precision_notes = vec![
+        "bm25_score_is_query_local_lower_is_better_not_confidence".to_string(),
+        "unicode_lowercase_without_canonical_equivalence".to_string(),
+        "documentation_search_reserved_empty".to_string(),
+    ];
+    if unsafe_omitted > 0 {
+        precision_notes.push(format!("unsafe_candidates_omitted:{unsafe_omitted}"));
+    }
+    Ok(ConceptResponse {
+        schema_version: 1,
+        repository_content_untrusted: true,
+        query_terms,
+        count: brief_u32(candidates.len()),
+        top,
+        freshness,
+        limits: ConceptLimits {
+            query_bytes: CONCEPT_QUERY_MAX_BYTES as u32,
+            query_terms: CONCEPT_QUERY_TERM_LIMIT as u32,
+            term_bytes: crate::store::CONCEPT_TERM_MAX_BYTES as u32,
+            top: CONCEPT_MAX_TOP,
+            signature_shape_bytes: crate::store::CONCEPT_SIGNATURE_MAX_BYTES as u32,
+        },
+        precision_notes,
+        candidates,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BriefRole {
@@ -3804,6 +4004,207 @@ mod tests {
         p.push(format!("mmcg-queries-{}-{}.db", std::process::id(), name));
         let _ = std::fs::remove_file(&p);
         p
+    }
+
+    fn verified_concept_freshness() -> ConceptFreshness {
+        ConceptFreshness {
+            status: "fresh".to_string(),
+            extractor_contract: crate::indexer::EXTRACTOR_CONTRACT_VERSION.to_string(),
+            normalization_contract: crate::store::CONCEPT_NORMALIZATION_VERSION.to_string(),
+        }
+    }
+
+    #[test]
+    fn concept_request_validation_never_admits_raw_fts_syntax() {
+        assert_eq!(
+            concept_match_query(&validate_concept_request("foo OR bar", 10).unwrap()),
+            "\"foo\" AND \"or\" AND \"bar\""
+        );
+        for invalid in ["", "---", "foo\0bar", "foo\nbar"] {
+            assert_eq!(
+                validate_concept_request(invalid, 10),
+                Err(ConceptError::InvalidArguments)
+            );
+        }
+        let too_many_terms = (0..17)
+            .map(|index| format!("term{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(
+            validate_concept_request(&too_many_terms, 10),
+            Err(ConceptError::InvalidArguments)
+        );
+        assert_eq!(
+            validate_concept_request(&"a".repeat(65), 10),
+            Err(ConceptError::InvalidArguments)
+        );
+        for top in [0, 51] {
+            assert_eq!(
+                validate_concept_request("handler", top),
+                Err(ConceptError::InvalidArguments)
+            );
+        }
+    }
+
+    #[test]
+    fn concept_ranking_applies_exact_path_sort_before_limit() {
+        let path = tmp_db("concept_path_sort");
+        let store = Store::open(&path).unwrap();
+        for index in (0..100).rev() {
+            store
+                .insert_symbol(
+                    "handler",
+                    "function",
+                    &format!("src/p{index:03}.rs"),
+                    1,
+                    2,
+                    Some("fn handler()"),
+                    None,
+                )
+                .unwrap();
+        }
+        store.finalize_index_contracts_current().unwrap();
+
+        let response = concept_verified(
+            &store,
+            "handler",
+            10,
+            store.data_version().unwrap(),
+            verified_concept_freshness(),
+        )
+        .unwrap();
+        let expected = (0..10)
+            .map(|index| format!("src/p{index:03}.rs"))
+            .collect::<Vec<_>>();
+        let paths = response
+            .candidates
+            .iter()
+            .map(|candidate| candidate.path.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, expected);
+        store.finalize_index_contracts_current().unwrap();
+        let rebuilt = concept_verified(
+            &store,
+            "handler",
+            10,
+            store.data_version().unwrap(),
+            verified_concept_freshness(),
+        )
+        .unwrap();
+        assert_eq!(rebuilt.candidates, response.candidates);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn concept_json_fields_preserve_repository_identity_for_serde_escaping() {
+        let path = tmp_db("concept_raw_json_fields");
+        let store = Store::open(&path).unwrap();
+        let hostile_name = "handler](https://evil.example)<a>`\u{1b}\u{7}\u{202e}";
+        let hostile_path = "src/](file://evil)/<b>`handler.rs";
+        store
+            .insert_symbol(
+                hostile_name,
+                "function",
+                hostile_path,
+                7,
+                8,
+                Some("fn handler()"),
+                None,
+            )
+            .unwrap();
+        store.finalize_index_contracts_current().unwrap();
+
+        let response = concept_verified(
+            &store,
+            "handler",
+            10,
+            store.data_version().unwrap(),
+            verified_concept_freshness(),
+        )
+        .unwrap();
+        let candidate = response.candidates.first().unwrap();
+        assert_eq!(candidate.name, hostile_name);
+        assert_eq!(candidate.path, hostile_path);
+        assert_eq!(candidate.citation, format!("{hostile_path}:7"));
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\\u001b"));
+        assert!(json.contains("\\u0007"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn concept_snapshot_rejects_a_writer_after_the_freshness_token() {
+        let path = tmp_db("concept_snapshot_race");
+        let store = Store::open(&path).unwrap();
+        store
+            .insert_symbol(
+                "ready_handler",
+                "function",
+                "src/ready.rs",
+                1,
+                2,
+                Some("fn ready_handler()"),
+                None,
+            )
+            .unwrap();
+        store.finalize_index_contracts_current().unwrap();
+        let expected_data_version = store.data_version().unwrap();
+
+        let writer = rusqlite::Connection::open(&path).unwrap();
+        writer
+            .execute(
+                "INSERT INTO symbols(name, kind, file_path, line_start, line_end)
+                 VALUES ('late_handler', 'function', 'src/late.rs', 1, 2)",
+                [],
+            )
+            .unwrap();
+        drop(writer);
+
+        let result = concept_verified(
+            &store,
+            "ready",
+            10,
+            expected_data_version,
+            verified_concept_freshness(),
+        );
+        assert_eq!(result, Err(ConceptError::SnapshotChanged));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn concept_query_budget_interrupts_without_partial_candidates() {
+        let path = tmp_db("concept_budget");
+        let store = Store::open(&path).unwrap();
+        for index in 0..2_000 {
+            store
+                .insert_symbol(
+                    &format!("common_handler_{index}"),
+                    "function",
+                    &format!("src/handler_{index}.rs"),
+                    1,
+                    2,
+                    Some("fn common_handler()"),
+                    None,
+                )
+                .unwrap();
+        }
+        store.finalize_index_contracts_current().unwrap();
+        assert!(!store.push_work_budget(crate::store::WorkBudget {
+            deadline: None,
+            op_ticks: Some(1),
+        }));
+        let result = concept_verified(
+            &store,
+            "common",
+            50,
+            store.data_version().unwrap(),
+            verified_concept_freshness(),
+        );
+        assert_eq!(result, Err(ConceptError::WorkLimitExceeded));
+        assert!(store.interrupt_source().is_some());
+        store.pop_work_budget();
+        let _ = store.take_interrupt_source();
+        std::fs::remove_file(path).ok();
     }
 
     #[test]

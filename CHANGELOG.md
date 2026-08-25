@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `mmcg_concept` and `mastermind concept` now return a bounded schema-v1 set of
+  local symbol candidates from normalized names, repository paths, and
+  declaration shapes. Fixed quoted-AND FTS5 retrieval uses no embeddings,
+  model calls, network access, source bodies, comments, literals, or defaults;
+  managed indexes refresh once on extractor or normalization drift, while
+  custom external indexes remain read-only and fail closed.
 - `mmcg_brief` and `mastermind brief` now build one deterministic,
   revision-bound planner/executor/auditor context packet. Role-specific prefix
   admission is capped and reports source, unsafe-content, and budget omissions;

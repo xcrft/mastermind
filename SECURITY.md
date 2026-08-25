@@ -82,6 +82,21 @@ automatic writable refresh. A custom `--index` is served through a read-only
 snapshot and is never created, migrated, truncated, or given source-side
 SQLite sidecars; an incompatible schema fails as `schema_incompatible`.
 
+Concept documentation is derived from untrusted repository text. Rust outer
+docs, Python owned docstrings, and JavaScript/TypeScript JSDoc are inspected
+while their declaration AST is available, but raw text is never written to the
+index or returned by a tool. Only bounded normalized search tokens are stored:
+2 KiB raw inspection per candidate, 512 UTF-8 bytes per symbol, and 64 KiB per
+file. Candidates matching a private-key header, AWS access-key shape, bearer
+authorization value, or non-placeholder api-key/secret/token/password
+assignment are omitted whole before normalization.
+
+These checks reduce accidental credential persistence; they are not a general
+secret scanner or a confidentiality boundary for a hostile local machine. The
+SQLite index remains local derived data and should receive the same filesystem
+protection as the repository. Count-only omission metadata and query precision
+notes never include documentation excerpts.
+
 ## Response and disclosure
 
 This is a small-maintainer open-source project. Targets are best effort:

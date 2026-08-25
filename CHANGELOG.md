@@ -10,10 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `mmcg_concept` and `mastermind concept` now return a bounded schema-v1 set of
   local symbol candidates from normalized names, repository paths, and
-  declaration shapes. Fixed quoted-AND FTS5 retrieval uses no embeddings,
-  model calls, network access, source bodies, comments, literals, or defaults;
-  managed indexes refresh once on extractor or normalization drift, while
-  custom external indexes remain read-only and fail closed.
+  declaration shapes. Rust outer docs, Python owned docstrings, and
+  JavaScript/TypeScript JSDoc now contribute bounded normalized search tokens
+  without persisting or returning raw text. Credential-shaped candidates and
+  per-symbol/per-file overflow are omitted and counted. Fixed quoted-AND FTS5
+  retrieval uses no embeddings, model calls, network access, source bodies,
+  literals, or defaults; managed indexes refresh once on extractor or
+  normalization drift, while custom external indexes remain read-only and fail
+  closed.
 - `mmcg_brief` and `mastermind brief` now build one deterministic,
   revision-bound planner/executor/auditor context packet. Role-specific prefix
   admission is capped and reports source, unsafe-content, and budget omissions;

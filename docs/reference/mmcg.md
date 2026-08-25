@@ -291,10 +291,33 @@ mmcg concept "payment retry handler" --top 10 --format json
 
 `mmcg_concept` and `mastermind concept` use one schema-v1 query builder over a
 private derived corpus. Searchable fields are normalized symbol names,
-repository-relative paths, and bounded declaration shapes; the documentation
-field is reserved and empty. Source bodies and comments are never indexed or
-returned. Quoted, character, raw, template, regex, numeric, and default-value
-content is removed from declaration shapes before persistence.
+repository-relative paths, bounded declaration shapes, and owned documentation
+for an explicit first language set. Source bodies and raw comments/docstrings
+are never persisted or returned. Quoted, character, raw, template, regex,
+numeric, and default-value content is removed from declaration shapes before
+persistence.
+
+| Language | Documentation ownership |
+|---|---|
+| Rust | Consecutive outer `///` or `/** */` docs on the immediately owned item; attributes may sit between the docs and item. Inner `//!` docs belong only to their module. |
+| Python | The first plain string-expression statement in a module, class, sync function, or async function body. |
+| TypeScript / TSX / JavaScript | One immediately preceding `/** ... */` JSDoc block, including through an export wrapper. |
+
+Blank-line gaps, ordinary/trailing comments, file/license headers, Python
+f-strings, later or assigned strings, and JSDoc before another statement are
+not attached. C, C++, C#, Go, Java, PHP, and Vue remain name/path/declaration-
+shape only; precision notes report this supported matrix rather than implying
+documentation coverage for every extractor.
+
+Each admitted documentation candidate is stripped without rendering Markdown
+or HTML and bounded to 2 KiB of raw UTF-8. The shared concept tokenizer then
+persists at most 512 bytes of normalized search tokens per symbol and 64 KiB
+per file, in stable symbol order. Private-key headers, AWS access-key shapes,
+bearer authorization values, and non-placeholder api-key/secret/token/password
+assignments omit the whole candidate before persistence. Index stats and meta
+report supported languages, indexed-document count, credential omissions,
+size truncations/omissions, and unsupported-language file count only. They do
+not contain matched text.
 
 The query is plain text up to 256 UTF-8 bytes. Shared normalization applies
 Unicode lowercase without claiming canonical equivalence, splits punctuation,
@@ -304,7 +327,7 @@ joined by a fixed `AND`, so callers cannot supply FTS syntax, column selectors,
 boolean operators, or prefix wildcards. `top` is an integer from 1 through 50.
 
 SQLite FTS5 ranks with fixed BM25 weights: name 10, path 4, declaration shape
-2, and the reserved documentation field 1. The total tie order is score,
+2, and documentation 1. The total tie order is score,
 lowercase repository path, line, kind, name, then symbol ID. Scores are local
 to one query, lower is better, and they are not confidence values. Each
 candidate contains `name`, `kind`, `language`, `path`, `line`, a declaration
@@ -312,14 +335,17 @@ candidate contains `name`, `kind`, `language`, `path`, `line`, a declaration
 `score`; the envelope also reports normalized `query_terms`, count, requested
 top, freshness, limits, and precision notes.
 
-The corpus is an additive schema-v7 table plus external-content FTS5 index.
-Symbol mutations dirty its independent normalization contract, including writes
-from older schema-v7 binaries. Managed queries may perform one bounded full
-refresh and retry when the extractor or concept contract drifts. Finalization
-checks symbol/concept parity and FTS integrity before stamping both contracts
-current. Custom external indexes open read-only, are never migrated, and return
-`index_stale` or `schema_incompatible` when the required corpus is unavailable.
-Stable query failures also include `invalid_arguments`, `snapshot_changed`,
+The corpus is an additive schema-v7 concept table, per-file count table, and
+external-content FTS5 index. Documentation rows and their count-only metadata
+are replaced or removed in the same file transaction as symbols and edges.
+Symbol mutations dirty the independent normalization contract, including
+writes from older schema-v7 binaries. Managed queries may perform one bounded
+full refresh and retry when the extractor or concept contract drifts.
+Finalization checks symbol/concept parity and FTS integrity before stamping the
+extractor and normalization contracts current. Custom external indexes open
+read-only, are never migrated, and return `index_stale` or
+`schema_incompatible` when the required corpus is unavailable. Stable query
+failures also include `invalid_arguments`, `snapshot_changed`,
 `work_limit_exceeded`, `cancelled`, and `internal_error`.
 
 This is deterministic local retrieval, not semantic inference: no embeddings,
@@ -989,7 +1015,7 @@ or given WAL/SHM sidecars by the server. Incompatible custom schemas return
 | `mmcg_dependency_cycles` | optional `language`, `min_size` (default 2) | Detect circular imports — strongly-connected components in the file-level import graph (Tarjan's algorithm). Each result is a cycle = a list of files. Pre-merge guard ("does this PR introduce a new cycle?") and architectural-hygiene survey. Resolves edges by leaf-name match — over-approximates (two unrelated `Logger` symbols cross-link) so verify before refactoring. Bump `min_size` to hide trivial A↔B and surface only larger structural problems. Work-capped at 50,000 file-pair edges: above that, `truncated: true` with an empty `cycles` list — incomplete and possibly inaccurate, not "more available"; narrow with `language` and retry. |
 | `mmcg_symbols_changed_since` | `git_ref`, optional `root` | Symbol-level diff between a git ref and the current index. Returns `{added, removed, signature_changed}` symbol sets for files in `git diff --name-only <ref>..HEAD`. Re-parses old blobs from `git show <ref>:<path>` using the same extractor. Different from `mmcg_recent_changes` (watcher mtime) — this is git-ref-based, answering "what symbols did THIS PR/branch touch?". PR-review pre-flight, auditor verification, "what new public API appeared in v2.3?". Git subprocesses are killed after `MMCG_GIT_TIMEOUT_MS`; the per-file loop is capped at 10,000 files with `truncated: true` marking a partial diff. |
 | `mmcg_status` | — | Index path, file/symbol counts, and bounded `stale_files`. A non-zero value means the next structural query will refresh a managed index, or that a custom external index needs an explicit `mmcg index`. |
-| `mmcg_concept` | `query`, optional `top` (default 10, max 50) | Deterministic schema-v1 symbol candidates from normalized names, repository paths, and declaration shapes. Plain terms are escaped and fixed-AND joined; no raw FTS syntax, embeddings, model calls, network, source bodies, comments, literals, or defaults. BM25 score is query-local and lower-is-better, not confidence. Managed drift gets at most one refresh/retry; custom indexes remain read-only and fail closed. |
+| `mmcg_concept` | `query`, optional `top` (default 10, max 50) | Deterministic schema-v1 symbol candidates from normalized names, repository paths, declaration shapes, and owned Rust/Python/JavaScript/TypeScript documentation tokens. Plain terms are escaped and fixed-AND joined; no raw FTS syntax, embeddings, model calls, network, source bodies, raw comments/docstrings, literals, or defaults. BM25 score is query-local and lower-is-better, not confidence. Managed drift gets at most one refresh/retry; custom indexes remain read-only and fail closed. |
 
 Tool responses are bounded JSON. Collection responses expose their own count or
 collection metadata; status and workflow responses use named fields.

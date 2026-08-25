@@ -2066,7 +2066,7 @@ fn schema_brief() -> Value {
 fn schema_concept() -> Value {
     json!({
         "name": "mmcg_concept",
-        "description": "Deterministic local concept retrieval over bounded normalized symbol names, repository paths, and declaration shapes. Uses SQLite FTS5 only: no embeddings, model calls, network access, source bodies, comments, literals, or defaults. Results are retrieval candidates, not confidence-ranked answers.",
+        "description": "Deterministic local concept retrieval over bounded normalized symbol names, repository paths, declaration shapes, and owned Rust/Python/JavaScript/TypeScript documentation tokens. Uses SQLite FTS5 only: no embeddings, model calls, network access, source bodies, raw comments/docstrings, literals, or defaults. Results are retrieval candidates, not confidence-ranked answers.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3964,7 +3964,7 @@ mod tests {
         let (root, mut store) = impact_fixture("concept-shared");
         std::fs::write(
             root.join("src/app.py"),
-            "def value(secret: str = 'TOPSECRET', required: ImportantType = None):\n    return required\n",
+            "def value(secret: str = 'TOPSECRET', required: ImportantType = None):\n    \"\"\"retrievalquartz private operational phrase\"\"\"\n    return required\n",
         )
         .unwrap();
         std::fs::write(
@@ -3992,6 +3992,28 @@ mod tests {
         assert_eq!(actual["isError"], false);
         assert_eq!(unwrap_content(&actual), expected);
         assert_eq!(actual["structuredContent"], expected);
+
+        let documentation =
+            serde_json::to_value(build_concept_current(&mut store, "retrievalquartz", 10).unwrap())
+                .unwrap();
+        assert_eq!(
+            documentation["candidates"][0]["matched_fields"],
+            json!(["documentation"])
+        );
+        let rendered = documentation.to_string();
+        assert!(!rendered.contains("operational"));
+        assert!(!rendered.contains("phrase"));
+        let mcp_documentation = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({
+                "name": "mmcg_concept",
+                "arguments": { "query": "retrievalquartz", "top": 10 }
+            }),
+        )
+        .unwrap();
+        assert_eq!(unwrap_content(&mcp_documentation), documentation);
+        assert_eq!(mcp_documentation["structuredContent"], documentation);
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -4070,6 +4092,71 @@ mod tests {
         assert_eq!(unwrap_content(&result)["code"], "index_stale");
         assert_eq!(std::fs::read(&db).unwrap(), before);
 
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn concept_documentation_stats_contract_repairs_managed_and_preserves_custom_indexes() {
+        let (root, store) = impact_fixture("concept-documentation-stats-drift");
+        let db = store.db_path().to_path_buf();
+        drop(store);
+
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch("DROP TABLE concept_documentation_file_stats")
+            .unwrap();
+        drop(connection);
+        let mut managed = crate::store::Store::open_for_serve(&db, Some(&root)).unwrap();
+        assert!(managed.concept_schema_objects_current().unwrap());
+        assert!(!managed.concept_contract_current().unwrap());
+        let result = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut managed,
+            &json!({ "name": "mmcg_concept", "arguments": { "query": "value" } }),
+        )
+        .unwrap();
+        assert_eq!(result["isError"], false);
+        assert!(managed.concept_contract_current().unwrap());
+        assert_eq!(
+            managed
+                .meta_value(crate::store::CONCEPT_DOCUMENTATION_LANGUAGES_META_KEY)
+                .unwrap()
+                .as_deref(),
+            Some(crate::store::CONCEPT_DOCUMENTATION_SUPPORTED_LANGUAGES)
+        );
+        drop(managed);
+
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch("DROP TABLE concept_documentation_file_stats")
+            .unwrap();
+        drop(connection);
+        let source_paths = [
+            db.clone(),
+            db.with_extension("db-wal"),
+            db.with_extension("db-shm"),
+        ];
+        let before = source_paths
+            .iter()
+            .map(|path| std::fs::read(path).ok())
+            .collect::<Vec<_>>();
+        let mut custom = crate::store::Store::open_for_serve(&db, None).unwrap();
+        let result = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut custom,
+            &json!({ "name": "mmcg_concept", "arguments": { "query": "value" } }),
+        )
+        .unwrap();
+        assert_eq!(result["isError"], true);
+        assert!(matches!(
+            unwrap_content(&result)["code"].as_str(),
+            Some("index_stale" | "schema_incompatible")
+        ));
+        let after = source_paths
+            .iter()
+            .map(|path| std::fs::read(path).ok())
+            .collect::<Vec<_>>();
+        assert_eq!(after, before);
         std::fs::remove_dir_all(root).ok();
     }
 

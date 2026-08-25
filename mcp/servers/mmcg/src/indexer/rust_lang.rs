@@ -5,8 +5,9 @@ use super::common::{
     line_of, node_text, push_call, push_call_with_type, push_def, push_def_with_decorators,
     push_import,
 };
-use super::LanguageExtractor;
+use super::{DocumentationTextBuilder, LanguageExtractor, RawConceptDocumentation};
 use crate::store::PendingFile;
+use std::collections::HashMap;
 use tree_sitter::{Node, Tree};
 
 pub struct RustExtractor;
@@ -431,6 +432,211 @@ fn signature_until_body_or_semi(node: &Node, source: &[u8]) -> Option<String> {
     } else {
         Some(trimmed)
     }
+}
+
+fn documentation_nodes_adjacent(source: &[u8], left: &Node, right: &Node) -> bool {
+    if left.end_byte() > right.start_byte()
+        || right.start_position().row > left.end_position().row.saturating_add(1)
+    {
+        return false;
+    }
+    let gap = &source[left.end_byte()..right.start_byte()];
+    if !gap.iter().all(u8::is_ascii_whitespace) {
+        return false;
+    }
+    let mut newlines = 0usize;
+    let mut index = 0usize;
+    while index < gap.len() {
+        if gap[index] == b'\r' {
+            newlines += 1;
+            index += usize::from(gap.get(index + 1) == Some(&b'\n'));
+        } else if gap[index] == b'\n' {
+            newlines += 1;
+        }
+        index += 1;
+    }
+    let consumed_line_ending = usize::from(
+        left.kind() == "line_comment"
+            && left.end_position().column == 0
+            && left.end_position().row > left.start_position().row,
+    );
+    newlines.saturating_add(consumed_line_ending) <= 1
+}
+
+fn documentation_comment_starts_line(source: &[u8], node: &Node) -> bool {
+    let line_start = source[..node.start_byte()]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |index| index + 1);
+    source[line_start..node.start_byte()]
+        .iter()
+        .all(u8::is_ascii_whitespace)
+}
+
+fn is_outer_doc_comment(node: &Node) -> bool {
+    matches!(node.kind(), "line_comment" | "block_comment")
+        && node.child_by_field_name("outer").is_some()
+}
+
+fn is_inner_doc_comment(node: &Node) -> bool {
+    matches!(node.kind(), "line_comment" | "block_comment")
+        && node.child_by_field_name("inner").is_some()
+}
+
+fn push_rust_doc_comment(builder: &mut DocumentationTextBuilder, node: &Node, source: &[u8]) {
+    let Some(text) = node_text(node, source) else {
+        return;
+    };
+    if node.kind() == "line_comment" {
+        let body = text.get(3..).unwrap_or_default();
+        builder.push_line(body.strip_prefix(' ').unwrap_or(body));
+        return;
+    }
+    let body = text
+        .strip_prefix("/**")
+        .or_else(|| text.strip_prefix("/*!"))
+        .unwrap_or_default()
+        .strip_suffix("*/")
+        .unwrap_or_default();
+    for line in body.lines() {
+        let line = line.trim_start();
+        let line = line.strip_prefix('*').unwrap_or(line);
+        builder.push_line(line.strip_prefix(' ').unwrap_or(line).trim_end());
+    }
+}
+
+fn symbol_index_for_declaration(
+    node: &Node,
+    source: &[u8],
+    symbols: &HashMap<(u32, &str), usize>,
+) -> Option<usize> {
+    let name = match node.kind() {
+        "impl_item" => impl_target_name(node, source)?,
+        _ => name_field(node, source)?.to_string(),
+    };
+    let line = node.start_position().row as u32 + 1;
+    symbols.get(&(line, name.as_str())).copied()
+}
+
+fn declaration_owns_outer_docs(kind: &str) -> bool {
+    matches!(
+        kind,
+        "function_item" | "struct_item" | "enum_item" | "trait_item" | "impl_item" | "mod_item"
+    )
+}
+
+fn collect_outer_docs_in(
+    node: Node,
+    source: &[u8],
+    symbols: &HashMap<(u32, &str), usize>,
+    output: &mut Vec<RawConceptDocumentation>,
+) {
+    let mut cursor = node.walk();
+    let children = node.named_children(&mut cursor).collect::<Vec<_>>();
+    for (declaration_index, declaration) in children.iter().enumerate() {
+        if !declaration_owns_outer_docs(declaration.kind()) {
+            continue;
+        }
+        let Some(symbol_index) = symbol_index_for_declaration(declaration, source, symbols) else {
+            continue;
+        };
+        let mut preceding_index = declaration_index;
+        let mut next = *declaration;
+        while preceding_index > 0 {
+            let candidate = children[preceding_index - 1];
+            if candidate.kind() != "attribute_item"
+                || !documentation_nodes_adjacent(source, &candidate, &next)
+            {
+                break;
+            }
+            preceding_index -= 1;
+            next = candidate;
+        }
+
+        let mut docs = Vec::new();
+        while preceding_index > 0 {
+            let candidate = children[preceding_index - 1];
+            if !is_outer_doc_comment(&candidate)
+                || !documentation_comment_starts_line(source, &candidate)
+                || !documentation_nodes_adjacent(source, &candidate, &next)
+            {
+                break;
+            }
+            docs.push(candidate);
+            preceding_index -= 1;
+            next = candidate;
+        }
+        if docs.is_empty() {
+            continue;
+        }
+        let mut builder = DocumentationTextBuilder::default();
+        for doc in docs.into_iter().rev() {
+            push_rust_doc_comment(&mut builder, &doc, source);
+        }
+        if let Some(candidate) = builder.finish(symbol_index) {
+            output.push(candidate);
+        }
+    }
+}
+
+fn collect_inner_module_docs(
+    node: Node,
+    module_index: usize,
+    source: &[u8],
+    output: &mut Vec<RawConceptDocumentation>,
+) {
+    let mut cursor = node.walk();
+    let mut builder = DocumentationTextBuilder::default();
+    for child in node.named_children(&mut cursor) {
+        if is_inner_doc_comment(&child) && documentation_comment_starts_line(source, &child) {
+            push_rust_doc_comment(&mut builder, &child, source);
+        }
+    }
+    if let Some(candidate) = builder.finish(module_index) {
+        output.push(candidate);
+    }
+}
+
+fn walk_concept_documentation(
+    node: Node,
+    source: &[u8],
+    symbols: &HashMap<(u32, &str), usize>,
+    output: &mut Vec<RawConceptDocumentation>,
+) {
+    collect_outer_docs_in(node, source, symbols, output);
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() == "mod_item" {
+            if let (Some(module_index), Some(body)) = (
+                symbol_index_for_declaration(&child, source, symbols),
+                child.child_by_field_name("body"),
+            ) {
+                collect_inner_module_docs(body, module_index, source, output);
+            }
+        }
+        walk_concept_documentation(child, source, symbols, output);
+    }
+}
+
+pub(super) fn collect_concept_documentation(
+    tree: &Tree,
+    source: &[u8],
+    pending: &PendingFile,
+    module_index: usize,
+) -> Vec<RawConceptDocumentation> {
+    let root = tree.root_node();
+    let mut output = Vec::new();
+    let mut symbols = HashMap::with_capacity(pending.symbols.len());
+    for (index, symbol) in pending.symbols.iter().enumerate() {
+        if symbol.kind != "module" {
+            symbols
+                .entry((symbol.line_start, symbol.name.as_str()))
+                .or_insert(index);
+        }
+    }
+    collect_inner_module_docs(root, module_index, source, &mut output);
+    walk_concept_documentation(root, source, &symbols, &mut output);
+    output
 }
 
 #[cfg(test)]

@@ -919,6 +919,7 @@ pub(crate) fn concept_verified(
         .begin_read_snapshot()
         .map_err(|_| ConceptError::SnapshotChanged)?;
     let search = store.search_concepts(&match_query, top);
+    let documentation_stats = store.concept_documentation_stats();
     let end = store.end_read_snapshot();
     let data_version_after = store.data_version().map_err(|_| {
         if store.interrupt_source().is_some() {
@@ -932,6 +933,13 @@ pub(crate) fn concept_verified(
         return Err(ConceptError::SnapshotChanged);
     }
     let hits = search.map_err(|_| {
+        if store.interrupt_source().is_some() {
+            ConceptError::WorkLimitExceeded
+        } else {
+            ConceptError::Internal
+        }
+    })?;
+    let documentation_stats = documentation_stats.map_err(|_| {
         if store.interrupt_source().is_some() {
             ConceptError::WorkLimitExceeded
         } else {
@@ -977,7 +985,23 @@ pub(crate) fn concept_verified(
     let mut precision_notes = vec![
         "bm25_score_is_query_local_lower_is_better_not_confidence".to_string(),
         "unicode_lowercase_without_canonical_equivalence".to_string(),
-        "documentation_search_reserved_empty".to_string(),
+        format!(
+            "documentation_search_supported_languages:{}",
+            crate::store::CONCEPT_DOCUMENTATION_SUPPORTED_LANGUAGES
+        ),
+        "documentation_search_bounded_normalized_tokens_only".to_string(),
+        format!(
+            "documentation_secret_omitted:{}",
+            documentation_stats.secret_omitted
+        ),
+        format!(
+            "documentation_size_omitted:{}",
+            documentation_stats.size_omitted
+        ),
+        format!(
+            "documentation_unsupported_language_files:{}",
+            documentation_stats.unsupported_language_files
+        ),
     ];
     if unsafe_omitted > 0 {
         precision_notes.push(format!("unsafe_candidates_omitted:{unsafe_omitted}"));

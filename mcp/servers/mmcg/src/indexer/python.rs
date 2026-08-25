@@ -3,8 +3,9 @@
 use super::common::{
     line_of, node_text, push_call_with_type, push_def, push_def_with_decorators, push_import,
 };
-use super::LanguageExtractor;
+use super::{DocumentationTextBuilder, LanguageExtractor, RawConceptDocumentation};
 use crate::store::PendingFile;
+use std::collections::HashMap;
 use tree_sitter::{Node, Tree};
 
 pub struct PythonExtractor;
@@ -455,6 +456,122 @@ fn extract_signature(node: &Node, source: &[u8]) -> Option<String> {
     } else {
         Some(trimmed)
     }
+}
+
+fn plain_docstring_body<'a>(node: &Node, source: &'a [u8]) -> Option<&'a str> {
+    if node.kind() != "string" {
+        return None;
+    }
+    let mut cursor = node.walk();
+    if node
+        .named_children(&mut cursor)
+        .any(|child| child.kind() == "interpolation")
+    {
+        return None;
+    }
+    let text = node_text(node, source)?;
+    let quote_index = text.find(['\'', '"'])?;
+    let prefix = text[..quote_index].to_ascii_lowercase();
+    if prefix
+        .chars()
+        .any(|character| matches!(character, 'b' | 'f'))
+        || !prefix
+            .chars()
+            .all(|character| matches!(character, 'r' | 'u'))
+    {
+        return None;
+    }
+    let quoted = &text[quote_index..];
+    let quote = quoted.as_bytes().first().copied()?;
+    let triple = quoted.as_bytes().get(..3) == Some([quote, quote, quote].as_slice());
+    let delimiter_len = if triple { 3 } else { 1 };
+    if quoted.len() < delimiter_len * 2
+        || !quoted.as_bytes()[quoted.len() - delimiter_len..]
+            .iter()
+            .all(|byte| *byte == quote)
+    {
+        return None;
+    }
+    Some(&quoted[delimiter_len..quoted.len() - delimiter_len])
+}
+
+fn first_owned_docstring<'source>(body: Node<'_>, source: &'source [u8]) -> Option<&'source str> {
+    let mut cursor = body.walk();
+    let statement = body
+        .named_children(&mut cursor)
+        .find(|child| child.kind() != "comment")?;
+    if statement.kind() != "expression_statement" {
+        return None;
+    }
+    let expression = statement.named_child(0)?;
+    plain_docstring_body(&expression, source)
+}
+
+fn definition_symbol_index(
+    node: &Node,
+    source: &[u8],
+    symbols: &HashMap<(u32, &str), usize>,
+) -> Option<usize> {
+    let name = node
+        .child_by_field_name("name")
+        .and_then(|name| node_text(&name, source))?;
+    let line = node.start_position().row as u32 + 1;
+    symbols.get(&(line, name)).copied()
+}
+
+fn collect_owned_docstrings(
+    node: Node,
+    source: &[u8],
+    symbols: &HashMap<(u32, &str), usize>,
+    module_index: usize,
+    output: &mut Vec<RawConceptDocumentation>,
+) {
+    let owner = match node.kind() {
+        "module" => Some((module_index, node)),
+        "class_definition" | "function_definition" | "async_function_definition" => {
+            definition_symbol_index(&node, source, symbols).zip(node.child_by_field_name("body"))
+        }
+        _ => None,
+    };
+    if let Some((symbol_index, body)) = owner {
+        if let Some(docstring) = first_owned_docstring(body, source) {
+            let mut builder = DocumentationTextBuilder::default();
+            builder.push_fragment(docstring);
+            if let Some(candidate) = builder.finish(symbol_index) {
+                output.push(candidate);
+            }
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_owned_docstrings(child, source, symbols, module_index, output);
+    }
+}
+
+pub(super) fn collect_concept_documentation(
+    tree: &Tree,
+    source: &[u8],
+    pending: &PendingFile,
+    module_index: usize,
+) -> Vec<RawConceptDocumentation> {
+    let mut output = Vec::new();
+    let mut symbols = HashMap::with_capacity(pending.symbols.len());
+    for (index, symbol) in pending.symbols.iter().enumerate() {
+        if symbol.kind != "module" {
+            symbols
+                .entry((symbol.line_start, symbol.name.as_str()))
+                .or_insert(index);
+        }
+    }
+    collect_owned_docstrings(
+        tree.root_node(),
+        source,
+        &symbols,
+        module_index,
+        &mut output,
+    );
+    output
 }
 
 #[cfg(test)]

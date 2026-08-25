@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `mmcg_brief` and `mastermind brief` now build one deterministic,
+  revision-bound planner/executor/auditor context packet. Role-specific prefix
+  admission is capped and reports source, unsafe-content, and budget omissions;
+  unknown source truncation remains an explicit lower bound, while structural
+  and history freshness remain separate. The accepted token budget counts the
+  final MCP result after escaping and text/structured duplication. History
+  citations use the source lexemes highlighted by the selecting FTS5 query,
+  while source bodies, signatures, literal/default values, and free-form
+  history content are excluded.
 - `mastermind workflow audit [--root PATH] [--json]` now builds a bounded,
   deterministic graph of owned agents, skills, models, MCP servers, tools,
   artifacts, and writers. Schema-v1 output includes stable wiring diagnostics,

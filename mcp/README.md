@@ -7,7 +7,7 @@ Mastermind currently ships one server:
 
 | Server | Transport | Surface |
 |---|---|---|
-| [`mmcg`](servers/mmcg/README.md) | stdio | 28 bounded tools over a local SQLite index: 19 refreshable non-destructive queries, 8 read-only queries, and one additive scratchpad write |
+| [`mmcg`](servers/mmcg/README.md) | stdio | 29 bounded tools over a local SQLite index: 20 refreshable non-destructive queries, 8 read-only queries, and one additive scratchpad write |
 
 The server supports Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#,
 Go, Java, PHP, and C/C++. It exposes structural, semantic, evidence, history,

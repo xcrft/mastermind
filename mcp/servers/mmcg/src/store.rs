@@ -18,7 +18,7 @@ use rusqlite::{
 };
 use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
@@ -509,6 +509,43 @@ pub struct ProjectHistoryHit {
     pub excerpt: String,
     /// FTS5 BM25 score — lower = better match (negative is normal).
     pub score: f64,
+    /// Source lexemes highlighted by the same FTS5 query that selected this
+    /// row. Kept out of the public history response; bounded briefs use it as
+    /// typed match evidence without returning a title or excerpt.
+    #[serde(skip)]
+    pub(crate) matched_terms: Vec<String>,
+}
+
+fn highlighted_fts_terms(values: [&str; 2]) -> Vec<String> {
+    const START: char = '\u{001e}';
+    const END: char = '\u{001f}';
+    const LIMIT: usize = 32;
+
+    let mut seen = HashSet::new();
+    let mut terms = Vec::new();
+    for value in values {
+        let mut remaining = value;
+        while let Some(start) = remaining.find(START) {
+            remaining = &remaining[start + START.len_utf8()..];
+            let Some(end) = remaining.find(END) else {
+                break;
+            };
+            let term = remaining[..end].trim();
+            let is_token = !term.is_empty()
+                && term.len() <= 512
+                && term
+                    .chars()
+                    .all(|character| character.is_alphanumeric() || character == '_');
+            if is_token && seen.insert(term.to_lowercase()) {
+                terms.push(term.to_string());
+                if terms.len() == LIMIT {
+                    return terms;
+                }
+            }
+            remaining = &remaining[end + END.len_utf8()..];
+        }
+    }
+    terms
 }
 
 /// Per-file batch ready to be committed in a single transaction.
@@ -4303,7 +4340,16 @@ impl Store {
                     kind,
                     title,
                     snippet(project_history_fts, 3, '«', '»', '…', 16) AS excerpt,
-                    bm25(project_history_fts) AS score
+                    bm25(project_history_fts) AS score,
+                    snippet(project_history_fts, 2, char(30), char(31), '…', 16)
+                        AS title_evidence,
+                    snippet(project_history_fts, 3, char(30), char(31), '…', 16)
+                        AS body_evidence,
+                    CASE WHEN instr(title, char(30)) > 0
+                               OR instr(title, char(31)) > 0
+                               OR instr(body, char(30)) > 0
+                               OR instr(body, char(31)) > 0
+                         THEN 1 ELSE 0 END AS evidence_marker_collision
              FROM project_history_fts
              WHERE project_history_fts MATCH ?1
                AND (?2 IS NULL OR kind = ?2)
@@ -4311,12 +4357,20 @@ impl Store {
              LIMIT ?3",
         )?;
         let rows = stmt.query_map(params![trimmed, kind, top], |row| {
+            let title_evidence: String = row.get(5)?;
+            let body_evidence: String = row.get(6)?;
+            let marker_collision = row.get::<_, i64>(7)? != 0;
             Ok(ProjectHistoryHit {
                 path: row.get(0)?,
                 kind: row.get(1)?,
                 title: row.get(2)?,
                 excerpt: row.get(3)?,
                 score: row.get(4)?,
+                matched_terms: if marker_collision {
+                    Vec::new()
+                } else {
+                    highlighted_fts_terms([&title_evidence, &body_evidence])
+                },
             })
         })?;
         rows.collect()
@@ -5646,6 +5700,13 @@ mod tests {
         let all = store.search_project_history("token", None, 10).unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].kind, "lesson");
+        assert_eq!(all[0].matched_terms, ["token"]);
+
+        let stemmed = store
+            .search_project_history("idempotent", None, 10)
+            .unwrap();
+        assert_eq!(stemmed.len(), 1);
+        assert_eq!(stemmed[0].matched_terms, ["idempotency"]);
 
         let filtered = store
             .search_project_history("token", Some("context"), 10)
@@ -5655,6 +5716,18 @@ mod tests {
             .search_project_history("   ", None, 10)
             .unwrap()
             .is_empty());
+
+        store
+            .replace_project_history(&[ProjectHistoryEntry {
+                path: "CONTEXT.md".into(),
+                kind: "context".into(),
+                title: "Collision".into(),
+                body: "token \u{001e}forged_history_excerpt\u{001f}".into(),
+            }])
+            .unwrap();
+        let collision = store.search_project_history("token", None, 10).unwrap();
+        assert_eq!(collision.len(), 1);
+        assert!(collision[0].matched_terms.is_empty());
 
         store.replace_project_history(&entries[..1]).unwrap();
         assert_eq!(store.project_history_count().unwrap(), 1);

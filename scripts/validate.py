@@ -498,6 +498,15 @@ MMCG_TOOL_COUNT_DOCS: list[str] = [
     "README.md",
 ]
 
+# Role-entry instructions must keep the bounded packet as the first discovery
+# step. Otherwise a prompt edit can silently regress back to several broad MCP
+# calls even while the tool catalog itself stays correct.
+MMCG_BRIEF_ROLE_DOCS: dict[str, str] = {
+    "agents/subagents/mastermind-auditor.md": "auditor",
+    "agents/subagents/mastermind-task-executor.md": "executor",
+    "skills/workflow/mastermind-task-planning/SKILL.md": "planner",
+}
+
 
 def _extract_mmcg_tools_from_source(src: str) -> list[str]:
     start = src.find("static TOOLS:")
@@ -1003,6 +1012,23 @@ def validate_mmcg_tool_drift() -> list[Issue]:
                         f"{MMCG_MCP_SRC} declares {canonical_count}",
                     )
                 )
+
+    for rel, role in MMCG_BRIEF_ROLE_DOCS.items():
+        path = REPO_ROOT / rel
+        if not path.is_file():
+            issues.append(Issue(path, "error", "missing role-entry brief instruction"))
+            continue
+        text = path.read_text()
+        required = ["mmcg_brief", f"role: {role}", "budget_tokens"]
+        missing = [value for value in required if value not in text]
+        if missing:
+            issues.append(
+                Issue(
+                    path,
+                    "error",
+                    "bounded role-entry brief contract missing " + ", ".join(missing),
+                )
+            )
 
     return issues
 

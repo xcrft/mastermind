@@ -43,6 +43,31 @@ pub enum ImpactFormat {
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 #[clap(rename_all = "kebab-case")]
+pub enum BriefFormat {
+    Text,
+    Json,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum BriefRoleArg {
+    Planner,
+    Executor,
+    Auditor,
+}
+
+impl From<BriefRoleArg> for mmcg::queries::BriefRole {
+    fn from(value: BriefRoleArg) -> Self {
+        match value {
+            BriefRoleArg::Planner => Self::Planner,
+            BriefRoleArg::Executor => Self::Executor,
+            BriefRoleArg::Auditor => Self::Auditor,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
 pub enum TemporalFormat {
     Text,
     Json,
@@ -194,6 +219,19 @@ enum Cmd {
         depth: u32,
         #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=500))]
         top: u32,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+    },
+    /// Build one bounded revision-bound context packet for an agent role.
+    Brief {
+        #[arg(long, value_enum)]
+        role: BriefRoleArg,
+        #[arg(long)]
+        since: String,
+        #[arg(long, default_value_t = 2_000, value_parser = clap::value_parser!(u32).range(256..=8_000))]
+        budget_tokens: u32,
+        #[arg(long, value_enum, default_value_t = BriefFormat::Text)]
+        format: BriefFormat,
         #[arg(long, default_value = ".")]
         root: PathBuf,
     },
@@ -1300,6 +1338,52 @@ fn run_cli_inner(
                 commands::query::render_change_impact(&response, format)?
             );
         }
+        Cmd::Brief {
+            role,
+            since,
+            budget_tokens,
+            format,
+            root,
+        } => {
+            let root = root
+                .canonicalize()
+                .map_err(|_| mmcg::queries::BriefError::RootMismatch)?;
+            let index_path = index_path_for_root(index_override.as_deref(), &root);
+            let managed_root = index_override.is_none().then_some(root.as_path());
+            let mut store = Store::open_for_serve(&index_path, managed_root)?;
+            store.set_default_work_budget_ms(mmcg::store::query_budget_ms_from_env(
+                mmcg::store::DEFAULT_CLI_BUDGET_MS,
+            ));
+            let budget = store.default_work_budget();
+            let expired = store.push_work_budget(budget);
+            let response = if expired {
+                Err(mmcg::queries::BriefError::WorkLimitExceeded)
+            } else {
+                mmcg::mcp::build_brief_current(
+                    &mut store,
+                    &root,
+                    &since,
+                    role.into(),
+                    budget_tokens,
+                )
+            };
+            let interrupted = store.take_interrupt_source();
+            store.pop_work_budget();
+            if interrupted.is_some() {
+                return Err(mmcg::queries::BriefError::WorkLimitExceeded.into());
+            }
+            let response = match response {
+                Ok(response) => response,
+                Err(mmcg::queries::BriefError::BudgetTooSmall { minimum_tokens }) => {
+                    return Err(format!(
+                        r#"{{"code":"budget_too_small","minimum_tokens":{minimum_tokens}}}"#
+                    )
+                    .into())
+                }
+                Err(error) => return Err(error.into()),
+            };
+            print!("{}", commands::query::render_brief(&response, format)?);
+        }
         Cmd::Temporal {
             since,
             format,
@@ -2235,6 +2319,53 @@ mod tests {
             decision.cmd,
             Cmd::History { kind: Some(kind), .. } if kind == "architecture_decision"
         ));
+    }
+
+    #[test]
+    fn brief_is_a_first_class_strict_cli_command() {
+        let brief = Cli::try_parse_from([
+            "mastermind",
+            "brief",
+            "--role",
+            "executor",
+            "--since",
+            "main",
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            brief.cmd,
+            Cmd::Brief {
+                role: BriefRoleArg::Executor,
+                since,
+                budget_tokens: 2_000,
+                format: BriefFormat::Json,
+                ..
+            } if since == "main"
+        ));
+        for budget in ["255", "8001", "2000.0", "true"] {
+            assert!(Cli::try_parse_from([
+                "mastermind",
+                "brief",
+                "--role",
+                "planner",
+                "--since",
+                "main",
+                "--budget-tokens",
+                budget,
+            ])
+            .is_err());
+        }
+        assert!(Cli::try_parse_from([
+            "mastermind",
+            "brief",
+            "--role",
+            "critic",
+            "--since",
+            "main",
+        ])
+        .is_err());
     }
 
     #[test]

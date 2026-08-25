@@ -13,7 +13,7 @@ dedicated Claude Code, Codex, Cursor, or Continue setup command applies.
 | transport | stdio |
 | command | `mastermind serve` |
 | protocol | MCP 2025-11-25; legacy 2024-11-05 |
-| tools | 28: 19 refreshable non-destructive queries, 8 read-only queries, 1 additive local write (see below) |
+| tools | 29: 20 refreshable non-destructive queries, 8 read-only queries, 1 additive local write (see below) |
 | resources | none |
 | prompts | none |
 
@@ -75,13 +75,20 @@ The `--index` flag is global and must come before `serve`.
   `mmcg_centrality`, `mmcg_dependency_cycles`, `mmcg_unreferenced`,
   `mmcg_semantic`, `mmcg_facts`, `mmcg_team_map`, `mmcg_map`, `mmcg_temporal`.
 - Change analysis: `mmcg_symbols_changed_since`, `mmcg_change_class`,
-  `mmcg_change_impact`, `mmcg_test_impact`, `mmcg_recent_changes`.
+  `mmcg_change_impact`, `mmcg_brief`, `mmcg_test_impact`, `mmcg_recent_changes`.
 - Workflow state: `mmcg_tasks`, `mmcg_history`, `mmcg_status`, `mmcg_scratchpad_read`, and the
   additive local write `mmcg_scratchpad_append`.
 
 The standard MCP `tools/list` response is the schema source of truth. See the
 [technical reference](../reference/mmcg.md#mcp-tools) for arguments, limits,
 and precision caveats.
+
+For role entry, prefer one `mmcg_brief` call with `role`, `since`, and an
+optional `budget_tokens` (default 2,000). Current MCP transports duplicate its
+logical packet into `content.text` and `structuredContent`; the reported budget
+already counts both copies after JSON escaping. The packet marks repository
+strings as untrusted data and never includes source bodies, declaration
+signatures, literal/default values, or free-form history excerpts.
 
 ## Start the server manually
 

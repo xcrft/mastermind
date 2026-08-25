@@ -117,14 +117,11 @@ enum HandlerError {
         cap: u64,
     },
     SchemaIncompatible,
-<<<<<<< HEAD
     SnapshotChanged,
     WorkLimitExceeded,
     BudgetTooSmall {
         minimum_tokens: u32,
     },
-=======
->>>>>>> origin/main
     Internal {
         class: &'static str,
     },
@@ -1230,10 +1227,7 @@ fn handle_tools_call_inner(
         None
     } else {
         Some(invoke_tool(
-<<<<<<< HEAD
             version,
-=======
->>>>>>> origin/main
             tool,
             tool_name,
             store,
@@ -1268,10 +1262,7 @@ fn handle_tools_call_inner(
                 Ok(()) => {
                     refresh_completed = true;
                     handled = Some(invoke_tool(
-<<<<<<< HEAD
                         version,
-=======
->>>>>>> origin/main
                         tool,
                         tool_name,
                         store,
@@ -1290,12 +1281,9 @@ fn handle_tools_call_inner(
             HandlerError::InvalidArguments(message) => {
                 tool_result(version, json!({ "error": message }), true)
             }
-<<<<<<< HEAD
             HandlerError::StructuredInvalid { code } => {
                 tool_result(version, json!({ "code": code }), true)
             }
-=======
->>>>>>> origin/main
             HandlerError::IndexStale {
                 stale_files,
                 extractor_contract_current,
@@ -1315,7 +1303,6 @@ fn handle_tools_call_inner(
             HandlerError::SchemaIncompatible => {
                 tool_result(version, schema_incompatible_payload(), true)
             }
-<<<<<<< HEAD
             HandlerError::SnapshotChanged => tool_result(version, snapshot_changed_payload(), true),
             HandlerError::WorkLimitExceeded => {
                 tool_result(version, work_limit_payload(budget), true)
@@ -1323,8 +1310,6 @@ fn handle_tools_call_inner(
             HandlerError::BudgetTooSmall { minimum_tokens } => {
                 tool_result(version, budget_too_small_payload(minimum_tokens), true)
             }
-=======
->>>>>>> origin/main
             HandlerError::Internal { class } => Err(ToolCallError::Internal { class }),
         },
         None => tool_result(version, work_limit_payload(budget), true),
@@ -3828,7 +3813,6 @@ mod tests {
     }
 
     #[test]
-<<<<<<< HEAD
     fn brief_cli_and_mcp_share_the_same_exactly_budgeted_packet() {
         let (root, mut store) = impact_fixture("brief-shared");
         let expected = build_brief_current(
@@ -4042,8 +4026,6 @@ mod tests {
     }
 
     #[test]
-=======
->>>>>>> origin/main
     fn change_impact_local_graph_limit_remains_a_successful_mcp_payload() {
         let (root, mut store) = impact_fixture("local-graph-limit");
         for index in 0..256 {

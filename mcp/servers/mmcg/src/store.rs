@@ -18,11 +18,7 @@ use rusqlite::{
 };
 use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
-<<<<<<< HEAD
 use std::collections::{HashMap, HashSet};
-=======
-use std::collections::HashMap;
->>>>>>> origin/main
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};

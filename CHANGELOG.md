@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-08-25
+
 ### Added
+- Lens now includes an evidence-backed codebase Audit view with component maps,
+  dependency cycles, large-file pressure, author concentration, dead-code
+  candidates, change hotspots, and change-scoped security evidence. Optional AI
+  narratives are bound to the exact repository, revisions, worktree snapshot,
+  and project map; invalid or stale sidecars are ignored.
 - `mmcg_concept` and `mastermind concept` now return a bounded schema-v1 set of
   local symbol candidates from normalized names, repository paths, and
   declaration shapes. Rust outer docs, Python owned docstrings, and
@@ -52,6 +59,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   staging backups if final cleanup fails.
 
 ### Changed
+- Lens now leads reviewers through Changed → Impacted → Boundary → Tests,
+  remains responsive down to 320 px, and keeps large dirty-worktree projections
+  bounded without hiding observed counts. Live and standalone views remain
+  offline and read-only.
 - Researcher and critic runtime prompts are compact evidence contracts without
   repeated examples or companion sections. Their behavioral and size ceilings
   are covered by deterministic and model-backed evals.
@@ -742,7 +753,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Seven prebuilt platform packages (`@xcraftmind/mmcg-*`) covering macOS (arm64, x64), Linux glibc and musl (x64, arm64), and Windows (x64). npm installs only the package matching the host's `os` / `cpu` / `libc`.
 - Install-mode-aware `setup claude` that writes the correct MCP `command` form for npx, global, project-local, and cargo installs.
 
-[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v2.0.1...HEAD
+[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v2.1.0...HEAD
+[2.1.0]: https://github.com/xcrft/mastermind/compare/npm-v2.0.1...npm-v2.1.0
 [2.0.1]: https://github.com/xcrft/mastermind/compare/npm-v2.0.0...npm-v2.0.1
 [2.0.0]: https://github.com/xcrft/mastermind/compare/npm-v1.2.1...npm-v2.0.0
 [1.2.1]: https://github.com/xcrft/mastermind/compare/npm-v1.2.0...npm-v1.2.1

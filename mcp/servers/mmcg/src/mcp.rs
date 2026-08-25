@@ -104,6 +104,9 @@ enum Frame {
 #[derive(Debug)]
 enum HandlerError {
     InvalidArguments(String),
+    StructuredInvalid {
+        code: &'static str,
+    },
     IndexStale {
         stale_files: usize,
         extractor_contract_current: bool,
@@ -114,6 +117,11 @@ enum HandlerError {
         cap: u64,
     },
     SchemaIncompatible,
+    SnapshotChanged,
+    WorkLimitExceeded,
+    BudgetTooSmall {
+        minimum_tokens: u32,
+    },
     Internal {
         class: &'static str,
     },
@@ -255,6 +263,7 @@ static TOOLS: &[ToolDef] = &[
         schema_change_impact,
         handle_change_impact,
     ),
+    refreshable_tool("mmcg_brief", schema_brief, handle_brief),
     refreshable_tool("mmcg_test_impact", schema_test_impact, handle_test_impact),
     read_only_tool(
         "mmcg_recent_changes",
@@ -1162,6 +1171,7 @@ fn handle_tools_call(
 }
 
 fn invoke_tool(
+    version: ProtocolVersion,
     tool: &ToolDef,
     tool_name: &str,
     store: &mut Store,
@@ -1169,6 +1179,7 @@ fn invoke_tool(
     impact_engine: Option<&queries::ImpactEngine<'_>>,
 ) -> Result<Value, HandlerError> {
     match (tool_name, impact_engine) {
+        ("mmcg_brief", _) => handle_brief_for_version(store, arguments, version),
         ("mmcg_change_impact", Some(engine)) => {
             handle_change_impact_with_engine(store, arguments, engine)
         }
@@ -1216,6 +1227,7 @@ fn handle_tools_call_inner(
         None
     } else {
         Some(invoke_tool(
+            version,
             tool,
             tool_name,
             store,
@@ -1250,6 +1262,7 @@ fn handle_tools_call_inner(
                 Ok(()) => {
                     refresh_completed = true;
                     handled = Some(invoke_tool(
+                        version,
                         tool,
                         tool_name,
                         store,
@@ -1267,6 +1280,9 @@ fn handle_tools_call_inner(
         Some(Err(handler_error)) => match handler_error {
             HandlerError::InvalidArguments(message) => {
                 tool_result(version, json!({ "error": message }), true)
+            }
+            HandlerError::StructuredInvalid { code } => {
+                tool_result(version, json!({ "code": code }), true)
             }
             HandlerError::IndexStale {
                 stale_files,
@@ -1286,6 +1302,13 @@ fn handle_tools_call_inner(
             }
             HandlerError::SchemaIncompatible => {
                 tool_result(version, schema_incompatible_payload(), true)
+            }
+            HandlerError::SnapshotChanged => tool_result(version, snapshot_changed_payload(), true),
+            HandlerError::WorkLimitExceeded => {
+                tool_result(version, work_limit_payload(budget), true)
+            }
+            HandlerError::BudgetTooSmall { minimum_tokens } => {
+                tool_result(version, budget_too_small_payload(minimum_tokens), true)
             }
             HandlerError::Internal { class } => Err(ToolCallError::Internal { class }),
         },
@@ -1501,6 +1524,20 @@ fn cancelled_payload() -> Value {
     json!({
         "code": "cancelled",
         "guidance": "the request was cancelled by the client before it completed"
+    })
+}
+
+fn snapshot_changed_payload() -> Value {
+    json!({
+        "code": "snapshot_changed",
+        "guidance": "repository or index state changed while the brief was being built; retry"
+    })
+}
+
+fn budget_too_small_payload(minimum_tokens: u32) -> Value {
+    json!({
+        "code": "budget_too_small",
+        "minimum_tokens": minimum_tokens
     })
 }
 
@@ -1987,6 +2024,40 @@ fn schema_change_impact() -> Value {
         "mmcg_change_impact",
         "Deterministic schema-v1 analysis of working-tree changes, callers, component crossings, and candidate tests.",
     )
+}
+
+fn schema_brief() -> Value {
+    json!({
+        "name": "mmcg_brief",
+        "description": "Build one deterministic revision-bound context packet for a planner, executor, or auditor. Repository strings are untrusted typed data; source bodies, signatures, literals, defaults, and history excerpts are excluded. The token budget covers the final MCP result envelope.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "role": {
+                    "type": "string",
+                    "enum": ["planner", "executor", "auditor"]
+                },
+                "since": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024,
+                    "description": "Git ref used as the baseline"
+                },
+                "root": {
+                    "type": "string",
+                    "description": "Indexed repository root; defaults to the index identity"
+                },
+                "budget_tokens": {
+                    "type": "integer",
+                    "minimum": 256,
+                    "maximum": 8000,
+                    "default": 2000,
+                    "description": "Conservative token bound computed as ceil(final MCP result bytes / 4)"
+                }
+            },
+            "required": ["role", "since"]
+        }
+    })
 }
 
 fn schema_test_impact() -> Value {
@@ -2529,6 +2600,243 @@ fn run_change_impact_with_engine(
     ensure_fresh_index(store)?;
     impact_engine(store, &root, &since, depth, top)
         .map_err(|error| HandlerError::InvalidArguments(error.code().to_string()))
+}
+
+fn brief_envelope_bytes_for_version(
+    version: ProtocolVersion,
+    packet: &queries::BriefPacket,
+) -> Result<usize, queries::BriefError> {
+    let payload = serde_json::to_value(packet).map_err(|_| queries::BriefError::Serialization)?;
+    let result =
+        tool_result(version, payload, false).map_err(|_| queries::BriefError::Serialization)?;
+    if result.get("isError").and_then(Value::as_bool) != Some(false) {
+        return Err(queries::BriefError::Serialization);
+    }
+    serde_json::to_vec(&result)
+        .map(|bytes| bytes.len())
+        .map_err(|_| queries::BriefError::Serialization)
+}
+
+/// CLI admission intentionally uses the current stateful MCP envelope so its
+/// logical JSON is byte-for-byte the packet a current MCP client receives.
+pub fn brief_current_envelope_bytes(
+    packet: &queries::BriefPacket,
+) -> Result<usize, queries::BriefError> {
+    brief_envelope_bytes_for_version(ProtocolVersion::Current, packet)
+}
+
+fn brief_current_attempt(
+    store: &Store,
+    root: &std::path::Path,
+    since: &str,
+    role: queries::BriefRole,
+    budget_tokens: u32,
+) -> Result<queries::BriefPacket, queries::BriefError> {
+    match store.schema_current() {
+        Ok(true) => {}
+        Ok(false) => return Err(queries::BriefError::SchemaIncompatible),
+        Err(_) => return Err(queries::BriefError::IndexStale),
+    }
+    let status = safe_index_status(store).map_err(|_| queries::BriefError::IndexStale)?;
+    if status.stale_files > 0 || !status.extractor_contract_current {
+        return Err(queries::BriefError::IndexStale);
+    }
+    queries::brief(
+        store,
+        root,
+        since,
+        role,
+        budget_tokens,
+        &brief_current_envelope_bytes,
+    )
+}
+
+/// Build a CLI brief with the same one-refresh/one-retry policy as MCP. Only a
+/// Store opened with managed repository authority can refresh; custom indexes
+/// remain read-only and fail closed.
+pub fn build_brief_current(
+    store: &mut Store,
+    root: &std::path::Path,
+    since: &str,
+    role: queries::BriefRole,
+    budget_tokens: u32,
+) -> Result<queries::BriefPacket, queries::BriefError> {
+    queries::validate_brief_request(since, budget_tokens)?;
+    let root = root
+        .canonicalize()
+        .map_err(|_| queries::BriefError::RootMismatch)?;
+    let indexed_root = store
+        .meta_value("index_root")
+        .map_err(|_| queries::BriefError::IndexStale)?
+        .map(std::path::PathBuf::from)
+        .ok_or(queries::BriefError::IndexStale)?
+        .canonicalize()
+        .map_err(|_| queries::BriefError::RootMismatch)?;
+    if root != indexed_root {
+        return Err(queries::BriefError::RootMismatch);
+    }
+    let interrupted = || store.work_interrupted();
+    crate::diff::validate_commit_ref_controlled(
+        &root,
+        since,
+        store.request_deadline(),
+        Some(&interrupted),
+    )
+    .map_err(|error| match error {
+        crate::diff::WorkingTreeDiffError::InvalidRef
+        | crate::diff::WorkingTreeDiffError::GitUnavailable => queries::BriefError::InvalidRef,
+        crate::diff::WorkingTreeDiffError::SnapshotChanged => queries::BriefError::SnapshotChanged,
+        crate::diff::WorkingTreeDiffError::GitTimeout
+        | crate::diff::WorkingTreeDiffError::GitOutputLimit => {
+            queries::BriefError::WorkLimitExceeded
+        }
+        crate::diff::WorkingTreeDiffError::IndexStale => queries::BriefError::IndexStale,
+    })?;
+    match brief_current_attempt(store, &root, since, role, budget_tokens) {
+        Err(queries::BriefError::IndexStale) => {}
+        result => return result,
+    }
+    let status = safe_index_status(store).unwrap_or(queries::StatusResponse {
+        db_path: store.db_path().to_string_lossy().to_string(),
+        symbol_count: 0,
+        file_count: 0,
+        stale_files: 1,
+        extractor_contract_current: true,
+    });
+    refresh_stale_index(store, status.stale_files, status.extractor_contract_current).map_err(
+        |error| match error {
+            HandlerError::SchemaIncompatible => queries::BriefError::SchemaIncompatible,
+            HandlerError::SnapshotChanged => queries::BriefError::SnapshotChanged,
+            HandlerError::WorkLimitExceeded | HandlerError::RefreshLimit { .. } => {
+                queries::BriefError::WorkLimitExceeded
+            }
+            _ => queries::BriefError::IndexStale,
+        },
+    )?;
+    brief_current_attempt(store, &root, since, role, budget_tokens)
+}
+
+fn map_brief_error(store: &Store, error: queries::BriefError) -> HandlerError {
+    match error {
+        queries::BriefError::InvalidArguments => HandlerError::StructuredInvalid {
+            code: "invalid_arguments",
+        },
+        queries::BriefError::InvalidRef => HandlerError::StructuredInvalid {
+            code: "invalid_ref",
+        },
+        queries::BriefError::RootMismatch => HandlerError::StructuredInvalid {
+            code: "root_mismatch",
+        },
+        queries::BriefError::IndexStale => match safe_index_status(store) {
+            Ok(status) => {
+                index_stale_error(status.stale_files, status.extractor_contract_current, false)
+            }
+            Err(_) => index_stale_error(1, true, false),
+        },
+        queries::BriefError::SchemaIncompatible => HandlerError::SchemaIncompatible,
+        queries::BriefError::SnapshotChanged => HandlerError::SnapshotChanged,
+        queries::BriefError::WorkLimitExceeded => HandlerError::WorkLimitExceeded,
+        queries::BriefError::Serialization => HandlerError::Internal {
+            class: "serialize_brief",
+        },
+        queries::BriefError::BudgetTooSmall { minimum_tokens } => {
+            HandlerError::BudgetTooSmall { minimum_tokens }
+        }
+    }
+}
+
+fn brief_arguments(
+    store: &Store,
+    args: &Value,
+) -> Result<(queries::BriefRole, String, std::path::PathBuf, u32), HandlerError> {
+    let role = args
+        .get("role")
+        .and_then(Value::as_str)
+        .and_then(queries::BriefRole::parse)
+        .ok_or(HandlerError::StructuredInvalid {
+            code: "invalid_arguments",
+        })?;
+    let since = args
+        .get("since")
+        .and_then(Value::as_str)
+        .ok_or(HandlerError::StructuredInvalid {
+            code: "invalid_arguments",
+        })?
+        .to_string();
+    let budget_tokens = match args.get("budget_tokens") {
+        None => queries::BRIEF_DEFAULT_BUDGET_TOKENS,
+        Some(value) => value
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| {
+                (queries::BRIEF_MIN_BUDGET_TOKENS..=queries::BRIEF_MAX_BUDGET_TOKENS)
+                    .contains(value)
+            })
+            .ok_or(HandlerError::StructuredInvalid {
+                code: "invalid_arguments",
+            })?,
+    };
+    queries::validate_brief_request(&since, budget_tokens)
+        .map_err(|error| map_brief_error(store, error))?;
+    let root_arg = match args.get("root") {
+        None => None,
+        Some(Value::String(value)) => Some(value.as_str()),
+        Some(_) => {
+            return Err(HandlerError::StructuredInvalid {
+                code: "invalid_arguments",
+            })
+        }
+    };
+    ensure_schema_compatible(store)?;
+    let root = changed_since_root(store, root_arg).map_err(|error| match error {
+        HandlerError::InvalidArguments(_) => HandlerError::StructuredInvalid {
+            code: "root_mismatch",
+        },
+        error => error,
+    })?;
+    let interrupted = || store.work_interrupted();
+    crate::diff::validate_commit_ref_controlled(
+        &root,
+        &since,
+        store.request_deadline(),
+        Some(&interrupted),
+    )
+    .map_err(|error| match error {
+        crate::diff::WorkingTreeDiffError::InvalidRef
+        | crate::diff::WorkingTreeDiffError::GitUnavailable => HandlerError::StructuredInvalid {
+            code: "invalid_ref",
+        },
+        crate::diff::WorkingTreeDiffError::SnapshotChanged => HandlerError::SnapshotChanged,
+        crate::diff::WorkingTreeDiffError::GitTimeout
+        | crate::diff::WorkingTreeDiffError::GitOutputLimit => HandlerError::WorkLimitExceeded,
+        crate::diff::WorkingTreeDiffError::IndexStale => index_stale_error(1, true, false),
+    })?;
+    Ok((role, since, root, budget_tokens))
+}
+
+fn run_brief_for_version(
+    store: &Store,
+    args: &Value,
+    version: ProtocolVersion,
+) -> Result<queries::BriefPacket, HandlerError> {
+    let (role, since, root, budget_tokens) = brief_arguments(store, args)?;
+    ensure_fresh_index(store)?;
+    let sizer = |packet: &queries::BriefPacket| brief_envelope_bytes_for_version(version, packet);
+    queries::brief(store, &root, &since, role, budget_tokens, &sizer)
+        .map_err(|error| map_brief_error(store, error))
+}
+
+fn handle_brief_for_version(
+    store: &mut Store,
+    args: &Value,
+    version: ProtocolVersion,
+) -> Result<Value, HandlerError> {
+    let packet = run_brief_for_version(store, args, version)?;
+    serde_json::to_value(packet).map_err(|error| HandlerError::internal("serialize_brief", error))
+}
+
+fn handle_brief(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
+    handle_brief_for_version(store, args, ProtocolVersion::Current)
 }
 
 fn handle_change_impact(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
@@ -3211,7 +3519,7 @@ mod tests {
     #[test]
     fn tool_annotations_match_behavior_table() {
         let legacy = tools_list(ProtocolVersion::Legacy);
-        assert_eq!(legacy["tools"].as_array().unwrap().len(), 28);
+        assert_eq!(legacy["tools"].as_array().unwrap().len(), 29);
         assert!(legacy["tools"]
             .as_array()
             .unwrap()
@@ -3220,7 +3528,7 @@ mod tests {
 
         let current = tools_list(ProtocolVersion::Current);
         let tools = current["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 28);
+        assert_eq!(tools.len(), 29);
         let mut readers = 0;
         let mut refreshers = 0;
         for tool in tools {
@@ -3251,7 +3559,7 @@ mod tests {
             }
         }
         assert_eq!(readers, 8);
-        assert_eq!(refreshers, 19);
+        assert_eq!(refreshers, 20);
     }
 
     #[test]
@@ -3505,6 +3813,219 @@ mod tests {
     }
 
     #[test]
+    fn brief_cli_and_mcp_share_the_same_exactly_budgeted_packet() {
+        let (root, mut store) = impact_fixture("brief-shared");
+        let expected = build_brief_current(
+            &mut store,
+            &root,
+            "HEAD",
+            queries::BriefRole::Executor,
+            8_000,
+        )
+        .unwrap();
+        let result = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({
+                "name": "mmcg_brief",
+                "arguments": {
+                    "role": "executor",
+                    "since": "HEAD",
+                    "root": root.to_string_lossy(),
+                    "budget_tokens": 8000
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(result["isError"], false);
+        let payload = unwrap_content(&result);
+        assert_eq!(payload, serde_json::to_value(expected).unwrap());
+        assert_eq!(payload, result["structuredContent"]);
+        let bytes = serde_json::to_vec(&result).unwrap().len();
+        assert_eq!(payload["budget"]["final_envelope_bytes"], bytes as u64);
+        assert_eq!(
+            payload["budget"]["estimated_tokens"],
+            bytes.div_ceil(4) as u64
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn brief_cli_custom_index_rejects_a_repository_subdirectory() {
+        let (root, store) = impact_fixture("brief-cli-root-mismatch");
+        let db = root.join(".mastermind/mmcg.db");
+        drop(store);
+        let mut custom = crate::store::Store::open_for_serve(&db, None).unwrap();
+        assert_eq!(
+            build_brief_current(
+                &mut custom,
+                &root.join("src"),
+                "HEAD",
+                queries::BriefRole::Executor,
+                8_000,
+            )
+            .unwrap_err(),
+            queries::BriefError::RootMismatch
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn brief_budget_counts_the_stateless_result_fields_too() {
+        let (root, mut store) = impact_fixture("brief-stateless");
+        let result = handle_tools_call(
+            ProtocolVersion::Stateless,
+            &mut store,
+            &json!({
+                "name": "mmcg_brief",
+                "arguments": {
+                    "role": "planner",
+                    "since": "HEAD",
+                    "root": root.to_string_lossy(),
+                    "budget_tokens": 8000
+                }
+            }),
+        )
+        .unwrap();
+        let payload = unwrap_content(&result);
+        let bytes = serde_json::to_vec(&result).unwrap().len();
+        assert_eq!(payload["budget"]["final_envelope_bytes"], bytes as u64);
+        assert_eq!(result["resultType"], "complete");
+        assert!(result.get("_meta").is_some());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn brief_256_error_is_structured_and_fits_its_requested_budget() {
+        let (root, mut store) = impact_fixture("brief-small-budget");
+        let result = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({
+                "name": "mmcg_brief",
+                "arguments": {
+                    "role": "auditor",
+                    "since": "HEAD",
+                    "root": root.to_string_lossy(),
+                    "budget_tokens": 256
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(result["isError"], true);
+        let payload = unwrap_content(&result);
+        assert_eq!(payload["code"], "budget_too_small");
+        assert!(payload["minimum_tokens"].as_u64().unwrap() > 256);
+        assert!(serde_json::to_vec(&result).unwrap().len() <= 256 * 4);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn brief_rejects_exact_argument_types_before_stale_refresh() {
+        let (root, mut store) = impact_fixture("brief-invalid-before-refresh");
+        std::fs::write(root.join("src/new.py"), "def fresh():\n    return 1\n").unwrap();
+        assert!(safe_index_status(&store).unwrap().stale_files > 0);
+        for arguments in [
+            json!({ "role": "critic", "since": "HEAD", "budget_tokens": 2000 }),
+            json!({ "role": "planner", "since": "HEAD", "budget_tokens": false }),
+            json!({ "role": "planner", "since": "HEAD", "budget_tokens": 2000.0 }),
+            json!({ "role": "planner", "since": "-HEAD", "budget_tokens": 2000 }),
+            json!({ "role": "planner", "since": "definitely-missing-ref", "budget_tokens": 2000 }),
+            json!({ "role": "planner", "since": "HEAD", "root": false }),
+        ] {
+            let result = handle_tools_call(
+                ProtocolVersion::Current,
+                &mut store,
+                &json!({ "name": "mmcg_brief", "arguments": arguments }),
+            )
+            .unwrap();
+            assert_eq!(result["isError"], true);
+            assert!(matches!(
+                unwrap_content(&result)["code"].as_str(),
+                Some("invalid_arguments" | "invalid_ref")
+            ));
+            assert!(safe_index_status(&store).unwrap().stale_files > 0);
+        }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn brief_managed_history_staleness_refreshes_once_and_retries() {
+        let (root, mut store) = impact_fixture("brief-history-refresh");
+        std::fs::create_dir_all(root.join(".mastermind")).unwrap();
+        std::fs::write(
+            root.join("CONTEXT.md"),
+            "# Value decision\nvalue stays deterministic\n",
+        )
+        .unwrap();
+        assert_eq!(
+            crate::indexer::Indexer::new(&root)
+                .project_history_freshness(&store)
+                .unwrap(),
+            crate::indexer::ProjectHistoryFreshness::Stale
+        );
+        let result = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({
+                "name": "mmcg_brief",
+                "arguments": {
+                    "role": "planner",
+                    "since": "HEAD",
+                    "root": root.to_string_lossy(),
+                    "budget_tokens": 8000
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(result["isError"], false);
+        let payload = unwrap_content(&result);
+        assert_eq!(payload["freshness"]["history"]["status"], "fresh");
+        assert!(payload["citations"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|citation| citation["path"] == "CONTEXT.md"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn brief_custom_stale_history_index_never_refreshes_or_writes() {
+        let (root, store) = impact_fixture("brief-custom-history-stale");
+        let db = root.join(".mastermind/mmcg.db");
+        drop(store);
+        let mut store = crate::store::Store::open_for_serve(&db, None).unwrap();
+        let inventory_before = store.meta_value("project_history_inventory_token").unwrap();
+        std::fs::write(
+            root.join("CONTEXT.md"),
+            "# Value decision\nvalue changed outside the custom index\n",
+        )
+        .unwrap();
+        let result = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({
+                "name": "mmcg_brief",
+                "arguments": {
+                    "role": "executor",
+                    "since": "HEAD",
+                    "root": root.to_string_lossy(),
+                    "budget_tokens": 2000
+                }
+            }),
+        )
+        .unwrap();
+        let payload = unwrap_content(&result);
+        assert_eq!(payload["code"], "index_stale");
+        assert_eq!(payload["refresh_attempted"], false);
+        assert_eq!(
+            store.meta_value("project_history_inventory_token").unwrap(),
+            inventory_before
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn change_impact_local_graph_limit_remains_a_successful_mcp_payload() {
         let (root, mut store) = impact_fixture("local-graph-limit");
         for index in 0..256 {
@@ -3704,7 +4225,8 @@ mod tests {
         let map = order.iter().position(|name| *name == "mmcg_map").unwrap();
         assert_eq!(order[map + 1], "mmcg_temporal");
         assert_eq!(order[map + 2], "mmcg_change_impact");
-        assert_eq!(order[map + 3], "mmcg_test_impact");
+        assert_eq!(order[map + 3], "mmcg_brief");
+        assert_eq!(order[map + 4], "mmcg_test_impact");
         std::fs::remove_file(path).ok();
     }
 
@@ -4006,7 +4528,7 @@ mod tests {
     #[test]
     fn tools_list_covers_every_handler() {
         let listed: Vec<&str> = TOOLS.iter().map(|t| t.name).collect();
-        assert_eq!(listed.len(), 28, "expected 28 tools, got {}", listed.len());
+        assert_eq!(listed.len(), 29, "expected 29 tools, got {}", listed.len());
         for name in &listed {
             assert!(
                 TOOLS.iter().any(|t| &t.name == name),
@@ -4288,6 +4810,12 @@ mod tests {
                 "mmcg_temporal" | "mmcg_change_impact" | "mmcg_test_impact" => {
                     json!({ "since": "HEAD", "root": root.to_string_lossy() })
                 }
+                "mmcg_brief" => json!({
+                    "role": "executor",
+                    "since": "HEAD",
+                    "root": root.to_string_lossy(),
+                    "budget_tokens": 2000
+                }),
                 name => panic!("missing valid-argument fixture for structural tool {name}"),
             };
             let error = (tool.handler)(&mut store, &arguments).unwrap_err();

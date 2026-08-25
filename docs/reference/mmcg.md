@@ -8,7 +8,7 @@ the source of truth for the `mmcg` engine. Start with
 `mmcg` is a Rust binary that builds a local structural index for Python,
 TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, and C/C++.
 It exposes the same indexed state through CLI, Lens, and MCP. The MCP surface
-contains 28 tools: 19 non-destructive queries that may refresh the managed
+contains 29 tools: 20 non-destructive queries that may refresh the managed
 derived index, 8 read-only queries, and one additive local scratchpad write.
 The binary also provides spec gates, client setup, evidence ingestion, review
 export, and style mining.
@@ -100,7 +100,7 @@ bounded query surface instead of repeatedly rescanning source text.
   syntactic graph.
 - External producers submit validated facts; they cannot execute inside the
   process or write SQLite.
-- MCP exposes 28 bounded tools: 19 non-destructive queries that may refresh the
+- MCP exposes 29 bounded tools: 20 non-destructive queries that may refresh the
   managed derived index, 8 read-only queries, and the additive, gitignored
   `mmcg_scratchpad_append` write.
 
@@ -937,6 +937,7 @@ or given WAL/SHM sidecars by the server. Incompatible custom schemas return
 | `mmcg_map` | optional `path` (default `.`), `depth` (1–6, default 2), `top` (1–100, default 20), `production_only` (default `false`) | Schema-v1 architecture briefing with lexical file/directory scope: `%` and `_` are literal bytes, selected-directory components are relative to that directory, root components remain repository-relative, and selected files retain their paths. `production_only` excludes conventional test/fixture/example/generated/vendor path segments and test filenames (`test_*`, `*_test.*`, `*.test.*`, `*.spec.*`, `*Test.*`, `*Tests.*`) before bounded queries run. Hotspots prefer unambiguous definitions before pooled same-name collisions. JSON, text, Mermaid, and CLI SARIF are projections of the same result; Mermaid includes component counts/languages, boundaries, hotspots, and cycle rings, while SARIF exports returned cycles as architecture findings. Caps are 50,000 aggregation paths, 20 languages, 20 components, 20 boundaries/component and 400 globally, 50 entry points, 100 hotspots, 50,000 scoped cycle edges, 50 cycles, and 500 cycle memberships. `path_work_limit` marks path-derived partial aggregates; `top_probe` marks a hotspot or per-component boundary cap+1 probe; `global_probe_limit` marks components whose certainty was prevented by the 401st global boundary row; cycle `work_limit` returns no cycles because SCC analysis was skipped before truncated edges could be analyzed. |
 | `mmcg_temporal` | `since`, optional `root`, `path` (default `.`), `depth` (1–5, default 2), `top` (1–100, default 20), `production_only`, `codeowners` | Schema-v1 base-vs-indexed-worktree architecture delta. It rewinds changed Git blobs only in a private SQLite snapshot and reports components, public boundaries/API, cycles, centrality/hotspot drift, base/head CODEOWNERS changes, exact history review candidates, provenance, limits, and partial diagnostics. A truncated 10,000-file change set fails closed. |
 | `mmcg_change_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Stable schema-v1 analysis of the resolved baseline against staged, unstaged, and untracked content. Reports added/removed/signature/body-changed symbols, batched transitive callers, component crossings, ranked test candidates, a `disciplines` block routing the change to an evidence set, exact collection metadata, caps, and precision notes. Root, SHA-256 index freshness, Git snapshot, and SQLite snapshot checks fail closed with stable codes. |
+| `mmcg_brief` | `role` (`planner`, `executor`, or `auditor`), `since`, optional `root`, `budget_tokens` (256–8,000; default 2,000) | One deterministic schema-v1 role packet over the checked worktree, structural graph, and project-history inventory. Role changes prefix admission order, not fields. The accepted budget covers the serialized MCP result after JSON escaping, `content.text`, and `structuredContent` duplication. Repository paths and symbol names are capped, control/bidi-escaped untrusted data; source bodies, signatures, literals/defaults, history titles, and excerpts are excluded. |
 | `mmcg_test_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Exact test-focused projection of `mmcg_change_impact`. Changed tests and depth-1 graph tests are direct, deeper graph tests are transitive, and scoped filename candidates are heuristic. Focused candidates never replace the repository's full required gate. |
 | `mmcg_tasks` | `query`, optional `top` (default 10) | Full-text search past task specs (`.mastermind/tasks/<NNN>-<name>/spec.md`). FTS5 MATCH syntax (bare words AND-joined, `"phrases"`, `OR`/`NOT`). Returns paths, titles, and snippet excerpts with `«match»` highlights ranked by BM25. Use as planner pre-flight: "have we touched this area before?" surfaces past designs and prior verdicts. Top-level files prefixed with `_` (e.g. `_lessons.md`) and bare `.md` files at the top of `tasks/` (legacy 0.6.x layout) are intentionally excluded. |
 | `mmcg_history` | `query`, optional `kind`, `top` (default 10) | Searches `CONTEXT.md`, `CONTEXT-archive-*.md`, canonical task specs, executor reports, audits, `.mastermind/releases/*.md`, legacy task-local release notes, lessons, and Markdown architecture decisions under conventional ADR directories. `architecture_decision` is an exact `kind` filter. `candidate` lessons are unresolved signals, not active guidance. Returns observed matches, `skipped_artifacts`, `truncated`, `freshness` (`fresh`, `stale`, `incomplete`, or `snapshot_changed`), and an explicit retrieval-only epistemic contract. Markdown remains authoritative. The deterministic inventory binds path, kind, length, content digest, skipped state, and truncation state. Limits are 1 MiB per artifact, 5,000 artifacts, and 32 MiB of admitted text. |
@@ -946,6 +947,37 @@ or given WAL/SHM sidecars by the server. Incompatible custom schemas return
 
 Tool responses are bounded JSON. Collection responses expose their own count or
 collection metadata; status and workflow responses use named fields.
+
+### Bounded role briefs
+
+`mmcg_brief` and `mastermind brief` call the same builder. CLI JSON is the MCP
+logical `structuredContent` packet; text is only a rendering of those fields.
+The fixed schema-v1 fields are `repository_content_untrusted`, `role`,
+`freshness`, `baseline`, `scope`, `budget`, `changes`, `callers`, `tests`,
+`history`, `citations`, `omitted`, `limits`, and `precision_notes` (plus
+`schema_version`). Structural and history freshness have separate checked
+tokens and statuses.
+
+Candidate caps are 100 changed files, 100 changed symbols, 100 callers, 50
+tests, 10 history citations, and eight derived history terms. History performs
+at most one quoted OR query and returns only path, kind, query-local rank, and
+the source lexemes highlighted by that same FTS5 match; stemming can therefore
+make a matched lexeme differ from the derived query term. `omitted` separates
+upstream/source limits, rejected unsafe content, and budget admission for every
+collection. A null collection `total` and `source_limit_exact: false` preserve
+an upstream lower bound instead of inventing an exact count. Planner priority is
+changes → callers → history → tests; executor is changes → tests → callers →
+history; auditor is tests → callers → changes → history.
+
+The estimate is `ceil(serialized MCP tool-result bytes / 4)`. It includes the
+escaped JSON text and structured-content copy but excludes only outer JSON-RPC
+framing and request ID. If even the empty fixed packet cannot fit, the tool
+returns `{"code":"budget_too_small","minimum_tokens":N}` within the requested
+budget. Other stable failures are `invalid_arguments`, `invalid_ref`,
+`root_mismatch`, `index_stale`, `schema_incompatible`, `snapshot_changed`,
+`work_limit_exceeded`, and `cancelled`. Managed structural or history drift gets
+at most one refresh and one retry under the original deadline; custom indexes
+remain read-only.
 
 ## Watcher (`mmcg watch`)
 

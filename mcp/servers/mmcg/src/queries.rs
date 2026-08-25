@@ -533,6 +533,8 @@ pub struct ChangeImpactResponse {
     pub schema_version: u32,
     #[serde(skip)]
     pub(crate) snapshot_token: String,
+    #[serde(skip)]
+    pub(crate) checked_snapshot: Option<CheckedSnapshotToken>,
     pub baseline: ImpactBaseline,
     pub scope: ImpactScope,
     pub changes: ImpactChanges,
@@ -738,6 +740,35 @@ fn run_impact_test_hook(stage: ImpactTestStage) {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static BRIEF_TEST_HOOK: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(crate) struct BriefTestHookGuard;
+
+#[cfg(test)]
+impl Drop for BriefTestHookGuard {
+    fn drop(&mut self) {
+        BRIEF_TEST_HOOK.with(|hook| hook.borrow_mut().take());
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_brief_test_hook(hook: impl FnOnce() + 'static) -> BriefTestHookGuard {
+    BRIEF_TEST_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    BriefTestHookGuard
+}
+
+#[cfg(test)]
+fn run_brief_test_hook() {
+    let hook = BRIEF_TEST_HOOK.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 impl ChangeImpactError {
     pub fn code(self) -> &'static str {
         match self {
@@ -759,11 +790,253 @@ impl std::fmt::Display for ChangeImpactError {
 
 impl std::error::Error for ChangeImpactError {}
 
+pub const BRIEF_MIN_BUDGET_TOKENS: u32 = 256;
+pub const BRIEF_MAX_BUDGET_TOKENS: u32 = 8_000;
+pub const BRIEF_DEFAULT_BUDGET_TOKENS: u32 = 2_000;
+const BRIEF_CHANGED_FILE_LIMIT: usize = 100;
+const BRIEF_CHANGED_SYMBOL_LIMIT: usize = 100;
+const BRIEF_CALLER_LIMIT: usize = 100;
+const BRIEF_TEST_LIMIT: usize = 50;
+const BRIEF_HISTORY_LIMIT: usize = 10;
+const BRIEF_HISTORY_TERM_LIMIT: usize = 8;
+const BRIEF_REPOSITORY_STRING_BYTES: usize = 512;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BriefRole {
+    Planner,
+    Executor,
+    Auditor,
+}
+
+impl BriefRole {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "planner" => Some(Self::Planner),
+            "executor" => Some(Self::Executor),
+            "auditor" => Some(Self::Auditor),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Planner => "planner",
+            Self::Executor => "executor",
+            Self::Auditor => "auditor",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BriefError {
+    InvalidArguments,
+    InvalidRef,
+    RootMismatch,
+    IndexStale,
+    SchemaIncompatible,
+    SnapshotChanged,
+    WorkLimitExceeded,
+    Serialization,
+    BudgetTooSmall { minimum_tokens: u32 },
+}
+
+impl BriefError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidArguments => "invalid_arguments",
+            Self::InvalidRef => "invalid_ref",
+            Self::RootMismatch => "root_mismatch",
+            Self::IndexStale => "index_stale",
+            Self::SchemaIncompatible => "schema_incompatible",
+            Self::SnapshotChanged => "snapshot_changed",
+            Self::WorkLimitExceeded => "work_limit_exceeded",
+            Self::Serialization => "serialization_failed",
+            Self::BudgetTooSmall { .. } => "budget_too_small",
+        }
+    }
+}
+
+impl std::fmt::Display for BriefError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.code())
+    }
+}
+
+impl std::error::Error for BriefError {}
+
+impl From<ChangeImpactError> for BriefError {
+    fn from(error: ChangeImpactError) -> Self {
+        match error {
+            ChangeImpactError::InvalidRef => Self::InvalidRef,
+            ChangeImpactError::RootMismatch => Self::RootMismatch,
+            ChangeImpactError::IndexStale => Self::IndexStale,
+            ChangeImpactError::SnapshotChanged => Self::SnapshotChanged,
+            ChangeImpactError::GitTimeout | ChangeImpactError::GitOutputLimit => {
+                Self::WorkLimitExceeded
+            }
+        }
+    }
+}
+
+pub type BriefEnvelopeSizer<'a> = dyn Fn(&BriefPacket) -> Result<usize, BriefError> + 'a;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BriefPacket {
+    pub schema_version: u32,
+    pub repository_content_untrusted: bool,
+    pub role: BriefRole,
+    pub freshness: BriefFreshness,
+    pub baseline: BriefBaseline,
+    pub scope: BriefScope,
+    pub budget: BriefBudget,
+    pub changes: BriefChanges,
+    pub callers: BriefCollection<BriefCaller>,
+    pub tests: BriefCollection<BriefTest>,
+    pub history: BriefHistory,
+    pub citations: BriefCollection<BriefHistoryCitation>,
+    pub omitted: BriefOmitted,
+    pub limits: BriefLimits,
+    pub precision_notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BriefFreshness {
+    pub structural: BriefFreshnessState,
+    pub history: BriefFreshnessState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BriefFreshnessState {
+    pub status: String,
+    pub checked_token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BriefBaseline {
+    pub requested_ref: String,
+    pub baseline_oid: String,
+    pub head_oid: String,
+    pub includes_worktree: bool,
+    pub includes_untracked: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BriefScope {
+    pub repository_relative_root: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BriefBudget {
+    pub requested_tokens: u32,
+    pub estimated_tokens: u32,
+    pub final_envelope_bytes: u32,
+    pub minimum_tokens: u32,
+    pub bytes_per_token: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BriefCollection<T> {
+    /// Exact candidate count, or null when an upstream work cap only proves a
+    /// lower bound.
+    pub total: Option<u32>,
+    pub returned: u32,
+    pub items: Vec<T>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BriefChanges {
+    pub files: BriefCollection<BriefChangedFile>,
+    pub symbols: BriefCollection<BriefChangedSymbol>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BriefChangedFile {
+    pub path: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BriefChangedSymbol {
+    pub file: String,
+    pub name: String,
+    pub kind: String,
+    pub line: u32,
+    pub change: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BriefCaller {
+    pub file: String,
+    pub name: String,
+    pub kind: String,
+    pub line: u32,
+    pub minimum_depth: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BriefTest {
+    pub file: String,
+    pub name: String,
+    pub kind: String,
+    pub line: u32,
+    pub classification: String,
+    pub minimum_depth: Option<u32>,
+    pub confidence: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BriefHistory {
+    pub query_terms: Vec<String>,
+    pub query_performed: bool,
+    pub empty_reason: Option<String>,
+    pub total: Option<u32>,
+    pub returned: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BriefHistoryCitation {
+    pub path: String,
+    pub kind: String,
+    pub matched_terms: Vec<String>,
+    pub rank: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct BriefOmissionCount {
+    /// Exact count when `source_limit_exact` is true, otherwise a lower bound.
+    pub source_limit: u32,
+    pub source_limit_exact: bool,
+    pub unsafe_content: u32,
+    pub budget: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct BriefOmitted {
+    pub changed_files: BriefOmissionCount,
+    pub changed_symbols: BriefOmissionCount,
+    pub callers: BriefOmissionCount,
+    pub tests: BriefOmissionCount,
+    pub history_citations: BriefOmissionCount,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BriefLimits {
+    pub changed_files: u32,
+    pub changed_symbols: u32,
+    pub callers: u32,
+    pub tests: u32,
+    pub history_citations: u32,
+    pub history_terms: u32,
+    pub impact_depth: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CheckedSnapshotToken {
     data_version: u64,
     structural_worktree_token: String,
     history_inventory_token: String,
+    history_freshness: crate::indexer::ProjectHistoryFreshness,
 }
 
 struct StoreReadSnapshot<'a> {
@@ -813,16 +1086,18 @@ pub(crate) fn checked_snapshot_token(
     let data_version = store
         .data_version()
         .map_err(|_| ChangeImpactError::SnapshotChanged)?;
-    let (history_inventory_token, freshness) = crate::indexer::Indexer::new(repository_root)
-        .live_project_history_inventory(store)
-        .map_err(history_snapshot_error)?;
-    if freshness == crate::indexer::ProjectHistoryFreshness::SnapshotChanged {
+    let (history_inventory_token, history_freshness) =
+        crate::indexer::Indexer::new(repository_root)
+            .live_project_history_inventory(store)
+            .map_err(history_snapshot_error)?;
+    if history_freshness == crate::indexer::ProjectHistoryFreshness::SnapshotChanged {
         return Err(ChangeImpactError::SnapshotChanged);
     }
     Ok(CheckedSnapshotToken {
         data_version,
         structural_worktree_token: structural_worktree_token.to_string(),
         history_inventory_token,
+        history_freshness,
     })
 }
 
@@ -845,6 +1120,7 @@ fn validate_checked_snapshot(
         .map_err(history_snapshot_error)?;
     if freshness == crate::indexer::ProjectHistoryFreshness::SnapshotChanged
         || history_inventory_token != expected.history_inventory_token
+        || freshness != expected.history_freshness
     {
         return Err(ChangeImpactError::SnapshotChanged);
     }
@@ -1589,6 +1865,7 @@ pub fn change_impact(
     Ok(ChangeImpactResponse {
         schema_version: 1,
         snapshot_token: working.snapshot_token,
+        checked_snapshot: Some(checked_snapshot),
         baseline: ImpactBaseline {
             requested_ref: git_ref.to_string(),
             baseline_oid: working.baseline_oid,
@@ -1620,6 +1897,685 @@ pub fn change_impact(
         },
         precision_notes,
     })
+}
+
+fn brief_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+#[derive(Clone, Copy)]
+struct BriefSourceLimit {
+    total: Option<u32>,
+    omitted: u32,
+    exact: bool,
+}
+
+fn brief_source_omitted<T>(collection: &Collection<T>, cap: usize) -> BriefSourceLimit {
+    let admitted = collection.returned.min(brief_u32(cap));
+    match collection.total {
+        Some(total) => BriefSourceLimit {
+            total: Some(total),
+            omitted: total.saturating_sub(admitted),
+            exact: true,
+        },
+        None => BriefSourceLimit {
+            total: None,
+            omitted: collection
+                .returned
+                .saturating_sub(admitted)
+                .saturating_add(u32::from(collection.truncated)),
+            exact: !collection.truncated,
+        },
+    }
+}
+
+fn brief_history_source_limit(
+    returned: u32,
+    skipped_artifacts: u32,
+    corpus_truncated: bool,
+) -> BriefSourceLimit {
+    let exact =
+        returned < BRIEF_HISTORY_LIMIT as u32 && skipped_artifacts == 0 && !corpus_truncated;
+    BriefSourceLimit {
+        total: exact.then_some(returned),
+        omitted: 0,
+        exact,
+    }
+}
+
+fn is_unsafe_display_char(value: char) -> bool {
+    value.is_control()
+        || matches!(
+            value,
+            '\u{061c}'
+                | '\u{200e}'
+                | '\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+        )
+}
+
+/// Repository-derived strings are data, never instructions. Preserve useful
+/// Unicode while making terminal/control direction changes visible and
+/// bounding the post-escape representation before JSON serialization.
+fn safe_brief_string(value: &str) -> Option<String> {
+    if value.is_empty() {
+        return None;
+    }
+    let mut output = String::new();
+    let mut piece_starts = Vec::new();
+    let mut visible = false;
+    let mut truncated = false;
+    for character in value.chars() {
+        let piece = if is_unsafe_display_char(character) {
+            format!("\\u{{{:04X}}}", character as u32)
+        } else {
+            visible = true;
+            character.to_string()
+        };
+        if output.len().saturating_add(piece.len()) > BRIEF_REPOSITORY_STRING_BYTES {
+            truncated = true;
+            break;
+        }
+        piece_starts.push(output.len());
+        output.push_str(&piece);
+    }
+    if !visible {
+        return None;
+    }
+    if truncated {
+        while output.len().saturating_add(3) > BRIEF_REPOSITORY_STRING_BYTES {
+            output.truncate(piece_starts.pop().unwrap_or(0));
+        }
+        output.push_str("...");
+    }
+    Some(output)
+}
+
+fn brief_history_terms(changes: &ImpactChanges) -> Vec<String> {
+    const STOP_WORDS: &[&str] = &[
+        "added",
+        "body",
+        "change",
+        "changed",
+        "code",
+        "file",
+        "files",
+        "main",
+        "removed",
+        "signature",
+        "source",
+        "src",
+        "test",
+        "tests",
+    ];
+    fn add_terms(value: &str, seen: &mut BTreeSet<String>, output: &mut Vec<String>) {
+        for part in
+            value.split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        {
+            let term = part.to_ascii_lowercase();
+            if !(3..=64).contains(&term.len())
+                || STOP_WORDS.binary_search(&term.as_str()).is_ok()
+                || !seen.insert(term.clone())
+            {
+                continue;
+            }
+            output.push(term);
+            if output.len() == BRIEF_HISTORY_TERM_LIMIT {
+                return;
+            }
+        }
+    }
+
+    let mut symbols = changes
+        .symbols
+        .items
+        .iter()
+        .take(BRIEF_CHANGED_SYMBOL_LIMIT)
+        .collect::<Vec<_>>();
+    symbols.sort_by(|left, right| {
+        (&left.file, &left.name, left.line, &left.kind, &left.change).cmp(&(
+            &right.file,
+            &right.name,
+            right.line,
+            &right.kind,
+            &right.change,
+        ))
+    });
+    let mut seen = BTreeSet::new();
+    let mut terms = Vec::new();
+    for symbol in symbols {
+        add_terms(&symbol.name, &mut seen, &mut terms);
+        if terms.len() == BRIEF_HISTORY_TERM_LIMIT {
+            return terms;
+        }
+    }
+    let mut paths = changes
+        .files
+        .items
+        .iter()
+        .take(BRIEF_CHANGED_FILE_LIMIT)
+        .map(|file| file.path.as_str())
+        .collect::<Vec<_>>();
+    paths.sort_unstable();
+    paths.dedup();
+    for path in paths {
+        add_terms(path, &mut seen, &mut terms);
+        if terms.len() == BRIEF_HISTORY_TERM_LIMIT {
+            break;
+        }
+    }
+    terms
+}
+
+fn brief_history_query(terms: &[String]) -> String {
+    terms
+        .iter()
+        .map(|term| format!("\"{term}\""))
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
+fn history_status(freshness: crate::indexer::ProjectHistoryFreshness) -> &'static str {
+    match freshness {
+        crate::indexer::ProjectHistoryFreshness::Fresh => "fresh",
+        crate::indexer::ProjectHistoryFreshness::Stale => "stale",
+        crate::indexer::ProjectHistoryFreshness::Incomplete => "incomplete",
+        crate::indexer::ProjectHistoryFreshness::SnapshotChanged => "snapshot_changed",
+    }
+}
+
+fn sync_brief_counts(packet: &mut BriefPacket) {
+    packet.changes.files.returned = brief_u32(packet.changes.files.items.len());
+    packet.changes.symbols.returned = brief_u32(packet.changes.symbols.items.len());
+    packet.callers.returned = brief_u32(packet.callers.items.len());
+    packet.tests.returned = brief_u32(packet.tests.items.len());
+    packet.citations.returned = brief_u32(packet.citations.items.len());
+    packet.history.total = packet.citations.total;
+    packet.history.returned = packet.citations.returned;
+}
+
+#[derive(Clone, Copy)]
+enum BriefSection {
+    Changes,
+    Callers,
+    Tests,
+    History,
+}
+
+fn brief_priority(role: BriefRole) -> [BriefSection; 4] {
+    match role {
+        BriefRole::Planner => [
+            BriefSection::Changes,
+            BriefSection::Callers,
+            BriefSection::History,
+            BriefSection::Tests,
+        ],
+        BriefRole::Executor => [
+            BriefSection::Changes,
+            BriefSection::Tests,
+            BriefSection::Callers,
+            BriefSection::History,
+        ],
+        BriefRole::Auditor => [
+            BriefSection::Tests,
+            BriefSection::Callers,
+            BriefSection::Changes,
+            BriefSection::History,
+        ],
+    }
+}
+
+fn remove_brief_candidate(packet: &mut BriefPacket) -> bool {
+    for section in brief_priority(packet.role).into_iter().rev() {
+        let removed = match section {
+            BriefSection::Changes => {
+                if packet.changes.symbols.items.pop().is_some() {
+                    packet.omitted.changed_symbols.budget =
+                        packet.omitted.changed_symbols.budget.saturating_add(1);
+                    true
+                } else if packet.changes.files.items.pop().is_some() {
+                    packet.omitted.changed_files.budget =
+                        packet.omitted.changed_files.budget.saturating_add(1);
+                    true
+                } else {
+                    false
+                }
+            }
+            BriefSection::Callers => {
+                if packet.callers.items.pop().is_some() {
+                    packet.omitted.callers.budget = packet.omitted.callers.budget.saturating_add(1);
+                    true
+                } else {
+                    false
+                }
+            }
+            BriefSection::Tests => {
+                if packet.tests.items.pop().is_some() {
+                    packet.omitted.tests.budget = packet.omitted.tests.budget.saturating_add(1);
+                    true
+                } else {
+                    false
+                }
+            }
+            BriefSection::History => {
+                if packet.citations.items.pop().is_some() {
+                    packet.omitted.history_citations.budget =
+                        packet.omitted.history_citations.budget.saturating_add(1);
+                    true
+                } else {
+                    false
+                }
+            }
+        };
+        if removed {
+            sync_brief_counts(packet);
+            return true;
+        }
+    }
+    false
+}
+
+fn clear_brief_candidates(packet: &mut BriefPacket) {
+    packet.omitted.changed_files.budget = packet
+        .omitted
+        .changed_files
+        .budget
+        .saturating_add(brief_u32(packet.changes.files.items.len()));
+    packet.omitted.changed_symbols.budget = packet
+        .omitted
+        .changed_symbols
+        .budget
+        .saturating_add(brief_u32(packet.changes.symbols.items.len()));
+    packet.omitted.callers.budget = packet
+        .omitted
+        .callers
+        .budget
+        .saturating_add(brief_u32(packet.callers.items.len()));
+    packet.omitted.tests.budget = packet
+        .omitted
+        .tests
+        .budget
+        .saturating_add(brief_u32(packet.tests.items.len()));
+    packet.omitted.history_citations.budget = packet
+        .omitted
+        .history_citations
+        .budget
+        .saturating_add(brief_u32(packet.citations.items.len()));
+    packet.changes.files.items.clear();
+    packet.changes.symbols.items.clear();
+    packet.callers.items.clear();
+    packet.tests.items.clear();
+    packet.citations.items.clear();
+    sync_brief_counts(packet);
+}
+
+fn stabilize_brief_budget(
+    packet: &mut BriefPacket,
+    envelope_sizer: &BriefEnvelopeSizer<'_>,
+) -> Result<u32, BriefError> {
+    for _ in 0..32 {
+        let bytes = envelope_sizer(packet)?;
+        let tokens = brief_u32(bytes.saturating_add(3) / 4);
+        let bytes = brief_u32(bytes);
+        if packet.budget.final_envelope_bytes == bytes && packet.budget.estimated_tokens == tokens {
+            return Ok(tokens);
+        }
+        packet.budget.final_envelope_bytes = bytes;
+        packet.budget.estimated_tokens = tokens;
+    }
+    Err(BriefError::Serialization)
+}
+
+fn minimum_brief_tokens(
+    packet: &BriefPacket,
+    envelope_sizer: &BriefEnvelopeSizer<'_>,
+) -> Result<u32, BriefError> {
+    let mut minimum = packet.clone();
+    clear_brief_candidates(&mut minimum);
+    minimum.budget.minimum_tokens = 0;
+    for _ in 0..32 {
+        let tokens = stabilize_brief_budget(&mut minimum, envelope_sizer)?;
+        if minimum.budget.minimum_tokens == tokens {
+            return Ok(tokens);
+        }
+        minimum.budget.minimum_tokens = tokens;
+    }
+    Err(BriefError::Serialization)
+}
+
+fn apply_brief_budget(
+    mut packet: BriefPacket,
+    envelope_sizer: &BriefEnvelopeSizer<'_>,
+) -> Result<BriefPacket, BriefError> {
+    let minimum_tokens = minimum_brief_tokens(&packet, envelope_sizer)?;
+    if packet.budget.requested_tokens < minimum_tokens {
+        return Err(BriefError::BudgetTooSmall { minimum_tokens });
+    }
+    packet.budget.minimum_tokens = minimum_tokens;
+    let mut estimated = stabilize_brief_budget(&mut packet, envelope_sizer)?;
+    while estimated > packet.budget.requested_tokens {
+        if !remove_brief_candidate(&mut packet) {
+            return Err(BriefError::BudgetTooSmall { minimum_tokens });
+        }
+        estimated = stabilize_brief_budget(&mut packet, envelope_sizer)?;
+    }
+    Ok(packet)
+}
+
+fn safe_brief_collection<T>(
+    candidates: impl IntoIterator<Item = Option<T>>,
+    source_limit: BriefSourceLimit,
+) -> (BriefCollection<T>, BriefOmissionCount) {
+    let mut unsafe_content = 0u32;
+    let items = candidates
+        .into_iter()
+        .filter_map(|candidate| match candidate {
+            Some(candidate) => Some(candidate),
+            None => {
+                unsafe_content = unsafe_content.saturating_add(1);
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    (
+        BriefCollection {
+            total: source_limit.total,
+            returned: brief_u32(items.len()),
+            items,
+        },
+        BriefOmissionCount {
+            source_limit: source_limit.omitted,
+            source_limit_exact: source_limit.exact,
+            unsafe_content,
+            budget: 0,
+        },
+    )
+}
+
+pub fn validate_brief_request(since: &str, budget_tokens: u32) -> Result<(), BriefError> {
+    if since.is_empty()
+        || since.len() > 1_024
+        || since.starts_with('-')
+        || since.contains('\0')
+        || !(BRIEF_MIN_BUDGET_TOKENS..=BRIEF_MAX_BUDGET_TOKENS).contains(&budget_tokens)
+    {
+        return Err(BriefError::InvalidArguments);
+    }
+    Ok(())
+}
+
+/// Build one deterministic, revision-bound context packet. The caller supplies
+/// the exact MCP result-envelope sizer so admission accounts for protocol
+/// escaping and duplication without coupling the query layer to MCP framing.
+pub fn brief(
+    store: &Store,
+    requested_root: &Path,
+    since: &str,
+    role: BriefRole,
+    budget_tokens: u32,
+    envelope_sizer: &BriefEnvelopeSizer<'_>,
+) -> Result<BriefPacket, BriefError> {
+    validate_brief_request(since, budget_tokens)?;
+    let requested_root = requested_root
+        .canonicalize()
+        .map_err(|_| BriefError::RootMismatch)?;
+    let impact = change_impact(store, &requested_root, since, 3, BRIEF_CALLER_LIMIT)?;
+    let repository_root = owning_repository(&requested_root).ok_or(BriefError::RootMismatch)?;
+    let root_capability = crate::bounded_fs::RootCapability::open(&repository_root)
+        .map_err(|_| BriefError::SnapshotChanged)?;
+    let checked = impact
+        .checked_snapshot
+        .clone()
+        .ok_or(BriefError::SnapshotChanged)?;
+    match checked.history_freshness {
+        crate::indexer::ProjectHistoryFreshness::Stale => return Err(BriefError::IndexStale),
+        crate::indexer::ProjectHistoryFreshness::SnapshotChanged => {
+            return Err(BriefError::SnapshotChanged)
+        }
+        crate::indexer::ProjectHistoryFreshness::Fresh
+        | crate::indexer::ProjectHistoryFreshness::Incomplete => {}
+    }
+
+    let terms = brief_history_terms(&impact.changes);
+    let query = brief_history_query(&terms);
+    let history_source_limit;
+    let mut raw_history = Vec::new();
+    let query_performed = !terms.is_empty();
+    if query_performed {
+        let response = history(store, &query, None, BRIEF_HISTORY_LIMIT as u32)
+            .map_err(|_| BriefError::IndexStale)?;
+        match response.freshness {
+            "stale" => return Err(BriefError::IndexStale),
+            "snapshot_changed" => return Err(BriefError::SnapshotChanged),
+            _ => {}
+        }
+        history_source_limit = brief_history_source_limit(
+            response.count,
+            response.skipped_artifacts,
+            response.truncated,
+        );
+        raw_history = response.observed;
+    } else {
+        history_source_limit = BriefSourceLimit {
+            total: Some(0),
+            omitted: 0,
+            exact: true,
+        };
+    }
+
+    let expected_files = impact
+        .changes
+        .files
+        .items
+        .iter()
+        .map(|file| crate::diff::WorkingTreeChangedFile {
+            path: file.path.clone(),
+            status: file.status.clone(),
+        })
+        .collect::<Vec<_>>();
+    #[cfg(test)]
+    run_brief_test_hook();
+    let interrupted = || store.work_interrupted();
+    crate::diff::validate_working_tree_snapshot_controlled(
+        &repository_root,
+        &impact.baseline.baseline_oid,
+        &impact.baseline.head_oid,
+        &expected_files,
+        &impact.snapshot_token,
+        store.request_deadline(),
+        Some(&interrupted),
+    )
+    .map_err(ChangeImpactError::from)?;
+    validate_checked_snapshot(store, &repository_root, &checked, &impact.snapshot_token)?;
+    root_capability
+        .verify()
+        .map_err(|_| BriefError::SnapshotChanged)?;
+
+    let file_source_limit = brief_source_omitted(&impact.changes.files, BRIEF_CHANGED_FILE_LIMIT);
+    let (files, omitted_files) = safe_brief_collection(
+        impact
+            .changes
+            .files
+            .items
+            .iter()
+            .take(BRIEF_CHANGED_FILE_LIMIT)
+            .map(|file| {
+                Some(BriefChangedFile {
+                    path: safe_brief_string(&file.path)?,
+                    status: safe_brief_string(&file.status)?,
+                })
+            }),
+        file_source_limit,
+    );
+
+    let symbol_source_limit =
+        brief_source_omitted(&impact.changes.symbols, BRIEF_CHANGED_SYMBOL_LIMIT);
+    let (symbols, omitted_symbols) = safe_brief_collection(
+        impact
+            .changes
+            .symbols
+            .items
+            .iter()
+            .take(BRIEF_CHANGED_SYMBOL_LIMIT)
+            .map(|symbol| {
+                Some(BriefChangedSymbol {
+                    file: safe_brief_string(&symbol.file)?,
+                    name: safe_brief_string(&symbol.name)?,
+                    kind: safe_brief_string(&symbol.kind)?,
+                    line: symbol.line,
+                    change: safe_brief_string(&symbol.change)?,
+                })
+            }),
+        symbol_source_limit,
+    );
+
+    let caller_source_limit = brief_source_omitted(&impact.impact, BRIEF_CALLER_LIMIT);
+    let (callers, omitted_callers) = safe_brief_collection(
+        impact
+            .impact
+            .items
+            .iter()
+            .take(BRIEF_CALLER_LIMIT)
+            .map(|caller| {
+                Some(BriefCaller {
+                    file: safe_brief_string(&caller.symbol.file)?,
+                    name: safe_brief_string(&caller.symbol.name)?,
+                    kind: safe_brief_string(&caller.symbol.kind)?,
+                    line: caller.symbol.line,
+                    minimum_depth: caller.minimum_depth,
+                })
+            }),
+        caller_source_limit,
+    );
+
+    let test_source_limit = brief_source_omitted(&impact.tests, BRIEF_TEST_LIMIT);
+    let (tests, omitted_tests) = safe_brief_collection(
+        impact
+            .tests
+            .items
+            .iter()
+            .take(BRIEF_TEST_LIMIT)
+            .map(|test| {
+                Some(BriefTest {
+                    file: safe_brief_string(&test.symbol.file)?,
+                    name: safe_brief_string(&test.symbol.name)?,
+                    kind: safe_brief_string(&test.symbol.kind)?,
+                    line: test.symbol.line,
+                    classification: safe_brief_string(&test.classification)?,
+                    minimum_depth: test.minimum_depth,
+                    confidence: safe_brief_string(&test.confidence)?,
+                })
+            }),
+        test_source_limit,
+    );
+
+    raw_history.sort_by(|left, right| {
+        left.score
+            .total_cmp(&right.score)
+            .then_with(|| left.path.cmp(&right.path))
+            .then_with(|| left.kind.cmp(&right.kind))
+    });
+    let (citations, omitted_history) = safe_brief_collection(
+        raw_history
+            .into_iter()
+            .take(BRIEF_HISTORY_LIMIT)
+            .enumerate()
+            .map(|(index, hit)| {
+                let matched_terms = hit
+                    .matched_terms
+                    .iter()
+                    .filter_map(|term| safe_brief_string(term))
+                    .take(BRIEF_HISTORY_TERM_LIMIT)
+                    .collect::<Vec<_>>();
+                if matched_terms.is_empty() {
+                    return None;
+                }
+                Some(BriefHistoryCitation {
+                    path: safe_brief_string(&hit.path)?,
+                    kind: safe_brief_string(&hit.kind)?,
+                    matched_terms,
+                    rank: brief_u32(index.saturating_add(1)),
+                })
+            }),
+        history_source_limit,
+    );
+
+    let structural_token =
+        safe_brief_string(&checked.structural_worktree_token).ok_or(BriefError::SnapshotChanged)?;
+    let history_token =
+        safe_brief_string(&checked.history_inventory_token).ok_or(BriefError::SnapshotChanged)?;
+    let mut precision_notes = impact.precision_notes.clone();
+    if checked.history_freshness == crate::indexer::ProjectHistoryFreshness::Incomplete {
+        precision_notes.push("history_index_incomplete".to_string());
+    }
+    precision_notes.sort();
+    precision_notes.dedup();
+    let citations_total = citations.total;
+    let citations_returned = citations.returned;
+    let packet = BriefPacket {
+        schema_version: 1,
+        repository_content_untrusted: true,
+        role,
+        freshness: BriefFreshness {
+            structural: BriefFreshnessState {
+                status: "fresh".to_string(),
+                checked_token: structural_token,
+            },
+            history: BriefFreshnessState {
+                status: history_status(checked.history_freshness).to_string(),
+                checked_token: history_token,
+            },
+        },
+        baseline: BriefBaseline {
+            requested_ref: safe_brief_string(&impact.baseline.requested_ref)
+                .ok_or(BriefError::InvalidRef)?,
+            baseline_oid: impact.baseline.baseline_oid,
+            head_oid: impact.baseline.head_oid,
+            includes_worktree: impact.baseline.includes_worktree,
+            includes_untracked: impact.baseline.includes_untracked,
+        },
+        scope: BriefScope {
+            repository_relative_root: safe_brief_string(&impact.scope.repository_relative_root)
+                .ok_or(BriefError::RootMismatch)?,
+        },
+        budget: BriefBudget {
+            requested_tokens: budget_tokens,
+            estimated_tokens: 0,
+            final_envelope_bytes: 0,
+            minimum_tokens: 0,
+            bytes_per_token: 4,
+        },
+        changes: BriefChanges { files, symbols },
+        callers,
+        tests,
+        history: BriefHistory {
+            query_terms: terms,
+            query_performed,
+            empty_reason: (!query_performed).then(|| "no_eligible_changed_terms".to_string()),
+            total: citations_total,
+            returned: citations_returned,
+        },
+        citations,
+        omitted: BriefOmitted {
+            changed_files: omitted_files,
+            changed_symbols: omitted_symbols,
+            callers: omitted_callers,
+            tests: omitted_tests,
+            history_citations: omitted_history,
+        },
+        limits: BriefLimits {
+            changed_files: BRIEF_CHANGED_FILE_LIMIT as u32,
+            changed_symbols: BRIEF_CHANGED_SYMBOL_LIMIT as u32,
+            callers: BRIEF_CALLER_LIMIT as u32,
+            tests: BRIEF_TEST_LIMIT as u32,
+            history_citations: BRIEF_HISTORY_LIMIT as u32,
+            history_terms: BRIEF_HISTORY_TERM_LIMIT as u32,
+            impact_depth: 3,
+        },
+        precision_notes,
+    };
+    apply_brief_budget(packet, envelope_sizer)
 }
 
 pub fn dependency_cycles(
@@ -4005,6 +4961,424 @@ mod tests {
             .index_all(&mut store, true)
             .unwrap();
         store
+    }
+
+    fn brief_repo(name: &str) -> (PathBuf, Store) {
+        let root = impact_repo(
+            name,
+            &[
+                (
+                    "src/app.py",
+                    "def target():\n    return 1\n\ndef caller():\n    return target()\n",
+                ),
+                (
+                    "src/test_app.py",
+                    "from src.app import target\n\ndef test_target():\n    assert target() == 1\n",
+                ),
+                ("src/é\"quoted.py", "def unicode_target():\n    return 1\n"),
+                (
+                    "CONTEXT.md",
+                    "# Target decision\nDO_NOT_OUTPUT_HISTORY_BODY target caller details.\n",
+                ),
+            ],
+        );
+        write_impact_file(
+            &root,
+            "src/app.py",
+            "def target():\n    return 2\n\ndef caller():\n    return target()\n",
+        );
+        write_impact_file(
+            &root,
+            "src/é\"quoted.py",
+            "def unicode_target():\n    return 2\n",
+        );
+        let store = index_impact(&root, name);
+        (root, store)
+    }
+
+    #[test]
+    fn brief_schema_v1_is_deterministic_bounded_and_body_free() {
+        let (root, store) = brief_repo("brief_schema");
+        let first = brief(
+            &store,
+            &root,
+            "HEAD",
+            BriefRole::Executor,
+            8_000,
+            &crate::mcp::brief_current_envelope_bytes,
+        )
+        .unwrap();
+        let second = brief(
+            &store,
+            &root,
+            "HEAD",
+            BriefRole::Executor,
+            8_000,
+            &crate::mcp::brief_current_envelope_bytes,
+        )
+        .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.schema_version, 1);
+        assert!(first.repository_content_untrusted);
+        assert_eq!(first.freshness.structural.status, "fresh");
+        assert!(matches!(
+            first.freshness.history.status.as_str(),
+            "fresh" | "incomplete"
+        ));
+        assert!(first
+            .changes
+            .symbols
+            .items
+            .iter()
+            .any(|symbol| symbol.name == "target"));
+        assert!(first
+            .callers
+            .items
+            .iter()
+            .any(|caller| caller.name == "caller"));
+        assert!(first
+            .history
+            .query_terms
+            .iter()
+            .any(|term| term == "target"));
+        assert!(first.citations.items.iter().any(|citation| {
+            citation
+                .matched_terms
+                .iter()
+                .any(|term| term.eq_ignore_ascii_case("target"))
+        }));
+        let bytes = crate::mcp::brief_current_envelope_bytes(&first).unwrap();
+        assert_eq!(first.budget.final_envelope_bytes, bytes as u32);
+        assert_eq!(first.budget.estimated_tokens, bytes.div_ceil(4) as u32);
+        assert!(first.budget.estimated_tokens <= first.budget.requested_tokens);
+        let encoded = serde_json::to_string(&first).unwrap();
+        assert!(encoded.contains("é"));
+        assert!(encoded.contains("quoted.py"));
+        assert!(!encoded.contains("DO_NOT_OUTPUT_HISTORY_BODY"));
+        assert!(!encoded.contains("excerpt"));
+        assert!(!encoded.contains("signature"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn brief_role_changes_prefix_admission_without_changing_schema() {
+        let (root, store) = brief_repo("brief-role-admission");
+        let mut full = brief(
+            &store,
+            &root,
+            "HEAD",
+            BriefRole::Executor,
+            8_000,
+            &crate::mcp::brief_current_envelope_bytes,
+        )
+        .unwrap();
+        for index in 0..4 {
+            full.tests.items.push(BriefTest {
+                file: format!("src/test_{index}.py"),
+                name: format!("test_{index}"),
+                kind: "function".into(),
+                line: index + 1,
+                classification: "direct".into(),
+                minimum_depth: Some(1),
+                confidence: "high".into(),
+            });
+            full.citations.items.push(BriefHistoryCitation {
+                path: format!(".mastermind/tasks/{index}/spec.md"),
+                kind: "task_spec".into(),
+                matched_terms: vec!["target".into()],
+                rank: index + 1,
+            });
+        }
+        full.tests.total = Some(brief_u32(full.tests.items.len()));
+        full.citations.total = Some(brief_u32(full.citations.items.len()));
+        sync_brief_counts(&mut full);
+        full.budget.requested_tokens = 8_000;
+        full.budget.estimated_tokens = 0;
+        full.budget.final_envelope_bytes = 0;
+        full.budget.minimum_tokens = 0;
+        full = apply_brief_budget(full, &crate::mcp::brief_current_envelope_bytes).unwrap();
+        let mut observed_priority_difference = false;
+        for budget in full.budget.minimum_tokens..full.budget.estimated_tokens {
+            let build = |role| {
+                let mut packet = full.clone();
+                packet.role = role;
+                packet.budget.requested_tokens = budget;
+                packet.budget.estimated_tokens = 0;
+                packet.budget.final_envelope_bytes = 0;
+                packet.budget.minimum_tokens = 0;
+                packet.omitted.changed_files.budget = 0;
+                packet.omitted.changed_symbols.budget = 0;
+                packet.omitted.callers.budget = 0;
+                packet.omitted.tests.budget = 0;
+                packet.omitted.history_citations.budget = 0;
+                apply_brief_budget(packet, &crate::mcp::brief_current_envelope_bytes).ok()
+            };
+            let (Some(planner), Some(executor)) =
+                (build(BriefRole::Planner), build(BriefRole::Executor))
+            else {
+                continue;
+            };
+            if planner.tests.returned < executor.tests.returned
+                && planner.citations.returned > executor.citations.returned
+            {
+                observed_priority_difference = true;
+                assert_eq!(
+                    serde_json::to_value(&planner)
+                        .unwrap()
+                        .as_object()
+                        .unwrap()
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    serde_json::to_value(&executor)
+                        .unwrap()
+                        .as_object()
+                        .unwrap()
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                );
+                break;
+            }
+        }
+        assert!(observed_priority_difference);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn brief_256_returns_a_precise_minimum_instead_of_overrunning() {
+        let (root, store) = brief_repo("brief_minimum");
+        let error = brief(
+            &store,
+            &root,
+            "HEAD",
+            BriefRole::Planner,
+            256,
+            &crate::mcp::brief_current_envelope_bytes,
+        )
+        .unwrap_err();
+        match error {
+            BriefError::BudgetTooSmall { minimum_tokens } => {
+                assert!(minimum_tokens > 256);
+                assert!(minimum_tokens <= BRIEF_MAX_BUDGET_TOKENS);
+            }
+            other => panic!("unexpected brief error: {other:?}"),
+        }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn brief_no_change_skips_fts_with_an_explicit_reason() {
+        let root = impact_repo(
+            "brief_no_change",
+            &[("src/app.py", "def stable():\n    return 1\n")],
+        );
+        let store = index_impact(&root, "brief_no_change");
+        let packet = brief(
+            &store,
+            &root,
+            "HEAD",
+            BriefRole::Auditor,
+            8_000,
+            &crate::mcp::brief_current_envelope_bytes,
+        )
+        .unwrap();
+        assert!(!packet.history.query_performed);
+        assert_eq!(
+            packet.history.empty_reason.as_deref(),
+            Some("no_eligible_changed_terms")
+        );
+        assert!(packet.history.query_terms.is_empty());
+        assert!(packet.citations.items.is_empty());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn brief_rejects_structural_and_history_snapshot_races() {
+        for history_race in [false, true] {
+            let suffix = if history_race { "history" } else { "worktree" };
+            let (root, store) = brief_repo(&format!("brief-race-{suffix}"));
+            let changed_root = root.clone();
+            let _hook = install_brief_test_hook(move || {
+                if history_race {
+                    write_impact_file(
+                        &changed_root,
+                        "CONTEXT.md",
+                        "# Replaced while briefing\nnew target record\n",
+                    );
+                } else {
+                    write_impact_file(
+                        &changed_root,
+                        "src/app.py",
+                        "def target():\n    return 3\n\ndef caller():\n    return target()\n",
+                    );
+                }
+            });
+            assert_eq!(
+                brief(
+                    &store,
+                    &root,
+                    "HEAD",
+                    BriefRole::Auditor,
+                    8_000,
+                    &crate::mcp::brief_current_envelope_bytes,
+                )
+                .unwrap_err(),
+                BriefError::SnapshotChanged
+            );
+            std::fs::remove_dir_all(root).ok();
+        }
+    }
+
+    #[test]
+    fn brief_history_terms_are_quoted_bounded_and_stable() {
+        let changes = ImpactChanges {
+            files: Collection {
+                total: Some(2),
+                returned: 2,
+                truncated: false,
+                truncation_reason: None,
+                items: vec![
+                    ChangedFile {
+                        path: "src/HTTP-client.ts".into(),
+                        status: "modified".into(),
+                    },
+                    ChangedFile {
+                        path: "tests/ignored.py".into(),
+                        status: "modified".into(),
+                    },
+                ],
+            },
+            symbols: Collection {
+                total: Some(2),
+                returned: 2,
+                truncated: false,
+                truncation_reason: None,
+                items: vec![
+                    ChangedSymbol {
+                        file: "z.py".into(),
+                        name: "Beta_handler".into(),
+                        kind: "function".into(),
+                        line: 9,
+                        change: "body_changed".into(),
+                    },
+                    ChangedSymbol {
+                        file: "a.py".into(),
+                        name: "Alpha-handler".into(),
+                        kind: "function".into(),
+                        line: 1,
+                        change: "body_changed".into(),
+                    },
+                ],
+            },
+        };
+        let terms = brief_history_terms(&changes);
+        assert_eq!(
+            terms,
+            vec![
+                "alpha",
+                "handler",
+                "beta_handler",
+                "http",
+                "client",
+                "ignored"
+            ]
+        );
+        assert_eq!(
+            brief_history_query(&terms),
+            r#""alpha" OR "handler" OR "beta_handler" OR "http" OR "client" OR "ignored""#
+        );
+        assert!(terms.len() <= BRIEF_HISTORY_TERM_LIMIT);
+    }
+
+    #[test]
+    fn brief_sanitizer_escapes_controls_and_rejects_control_only_values() {
+        assert_eq!(
+            safe_brief_string("src/ok\n\u{202e}.rs").as_deref(),
+            Some("src/ok\\u{000A}\\u{202E}.rs")
+        );
+        assert_eq!(safe_brief_string("\n\u{202e}"), None);
+        let long = safe_brief_string(&"é".repeat(600)).unwrap();
+        assert!(long.len() <= BRIEF_REPOSITORY_STRING_BYTES);
+        assert!(long.ends_with("..."));
+        let escape_boundary = safe_brief_string(&("a".repeat(504) + "\u{202e}" + "z")).unwrap();
+        assert_eq!(escape_boundary, "a".repeat(504) + "...");
+        assert!(!escape_boundary.contains("\\u{"));
+        let (collection, omitted) = safe_brief_collection(
+            [None, Some("safe")],
+            BriefSourceLimit {
+                total: Some(9),
+                omitted: 7,
+                exact: true,
+            },
+        );
+        assert_eq!(collection.total, Some(9));
+        assert_eq!(collection.returned, 1);
+        assert_eq!(omitted.source_limit, 7);
+        assert!(omitted.source_limit_exact);
+        assert_eq!(omitted.unsafe_content, 1);
+        assert_eq!(omitted.budget, 0);
+    }
+
+    #[test]
+    fn brief_unknown_source_truncation_stays_a_lower_bound() {
+        let source = Collection {
+            total: None,
+            returned: 4,
+            truncated: true,
+            truncation_reason: Some("work_limit".into()),
+            items: vec!["one", "two", "three", "four"],
+        };
+        let source_limit = brief_source_omitted(&source, 3);
+        let (collection, omitted) =
+            safe_brief_collection(source.items.into_iter().take(3).map(Some), source_limit);
+        assert_eq!(collection.total, None);
+        assert_eq!(collection.returned, 3);
+        assert_eq!(omitted.source_limit, 2);
+        assert!(!omitted.source_limit_exact);
+    }
+
+    #[test]
+    fn brief_history_totals_are_unknown_at_the_query_cap_or_with_missing_sources() {
+        for source_limit in [
+            brief_history_source_limit(BRIEF_HISTORY_LIMIT as u32, 0, false),
+            brief_history_source_limit(3, 1, false),
+            brief_history_source_limit(3, 0, true),
+        ] {
+            assert_eq!(source_limit.total, None);
+            assert_eq!(source_limit.omitted, 0);
+            assert!(!source_limit.exact);
+        }
+        let exact = brief_history_source_limit(3, 0, false);
+        assert_eq!(exact.total, Some(3));
+        assert!(exact.exact);
+    }
+
+    #[test]
+    fn brief_role_priority_is_fixed() {
+        let names = |role| {
+            brief_priority(role)
+                .into_iter()
+                .map(|section| match section {
+                    BriefSection::Changes => "changes",
+                    BriefSection::Callers => "callers",
+                    BriefSection::Tests => "tests",
+                    BriefSection::History => "history",
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(BriefRole::Planner),
+            ["changes", "callers", "history", "tests"]
+        );
+        assert_eq!(
+            names(BriefRole::Executor),
+            ["changes", "tests", "callers", "history"]
+        );
+        assert_eq!(
+            names(BriefRole::Auditor),
+            ["tests", "callers", "changes", "history"]
+        );
     }
 
     #[test]

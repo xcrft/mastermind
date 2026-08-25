@@ -61,6 +61,7 @@ npm install -g @xcraftmind/mastermind
 cd your-repository
 mastermind index .
 mastermind impact --since main
+mastermind brief --role executor --since main --budget-tokens 2000
 mastermind ui --since main
 ```
 
@@ -68,6 +69,12 @@ That is the whole first run. `index` creates a local SQLite graph at
 `.mastermind/mmcg.db`. `ui` opens Lens on loopback with embedded assets, no
 repository upload, and no CDN. Start with `impact` in the terminal; open Lens
 when you want the complete review surface.
+
+`brief` is the one-call agent entry point. It returns a revision-bound planner,
+executor, or auditor packet and budgets the final MCP envelope, including JSON
+escaping and transport duplication. It includes typed paths and symbols, never
+source bodies, declaration signatures, literal/default values, or history
+excerpts.
 
 <p align="center">
   <img src="docs/images/lens/mastermind-lens-live-desktop.png" alt="Mastermind Lens reviewing the current change with changed symbols, downstream impact, boundary crossings, test candidates, and explicit partial-evidence state" width="1000">
@@ -84,7 +91,7 @@ when you want the complete review surface.
 | Review the current change | Changed symbols, downstream reach, component crossings, candidate tests, and an evidence inspector |
 | Audit the architecture | Components, entry points, cycles, centrality, large-file pressure, ownership concentration, and change hotspots |
 | Keep boundaries enforceable | Repository policy checks with text, JSON, and SARIF output |
-| Give an agent real context | 28 bounded MCP tools over the same local graph instead of direct database access |
+| Give an agent real context | 29 bounded MCP tools, including one revision-bound role brief, over the same local graph |
 | Hand the review to anyone | A standalone offline Lens package with HTML, SARIF, summary, and a revision/evidence manifest |
 
 <table>
@@ -124,6 +131,7 @@ invent graph topology.
 
 ```bash
 mastermind impact --since main
+mastermind brief --role auditor --since main --budget-tokens 2000
 mastermind temporal --since main
 mastermind ui --since main --production-only
 ```
@@ -211,7 +219,7 @@ directory for manifest-scoped validation; add `--json` for the schema-v1 report.
 
 Mastermind supports Claude Code, Codex, Cursor, Continue, and generic MCP stdio
 clients. Setup is dry-run-first unless `--write` is present. The MCP surface has
-19 non-destructive queries that may refresh the managed derived index, 8
+20 non-destructive queries that may refresh the managed derived index, 8
 read-only tools, and one additive write to the local gitignored scratchpad.
 
 ## How it works

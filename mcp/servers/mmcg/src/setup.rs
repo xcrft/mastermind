@@ -6,7 +6,7 @@
 //!   - project (`--project .`): writes `<root>/.mcp.json`, merging into an
 //!     existing `mcpServers` object without clobbering others (see `run_claude`).
 //!
-//! Safe by default: prints what it will do and exits unless `--write-mcp`.
+//! Safe by default: prints what it will do and exits unless `--write`.
 //!
 //! Why hand-rolled diff (vs `similar` crate): the change is always additive +
 //! contiguous (one entry into one object), and `serde_json::to_string_pretty`
@@ -100,7 +100,7 @@ pub struct Opts {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
-    /// Showed diff only (no `--write-mcp`).
+    /// Showed diff only (no `--write`).
     DryRun,
     /// Wrote the MCP config.
     Wrote,

@@ -13,7 +13,7 @@ pub fn run() {
     println!("       mastermind demo signature-drift\n");
 
     println!("  3/6  Connect your editor");
-    println!("       mastermind setup claude --write-mcp   # Claude Code");
+    println!("       mastermind setup claude --write       # Claude Code");
     println!("       Cursor / Continue / Codex: see docs/integrations/");
     println!("       Restart your editor after setup.\n");
 

@@ -96,7 +96,7 @@ pub enum UninstallScope {
 over MCP, plus runs spec-driven workflow gates (verify-spec / audit-spec).\n\n\
 Onboard a project (run inside your repo):\n  \
 mastermind init                       scaffold .mastermind/, build the index, draft CONTEXT.md\n  \
-  mastermind setup claude --write-mcp   register the codegraph with Claude Code (run once)\n  \
+mastermind setup claude --write       register the codegraph with Claude Code (run once)\n  \
 mastermind temporal --since main        review architecture drift over time\n  \
   mastermind ui --since main            inspect this change in the local read-only Lens UI\n  \
 mastermind doctor                     verify the setup\n\n\
@@ -2047,6 +2047,12 @@ mod tests {
             normalize_setup_args(mmcg::setup::Client::Claude, args).unwrap_err(),
             "legacy --dry-run conflicts with --write"
         );
+    }
+
+    #[test]
+    fn claude_setup_keeps_write_mcp_as_an_alias_for_canonical_write() {
+        assert!(claude_setup_args(&["mastermind", "setup", "claude", "--write"]).write);
+        assert!(claude_setup_args(&["mastermind", "setup", "claude", "--write-mcp"]).write);
     }
 
     #[test]

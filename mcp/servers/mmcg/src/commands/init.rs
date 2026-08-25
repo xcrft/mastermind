@@ -260,7 +260,7 @@ pub fn do_init(root: &Path, opts: InitOpts) -> Result<(), Box<dyn std::error::Er
     }
 
     println!("\nNext steps:");
-    println!("  1. Register with Claude Code:  mastermind setup claude --write-mcp");
+    println!("  1. Register with Claude Code:  mastermind setup claude --write");
     println!("     (run once — the global server serves whichever project you open)");
     println!("  2. Add `.mastermind/` to your project's root `.gitignore` (local working state)");
     println!("  3. (Optional) Keep the index fresh in another terminal:  mastermind watch");

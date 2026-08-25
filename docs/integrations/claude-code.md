@@ -61,5 +61,8 @@ Doctor parses supported configuration locations as bounded data, rejects
 symlinked config files or existing path ancestors, and reports only client
 labels and structural status. It does not execute commands from configuration;
 the separate MCP handshake starts only the trusted current Mastermind binary.
+For installed `mastermind-*` agents it also verifies the full runtime chain:
+explicit model, tools, `maxTurns`, and effort; registered MCP servers; exact
+known mmcg grants; and every mmcg tool named by the prompt.
 
 Restart Claude Code after changing registration.

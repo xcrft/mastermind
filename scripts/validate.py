@@ -477,6 +477,12 @@ MMCG_TEMPLATE_MIRRORS: list[tuple[str, str]] = [
 # without forcing the same long inventory into every user-facing README.
 
 MMCG_MCP_SRC = "mcp/servers/mmcg/src/mcp.rs"
+MMCG_EXPECTED_LAST_TOOL = "mmcg_concept"
+MMCG_EXPECTED_BEHAVIOR_COUNTS = {
+    "refreshable_tool": 21,
+    "read_only_tool": 8,
+    "additive_tool": 1,
+}
 
 # Files that must reference every mmcg_* tool name. (Each may have one
 # canonical mention line; we only require *presence* of each tool name in the
@@ -972,6 +978,29 @@ def validate_mmcg_tool_drift() -> list[Issue]:
         )
         return issues
     canonical_count = len(tools)
+    if tools[-1] != MMCG_EXPECTED_LAST_TOOL:
+        issues.append(
+            Issue(
+                src_path,
+                "error",
+                f"authoritative tool order drift — expected final tool "
+                f"`{MMCG_EXPECTED_LAST_TOOL}`, got `{tools[-1]}`",
+            )
+        )
+    source = src_path.read_text()
+    start = source.find("static TOOLS:")
+    end = source.find("];", start) + 2 if start != -1 else -1
+    registry = source[start:end] if start != -1 and end != -1 else ""
+    for constructor, expected in MMCG_EXPECTED_BEHAVIOR_COUNTS.items():
+        actual = len(re.findall(rf"\b{constructor}\s*\(", registry))
+        if actual != expected:
+            issues.append(
+                Issue(
+                    src_path,
+                    "error",
+                    f"tool behavior drift — expected {expected} `{constructor}` entries, got {actual}",
+                )
+            )
 
     # 1. Presence check — every tool name must appear in each docfile.
     for rel in MMCG_TOOL_LIST_DOCS:

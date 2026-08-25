@@ -13,7 +13,7 @@ dedicated Claude Code, Codex, Cursor, or Continue setup command applies.
 | transport | stdio |
 | command | `mastermind serve` |
 | protocol | MCP 2025-11-25; legacy 2024-11-05 |
-| tools | 29: 20 refreshable non-destructive queries, 8 read-only queries, 1 additive local write (see below) |
+| tools | 30: 21 refreshable non-destructive queries, 8 read-only queries, 1 additive local write (see below) |
 | resources | none |
 | prompts | none |
 
@@ -68,7 +68,7 @@ The `--index` flag is global and must come before `serve`.
 
 ## What the client receives
 
-- Symbol discovery: `mmcg_search`, `mmcg_outline`, `mmcg_files`,
+- Symbol discovery: `mmcg_search`, `mmcg_concept`, `mmcg_outline`, `mmcg_files`,
   `mmcg_symbols_in_file`.
 - Relationships and architecture: `mmcg_callers`, `mmcg_callees`,
   `mmcg_imports`, `mmcg_imported_by`, `mmcg_impact`, `mmcg_api_surface`,
@@ -89,6 +89,12 @@ logical packet into `content.text` and `structuredContent`; the reported budget
 already counts both copies after JSON escaping. The packet marks repository
 strings as untrusted data and never includes source bodies, declaration
 signatures, literal/default values, or free-form history excerpts.
+
+For natural-language symbol discovery, call `mmcg_concept` with a plain `query`
+and optional `top` (default 10, maximum 50). Terms are normalized, quoted, and
+joined with fixed AND semantics. The tool uses only the local SQLite index and
+returns schema-v1 retrieval candidates, not confidence-ranked answers; it does
+not use embeddings, models, network access, source bodies, or comments.
 
 ## Start the server manually
 

@@ -91,7 +91,7 @@ excerpts.
 | Review the current change | Changed symbols, downstream reach, component crossings, candidate tests, and an evidence inspector |
 | Audit the architecture | Components, entry points, cycles, centrality, large-file pressure, ownership concentration, and change hotspots |
 | Keep boundaries enforceable | Repository policy checks with text, JSON, and SARIF output |
-| Give an agent real context | 29 bounded MCP tools, including one revision-bound role brief, over the same local graph |
+| Give an agent real context | 30 bounded MCP tools, including local concept search and one revision-bound role brief, over the same local graph |
 | Hand the review to anyone | A standalone offline Lens package with HTML, SARIF, summary, and a revision/evidence manifest |
 
 <table>
@@ -132,6 +132,7 @@ invent graph topology.
 ```bash
 mastermind impact --since main
 mastermind brief --role auditor --since main --budget-tokens 2000
+mastermind concept "payment retry handler" --top 10
 mastermind temporal --since main
 mastermind ui --since main --production-only
 ```
@@ -219,7 +220,7 @@ directory for manifest-scoped validation; add `--json` for the schema-v1 report.
 
 Mastermind supports Claude Code, Codex, Cursor, Continue, and generic MCP stdio
 clients. Setup is dry-run-first unless `--write` is present. The MCP surface has
-20 non-destructive queries that may refresh the managed derived index, 8
+21 non-destructive queries that may refresh the managed derived index, 8
 read-only tools, and one additive write to the local gitignored scratchpad.
 
 ## How it works

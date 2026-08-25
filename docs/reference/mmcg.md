@@ -8,7 +8,7 @@ the source of truth for the `mmcg` engine. Start with
 `mmcg` is a Rust binary that builds a local structural index for Python,
 TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, and C/C++.
 It exposes the same indexed state through CLI, Lens, and MCP. The MCP surface
-contains 29 tools: 20 non-destructive queries that may refresh the managed
+contains 30 tools: 21 non-destructive queries that may refresh the managed
 derived index, 8 read-only queries, and one additive local scratchpad write.
 The binary also provides spec gates, client setup, evidence ingestion, review
 export, and style mining.
@@ -30,6 +30,7 @@ export, and style mining.
 | Architecture rules | [Policy as code](#architecture-policy-as-code-mmcg-policy-check) |
 | MCP protocol and tool schemas | [MCP server](#mcp-server-usage), [MCP tools](#mcp-tools) |
 | Bounds and precision caveats | [Work budgets](#work-budgets-timeouts-and-cancellation), [limitations](#limitations) |
+| Local natural-language symbol retrieval | [Local symbol concept search](#local-symbol-concept-search) |
 
 ## What it indexes
 
@@ -100,7 +101,7 @@ bounded query surface instead of repeatedly rescanning source text.
   syntactic graph.
 - External producers submit validated facts; they cannot execute inside the
   process or write SQLite.
-- MCP exposes 29 bounded tools: 20 non-destructive queries that may refresh the
+- MCP exposes 30 bounded tools: 21 non-destructive queries that may refresh the
   managed derived index, 8 read-only queries, and the additive, gitignored
   `mmcg_scratchpad_append` write.
 
@@ -280,7 +281,51 @@ mmcg query outline src/store.rs                    # symbol tree of one file
 mmcg query recent --since 2h                       # files re-indexed in last 2 hours
 mmcg query unreferenced --kind function            # dead-code candidates (review manually)
 mmcg query api-surface src/runtime/                # symbols under prefix used externally
+
+# Deterministic local concept retrieval (no embeddings or model calls)
+mmcg concept "payment retry handler" --top 10
+mmcg concept "payment retry handler" --top 10 --format json
 ```
+
+### Local symbol concept search
+
+`mmcg_concept` and `mastermind concept` use one schema-v1 query builder over a
+private derived corpus. Searchable fields are normalized symbol names,
+repository-relative paths, and bounded declaration shapes; the documentation
+field is reserved and empty. Source bodies and comments are never indexed or
+returned. Quoted, character, raw, template, regex, numeric, and default-value
+content is removed from declaration shapes before persistence.
+
+The query is plain text up to 256 UTF-8 bytes. Shared normalization applies
+Unicode lowercase without claiming canonical equivalence, splits punctuation,
+paths, snake/kebab/camel/acronym transitions and letter/digit boundaries, and
+admits at most 16 terms of 64 bytes each. Every term is escaped, quoted, and
+joined by a fixed `AND`, so callers cannot supply FTS syntax, column selectors,
+boolean operators, or prefix wildcards. `top` is an integer from 1 through 50.
+
+SQLite FTS5 ranks with fixed BM25 weights: name 10, path 4, declaration shape
+2, and the reserved documentation field 1. The total tie order is score,
+lowercase repository path, line, kind, name, then symbol ID. Scores are local
+to one query, lower is better, and they are not confidence values. Each
+candidate contains `name`, `kind`, `language`, `path`, `line`, a declaration
+`signature_shape` capped at 256 bytes, `matched_fields`, `citation`, and
+`score`; the envelope also reports normalized `query_terms`, count, requested
+top, freshness, limits, and precision notes.
+
+The corpus is an additive schema-v7 table plus external-content FTS5 index.
+Symbol mutations dirty its independent normalization contract, including writes
+from older schema-v7 binaries. Managed queries may perform one bounded full
+refresh and retry when the extractor or concept contract drifts. Finalization
+checks symbol/concept parity and FTS integrity before stamping both contracts
+current. Custom external indexes open read-only, are never migrated, and return
+`index_stale` or `schema_incompatible` when the required corpus is unavailable.
+Stable query failures also include `invalid_arguments`, `snapshot_changed`,
+`work_limit_exceeded`, `cancelled`, and `internal_error`.
+
+This is deterministic local retrieval, not semantic inference: no embeddings,
+model calls, network access, broad grep, or canonical-equivalence matching are
+used. Returned repository strings are untrusted data. JSON preserves them as
+JSON strings; human text renders syntax-forming characters as Unicode escapes.
 
 ### Workflow audit
 
@@ -347,7 +392,7 @@ structural rebuild even when file mtimes are unchanged. `status`, `doctor`, and
 Output example:
 
 ```
-indexed 3 (unchanged 124, purged 1, skipped binary 2, skipped large 1, failed 0) / scanned 1247 | 87 symbols | 412 edges | 4 task specs | 84 ms
+indexed 3 (unchanged 124, purged 1, skipped binary 2, skipped large 1, failed 0) / scanned 1247 | 87 symbols | 412 edges | 87 concept rows (orphans purged 0, contract rebuilt false) | 4 task specs | 84 history entries (skipped 0, truncated false) | 84 ms
 ```
 
 When to use `--force`:
@@ -944,6 +989,7 @@ or given WAL/SHM sidecars by the server. Incompatible custom schemas return
 | `mmcg_dependency_cycles` | optional `language`, `min_size` (default 2) | Detect circular imports — strongly-connected components in the file-level import graph (Tarjan's algorithm). Each result is a cycle = a list of files. Pre-merge guard ("does this PR introduce a new cycle?") and architectural-hygiene survey. Resolves edges by leaf-name match — over-approximates (two unrelated `Logger` symbols cross-link) so verify before refactoring. Bump `min_size` to hide trivial A↔B and surface only larger structural problems. Work-capped at 50,000 file-pair edges: above that, `truncated: true` with an empty `cycles` list — incomplete and possibly inaccurate, not "more available"; narrow with `language` and retry. |
 | `mmcg_symbols_changed_since` | `git_ref`, optional `root` | Symbol-level diff between a git ref and the current index. Returns `{added, removed, signature_changed}` symbol sets for files in `git diff --name-only <ref>..HEAD`. Re-parses old blobs from `git show <ref>:<path>` using the same extractor. Different from `mmcg_recent_changes` (watcher mtime) — this is git-ref-based, answering "what symbols did THIS PR/branch touch?". PR-review pre-flight, auditor verification, "what new public API appeared in v2.3?". Git subprocesses are killed after `MMCG_GIT_TIMEOUT_MS`; the per-file loop is capped at 10,000 files with `truncated: true` marking a partial diff. |
 | `mmcg_status` | — | Index path, file/symbol counts, and bounded `stale_files`. A non-zero value means the next structural query will refresh a managed index, or that a custom external index needs an explicit `mmcg index`. |
+| `mmcg_concept` | `query`, optional `top` (default 10, max 50) | Deterministic schema-v1 symbol candidates from normalized names, repository paths, and declaration shapes. Plain terms are escaped and fixed-AND joined; no raw FTS syntax, embeddings, model calls, network, source bodies, comments, literals, or defaults. BM25 score is query-local and lower-is-better, not confidence. Managed drift gets at most one refresh/retry; custom indexes remain read-only and fail closed. |
 
 Tool responses are bounded JSON. Collection responses expose their own count or
 collection metadata; status and workflow responses use named fields.

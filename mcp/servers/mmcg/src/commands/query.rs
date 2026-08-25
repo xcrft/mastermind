@@ -539,6 +539,67 @@ pub fn render_brief(
     Ok(output)
 }
 
+fn concept_text_field(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character.is_alphanumeric() || matches!(character, ' ' | '-') {
+            output.push(character);
+        } else {
+            output.push_str(&format!("\\u{:06x}", character as u32));
+        }
+    }
+    output
+}
+
+pub fn render_concept(
+    response: &queries::ConceptResponse,
+    format: crate::ConceptFormat,
+) -> Result<String, serde_json::Error> {
+    if matches!(format, crate::ConceptFormat::Json) {
+        let mut output = serde_json::to_string_pretty(response)?;
+        output.push('\n');
+        return Ok(output);
+    }
+
+    let mut output = format!(
+        "mastermind concept\nquery terms: {}\ncount: {}\ntop: {}\nfreshness: {}\n\n",
+        response
+            .query_terms
+            .iter()
+            .map(|term| concept_text_field(term))
+            .collect::<Vec<_>>()
+            .join(" "),
+        response.count,
+        response.top,
+        concept_text_field(&response.freshness.status),
+    );
+    output.push_str("candidates\n");
+    for candidate in &response.candidates {
+        output.push_str(&format!(
+            "name={} kind={} language={} line={} score={}\npath={}\nsignature={}\nmatched={}\ncitation={}\n\n",
+            concept_text_field(&candidate.name),
+            concept_text_field(&candidate.kind),
+            concept_text_field(&candidate.language),
+            candidate.line,
+            candidate.score,
+            concept_text_field(&candidate.path),
+            concept_text_field(&candidate.signature_shape),
+            candidate
+                .matched_fields
+                .iter()
+                .map(|field| concept_text_field(field))
+                .collect::<Vec<_>>()
+                .join(" "),
+            concept_text_field(&candidate.citation),
+        ));
+    }
+    output.push_str("precision notes\n");
+    for note in &response.precision_notes {
+        output.push_str(&format!("{}\n", concept_text_field(note)));
+    }
+    Ok(output)
+}
+
 fn execute(store: &Store, q: QueryCmd) -> Result<Value, Box<dyn std::error::Error>> {
     let budget_ms = query_budget_ms_from_env(DEFAULT_CLI_BUDGET_MS);
     store.push_work_budget(WorkBudget::from_millis(budget_ms));
@@ -668,6 +729,63 @@ mod map_tests {
         assert!(!label.contains("%%"));
         assert!(!label.contains('['));
         assert!(!label.contains('"'));
+    }
+
+    #[test]
+    fn concept_text_renderer_has_no_markdown_html_url_or_terminal_syntax() {
+        let hostile = "](https://evil.example)<a>`file://\u{1b}\u{7}\u{202e}\r\n";
+        assert_eq!(
+            concept_text_field(hostile),
+            "\\u00005d\\u000028https\\u00003a\\u00002f\\u00002fevil\\u00002eexample\\u000029\\u00003ca\\u00003e\\u000060file\\u00003a\\u00002f\\u00002f\\u00001b\\u000007\\u00202e\\u00000d\\u00000a"
+        );
+        let response = queries::ConceptResponse {
+            schema_version: 1,
+            repository_content_untrusted: true,
+            query_terms: vec!["handler".to_string()],
+            count: 1,
+            top: 10,
+            freshness: queries::ConceptFreshness {
+                status: "fresh".to_string(),
+                extractor_contract: "extractor".to_string(),
+                normalization_contract: "normalization".to_string(),
+            },
+            limits: queries::ConceptLimits {
+                query_bytes: 256,
+                query_terms: 16,
+                term_bytes: 64,
+                top: 50,
+                signature_shape_bytes: 256,
+            },
+            precision_notes: vec!["retrieval only".to_string()],
+            candidates: vec![queries::ConceptCandidate {
+                name: hostile.to_string(),
+                kind: "function".to_string(),
+                language: "typescript".to_string(),
+                path: hostile.to_string(),
+                line: 7,
+                signature_shape: hostile.to_string(),
+                matched_fields: vec!["path".to_string()],
+                citation: format!("{hostile}:7"),
+                score: -1.0,
+            }],
+        };
+        let text = render_concept(&response, crate::ConceptFormat::Text).unwrap();
+        for forbidden in [
+            "](https://",
+            "file://",
+            "<a>",
+            "`",
+            "\u{1b}",
+            "\u{7}",
+            "\u{202e}",
+            "\r",
+            "\n\n\n",
+        ] {
+            assert!(!text.contains(forbidden), "rendered {forbidden:?}");
+        }
+        let json = render_concept(&response, crate::ConceptFormat::Json).unwrap();
+        assert!(json.contains("https://evil.example"));
+        assert!(json.contains("file://"));
     }
 
     #[test]

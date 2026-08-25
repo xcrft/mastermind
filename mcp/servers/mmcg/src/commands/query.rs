@@ -460,6 +460,85 @@ pub fn render_change_impact(
     Ok(output)
 }
 
+pub fn render_brief(
+    packet: &queries::BriefPacket,
+    format: crate::BriefFormat,
+) -> Result<String, serde_json::Error> {
+    if matches!(format, crate::BriefFormat::Json) {
+        let mut output = serde_json::to_string_pretty(packet)?;
+        output.push('\n');
+        return Ok(output);
+    }
+    let mut output = format!(
+        "mastermind brief — {} · {}..working copy\nBudget: {}/{} tokens · minimum {}\nFreshness: structural {} · history {}\n\nChanged files\n",
+        packet.role.as_str(),
+        safe_text(&packet.baseline.requested_ref),
+        packet.budget.estimated_tokens,
+        packet.budget.requested_tokens,
+        packet.budget.minimum_tokens,
+        safe_text(&packet.freshness.structural.status),
+        safe_text(&packet.freshness.history.status),
+    );
+    for file in &packet.changes.files.items {
+        output.push_str(&format!(
+            "  {} ({})\n",
+            safe_text(&file.path),
+            safe_text(&file.status)
+        ));
+    }
+    output.push_str("\nChanged symbols\n");
+    for symbol in &packet.changes.symbols.items {
+        output.push_str(&format!(
+            "  {} {} — {}:{} ({})\n",
+            safe_text(&symbol.kind),
+            safe_text(&symbol.name),
+            safe_text(&symbol.file),
+            symbol.line,
+            safe_text(&symbol.change)
+        ));
+    }
+    output.push_str("\nImpacted callers\n");
+    for caller in &packet.callers.items {
+        output.push_str(&format!(
+            "  {} — {}:{} (depth {})\n",
+            safe_text(&caller.name),
+            safe_text(&caller.file),
+            caller.line,
+            caller.minimum_depth
+        ));
+    }
+    output.push_str("\nCandidate tests\n");
+    for test in &packet.tests.items {
+        output.push_str(&format!(
+            "  {} — {}:{} ({}, {})\n",
+            safe_text(&test.name),
+            safe_text(&test.file),
+            test.line,
+            safe_text(&test.classification),
+            safe_text(&test.confidence)
+        ));
+    }
+    output.push_str("\nHistory citations\n");
+    for citation in &packet.citations.items {
+        output.push_str(&format!(
+            "  {} [{}] — rank {}, terms {}\n",
+            safe_text(&citation.path),
+            safe_text(&citation.kind),
+            citation.rank,
+            safe_text(&citation.matched_terms.join(", "))
+        ));
+    }
+    output.push_str(&format!(
+        "\nOmitted by budget: files {} · symbols {} · callers {} · tests {} · history {}\n",
+        packet.omitted.changed_files.budget,
+        packet.omitted.changed_symbols.budget,
+        packet.omitted.callers.budget,
+        packet.omitted.tests.budget,
+        packet.omitted.history_citations.budget,
+    ));
+    Ok(output)
+}
+
 fn execute(store: &Store, q: QueryCmd) -> Result<Value, Box<dyn std::error::Error>> {
     let budget_ms = query_budget_ms_from_env(DEFAULT_CLI_BUDGET_MS);
     store.push_work_budget(WorkBudget::from_millis(budget_ms));

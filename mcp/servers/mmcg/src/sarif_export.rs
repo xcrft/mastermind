@@ -476,6 +476,7 @@ mod tests {
         let response = ChangeImpactResponse {
             schema_version: 1,
             snapshot_token: "snapshot".into(),
+            checked_snapshot: None,
             baseline: ImpactBaseline {
                 requested_ref: "main".into(),
                 baseline_oid: "111".into(),

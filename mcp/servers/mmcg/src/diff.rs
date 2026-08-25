@@ -841,6 +841,15 @@ fn resolve_commit_controlled(
     Ok(oid.to_ascii_lowercase())
 }
 
+pub(crate) fn validate_commit_ref_controlled(
+    repo: &Path,
+    git_ref: &str,
+    deadline: Option<Instant>,
+    interrupted: Option<&dyn Fn() -> bool>,
+) -> Result<(), WorkingTreeDiffError> {
+    resolve_commit_controlled(repo, git_ref, deadline, interrupted).map(|_| ())
+}
+
 fn resolve_head(repo: &Path) -> Result<String, WorkingTreeDiffError> {
     resolve_head_controlled(repo, None, None)
 }

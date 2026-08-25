@@ -50,6 +50,13 @@ pub enum BriefFormat {
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 #[clap(rename_all = "kebab-case")]
+pub enum ConceptFormat {
+    Text,
+    Json,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
 pub enum BriefRoleArg {
     Planner,
     Executor,
@@ -234,6 +241,14 @@ enum Cmd {
         format: BriefFormat,
         #[arg(long, default_value = ".")]
         root: PathBuf,
+    },
+    /// Retrieve bounded local symbol candidates by plain concept terms.
+    Concept {
+        query: String,
+        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=50))]
+        top: u32,
+        #[arg(long, value_enum, default_value_t = ConceptFormat::Text)]
+        format: ConceptFormat,
     },
     /// Compare bounded architecture snapshots between a Git baseline and the indexed worktree.
     Temporal {
@@ -1130,7 +1145,7 @@ fn run_cli_inner(
             let indexer = mmcg::indexer::Indexer::new(&root);
             let stats = indexer.index_all(&mut store, force)?;
             println!(
-                "indexed {} (unchanged {}, purged {}, skipped binary {}, skipped large {}, failed {}) / scanned {} | {} symbols | {} edges | {} task specs | {} history entries (skipped {}, truncated {}) | {} ms",
+                "indexed {} (unchanged {}, purged {}, skipped binary {}, skipped large {}, failed {}) / scanned {} | {} symbols | {} edges | {} concept rows (orphans purged {}, contract rebuilt {}) | {} task specs | {} history entries (skipped {}, truncated {}) | {} ms",
                 stats.files_indexed,
                 stats.files_unchanged,
                 stats.files_purged,
@@ -1140,6 +1155,9 @@ fn run_cli_inner(
                 stats.files_scanned,
                 stats.symbols_total,
                 stats.edges_total,
+                stats.concept_rows_indexed,
+                stats.concept_orphans_purged,
+                stats.concept_contract_rebuilt,
                 stats.task_specs_indexed,
                 stats.history_entries_indexed,
                 stats.history_entries_skipped,
@@ -1383,6 +1401,31 @@ fn run_cli_inner(
                 Err(error) => return Err(error.into()),
             };
             print!("{}", commands::query::render_brief(&response, format)?);
+        }
+        Cmd::Concept { query, top, format } => {
+            mmcg::queries::validate_concept_request(&query, top)?;
+            let managed_root = if index_override.is_none() {
+                Some(std::env::current_dir()?.canonicalize()?)
+            } else {
+                None
+            };
+            let mut store = Store::open_for_serve(&index_path, managed_root.as_deref())?;
+            store.set_default_work_budget_ms(mmcg::store::query_budget_ms_from_env(
+                mmcg::store::DEFAULT_CLI_BUDGET_MS,
+            ));
+            let budget = store.default_work_budget();
+            let expired = store.push_work_budget(budget);
+            let response = if expired {
+                Err(mmcg::queries::ConceptError::WorkLimitExceeded)
+            } else {
+                mmcg::mcp::build_concept_current(&mut store, &query, top)
+            };
+            let interrupted = store.take_interrupt_source();
+            store.pop_work_budget();
+            if interrupted.is_some() {
+                return Err(mmcg::queries::ConceptError::WorkLimitExceeded.into());
+            }
+            print!("{}", commands::query::render_concept(&response?, format)?);
         }
         Cmd::Temporal {
             since,
@@ -2366,6 +2409,56 @@ mod tests {
             "main",
         ])
         .is_err());
+    }
+
+    #[test]
+    fn concept_is_a_first_class_strict_cli_command() {
+        let concept = Cli::try_parse_from([
+            "mastermind",
+            "concept",
+            "request handler",
+            "--top",
+            "7",
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            concept.cmd,
+            Cmd::Concept {
+                query,
+                top: 7,
+                format: ConceptFormat::Json,
+            } if query == "request handler"
+        ));
+        for top in ["0", "51", "1.0", "true"] {
+            assert!(
+                Cli::try_parse_from(["mastermind", "concept", "handler", "--top", top,]).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_concept_cli_request_does_not_open_or_create_an_index() {
+        let directory = tempfile::tempdir().unwrap();
+        let index = directory.path().join("missing.db");
+        let cli = Cli::try_parse_from([
+            "mastermind",
+            "--index",
+            index.to_str().unwrap(),
+            "concept",
+            "",
+        ])
+        .unwrap();
+
+        let error = run_cli(cli).unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<mmcg::queries::ConceptError>()
+                .map(mmcg::queries::ConceptError::code),
+            Some("invalid_arguments")
+        );
+        assert!(!index.exists());
     }
 
     #[test]

@@ -22,10 +22,148 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 const SCHEMA_VERSION: &str = "7";
+pub const CONCEPT_NORMALIZATION_META_KEY: &str = "concept_normalization_version";
+pub const CONCEPT_NORMALIZATION_VERSION: &str = "mmcg-concepts-v1";
+pub const CONCEPT_TERM_MAX_BYTES: usize = 64;
+pub const CONCEPT_SIGNATURE_MAX_BYTES: usize = 256;
+const CONCEPT_FIELD_MAX_BYTES: usize = 512;
+const CONCEPT_INDEX_TERM_LIMIT: usize = 128;
+const CONCEPT_SIGNATURE_SCAN_MAX_BYTES: usize = 64 * 1024;
+const CONCEPT_CONTRACT_DIRTY: &str = "dirty";
+static INSERT_SYMBOL_SAVEPOINT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+const CONCEPT_SCHEMA_DROP_SQL: &str = r#"
+    DROP TRIGGER IF EXISTS symbol_concepts_graph_ai;
+    DROP TRIGGER IF EXISTS symbol_concepts_graph_ad;
+    DROP TRIGGER IF EXISTS symbol_concepts_graph_au;
+    DROP TRIGGER IF EXISTS symbol_concepts_ai;
+    DROP TRIGGER IF EXISTS symbol_concepts_ad;
+    DROP TRIGGER IF EXISTS symbol_concepts_au;
+    DROP TABLE IF EXISTS symbol_concepts_fts;
+    DROP TABLE IF EXISTS symbol_concepts;
+"#;
+const CONCEPT_SCHEMA_DDL: &str = r#"
+    CREATE TABLE symbol_concepts (
+        symbol_id             INTEGER PRIMARY KEY
+                              REFERENCES symbols(id) ON DELETE CASCADE,
+        name_search           TEXT NOT NULL,
+        path_search           TEXT NOT NULL,
+        path_sort             TEXT NOT NULL,
+        signature_search      TEXT NOT NULL,
+        documentation_search  TEXT NOT NULL DEFAULT ''
+    );
+    CREATE VIRTUAL TABLE symbol_concepts_fts USING fts5(
+        name_search,
+        path_search,
+        signature_search,
+        documentation_search,
+        content='symbol_concepts',
+        content_rowid='symbol_id',
+        tokenize = "unicode61 remove_diacritics 0 tokenchars '_'"
+    );
+    CREATE TRIGGER symbol_concepts_ai
+    AFTER INSERT ON symbol_concepts BEGIN
+        INSERT INTO symbol_concepts_fts(
+            rowid, name_search, path_search, signature_search,
+            documentation_search
+        ) VALUES (
+            new.symbol_id, new.name_search, new.path_search,
+            new.signature_search, new.documentation_search
+        );
+    END;
+    CREATE TRIGGER symbol_concepts_ad
+    AFTER DELETE ON symbol_concepts BEGIN
+        INSERT INTO symbol_concepts_fts(
+            symbol_concepts_fts, rowid, name_search, path_search,
+            signature_search, documentation_search
+        ) VALUES (
+            'delete', old.symbol_id, old.name_search, old.path_search,
+            old.signature_search, old.documentation_search
+        );
+    END;
+    CREATE TRIGGER symbol_concepts_au
+    AFTER UPDATE ON symbol_concepts BEGIN
+        INSERT INTO symbol_concepts_fts(
+            symbol_concepts_fts, rowid, name_search, path_search,
+            signature_search, documentation_search
+        ) VALUES (
+            'delete', old.symbol_id, old.name_search, old.path_search,
+            old.signature_search, old.documentation_search
+        );
+        INSERT INTO symbol_concepts_fts(
+            rowid, name_search, path_search, signature_search,
+            documentation_search
+        ) VALUES (
+            new.symbol_id, new.name_search, new.path_search,
+            new.signature_search, new.documentation_search
+        );
+    END;
+    CREATE TRIGGER symbol_concepts_graph_ai
+    AFTER INSERT ON symbols BEGIN
+        INSERT INTO meta(key, value)
+        VALUES ('concept_normalization_version', 'dirty')
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        WHERE meta.value <> excluded.value;
+    END;
+    CREATE TRIGGER symbol_concepts_graph_ad
+    AFTER DELETE ON symbols BEGIN
+        INSERT INTO meta(key, value)
+        VALUES ('concept_normalization_version', 'dirty')
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        WHERE meta.value <> excluded.value;
+    END;
+    CREATE TRIGGER symbol_concepts_graph_au
+    AFTER UPDATE ON symbols BEGIN
+        INSERT INTO meta(key, value)
+        VALUES ('concept_normalization_version', 'dirty')
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        WHERE meta.value <> excluded.value;
+    END;
+"#;
+const CONCEPT_SHADOW_REPAIR_SQL: &str = r#"
+    CREATE TABLE IF NOT EXISTS 'symbol_concepts_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS 'symbol_concepts_fts_data'(id INTEGER PRIMARY KEY, block BLOB);
+    CREATE TABLE IF NOT EXISTS 'symbol_concepts_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB);
+    CREATE TABLE IF NOT EXISTS 'symbol_concepts_fts_idx'(
+        segid, term, pgno, PRIMARY KEY(segid, term)
+    ) WITHOUT ROWID;
+    INSERT OR IGNORE INTO symbol_concepts_fts_config(k, v) VALUES ('version', 4);
+    INSERT OR IGNORE INTO symbol_concepts_fts_data(id, block) VALUES (1, x'');
+    INSERT OR IGNORE INTO symbol_concepts_fts_data(id, block) VALUES (10, zeroblob(7));
+"#;
+const CONCEPT_SHADOW_NAMES: &[&str] = &[
+    "symbol_concepts_fts_config",
+    "symbol_concepts_fts_data",
+    "symbol_concepts_fts_docsize",
+    "symbol_concepts_fts_idx",
+];
+const CONCEPT_TRIGGER_NAMES: &[&str] = &[
+    "symbol_concepts_graph_ai",
+    "symbol_concepts_graph_ad",
+    "symbol_concepts_graph_au",
+    "symbol_concepts_ai",
+    "symbol_concepts_ad",
+    "symbol_concepts_au",
+];
+const CONCEPT_SCHEMA_OBJECTS: &[(&str, &str)] = &[
+    ("table", "symbol_concepts"),
+    ("table", "symbol_concepts_fts"),
+    ("table", "symbol_concepts_fts_config"),
+    ("table", "symbol_concepts_fts_data"),
+    ("table", "symbol_concepts_fts_docsize"),
+    ("table", "symbol_concepts_fts_idx"),
+    ("trigger", "symbol_concepts_ai"),
+    ("trigger", "symbol_concepts_ad"),
+    ("trigger", "symbol_concepts_au"),
+    ("trigger", "symbol_concepts_graph_ai"),
+    ("trigger", "symbol_concepts_graph_ad"),
+    ("trigger", "symbol_concepts_graph_au"),
+];
+static CONCEPT_SCHEMA_CONTRACT: OnceLock<Vec<(&'static str, &'static str, String)>> =
+    OnceLock::new();
 const READ_ONLY_SNAPSHOT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const READ_ONLY_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -79,6 +217,7 @@ fn impact_precision_budget() -> WorkBudget {
 #[cfg(test)]
 thread_local! {
     static IMPACT_PRECISION_BUDGET_OVERRIDE: Cell<Option<WorkBudget>> = const { Cell::new(None) };
+    static FAIL_CONCEPT_SCHEMA_AFTER_SHADOW_REPAIR: Cell<bool> = const { Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -516,6 +655,1140 @@ pub struct ProjectHistoryHit {
     pub(crate) matched_terms: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct ConceptDocument {
+    name_search: String,
+    path_search: String,
+    path_sort: String,
+    signature_search: String,
+    documentation_search: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ConceptStoreHit {
+    pub name: String,
+    pub kind: String,
+    pub language: Option<String>,
+    pub path: String,
+    pub line: u32,
+    pub signature_shape: String,
+    pub name_matched: bool,
+    pub path_matched: bool,
+    pub signature_matched: bool,
+    pub documentation_matched: bool,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ConceptFinalizeStats {
+    pub rows: u32,
+    pub orphans_purged: u32,
+}
+
+fn lowercase_concept(value: &str) -> String {
+    value.chars().flat_map(char::to_lowercase).collect()
+}
+
+fn push_concept_term(term: String, seen: &mut HashSet<String>, terms: &mut Vec<String>) {
+    if !term.is_empty() && seen.insert(term.clone()) {
+        terms.push(term);
+    }
+}
+
+fn split_concept_identifier(value: &[char], seen: &mut HashSet<String>, terms: &mut Vec<String>) {
+    if value.is_empty() {
+        return;
+    }
+    let joined = lowercase_concept(
+        &value
+            .iter()
+            .filter(|character| **character != '_' && **character != '-')
+            .collect::<String>(),
+    );
+    push_concept_term(joined, seen, terms);
+
+    for part in value.split(|character| matches!(character, '_' | '-')) {
+        if part.is_empty() {
+            continue;
+        }
+        let mut start = 0usize;
+        for index in 1..part.len() {
+            let previous = part[index - 1];
+            let current = part[index];
+            let next = part.get(index + 1).copied();
+            let lower_to_upper = previous.is_lowercase() && current.is_uppercase();
+            let acronym_to_word = previous.is_uppercase()
+                && current.is_uppercase()
+                && next.is_some_and(char::is_lowercase);
+            let letter_to_digit = previous.is_alphabetic() && current.is_numeric();
+            let digit_to_letter = previous.is_numeric() && current.is_alphabetic();
+            if lower_to_upper || acronym_to_word || letter_to_digit || digit_to_letter {
+                push_concept_term(
+                    lowercase_concept(&part[start..index].iter().collect::<String>()),
+                    seen,
+                    terms,
+                );
+                start = index;
+            }
+        }
+        push_concept_term(
+            lowercase_concept(&part[start..].iter().collect::<String>()),
+            seen,
+            terms,
+        );
+    }
+}
+
+fn normalized_concept_terms(value: &str, formatting_whitespace: bool) -> Option<Vec<String>> {
+    let mut seen = HashSet::new();
+    let mut terms = Vec::new();
+    let mut identifier = Vec::new();
+    for character in value.chars() {
+        if character.is_control() {
+            if formatting_whitespace && matches!(character, '\r' | '\n' | '\t') {
+                split_concept_identifier(&identifier, &mut seen, &mut terms);
+                identifier.clear();
+                continue;
+            }
+            return None;
+        }
+        if character.is_alphanumeric() || matches!(character, '_' | '-') {
+            identifier.push(character);
+        } else {
+            split_concept_identifier(&identifier, &mut seen, &mut terms);
+            identifier.clear();
+        }
+    }
+    split_concept_identifier(&identifier, &mut seen, &mut terms);
+    Some(terms)
+}
+
+/// Query lexical normalization. Index fields use the same splitting and
+/// lowercase rules but additionally admit CR/LF/tab as declaration separators.
+pub(crate) fn concept_terms(value: &str) -> Option<Vec<String>> {
+    normalized_concept_terms(value, false)
+}
+
+fn concept_index_terms(value: &str) -> Option<Vec<String>> {
+    normalized_concept_terms(value, true)
+}
+
+fn concept_path_sort(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => output.push('/'),
+            character if character.is_control() => {
+                output.push_str(&format!("\\u{:06x}", character as u32));
+            }
+            character => output.extend(character.to_lowercase()),
+        }
+    }
+    output
+}
+
+#[derive(Clone, Copy, Default)]
+struct SignatureDialect {
+    hash_line_comments: bool,
+    nested_block_comments: bool,
+    csharp_raw_strings: bool,
+    interpolated_strings: bool,
+    javascript_regex: bool,
+    python_defaults: bool,
+    php_heredoc: bool,
+    cpp_operators: bool,
+}
+
+fn signature_dialect(path: &str) -> SignatureDialect {
+    let language = crate::indexer::guess_language_for(path).unwrap_or_default();
+    SignatureDialect {
+        hash_line_comments: matches!(language, "python" | "php"),
+        nested_block_comments: language == "rust",
+        csharp_raw_strings: language == "csharp",
+        interpolated_strings: matches!(language, "python" | "csharp"),
+        javascript_regex: matches!(language, "javascript" | "typescript" | "tsx" | "vue"),
+        python_defaults: language == "python",
+        php_heredoc: language == "php",
+        cpp_operators: language == "cpp",
+    }
+}
+
+fn php_heredoc_signature_end(characters: &[char], start: usize) -> Option<usize> {
+    if characters.get(start..start + 3) != Some(&['<', '<', '<']) {
+        return None;
+    }
+    let mut cursor = start + 3;
+    while characters
+        .get(cursor)
+        .is_some_and(|character| matches!(character, ' ' | '\t'))
+    {
+        cursor += 1;
+    }
+    let quote = characters
+        .get(cursor)
+        .copied()
+        .filter(|character| matches!(character, '\'' | '"'));
+    if quote.is_some() {
+        cursor += 1;
+    }
+    let label_start = cursor;
+    while characters
+        .get(cursor)
+        .is_some_and(|character| character.is_alphanumeric() || *character == '_')
+    {
+        cursor += 1;
+    }
+    if cursor == label_start {
+        return Some(characters.len());
+    }
+    let label = &characters[label_start..cursor];
+    if let Some(quote) = quote {
+        if characters.get(cursor) != Some(&quote) {
+            return Some(characters.len());
+        }
+        cursor += 1;
+    }
+    while characters
+        .get(cursor)
+        .is_some_and(|character| !matches!(character, '\r' | '\n'))
+    {
+        cursor += 1;
+    }
+    if characters.get(cursor) == Some(&'\r') {
+        cursor += 1;
+    }
+    if characters.get(cursor) == Some(&'\n') {
+        cursor += 1;
+    } else {
+        return Some(characters.len());
+    }
+
+    while cursor < characters.len() {
+        let mut candidate = cursor;
+        while characters
+            .get(candidate)
+            .is_some_and(|character| matches!(character, ' ' | '\t'))
+        {
+            candidate += 1;
+        }
+        if characters.get(candidate..candidate + label.len()) == Some(label) {
+            candidate += label.len();
+            while characters
+                .get(candidate)
+                .is_some_and(|character| matches!(character, ' ' | '\t'))
+            {
+                candidate += 1;
+            }
+            if characters.get(candidate) == Some(&';') {
+                candidate += 1;
+                while characters
+                    .get(candidate)
+                    .is_some_and(|character| matches!(character, ' ' | '\t'))
+                {
+                    candidate += 1;
+                }
+            }
+            if characters.get(candidate) == Some(&',') {
+                return Some(candidate);
+            }
+            if characters
+                .get(candidate)
+                .is_none_or(|character| matches!(character, '\r' | '\n'))
+            {
+                if characters.get(candidate) == Some(&'\r') {
+                    candidate += 1;
+                }
+                if characters.get(candidate) == Some(&'\n') {
+                    candidate += 1;
+                }
+                return Some(candidate);
+            }
+        }
+        while characters
+            .get(cursor)
+            .is_some_and(|character| !matches!(character, '\r' | '\n'))
+        {
+            cursor += 1;
+        }
+        if characters.get(cursor) == Some(&'\r') {
+            cursor += 1;
+        }
+        if characters.get(cursor) == Some(&'\n') {
+            cursor += 1;
+        }
+    }
+    Some(characters.len())
+}
+
+fn quoted_signature_end(characters: &[char], start: usize, dialect: SignatureDialect) -> usize {
+    let quote = characters[start];
+    let quote_run = characters[start..]
+        .iter()
+        .take_while(|character| **character == quote)
+        .count();
+    let csharp_raw = dialect.csharp_raw_strings && quote_run >= 3;
+    let width = if csharp_raw {
+        quote_run
+    } else if quote_run >= 3 {
+        3
+    } else {
+        1
+    };
+    let mut prefix_start = start;
+    while prefix_start > 0
+        && start - prefix_start < 3
+        && matches!(
+            characters[prefix_start - 1],
+            'f' | 'F' | 'r' | 'R' | '$' | '@'
+        )
+    {
+        prefix_start -= 1;
+    }
+    let prefix = characters[prefix_start..start]
+        .iter()
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let prefix_boundary = prefix_start == 0
+        || !characters[prefix_start - 1].is_alphanumeric() && characters[prefix_start - 1] != '_';
+    let interpolated = dialect.interpolated_strings
+        && prefix_boundary
+        && (dialect.python_defaults && matches!(prefix.as_str(), "f" | "fr" | "rf")
+            || dialect.csharp_raw_strings && matches!(prefix.as_str(), "$" | "$@" | "@$"));
+    let doubled_quote_escape = dialect.csharp_raw_strings && prefix.contains('@');
+    let mut interpolation_depth = 0usize;
+    let mut index = start + width;
+    while index < characters.len() {
+        if !csharp_raw && characters[index] == '\\' {
+            index = index.saturating_add(2);
+            continue;
+        }
+        if interpolated && width == 1 {
+            if interpolation_depth > 0 && matches!(characters[index], '\'' | '"') {
+                index = quoted_signature_end(characters, index, SignatureDialect::default());
+                continue;
+            }
+            match characters[index] {
+                '{' if characters.get(index + 1) == Some(&'{') => {
+                    index += 2;
+                    continue;
+                }
+                '{' => {
+                    interpolation_depth += 1;
+                    index += 1;
+                    continue;
+                }
+                '}' if characters.get(index + 1) == Some(&'}') => {
+                    index += 2;
+                    continue;
+                }
+                '}' if interpolation_depth > 0 => {
+                    interpolation_depth -= 1;
+                    index += 1;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        if interpolation_depth == 0
+            && (0..width).all(|offset| characters.get(index + offset) == Some(&quote))
+        {
+            if doubled_quote_escape && characters.get(index + width) == Some(&quote) {
+                index += width + 1;
+                continue;
+            }
+            return index + width;
+        }
+        index += 1;
+    }
+    characters.len()
+}
+
+fn rust_raw_signature_end(characters: &[char], start: usize) -> Option<usize> {
+    let boundary =
+        start == 0 || !characters[start - 1].is_alphanumeric() && characters[start - 1] != '_';
+    if !boundary {
+        return None;
+    }
+    let mut cursor = start;
+    if matches!(characters.get(cursor), Some('b' | 'c')) {
+        cursor += 1;
+    }
+    if characters.get(cursor) != Some(&'r') {
+        return None;
+    }
+    cursor += 1;
+    let hashes_start = cursor;
+    while characters.get(cursor) == Some(&'#') && cursor - hashes_start <= 255 {
+        cursor += 1;
+    }
+    let hashes = cursor - hashes_start;
+    if hashes > 255 || characters.get(cursor) != Some(&'"') {
+        return None;
+    }
+    cursor += 1;
+    while cursor < characters.len() {
+        if characters[cursor] == '"'
+            && (0..hashes).all(|offset| characters.get(cursor + 1 + offset) == Some(&'#'))
+        {
+            return Some(cursor + 1 + hashes);
+        }
+        cursor += 1;
+    }
+    Some(characters.len())
+}
+
+fn cpp_raw_signature_end(characters: &[char], start: usize) -> Option<usize> {
+    let boundary =
+        start == 0 || !characters[start - 1].is_alphanumeric() && characters[start - 1] != '_';
+    if !boundary {
+        return None;
+    }
+    let raw_prefix_end = match characters.get(start..) {
+        Some(['R', '"', ..]) => start + 1,
+        Some(['L' | 'u' | 'U', 'R', '"', ..]) => start + 2,
+        Some(['u', '8', 'R', '"', ..]) => start + 3,
+        _ => return None,
+    };
+    let mut open = raw_prefix_end + 1;
+    while open < characters.len()
+        && open - (raw_prefix_end + 1) <= 16
+        && characters[open] != '('
+        && !characters[open].is_whitespace()
+        && !matches!(characters[open], '\\' | ')')
+    {
+        open += 1;
+    }
+    if open - (raw_prefix_end + 1) > 16 || characters.get(open) != Some(&'(') {
+        return None;
+    }
+    let delimiter = &characters[raw_prefix_end + 1..open];
+    let mut cursor = open + 1;
+    while cursor < characters.len() {
+        if characters[cursor] == ')'
+            && characters.get(cursor + 1..cursor + 1 + delimiter.len()) == Some(delimiter)
+            && characters.get(cursor + 1 + delimiter.len()) == Some(&'"')
+        {
+            return Some(cursor + 2 + delimiter.len());
+        }
+        cursor += 1;
+    }
+    Some(characters.len())
+}
+
+fn raw_signature_end(characters: &[char], start: usize) -> Option<usize> {
+    rust_raw_signature_end(characters, start).or_else(|| cpp_raw_signature_end(characters, start))
+}
+
+fn template_signature_end(characters: &[char], start: usize) -> Option<usize> {
+    if characters.get(start) != Some(&'`') {
+        return None;
+    }
+
+    #[derive(Clone, Copy)]
+    enum Mode {
+        Template,
+        Expression { depth: usize, regex_allowed: bool },
+    }
+
+    let mut modes = vec![Mode::Template];
+    let mut index = start + 1;
+    while index < characters.len() {
+        match modes.last().copied().unwrap_or(Mode::Template) {
+            Mode::Template => match characters[index] {
+                '\\' => index = index.saturating_add(2),
+                '$' if characters.get(index + 1) == Some(&'{') => {
+                    modes.push(Mode::Expression {
+                        depth: 1,
+                        regex_allowed: true,
+                    });
+                    index += 2;
+                }
+                '`' => {
+                    modes.pop();
+                    index += 1;
+                    if modes.is_empty() {
+                        return Some(index);
+                    }
+                }
+                _ => index += 1,
+            },
+            Mode::Expression {
+                depth,
+                regex_allowed,
+            } => {
+                if let Some(end) = comment_signature_end(
+                    characters,
+                    index,
+                    SignatureDialect {
+                        javascript_regex: true,
+                        ..SignatureDialect::default()
+                    },
+                ) {
+                    index = end;
+                    continue;
+                }
+                if matches!(characters[index], '\'' | '"') {
+                    index = quoted_signature_end(characters, index, SignatureDialect::default());
+                    *modes.last_mut().expect("template expression exists") = Mode::Expression {
+                        depth,
+                        regex_allowed: false,
+                    };
+                    continue;
+                }
+                if characters[index].is_alphabetic() || matches!(characters[index], '_' | '$') {
+                    let token_start = index;
+                    index += 1;
+                    while characters.get(index).is_some_and(|character| {
+                        character.is_alphanumeric() || matches!(character, '_' | '$')
+                    }) {
+                        index += 1;
+                    }
+                    let token = characters[token_start..index].iter().collect::<String>();
+                    *modes.last_mut().expect("template expression exists") = Mode::Expression {
+                        depth,
+                        regex_allowed: matches!(
+                            token.as_str(),
+                            "await"
+                                | "case"
+                                | "delete"
+                                | "do"
+                                | "else"
+                                | "in"
+                                | "instanceof"
+                                | "new"
+                                | "of"
+                                | "return"
+                                | "throw"
+                                | "typeof"
+                                | "void"
+                                | "yield"
+                        ),
+                    };
+                    continue;
+                }
+                match characters[index] {
+                    '`' => {
+                        *modes.last_mut().expect("template expression exists") = Mode::Expression {
+                            depth,
+                            regex_allowed: false,
+                        };
+                        modes.push(Mode::Template);
+                        index += 1;
+                    }
+                    '{' => {
+                        *modes.last_mut().expect("template mode exists") = Mode::Expression {
+                            depth: depth + 1,
+                            regex_allowed: true,
+                        };
+                        index += 1;
+                    }
+                    '}' if depth == 1 => {
+                        modes.pop();
+                        index += 1;
+                    }
+                    '}' => {
+                        *modes.last_mut().expect("template mode exists") = Mode::Expression {
+                            depth: depth - 1,
+                            regex_allowed: false,
+                        };
+                        index += 1;
+                    }
+                    '/' => {
+                        if regex_allowed {
+                            if let Some(end) = js_regex_signature_end(characters, index) {
+                                index = end;
+                                *modes.last_mut().expect("template expression exists") =
+                                    Mode::Expression {
+                                        depth,
+                                        regex_allowed: false,
+                                    };
+                                continue;
+                            }
+                        }
+                        index += 1;
+                        *modes.last_mut().expect("template expression exists") = Mode::Expression {
+                            depth,
+                            regex_allowed: true,
+                        };
+                    }
+                    '(' | '[' | ',' | ':' | '?' | '!' | '&' | '|' | '+' | '-' | '*' | '%' | '^'
+                    | '~' | '=' => {
+                        index += 1;
+                        *modes.last_mut().expect("template expression exists") = Mode::Expression {
+                            depth,
+                            regex_allowed: true,
+                        };
+                    }
+                    ')' | ']' => {
+                        index += 1;
+                        *modes.last_mut().expect("template expression exists") = Mode::Expression {
+                            depth,
+                            regex_allowed: false,
+                        };
+                    }
+                    character if character.is_whitespace() => index += 1,
+                    _ => {
+                        index += 1;
+                        *modes.last_mut().expect("template expression exists") = Mode::Expression {
+                            depth,
+                            regex_allowed: false,
+                        };
+                    }
+                }
+            }
+        }
+    }
+    Some(characters.len())
+}
+
+fn comment_signature_end(
+    characters: &[char],
+    start: usize,
+    dialect: SignatureDialect,
+) -> Option<usize> {
+    match (characters.get(start), characters.get(start + 1)) {
+        (Some('#'), _) if dialect.hash_line_comments => {
+            let content_start = start + 1;
+            Some(
+                characters[content_start..]
+                    .iter()
+                    .position(|character| matches!(character, '\r' | '\n'))
+                    .map_or(characters.len(), |offset| content_start + offset),
+            )
+        }
+        (Some('/'), Some('/')) => {
+            let content_start = start + usize::from(characters[start] == '/') + 1;
+            Some(
+                characters[content_start..]
+                    .iter()
+                    .position(|character| matches!(character, '\r' | '\n'))
+                    .map_or(characters.len(), |offset| content_start + offset),
+            )
+        }
+        (Some('/'), Some('*')) => {
+            let mut index = start + 2;
+            let mut depth = 1usize;
+            while index + 1 < characters.len() {
+                if dialect.nested_block_comments
+                    && characters[index] == '/'
+                    && characters[index + 1] == '*'
+                {
+                    depth += 1;
+                    index += 2;
+                    continue;
+                }
+                if characters[index] == '*' && characters[index + 1] == '/' {
+                    depth -= 1;
+                    index += 2;
+                    if depth == 0 {
+                        return Some(index);
+                    }
+                    continue;
+                }
+                index += 1;
+            }
+            Some(characters.len())
+        }
+        _ => None,
+    }
+}
+
+fn rust_lifetime_start(characters: &[char], start: usize) -> bool {
+    if characters.get(start) != Some(&'\'') {
+        return false;
+    }
+    let Some(first) = characters.get(start + 1) else {
+        return false;
+    };
+    if !first.is_alphabetic() && *first != '_' {
+        return false;
+    }
+    let mut end = start + 2;
+    while characters
+        .get(end)
+        .is_some_and(|character| character.is_alphanumeric() || *character == '_')
+    {
+        end += 1;
+    }
+    characters.get(end) != Some(&'\'')
+}
+
+fn js_regex_signature_end(characters: &[char], start: usize) -> Option<usize> {
+    if characters.get(start) != Some(&'/') || matches!(characters.get(start + 1), Some('/' | '*')) {
+        return None;
+    }
+    let mut index = start + 1;
+    let mut in_class = false;
+    while index < characters.len() {
+        match characters[index] {
+            '\\' => index = index.saturating_add(2),
+            '[' => {
+                in_class = true;
+                index += 1;
+            }
+            ']' => {
+                in_class = false;
+                index += 1;
+            }
+            '/' if !in_class => {
+                index += 1;
+                while characters
+                    .get(index)
+                    .is_some_and(|character| character.is_alphabetic())
+                {
+                    index += 1;
+                }
+                return Some(index);
+            }
+            _ => index += 1,
+        }
+    }
+    Some(characters.len())
+}
+
+fn previous_non_whitespace(characters: &[char], index: usize) -> Option<usize> {
+    (0..index)
+        .rev()
+        .find(|candidate| !characters[*candidate].is_whitespace())
+}
+
+fn next_non_whitespace(characters: &[char], index: usize) -> Option<usize> {
+    (index + 1..characters.len()).find(|candidate| !characters[*candidate].is_whitespace())
+}
+
+fn generic_angle_has_close(characters: &[char], start: usize) -> bool {
+    let (mut angles, mut parentheses, mut brackets, mut braces) = (1usize, 0usize, 0usize, 0usize);
+    let mut index = start + 1;
+    while index < characters.len() {
+        if let Some(end) = raw_signature_end(characters, index) {
+            index = end;
+            continue;
+        }
+        if let Some(end) = template_signature_end(characters, index) {
+            index = end;
+            continue;
+        }
+        if let Some(end) = comment_signature_end(characters, index, SignatureDialect::default()) {
+            index = end;
+            continue;
+        }
+        if matches!(characters[index], '\'' | '"') {
+            index = quoted_signature_end(characters, index, SignatureDialect::default());
+            continue;
+        }
+        match characters[index] {
+            '(' => parentheses += 1,
+            ')' if parentheses == 0 && brackets == 0 && braces == 0 => return false,
+            ')' => parentheses = parentheses.saturating_sub(1),
+            '[' => brackets += 1,
+            ']' if brackets == 0 && parentheses == 0 && braces == 0 => return false,
+            ']' => brackets = brackets.saturating_sub(1),
+            '{' => braces += 1,
+            '}' if braces == 0 && parentheses == 0 && brackets == 0 => return false,
+            '}' => braces = braces.saturating_sub(1),
+            '<' if !matches!(characters.get(index + 1), Some('<' | '=')) => angles += 1,
+            '>' if !matches!(characters.get(index + 1), Some('=')) => {
+                angles -= 1;
+                if angles == 0 {
+                    return true;
+                }
+            }
+            ';' if parentheses == 0 && brackets == 0 && braces == 0 => return false,
+            _ => {}
+        }
+        index += 1;
+    }
+    false
+}
+
+fn generic_angle_open(characters: &[char], index: usize) -> bool {
+    if characters.get(index) != Some(&'<') || matches!(characters.get(index + 1), Some('<' | '=')) {
+        return false;
+    }
+    let Some(previous) = previous_non_whitespace(characters, index) else {
+        return false;
+    };
+    let Some(next) = next_non_whitespace(characters, index) else {
+        return false;
+    };
+    if !matches!(characters[previous], '>' | ':' | ')' | ']')
+        && !characters[previous].is_alphanumeric()
+        && characters[previous] != '_'
+    {
+        return false;
+    }
+    !matches!(
+        characters[next],
+        '<' | '=' | '>' | ',' | ';' | ')' | ']' | '}'
+    ) && generic_angle_has_close(characters, index)
+}
+
+fn cpp_operator_equals(characters: &[char], index: usize) -> bool {
+    let mut cursor = index;
+    while cursor > 0 && characters[cursor - 1].is_whitespace() {
+        cursor -= 1;
+    }
+    while cursor > 0
+        && matches!(
+            characters[cursor - 1],
+            '+' | '-' | '*' | '/' | '%' | '&' | '|' | '^' | '!' | '<' | '>' | '~'
+        )
+    {
+        cursor -= 1;
+    }
+    while cursor > 0 && characters[cursor - 1].is_whitespace() {
+        cursor -= 1;
+    }
+    let end = cursor;
+    while cursor > 0 && (characters[cursor - 1].is_alphanumeric() || characters[cursor - 1] == '_')
+    {
+        cursor -= 1;
+    }
+    characters[cursor..end].iter().collect::<String>() == "operator"
+}
+
+fn standalone_default_equals(characters: &[char], index: usize, dialect: SignatureDialect) -> bool {
+    if characters.get(index) != Some(&'=') {
+        return false;
+    }
+    if dialect.cpp_operators && cpp_operator_equals(characters, index) {
+        return false;
+    }
+    let previous =
+        previous_non_whitespace(characters, index).and_then(|value| characters.get(value));
+    let next = characters.get(index + 1);
+    !previous.is_some_and(|value| {
+        matches!(
+            value,
+            '=' | '!' | '<' | '>' | '-' | ':' | '+' | '*' | '/' | '%' | '&' | '|' | '^'
+        )
+    }) && !next.is_some_and(|value| matches!(value, '=' | '>'))
+}
+
+fn skip_signature_default(
+    characters: &[char],
+    start: usize,
+    base_depth: (usize, usize, usize, usize),
+    dialect: SignatureDialect,
+) -> usize {
+    let (mut parentheses, mut brackets, mut braces, mut angles) = base_depth;
+    let mut index = start;
+    let mut regex_allowed = true;
+    let mut python_lambda_parameters = 0usize;
+    while index < characters.len() {
+        if dialect.php_heredoc {
+            if let Some(end) = php_heredoc_signature_end(characters, index) {
+                index = end;
+                regex_allowed = false;
+                continue;
+            }
+        }
+        if let Some(end) = raw_signature_end(characters, index) {
+            index = end;
+            regex_allowed = false;
+            continue;
+        }
+        if let Some(end) = template_signature_end(characters, index) {
+            index = end;
+            regex_allowed = false;
+            continue;
+        }
+        if let Some(end) = comment_signature_end(characters, index, dialect) {
+            index = end;
+            continue;
+        }
+        if characters[index] == '\'' && rust_lifetime_start(characters, index) {
+            index += 1;
+            regex_allowed = false;
+            continue;
+        }
+        if matches!(characters[index], '\'' | '"') {
+            index = quoted_signature_end(characters, index, dialect);
+            regex_allowed = false;
+            continue;
+        }
+        if dialect.javascript_regex && characters[index] == '/' && regex_allowed {
+            if let Some(end) = js_regex_signature_end(characters, index) {
+                index = end;
+                regex_allowed = false;
+                continue;
+            }
+        }
+        if dialect.python_defaults
+            && (parentheses, brackets, braces, angles) == base_depth
+            && characters[index..].starts_with(&['l', 'a', 'm', 'b', 'd', 'a'])
+            && (index == 0
+                || !characters[index - 1].is_alphanumeric() && characters[index - 1] != '_')
+            && characters
+                .get(index + 6)
+                .is_none_or(|character| !character.is_alphanumeric() && *character != '_')
+        {
+            python_lambda_parameters += 1;
+            index += 6;
+            regex_allowed = false;
+            continue;
+        }
+        match characters[index] {
+            '(' => {
+                parentheses += 1;
+                regex_allowed = true;
+            }
+            ')' if parentheses == base_depth.0 => return index,
+            ')' => {
+                parentheses = parentheses.saturating_sub(1);
+                regex_allowed = false;
+            }
+            '[' => {
+                brackets += 1;
+                regex_allowed = true;
+            }
+            ']' if brackets == base_depth.1 => return index,
+            ']' => {
+                brackets = brackets.saturating_sub(1);
+                regex_allowed = false;
+            }
+            '{' => {
+                braces += 1;
+                regex_allowed = true;
+            }
+            '}' if braces == base_depth.2 => return index,
+            '}' => {
+                braces = braces.saturating_sub(1);
+                regex_allowed = false;
+            }
+            '<' if generic_angle_open(characters, index) => {
+                angles += 1;
+                regex_allowed = true;
+            }
+            '>' if angles > base_depth.3 => {
+                angles -= 1;
+                regex_allowed = false;
+            }
+            ':' if dialect.python_defaults
+                && python_lambda_parameters > 0
+                && (parentheses, brackets, braces, angles) == base_depth =>
+            {
+                python_lambda_parameters -= 1;
+                regex_allowed = true;
+            }
+            ',' if dialect.python_defaults
+                && python_lambda_parameters > 0
+                && (parentheses, brackets, braces, angles) == base_depth =>
+            {
+                regex_allowed = true;
+            }
+            ',' | ';' if (parentheses, brackets, braces, angles) == base_depth => {
+                return index + usize::from(characters[index] == ',');
+            }
+            character if character.is_whitespace() => {}
+            '=' | ':' | '?' | '!' | '&' | '|' | '+' | '-' | '*' | '/' | '%' | '^' | '~' => {
+                regex_allowed = true;
+            }
+            _ => regex_allowed = false,
+        }
+        index += 1;
+    }
+    index
+}
+
+fn redact_signature(value: &str, dialect: SignatureDialect) -> Option<String> {
+    if value.len() > CONCEPT_SIGNATURE_SCAN_MAX_BYTES {
+        return None;
+    }
+    let characters = value.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(value.len().min(CONCEPT_SIGNATURE_MAX_BYTES));
+    let (mut parentheses, mut brackets, mut braces, mut angles) = (0, 0, 0, 0);
+    let mut index = 0usize;
+    let mut regex_allowed = true;
+    while index < characters.len() {
+        if characters[index].is_control() {
+            if matches!(characters[index], '\r' | '\n' | '\t') {
+                output.push(' ');
+                index += 1;
+                continue;
+            }
+            return None;
+        }
+        if dialect.php_heredoc {
+            if let Some(end) = php_heredoc_signature_end(&characters, index) {
+                output.push(' ');
+                index = end;
+                regex_allowed = false;
+                continue;
+            }
+        }
+        if let Some(end) = raw_signature_end(&characters, index) {
+            output.push(' ');
+            index = end;
+            regex_allowed = false;
+            continue;
+        }
+        if let Some(end) = template_signature_end(&characters, index) {
+            output.push(' ');
+            index = end;
+            regex_allowed = false;
+            continue;
+        }
+        if let Some(end) = comment_signature_end(&characters, index, dialect) {
+            output.push(' ');
+            index = end;
+            continue;
+        }
+        if characters[index] == '\'' && rust_lifetime_start(&characters, index) {
+            output.push(characters[index]);
+            index += 1;
+            regex_allowed = false;
+            continue;
+        }
+        if matches!(characters[index], '\'' | '"') {
+            output.push(' ');
+            index = quoted_signature_end(&characters, index, dialect);
+            regex_allowed = false;
+            continue;
+        }
+        if dialect.javascript_regex && characters[index] == '/' && regex_allowed {
+            if let Some(end) = js_regex_signature_end(&characters, index) {
+                output.push(' ');
+                index = end;
+                regex_allowed = false;
+                continue;
+            }
+        }
+        if standalone_default_equals(&characters, index, dialect) {
+            output.push(' ');
+            index = skip_signature_default(
+                &characters,
+                index + 1,
+                (parentheses, brackets, braces, angles),
+                dialect,
+            );
+            regex_allowed = true;
+            continue;
+        }
+        let numeric_boundary =
+            index == 0 || !characters[index - 1].is_alphanumeric() && characters[index - 1] != '_';
+        if characters[index].is_ascii_digit() && numeric_boundary {
+            output.push(' ');
+            index += 1;
+            while index < characters.len()
+                && (characters[index].is_alphanumeric()
+                    || matches!(characters[index], '_' | '.' | '+' | '-'))
+            {
+                index += 1;
+            }
+            regex_allowed = false;
+            continue;
+        }
+        match characters[index] {
+            '(' => {
+                parentheses += 1;
+                regex_allowed = true;
+            }
+            ')' => {
+                parentheses = parentheses.saturating_sub(1);
+                regex_allowed = false;
+            }
+            '[' => {
+                brackets += 1;
+                regex_allowed = true;
+            }
+            ']' => {
+                brackets = brackets.saturating_sub(1);
+                regex_allowed = false;
+            }
+            '{' => {
+                braces += 1;
+                regex_allowed = true;
+            }
+            '}' => {
+                braces = braces.saturating_sub(1);
+                regex_allowed = false;
+            }
+            '<' if generic_angle_open(&characters, index) => {
+                angles += 1;
+                regex_allowed = true;
+            }
+            '>' => {
+                angles = angles.saturating_sub(1);
+                regex_allowed = false;
+            }
+            character if character.is_whitespace() => {}
+            '=' | ':' | '?' | '!' | '&' | '|' | '+' | '-' | '*' | '/' | '%' | '^' | '~' | ',' => {
+                regex_allowed = true;
+            }
+            _ => regex_allowed = false,
+        }
+        output.push(characters[index]);
+        index += 1;
+    }
+    Some(output)
+}
+
+fn bounded_concept_field(value: &str, byte_limit: usize) -> Option<String> {
+    let terms = concept_index_terms(value)?;
+    let mut output = String::new();
+    for term in terms.into_iter().take(CONCEPT_INDEX_TERM_LIMIT) {
+        if term.len() > CONCEPT_TERM_MAX_BYTES {
+            continue;
+        }
+        let separator = usize::from(!output.is_empty());
+        if output
+            .len()
+            .saturating_add(separator)
+            .saturating_add(term.len())
+            > byte_limit
+        {
+            break;
+        }
+        if separator == 1 {
+            output.push(' ');
+        }
+        output.push_str(&term);
+    }
+    Some(output)
+}
+
+fn concept_document(name: &str, path: &str, signature: Option<&str>) -> ConceptDocument {
+    let name_search = bounded_concept_field(name, CONCEPT_FIELD_MAX_BYTES).unwrap_or_default();
+    let path_search = bounded_concept_field(path, CONCEPT_FIELD_MAX_BYTES).unwrap_or_default();
+    let signature_search = signature
+        .and_then(|value| redact_signature(value, signature_dialect(path)))
+        .and_then(|value| bounded_concept_field(&value, CONCEPT_SIGNATURE_MAX_BYTES))
+        .unwrap_or_default();
+    ConceptDocument {
+        name_search,
+        path_search,
+        path_sort: concept_path_sort(path),
+        signature_search,
+        documentation_search: String::new(),
+    }
+}
+
+fn insert_concept_document(
+    connection: &Connection,
+    symbol_id: i64,
+    name: &str,
+    path: &str,
+    signature: Option<&str>,
+) -> SqlResult<()> {
+    let document = concept_document(name, path, signature);
+    connection.execute(
+        "INSERT INTO symbol_concepts(
+             symbol_id, name_search, path_search, path_sort, signature_search,
+             documentation_search
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            symbol_id,
+            document.name_search,
+            document.path_search,
+            document.path_sort,
+            document.signature_search,
+            document.documentation_search
+        ],
+    )?;
+    Ok(())
+}
+
 fn highlighted_fts_terms(values: [&str; 2]) -> Vec<String> {
     const START: char = '\u{001e}';
     const END: char = '\u{001f}';
@@ -668,6 +1941,148 @@ fn sqlite_sidecar_path(db_path: &Path, suffix: &str) -> PathBuf {
     let mut value = db_path.as_os_str().to_os_string();
     value.push(suffix);
     PathBuf::from(value)
+}
+
+fn normalized_schema_sql(value: &str) -> String {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Quote {
+        Single,
+        Double,
+        Backtick,
+        Bracket,
+    }
+
+    let characters = value.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(value.len());
+    let mut quote = None;
+    let mut index = 0usize;
+    while index < characters.len() {
+        let character = characters[index];
+        if let Some(active) = quote {
+            output.push(character);
+            let closing = match active {
+                Quote::Single => '\'',
+                Quote::Double => '"',
+                Quote::Backtick => '`',
+                Quote::Bracket => ']',
+            };
+            if character == closing {
+                if characters.get(index + 1) == Some(&closing) {
+                    output.push(closing);
+                    index += 2;
+                    continue;
+                }
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        quote = match character {
+            '\'' => Some(Quote::Single),
+            '"' => Some(Quote::Double),
+            '`' => Some(Quote::Backtick),
+            '[' => Some(Quote::Bracket),
+            _ => None,
+        };
+        if quote.is_some() {
+            output.push(character);
+        } else if !character.is_whitespace() {
+            output.extend(character.to_lowercase());
+        }
+        index += 1;
+    }
+    output
+}
+
+fn concept_schema_contract() -> &'static [(&'static str, &'static str, String)] {
+    CONCEPT_SCHEMA_CONTRACT.get_or_init(|| {
+        let connection = Connection::open_in_memory()
+            .expect("constant concept schema contract must open an in-memory database");
+        connection
+            .execute_batch(
+                "CREATE TABLE symbols(id INTEGER PRIMARY KEY);
+                 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+            )
+            .expect("constant concept schema prerequisites must be valid");
+        connection
+            .execute_batch(CONCEPT_SCHEMA_DDL)
+            .expect("constant concept schema DDL must be valid");
+        CONCEPT_SCHEMA_OBJECTS
+            .iter()
+            .map(|&(object_type, name)| {
+                let sql: String = connection
+                    .query_row(
+                        "SELECT sql FROM sqlite_master WHERE type = ?1 AND name = ?2",
+                        params![object_type, name],
+                        |row| row.get(0),
+                    )
+                    .expect("constant concept schema object must exist");
+                (object_type, name, normalized_schema_sql(&sql))
+            })
+            .collect()
+    })
+}
+
+fn schema_object_sql(
+    connection: &Connection,
+    object_type: &str,
+    name: &str,
+) -> SqlResult<Option<String>> {
+    connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = ?1 AND name = ?2",
+            params![object_type, name],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map(Option::flatten)
+}
+
+fn concept_schema_object_current_on(
+    connection: &Connection,
+    object_type: &str,
+    name: &str,
+) -> SqlResult<bool> {
+    let Some((_, _, expected_sql)) =
+        concept_schema_contract()
+            .iter()
+            .find(|(expected_type, expected_name, _)| {
+                *expected_type == object_type && *expected_name == name
+            })
+    else {
+        return Ok(false);
+    };
+    Ok(schema_object_sql(connection, object_type, name)?
+        .is_some_and(|sql| normalized_schema_sql(&sql) == *expected_sql))
+}
+
+fn retire_schema_object_name(connection: &Connection, name: &str) -> SqlResult<()> {
+    let mut statement = connection.prepare(
+        "SELECT type FROM sqlite_master
+         WHERE name = ?1 AND type IN ('trigger', 'index', 'view', 'table')
+         ORDER BY CASE type
+             WHEN 'trigger' THEN 1
+             WHEN 'index' THEN 2
+             WHEN 'view' THEN 3
+             ELSE 4
+         END",
+    )?;
+    let object_types = statement
+        .query_map([name], |row| row.get::<_, String>(0))?
+        .collect::<SqlResult<Vec<_>>>()?;
+    drop(statement);
+    let quoted_name = name.replace('"', "\"\"");
+    for object_type in object_types {
+        let keyword = match object_type.as_str() {
+            "trigger" => "TRIGGER",
+            "index" => "INDEX",
+            "view" => "VIEW",
+            "table" => "TABLE",
+            _ => continue,
+        };
+        connection.execute_batch(&format!("DROP {keyword} IF EXISTS \"{quoted_name}\";"))?;
+    }
+    Ok(())
 }
 
 fn sqlite_bounded_error(
@@ -1165,6 +2580,7 @@ impl Store {
         if !snapshot.schema_current()? {
             return Err(rusqlite::Error::InvalidQuery);
         }
+        snapshot.init_schema()?;
         Ok(snapshot)
     }
 
@@ -1527,6 +2943,7 @@ impl Store {
                     "[mmcg] schema version mismatch (have {:?}, need {}). Rebuilding — re-run `mastermind index <root>` to repopulate.",
                     stored, SCHEMA_VERSION
                 );
+                self.conn.execute_batch(CONCEPT_SCHEMA_DROP_SQL)?;
                 self.conn.execute_batch(
                     r#"
                     DROP TABLE IF EXISTS edges;
@@ -1536,6 +2953,12 @@ impl Store {
                     DROP TABLE IF EXISTS task_specs_fts;
                     "#,
                 )?;
+            } else {
+                // Repair a partially missing FTS5 corpus before the general
+                // CREATE TABLE batch asks SQLite to initialize its broken
+                // virtual-table module. The rebuilt corpus remains dirty until
+                // a successful full index finalizes it.
+                self.ensure_concept_schema()?;
             }
         }
 
@@ -1854,6 +3277,76 @@ impl Store {
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![SCHEMA_VERSION],
         )?;
+        self.ensure_concept_schema()?;
+        Ok(())
+    }
+
+    fn concept_schema_objects_current_on(connection: &Connection) -> SqlResult<bool> {
+        for (object_type, name, _) in concept_schema_contract() {
+            if !concept_schema_object_current_on(connection, object_type, name)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn concept_schema_objects_current(&self) -> SqlResult<bool> {
+        Self::concept_schema_objects_current_on(&self.conn)
+    }
+
+    pub(crate) fn ensure_concept_schema(&self) -> SqlResult<()> {
+        if self.concept_schema_objects_current()? {
+            return Ok(());
+        }
+        let virtual_table_sql = schema_object_sql(&self.conn, "table", "symbol_concepts_fts")?;
+        let virtual_table_uses_fts5 = virtual_table_sql.as_deref().is_some_and(|sql| {
+            let normalized = normalized_schema_sql(sql);
+            normalized.starts_with("createvirtualtable") && normalized.contains("usingfts5(")
+        });
+        let tx = self.conn.unchecked_transaction()?;
+        if virtual_table_uses_fts5 {
+            // SQLite cannot drop an FTS5 virtual table from a newly opened
+            // connection when a generated shadow table is absent or malformed.
+            // Retire wrong-type/wrong-DDL collisions, then recreate only the
+            // disposable minimum needed for the constructor. This same
+            // transaction drops and rebuilds the complete corpus.
+            for shadow in CONCEPT_SHADOW_NAMES {
+                if !concept_schema_object_current_on(&tx, "table", shadow)? {
+                    retire_schema_object_name(&tx, shadow)?;
+                }
+            }
+            tx.execute_batch(CONCEPT_SHADOW_REPAIR_SQL)?;
+            #[cfg(test)]
+            if FAIL_CONCEPT_SCHEMA_AFTER_SHADOW_REPAIR.with(Cell::get) {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        } else {
+            // A damaged schema can lose or replace only the virtual-table row
+            // while generated shadows remain. Every name is private derived
+            // state, so retire any table/view/index collision before rebuild.
+            retire_schema_object_name(&tx, "symbol_concepts_fts")?;
+            for shadow in CONCEPT_SHADOW_NAMES {
+                retire_schema_object_name(&tx, shadow)?;
+            }
+        }
+        for trigger in CONCEPT_TRIGGER_NAMES {
+            retire_schema_object_name(&tx, trigger)?;
+        }
+        retire_schema_object_name(&tx, "symbol_concepts_fts")?;
+        for shadow in CONCEPT_SHADOW_NAMES {
+            retire_schema_object_name(&tx, shadow)?;
+        }
+        retire_schema_object_name(&tx, "symbol_concepts")?;
+        tx.execute_batch(CONCEPT_SCHEMA_DDL)?;
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![CONCEPT_NORMALIZATION_META_KEY, CONCEPT_CONTRACT_DIRTY],
+        )?;
+        tx.commit()?;
+        if !self.concept_schema_objects_current()? {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         Ok(())
     }
 
@@ -2632,20 +4125,33 @@ impl Store {
     /// Wipe everything related to a single file before re-indexing it.
     /// Foreign keys CASCADE delete edges + child symbols.
     pub fn purge_file(&self, file_path: &str) -> SqlResult<()> {
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "DELETE FROM symbols WHERE file_path = ?1",
-            params![file_path],
-        )?;
-        tx.execute("DELETE FROM files WHERE path = ?1", params![file_path])?;
-        tx.commit()?;
-        Ok(())
+        let result = (|| {
+            let tx = self.conn.unchecked_transaction()?;
+            let restore_contract = Self::incremental_concept_contract_current_on(&tx)?;
+            tx.execute(
+                "DELETE FROM symbols WHERE file_path = ?1",
+                params![file_path],
+            )?;
+            tx.execute("DELETE FROM files WHERE path = ?1", params![file_path])?;
+            if restore_contract {
+                Self::set_concept_contract_current(&tx)?;
+            }
+            tx.commit()
+        })();
+        if result.is_err() {
+            // A failing delete trigger rolls its dirty-marker write back with the
+            // file transaction. Persist the marker separately so a later file
+            // commit cannot make an unpurged path queryable as current.
+            let _ = self.mark_concept_contract_dirty();
+        }
+        result
     }
 
     /// Commit a parsed file's symbols and edges in a single transaction.
     /// Hot path during indexing — keep it batched.
     pub fn commit_file(&mut self, pending: PendingFile) -> SqlResult<()> {
         let tx = self.conn.transaction()?;
+        let restore_contract = Self::incremental_concept_contract_current_on(&tx)?;
 
         // Purge any existing data for this file.
         tx.execute(
@@ -2681,7 +4187,15 @@ impl Store {
                     s.decorators,
                     production
                 ])?;
-                symbol_ids.push(tx.last_insert_rowid());
+                let symbol_id = tx.last_insert_rowid();
+                insert_concept_document(
+                    &tx,
+                    symbol_id,
+                    &s.name,
+                    &pending.path,
+                    s.signature.as_deref(),
+                )?;
+                symbol_ids.push(symbol_id);
             }
         }
 
@@ -2714,6 +4228,9 @@ impl Store {
             ],
         )?;
 
+        if restore_contract {
+            Self::set_concept_contract_current(&tx)?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -2729,21 +4246,49 @@ impl Store {
         signature: Option<&str>,
         parent_id: Option<i64>,
     ) -> SqlResult<i64> {
-        self.conn.execute(
-            "INSERT INTO symbols(name, kind, file_path, line_start, line_end, signature, parent_id, production)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                name,
-                kind,
-                file_path,
-                line_start,
-                line_end,
-                signature,
-                parent_id,
-                is_production_path(file_path)
-            ],
-        )?;
-        Ok(self.conn.last_insert_rowid())
+        let sequence = INSERT_SYMBOL_SAVEPOINT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let savepoint = format!("mmcg_insert_symbol_{sequence}");
+        self.conn.execute_batch(&format!("SAVEPOINT {savepoint}"))?;
+        let result = (|| {
+            let restore_contract = Self::incremental_concept_contract_current_on(&self.conn)?;
+            self.conn.execute(
+                "INSERT INTO symbols(name, kind, file_path, line_start, line_end, signature, parent_id, production)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    name,
+                    kind,
+                    file_path,
+                    line_start,
+                    line_end,
+                    signature,
+                    parent_id,
+                    is_production_path(file_path)
+                ],
+            )?;
+            let symbol_id = self.conn.last_insert_rowid();
+            insert_concept_document(&self.conn, symbol_id, name, file_path, signature)?;
+            if restore_contract {
+                Self::set_concept_contract_current(&self.conn)?;
+            }
+            Ok(symbol_id)
+        })();
+        match result {
+            Ok(symbol_id) => {
+                if let Err(error) = self.conn.execute_batch(&format!("RELEASE {savepoint}")) {
+                    let _ = self
+                        .conn
+                        .execute_batch(&format!("ROLLBACK TO {savepoint}; RELEASE {savepoint}"));
+                    return Err(error);
+                }
+                Ok(symbol_id)
+            }
+            Err(error) => {
+                let _ = self
+                    .conn
+                    .execute_batch(&format!("ROLLBACK TO {savepoint}; RELEASE {savepoint}"));
+                Err(error)
+            }
+        }
     }
 
     pub fn insert_edge(
@@ -2859,6 +4404,133 @@ impl Store {
             .meta_value(crate::indexer::EXTRACTOR_CONTRACT_META_KEY)?
             .as_deref()
             == Some(crate::indexer::EXTRACTOR_CONTRACT_VERSION))
+    }
+
+    pub fn concept_contract_current(&self) -> SqlResult<bool> {
+        Ok(self.concept_schema_objects_current()?
+            && self.meta_value(CONCEPT_NORMALIZATION_META_KEY)?.as_deref()
+                == Some(CONCEPT_NORMALIZATION_VERSION))
+    }
+
+    fn incremental_concept_contract_current_on(connection: &Connection) -> SqlResult<bool> {
+        if !Self::concept_schema_objects_current_on(connection)? {
+            return Ok(false);
+        }
+        let extractor_contract = connection
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [crate::indexer::EXTRACTOR_CONTRACT_META_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let concept_contract = connection
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [CONCEPT_NORMALIZATION_META_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(
+            extractor_contract.as_deref() == Some(crate::indexer::EXTRACTOR_CONTRACT_VERSION)
+                && concept_contract.as_deref() == Some(CONCEPT_NORMALIZATION_VERSION),
+        )
+    }
+
+    pub(crate) fn mark_concept_contract_dirty(&self) -> SqlResult<()> {
+        self.conn.execute(
+            "INSERT INTO meta(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![CONCEPT_NORMALIZATION_META_KEY, CONCEPT_CONTRACT_DIRTY],
+        )?;
+        Ok(())
+    }
+
+    fn set_concept_contract_current(connection: &Connection) -> SqlResult<()> {
+        connection.execute(
+            "INSERT INTO meta(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![
+                CONCEPT_NORMALIZATION_META_KEY,
+                CONCEPT_NORMALIZATION_VERSION
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn finalize_index_contracts_current(&self) -> SqlResult<ConceptFinalizeStats> {
+        self.ensure_concept_schema()?;
+        let tx = self.conn.unchecked_transaction()?;
+        let orphans_purged = tx.execute(
+            "DELETE FROM symbol_concepts
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM symbols WHERE symbols.id = symbol_concepts.symbol_id
+             )",
+            [],
+        )?;
+        let missing: i64 = tx.query_row(
+            "SELECT COUNT(*)
+             FROM symbols s
+             LEFT JOIN symbol_concepts c ON c.symbol_id = s.id
+             WHERE c.symbol_id IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        if missing != 0 {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+                Some(format!(
+                    "concept finalization found {missing} symbols without concept rows"
+                )),
+            ));
+        }
+        tx.execute(
+            "INSERT INTO symbol_concepts_fts(symbol_concepts_fts) VALUES ('rebuild')",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO symbol_concepts_fts(symbol_concepts_fts, rank)
+             VALUES ('integrity-check', 1)",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![
+                crate::indexer::EXTRACTOR_CONTRACT_META_KEY,
+                crate::indexer::EXTRACTOR_CONTRACT_VERSION
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![
+                CONCEPT_NORMALIZATION_META_KEY,
+                CONCEPT_NORMALIZATION_VERSION
+            ],
+        )?;
+        let rows: u32 =
+            tx.query_row("SELECT COUNT(*) FROM symbol_concepts", [], |row| row.get(0))?;
+        tx.commit()?;
+        Ok(ConceptFinalizeStats {
+            rows,
+            orphans_purged: u32::try_from(orphans_purged).unwrap_or(u32::MAX),
+        })
+    }
+
+    pub fn concept_count(&self) -> SqlResult<u32> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM symbol_concepts", [], |row| row.get(0))
+    }
+
+    pub(crate) fn purge_orphan_concepts(&self) -> SqlResult<u32> {
+        let changed = self.conn.execute(
+            "DELETE FROM symbol_concepts
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM symbols WHERE symbols.id = symbol_concepts.symbol_id
+             )",
+            [],
+        )?;
+        Ok(u32::try_from(changed).unwrap_or(u32::MAX))
     }
 
     pub fn data_version(&self) -> SqlResult<u64> {
@@ -4376,6 +6048,65 @@ impl Store {
         rows.collect()
     }
 
+    pub(crate) fn search_concepts(
+        &self,
+        match_query: &str,
+        top: u32,
+    ) -> SqlResult<Vec<ConceptStoreHit>> {
+        let mut statement = self.conn.prepare(
+            "SELECT s.name,
+                    s.kind,
+                    s.language,
+                    s.file_path,
+                    s.line_start,
+                    c.signature_search,
+                    instr(
+                        highlight(symbol_concepts_fts, 0, char(30), char(31)),
+                        char(30)
+                    ) > 0 AS name_matched,
+                    instr(
+                        highlight(symbol_concepts_fts, 1, char(30), char(31)),
+                        char(30)
+                    ) > 0 AS path_matched,
+                    instr(
+                        highlight(symbol_concepts_fts, 2, char(30), char(31)),
+                        char(30)
+                    ) > 0 AS signature_matched,
+                    instr(
+                        highlight(symbol_concepts_fts, 3, char(30), char(31)),
+                        char(30)
+                    ) > 0 AS documentation_matched,
+                    bm25(symbol_concepts_fts, 10.0, 4.0, 2.0, 1.0) AS score
+             FROM symbol_concepts_fts
+             JOIN symbol_concepts c ON c.symbol_id = symbol_concepts_fts.rowid
+             JOIN symbols s ON s.id = c.symbol_id
+             WHERE symbol_concepts_fts MATCH ?1
+             ORDER BY score ASC,
+                      c.path_sort COLLATE BINARY ASC,
+                      s.line_start ASC,
+                      s.kind COLLATE BINARY ASC,
+                      s.name COLLATE BINARY ASC,
+                      s.id ASC
+            LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![match_query, top], |row| {
+            Ok(ConceptStoreHit {
+                name: row.get(0)?,
+                kind: row.get(1)?,
+                language: row.get(2)?,
+                path: row.get(3)?,
+                line: row.get(4)?,
+                signature_shape: row.get(5)?,
+                name_matched: row.get(6)?,
+                path_matched: row.get(7)?,
+                signature_matched: row.get(8)?,
+                documentation_matched: row.get(9)?,
+                score: row.get(10)?,
+            })
+        })?;
+        rows.collect()
+    }
+
     /// Deterministic bounded read of the derived project-history corpus for
     /// local evidence correlation. Markdown remains authoritative.
     pub fn project_history_entries_bounded(
@@ -4976,6 +6707,40 @@ mod tests {
             Some("snapshot")
         );
         assert!(!snapshot.db_path().starts_with(directory.path()));
+        assert_eq!(directory_bytes(directory.path()), before);
+    }
+
+    #[test]
+    fn private_temporal_snapshot_adds_concepts_only_to_old_v7_clone_and_stays_dirty() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("old-v7.db");
+        {
+            let source = Store::open(&path).unwrap();
+            source
+                .insert_symbol("legacy", "function", "src/lib.rs", 1, 2, None, None)
+                .unwrap();
+            source.upsert_file("src/lib.rs", 1, 1).unwrap();
+            source.conn.execute_batch(CONCEPT_SCHEMA_DROP_SQL).unwrap();
+            source
+                .conn
+                .execute(
+                    "DELETE FROM meta WHERE key = ?1",
+                    [CONCEPT_NORMALIZATION_META_KEY],
+                )
+                .unwrap();
+            assert!(!source.concept_schema_objects_current().unwrap());
+        }
+        let before = directory_bytes(directory.path());
+        let source = Store::open_read_only(&path).unwrap();
+        let snapshot = source.private_writable_snapshot().unwrap();
+
+        assert!(snapshot.concept_schema_objects_current().unwrap());
+        assert!(!snapshot.concept_contract_current().unwrap());
+        snapshot.purge_file("src/lib.rs").unwrap();
+        assert_eq!(snapshot.symbol_count().unwrap(), 0);
+        assert!(!snapshot.concept_contract_current().unwrap());
+        assert_eq!(source.symbol_count().unwrap(), 1);
+        assert!(!source.concept_schema_objects_current().unwrap());
         assert_eq!(directory_bytes(directory.path()), before);
     }
 
@@ -7406,5 +9171,593 @@ mod tests {
         assert!(truncated);
         assert!(cycles.is_empty());
         std::fs::remove_file(&path).ok();
+    }
+
+    fn concept_signature_terms_for(path: &str, signature: &str) -> Vec<String> {
+        concept_document("fixture", path, Some(signature))
+            .signature_search
+            .split_whitespace()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn concept_signature_terms(signature: &str) -> Vec<String> {
+        concept_signature_terms_for("src/fixture.rs", signature)
+    }
+
+    #[test]
+    fn concept_normalization_splits_digits_identifiers_and_unicode_lowercase() {
+        let terms =
+            concept_terms("sha256Digest HTTP2Server OAuth2Client path/to_file-name").unwrap();
+        for expected in [
+            "sha256digest",
+            "sha",
+            "256",
+            "digest",
+            "http2server",
+            "http",
+            "2",
+            "server",
+            "oauth2client",
+            "auth",
+            "client",
+            "tofilename",
+            "to",
+            "file",
+            "name",
+        ] {
+            assert!(
+                terms.iter().any(|term| term == expected),
+                "missing {expected:?}"
+            );
+        }
+
+        let expanded = concept_terms("İValue").unwrap();
+        assert!(expanded.iter().any(|term| term == "i\u{307}value"));
+        assert!(expanded.iter().any(|term| term == "i\u{307}"));
+        assert!(expanded.iter().any(|term| term == "value"));
+    }
+
+    #[test]
+    fn concept_signature_redaction_omits_comments_literals_templates_and_regexes() {
+        let multiline = concept_signature_terms(
+            "fn borrow<'a>(\n\t/* TOPSECRET */ x: &'a str,\n y: ImportantType, c: char = 'X'\n) -> &'a str",
+        );
+        for expected in ["borrow", "a", "str", "importanttype"] {
+            assert!(
+                multiline.iter().any(|term| term == expected),
+                "missing {expected:?}"
+            );
+        }
+        assert!(!multiline.iter().any(|term| term.contains("topsecret")));
+
+        let python_comment = concept_signature_terms_for(
+            "src/fixture.py",
+            "def borrow(x: str, # OTHERSECRET\n y: ImportantType): ...",
+        );
+        assert!(python_comment.iter().any(|term| term == "importanttype"));
+        assert!(!python_comment
+            .iter()
+            .any(|term| term.contains("othersecret")));
+
+        let rust_attributes = concept_signature_terms_for(
+            "src/fixture.rs",
+            "#[inline] pub fn r#match<'a>(x: &'a str) -> &'a str",
+        );
+        for expected in ["inline", "match", "a", "str"] {
+            assert!(
+                rust_attributes.iter().any(|term| term == expected),
+                "missing {expected:?}: {rust_attributes:?}"
+            );
+        }
+
+        for signature in [
+            "function f(x = `prefix,TOPSECRET`, y: ImportantType) {}",
+            "function f(x = /a,b/, y: ImportantType) {}",
+            "function f(x = /[/,]TOPSECRET/u, y: ImportantType) {}",
+            r"function f(x = /a\/,TOPSECRET/u, y: ImportantType) {}",
+            "function f(x = a < b, y: ImportantType) {}",
+            "function f(x = value < limit, y: ImportantType) {}",
+            "function f(x = value <= limit, y: ImportantType) {}",
+            "function f(x = low < value && value < high, y: ImportantType) {}",
+            "void f(int x = 1 << 2, ImportantType y={})",
+            "function f(x = new Map<Key,Value>(), y: ImportantType) {}",
+            "function f(x = amount / /prefix,TOPSECRET/.test(v), y: ImportantType) {}",
+            "function f(x = `value ${a / b}`, y: ImportantType) {}",
+            "function f(x = `value ${/TOPSECRET/.test(v)}`, y: ImportantType) {}",
+            "function f(x = `${typeof /[}]`PREFIX,TOPSECRET/}`, y: ImportantType) {}",
+        ] {
+            let terms = concept_signature_terms_for("src/fixture.ts", signature);
+            assert!(
+                terms.iter().any(|term| term == "importanttype"),
+                "following declaration token lost for {signature:?}: {terms:?}"
+            );
+            assert!(
+                !terms.iter().any(|term| term.contains("topsecret")),
+                "literal leaked for {signature:?}: {terms:?}"
+            );
+        }
+
+        for hash_count in [0usize, 1, 16, 17, 255] {
+            let hashes = "#".repeat(hash_count);
+            let content = if hash_count == 0 {
+                "TOPSECRET"
+            } else {
+                "inside \",TOPSECRET"
+            };
+            let signature = format!(
+                "fn borrow<'a>(x: &'a str = r{hashes}\"{content}\"{hashes}, y: ImportantType)"
+            );
+            let terms = concept_signature_terms(&signature);
+            assert!(terms.iter().any(|term| term == "importanttype"));
+            assert!(!terms.iter().any(|term| term.contains("topsecret")));
+            assert!(terms.iter().any(|term| term == "a"));
+        }
+        let c_raw =
+            concept_signature_terms("fn f(x: str = cr#\"inside \",TOPSECRET\"#, y: ImportantType)");
+        assert!(c_raw.iter().any(|term| term == "importanttype"));
+        assert!(!c_raw.iter().any(|term| term.contains("topsecret")));
+
+        for prefix in ["R", "u8R", "uR", "UR", "LR"] {
+            let signature = format!(
+                "void f(const char* x = {prefix}\"tag(before\",TOPSECRET)tag\", ImportantType y={{}})"
+            );
+            let terms = concept_signature_terms_for("src/fixture.cpp", &signature);
+            assert!(
+                terms.iter().any(|term| term == "importanttype"),
+                "following declaration token lost for {signature:?}: {terms:?}"
+            );
+            assert!(
+                !terms.iter().any(|term| term.contains("topsecret")),
+                "raw literal leaked for {signature:?}: {terms:?}"
+            );
+        }
+
+        for (path, signature, retained) in [
+            (
+                "src/fixture.ts",
+                "function f(x = `outer ${`inner,TOPSECRET`}`, y: ImportantType) {}",
+                "importanttype",
+            ),
+            (
+                "src/fixture.cs",
+                r#"[Label(""""prefix """ TOPSECRET"""")] public void F()"#,
+                "void",
+            ),
+            (
+                "src/fixture.ts",
+                "@Matches(/TOPSECRET/) class Candidate {}",
+                "candidate",
+            ),
+            (
+                "src/fixture.py",
+                "def f(cb=lambda a, TOPSECRET: a, y: ImportantType): ...",
+                "importanttype",
+            ),
+            (
+                "src/fixture.cs",
+                r#"[Label($"{ "TOPSECRET" }")] public void Interpolated()"#,
+                "interpolated",
+            ),
+            (
+                "src/fixture.cs",
+                r#"[Label($@"{ "TOPSECRET" }")] public void VerbatimInterpolated()"#,
+                "verbatiminterpolated",
+            ),
+            (
+                "src/fixture.py",
+                "@label(f\"{ \"TOPSECRET\" }\")\ndef decorated() -> ImportantType: ...",
+                "importanttype",
+            ),
+            (
+                "src/fixture.rs",
+                "fn f(/* outer /* inner */ TOPSECRET */ x: ImportantType)",
+                "importanttype",
+            ),
+            (
+                "src/fixture.cpp",
+                "void f(auto x = Foo<1, TOPSECRET>{}, ImportantType y={})",
+                "importanttype",
+            ),
+            (
+                "src/fixture.ts",
+                "function f(x = Foo<\"x\", TOPSECRET>(), y: ImportantType) {}",
+                "importanttype",
+            ),
+        ] {
+            let terms = concept_signature_terms_for(path, signature);
+            assert!(
+                terms.iter().any(|term| term == retained),
+                "following declaration token lost for {signature:?}: {terms:?}"
+            );
+            assert!(
+                !terms.iter().any(|term| term.contains("topsecret")),
+                "literal/default leaked for {signature:?}: {terms:?}"
+            );
+        }
+
+        for signature in [
+            "Widget& operator=(const Widget& other)",
+            "Widget& operator+=(const Widget& other)",
+        ] {
+            let terms = concept_signature_terms_for("src/fixture.cpp", signature);
+            assert!(terms.iter().any(|term| term == "operator"));
+            assert!(terms.iter().any(|term| term == "widget"));
+            assert!(terms.iter().any(|term| term == "other"));
+        }
+
+        for path in ["src/fixture.mjs", "src/fixture.cjs"] {
+            let terms = concept_signature_terms_for(
+                path,
+                "function f(x = /prefix,TOPSECRET/, y: ImportantType) {}",
+            );
+            assert!(terms.iter().any(|term| term == "importanttype"));
+            assert!(!terms.iter().any(|term| term.contains("topsecret")));
+        }
+        let phtml = concept_signature_terms_for(
+            "src/fixture.phtml",
+            "function f($x, # TOPSECRET\n ImportantType $y)",
+        );
+        assert!(phtml.iter().any(|term| term == "importanttype"));
+        assert!(!phtml.iter().any(|term| term.contains("topsecret")));
+        for path in ["src/fixture.ipp", "src/fixture.tpp"] {
+            let terms =
+                concept_signature_terms_for(path, "Widget& operator+=(const Widget& other)");
+            assert!(terms.iter().any(|term| term == "operator"));
+            assert!(terms.iter().any(|term| term == "other"));
+        }
+
+        for signature in [
+            "function f($x = <<<LABEL\nprefix,TOPSECRET\n    LABEL,\n ImportantType $y = null) {}",
+            "function f($x = <<<'LABEL'\nprefix,TOPSECRET\nLABEL;\n, ImportantType $y = null) {}",
+        ] {
+            let terms = concept_signature_terms_for("src/fixture.php", signature);
+            assert!(
+                terms.iter().any(|term| term == "importanttype"),
+                "following declaration token lost for heredoc {terms:?}"
+            );
+            assert!(
+                !terms.iter().any(|term| term.contains("topsecret")),
+                "heredoc leaked into corpus: {terms:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn concept_persisted_corpus_never_contains_signature_canaries() {
+        let path = tmp_db("concept_signature_canaries");
+        let store = Store::open(&path).unwrap();
+        for (index, (source_path, signature)) in [
+            (
+                "src/template.ts",
+                "function template(x = `outer ${`inner,TOPSECRET`}`, y: ImportantType) {}",
+            ),
+            (
+                "src/raw.cs",
+                r#"[Label(""""prefix """ TOPSECRET"""")] public void RawCandidate()"#,
+            ),
+            (
+                "src/decorator.ts",
+                "@Matches(/TOPSECRET/) class RegexCandidate {}",
+            ),
+            (
+                "src/lambda.py",
+                "def lambda_candidate(cb=lambda a, TOPSECRET: a, y: ImportantType): ...",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            store
+                .insert_symbol(
+                    &format!("candidate_{index}"),
+                    "function",
+                    source_path,
+                    1,
+                    1,
+                    Some(signature),
+                    None,
+                )
+                .unwrap();
+        }
+        store.finalize_index_contracts_current().unwrap();
+
+        assert!(store
+            .search_concepts("\"topsecret\"", 50)
+            .unwrap()
+            .is_empty());
+        let documents = store
+            .conn
+            .prepare("SELECT signature_search FROM symbol_concepts ORDER BY symbol_id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<SqlResult<Vec<_>>>()
+            .unwrap();
+        assert_eq!(documents.len(), 4);
+        assert!(documents
+            .iter()
+            .all(|document| !document.to_ascii_lowercase().contains("topsecret")));
+        assert!(!store
+            .search_concepts("\"importanttype\"", 50)
+            .unwrap()
+            .is_empty());
+        assert!(!store
+            .search_concepts("\"candidate\"", 50)
+            .unwrap()
+            .is_empty());
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn concept_insert_symbol_savepoint_nests_and_rolls_back_both_rows() {
+        let path = tmp_db("concept_nested_savepoint");
+        let store = Store::open(&path).unwrap();
+        store
+            .insert_symbol(
+                "firstHandler",
+                "function",
+                "src/first.rs",
+                1,
+                2,
+                Some("fn first_handler()"),
+                None,
+            )
+            .unwrap();
+        store.finalize_index_contracts_current().unwrap();
+        assert!(store.concept_contract_current().unwrap());
+        assert_eq!(store.symbol_count().unwrap(), 1);
+        assert_eq!(store.concept_count().unwrap(), 1);
+
+        store.conn.execute_batch("BEGIN").unwrap();
+        store
+            .insert_symbol(
+                "secondHandler",
+                "function",
+                "src/second.rs",
+                1,
+                2,
+                Some("fn second_handler()"),
+                None,
+            )
+            .unwrap();
+        assert_eq!(store.symbol_count().unwrap(), 2);
+        assert_eq!(store.concept_count().unwrap(), 2);
+        store.conn.execute_batch("ROLLBACK").unwrap();
+
+        assert_eq!(store.symbol_count().unwrap(), 1);
+        assert_eq!(store.concept_count().unwrap(), 1);
+        assert!(store.concept_contract_current().unwrap());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn concept_old_writer_dirty_marker_blocks_incomplete_finalization() {
+        let path = tmp_db("concept_old_writer_dirty");
+        let store = Store::open(&path).unwrap();
+        store
+            .insert_symbol("ready", "function", "src/ready.rs", 1, 2, None, None)
+            .unwrap();
+        store.finalize_index_contracts_current().unwrap();
+        assert!(store.concept_contract_current().unwrap());
+
+        store
+            .conn
+            .execute(
+                "INSERT INTO symbols(name, kind, file_path, line_start, line_end)
+                 VALUES ('legacy_only', 'function', 'src/legacy.rs', 1, 2)",
+                [],
+            )
+            .unwrap();
+        assert!(!store.concept_contract_current().unwrap());
+        assert!(store.finalize_index_contracts_current().is_err());
+        assert!(!store.concept_contract_current().unwrap());
+
+        store
+            .conn
+            .execute("DELETE FROM symbols WHERE name = 'legacy_only'", [])
+            .unwrap();
+        store.finalize_index_contracts_current().unwrap();
+        assert!(store.concept_contract_current().unwrap());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn concept_schema_object_drift_repairs_additively_and_stays_dirty() {
+        let path = tmp_db("concept_schema_object_drift");
+        let store = Store::open(&path).unwrap();
+        store.finalize_index_contracts_current().unwrap();
+        assert!(store.concept_contract_current().unwrap());
+        store
+            .conn
+            .execute_batch("DROP TRIGGER symbol_concepts_ai")
+            .unwrap();
+        assert!(!store.concept_contract_current().unwrap());
+
+        store.ensure_concept_schema().unwrap();
+        assert!(store.concept_schema_objects_current().unwrap());
+        assert!(!store.concept_contract_current().unwrap());
+        store.finalize_index_contracts_current().unwrap();
+        assert!(store.concept_contract_current().unwrap());
+
+        store
+            .conn
+            .execute_batch(
+                "DROP TRIGGER symbol_concepts_ai;
+                 CREATE TRIGGER symbol_concepts_ai
+                 AFTER INSERT ON symbol_concepts BEGIN
+                     INSERT INTO symbol_concepts_fts(
+                         rowid, name_search, path_search, signature_search,
+                         documentation_search
+                     ) VALUES (
+                         new.symbol_id, new.name_search, new.path_search,
+                         new.signature_search, new.documentation_search
+                     );
+                     INSERT INTO meta(key, value) VALUES ('unexpected', 'extra');
+                 END;",
+            )
+            .unwrap();
+        assert!(!store.concept_schema_objects_current().unwrap());
+        store.ensure_concept_schema().unwrap();
+        assert!(store.concept_schema_objects_current().unwrap());
+        assert!(!store.concept_contract_current().unwrap());
+
+        store
+            .conn
+            .execute_batch(
+                "DROP TRIGGER symbol_concepts_graph_ai;
+                 CREATE TRIGGER symbol_concepts_graph_ai
+                 AFTER INSERT ON symbols BEGIN
+                     INSERT INTO meta(key, value)
+                     VALUES ('CONCEPT_NORMALIZATION_VERSION', 'dirty')
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                     WHERE meta.value <> excluded.value;
+                 END;",
+            )
+            .unwrap();
+        assert!(!store.concept_schema_objects_current().unwrap());
+        store.ensure_concept_schema().unwrap();
+        assert!(store.concept_schema_objects_current().unwrap());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn concept_schema_contract_checks_and_repairs_every_fts_shadow_table() {
+        for shadow in ["config", "data", "docsize", "idx"] {
+            let path = tmp_db(&format!("concept_shadow_{shadow}"));
+            let store = Store::open(&path).unwrap();
+            store.finalize_index_contracts_current().unwrap();
+            assert!(store.concept_contract_current().unwrap());
+
+            store
+                .conn
+                .execute_batch(&format!("DROP TABLE symbol_concepts_fts_{shadow}"))
+                .unwrap();
+            assert!(!store.concept_schema_objects_current().unwrap());
+            assert!(!store.concept_contract_current().unwrap());
+
+            store.ensure_concept_schema().unwrap();
+            assert!(store.concept_schema_objects_current().unwrap());
+            assert!(!store.concept_contract_current().unwrap());
+            store.finalize_index_contracts_current().unwrap();
+            assert!(store.concept_contract_current().unwrap());
+            std::fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
+    fn concept_shadow_repair_and_dirty_rebuild_are_one_transaction() {
+        let path = tmp_db("concept_shadow_repair_atomic");
+        let store = Store::open(&path).unwrap();
+        store.finalize_index_contracts_current().unwrap();
+        store
+            .conn
+            .execute_batch("DROP TABLE symbol_concepts_fts_data")
+            .unwrap();
+        assert!(!store.concept_schema_objects_current().unwrap());
+        assert_eq!(
+            store
+                .meta_value(CONCEPT_NORMALIZATION_META_KEY)
+                .unwrap()
+                .as_deref(),
+            Some(CONCEPT_NORMALIZATION_VERSION)
+        );
+
+        FAIL_CONCEPT_SCHEMA_AFTER_SHADOW_REPAIR.set(true);
+        let result = store.ensure_concept_schema();
+        FAIL_CONCEPT_SCHEMA_AFTER_SHADOW_REPAIR.set(false);
+        assert!(result.is_err());
+        assert!(!store.concept_schema_objects_current().unwrap());
+        assert!(!store.concept_contract_current().unwrap());
+
+        store.ensure_concept_schema().unwrap();
+        assert!(store.concept_schema_objects_current().unwrap());
+        assert!(!store.concept_contract_current().unwrap());
+        store.finalize_index_contracts_current().unwrap();
+        assert!(store.concept_contract_current().unwrap());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn concept_schema_repair_retires_orphaned_fts_shadow_tables() {
+        let path = tmp_db("concept_orphan_shadows");
+        let store = Store::open(&path).unwrap();
+        store.finalize_index_contracts_current().unwrap();
+        store
+            .conn
+            .execute_batch(
+                "PRAGMA writable_schema = ON;
+                 DELETE FROM sqlite_master
+                 WHERE type = 'table' AND name = 'symbol_concepts_fts';
+                 PRAGMA writable_schema = OFF;
+                 PRAGMA schema_version = 99;",
+            )
+            .unwrap();
+        assert!(!store.concept_schema_objects_current().unwrap());
+        let orphan_count: u32 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name GLOB 'symbol_concepts_fts_*'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphan_count, 4);
+
+        store.ensure_concept_schema().unwrap();
+        assert!(store.concept_schema_objects_current().unwrap());
+        assert!(!store.concept_contract_current().unwrap());
+        store.finalize_index_contracts_current().unwrap();
+        assert!(store.concept_contract_current().unwrap());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn concept_schema_repair_retires_wrong_type_owned_objects() {
+        for (name, corruption) in [
+            (
+                "shadow_view",
+                "DROP TABLE symbol_concepts_fts_data;
+                 CREATE VIEW symbol_concepts_fts_data AS SELECT 1 AS id, x'' AS block;",
+            ),
+            (
+                "shadow_table",
+                "DROP TABLE symbol_concepts_fts_data;
+                 CREATE TABLE symbol_concepts_fts_data(
+                     id INTEGER PRIMARY KEY, wrong_column TEXT
+                 );",
+            ),
+            (
+                "virtual_view",
+                "DROP TABLE symbol_concepts_fts;
+                 CREATE VIEW symbol_concepts_fts AS SELECT 1 AS rowid;",
+            ),
+            (
+                "content_view",
+                "DROP TABLE symbol_concepts_fts;
+                 DROP TABLE symbol_concepts;
+                 CREATE VIEW symbol_concepts AS SELECT 1 AS symbol_id;",
+            ),
+            (
+                "trigger_view",
+                "DROP TRIGGER symbol_concepts_ai;
+                 CREATE VIEW symbol_concepts_ai AS SELECT 1 AS value;",
+            ),
+        ] {
+            let path = tmp_db(&format!("concept_wrong_type_{name}"));
+            let store = Store::open(&path).unwrap();
+            store.finalize_index_contracts_current().unwrap();
+            store.conn.execute_batch(corruption).unwrap();
+            assert!(!store.concept_schema_objects_current().unwrap());
+
+            store.ensure_concept_schema().unwrap();
+            assert!(store.concept_schema_objects_current().unwrap());
+            assert!(!store.concept_contract_current().unwrap());
+            store.finalize_index_contracts_current().unwrap();
+            assert!(store.concept_contract_current().unwrap());
+            std::fs::remove_file(path).ok();
+        }
     }
 }

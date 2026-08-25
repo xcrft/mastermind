@@ -1,6 +1,6 @@
 ---
 name: mmcg
-description: Mastermind Codegraph — local multi-language code indexer for Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, and C/C++. Stores symbols, calls, imports, evidence, and project history in SQLite and exposes 29 bounded MCP tools.
+description: Mastermind Codegraph — local multi-language code indexer for Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, and C/C++. Stores symbols, calls, imports, evidence, and project history in SQLite and exposes 30 bounded MCP tools.
 metadata:
   version: 2.0.1
   authors:
@@ -72,6 +72,7 @@ mmcg status
 mmcg map .
 mmcg impact --since main
 mmcg brief --role executor --since main --budget-tokens 2000
+mmcg concept "payment retry handler" --top 10
 mmcg temporal --since main
 mmcg ui --since main
 ```
@@ -117,7 +118,7 @@ See the [client integration guides](https://github.com/xcrft/mastermind/tree/mai
 | Workflow gates | `verify-spec`, `audit-spec`, and `run-task` |
 | Local coordination | Bounded additive scratchpad and indexed project history |
 
-The MCP surface contains 20 non-destructive queries that may refresh the managed
+The MCP surface contains 21 non-destructive queries that may refresh the managed
 derived index, 8 read-only tools, and one additive local scratchpad write.
 Results are bounded and return precision or truncation notes when the engine
 cannot prove completeness.
@@ -128,6 +129,14 @@ The 256–8,000 token budget counts the final MCP envelope after JSON escaping
 and `content.text`/`structuredContent` duplication. Typed repository strings
 are marked untrusted; source bodies, declaration signatures, literal/default
 values, and history titles or excerpts are excluded.
+
+Use `mmcg_concept` or `mastermind concept` to retrieve at most 50 local symbol
+candidates from plain concept terms. The schema-v1 result uses fixed quoted-AND
+matching over normalized names, repository paths, and declaration shapes. It
+uses SQLite FTS5 only: no embeddings, model calls, network access, source
+bodies, comments, literals, or default values. Scores are query-local retrieval
+ranks where lower is better, not confidence. Managed indexes refresh once when
+needed; custom external indexes remain read-only and fail closed when stale.
 
 ## Supported languages
 

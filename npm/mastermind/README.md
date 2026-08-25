@@ -28,7 +28,7 @@ A diff tells you what changed. Mastermind shows what the change reaches:
 downstream callers, architecture boundaries, candidate tests, ownership,
 security findings, runtime evidence, and repository policy.
 
-One local snapshot powers the CLI, 29 bounded MCP tools, the read-only Lens UI,
+One local snapshot powers the CLI, 30 bounded MCP tools, the read-only Lens UI,
 SARIF output, and a standalone review package.
 
 ## Your first review in three commands
@@ -43,6 +43,7 @@ cd your-repository
 mastermind index .
 mastermind impact --since main
 mastermind brief --role executor --since main --budget-tokens 2000
+mastermind concept "payment retry handler" --top 10
 mastermind ui --since main
 ```
 
@@ -52,6 +53,10 @@ reads the index without mutating it, and loads no remote frontend resources.
 budget includes the final MCP transport envelope; repository source bodies,
 declaration signatures, literal/default values, and history excerpts are never
 included.
+
+`concept` retrieves a small deterministic candidate set from normalized symbol
+names, repository paths, and declaration shapes. It uses local SQLite FTS5,
+with no embeddings, model calls, network access, source bodies, or comments.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/xcrft/mastermind/main/docs/images/lens/mastermind-lens-live-desktop.png" alt="Mastermind Lens showing changed symbols, downstream impact, boundary crossings, test candidates, and explicit partial evidence" width="900">
@@ -122,7 +127,7 @@ writer conflicts, unreachable tools, and componentized context estimates.
 
 Mastermind supports Claude Code, Codex, Cursor, Continue, and generic MCP stdio
 clients. Setup previews changes unless `--write` is present. The MCP server
-exposes 20 non-destructive queries that may refresh the managed derived index,
+exposes 21 non-destructive queries that may refresh the managed derived index,
 8 read-only tools, and one additive write to the local gitignored scratchpad.
 
 ## Supported stack

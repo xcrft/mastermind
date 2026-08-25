@@ -1,6 +1,6 @@
 {
   "name": "@xcraftmind/mmcg-darwin-x64",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "description": "Prebuilt mmcg binary for macOS x86_64 (Intel). Internal — installed automatically as an optional dependency of @xcraftmind/mastermind.",
   "license": "MIT",
   "author": "xcraftmind",

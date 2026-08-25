@@ -2,7 +2,7 @@
 name: mastermind-workflow
 description: Compact project router for the Mastermind Direct, Verified, and Strict workflows.
 metadata:
-  version: 2.0.2
+  version: 2.1.0
   authors: [mastermind]
   tags: [claude-md, workflow, delegation, audit]
 ---

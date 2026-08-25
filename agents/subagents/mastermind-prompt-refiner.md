@@ -5,6 +5,10 @@ tools: Read
 model: sonnet
 maxTurns: 4
 effort: low
+workflow:
+  schema_version: 1
+  activation: manual
+  mutability: read-only
 metadata:
   version: 0.4.1
   authors: [mastermind]

@@ -150,6 +150,51 @@ After a held audit, review `history-review.md` and mark Context and Lesson as
 `updated` or `not applicable` with a concrete reason. This prevents a successful
 diff from silently becoming an invented architectural decision.
 
+## Deterministic workflow audit
+
+```bash
+mastermind workflow audit --root .
+mastermind workflow audit --root ~/.claude --json
+```
+
+The source layout is exactly `agents/subagents` plus nested `skills`. An
+installed layout is selected only by `.mastermind-workflow.json`; its client,
+profile, artifact list, and digests define the ownership boundary. If both or
+neither layout is present, audit fails instead of guessing or scanning unrelated
+user agents.
+
+Managed agents declare `workflow.schema_version: 1`, `activation`
+(`always`, `conditional`, or `manual`), `mutability` (`read-only` or `writer`),
+optional skill relations, and canonical writes. Skill links from an agent are
+advisory unless `required: true`. Installed skill-to-skill links remain profile
+closure requirements. A missing optional frontend skill in `core` is therefore
+visible in context estimates but is not an error.
+
+Write declarations bind an artifact ID to a repository-relative path template,
+authority, runtime, and exclusivity group. Only `{task}` is a valid placeholder.
+Artifact IDs and normalized paths are one-to-one; aliases and one ID mapped to
+multiple paths are invalid.
+Two co-activatable canonical writers conflict unless they share an exclusivity
+group or belong to mutually exclusive clients. The Claude executor agent and
+portable executor skill intentionally share `task-executor`; controller-owned
+state, audit, and history artifacts have separate writer identities.
+
+The graph records every declared built-in or mmcg grant separately from
+mutation capability. A read-only role with `Edit` or `Write` is invalid; broad
+`Bash` remains a visible warning, while all `Bash`, `Edit`, and `Write` grants
+retain a mutation-capability edge. Context estimates are independent byte-based
+scenarios for the agent body, each available advisory skill if loaded, known
+mmcg schemas, and unknown built-in tool schemas. They are not a promised runtime
+token total.
+
+Installed Claude audits verify registration only when an owned role scopes
+`mmcg`, and only at the paths Claude reads: the project `.mcp.json` next to a
+project `.claude` directory and the user `~/.claude.json`. A same-named key in
+`.claude/.mcp.json` or legacy `servers` data does not count. The entry must match
+an installer-produced Mastermind binary, project/global launcher, or canonical
+`npx` command for the current platform; arbitrary executables, packages, and
+launcher-controlling environment overrides are rejected.
+
 ## Client model
 
 Planning, implementation, and post-flight are client-neutral. Claude Code and

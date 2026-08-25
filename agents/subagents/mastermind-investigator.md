@@ -6,6 +6,10 @@ model: sonnet
 mcpServers: [mmcg]
 maxTurns: 20
 effort: high
+workflow:
+  schema_version: 1
+  activation: conditional
+  mutability: read-only
 metadata:
   version: 0.1.2
   authors:

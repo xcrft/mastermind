@@ -54,6 +54,15 @@ MMCG_REFERENCE_RE = re.compile(r"\bmmcg_[a-z_]+\b")
 SUBAGENT_MODELS = {"haiku", "sonnet", "opus"}
 SUBAGENT_EFFORT_LEVELS = {"low", "medium", "high", "xhigh", "max"}
 SUBAGENT_MAX_TURNS = 100
+WORKFLOW_ACTIVATIONS = {"always", "conditional", "manual"}
+WORKFLOW_MUTABILITIES = {"read-only", "writer"}
+WORKFLOW_RUNTIMES = {"claude", "codex", "portable", "controller"}
+WORKFLOW_MAX_RELATIONS = 512
+WORKFLOW_MAX_WRITES = 64
+WORKFLOW_MAX_TOOL_GRANTS = 512
+WORKFLOW_MAX_SERVERS = 64
+RUNTIME_TOOL_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
+MCP_SERVER_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 
 
 @dataclass
@@ -228,6 +237,19 @@ def validate_artifact(a: Artifact) -> list[Issue]:
 
     if a.path.parent.name == "subagents":
         for message in _subagent_runtime_contract_messages(a.frontmatter):
+            issues.append(Issue(a.path, "error", message))
+        for message in _workflow_metadata_messages(
+            a.frontmatter,
+            required=True,
+            runtime_tools=_runtime_tool_names(a.frontmatter.get("tools")),
+        ):
+            issues.append(Issue(a.path, "error", message))
+    elif "workflow" in a.frontmatter or a.slug == "mastermind-task-executor":
+        for message in _workflow_metadata_messages(
+            a.frontmatter,
+            required=a.slug == "mastermind-task-executor",
+            runtime_tools=[],
+        ):
             issues.append(Issue(a.path, "error", message))
 
     return issues
@@ -516,7 +538,7 @@ def _subagent_runtime_contract_messages(frontmatter: dict) -> list[str]:
     model = frontmatter.get("model")
     if not isinstance(model, str) or model not in SUBAGENT_MODELS:
         messages.append(
-            f"subagent 'model' must be one of {sorted(SUBAGENT_MODELS)}, got {model!r}"
+            f"[model_unsupported] subagent 'model' must be one of {sorted(SUBAGENT_MODELS)}, got {model!r}"
         )
 
     tools_value = frontmatter.get("tools")
@@ -526,9 +548,19 @@ def _subagent_runtime_contract_messages(frontmatter: dict) -> list[str]:
     )
     runtime_tools = _runtime_tool_names(tools_value)
     if not valid_tools_shape or not runtime_tools:
-        messages.append("subagent 'tools' must be an explicit non-empty allowlist")
+        messages.append("[tool_allowlist_invalid] subagent 'tools' must be an explicit non-empty allowlist")
+    elif len(runtime_tools) > WORKFLOW_MAX_TOOL_GRANTS:
+        messages.append(
+            f"[workflow_declaration_limit_exceeded] subagent 'tools' exceeds {WORKFLOW_MAX_TOOL_GRANTS} entries"
+        )
     elif len(runtime_tools) != len(set(runtime_tools)):
-        messages.append("subagent 'tools' allowlist contains duplicate entries")
+        messages.append("[tool_allowlist_duplicate] subagent 'tools' allowlist contains duplicate entries")
+    elif any(
+        not RUNTIME_TOOL_RE.fullmatch(tool)
+        and not (tool.startswith("mcp__mmcg__") and "*" in tool)
+        for tool in runtime_tools
+    ):
+        messages.append("[tool_allowlist_invalid] subagent 'tools' contains an invalid tool name")
 
     max_turns = frontmatter.get("maxTurns")
     if (
@@ -537,13 +569,13 @@ def _subagent_runtime_contract_messages(frontmatter: dict) -> list[str]:
         or not 1 <= max_turns <= SUBAGENT_MAX_TURNS
     ):
         messages.append(
-            f"subagent 'maxTurns' must be an integer from 1 to {SUBAGENT_MAX_TURNS}"
+            f"[max_turns_invalid] subagent 'maxTurns' must be an integer from 1 to {SUBAGENT_MAX_TURNS}"
         )
 
     effort = frontmatter.get("effort")
     if not isinstance(effort, str) or effort not in SUBAGENT_EFFORT_LEVELS:
         messages.append(
-            f"subagent 'effort' must be one of {sorted(SUBAGENT_EFFORT_LEVELS)}, got {effort!r}"
+            f"[effort_invalid] subagent 'effort' must be one of {sorted(SUBAGENT_EFFORT_LEVELS)}, got {effort!r}"
         )
 
     servers = frontmatter.get("mcpServers")
@@ -555,9 +587,188 @@ def _subagent_runtime_contract_messages(frontmatter: dict) -> list[str]:
         and all(isinstance(server, str) for server in servers)
     )
     if servers is not None and not valid_servers_shape:
-        messages.append("subagent 'mcpServers' must be a list or mapping when present")
+        messages.append("[mcp_servers_invalid] subagent 'mcpServers' must be a list or mapping when present")
+    elif len(_mcp_server_names(servers)) > WORKFLOW_MAX_SERVERS:
+        messages.append(
+            f"[workflow_declaration_limit_exceeded] subagent 'mcpServers' exceeds {WORKFLOW_MAX_SERVERS} entries"
+        )
+    elif any(not MCP_SERVER_RE.fullmatch(server) for server in _mcp_server_names(servers)):
+        messages.append("[mcp_servers_invalid] subagent 'mcpServers' contains an invalid server name")
 
     return messages
+
+
+def _safe_workflow_write_path(value: object) -> bool:
+    if not isinstance(value, str) or value.count("{task}") > 1:
+        return False
+    expanded = value.replace("{task}", "task")
+    if "{" in expanded or "}" in expanded or "\\" in expanded:
+        return False
+    if any(part in {"", ".", ".."} for part in expanded.split("/")):
+        return False
+    path = Path(expanded)
+    return not path.is_absolute() and all(part not in {"", ".", ".."} for part in path.parts)
+
+
+def _workflow_metadata_messages(
+    frontmatter: dict, *, required: bool, runtime_tools: list[str]
+) -> list[str]:
+    workflow = frontmatter.get("workflow")
+    if workflow is None:
+        return ["[workflow_metadata_missing] managed component must declare workflow metadata"] if required else []
+    if not isinstance(workflow, dict):
+        return ["[workflow_metadata_invalid] workflow metadata must be a mapping"]
+
+    messages: list[str] = []
+    allowed = {"schema_version", "activation", "mutability", "skills", "writes"}
+    unknown = sorted(set(workflow) - allowed)
+    if unknown:
+        messages.append(
+            f"[workflow_metadata_invalid] unknown workflow field(s): {', '.join(unknown)}"
+        )
+    if type(workflow.get("schema_version")) is not int or workflow.get("schema_version") != 1:
+        messages.append("[workflow_metadata_invalid] workflow schema_version must be 1")
+    if workflow.get("activation") not in WORKFLOW_ACTIVATIONS:
+        messages.append("[workflow_metadata_invalid] workflow activation is unsupported")
+    mutability = workflow.get("mutability")
+    if mutability not in WORKFLOW_MUTABILITIES:
+        messages.append("[workflow_metadata_invalid] workflow mutability is unsupported")
+
+    skills = workflow.get("skills", [])
+    if not isinstance(skills, list):
+        messages.append("[workflow_metadata_invalid] workflow skills must be a list")
+    elif len(skills) > WORKFLOW_MAX_RELATIONS:
+        messages.append(
+            f"[workflow_declaration_limit_exceeded] workflow skills exceeds {WORKFLOW_MAX_RELATIONS} entries"
+        )
+    else:
+        relation_ids: list[str] = []
+        for relation in skills:
+            if (
+                not isinstance(relation, dict)
+                or set(relation) != {"id", "required"}
+                or not isinstance(relation.get("id"), str)
+                or not SLUG_RE.fullmatch(relation["id"])
+                or not isinstance(relation.get("required"), bool)
+            ):
+                messages.append(
+                    "[workflow_metadata_invalid] each skill relation needs only canonical id and boolean required"
+                )
+                break
+            relation_ids.append(relation["id"])
+        if len(relation_ids) != len(set(relation_ids)):
+            messages.append(
+                "[workflow_metadata_invalid] workflow skill relation IDs must be unique"
+            )
+
+    writes = workflow.get("writes", [])
+    write_fields = {"artifact", "path", "authority", "runtime", "exclusivity_group"}
+    if not isinstance(writes, list):
+        messages.append("[writer_declaration_invalid] workflow writes must be a list")
+    elif len(writes) > WORKFLOW_MAX_WRITES:
+        messages.append(
+            f"[workflow_declaration_limit_exceeded] workflow writes exceeds {WORKFLOW_MAX_WRITES} entries"
+        )
+    else:
+        for declaration in writes:
+            valid = (
+                isinstance(declaration, dict)
+                and set(declaration) == write_fields
+                and isinstance(declaration.get("artifact"), str)
+                and re.fullmatch(r"[a-z][a-z0-9.-]*", declaration["artifact"])
+                and _safe_workflow_write_path(declaration.get("path"))
+                and declaration.get("authority") in {"canonical", "advisory"}
+                and declaration.get("runtime") in WORKFLOW_RUNTIMES
+                and isinstance(declaration.get("exclusivity_group"), str)
+                and SLUG_RE.fullmatch(declaration["exclusivity_group"])
+            )
+            if not valid:
+                messages.append(
+                    "[writer_declaration_invalid] writer needs canonical artifact, safe path, authority, runtime, and exclusivity group"
+                )
+                break
+
+    if mutability == "read-only" and {"Edit", "Write"}.intersection(runtime_tools):
+        messages.append(
+            "[readonly_mutation_capability] read-only workflow role grants Edit or Write"
+        )
+    return messages
+
+
+def validate_workflow_metadata_fixture() -> list[Issue]:
+    valid = {
+        "workflow": {
+            "schema_version": 1,
+            "activation": "conditional",
+            "mutability": "read-only",
+            "skills": [{"id": "mastermind-example", "required": False}],
+            "writes": [],
+        }
+    }
+    checks = (
+        not _workflow_metadata_messages(valid, required=True, runtime_tools=["Read"]),
+        any(
+            "workflow_metadata_missing" in message
+            for message in _workflow_metadata_messages({}, required=True, runtime_tools=["Read"])
+        ),
+        any(
+            "unknown workflow field" in message
+            for message in _workflow_metadata_messages(
+                {"workflow": {**valid["workflow"], "surprise": True}},
+                required=True,
+                runtime_tools=["Read"],
+            )
+        ),
+        any(
+            "readonly_mutation_capability" in message
+            for message in _workflow_metadata_messages(
+                valid, required=True, runtime_tools=["Read", "Write"]
+            )
+        ),
+        any(
+            "workflow_metadata_invalid" in message
+            for message in _workflow_metadata_messages(
+                {"workflow": {**valid["workflow"], "schema_version": True}},
+                required=True,
+                runtime_tools=["Read"],
+            )
+        ),
+        any(
+            "workflow_metadata_invalid" in message
+            for message in _workflow_metadata_messages(
+                {
+                    "workflow": {
+                        **valid["workflow"],
+                        "skills": [{"id": "mastermind-example"}],
+                    }
+                },
+                required=True,
+                runtime_tools=["Read"],
+            )
+        ),
+        any(
+            "workflow_declaration_limit_exceeded" in message
+            for message in _workflow_metadata_messages(
+                {
+                    "workflow": {
+                        **valid["workflow"],
+                        "writes": [{}] * (WORKFLOW_MAX_WRITES + 1),
+                    }
+                },
+                required=True,
+                runtime_tools=["Read"],
+            )
+        ),
+    )
+    if all(checks):
+        return []
+    return [
+        Issue(
+            REPO_ROOT / "scripts/validate.py",
+            "error",
+            "workflow metadata validator fixture failed",
+        )
+    ]
 
 
 def _mcp_server_names(value: object) -> list[str]:
@@ -583,19 +794,19 @@ def _subagent_mmcg_contract_messages(
     if "mmcg" not in servers:
         if grants or all_referenced:
             messages.append(
-                "uses mmcg tools but does not declare `mcpServers: [mmcg]`"
+                "[mmcg_server_scope_missing] uses mmcg tools but does not declare `mcpServers: [mmcg]`"
             )
 
     if "mmcg" in servers and not grants:
         messages.append(
-            "declares `mcpServers: [mmcg]` but its `tools` allowlist grants no "
+            "[mmcg_scope_without_grant] declares `mcpServers: [mmcg]` but its `tools` allowlist grants no "
             "`mcp__mmcg__mmcg_*` tools"
         )
 
     wildcards = {grant for grant in grants if "*" in grant}
     for wildcard in sorted(wildcards):
         messages.append(
-            f"uses broad `{wildcard}`; grant only the exact mmcg tools this role needs"
+            f"[mmcg_wildcard_grant] uses broad `{wildcard}`; grant only the exact mmcg tools this role needs"
         )
 
     granted_mmcg = {
@@ -604,14 +815,14 @@ def _subagent_mmcg_contract_messages(
         if grant not in wildcards
     }
     for granted in sorted(granted_mmcg - known_tools):
-        messages.append(f"grants unknown mmcg tool `{granted}`")
+        messages.append(f"[mmcg_tool_unknown] grants unknown mmcg tool `{granted}`")
 
     for unknown in sorted(all_referenced - known_tools):
-        messages.append(f"prompt references unknown mmcg tool `{unknown}`")
+        messages.append(f"[mmcg_prompt_tool_unknown] prompt references unknown mmcg tool `{unknown}`")
     referenced = all_referenced & known_tools
     for required in sorted(referenced - granted_mmcg):
         messages.append(
-            f"prompt references `{required}` but `tools` omits "
+            f"[mmcg_prompt_grant_missing] prompt references `{required}` but `tools` omits "
             f"`mcp__mmcg__{required}`"
         )
     return messages
@@ -1986,6 +2197,7 @@ def main(argv: list[str]) -> int:
     issues: list[Issue] = []
     for a in artifacts:
         issues.extend(validate_artifact(a))
+    issues.extend(validate_workflow_metadata_fixture())
     issues.extend(validate_subagent_mmcg_access(artifacts))
     issues.extend(validate_openai_skill_adapters(artifacts))
     issues.extend(validate_workflow_role_contracts())

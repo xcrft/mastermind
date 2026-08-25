@@ -1,6 +1,16 @@
 ---
 name: mastermind-task-executor
 description: Execute an approved Mastermind task contract within Scope, prove its Acceptance Criteria, and write the canonical file-backed executor report. Use when the user hands off a `.mastermind/tasks/<NNN>-<name>/spec.md` or explicitly asks to execute an approved Mastermind task.
+workflow:
+  schema_version: 1
+  activation: manual
+  mutability: writer
+  writes:
+    - artifact: task.executor-report
+      path: ".mastermind/tasks/{task}/executor-report.md"
+      authority: canonical
+      runtime: portable
+      exclusivity_group: task-executor
 metadata:
   version: 0.6.2
   authors: [mastermind]

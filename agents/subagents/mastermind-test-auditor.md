@@ -6,6 +6,13 @@ model: sonnet
 mcpServers: [mmcg]
 maxTurns: 15
 effort: medium
+workflow:
+  schema_version: 1
+  activation: conditional
+  mutability: read-only
+  skills:
+    - id: mastermind-test-audit
+      required: false
 metadata:
   version: 0.1.1
   authors: [mastermind]

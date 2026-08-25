@@ -99,6 +99,7 @@ mastermind install --client all --profile core
 mastermind setup cursor --scope user --write
 mastermind setup continue --scope user --write
 mastermind doctor --workflow --client all
+mastermind workflow audit --root . --json
 ```
 
 Fresh installs default to `core` (14 portable skills). `frontend` installs 19,
@@ -108,6 +109,11 @@ Updates preserve each client's installed profile unless `--profile` explicitly
 changes it. Legacy schema-v1 manifests migrate as `full`. Older installers
 reject the schema-v2 manifest without replacing managed files, so use the
 current package for later updates.
+
+`workflow audit` is read-only. It graphs only repository-owned source workflow
+files or artifacts listed by an installed ownership manifest, then reports
+missing MCP scope/registration, invalid runtime bounds, optional skill closure,
+writer conflicts, unreachable tools, and componentized context estimates.
 
 Mastermind supports Claude Code, Codex, Cursor, Continue, and generic MCP stdio
 clients. Setup previews changes unless `--write` is present. The MCP server

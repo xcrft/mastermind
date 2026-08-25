@@ -5,6 +5,13 @@ tools: Read, Grep, Glob, Bash
 model: sonnet
 maxTurns: 12
 effort: medium
+workflow:
+  schema_version: 1
+  activation: conditional
+  mutability: read-only
+  skills:
+    - id: mastermind-comment-audit
+      required: false
 metadata:
   version: 0.1.1
   authors: [mastermind]

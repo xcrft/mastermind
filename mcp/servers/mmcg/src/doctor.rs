@@ -24,7 +24,7 @@
 //! Human-readable by default; `--json` switches to a machine-parseable format.
 
 use serde::Serialize;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Per-check verdict. Order matters — Display picks the marker by severity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -185,6 +185,7 @@ pub fn run(root: &Path, mmcg_binary: &Path) -> Report {
 
 /// Run every check against `root` using the selected index database.
 pub fn run_with_index(root: &Path, mmcg_binary: &Path, index_path: &Path) -> Report {
+    let workflow_audit = crate::workflow_status::audit_workflow_for_doctor(root);
     let checks = vec![
         check_binary(),
         check_path_entries(),
@@ -196,8 +197,8 @@ pub fn run_with_index(root: &Path, mmcg_binary: &Path, index_path: &Path) -> Rep
         check_claude_md(root),
         check_mcp_config(root),
         check_mcp_handshake(index_path, mmcg_binary),
-        check_subagent_mcp_servers(root),
-        check_subagent_runtime_contract(root),
+        check_workflow_mcp_contract(workflow_audit.as_ref()),
+        check_workflow_runtime_contract(workflow_audit.as_ref()),
         check_style_profile(root),
     ];
     Report::from_checks(root, checks)
@@ -916,362 +917,104 @@ fn format_bytes(n: u64) -> String {
     }
 }
 
-/// Server names registered for Claude Code: keys under `mcpServers` (or legacy
-/// `servers`) in project `.mcp.json` and user `~/.claude.json`.
-fn registered_servers(root: &Path) -> std::collections::BTreeSet<String> {
-    let mut set = std::collections::BTreeSet::new();
-    let candidates: Vec<PathBuf> = std::iter::once(root.join(".mcp.json"))
-        .chain(std::env::home_dir().map(|h| h.join(".claude.json")))
-        .collect();
-    for path in candidates {
-        let Ok(body) = std::fs::read_to_string(&path) else {
-            continue;
+fn check_workflow_mcp_contract(
+    report: Option<&crate::workflow_status::WorkflowAuditReport>,
+) -> Check {
+    workflow_diagnostic_check(
+        "subagent MCP scoping",
+        report,
+        |code| {
+            matches!(
+                code,
+                "mcp_servers_invalid"
+                    | "mcp_registration_entry_invalid"
+                    | "mmcg_registration_missing"
+                    | "mmcg_scope_without_grant"
+                    | "mmcg_server_scope_missing"
+                    | "mmcg_tool_unknown"
+                    | "mmcg_wildcard_grant"
+            )
+        },
+        "owned workflow MCP server scope, registration, and exact grants are valid",
+    )
+}
+
+fn check_workflow_runtime_contract(
+    report: Option<&crate::workflow_status::WorkflowAuditReport>,
+) -> Check {
+    workflow_diagnostic_check(
+        "subagent runtime contract",
+        report,
+        |code| {
+            !matches!(
+                code,
+                "mcp_servers_invalid"
+                    | "mcp_registration_entry_invalid"
+                    | "mmcg_registration_missing"
+                    | "mmcg_scope_without_grant"
+                    | "mmcg_server_scope_missing"
+                    | "mmcg_tool_unknown"
+                    | "mmcg_wildcard_grant"
+                    | "role_unconditional"
+                    | "tool_grant_unreferenced"
+                    | "tools_unreachable"
+            )
+        },
+        "owned workflow model, tools, turns, effort, metadata, and writers are valid",
+    )
+}
+
+fn workflow_diagnostic_check(
+    name: &'static str,
+    report: Option<&crate::workflow_status::WorkflowAuditReport>,
+    includes: impl Fn(&str) -> bool,
+    ok_message: &str,
+) -> Check {
+    let Some(report) = report else {
+        return Check {
+            name,
+            status: Status::Ok,
+            message: "no owned Mastermind workflow layout found — nothing to verify".into(),
+            hint: None,
         };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else {
-            continue;
-        };
-        for key in ["mcpServers", "servers"] {
-            if let Some(map) = v.get(key).and_then(|m| m.as_object()) {
-                set.extend(map.keys().cloned());
-            }
-        }
-    }
-    set
-}
-
-/// YAML frontmatter block between the opening `---` and the next `---`.
-/// `None` if the text doesn't open with frontmatter.
-fn frontmatter_block(md: &str) -> Option<&str> {
-    let rest = md
-        .strip_prefix("---\n")
-        .or_else(|| md.strip_prefix("---\r\n"))?;
-    let end = rest.find("\n---")?;
-    Some(&rest[..end])
-}
-
-/// MCP server names a subagent references in its top-level `mcpServers:` field —
-/// list entries or mapping keys (inline definitions). Empty if the field is
-/// absent or the frontmatter won't parse.
-fn subagent_mcp_refs(md: &str) -> Vec<String> {
-    let Some(fm) = frontmatter_block(md) else {
-        return vec![];
     };
-    let Ok(v) = serde_norway::from_str::<serde_norway::Value>(fm) else {
-        return vec![];
-    };
-    match v.get("mcpServers") {
-        Some(serde_norway::Value::Sequence(seq)) => seq
-            .iter()
-            .filter_map(|x| x.as_str().map(String::from))
-            .collect(),
-        Some(serde_norway::Value::Mapping(map)) => map
-            .iter()
-            .filter_map(|(k, _)| k.as_str().map(String::from))
-            .collect(),
-        _ => vec![],
-    }
-}
-
-/// Claude Code's explicit subagent `tools:` allowlist. `None` means the field
-/// is absent and the runtime inherits the parent tool surface. A malformed
-/// value becomes an empty explicit allowlist so doctor fails safe.
-fn subagent_tool_allowlist(md: &str) -> Option<Vec<String>> {
-    let fm = frontmatter_block(md)?;
-    let Ok(v) = serde_norway::from_str::<serde_norway::Value>(fm) else {
-        return Some(vec![]);
-    };
-    match v.get("tools") {
-        None => None,
-        Some(serde_norway::Value::String(value)) => Some(
-            value
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(String::from)
-                .collect(),
-        ),
-        Some(serde_norway::Value::Sequence(values)) => Some(
-            values
-                .iter()
-                .map(|value| value.as_str().map(str::trim).map(String::from))
-                .collect::<Option<Vec<_>>>()
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|value| !value.is_empty())
-                .collect(),
-        ),
-        Some(_) => Some(vec![]),
-    }
-}
-
-fn subagent_prompt_mmcg_refs(md: &str) -> std::collections::BTreeSet<String> {
-    let body = md
-        .strip_prefix("---\n")
-        .or_else(|| md.strip_prefix("---\r\n"))
-        .and_then(|rest| rest.find("\n---").map(|end| &rest[end + 4..]))
-        .unwrap_or(md);
-    body.split(|character: char| !(character.is_ascii_lowercase() || character == '_'))
-        .filter_map(|token| {
-            token
-                .strip_prefix("mcp__mmcg__")
-                .filter(|name| name.starts_with("mmcg_"))
-                .or_else(|| token.starts_with("mmcg_").then_some(token))
+    let findings = report
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            includes(&diagnostic.code)
+                && matches!(diagnostic.severity.as_str(), "error" | "warning")
         })
-        .map(String::from)
-        .collect()
-}
-
-/// Pure core of `check_subagent_mcp_servers`: scan `agent_dirs` for subagent
-/// `.md` files; return `(any_declared, sorted unregistered "server (in file)"
-/// descriptions)`. Split out so tests use a controlled directory, not the real
-/// `~/.claude/agents`.
-fn unregistered_subagent_servers(
-    agent_dirs: &[PathBuf],
-    registered: &std::collections::BTreeSet<String>,
-) -> (bool, Vec<String>) {
-    let mut declared = false;
-    let mut missing: Vec<String> = Vec::new();
-    for dir in agent_dirs {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        for ent in entries.flatten() {
-            let p = ent.path();
-            if p.extension().and_then(|e| e.to_str()) != Some("md") {
-                continue;
-            }
-            let body = std::fs::read_to_string(&p).unwrap_or_default();
-            for server in subagent_mcp_refs(&body) {
-                declared = true;
-                if !registered.contains(&server) {
-                    let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-                    missing.push(format!("{server} (in {fname})"));
-                }
-            }
-        }
-    }
-    missing.sort();
-    missing.dedup();
-    (declared, missing)
-}
-
-/// Every server a subagent scopes via `mcpServers:` must be registered —
-/// otherwise the subagent silently gets nothing for that entry. Scans project
-/// `.claude/agents/` and user `~/.claude/agents/`.
-fn check_subagent_mcp_servers(root: &Path) -> Check {
-    let registered = registered_servers(root);
-    let mut agent_dirs: Vec<PathBuf> = vec![root.join(".claude").join("agents")];
-    if let Some(h) = std::env::home_dir() {
-        agent_dirs.push(h.join(".claude").join("agents"));
-    }
-    let (declared, missing) = unregistered_subagent_servers(&agent_dirs, &registered);
-
-    if !declared {
+        .collect::<Vec<_>>();
+    if findings.is_empty() && report.complete {
         return Check {
-            name: "subagent MCP scoping",
+            name,
             status: Status::Ok,
-            message: "no subagent declares `mcpServers:` — nothing to verify".into(),
+            message: ok_message.into(),
             hint: None,
         };
     }
-    if missing.is_empty() {
-        return Check {
-            name: "subagent MCP scoping",
-            status: Status::Ok,
-            message: "every subagent `mcpServers:` entry names a registered server".into(),
-            hint: None,
-        };
-    }
+    let failed = !report.complete
+        || findings
+            .iter()
+            .any(|diagnostic| diagnostic.severity == "error");
+    let summary = findings
+        .iter()
+        .take(8)
+        .map(|diagnostic| format!("{}: {}", diagnostic.code, diagnostic.message))
+        .collect::<Vec<_>>()
+        .join("; ");
     Check {
-        name: "subagent MCP scoping",
-        status: Status::Warn,
-        message: format!(
-            "subagent scopes an unregistered MCP server: {}",
-            missing.join(", ")
-        ),
+        name,
+        status: if failed { Status::Fail } else { Status::Warn },
+        message: if summary.is_empty() {
+            "workflow audit input is incomplete".into()
+        } else {
+            summary
+        },
         hint: Some(
-            "register it (project `.mcp.json` / `mastermind setup claude --write`) or drop the `mcpServers:` entry"
+            "run `mastermind workflow audit --root <workflow-root>` for the complete graph report"
                 .into(),
-        ),
-    }
-}
-
-const SUBAGENT_MODELS: &[&str] = &["haiku", "sonnet", "opus"];
-const SUBAGENT_EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
-const SUBAGENT_MAX_TURNS: u64 = 100;
-
-/// Keep third-party agent policies outside Mastermind's strict runtime contract.
-fn subagent_runtime_contract_issues(agent_dirs: &[PathBuf]) -> (bool, Vec<String>) {
-    let mut found = false;
-    let mut issues = Vec::new();
-    for dir in agent_dirs {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("md") {
-                continue;
-            }
-            let body = std::fs::read_to_string(&path).unwrap_or_default();
-            let filename = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("?");
-            let stem = path
-                .file_stem()
-                .and_then(|name| name.to_str())
-                .unwrap_or("");
-            let parsed = frontmatter_block(&body).and_then(|frontmatter| {
-                serde_norway::from_str::<serde_norway::Value>(frontmatter).ok()
-            });
-            let managed = stem.starts_with("mastermind-")
-                || parsed
-                    .as_ref()
-                    .and_then(|value| value.get("name"))
-                    .and_then(serde_norway::Value::as_str)
-                    .is_some_and(|name| name.starts_with("mastermind-"));
-            if !managed {
-                continue;
-            }
-            found = true;
-            let Some(frontmatter) = parsed else {
-                issues.push(format!("{filename}: missing or malformed frontmatter"));
-                continue;
-            };
-
-            match frontmatter
-                .get("name")
-                .and_then(serde_norway::Value::as_str)
-            {
-                Some(name) if name == stem => {}
-                Some(_) => issues.push(format!("{filename}: name does not match filename")),
-                None => issues.push(format!("{filename}: missing name")),
-            }
-            if !frontmatter
-                .get("model")
-                .and_then(serde_norway::Value::as_str)
-                .is_some_and(|model| SUBAGENT_MODELS.contains(&model))
-            {
-                issues.push(format!("{filename}: missing or unsupported model"));
-            }
-            if !frontmatter
-                .get("maxTurns")
-                .and_then(serde_norway::Value::as_u64)
-                .is_some_and(|turns| (1..=SUBAGENT_MAX_TURNS).contains(&turns))
-            {
-                issues.push(format!(
-                    "{filename}: maxTurns must be from 1 to {SUBAGENT_MAX_TURNS}"
-                ));
-            }
-            if !frontmatter
-                .get("effort")
-                .and_then(serde_norway::Value::as_str)
-                .is_some_and(|effort| SUBAGENT_EFFORT_LEVELS.contains(&effort))
-            {
-                issues.push(format!("{filename}: missing or unsupported effort"));
-            }
-
-            let tools = subagent_tool_allowlist(&body).unwrap_or_default();
-            if tools.is_empty() {
-                issues.push(format!(
-                    "{filename}: missing explicit non-empty tools allowlist"
-                ));
-            }
-            let unique_tools: std::collections::BTreeSet<&str> =
-                tools.iter().map(String::as_str).collect();
-            if unique_tools.len() != tools.len() {
-                issues.push(format!("{filename}: tools allowlist contains duplicates"));
-            }
-
-            let valid_server_shape = match frontmatter.get("mcpServers") {
-                None => true,
-                Some(serde_norway::Value::Sequence(values)) => {
-                    values.iter().all(|value| value.as_str().is_some())
-                }
-                Some(serde_norway::Value::Mapping(values)) => {
-                    values.keys().all(|value| value.as_str().is_some())
-                }
-                Some(_) => false,
-            };
-            if !valid_server_shape {
-                issues.push(format!("{filename}: mcpServers must be a list or mapping"));
-            }
-            let servers = subagent_mcp_refs(&body);
-            let scopes_mmcg = servers.iter().any(|server| server == "mmcg");
-            let grants: std::collections::BTreeSet<String> = tools
-                .iter()
-                .filter_map(|tool| tool.strip_prefix("mcp__mmcg__"))
-                .filter(|tool| !tool.contains('*'))
-                .map(String::from)
-                .collect();
-            let wildcard = tools
-                .iter()
-                .any(|tool| tool.starts_with("mcp__mmcg__") && tool.contains('*'));
-            if wildcard {
-                issues.push(format!("{filename}: mmcg wildcard grant is not allowed"));
-            }
-            for unknown in grants
-                .iter()
-                .filter(|tool| !crate::mcp::is_known_tool(tool))
-            {
-                issues.push(format!("{filename}: grants unknown mmcg tool {unknown}"));
-            }
-
-            let references = subagent_prompt_mmcg_refs(&body);
-            if (!grants.is_empty() || !references.is_empty() || wildcard) && !scopes_mmcg {
-                issues.push(format!("{filename}: uses mmcg without mcpServers: [mmcg]"));
-            }
-            if scopes_mmcg && grants.is_empty() {
-                issues.push(format!(
-                    "{filename}: scopes mmcg without an exact known grant"
-                ));
-            }
-            for required in references {
-                if !crate::mcp::is_known_tool(&required) {
-                    issues.push(format!(
-                        "{filename}: prompt names unknown mmcg tool {required}"
-                    ));
-                } else if !grants.contains(&required) {
-                    issues.push(format!("{filename}: prompt tool {required} is not allowed"));
-                }
-            }
-        }
-    }
-    issues.sort();
-    issues.dedup();
-    (found, issues)
-}
-
-fn check_subagent_runtime_contract(root: &Path) -> Check {
-    let mut agent_dirs = vec![root.join(".claude").join("agents")];
-    if let Some(home) = std::env::home_dir() {
-        agent_dirs.push(home.join(".claude").join("agents"));
-    }
-    let (found, issues) = subagent_runtime_contract_issues(&agent_dirs);
-    if !found {
-        return Check {
-            name: "subagent runtime contract",
-            status: Status::Ok,
-            message: "no Mastermind subagents found — nothing to verify".into(),
-            hint: None,
-        };
-    }
-    if issues.is_empty() {
-        return Check {
-            name: "subagent runtime contract",
-            status: Status::Ok,
-            message: "Mastermind subagents have explicit bounded runtime contracts".into(),
-            hint: None,
-        };
-    }
-    Check {
-        name: "subagent runtime contract",
-        status: Status::Warn,
-        message: format!("invalid Mastermind subagent contract: {}", issues.join("; ")),
-        hint: Some(
-            "run `mastermind update` or restore explicit model, tools, maxTurns, effort, and exact mmcg grants"
-                .into()
         ),
     }
 }
@@ -1745,146 +1488,32 @@ mod tests {
     }
 
     #[test]
-    fn subagent_mcp_refs_parses_list_and_handles_absence() {
-        let list = "---\nname: r\ndescription: d\nmcpServers: [mmcg, foo]\n---\nbody";
-        assert_eq!(
-            subagent_mcp_refs(list),
-            vec!["mmcg".to_string(), "foo".to_string()]
-        );
-        let none = "---\nname: r\ndescription: d\ntools: Read\n---\nbody";
-        assert!(subagent_mcp_refs(none).is_empty());
-        let no_fm = "# heading only\n";
-        assert!(subagent_mcp_refs(no_fm).is_empty());
-    }
+    fn doctor_consumes_shared_workflow_analyzer_diagnostics() {
+        let report = crate::workflow_status::WorkflowAuditReport {
+            schema_version: 1,
+            root: "/tmp/workflow".into(),
+            layout: "installed".into(),
+            client: Some("claude".into()),
+            profile: Some("core".into()),
+            limits: crate::workflow_status::WorkflowAuditLimits::default(),
+            complete: true,
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            diagnostics: vec![crate::workflow_status::WorkflowDiagnostic {
+                code: "mmcg_server_scope_missing".into(),
+                severity: "error".into(),
+                message: "missing scope".into(),
+                component_id: Some("mastermind-broken".into()),
+                path: Some("agents/mastermind-broken.md".into()),
+                evidence_relation: Some("agent_scopes_server".into()),
+            }],
+            context_estimates: Vec::new(),
+        };
 
-    #[test]
-    fn subagent_tool_allowlist_parses_scalar_list_and_inheritance() {
-        let scalar = "---\nname: r\ntools: Read, mcp__mmcg__mmcg_search\n---\nbody";
-        assert_eq!(
-            subagent_tool_allowlist(scalar),
-            Some(vec![
-                "Read".to_string(),
-                "mcp__mmcg__mmcg_search".to_string()
-            ])
-        );
-        let list = "---\nname: r\ntools: [Read, mcp__mmcg__mmcg_status]\n---\nbody";
-        assert_eq!(
-            subagent_tool_allowlist(list),
-            Some(vec![
-                "Read".to_string(),
-                "mcp__mmcg__mmcg_status".to_string()
-            ])
-        );
-        let inherited = "---\nname: r\nmcpServers: [mmcg]\n---\nbody";
-        assert_eq!(subagent_tool_allowlist(inherited), None);
-        let malformed = "---\nname: r\ntools: [Read, 42]\n---\nbody";
-        assert_eq!(subagent_tool_allowlist(malformed), Some(vec![]));
-    }
-
-    #[test]
-    fn subagent_prompt_mmcg_refs_reads_bare_and_qualified_names_from_the_body() {
-        let body = "---\nname: r\ntools: mcp__mmcg__mmcg_status\n---\nUse mmcg_search, then mcp__mmcg__mmcg_callers.";
-        assert_eq!(
-            subagent_prompt_mmcg_refs(body),
-            ["mmcg_callers".to_string(), "mmcg_search".to_string()]
-                .into_iter()
-                .collect()
-        );
-    }
-
-    #[test]
-    fn subagent_runtime_contract_issues_cover_the_full_agent_chain() {
-        let root = tmp();
-        let agents = root.join("agents");
-        fs::create_dir_all(&agents).unwrap();
-        fs::write(
-            agents.join("mastermind-working.md"),
-            "---\nname: mastermind-working\nmodel: haiku\ntools: Read, mcp__mmcg__mmcg_search\nmcpServers: [mmcg]\nmaxTurns: 12\neffort: low\n---\nUse mmcg_search.",
-        )
-        .unwrap();
-        fs::write(
-            agents.join("mastermind-missing.md"),
-            "---\nname: mastermind-missing\n---\nbody",
-        )
-        .unwrap();
-        fs::write(
-            agents.join("mastermind-wildcard.md"),
-            "---\nname: mastermind-wildcard\nmodel: sonnet\ntools: Read, mcp__mmcg__*\nmcpServers: [mmcg]\nmaxTurns: 20\neffort: medium\n---\nUse mmcg_search.",
-        )
-        .unwrap();
-        fs::write(
-            agents.join("mastermind-unscoped.md"),
-            "---\nname: mastermind-unscoped\nmodel: sonnet\ntools: Read, mcp__mmcg__mmcg_search\nmaxTurns: 20\neffort: medium\n---\nUse mmcg_search.",
-        )
-        .unwrap();
-        fs::write(
-            agents.join("mastermind-missing-grant.md"),
-            "---\nname: mastermind-missing-grant\nmodel: sonnet\ntools: Read, mcp__mmcg__mmcg_status\nmcpServers: [mmcg]\nmaxTurns: 20\neffort: medium\n---\nUse mmcg_search.",
-        )
-        .unwrap();
-        fs::write(
-            agents.join("mastermind-unknown.md"),
-            "---\nname: mastermind-unknown\nmodel: opus\ntools: Read, mcp__mmcg__mmcg_not_a_tool\nmcpServers: [mmcg]\nmaxTurns: 20\neffort: high\n---\nbody",
-        )
-        .unwrap();
-        fs::write(
-            agents.join("mastermind-malformed-server.md"),
-            "---\nname: mastermind-malformed-server\nmodel: haiku\ntools: Read\nmcpServers: mmcg\nmaxTurns: 4\neffort: low\n---\nbody",
-        )
-        .unwrap();
-
-        let (found, issues) = subagent_runtime_contract_issues(std::slice::from_ref(&agents));
-        assert!(found);
-        let rendered = issues.join("\n");
-        for expected in [
-            "mastermind-missing.md: missing or unsupported model",
-            "mastermind-missing.md: missing explicit non-empty tools allowlist",
-            "mastermind-missing.md: maxTurns must be from 1 to 100",
-            "mastermind-missing.md: missing or unsupported effort",
-            "mastermind-wildcard.md: mmcg wildcard grant is not allowed",
-            "mastermind-unscoped.md: uses mmcg without mcpServers: [mmcg]",
-            "mastermind-missing-grant.md: prompt tool mmcg_search is not allowed",
-            "mastermind-unknown.md: grants unknown mmcg tool mmcg_not_a_tool",
-            "mastermind-malformed-server.md: mcpServers must be a list or mapping",
-        ] {
-            assert!(
-                rendered.contains(expected),
-                "missing {expected}:\n{rendered}"
-            );
-        }
-        assert!(!rendered.contains("mastermind-working.md"));
-
-        fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn unregistered_subagent_servers_flags_missing_then_clears() {
-        let root = tmp();
-        let agents = root.join("agents");
-        fs::create_dir_all(&agents).unwrap();
-        fs::write(
-            agents.join("r.md"),
-            "---\nname: r\ndescription: d\nmcpServers: [mmcg]\nmetadata:\n  version: 0.1.0\n---\nb",
-        )
-        .unwrap();
-        fs::write(
-            agents.join("p.md"),
-            "---\nname: p\ndescription: d\ntools: Read\nmetadata:\n  version: 0.1.0\n---\nb",
-        )
-        .unwrap();
-
-        let mut reg = std::collections::BTreeSet::new();
-        let (declared, missing) =
-            unregistered_subagent_servers(std::slice::from_ref(&agents), &reg);
-        assert!(declared, "r.md declares mcpServers");
-        assert_eq!(missing, vec!["mmcg (in r.md)".to_string()]);
-
-        reg.insert("mmcg".to_string());
-        let (declared2, missing2) =
-            unregistered_subagent_servers(std::slice::from_ref(&agents), &reg);
-        assert!(declared2);
-        assert!(missing2.is_empty(), "mmcg now registered");
-
-        fs::remove_dir_all(&root).ok();
+        let mcp = check_workflow_mcp_contract(Some(&report));
+        let runtime = check_workflow_runtime_contract(Some(&report));
+        assert_eq!(mcp.status, Status::Fail);
+        assert!(mcp.message.contains("mmcg_server_scope_missing"));
+        assert_eq!(runtime.status, Status::Ok);
     }
 }

@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `mastermind workflow audit [--root PATH] [--json]` now builds a bounded,
+  deterministic graph of owned agents, skills, models, MCP servers, tools,
+  artifacts, and writers. Schema-v1 output includes stable wiring diagnostics,
+  installed-profile ownership checks, component context estimates, and strict
+  no-follow/YAML/input/output limits, real Claude registration-scope checks,
+  and canonical writer-target validation; doctor and packaged-profile smoke
+  tests consume the same analyzer.
 - The artifact validator and `mastermind doctor` now detect Claude subagents
   that scope an MCP server but block all of its tools with an explicit
   frontmatter allowlist.

@@ -278,6 +278,15 @@ pub(crate) fn is_known_tool(name: &str) -> bool {
     TOOLS.iter().any(|tool| tool.name == name)
 }
 
+/// Return the same tool schemas exposed by `tools/list`, in registry order.
+/// Workflow analysis uses this instead of maintaining a second tool catalog.
+pub(crate) fn workflow_tool_schemas() -> Vec<(&'static str, Value)> {
+    TOOLS
+        .iter()
+        .map(|tool| (tool.name, (tool.schema)()))
+        .collect()
+}
+
 /// Structural graph answers are trustworthy only while the index matches the
 /// repository. A small set of diagnostic, revision-bound, and additive tools
 /// remains available so clients can inspect or recover from stale state.

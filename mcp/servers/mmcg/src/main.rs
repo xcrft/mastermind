@@ -166,6 +166,9 @@ enum Cmd {
     /// Lock and inspect a bounded local graph across multiple repositories.
     #[command(subcommand)]
     Team(TeamCmd),
+    /// Audit Mastermind agent, skill, model, tool, and writer wiring.
+    #[command(subcommand)]
+    Workflow(WorkflowCmd),
     /// Build a compact deterministic architecture briefing from the codegraph.
     Map {
         /// Repository-relative file or directory scope. Defaults to the index root.
@@ -556,6 +559,19 @@ enum Cmd {
     /// code-shape style). Output lives under `~/.mastermind/`, not the project.
     #[command(subcommand)]
     Miner(MinerCmd),
+}
+
+#[derive(Subcommand)]
+enum WorkflowCmd {
+    /// Build a deterministic read-only graph of the owned workflow layout.
+    Audit {
+        /// Source repository or installed client workflow root.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Output the versioned schema-v1 report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1106,6 +1122,17 @@ fn run_cli_inner(
             }
             if stats.extractor_contract_rebuilt {
                 eprintln!("extractor contract changed: rebuilt all structural data");
+            }
+        }
+        Cmd::Workflow(WorkflowCmd::Audit { root, json }) => {
+            let report = mmcg::workflow_status::audit_workflow(&root);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", report.render_text());
+            }
+            if report.has_errors() {
+                std::process::exit(1);
             }
         }
         Cmd::Enrich {
@@ -1831,6 +1858,29 @@ mod tests {
             index_path_for_root(Some(std::path::Path::new("custom/index.db")), root),
             PathBuf::from("custom/index.db")
         );
+    }
+
+    #[test]
+    fn workflow_audit_cli_contract_is_explicit() {
+        let cli = Cli::try_parse_from([
+            "mastermind",
+            "workflow",
+            "audit",
+            "--root",
+            "/workflow",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Workflow(WorkflowCmd::Audit { root, json })
+                if root == std::path::Path::new("/workflow") && json
+        ));
+        let Err(usage) = Cli::try_parse_from(["mastermind", "workflow", "audit", "--unknown"])
+        else {
+            panic!("unknown workflow audit flags must fail parsing");
+        };
+        assert_eq!(usage.exit_code(), 2);
     }
 
     #[test]

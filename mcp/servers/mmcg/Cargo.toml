@@ -69,6 +69,7 @@ getrandom = "0.4"
 libc = "0.2"
 similar = "3.1"
 tempfile = "3"
+cap-std = "4.0.3"
 
 # YAML frontmatter in spec files. `serde_norway` is the maintained fork of
 # `serde_yaml` (archived upstream Sept 2024) — switched to it from `serde_yml`
@@ -86,7 +87,7 @@ globset = "0.4"
 aho-corasick = "1.1"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [[bench]]
 name = "indexer"

@@ -139,6 +139,11 @@ large checklist looks thorough.
 The installed [skill catalog](../skills/README.md) defines each contract. These
 reviews are read-only and do not replace the controller audit.
 
+For structural discovery, take one bounded `mmcg_brief`, use `mmcg_concept` when
+the exact symbol is unknown, then use exact graph edges. Do not repeat a fresh,
+complete graph answer with Bash. Literal strings, configuration, logs, Git,
+builds, tests, and runtime probes remain source/tool work rather than graph work.
+
 ## History and lessons
 
 Mechanical drift may create one lesson candidate per task. A candidate records

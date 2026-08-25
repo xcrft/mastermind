@@ -20,7 +20,7 @@ workflow:
       runtime: claude
       exclusivity_group: task-executor
 metadata:
-  version: 0.5.2
+  version: 0.5.3
   authors: [mastermind]
   tags: [workflow, delegation]
 ---
@@ -53,8 +53,9 @@ across languages. Commit voice is fallback-only when repository policy is silent
    implementation question.
 2. Validate that Goals, Scope, Acceptance Criteria, Tests Plan, and Final
    Verification are internally consistent.
-3. Check named symbols with mmcg, preserve stale/collision/precision caveats,
-   and read the source before changing runtime behavior.
+3. Check named symbols with `mmcg_search`; use `mmcg_callers` or `mmcg_impact`
+   only for relationships omitted by the brief. Use `mmcg_status` after a
+   freshness warning. Preserve graph caveats and read runtime source before edits.
 4. Implement each plan-step outcome. Literal FIND/CHANGE blocks require exact
    matching; other steps are outcome-oriented.
 5. Run focused checks as behavior lands.

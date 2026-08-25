@@ -55,6 +55,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Researcher and critic runtime prompts are compact evidence contracts without
   repeated examples or companion sections. Their behavioral and size ceilings
   are covered by deterministic and model-backed evals.
+- Project routing now starts non-trivial structural work with one bounded brief,
+  uses concept and exact graph queries before literal fallbacks, and forbids
+  rediscovering complete graph answers through Bash. The read-only researcher
+  no longer receives Bash and can resolve natural-language candidates through
+  `mmcg_concept`; managed-index auto-refresh guidance is synchronized across
+  the portable skill and Claude workflow template. Investigator instructions
+  drop long examples and companion sections, and every Bash-capable structural
+  role now names the exact graph route before shell fallback.
 
 ### Fixed
 - Repository source, change-impact, and project-history reads now use one

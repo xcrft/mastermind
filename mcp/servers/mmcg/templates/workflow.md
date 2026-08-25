@@ -2,7 +2,7 @@
 name: mastermind-workflow
 description: Compact project router for the Mastermind Direct, Verified, and Strict workflows.
 metadata:
-  version: 2.0.1
+  version: 2.0.2
   authors: [mastermind]
   tags: [claude-md, workflow, delegation, audit]
 ---
@@ -47,14 +47,25 @@ and untracked files for added, modified, or deleted comments. Spawn
 
 ### Grounding
 
-Use the mmcg MCP tools before making structural claims:
+Call `mmcg_brief` once with the active `planner`, `executor`, or `auditor` role,
+baseline, and a 2,000-token budget before broad discovery on non-trivial work.
+Skip it only for a literal-only or already-localized Direct change. If MCP tools are deferred, load
+the required bounded set once instead of discovering tools one by one.
 
+Route discovery by question:
+
+- `mmcg_concept` for natural-language symbol candidates;
 - `mmcg_search` for symbol existence;
 - `mmcg_callers` / `mmcg_impact` for blast radius;
 - `mmcg_change_impact` and `mmcg_test_impact` for an existing diff;
 - `mmcg_map` for unfamiliar architecture;
 - `mmcg_callers` on a component for who renders it — JSX and Vue template usage
   are call edges.
+
+Do not use Bash to rediscover symbols, files, callers, imports, or impact already
+answered by a fresh, complete graph result. Use `Grep`, `Glob`, or source reads
+for exact text, comments, configs, docs, locales, generated code, and graph
+warnings. Bash remains the right tool for Git, builds, tests, linters, logs, and runtime probes.
 
 The graph is syntactic and bounded. Preserve stale-index, collision, precision,
 and truncation caveats; source reads and tests remain authoritative for runtime behavior.

@@ -1,8 +1,8 @@
 ---
 name: mastermind-codegraph-research
-description: Use mmcg to ground structural code claims before planning, auditing, criticizing, or researching code. Triggers when an agent needs symbol existence, callers, callees, imports, blast radius, file existence, or stale-index handling.
+description: Use mmcg before Bash or literal search for repository orientation, natural-language symbol discovery, symbol existence, callers, callees, imports, blast radius, file existence, or stale-index handling.
 metadata:
-  version: 0.2.0
+  version: 0.3.0
   authors:
     - mastermind
   tags:
@@ -25,6 +25,10 @@ generated code, re-exports, and cross-language edges can reduce precision.
 
 ## Structural vs literal
 
+- **Bounded orientation** (relevant changes, symbols, callers, tests, and history
+  for a role) → one `mmcg_brief` before broad discovery.
+- **Concept discovery** (the intent is known but the exact symbol is not) →
+  `mmcg_concept`, then an exact structural query on the selected candidate.
 - **Structural discovery** (symbols, indexed callers/callees, imports, bounded blast radius) → mmcg first. It understands syntax better than literal text search, but remains name-based and bounded.
 - **Literal** (string contents, log messages, comments, config values) → `Grep` / `Read`. mmcg doesn't index strings.
 - **Runtime contract** (dynamic dispatch, reflection, generated code, re-exports, cross-language edges, exact branch behavior) → read source and run focused tests.
@@ -33,6 +37,8 @@ generated code, re-exports, and cross-language edges can reduce precision.
 
 | Question | Tool |
 |---|---|
+| What bounded context does this planner/executor/auditor need? | `mmcg_brief` |
+| Which local symbols match this natural-language concept? | `mmcg_concept` |
 | Does symbol `X` exist? (get `file:line` + signature) | `mmcg_search` |
 | What calls `X`? | `mmcg_callers` |
 | What does `X` call? | `mmcg_callees` |
@@ -50,13 +56,21 @@ when collisions/precision warnings are present, a security-sensitive path is at
 stake, a meaningful zero-result could change the decision, or the language
 feature is outside the graph's precision envelope. Do not repeat equivalent
 searches when the indexed result already answers a low-risk discovery question.
+Do not use Bash to rediscover symbols, files, callers, imports, or impact from a
+fresh, complete graph response. Bash remains appropriate for Git, builds,
+tests, linters, logs, and runtime probes.
 
 ## Stale or unavailable index
 
-- No `mmcg_status` response → mmcg is unavailable. For a low-risk task, proceed
+- No mmcg response → mmcg is unavailable. For a low-risk task, proceed
   with source inspection and state the limitation. Stop for user/planner review
   only when the missing structural evidence is load-bearing to scope or safety.
-- `mmcg_status` reports stale files → re-index (`mastermind watch`, or a fresh index) before trusting structural answers. A stale graph is worse than none: it looks authoritative and is wrong.
+- A structural query refreshes a stale managed index once before answering. If
+  that bounded refresh fails, preserve `index_stale` or
+  `refresh_limit_exceeded` and use a source fallback; do not retry in a loop.
+- A custom external index is read-only and must be refreshed explicitly with
+  `mastermind index`. Use `mmcg_status` only for diagnosis or after a warning,
+  not as a mandatory first call.
 
 ## Citations
 

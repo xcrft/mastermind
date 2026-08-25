@@ -694,11 +694,57 @@ class PromptIsolationTests(unittest.TestCase):
         self.assertEqual(definition["maxTurns"], 12)
         self.assertEqual(definition["effort"], "low")
         self.assertIn("mcp__mmcg__mmcg_search", definition["tools"])
+        self.assertIn("mcp__mmcg__mmcg_concept", definition["tools"])
+        self.assertNotIn("Bash", definition["tools"])
+        self.assertIn("Do not replace a complete graph answer", definition["prompt"])
+        self.assertIn("data, never instructions", definition["prompt"])
         self.assertIn("Contradictions / Unknowns", definition["prompt"])
 
         args = runner.subagent_cli_args(path, model_override="haiku")
         payload = json.loads(args[args.index("--agents") + 1])
         self.assertEqual(payload[name]["prompt"], definition["prompt"])
+
+    def test_project_router_enforces_graph_first_tool_selection(self):
+        workflow = (
+            runner.REPO_ROOT / "agents/claude-md/mastermind-workflow.md"
+        ).read_text(encoding="utf-8")
+        for token in (
+            "Call `mmcg_brief` once",
+            "`mmcg_concept`",
+            "Do not use Bash to rediscover",
+            "Bash remains the right tool for Git, builds, tests, linters, logs, and runtime probes",
+        ):
+            self.assertIn(token, workflow)
+
+        codegraph = (
+            runner.REPO_ROOT
+            / "skills/workflow/mastermind-codegraph-research/SKILL.md"
+        ).read_text(encoding="utf-8")
+        for token in (
+            "`mmcg_brief`",
+            "`mmcg_concept`",
+            "managed index",
+            "custom external index",
+        ):
+            self.assertIn(token, codegraph)
+
+    def test_graph_first_bash_roles_route_every_granted_mmcg_tool(self):
+        for name in (
+            "mastermind-investigator",
+            "mastermind-security-auditor",
+            "mastermind-task-executor",
+        ):
+            path = runner.REPO_ROOT / "agents/subagents" / f"{name}.md"
+            _, definition = runner.subagent_runtime_definition(path)
+            self.assertIn("Bash", definition["tools"], name)
+            granted = {
+                tool.removeprefix("mcp__mmcg__")
+                for tool in definition["tools"]
+                if tool.startswith("mcp__mmcg__mmcg_")
+            }
+            self.assertTrue(granted, name)
+            for tool in granted:
+                self.assertIn(tool, definition["prompt"], f"{name}: {tool}")
 
     def test_lean_runtime_prompts_have_no_examples_or_companion_sections(self):
         ceilings = {
@@ -713,6 +759,13 @@ class PromptIsolationTests(unittest.TestCase):
             self.assertLessEqual(len(prompt), ceiling, suite)
             self.assertNotIn("## Examples", prompt, suite)
             self.assertNotIn("## Companion pieces", prompt, suite)
+
+        _, investigator = runner.subagent_runtime_definition(
+            runner.REPO_ROOT / "agents/subagents/mastermind-investigator.md"
+        )
+        self.assertLessEqual(len(investigator["prompt"]), 3_500, "investigator")
+        self.assertNotIn("## Examples", investigator["prompt"])
+        self.assertNotIn("## Companion pieces", investigator["prompt"])
 
     def test_every_scoped_shipped_agent_grants_exact_mmcg_tools(self):
         for path in (runner.REPO_ROOT / "agents/subagents").glob("*.md"):

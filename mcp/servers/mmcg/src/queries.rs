@@ -790,6 +790,7 @@ impl std::fmt::Display for ChangeImpactError {
 
 impl std::error::Error for ChangeImpactError {}
 
+<<<<<<< HEAD
 pub const BRIEF_MIN_BUDGET_TOKENS: u32 = 256;
 pub const BRIEF_MAX_BUDGET_TOKENS: u32 = 8_000;
 pub const BRIEF_DEFAULT_BUDGET_TOKENS: u32 = 2_000;
@@ -1031,12 +1032,17 @@ pub struct BriefLimits {
     pub impact_depth: u32,
 }
 
+=======
+>>>>>>> origin/main
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CheckedSnapshotToken {
     data_version: u64,
     structural_worktree_token: String,
     history_inventory_token: String,
+<<<<<<< HEAD
     history_freshness: crate::indexer::ProjectHistoryFreshness,
+=======
+>>>>>>> origin/main
 }
 
 struct StoreReadSnapshot<'a> {
@@ -1086,18 +1092,28 @@ pub(crate) fn checked_snapshot_token(
     let data_version = store
         .data_version()
         .map_err(|_| ChangeImpactError::SnapshotChanged)?;
+<<<<<<< HEAD
     let (history_inventory_token, history_freshness) =
         crate::indexer::Indexer::new(repository_root)
             .live_project_history_inventory(store)
             .map_err(history_snapshot_error)?;
     if history_freshness == crate::indexer::ProjectHistoryFreshness::SnapshotChanged {
+=======
+    let (history_inventory_token, freshness) = crate::indexer::Indexer::new(repository_root)
+        .live_project_history_inventory(store)
+        .map_err(history_snapshot_error)?;
+    if freshness == crate::indexer::ProjectHistoryFreshness::SnapshotChanged {
+>>>>>>> origin/main
         return Err(ChangeImpactError::SnapshotChanged);
     }
     Ok(CheckedSnapshotToken {
         data_version,
         structural_worktree_token: structural_worktree_token.to_string(),
         history_inventory_token,
+<<<<<<< HEAD
         history_freshness,
+=======
+>>>>>>> origin/main
     })
 }
 
@@ -1120,7 +1136,10 @@ fn validate_checked_snapshot(
         .map_err(history_snapshot_error)?;
     if freshness == crate::indexer::ProjectHistoryFreshness::SnapshotChanged
         || history_inventory_token != expected.history_inventory_token
+<<<<<<< HEAD
         || freshness != expected.history_freshness
+=======
+>>>>>>> origin/main
     {
         return Err(ChangeImpactError::SnapshotChanged);
     }

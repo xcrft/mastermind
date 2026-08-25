@@ -1279,7 +1279,22 @@ fn run_cli_inner(
                 .map_err(|_| mmcg::queries::ChangeImpactError::IndexStale)?;
             let top =
                 usize::try_from(top).map_err(|_| mmcg::queries::ChangeImpactError::InvalidRef)?;
-            let response = impact_engine(&store, &root, &since, depth, top)?;
+            store.set_default_work_budget_ms(mmcg::store::query_budget_ms_from_env(
+                mmcg::store::DEFAULT_CLI_BUDGET_MS,
+            ));
+            let budget = store.default_work_budget();
+            let expired = store.push_work_budget(budget);
+            let response = if expired {
+                Err(mmcg::queries::ChangeImpactError::GitTimeout)
+            } else {
+                impact_engine(&store, &root, &since, depth, top)
+            };
+            let interrupted = store.take_interrupt_source();
+            store.pop_work_budget();
+            if interrupted.is_some() {
+                return Err("impact request exceeded its work budget".into());
+            }
+            let response = response?;
             print!(
                 "{}",
                 commands::query::render_change_impact(&response, format)?
@@ -1467,7 +1482,12 @@ fn run_cli_inner(
             )?;
         }
         Cmd::Serve => {
-            let store = Store::open(&index_path)?;
+            let managed_root = if index_override.is_none() {
+                Some(std::env::current_dir()?.canonicalize()?)
+            } else {
+                None
+            };
+            let store = Store::open_for_serve(&index_path, managed_root.as_deref())?;
             store.set_default_work_budget_ms(mmcg::store::query_budget_ms_from_env(
                 mmcg::store::DEFAULT_SERVE_BUDGET_MS,
             ));

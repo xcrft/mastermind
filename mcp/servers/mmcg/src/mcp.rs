@@ -109,6 +109,11 @@ enum HandlerError {
         extractor_contract_current: bool,
         refresh_attempted: bool,
     },
+    RefreshLimit {
+        dimension: &'static str,
+        cap: u64,
+    },
+    SchemaIncompatible,
     Internal {
         class: &'static str,
     },
@@ -450,11 +455,10 @@ fn spawn_watchdog(
                 eprintln!("[mmcg] watchdog: parent {original_parent} is gone, exiting");
                 std::process::exit(0);
             }
-            let current = in_flight
+            let guard = in_flight
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            let Some(current) = current else {
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(current) = guard.as_ref() else {
                 cancelled = None;
                 continue;
             };
@@ -467,6 +471,10 @@ fn spawn_watchdog(
                         current.id,
                         elapsed.as_millis()
                     );
+                    // The request-completion path clears `in_flight` and the
+                    // Store interrupt while holding this same mutex. Keep it
+                    // held through `cancel()` so a watchdog decision made for
+                    // request N cannot land after N is cleared and abort N+1.
                     cancel.cancel();
                     cancelled = Some(current.started);
                 }
@@ -575,7 +583,7 @@ where
             }
             ReaderMsg::Frame(frame) => frame,
         };
-        let response = match frame {
+        match frame {
             Frame::Line(line) if line.trim().is_empty() => continue,
             Frame::Line(line) => {
                 let trimmed = line.trim();
@@ -583,6 +591,8 @@ where
                 // that races ahead of `in_flight` being set is harmless — the
                 // reader will simply see no matching in-flight id and skip.
                 let request_id = peek_request_id(trimmed);
+                let tool_version = peek_tool_call_protocol(trimmed, state);
+                let outer_budget = tool_version.map(|_| store.default_work_budget());
                 if let Some(id) = &request_id {
                     *in_flight
                         .lock()
@@ -591,17 +601,57 @@ where
                         started: Instant::now(),
                     });
                 }
-                let response = handle_line(&mut state, store, trimmed);
-                if request_id.is_some() {
-                    *in_flight
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                if let Some(budget) = outer_budget {
+                    let _ = store.push_work_budget(budget);
                 }
-                response
+                let response = handle_line(&mut state, store, trimmed);
+
+                // Encode while the tool request's outer budget is still
+                // active. A cancel or deadline reached during serde's writes
+                // becomes the same structured tool result as an interrupt in
+                // the handler rather than escaping as a partial JSON frame.
+                let mut encoded = response.as_ref().map(|response| {
+                    if outer_budget.is_some() {
+                        encode_response_controlled(store, response)
+                    } else {
+                        encode_response(response)
+                    }
+                });
+
+                if request_id.is_some() {
+                    let mut guard = in_flight
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let interrupt = if outer_budget.is_some() {
+                        let _ = store.work_interrupted();
+                        store.take_interrupt_source()
+                    } else {
+                        // Cancelling a fast non-tool request such as
+                        // `tools/list` must not bleed into the next request.
+                        let _ = store.take_interrupt_source();
+                        None
+                    };
+                    *guard = None;
+                    if let Some(budget) = outer_budget {
+                        store.pop_work_budget();
+                        if let (Some(id), Some(version), Some(interrupt)) =
+                            (request_id.clone(), tool_version, interrupt)
+                        {
+                            encoded = Some(encode_response(&interrupted_tool_response(
+                                id, version, interrupt, budget,
+                            )));
+                        }
+                    }
+                    drop(guard);
+                }
+
+                if let Some(encoded) = encoded {
+                    write_encoded_response(&mut output, &encoded?)?;
+                }
             }
             Frame::InvalidUtf8 => {
                 eprintln!("[mmcg] parse error class=invalid_utf8");
-                Some(err(Value::Null, -32700, "Parse error".into()))
+                write_response(&mut output, &err(Value::Null, -32700, "Parse error".into()))?;
             }
             Frame::TooLarge(size) => {
                 eprintln!("[mmcg] protocol error class=frame_too_large bytes={size}");
@@ -611,9 +661,6 @@ where
                 )?;
                 return Ok(());
             }
-        };
-        if let Some(response) = response {
-            write_response(&mut output, &response)?;
         }
     }
     Ok(())
@@ -626,6 +673,37 @@ fn peek_request_id(line: &str) -> Option<Value> {
     let value: Value = serde_json::from_str(line).ok()?;
     let id = value.get("id")?.clone();
     valid_request_id(&id).then_some(id)
+}
+
+/// Return the exact wire-version only for a request that will enter
+/// `handle_tools_call`. The transport uses this to own one budget across the
+/// handler and final JSON encoding without changing errors for malformed or
+/// not-yet-initialized requests.
+fn peek_tool_call_protocol(line: &str, state: SessionState) -> Option<ProtocolVersion> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    if value.get("method")?.as_str()? != "tools/call" {
+        return None;
+    }
+    let id = value.get("id")?;
+    if !valid_request_id(id) {
+        return None;
+    }
+    let params = value.get("params").cloned().unwrap_or_else(|| json!({}));
+    let has_meta = params.get("_meta").is_some();
+    let declares_protocol = params
+        .get("_meta")
+        .and_then(Value::as_object)
+        .is_some_and(|meta| meta.contains_key(PROTOCOL_VERSION_META_KEY));
+    let stateless = declares_protocol || (state == SessionState::Cold && has_meta);
+    if stateless {
+        validate_stateless_request_meta(&params)
+            .ok()
+            .map(|_| ProtocolVersion::Stateless)
+    } else if state.is_ready() {
+        state.protocol()
+    } else {
+        None
+    }
 }
 
 /// Extract the target request id from an MCP cancel notification
@@ -684,11 +762,89 @@ fn read_frame<R: BufRead>(input: &mut R) -> io::Result<Option<Frame>> {
     }))
 }
 
-fn write_response<W: Write>(output: &mut W, response: &JsonRpcResponse) -> io::Result<()> {
-    let encoded = serde_json::to_string(response)
+fn encode_response(response: &JsonRpcResponse) -> io::Result<Vec<u8>> {
+    let encoded = serde_json::to_vec(response)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    writeln!(output, "{encoded}")?;
+    if encoded.len() > MCP_RESULT_MAX {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "JSON-RPC response exceeds 8 MiB",
+        ));
+    }
+    Ok(encoded)
+}
+
+struct ControlledResponseWriter<'a> {
+    store: &'a Store,
+    bytes: Vec<u8>,
+}
+
+impl Write for ControlledResponseWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.store.work_interrupted() {
+            // `Write::write_all` retries `Interrupted` forever. Use a
+            // non-retryable transport-local error; the request finalizer
+            // reads the Store's authoritative interrupt source and emits the
+            // structured cancelled/work-limit result.
+            return Err(io::Error::other("request interrupted during JSON encoding"));
+        }
+        if self.bytes.len().saturating_add(bytes.len()) > MCP_RESULT_MAX {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "JSON-RPC response exceeds 8 MiB",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn encode_response_controlled(store: &Store, response: &JsonRpcResponse) -> io::Result<Vec<u8>> {
+    let mut writer = ControlledResponseWriter {
+        store,
+        bytes: Vec::new(),
+    };
+    serde_json::to_writer(&mut writer, response).map_err(|error| {
+        io::Error::new(
+            error.io_error_kind().unwrap_or(io::ErrorKind::InvalidData),
+            error,
+        )
+    })?;
+    if store.work_interrupted() {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "request interrupted after JSON encoding",
+        ));
+    }
+    Ok(writer.bytes)
+}
+
+fn interrupted_tool_response(
+    id: Value,
+    version: ProtocolVersion,
+    interrupt: InterruptSource,
+    budget: WorkBudget,
+) -> JsonRpcResponse {
+    let payload = match interrupt {
+        InterruptSource::Cancel => cancelled_payload(),
+        InterruptSource::Budget => work_limit_payload(budget),
+    };
+    let result = tool_result(version, payload, true).expect("static interrupt result serializes");
+    ok(id, result)
+}
+
+fn write_encoded_response<W: Write>(output: &mut W, encoded: &[u8]) -> io::Result<()> {
+    output.write_all(encoded)?;
+    output.write_all(b"\n")?;
     output.flush()
+}
+
+fn write_response<W: Write>(output: &mut W, response: &JsonRpcResponse) -> io::Result<()> {
+    write_encoded_response(output, &encode_response(response)?)
 }
 
 fn handle_line(state: &mut SessionState, store: &mut Store, line: &str) -> Option<JsonRpcResponse> {
@@ -1023,31 +1179,6 @@ fn invoke_tool(
     }
 }
 
-fn invoke_tool_with_budget(
-    tool: &ToolDef,
-    tool_name: &str,
-    store: &mut Store,
-    arguments: &Value,
-    impact_engine: Option<&queries::ImpactEngine<'_>>,
-    budget: WorkBudget,
-) -> (Option<Result<Value, HandlerError>>, Option<InterruptSource>) {
-    let already_expired = store.push_work_budget(budget);
-    let handled = if already_expired {
-        None
-    } else {
-        Some(invoke_tool(
-            tool,
-            tool_name,
-            store,
-            arguments,
-            impact_engine,
-        ))
-    };
-    let interrupt = store.take_interrupt_source();
-    store.pop_work_budget();
-    (handled, interrupt)
-}
-
 fn handle_tools_call_inner(
     version: ProtocolVersion,
     store: &mut Store,
@@ -1075,21 +1206,31 @@ fn handle_tools_call_inner(
         .find(|tool| tool.name == tool_name)
         .ok_or_else(|| ToolCallError::InvalidParams("Unknown tool".into()))?;
 
-    // Every tool dispatch runs inside the work-budget guard — the single
-    // owner of the connection's progress handler. A pre-expired budget (e.g.
-    // a zero budget installed by a test) short-circuits before the handler
-    // ever runs, so coverage doesn't depend on a query being slow enough to
-    // trip the in-flight progress-handler check.
+    // One outer guard owns the full request lifetime. First dispatch, managed
+    // refresh, retry, Git/filesystem work, and result serialization all consume
+    // the same absolute deadline; no phase receives a reset duration.
+    let owns_request_guard = store.work_budget_depth() == 0;
     let budget = store.default_work_budget();
-    let (mut handled, mut interrupt) =
-        invoke_tool_with_budget(tool, tool_name, store, &arguments, impact_engine, budget);
+    let already_expired = store.push_work_budget(budget);
+    let mut handled = if already_expired {
+        None
+    } else {
+        Some(invoke_tool(
+            tool,
+            tool_name,
+            store,
+            &arguments,
+            impact_engine,
+        ))
+    };
 
     // Argument parsing happens before each structural handler checks
     // freshness, preserving precise invalid-argument errors without indexing.
     // A validated stale call gets one refresh outside the narrow query budget,
     // then one retry. The request watchdog and client cancellation still bound
     // both indexing and the retried query.
-    let stale_index = if interrupt.is_none() && tool_requires_fresh_index(tool_name) {
+    let stale_index = if store.interrupt_source().is_none() && tool_requires_fresh_index(tool_name)
+    {
         match handled.as_ref() {
             Some(Err(HandlerError::IndexStale {
                 stale_files,
@@ -1104,52 +1245,67 @@ fn handle_tools_call_inner(
     let mut refresh_completed = false;
     if let Some((stale_files, extractor_contract_current)) = stale_index {
         let refresh = refresh_stale_index(store, stale_files, extractor_contract_current);
-        interrupt = store.take_interrupt_source();
-        if interrupt.is_none() {
+        if store.interrupt_source().is_none() {
             match refresh {
                 Ok(()) => {
                     refresh_completed = true;
-                    (handled, interrupt) = invoke_tool_with_budget(
+                    handled = Some(invoke_tool(
                         tool,
                         tool_name,
                         store,
                         &arguments,
                         impact_engine,
-                        budget,
-                    );
+                    ));
                 }
                 Err(error) => handled = Some(Err(error)),
             }
         }
     }
 
-    match handled {
+    let mut result = match handled {
         Some(Ok(payload)) => tool_result(version, payload, false),
-        Some(Err(handler_error)) => match interrupt {
-            Some(InterruptSource::Cancel) => tool_result(version, cancelled_payload(), true),
-            Some(InterruptSource::Budget) => tool_result(version, work_limit_payload(budget), true),
-            None => match handler_error {
-                HandlerError::InvalidArguments(message) => {
-                    tool_result(version, json!({ "error": message }), true)
-                }
-                HandlerError::IndexStale {
+        Some(Err(handler_error)) => match handler_error {
+            HandlerError::InvalidArguments(message) => {
+                tool_result(version, json!({ "error": message }), true)
+            }
+            HandlerError::IndexStale {
+                stale_files,
+                extractor_contract_current,
+                refresh_attempted,
+            } => tool_result(
+                version,
+                index_stale_payload(
                     stale_files,
                     extractor_contract_current,
-                    refresh_attempted,
-                } => tool_result(
-                    version,
-                    index_stale_payload(
-                        stale_files,
-                        extractor_contract_current,
-                        refresh_attempted || refresh_completed,
-                    ),
-                    true,
+                    refresh_attempted || refresh_completed,
                 ),
-                HandlerError::Internal { class } => Err(ToolCallError::Internal { class }),
-            },
+                true,
+            ),
+            HandlerError::RefreshLimit { dimension, cap } => {
+                tool_result(version, refresh_limit_payload(dimension, cap), true)
+            }
+            HandlerError::SchemaIncompatible => {
+                tool_result(version, schema_incompatible_payload(), true)
+            }
+            HandlerError::Internal { class } => Err(ToolCallError::Internal { class }),
         },
         None => tool_result(version, work_limit_payload(budget), true),
+    };
+
+    if store.interrupt_source().is_none() {
+        let _ = store.work_interrupted();
     }
+    if let Some(interrupt) = store.interrupt_source() {
+        result = match interrupt {
+            InterruptSource::Cancel => tool_result(version, cancelled_payload(), true),
+            InterruptSource::Budget => tool_result(version, work_limit_payload(budget), true),
+        };
+    }
+    store.pop_work_budget();
+    if owns_request_guard {
+        let _ = store.take_interrupt_source();
+    }
+    result
 }
 
 fn index_stale_payload(
@@ -1183,28 +1339,85 @@ fn index_stale_error(
     }
 }
 
+fn refresh_limit_payload(dimension: &'static str, cap: u64) -> Value {
+    json!({
+        "code": "refresh_limit_exceeded",
+        "dimension": dimension,
+        "cap": cap,
+        "guidance": "run `mastermind index .` manually or narrow the repository source inventory"
+    })
+}
+
+fn schema_incompatible_payload() -> Value {
+    json!({
+        "code": "schema_incompatible",
+        "guidance": "rebuild the managed ROOT/.mastermind/mmcg.db index; custom indexes are never migrated by the MCP server"
+    })
+}
+
 fn safe_index_status(store: &Store) -> Result<queries::StatusResponse, HandlerError> {
-    if let Some(root) = managed_auto_refresh_root(store) {
-        if crate::indexer::validate_index_root(store, &root).is_err() {
-            return Ok(queries::StatusResponse {
-                db_path: store.db_path().to_string_lossy().to_string(),
-                symbol_count: store
-                    .symbol_count()
-                    .map_err(|error| HandlerError::internal("symbol_count_query", error))?,
-                file_count: store
-                    .file_count()
-                    .map_err(|error| HandlerError::internal("file_count_query", error))?,
-                stale_files: 1,
-                extractor_contract_current: store
-                    .extractor_contract_current()
-                    .map_err(|error| HandlerError::internal("extractor_contract_query", error))?,
-            });
+    let symbol_count = store
+        .symbol_count()
+        .map_err(|error| HandlerError::internal("symbol_count_query", error))?;
+    let file_count = store
+        .file_count()
+        .map_err(|error| HandlerError::internal("file_count_query", error))?;
+    let extractor_contract_current = store
+        .extractor_contract_current()
+        .map_err(|error| HandlerError::internal("extractor_contract_query", error))?;
+    let root = store
+        .meta_value("index_root")
+        .map_err(|error| HandlerError::internal("index_root_query", error))?
+        .map(PathBuf::from)
+        .and_then(|root| root.canonicalize().ok());
+    let stale_files = match root {
+        Some(root)
+            if store
+                .serve_root()
+                .is_some_and(|authorized| authorized != root.as_path()) =>
+        {
+            1
         }
-    }
-    queries::status(store).map_err(|error| HandlerError::internal("index_freshness_query", error))
+        Some(root) => {
+            let interrupted = || store.work_interrupted();
+            match crate::workflow_status::stale_paths_controlled(
+                store,
+                &root,
+                100,
+                crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
+                crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
+                crate::bounded_fs::ReadControl {
+                    deadline: store.request_deadline(),
+                    interrupted: Some(&interrupted),
+                },
+            ) {
+                Ok(paths) => paths.len(),
+                Err(crate::indexer::IndexError::LimitExceeded { dimension, cap }) => {
+                    return Err(HandlerError::RefreshLimit { dimension, cap })
+                }
+                Err(crate::indexer::IndexError::Cancelled)
+                | Err(crate::indexer::IndexError::DeadlineExceeded) => {
+                    return Err(HandlerError::internal(
+                        "freshness_interrupted",
+                        "request interrupted",
+                    ))
+                }
+                Err(_) => 1,
+            }
+        }
+        None => 1,
+    };
+    Ok(queries::StatusResponse {
+        db_path: store.db_path().to_string_lossy().to_string(),
+        symbol_count,
+        file_count,
+        stale_files,
+        extractor_contract_current,
+    })
 }
 
 fn ensure_fresh_index(store: &Store) -> Result<(), HandlerError> {
+    ensure_schema_compatible(store)?;
     let status = safe_index_status(store)?;
     if status.stale_files > 0 || !status.extractor_contract_current {
         return Err(index_stale_error(
@@ -1216,18 +1429,18 @@ fn ensure_fresh_index(store: &Store) -> Result<(), HandlerError> {
     Ok(())
 }
 
+fn ensure_schema_compatible(store: &Store) -> Result<(), HandlerError> {
+    match store.schema_current() {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(HandlerError::SchemaIncompatible),
+        Err(error) => Err(HandlerError::internal("schema_compatibility_query", error)),
+    }
+}
+
 /// Derive refresh authority from the canonical managed database location, not
 /// from mutable index metadata that could redirect automatic filesystem reads.
 fn managed_auto_refresh_root(store: &Store) -> Option<PathBuf> {
-    let db_path = store.db_path().canonicalize().ok()?;
-    if db_path.file_name()? != OsStr::new("mmcg.db") {
-        return None;
-    }
-    let state_dir = db_path.parent()?;
-    if state_dir.file_name()? != OsStr::new(".mastermind") {
-        return None;
-    }
-    state_dir.parent()?.canonicalize().ok()
+    store.managed_root().map(std::path::Path::to_path_buf)
 }
 
 fn refresh_stale_index(
@@ -1243,13 +1456,30 @@ fn refresh_stale_index(
         ));
     };
 
-    let refresh = crate::indexer::Indexer::new(root).index_all(store, false);
-    if !matches!(refresh, Ok(stats) if stats.files_failed == 0) {
-        return Err(index_stale_error(
-            stale_files,
-            extractor_contract_current,
-            true,
-        ));
+    let refresh = crate::indexer::Indexer::new(root).index_all_with_limits(
+        store,
+        false,
+        crate::indexer::IndexLimits::AUTO_REFRESH,
+    );
+    match refresh {
+        Ok(stats) if stats.files_failed == 0 => {}
+        Err(crate::indexer::IndexError::LimitExceeded { dimension, cap }) => {
+            return Err(HandlerError::RefreshLimit { dimension, cap });
+        }
+        Err(crate::indexer::IndexError::Cancelled)
+        | Err(crate::indexer::IndexError::DeadlineExceeded) => {
+            return Err(HandlerError::internal(
+                "refresh_interrupted",
+                "request interrupted",
+            ));
+        }
+        _ => {
+            return Err(index_stale_error(
+                stale_files,
+                extractor_contract_current,
+                true,
+            ));
+        }
     }
     Ok(())
 }
@@ -1937,31 +2167,54 @@ fn handle_api_surface(store: &mut Store, args: &Value) -> Result<Value, HandlerE
 }
 
 fn changed_since_root(
+    store: &Store,
     root_arg: Option<&str>,
-    db_path: &std::path::Path,
 ) -> Result<std::path::PathBuf, HandlerError> {
-    let root = match root_arg {
-        Some(s) => std::path::PathBuf::from(s),
-        None => {
-            let db = db_path
-                .canonicalize()
-                .map_err(|error| HandlerError::internal("changed_since_root", error))?;
-            db.parent()
-                .and_then(|d| d.parent())
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-        }
-    };
-    root.canonicalize()
-        .map_err(|error| HandlerError::internal("changed_since_root", error))
+    let stored = store
+        .meta_value("index_root")
+        .map_err(|error| HandlerError::internal("changed_since_root", error))?
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| HandlerError::InvalidArguments("index_stale".into()))?
+        .canonicalize()
+        .map_err(|_| HandlerError::InvalidArguments("root_mismatch".into()))?;
+    let requested = root_arg
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| stored.clone())
+        .canonicalize()
+        .map_err(|_| HandlerError::InvalidArguments("root_mismatch".into()))?;
+    if requested != stored {
+        return Err(HandlerError::InvalidArguments("root_mismatch".into()));
+    }
+    Ok(stored)
 }
 
 fn handle_symbols_changed_since(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let git_ref = str_arg(args, "git_ref")?;
-    let root = changed_since_root(opt_str_arg(args, "root"), store.db_path())?;
+    let root = changed_since_root(store, opt_str_arg(args, "root"))?;
     ensure_fresh_index(store)?;
-    let diff = queries::symbols_changed_since(store, &root, git_ref)
-        .map_err(|error| HandlerError::internal("git_diff", error))?;
+    let interrupted = || store.work_interrupted();
+    let diff = queries::symbols_changed_since_controlled(
+        store,
+        &root,
+        git_ref,
+        store.request_deadline(),
+        Some(&interrupted),
+    )
+    .map_err(|error| match error {
+        crate::diff::DiffError::GitRefMissing(_) => {
+            HandlerError::InvalidArguments("invalid_ref".into())
+        }
+        crate::diff::DiffError::GitTimeout => HandlerError::InvalidArguments("git_timeout".into()),
+        crate::diff::DiffError::GitFailed(code)
+            if matches!(
+                code.as_str(),
+                "git_output_limit" | "snapshot_changed" | "index_stale"
+            ) =>
+        {
+            HandlerError::InvalidArguments(code)
+        }
+        error => HandlerError::internal("git_diff", error),
+    })?;
     serde_json::to_value(diff).map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
@@ -1987,6 +2240,7 @@ fn handle_tasks(store: &mut Store, args: &Value) -> Result<Value, HandlerError> 
         .and_then(|n| u32::try_from(n).ok())
         .unwrap_or(10)
         .clamp(1, 50);
+    ensure_schema_compatible(store)?;
     let r = queries::tasks(store, query, top)
         .map_err(|error| HandlerError::internal("tasks_query", error))?;
     serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
@@ -2001,6 +2255,7 @@ fn handle_history(store: &mut Store, args: &Value) -> Result<Value, HandlerError
         .and_then(|value| u32::try_from(value).ok())
         .unwrap_or(10)
         .clamp(1, 50);
+    ensure_schema_compatible(store)?;
     let response = queries::history(store, query, kind, top)
         .map_err(|error| HandlerError::internal("history_query", error))?;
     serde_json::to_value(response)
@@ -2188,6 +2443,7 @@ fn handle_facts(store: &mut Store, args: &Value) -> Result<Value, HandlerError> 
             .and_then(|value| usize::try_from(value).ok())
             .ok_or_else(|| HandlerError::InvalidArguments("Invalid argument: top".into()))?,
     };
+    ensure_schema_compatible(store)?;
     let result = crate::facts::snapshot(store, path, top)
         .map_err(|error| HandlerError::internal("fact_query", error))?;
     serde_json::to_value(result)
@@ -2198,6 +2454,7 @@ fn handle_team_map(store: &mut Store, args: &Value) -> Result<Value, HandlerErro
     let manifest = str_arg(args, "manifest")?;
     let manifest = crate::facts::normalize_fact_path(manifest)
         .map_err(|_| HandlerError::InvalidArguments("Invalid argument: manifest".into()))?;
+    ensure_schema_compatible(store)?;
     let root = store
         .meta_value("index_root")
         .map_err(|error| HandlerError::internal("team_index_root", error))?
@@ -2227,7 +2484,7 @@ fn impact_arguments(
 ) -> Result<(String, std::path::PathBuf, u32, usize), HandlerError> {
     let since = str_arg(args, "since")?.to_string();
     let root = match args.get("root") {
-        None => changed_since_root(None, store.db_path())?,
+        None => changed_since_root(store, None)?,
         Some(Value::String(value)) => std::path::PathBuf::from(value)
             .canonicalize()
             .map_err(|_| HandlerError::InvalidArguments("root_mismatch".to_string()))?,
@@ -2325,12 +2582,14 @@ fn handle_recent_changes(store: &mut Store, args: &Value) -> Result<Value, Handl
     let since = str_arg(args, "since")?;
     queries::parse_duration(since)
         .map_err(|_| HandlerError::InvalidArguments("Invalid argument: since".into()))?;
+    ensure_schema_compatible(store)?;
     let r = queries::recent_changes(store, since)
         .map_err(|error| HandlerError::internal("recent_changes_query", error))?;
     serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
 fn handle_status(store: &mut Store, _args: &Value) -> Result<Value, HandlerError> {
+    ensure_schema_compatible(store)?;
     let r = safe_index_status(store)?;
     serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
@@ -2344,6 +2603,7 @@ fn handle_scratchpad_append(store: &mut Store, args: &Value) -> Result<Value, Ha
             "Scratchpad body exceeds 8 KiB".into(),
         ));
     }
+    ensure_schema_compatible(store)?;
     let (id, ts) = store
         .scratchpad_append(agent, kind, body)
         .map_err(|error| HandlerError::internal("scratchpad_write", error))?;
@@ -2359,6 +2619,7 @@ fn handle_scratchpad_read(store: &mut Store, args: &Value) -> Result<Value, Hand
         .and_then(|v| v.as_u64())
         .unwrap_or(20)
         .min(200) as u32;
+    ensure_schema_compatible(store)?;
     let r = store
         .scratchpad_read(since, agent, kind, limit)
         .map_err(|error| HandlerError::internal("scratchpad_read", error))?;
@@ -2367,6 +2628,7 @@ fn handle_scratchpad_read(store: &mut Store, args: &Value) -> Result<Value, Hand
 
 fn handle_change_class(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let file = str_arg(args, "file")?;
+    ensure_schema_compatible(store)?;
     let root = std::env::current_dir()
         .map_err(|error| HandlerError::internal("change_class_root", error))?;
     let r = queries::classify_change(store, &root, file)
@@ -2386,6 +2648,12 @@ mod tests {
 
     fn fresh_test_store() -> (tempfile::TempDir, Store) {
         let root = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
         let mut store = Store::open(root.path().join("mmcg.db")).unwrap();
         crate::indexer::Indexer::new(root.path())
             .index_all(&mut store, true)
@@ -2844,10 +3112,12 @@ mod tests {
             }),
             json!(2),
         );
-        let error = internal.error.unwrap();
-        assert_eq!(error.code, -32603);
-        assert_eq!(error.message, "Internal tool error");
-        assert!(!error.message.contains("/path/that/does/not/exist"));
+        let result = internal.result.unwrap();
+        assert_eq!(result["isError"], true);
+        assert_eq!(unwrap_content(&result)["error"], "index_stale");
+        assert!(!serde_json::to_string(&result)
+            .unwrap()
+            .contains("/path/that/does/not/exist"));
 
         let _ = std::fs::remove_file(&path);
     }
@@ -2868,9 +3138,9 @@ mod tests {
             "name": "mmcg_symbols_changed_since",
             "arguments": { "git_ref": "HEAD", "root": SENTINEL }
         });
-        let typed_error =
-            handle_tools_call(ProtocolVersion::Current, &mut store, &params).unwrap_err();
-        let typed_debug = format!("{typed_error:?}");
+        let typed = handle_tools_call(ProtocolVersion::Current, &mut store, &params).unwrap();
+        let typed_debug = serde_json::to_string(&typed).unwrap();
+        assert_eq!(unwrap_content(&typed)["error"], "index_stale");
         assert!(!typed_debug.contains(SENTINEL));
         assert!(!typed_debug.contains("No such file"));
 
@@ -2879,7 +3149,10 @@ mod tests {
         let public_diagnostic = serde_json::to_string(&public_error).unwrap();
         assert!(!public_diagnostic.contains(SENTINEL));
         assert!(!public_diagnostic.contains("No such file"));
-        assert_eq!(public_error.error.unwrap().message, "Internal tool error");
+        assert_eq!(
+            unwrap_content(&public_error.result.unwrap())["error"],
+            "index_stale"
+        );
 
         let _ = std::fs::remove_file(&path);
     }
@@ -3064,10 +3337,7 @@ mod tests {
             .contains("Markdown"));
         assert_eq!(result["skipped_artifacts"], 0);
         assert_eq!(result["truncated"], false);
-        assert!(result["freshness"]
-            .as_str()
-            .unwrap()
-            .contains("not checked"));
+        assert_eq!(result["freshness"], "stale");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -3212,7 +3482,7 @@ mod tests {
         run(&["commit", "-q", "-m", "baseline"]);
         std::fs::write(root.join("src/app.py"), "def value():\n    return 2\n").unwrap();
         let db = root.join(".mastermind/mmcg.db");
-        let mut store = crate::store::Store::open(db).unwrap();
+        let mut store = crate::store::Store::open_for_serve(&db, Some(&root)).unwrap();
         crate::indexer::Indexer::new(&root)
             .index_all(&mut store, true)
             .unwrap();
@@ -3231,6 +3501,58 @@ mod tests {
         )
         .unwrap();
         assert_eq!(actual, expected);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn change_impact_local_graph_limit_remains_a_successful_mcp_payload() {
+        let (root, mut store) = impact_fixture("local-graph-limit");
+        for index in 0..256 {
+            let caller = store
+                .insert_symbol(
+                    &format!("dense_caller_{index}"),
+                    "function",
+                    "src/generated.py",
+                    index + 1,
+                    index + 1,
+                    None,
+                    None,
+                )
+                .unwrap();
+            store
+                .insert_edge(caller, None, "value", "calls", index + 1)
+                .unwrap();
+        }
+        let _local_budget = crate::store::override_impact_precision_budget(WorkBudget {
+            deadline: None,
+            op_ticks: Some(1),
+        });
+
+        let result = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({
+                "name": "mmcg_change_impact",
+                "arguments": {
+                    "since": "HEAD",
+                    "root": root.to_string_lossy(),
+                    "depth": 3,
+                    "top": 100
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(result["isError"], false);
+        let payload = unwrap_content(&result);
+        assert_eq!(payload["schema_version"], 1);
+        assert!(payload["precision_notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|note| note == "graph_work_limit"));
+        assert_eq!(payload["impact"]["truncated"], true);
+        assert_eq!(payload["impact"]["truncation_reason"], "work_limit");
+        assert_eq!(store.interrupt_source(), None);
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -3500,18 +3822,29 @@ mod tests {
     }
 
     #[test]
-    fn changed_since_root_defaults_to_repo_root_from_db_path() {
+    fn changed_since_root_is_bound_to_index_identity() {
         let tmp = tempfile::tempdir().unwrap();
         let mastermind = tmp.path().join(".mastermind");
         std::fs::create_dir_all(&mastermind).unwrap();
         let db = mastermind.join("mmcg.db");
-        std::fs::write(&db, b"").unwrap();
+        let store = Store::open(&db).unwrap();
+        store
+            .set_meta(
+                "index_root",
+                tmp.path().canonicalize().unwrap().to_str().unwrap(),
+            )
+            .unwrap();
 
-        let root = changed_since_root(None, &db).unwrap();
+        let root = changed_since_root(&store, None).unwrap();
         assert_eq!(root, tmp.path().canonicalize().unwrap());
 
-        let explicit = changed_since_root(Some(tmp.path().to_str().unwrap()), &db).unwrap();
+        let explicit = changed_since_root(&store, Some(tmp.path().to_str().unwrap())).unwrap();
         assert_eq!(explicit, tmp.path().canonicalize().unwrap());
+        let unrelated = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            changed_since_root(&store, Some(unrelated.path().to_str().unwrap())),
+            Err(HandlerError::InvalidArguments(message)) if message == "root_mismatch"
+        ));
     }
 
     #[test]
@@ -3869,6 +4202,56 @@ mod tests {
             .is_empty());
 
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn external_incompatible_index_is_byte_preserved_and_has_no_sidecars() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().join("repository/.mastermind");
+        std::fs::create_dir_all(&state).unwrap();
+        let path = state.join("mmcg.db");
+        {
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                     INSERT INTO meta(key, value) VALUES ('schema_version', 'old');
+                     CREATE TABLE sentinel(value TEXT NOT NULL);
+                     INSERT INTO sentinel(value) VALUES ('preserve-me');",
+                )
+                .unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+        let mut store = crate::store::Store::open_for_serve(&path, None).unwrap();
+        let invalid = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({ "name": "mmcg_search", "arguments": {} }),
+        )
+        .unwrap();
+        let invalid_payload = unwrap_content(&invalid);
+        assert_eq!(invalid["isError"], true);
+        assert!(invalid_payload["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("name")));
+        let response = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({ "name": "mmcg_search", "arguments": { "name": "anything" } }),
+        )
+        .unwrap();
+        let payload = unwrap_content(&response);
+        assert_eq!(response["isError"], true);
+        assert_eq!(payload["code"], "schema_incompatible");
+        drop(store);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let sidecar = |suffix: &str| {
+            let mut value = path.as_os_str().to_os_string();
+            value.push(suffix);
+            PathBuf::from(value)
+        };
+        assert!(!sidecar("-wal").exists());
+        assert!(!sidecar("-shm").exists());
     }
 
     #[test]
@@ -4243,9 +4626,6 @@ mod tests {
     #[test]
     fn serve_io_late_cancel_does_not_abort_next_request() {
         let (_tmp, mut store) = fresh_test_store();
-        store
-            .insert_symbol("solo", "function", "src/solo.rs", 1, 2, None, None)
-            .unwrap();
 
         // `ping` (id 1) finishes near-instantly; a cancel notification for id
         // 1 arrives only after a delay, by which point request 1 has long
@@ -4253,7 +4633,7 @@ mod tests {
         let ping = r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}"#;
         let stale_cancel =
             r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#;
-        let next_call = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"mmcg_impact","arguments":{"name":"solo"}}}"#;
+        let next_call = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"mmcg_status","arguments":{}}}"#;
 
         let mut bytes = format!("{INITIALIZE_LINE}\n{INITIALIZED_LINE}\n{ping}\n").into_bytes();
         let delay_at = bytes.len();

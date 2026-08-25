@@ -11,6 +11,7 @@
 
 pub mod audit_bundle;
 pub mod audit_spec;
+pub mod bounded_fs;
 pub mod context_doctor;
 pub mod diff;
 pub mod doctor;

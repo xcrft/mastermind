@@ -6,6 +6,10 @@ model: haiku
 mcpServers: [mmcg]
 maxTurns: 12
 effort: low
+workflow:
+  schema_version: 1
+  activation: conditional
+  mutability: read-only
 metadata:
   version: 0.3.0
   authors:

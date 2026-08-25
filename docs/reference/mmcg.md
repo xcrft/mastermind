@@ -198,6 +198,10 @@ mmcg ui --since main --sarif semgrep.sarif --sarif codeql.sarif \
 mmcg doctor                                          # human-readable report
 mmcg doctor --json                                   # machine-parseable
 
+# Audit owned workflow wiring without executing prompts, tools, or models.
+mmcg workflow audit --root .
+mmcg workflow audit --root ~/.claude --json
+
 # Pre-execution gate — verify a spec before handing off to the executor.
 # Catches missing symbols, missing files, empty mandatory sections, snapshot
 # drift, blast-radius warnings. Exit 1 on errors.
@@ -277,6 +281,52 @@ mmcg query recent --since 2h                       # files re-indexed in last 2 
 mmcg query unreferenced --kind function            # dead-code candidates (review manually)
 mmcg query api-surface src/runtime/                # symbols under prefix used externally
 ```
+
+### Workflow audit
+
+`workflow audit` emits `schema_version: 1` with stable `nodes`, `edges`,
+`diagnostics`, `limits`, `complete`, and `context_estimates`. Node IDs are
+kind-prefixed (`agent:`, `skill:`, `model:`, `server:`, `tool:`, `artifact:`,
+`writer:`). Edges identify their relation and precision. Human and JSON output
+come from the same report. Exit 0 means complete input and no error diagnostic;
+exit 1 means an error or incomplete input; clap usage errors remain exit 2.
+
+The loader limits source/installed input to 128 agents, 512 skills, 256 KiB per
+Markdown file, a 1 MiB manifest, 8 MiB aggregate text, 8,192 directory entries,
+4,096 directories, 4,096 nodes, 16,384 edges, and depth 16. Per-component
+limits cover 512 skill relations, 64 writes, 512 runtime grants, and 64 MCP
+servers; the report also caps admitted writers at 512, diagnostics at 4,096,
+and context estimates at 16,384. It enumerates directories through already
+opened no-follow handles and rejects symlinks, non-regular files, path escapes,
+identity changes during reads, non-UTF-8 Markdown, aliases, anchors, tags, merge
+keys, duplicate keys, multiple YAML documents, and unknown workflow metadata.
+Any skipped input sets `complete: false`; dependent negative findings are not
+claimed from a partial inventory.
+
+When an installed Claude role scopes `mmcg`, registration comes only from the
+project `.mcp.json` beside `.claude` or the user `~/.claude.json`. The named
+entry must match a supported Mastermind stdio launcher: the installed binary,
+the project/global `mastermind` launcher, or canonical `npx -y
+@xcraftmind/mastermind[@version] serve`. Arbitrary executables and packages do
+not count, launcher forms must match the current platform, and `env` must be
+absent or empty so it cannot replace the executable or npm behavior.
+
+Stable runtime and wiring codes include `layout_ambiguous`,
+`mmcg_server_scope_missing`, `mmcg_registration_missing`,
+`mcp_registration_entry_invalid`, `mmcg_wildcard_grant`, `mmcg_tool_unknown`,
+`mmcg_prompt_grant_missing`,
+`model_unsupported`, `effort_invalid`, `max_turns_invalid`,
+`tool_allowlist_invalid`, `required_skill_missing`,
+`readonly_mutation_capability`, `artifact_definition_conflict`,
+`workflow_declaration_limit_exceeded`, and `writer_conflict`. Informational
+`tool_grant_unreferenced`, `tools_unreachable`, and `role_unconditional`
+diagnostics do not claim that an unmentioned grant is wrong or that a role is
+automatically invoked.
+
+Each context estimate uses `ceil(UTF-8 bytes / 4)`. Agent bodies, advisory
+skills if loaded, and known mmcg tool schemas are separate scenarios. Missing
+optional skills and built-in tools whose schema is unavailable are named, and
+no field represents a guaranteed runtime total.
 
 ### Incremental indexing — how it works
 

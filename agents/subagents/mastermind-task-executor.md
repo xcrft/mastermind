@@ -6,6 +6,19 @@ model: sonnet
 mcpServers: [mmcg]
 maxTurns: 40
 effort: high
+workflow:
+  schema_version: 1
+  activation: conditional
+  mutability: writer
+  skills:
+    - id: no-ai-slop-comments
+      required: false
+  writes:
+    - artifact: task.executor-report
+      path: ".mastermind/tasks/{task}/executor-report.md"
+      authority: canonical
+      runtime: claude
+      exclusivity_group: task-executor
 metadata:
   version: 0.5.2
   authors: [mastermind]

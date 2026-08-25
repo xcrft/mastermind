@@ -195,6 +195,7 @@ mastermind install --client all --profile core
 mastermind setup cursor --scope user --write
 mastermind setup continue --scope user --write
 mastermind doctor --workflow --client all
+mastermind workflow audit --root .
 ```
 
 Fresh workflow installs default to the 14-skill `core` profile. Use `frontend`
@@ -202,6 +203,11 @@ or `security` for a focused extension, or `full` for all 26 portable skills.
 Profiles reduce skill discovery; Claude keeps the complete named-subagent set so
 workflow routes do not dangle. `mastermind update` preserves each client's
 installed profile unless `--profile` explicitly switches it.
+
+`workflow audit` builds a deterministic, read-only graph from owned agents,
+skills, models, MCP servers, tools, artifacts, and writers. Point `--root` at
+the repository for source validation or at an installed `.claude`/`.codex`
+directory for manifest-scoped validation; add `--json` for the schema-v1 report.
 
 Mastermind supports Claude Code, Codex, Cursor, Continue, and generic MCP stdio
 clients. Setup is dry-run-first unless `--write` is present. The MCP surface has

@@ -6,6 +6,10 @@ model: opus
 mcpServers: [mmcg]
 maxTurns: 10
 effort: high
+workflow:
+  schema_version: 1
+  activation: conditional
+  mutability: read-only
 metadata:
   version: 0.5.0
   authors:

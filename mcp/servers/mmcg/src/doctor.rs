@@ -18,7 +18,7 @@
 //! | 8 | `MCP config`           | mmcg registered in `~/.claude.json` (user) or `./.mcp.json` (project) |
 //! | 9 | `MCP serve handshake`  | spawning `mastermind serve` responds to `initialize` + `tools/list` |
 //! | 10 | `subagent MCP scoping` | every subagent `mcpServers:` entry names a registered server |
-//! | 11 | `subagent MCP tools`   | scoped agents' explicit tool allowlists grant mmcg access |
+//! | 11 | `subagent runtime contract` | Mastermind agents pin model, tools, turns, effort, and exact mmcg access |
 //! | 12 | `style profile`        | author's `~/.mastermind/style.md` has fallen behind their commits |
 //!
 //! Human-readable by default; `--json` switches to a machine-parseable format.
@@ -167,7 +167,7 @@ impl Report {
         if self.summary.fail > 0 || self.summary.warn > 0 {
             out.push_str("\nCommon fixes:\n");
             out.push_str("  No index       run `mastermind init` or `mastermind index .`\n");
-            out.push_str("  No MCP config  run `mastermind setup claude --write-mcp`\n");
+            out.push_str("  No MCP config  run `mastermind setup claude --write`\n");
             out.push_str("  Stale index    run `mastermind index .` or start `mastermind watch`\n");
             out.push_str("  No .gitignore  add `.mastermind/` to your .gitignore\n");
         }
@@ -197,7 +197,7 @@ pub fn run_with_index(root: &Path, mmcg_binary: &Path, index_path: &Path) -> Rep
         check_mcp_config(root),
         check_mcp_handshake(index_path, mmcg_binary),
         check_subagent_mcp_servers(root),
-        check_subagent_mcp_tools(root),
+        check_subagent_runtime_contract(root),
         check_style_profile(root),
     ];
     Report::from_checks(root, checks)
@@ -993,13 +993,32 @@ fn subagent_tool_allowlist(md: &str) -> Option<Vec<String>> {
         Some(serde_norway::Value::Sequence(values)) => Some(
             values
                 .iter()
-                .filter_map(|value| value.as_str().map(str::trim))
+                .map(|value| value.as_str().map(str::trim).map(String::from))
+                .collect::<Option<Vec<_>>>()
+                .unwrap_or_default()
+                .into_iter()
                 .filter(|value| !value.is_empty())
-                .map(String::from)
                 .collect(),
         ),
         Some(_) => Some(vec![]),
     }
+}
+
+fn subagent_prompt_mmcg_refs(md: &str) -> std::collections::BTreeSet<String> {
+    let body = md
+        .strip_prefix("---\n")
+        .or_else(|| md.strip_prefix("---\r\n"))
+        .and_then(|rest| rest.find("\n---").map(|end| &rest[end + 4..]))
+        .unwrap_or(md);
+    body.split(|character: char| !(character.is_ascii_lowercase() || character == '_'))
+        .filter_map(|token| {
+            token
+                .strip_prefix("mcp__mmcg__")
+                .filter(|name| name.starts_with("mmcg_"))
+                .or_else(|| token.starts_with("mmcg_").then_some(token))
+        })
+        .map(String::from)
+        .collect()
 }
 
 /// Pure core of `check_subagent_mcp_servers`: scan `agent_dirs` for subagent
@@ -1071,18 +1090,20 @@ fn check_subagent_mcp_servers(root: &Path) -> Check {
             missing.join(", ")
         ),
         hint: Some(
-            "register it (project `.mcp.json` / `mastermind setup claude --write-mcp`) or drop the `mcpServers:` entry"
+            "register it (project `.mcp.json` / `mastermind setup claude --write`) or drop the `mcpServers:` entry"
                 .into(),
         ),
     }
 }
 
-/// Return scoped mmcg agents whose explicit `tools:` allowlist makes every
-/// mmcg tool unavailable. This is separate from server registration: a server
-/// can be configured correctly while Claude silently filters all its tools.
-fn subagent_mmcg_tool_issues(agent_dirs: &[PathBuf]) -> (bool, Vec<String>) {
-    let mut scoped = false;
-    let mut inaccessible = Vec::new();
+const SUBAGENT_MODELS: &[&str] = &["haiku", "sonnet", "opus"];
+const SUBAGENT_EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+const SUBAGENT_MAX_TURNS: u64 = 100;
+
+/// Keep third-party agent policies outside Mastermind's strict runtime contract.
+fn subagent_runtime_contract_issues(agent_dirs: &[PathBuf]) -> (bool, Vec<String>) {
+    let mut found = false;
+    let mut issues = Vec::new();
     for dir in agent_dirs {
         let Ok(entries) = std::fs::read_dir(dir) else {
             continue;
@@ -1093,65 +1114,164 @@ fn subagent_mmcg_tool_issues(agent_dirs: &[PathBuf]) -> (bool, Vec<String>) {
                 continue;
             }
             let body = std::fs::read_to_string(&path).unwrap_or_default();
-            if !subagent_mcp_refs(&body)
-                .iter()
-                .any(|server| server == "mmcg")
-            {
+            let filename = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("?");
+            let stem = path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            let parsed = frontmatter_block(&body).and_then(|frontmatter| {
+                serde_norway::from_str::<serde_norway::Value>(frontmatter).ok()
+            });
+            let managed = stem.starts_with("mastermind-")
+                || parsed
+                    .as_ref()
+                    .and_then(|value| value.get("name"))
+                    .and_then(serde_norway::Value::as_str)
+                    .is_some_and(|name| name.starts_with("mastermind-"));
+            if !managed {
                 continue;
             }
-            scoped = true;
-            let Some(tools) = subagent_tool_allowlist(&body) else {
+            found = true;
+            let Some(frontmatter) = parsed else {
+                issues.push(format!("{filename}: missing or malformed frontmatter"));
                 continue;
             };
-            if !tools.iter().any(|tool| {
-                tool.strip_prefix("mcp__mmcg__")
-                    .is_some_and(crate::mcp::is_known_tool)
-            }) {
-                let filename = path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("?");
-                inaccessible.push(filename.to_string());
+
+            match frontmatter
+                .get("name")
+                .and_then(serde_norway::Value::as_str)
+            {
+                Some(name) if name == stem => {}
+                Some(_) => issues.push(format!("{filename}: name does not match filename")),
+                None => issues.push(format!("{filename}: missing name")),
+            }
+            if !frontmatter
+                .get("model")
+                .and_then(serde_norway::Value::as_str)
+                .is_some_and(|model| SUBAGENT_MODELS.contains(&model))
+            {
+                issues.push(format!("{filename}: missing or unsupported model"));
+            }
+            if !frontmatter
+                .get("maxTurns")
+                .and_then(serde_norway::Value::as_u64)
+                .is_some_and(|turns| (1..=SUBAGENT_MAX_TURNS).contains(&turns))
+            {
+                issues.push(format!(
+                    "{filename}: maxTurns must be from 1 to {SUBAGENT_MAX_TURNS}"
+                ));
+            }
+            if !frontmatter
+                .get("effort")
+                .and_then(serde_norway::Value::as_str)
+                .is_some_and(|effort| SUBAGENT_EFFORT_LEVELS.contains(&effort))
+            {
+                issues.push(format!("{filename}: missing or unsupported effort"));
+            }
+
+            let tools = subagent_tool_allowlist(&body).unwrap_or_default();
+            if tools.is_empty() {
+                issues.push(format!(
+                    "{filename}: missing explicit non-empty tools allowlist"
+                ));
+            }
+            let unique_tools: std::collections::BTreeSet<&str> =
+                tools.iter().map(String::as_str).collect();
+            if unique_tools.len() != tools.len() {
+                issues.push(format!("{filename}: tools allowlist contains duplicates"));
+            }
+
+            let valid_server_shape = match frontmatter.get("mcpServers") {
+                None => true,
+                Some(serde_norway::Value::Sequence(values)) => {
+                    values.iter().all(|value| value.as_str().is_some())
+                }
+                Some(serde_norway::Value::Mapping(values)) => {
+                    values.keys().all(|value| value.as_str().is_some())
+                }
+                Some(_) => false,
+            };
+            if !valid_server_shape {
+                issues.push(format!("{filename}: mcpServers must be a list or mapping"));
+            }
+            let servers = subagent_mcp_refs(&body);
+            let scopes_mmcg = servers.iter().any(|server| server == "mmcg");
+            let grants: std::collections::BTreeSet<String> = tools
+                .iter()
+                .filter_map(|tool| tool.strip_prefix("mcp__mmcg__"))
+                .filter(|tool| !tool.contains('*'))
+                .map(String::from)
+                .collect();
+            let wildcard = tools
+                .iter()
+                .any(|tool| tool.starts_with("mcp__mmcg__") && tool.contains('*'));
+            if wildcard {
+                issues.push(format!("{filename}: mmcg wildcard grant is not allowed"));
+            }
+            for unknown in grants
+                .iter()
+                .filter(|tool| !crate::mcp::is_known_tool(tool))
+            {
+                issues.push(format!("{filename}: grants unknown mmcg tool {unknown}"));
+            }
+
+            let references = subagent_prompt_mmcg_refs(&body);
+            if (!grants.is_empty() || !references.is_empty() || wildcard) && !scopes_mmcg {
+                issues.push(format!("{filename}: uses mmcg without mcpServers: [mmcg]"));
+            }
+            if scopes_mmcg && grants.is_empty() {
+                issues.push(format!(
+                    "{filename}: scopes mmcg without an exact known grant"
+                ));
+            }
+            for required in references {
+                if !crate::mcp::is_known_tool(&required) {
+                    issues.push(format!(
+                        "{filename}: prompt names unknown mmcg tool {required}"
+                    ));
+                } else if !grants.contains(&required) {
+                    issues.push(format!("{filename}: prompt tool {required} is not allowed"));
+                }
             }
         }
     }
-    inaccessible.sort();
-    inaccessible.dedup();
-    (scoped, inaccessible)
+    issues.sort();
+    issues.dedup();
+    (found, issues)
 }
 
-fn check_subagent_mcp_tools(root: &Path) -> Check {
+fn check_subagent_runtime_contract(root: &Path) -> Check {
     let mut agent_dirs = vec![root.join(".claude").join("agents")];
     if let Some(home) = std::env::home_dir() {
         agent_dirs.push(home.join(".claude").join("agents"));
     }
-    let (scoped, inaccessible) = subagent_mmcg_tool_issues(&agent_dirs);
-    if !scoped {
+    let (found, issues) = subagent_runtime_contract_issues(&agent_dirs);
+    if !found {
         return Check {
-            name: "subagent MCP tools",
+            name: "subagent runtime contract",
             status: Status::Ok,
-            message: "no subagent scopes mmcg — nothing to verify".into(),
+            message: "no Mastermind subagents found — nothing to verify".into(),
             hint: None,
         };
     }
-    if inaccessible.is_empty() {
+    if issues.is_empty() {
         return Check {
-            name: "subagent MCP tools",
+            name: "subagent runtime contract",
             status: Status::Ok,
-            message: "scoped subagent allowlists grant mmcg tools".into(),
+            message: "Mastermind subagents have explicit bounded runtime contracts".into(),
             hint: None,
         };
     }
     Check {
-        name: "subagent MCP tools",
+        name: "subagent runtime contract",
         status: Status::Warn,
-        message: format!(
-            "explicit `tools:` blocks mmcg in {}",
-            inaccessible.join(", ")
-        ),
+        message: format!("invalid Mastermind subagent contract: {}", issues.join("; ")),
         hint: Some(
-            "add exact `mcp__mmcg__mmcg_*` permissions to each agent's top-level `tools:` allowlist"
-                .into(),
+            "run `mastermind update` or restore explicit model, tools, maxTurns, effort, and exact mmcg grants"
+                .into()
         ),
     }
 }
@@ -1608,6 +1728,23 @@ mod tests {
     }
 
     #[test]
+    fn report_explain_uses_the_canonical_setup_write_flag() {
+        let root = PathBuf::from("/tmp/test");
+        let report = Report::from_checks(
+            &root,
+            vec![Check {
+                name: "MCP config",
+                status: Status::Warn,
+                message: "missing".into(),
+                hint: None,
+            }],
+        );
+        let text = report.render_explain(Path::new("/tmp/mmcg"), Path::new("/tmp/mmcg.db"));
+        assert!(text.contains("mastermind setup claude --write"));
+        assert!(!text.contains("--write-mcp"));
+    }
+
+    #[test]
     fn subagent_mcp_refs_parses_list_and_handles_absence() {
         let list = "---\nname: r\ndescription: d\nmcpServers: [mmcg, foo]\n---\nbody";
         assert_eq!(
@@ -1640,35 +1777,82 @@ mod tests {
         );
         let inherited = "---\nname: r\nmcpServers: [mmcg]\n---\nbody";
         assert_eq!(subagent_tool_allowlist(inherited), None);
+        let malformed = "---\nname: r\ntools: [Read, 42]\n---\nbody";
+        assert_eq!(subagent_tool_allowlist(malformed), Some(vec![]));
     }
 
     #[test]
-    fn subagent_mmcg_tool_issues_catches_explicit_allowlist_block() {
+    fn subagent_prompt_mmcg_refs_reads_bare_and_qualified_names_from_the_body() {
+        let body = "---\nname: r\ntools: mcp__mmcg__mmcg_status\n---\nUse mmcg_search, then mcp__mmcg__mmcg_callers.";
+        assert_eq!(
+            subagent_prompt_mmcg_refs(body),
+            ["mmcg_callers".to_string(), "mmcg_search".to_string()]
+                .into_iter()
+                .collect()
+        );
+    }
+
+    #[test]
+    fn subagent_runtime_contract_issues_cover_the_full_agent_chain() {
         let root = tmp();
         let agents = root.join("agents");
         fs::create_dir_all(&agents).unwrap();
         fs::write(
-            agents.join("blocked.md"),
-            "---\nname: blocked\ntools: Read, Grep\nmcpServers: [mmcg]\n---\nbody",
+            agents.join("mastermind-working.md"),
+            "---\nname: mastermind-working\nmodel: haiku\ntools: Read, mcp__mmcg__mmcg_search\nmcpServers: [mmcg]\nmaxTurns: 12\neffort: low\n---\nUse mmcg_search.",
         )
         .unwrap();
         fs::write(
-            agents.join("working.md"),
-            "---\nname: working\ntools: Read, mcp__mmcg__mmcg_search\nmcpServers: [mmcg]\n---\nbody",
+            agents.join("mastermind-missing.md"),
+            "---\nname: mastermind-missing\n---\nbody",
         )
         .unwrap();
         fs::write(
-            agents.join("unknown.md"),
-            "---\nname: unknown\ntools: Read, mcp__mmcg__mmcg_not_a_tool\nmcpServers: [mmcg]\n---\nbody",
+            agents.join("mastermind-wildcard.md"),
+            "---\nname: mastermind-wildcard\nmodel: sonnet\ntools: Read, mcp__mmcg__*\nmcpServers: [mmcg]\nmaxTurns: 20\neffort: medium\n---\nUse mmcg_search.",
+        )
+        .unwrap();
+        fs::write(
+            agents.join("mastermind-unscoped.md"),
+            "---\nname: mastermind-unscoped\nmodel: sonnet\ntools: Read, mcp__mmcg__mmcg_search\nmaxTurns: 20\neffort: medium\n---\nUse mmcg_search.",
+        )
+        .unwrap();
+        fs::write(
+            agents.join("mastermind-missing-grant.md"),
+            "---\nname: mastermind-missing-grant\nmodel: sonnet\ntools: Read, mcp__mmcg__mmcg_status\nmcpServers: [mmcg]\nmaxTurns: 20\neffort: medium\n---\nUse mmcg_search.",
+        )
+        .unwrap();
+        fs::write(
+            agents.join("mastermind-unknown.md"),
+            "---\nname: mastermind-unknown\nmodel: opus\ntools: Read, mcp__mmcg__mmcg_not_a_tool\nmcpServers: [mmcg]\nmaxTurns: 20\neffort: high\n---\nbody",
+        )
+        .unwrap();
+        fs::write(
+            agents.join("mastermind-malformed-server.md"),
+            "---\nname: mastermind-malformed-server\nmodel: haiku\ntools: Read\nmcpServers: mmcg\nmaxTurns: 4\neffort: low\n---\nbody",
         )
         .unwrap();
 
-        let (scoped, inaccessible) = subagent_mmcg_tool_issues(std::slice::from_ref(&agents));
-        assert!(scoped);
-        assert_eq!(
-            inaccessible,
-            vec!["blocked.md".to_string(), "unknown.md".to_string()]
-        );
+        let (found, issues) = subagent_runtime_contract_issues(std::slice::from_ref(&agents));
+        assert!(found);
+        let rendered = issues.join("\n");
+        for expected in [
+            "mastermind-missing.md: missing or unsupported model",
+            "mastermind-missing.md: missing explicit non-empty tools allowlist",
+            "mastermind-missing.md: maxTurns must be from 1 to 100",
+            "mastermind-missing.md: missing or unsupported effort",
+            "mastermind-wildcard.md: mmcg wildcard grant is not allowed",
+            "mastermind-unscoped.md: uses mmcg without mcpServers: [mmcg]",
+            "mastermind-missing-grant.md: prompt tool mmcg_search is not allowed",
+            "mastermind-unknown.md: grants unknown mmcg tool mmcg_not_a_tool",
+            "mastermind-malformed-server.md: mcpServers must be a list or mapping",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "missing {expected}:\n{rendered}"
+            );
+        }
+        assert!(!rendered.contains("mastermind-working.md"));
 
         fs::remove_dir_all(&root).ok();
     }

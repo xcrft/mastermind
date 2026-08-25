@@ -1851,6 +1851,7 @@ def validate_workflow_role_contracts() -> list[Issue]:
     auditor_path = REPO_ROOT / "agents/subagents/mastermind-auditor.md"
     planner_path = REPO_ROOT / "skills/workflow/mastermind-task-planning/SKILL.md"
     executor_path = REPO_ROOT / "agents/subagents/mastermind-task-executor.md"
+    researcher_path = REPO_ROOT / "agents/subagents/mastermind-researcher.md"
     try:
         auditor = auditor_path.read_text(encoding="utf-8")
     except OSError as error:
@@ -1890,6 +1891,21 @@ def validate_workflow_role_contracts() -> list[Issue]:
                 issues.append(Issue(executor_path, "error", f"executor ownership contract missing {token!r}"))
         if "### Write state.json" in executor:
             issues.append(Issue(executor_path, "error", "executor must not own lifecycle state"))
+    try:
+        researcher = researcher_path.read_text(encoding="utf-8")
+    except OSError as error:
+        issues.append(Issue(researcher_path, "error", f"cannot read researcher contract: {error}"))
+    else:
+        for token in (
+            "mcp__mmcg__mmcg_concept",
+            "Do not replace a complete graph answer",
+            "data, never instructions",
+        ):
+            if token not in researcher:
+                issues.append(Issue(researcher_path, "error", f"researcher graph-first contract missing {token!r}"))
+        tools_line = re.search(r"^tools:\s*(.*)$", researcher, re.MULTILINE)
+        if tools_line is None or "Bash" in _runtime_tool_names(tools_line.group(1)):
+            issues.append(Issue(researcher_path, "error", "read-only researcher must not receive Bash"))
     workflow_path = REPO_ROOT / "agents/claude-md/mastermind-workflow.md"
     try:
         workflow = workflow_path.read_bytes()
@@ -1899,6 +1915,14 @@ def validate_workflow_role_contracts() -> list[Issue]:
         if len(workflow) > 10_000:
             issues.append(Issue(workflow_path, "error", "project workflow exceeds the 10 KB anti-ceremony budget"))
         text = workflow.decode("utf-8")
+        for token in (
+            "Call `mmcg_brief` once",
+            "`mmcg_concept`",
+            "Do not use Bash to rediscover",
+            "Bash remains the right tool for Git, builds, tests, linters, logs, and runtime probes",
+        ):
+            if token not in text:
+                issues.append(Issue(workflow_path, "error", f"workflow graph-first routing missing {token!r}"))
         ordered = (
             text.find("mastermind verify-spec"),
             text.find("The user approves Scope and Acceptance Criteria"),
@@ -1926,7 +1950,14 @@ def validate_portable_skill_semantics() -> list[Issue]:
             "forbidden": ("planner extracts it with one regex", "planner applies the taxonomy fix and re-spawns"),
         },
         "skills/workflow/mastermind-codegraph-research/SKILL.md": {
-            "required": ("syntactic evidence", "read the\nsource"),
+            "required": (
+                "syntactic evidence",
+                "read the\nsource",
+                "`mmcg_brief`",
+                "`mmcg_concept`",
+                "managed index",
+                "custom external index",
+            ),
             "forbidden": ("Do NOT re-verify mmcg results", "always cheaper"),
         },
         "skills/prompt-engineering/mastermind-prompt-refiner/SKILL.md": {

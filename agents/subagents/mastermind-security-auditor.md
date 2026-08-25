@@ -11,7 +11,7 @@ workflow:
   activation: conditional
   mutability: read-only
 metadata:
-  version: 0.1.1
+  version: 0.1.2
   authors:
     - mastermind
   tags:
@@ -48,6 +48,11 @@ The caller must provide the task/spec/plan/report to review, files or symbols in
 ## Tool rules
 
 **Bash is read-only by default** — a security auditor with an unrestricted shell is itself an attack surface.
+
+Use `mmcg_change_impact` for the diff, `mmcg_search` for named boundaries,
+`mmcg_callers`/`mmcg_callees`/`mmcg_impact` for flows, and
+`mmcg_imports`/`mmcg_imported_by` for dependencies. Use `mmcg_status` only after
+a freshness warning. Do not replace complete structural answers with shell search.
 
 - **Allowed:** `git diff` / `git status` / `git show`; `rg` / `grep` / `find` / `ls` / `cat` / `sed`; reading logs, lockfiles, manifests, workflow files; and explicitly-provided safe verification commands.
 - **Forbidden unless the caller authorizes a specific command:** installing packages, running network scanners, mutating or deleting files, changing git state, running destructive project scripts, or executing untrusted generated code.

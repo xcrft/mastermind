@@ -17,7 +17,7 @@ Skills define task behavior. Claude Code-specific spawnable roles live under
 |---|---|
 | [`mastermind-task-planning`](workflow/mastermind-task-planning/SKILL.md) | Chooses Direct, Verified, or Strict and creates the lightest evidence-grounded delegation contract that fits the risk. |
 | [`mastermind-task-executor`](workflow/mastermind-task-executor/SKILL.md) | Executes an approved contract by outcomes and acceptance criteria, uses bounded repair, and writes `executor-report.md`. |
-| [`mastermind-codegraph-research`](workflow/mastermind-codegraph-research/SKILL.md) | Uses mmcg for structural discovery while preserving syntactic, collision, precision, stale-index, and runtime-proof limits. |
+| [`mastermind-codegraph-research`](workflow/mastermind-codegraph-research/SKILL.md) | Routes bounded orientation, concept discovery, and structural lookup through mmcg before literal fallbacks while preserving precision and runtime-proof limits. |
 | [`mastermind-component-research`](workflow/mastermind-component-research/SKILL.md) | Answers whether a React or Vue component already exists, who renders it, and what its props contract is, before the change is written. |
 | [`mastermind-structured-report-contract`](workflow/mastermind-structured-report-contract/SKILL.md) | Defines the file-backed executor report consumed by post-flight and the advisory Strict auditor tail. |
 | [`mastermind-critical-review`](workflow/mastermind-critical-review/SKILL.md) | Stress-test a design, spec, plan, or report for false assumptions, broken contracts, scope creep, missing evidence, and high-risk failure modes. |

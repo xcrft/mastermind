@@ -3,8 +3,9 @@
 use super::common::{
     line_of, node_text, push_call_with_type, push_def, push_import, signature_until_body,
 };
-use super::LanguageExtractor;
+use super::{DocumentationTextBuilder, LanguageExtractor, RawConceptDocumentation};
 use crate::store::PendingFile;
+use std::collections::HashMap;
 use tree_sitter::{Node, Tree};
 
 pub struct TypescriptExtractor {
@@ -360,6 +361,171 @@ fn find_child_of_kind<'tree>(node: &Node<'tree>, target_kind: &str) -> Option<No
         }
     }
     None
+}
+
+fn documentation_nodes_adjacent(source: &[u8], left: &Node, right: &Node) -> bool {
+    if left.end_byte() > right.start_byte()
+        || right.start_position().row > left.end_position().row.saturating_add(1)
+    {
+        return false;
+    }
+    let gap = &source[left.end_byte()..right.start_byte()];
+    if !gap.iter().all(u8::is_ascii_whitespace) {
+        return false;
+    }
+    let mut newlines = 0usize;
+    let mut index = 0usize;
+    while index < gap.len() {
+        if gap[index] == b'\r' {
+            newlines += 1;
+            index += usize::from(gap.get(index + 1) == Some(&b'\n'));
+        } else if gap[index] == b'\n' {
+            newlines += 1;
+        }
+        index += 1;
+    }
+    newlines <= 1
+}
+
+fn documentation_comment_starts_line(source: &[u8], node: &Node) -> bool {
+    let line_start = source[..node.start_byte()]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |index| index + 1);
+    source[line_start..node.start_byte()]
+        .iter()
+        .all(u8::is_ascii_whitespace)
+}
+
+fn is_jsdoc(node: &Node, source: &[u8]) -> bool {
+    node.kind() == "comment" && node_text(node, source).is_some_and(|text| text.starts_with("/**"))
+}
+
+fn is_file_header_jsdoc(node: &Node, source: &[u8]) -> bool {
+    let Some(text) = node_text(node, source) else {
+        return false;
+    };
+    let lower = text.to_ascii_lowercase();
+    lower.contains("@file")
+        || lower.contains("@fileoverview")
+        || lower.contains("@license")
+        || lower.contains("@copyright")
+        || lower.contains("copyright")
+        || lower.contains("licensed under")
+        || lower.contains("spdx-license-identifier")
+}
+
+fn push_jsdoc(builder: &mut DocumentationTextBuilder, node: &Node, source: &[u8]) {
+    let Some(text) = node_text(node, source) else {
+        return;
+    };
+    let body = text
+        .strip_prefix("/**")
+        .unwrap_or_default()
+        .strip_suffix("*/")
+        .unwrap_or_default();
+    for line in body.lines() {
+        let line = line.trim_start();
+        let line = line.strip_prefix('*').unwrap_or(line);
+        builder.push_line(line.strip_prefix(' ').unwrap_or(line).trim_end());
+    }
+}
+
+fn owned_symbol_nodes<'tree>(node: Node<'tree>) -> Vec<Node<'tree>> {
+    match node.kind() {
+        "export_statement" => node
+            .child_by_field_name("declaration")
+            .map(owned_symbol_nodes)
+            .unwrap_or_default(),
+        "function_declaration"
+        | "generator_function_declaration"
+        | "class_declaration"
+        | "abstract_class_declaration"
+        | "interface_declaration"
+        | "method_definition" => vec![node],
+        "lexical_declaration" | "variable_declaration" => {
+            let mut cursor = node.walk();
+            node.named_children(&mut cursor)
+                .filter(|child| {
+                    child.kind() == "variable_declarator"
+                        && child
+                            .child_by_field_name("value")
+                            .as_ref()
+                            .and_then(function_body_owner)
+                            .is_some()
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn symbol_index_for_declaration(
+    node: &Node,
+    source: &[u8],
+    symbols: &HashMap<(u32, &str), usize>,
+) -> Option<usize> {
+    let name = node
+        .child_by_field_name("name")
+        .and_then(|name| node_text(&name, source))
+        .unwrap_or("<anon>");
+    let line = node.start_position().row as u32 + 1;
+    symbols.get(&(line, name)).copied()
+}
+
+fn walk_concept_documentation(
+    node: Node,
+    source: &[u8],
+    symbols: &HashMap<(u32, &str), usize>,
+    output: &mut Vec<RawConceptDocumentation>,
+) {
+    let mut cursor = node.walk();
+    let children = node.named_children(&mut cursor).collect::<Vec<_>>();
+    for (index, wrapper) in children.iter().enumerate() {
+        let owners = owned_symbol_nodes(*wrapper);
+        if owners.is_empty() || index == 0 {
+            continue;
+        }
+        let comment = children[index - 1];
+        if !is_jsdoc(&comment, source)
+            || (node.kind() == "program" && is_file_header_jsdoc(&comment, source))
+            || !documentation_comment_starts_line(source, &comment)
+            || !documentation_nodes_adjacent(source, &comment, wrapper)
+        {
+            continue;
+        }
+        for owner in owners {
+            let Some(symbol_index) = symbol_index_for_declaration(&owner, source, symbols) else {
+                continue;
+            };
+            let mut builder = DocumentationTextBuilder::default();
+            push_jsdoc(&mut builder, &comment, source);
+            if let Some(candidate) = builder.finish(symbol_index) {
+                output.push(candidate);
+            }
+        }
+    }
+    for child in children {
+        walk_concept_documentation(child, source, symbols, output);
+    }
+}
+
+pub(super) fn collect_concept_documentation(
+    tree: &Tree,
+    source: &[u8],
+    pending: &PendingFile,
+) -> Vec<RawConceptDocumentation> {
+    let mut output = Vec::new();
+    let mut symbols = HashMap::with_capacity(pending.symbols.len());
+    for (index, symbol) in pending.symbols.iter().enumerate() {
+        if symbol.kind != "module" {
+            symbols
+                .entry((symbol.line_start, symbol.name.as_str()))
+                .or_insert(index);
+        }
+    }
+    walk_concept_documentation(tree.root_node(), source, &symbols, &mut output);
+    output
 }
 
 #[cfg(test)]

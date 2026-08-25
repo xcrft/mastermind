@@ -3,7 +3,7 @@
 //! calls, imports). TS-only node kinds don't appear in JS files.
 
 use super::typescript;
-use super::LanguageExtractor;
+use super::{LanguageExtractor, RawConceptDocumentation};
 use crate::store::PendingFile;
 use tree_sitter::Tree;
 
@@ -28,6 +28,14 @@ impl LanguageExtractor for JavascriptExtractor {
             module_index,
         );
     }
+}
+
+pub(super) fn collect_concept_documentation(
+    tree: &Tree,
+    source: &[u8],
+    pending: &PendingFile,
+) -> Vec<RawConceptDocumentation> {
+    typescript::collect_concept_documentation(tree, source, pending)
 }
 
 #[cfg(test)]

@@ -1145,7 +1145,7 @@ fn run_cli_inner(
             let indexer = mmcg::indexer::Indexer::new(&root);
             let stats = indexer.index_all(&mut store, force)?;
             println!(
-                "indexed {} (unchanged {}, purged {}, skipped binary {}, skipped large {}, failed {}) / scanned {} | {} symbols | {} edges | {} concept rows (orphans purged {}, contract rebuilt {}) | {} task specs | {} history entries (skipped {}, truncated {}) | {} ms",
+                "indexed {} (unchanged {}, purged {}, skipped binary {}, skipped large {}, failed {}) / scanned {} | {} symbols | {} edges | {} concept rows (orphans purged {}, contract rebuilt {}) | {} documentation documents (languages {}, secret omitted {}, size omitted {}, unsupported files {}) | {} task specs | {} history entries (skipped {}, truncated {}) | {} ms",
                 stats.files_indexed,
                 stats.files_unchanged,
                 stats.files_purged,
@@ -1158,6 +1158,11 @@ fn run_cli_inner(
                 stats.concept_rows_indexed,
                 stats.concept_orphans_purged,
                 stats.concept_contract_rebuilt,
+                stats.concept_documentation_indexed,
+                stats.concept_documentation_supported_languages,
+                stats.concept_documentation_secret_omitted,
+                stats.concept_documentation_size_omitted,
+                stats.concept_documentation_unsupported_language_files,
                 stats.task_specs_indexed,
                 stats.history_entries_indexed,
                 stats.history_entries_skipped,

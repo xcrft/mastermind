@@ -27,10 +27,21 @@ use std::time::{Duration, Instant};
 
 const SCHEMA_VERSION: &str = "7";
 pub const CONCEPT_NORMALIZATION_META_KEY: &str = "concept_normalization_version";
-pub const CONCEPT_NORMALIZATION_VERSION: &str = "mmcg-concepts-v1";
+pub const CONCEPT_NORMALIZATION_VERSION: &str = "mmcg-concepts-v2";
+pub const CONCEPT_DOCUMENTATION_SUPPORTED_LANGUAGES: &str = "javascript,python,rust,tsx,typescript";
+pub const CONCEPT_DOCUMENTATION_INDEXED_META_KEY: &str = "concept_documentation_indexed_count";
+pub const CONCEPT_DOCUMENTATION_SECRET_OMITTED_META_KEY: &str =
+    "concept_documentation_secret_omitted_count";
+pub const CONCEPT_DOCUMENTATION_SIZE_OMITTED_META_KEY: &str =
+    "concept_documentation_size_omitted_count";
+pub const CONCEPT_DOCUMENTATION_UNSUPPORTED_META_KEY: &str =
+    "concept_documentation_unsupported_language_count";
+pub const CONCEPT_DOCUMENTATION_LANGUAGES_META_KEY: &str =
+    "concept_documentation_supported_languages";
 pub const CONCEPT_TERM_MAX_BYTES: usize = 64;
 pub const CONCEPT_SIGNATURE_MAX_BYTES: usize = 256;
-const CONCEPT_FIELD_MAX_BYTES: usize = 512;
+pub const CONCEPT_DOCUMENTATION_MAX_BYTES: usize = 512;
+const CONCEPT_FIELD_MAX_BYTES: usize = CONCEPT_DOCUMENTATION_MAX_BYTES;
 const CONCEPT_INDEX_TERM_LIMIT: usize = 128;
 const CONCEPT_SIGNATURE_SCAN_MAX_BYTES: usize = 64 * 1024;
 const CONCEPT_CONTRACT_DIRTY: &str = "dirty";
@@ -43,6 +54,7 @@ const CONCEPT_SCHEMA_DROP_SQL: &str = r#"
     DROP TRIGGER IF EXISTS symbol_concepts_ad;
     DROP TRIGGER IF EXISTS symbol_concepts_au;
     DROP TABLE IF EXISTS symbol_concepts_fts;
+    DROP TABLE IF EXISTS concept_documentation_file_stats;
     DROP TABLE IF EXISTS symbol_concepts;
 "#;
 const CONCEPT_SCHEMA_DDL: &str = r#"
@@ -54,6 +66,15 @@ const CONCEPT_SCHEMA_DDL: &str = r#"
         path_sort             TEXT NOT NULL,
         signature_search      TEXT NOT NULL,
         documentation_search  TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE concept_documentation_file_stats (
+        path                TEXT PRIMARY KEY
+                            REFERENCES files(path) ON DELETE CASCADE,
+        language_supported  INTEGER NOT NULL
+                            CHECK(language_supported IN (0, 1)),
+        indexed_documents   INTEGER NOT NULL CHECK(indexed_documents >= 0),
+        secret_omitted      INTEGER NOT NULL CHECK(secret_omitted >= 0),
+        size_omitted        INTEGER NOT NULL CHECK(size_omitted >= 0)
     );
     CREATE VIRTUAL TABLE symbol_concepts_fts USING fts5(
         name_search,
@@ -150,6 +171,7 @@ const CONCEPT_TRIGGER_NAMES: &[&str] = &[
 ];
 const CONCEPT_SCHEMA_OBJECTS: &[(&str, &str)] = &[
     ("table", "symbol_concepts"),
+    ("table", "concept_documentation_file_stats"),
     ("table", "symbol_concepts_fts"),
     ("table", "symbol_concepts_fts_config"),
     ("table", "symbol_concepts_fts_data"),
@@ -683,6 +705,34 @@ pub(crate) struct ConceptStoreHit {
 pub(crate) struct ConceptFinalizeStats {
     pub rows: u32,
     pub orphans_purged: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ConceptDocumentationStats {
+    pub indexed_documents: u32,
+    pub secret_omitted: u32,
+    pub size_omitted: u32,
+    pub unsupported_language_files: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingConceptDocumentation {
+    pub symbol_index: usize,
+    pub documentation_search: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PendingConceptCorpus {
+    pub language_supported: bool,
+    pub documents: Vec<PendingConceptDocumentation>,
+    pub secret_omitted: u32,
+    pub size_omitted: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NormalizedConceptDocumentation {
+    pub value: String,
+    pub truncated: bool,
 }
 
 fn lowercase_concept(value: &str) -> String {
@@ -1724,11 +1774,16 @@ fn redact_signature(value: &str, dialect: SignatureDialect) -> Option<String> {
     Some(output)
 }
 
-fn bounded_concept_field(value: &str, byte_limit: usize) -> Option<String> {
+fn bounded_concept_field_with_status(
+    value: &str,
+    byte_limit: usize,
+) -> Option<NormalizedConceptDocumentation> {
     let terms = concept_index_terms(value)?;
     let mut output = String::new();
+    let mut truncated = terms.len() > CONCEPT_INDEX_TERM_LIMIT;
     for term in terms.into_iter().take(CONCEPT_INDEX_TERM_LIMIT) {
         if term.len() > CONCEPT_TERM_MAX_BYTES {
+            truncated = true;
             continue;
         }
         let separator = usize::from(!output.is_empty());
@@ -1738,6 +1793,7 @@ fn bounded_concept_field(value: &str, byte_limit: usize) -> Option<String> {
             .saturating_add(term.len())
             > byte_limit
         {
+            truncated = true;
             break;
         }
         if separator == 1 {
@@ -1745,10 +1801,28 @@ fn bounded_concept_field(value: &str, byte_limit: usize) -> Option<String> {
         }
         output.push_str(&term);
     }
-    Some(output)
+    Some(NormalizedConceptDocumentation {
+        value: output,
+        truncated,
+    })
 }
 
-fn concept_document(name: &str, path: &str, signature: Option<&str>) -> ConceptDocument {
+fn bounded_concept_field(value: &str, byte_limit: usize) -> Option<String> {
+    bounded_concept_field_with_status(value, byte_limit).map(|field| field.value)
+}
+
+pub(crate) fn normalize_concept_documentation(
+    value: &str,
+) -> Option<NormalizedConceptDocumentation> {
+    bounded_concept_field_with_status(value, CONCEPT_FIELD_MAX_BYTES)
+}
+
+fn concept_document(
+    name: &str,
+    path: &str,
+    signature: Option<&str>,
+    documentation_search: &str,
+) -> ConceptDocument {
     let name_search = bounded_concept_field(name, CONCEPT_FIELD_MAX_BYTES).unwrap_or_default();
     let path_search = bounded_concept_field(path, CONCEPT_FIELD_MAX_BYTES).unwrap_or_default();
     let signature_search = signature
@@ -1760,7 +1834,7 @@ fn concept_document(name: &str, path: &str, signature: Option<&str>) -> ConceptD
         path_search,
         path_sort: concept_path_sort(path),
         signature_search,
-        documentation_search: String::new(),
+        documentation_search: documentation_search.to_string(),
     }
 }
 
@@ -1770,8 +1844,9 @@ fn insert_concept_document(
     name: &str,
     path: &str,
     signature: Option<&str>,
+    documentation_search: &str,
 ) -> SqlResult<()> {
-    let document = concept_document(name, path, signature);
+    let document = concept_document(name, path, signature, documentation_search);
     connection.execute(
         "INSERT INTO symbol_concepts(
              symbol_id, name_search, path_search, path_sort, signature_search,
@@ -1786,6 +1861,84 @@ fn insert_concept_document(
             document.documentation_search
         ],
     )?;
+    Ok(())
+}
+
+pub(crate) fn concept_documentation_language_supported(language: &str) -> bool {
+    matches!(
+        language,
+        "javascript" | "python" | "rust" | "tsx" | "typescript"
+    )
+}
+
+fn valid_documentation_search(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= CONCEPT_FIELD_MAX_BYTES
+        && value.split(' ').all(|term| {
+            !term.is_empty()
+                && term.len() <= CONCEPT_TERM_MAX_BYTES
+                && term
+                    .chars()
+                    .all(|character| character.is_alphanumeric() || character == '_')
+        })
+}
+
+fn concept_documentation_stats_on(connection: &Connection) -> SqlResult<ConceptDocumentationStats> {
+    connection.query_row(
+        "SELECT
+             COALESCE(SUM(indexed_documents), 0),
+             COALESCE(SUM(secret_omitted), 0),
+             COALESCE(SUM(size_omitted), 0),
+             COALESCE(SUM(CASE WHEN language_supported = 0 THEN 1 ELSE 0 END), 0)
+         FROM concept_documentation_file_stats",
+        [],
+        |row| {
+            let bounded = |value: i64| u32::try_from(value).unwrap_or(u32::MAX);
+            Ok(ConceptDocumentationStats {
+                indexed_documents: bounded(row.get(0)?),
+                secret_omitted: bounded(row.get(1)?),
+                size_omitted: bounded(row.get(2)?),
+                unsupported_language_files: bounded(row.get(3)?),
+            })
+        },
+    )
+}
+
+fn set_meta_on(connection: &Connection, key: &str, value: &str) -> SqlResult<()> {
+    connection.execute(
+        "INSERT INTO meta(key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
+fn update_concept_documentation_meta_on(connection: &Connection) -> SqlResult<()> {
+    let stats = concept_documentation_stats_on(connection)?;
+    for (key, value) in [
+        (
+            CONCEPT_DOCUMENTATION_LANGUAGES_META_KEY,
+            CONCEPT_DOCUMENTATION_SUPPORTED_LANGUAGES.to_string(),
+        ),
+        (
+            CONCEPT_DOCUMENTATION_INDEXED_META_KEY,
+            stats.indexed_documents.to_string(),
+        ),
+        (
+            CONCEPT_DOCUMENTATION_SECRET_OMITTED_META_KEY,
+            stats.secret_omitted.to_string(),
+        ),
+        (
+            CONCEPT_DOCUMENTATION_SIZE_OMITTED_META_KEY,
+            stats.size_omitted.to_string(),
+        ),
+        (
+            CONCEPT_DOCUMENTATION_UNSUPPORTED_META_KEY,
+            stats.unsupported_language_files.to_string(),
+        ),
+    ] {
+        set_meta_on(connection, key, &value)?;
+    }
     Ok(())
 }
 
@@ -3336,6 +3489,7 @@ impl Store {
         for shadow in CONCEPT_SHADOW_NAMES {
             retire_schema_object_name(&tx, shadow)?;
         }
+        retire_schema_object_name(&tx, "concept_documentation_file_stats")?;
         retire_schema_object_name(&tx, "symbol_concepts")?;
         tx.execute_batch(CONCEPT_SCHEMA_DDL)?;
         tx.execute(
@@ -4133,6 +4287,9 @@ impl Store {
                 params![file_path],
             )?;
             tx.execute("DELETE FROM files WHERE path = ?1", params![file_path])?;
+            if restore_contract && Self::concept_schema_objects_current_on(&tx)? {
+                update_concept_documentation_meta_on(&tx)?;
+            }
             if restore_contract {
                 Self::set_concept_contract_current(&tx)?;
             }
@@ -4150,6 +4307,57 @@ impl Store {
     /// Commit a parsed file's symbols and edges in a single transaction.
     /// Hot path during indexing — keep it batched.
     pub fn commit_file(&mut self, pending: PendingFile) -> SqlResult<()> {
+        let corpus = if concept_documentation_language_supported(&pending.language) {
+            None
+        } else {
+            Some(PendingConceptCorpus::default())
+        };
+        let result = self.commit_file_inner(pending, corpus);
+        if result.is_err() {
+            let _ = self.mark_concept_contract_dirty();
+        }
+        result
+    }
+
+    pub(crate) fn commit_file_with_concepts(
+        &mut self,
+        pending: PendingFile,
+        corpus: PendingConceptCorpus,
+    ) -> SqlResult<()> {
+        if corpus.language_supported != concept_documentation_language_supported(&pending.language)
+        {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "concept documentation language support mismatch".to_string(),
+            ));
+        }
+        let result = self.commit_file_inner(pending, Some(corpus));
+        if result.is_err() {
+            let _ = self.mark_concept_contract_dirty();
+        }
+        result
+    }
+
+    fn commit_file_inner(
+        &mut self,
+        pending: PendingFile,
+        corpus: Option<PendingConceptCorpus>,
+    ) -> SqlResult<()> {
+        let mut documentation_by_symbol = vec![None; pending.symbols.len()];
+        if let Some(corpus) = corpus.as_ref() {
+            for document in &corpus.documents {
+                if document.symbol_index >= documentation_by_symbol.len()
+                    || documentation_by_symbol[document.symbol_index].is_some()
+                    || !valid_documentation_search(&document.documentation_search)
+                {
+                    return Err(rusqlite::Error::InvalidParameterName(
+                        "invalid normalized concept documentation".to_string(),
+                    ));
+                }
+                documentation_by_symbol[document.symbol_index] =
+                    Some(document.documentation_search.as_str());
+            }
+        }
+
         let tx = self.conn.transaction()?;
         let restore_contract = Self::incremental_concept_contract_current_on(&tx)?;
 
@@ -4173,7 +4381,7 @@ impl Store {
                 "INSERT INTO symbols(name, kind, file_path, line_start, line_end, signature, parent_id, language, decorators, production)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             )?;
-            for s in &pending.symbols {
+            for (symbol_index, s) in pending.symbols.iter().enumerate() {
                 let parent_id = s.parent_index.map(|i| symbol_ids[i]);
                 stmt.execute(params![
                     s.name,
@@ -4194,6 +4402,7 @@ impl Store {
                     &s.name,
                     &pending.path,
                     s.signature.as_deref(),
+                    documentation_by_symbol[symbol_index].unwrap_or_default(),
                 )?;
                 symbol_ids.push(symbol_id);
             }
@@ -4228,7 +4437,26 @@ impl Store {
             ],
         )?;
 
-        if restore_contract {
+        if let Some(corpus) = corpus.as_ref() {
+            tx.execute(
+                "INSERT INTO concept_documentation_file_stats(
+                     path, language_supported, indexed_documents,
+                     secret_omitted, size_omitted
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    &pending.path,
+                    i64::from(corpus.language_supported),
+                    corpus.documents.len() as u32,
+                    corpus.secret_omitted,
+                    corpus.size_omitted
+                ],
+            )?;
+            if restore_contract {
+                update_concept_documentation_meta_on(&tx)?;
+            }
+        }
+
+        if restore_contract && corpus.is_some() {
             Self::set_concept_contract_current(&tx)?;
         }
         tx.commit()?;
@@ -4266,7 +4494,7 @@ impl Store {
                 ],
             )?;
             let symbol_id = self.conn.last_insert_rowid();
-            insert_concept_document(&self.conn, symbol_id, name, file_path, signature)?;
+            insert_concept_document(&self.conn, symbol_id, name, file_path, signature, "")?;
             if restore_contract {
                 Self::set_concept_contract_current(&self.conn)?;
             }
@@ -4483,6 +4711,34 @@ impl Store {
                 )),
             ));
         }
+        let missing_documentation_stats: i64 = tx.query_row(
+            "SELECT COUNT(*)
+             FROM files f
+             LEFT JOIN concept_documentation_file_stats d ON d.path = f.path
+             WHERE d.path IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        let mismatched_documentation_counts: i64 = tx.query_row(
+            "SELECT COUNT(*)
+             FROM concept_documentation_file_stats d
+             WHERE d.indexed_documents <> (
+                 SELECT COUNT(*)
+                 FROM symbols s
+                 JOIN symbol_concepts c ON c.symbol_id = s.id
+                 WHERE s.file_path = d.path AND c.documentation_search <> ''
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        if missing_documentation_stats != 0 || mismatched_documentation_counts != 0 {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+                Some(format!(
+                    "concept finalization found {missing_documentation_stats} files without documentation stats and {mismatched_documentation_counts} mismatched documentation counts"
+                )),
+            ));
+        }
         tx.execute(
             "INSERT INTO symbol_concepts_fts(symbol_concepts_fts) VALUES ('rebuild')",
             [],
@@ -4492,6 +4748,7 @@ impl Store {
              VALUES ('integrity-check', 1)",
             [],
         )?;
+        update_concept_documentation_meta_on(&tx)?;
         tx.execute(
             "INSERT INTO meta(key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -4520,6 +4777,10 @@ impl Store {
     pub fn concept_count(&self) -> SqlResult<u32> {
         self.conn
             .query_row("SELECT COUNT(*) FROM symbol_concepts", [], |row| row.get(0))
+    }
+
+    pub(crate) fn concept_documentation_stats(&self) -> SqlResult<ConceptDocumentationStats> {
+        concept_documentation_stats_on(&self.conn)
     }
 
     pub(crate) fn purge_orphan_concepts(&self) -> SqlResult<u32> {
@@ -9174,7 +9435,7 @@ mod tests {
     }
 
     fn concept_signature_terms_for(path: &str, signature: &str) -> Vec<String> {
-        concept_document("fixture", path, Some(signature))
+        concept_document("fixture", path, Some(signature), "")
             .signature_search
             .split_whitespace()
             .map(str::to_string)
@@ -9560,6 +9821,35 @@ mod tests {
             .unwrap();
         store.finalize_index_contracts_current().unwrap();
         assert!(store.concept_contract_current().unwrap());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn concept_documentation_legacy_file_writer_cannot_finalize_current() {
+        let path = tmp_db("concept_documentation_legacy_file_writer");
+        let mut store = Store::open(&path).unwrap();
+        store
+            .commit_file(PendingFile {
+                path: "src/legacy.rs".to_string(),
+                mtime: 1,
+                content_sha256: "legacy-hash".to_string(),
+                language: "rust".to_string(),
+                symbols: vec![PendingSymbol {
+                    name: "legacy".to_string(),
+                    kind: "function".to_string(),
+                    line_start: 1,
+                    line_end: 2,
+                    signature: Some("fn legacy()".to_string()),
+                    parent_index: None,
+                    decorators: None,
+                }],
+                edges: Vec::new(),
+            })
+            .unwrap();
+
+        assert!(!store.concept_contract_current().unwrap());
+        assert!(store.finalize_index_contracts_current().is_err());
+        assert!(!store.concept_contract_current().unwrap());
         std::fs::remove_file(path).ok();
     }
 

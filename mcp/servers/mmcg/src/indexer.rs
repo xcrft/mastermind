@@ -9,12 +9,15 @@ use crate::bounded_fs::{
     read_regular_file, read_regular_file_expected, read_regular_file_with_capability,
     BoundedPathKind, BoundedReadError, ReadControl, RootCapability, StableFileIdentity,
 };
-use crate::store::{PendingFile, PendingSymbol, Store};
+use crate::store::{
+    normalize_concept_documentation, PendingConceptCorpus, PendingConceptDocumentation,
+    PendingFile, PendingSymbol, Store,
+};
 use ignore::{IncrementalIgnore, WalkBuilder};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tree_sitter::{Parser, Tree};
@@ -44,7 +47,7 @@ pub use vue::VueExtractor;
 /// Semantic contract for the extractor output stored in SQLite. Bump this when
 /// an extractor or grammar change can alter symbols, edges, ownership, or paths
 /// without requiring a database schema migration.
-pub const EXTRACTOR_CONTRACT_VERSION: &str = "mmcg-extractors-v4";
+pub const EXTRACTOR_CONTRACT_VERSION: &str = "mmcg-extractors-v5";
 pub const EXTRACTOR_CONTRACT_META_KEY: &str = "extractor_contract_version";
 
 /// Bind a persisted codegraph to the repository it was built from.
@@ -91,6 +94,59 @@ pub const AUTO_REFRESH_SOURCE_AGGREGATE_BYTES: u64 = 512 * 1024 * 1024;
 /// memory without changing the existing parallel-parse/single-writer model.
 pub const PARSE_BATCH_SIZE: usize = 64;
 
+const CONCEPT_DOCUMENTATION_RAW_MAX_BYTES: usize = 2 * 1024;
+const CONCEPT_DOCUMENTATION_FILE_MAX_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RawConceptDocumentation {
+    pub symbol_index: usize,
+    pub text: String,
+    pub size_limited: bool,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct DocumentationTextBuilder {
+    text: String,
+    size_limited: bool,
+}
+
+impl DocumentationTextBuilder {
+    pub fn push_line(&mut self, line: &str) {
+        if !self.text.is_empty() {
+            self.push_fragment("\n");
+        }
+        self.push_fragment(line);
+    }
+
+    pub fn push_fragment(&mut self, fragment: &str) {
+        let remaining = CONCEPT_DOCUMENTATION_RAW_MAX_BYTES.saturating_sub(self.text.len());
+        if fragment.len() <= remaining {
+            self.text.push_str(fragment);
+            return;
+        }
+        let mut end = remaining;
+        while end > 0 && !fragment.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.text.push_str(&fragment[..end]);
+        self.size_limited = true;
+    }
+
+    pub fn finish(self, symbol_index: usize) -> Option<RawConceptDocumentation> {
+        (!self.text.trim().is_empty()).then_some(RawConceptDocumentation {
+            symbol_index,
+            text: self.text,
+            size_limited: self.size_limited,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct IndexedPendingFile {
+    pending: PendingFile,
+    documentation: PendingConceptCorpus,
+}
+
 /// Per-language symbol/edge extractor.
 ///
 /// Implementors receive a parsed tree plus source bytes and append symbols/edges
@@ -101,6 +157,261 @@ pub trait LanguageExtractor: Send + Sync {
     fn language(&self) -> tree_sitter::Language;
     fn name(&self) -> &'static str;
     fn extract(&self, tree: &Tree, source: &[u8], pending: &mut PendingFile, module_index: usize);
+}
+
+fn placeholder_documentation_value(value: &str) -> bool {
+    let trimmed = value
+        .trim()
+        .trim_matches(|character: char| {
+            matches!(character, '"' | '\'' | '`' | ',' | ';' | ')' | ']' | '}')
+        })
+        .to_ascii_lowercase();
+    if trimmed.is_empty()
+        || trimmed.starts_with("${")
+        || trimmed.starts_with("{{")
+        || trimmed.starts_with('<')
+        || trimmed == "example"
+        || trimmed.starts_with("example_")
+        || trimmed.starts_with("example-")
+        || trimmed.starts_with("your_")
+        || trimmed.starts_with("your-")
+    {
+        return true;
+    }
+    if matches!(
+        trimmed.as_str(),
+        "placeholder"
+            | "redacted"
+            | "changeme"
+            | "change_me"
+            | "change-me"
+            | "dummy"
+            | "fake"
+            | "test"
+            | "none"
+            | "null"
+            | "value"
+            | "todo"
+            | "secret_here"
+            | "token_here"
+            | "password_here"
+            | "api_key_here"
+    ) {
+        return true;
+    }
+    trimmed
+        .chars()
+        .all(|character| matches!(character, 'x' | '*' | '-' | '_' | '.'))
+}
+
+fn assignment_key_like_secret(value: &str) -> bool {
+    let trimmed = value
+        .trim()
+        .trim_start_matches(['-', '*', '+', '>', '`'])
+        .trim()
+        .trim_matches(|character: char| matches!(character, '"' | '\'' | '`'));
+    if trimmed.is_empty() {
+        return false;
+    }
+    let compact = trimmed
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    let has_internal_space = trimmed.chars().any(char::is_whitespace);
+    !has_internal_space
+        && (compact.ends_with("apikey")
+            || compact.ends_with("secret")
+            || compact.ends_with("token")
+            || compact.ends_with("password"))
+}
+
+fn assigned_secret_like(line: &str) -> bool {
+    for (index, separator) in line.char_indices() {
+        if !matches!(separator, '=' | ':') {
+            continue;
+        }
+        let left = &line[..index];
+        let left = if separator == '=' {
+            let trimmed = left.trim_end();
+            let start = trimmed
+                .rfind(|character: char| {
+                    character.is_whitespace() || matches!(character, ',' | ';' | '(' | '{')
+                })
+                .map_or(0, |position| position + 1);
+            &trimmed[start..]
+        } else {
+            left
+        };
+        let mut right = line[index + separator.len_utf8()..].trim_start();
+        if !assignment_key_like_secret(left) {
+            continue;
+        }
+        right = right.trim_start_matches(['"', '\'', '`']);
+        let end = right
+            .find(|character: char| {
+                character.is_whitespace()
+                    || matches!(character, '"' | '\'' | '`' | ',' | ';' | ')' | ']' | '}')
+            })
+            .unwrap_or(right.len());
+        if !placeholder_documentation_value(&right[..end]) {
+            return true;
+        }
+    }
+    false
+}
+
+fn bearer_authorization_like(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    let mut search_start = 0usize;
+    while let Some(relative) = lower[search_start..].find("authorization") {
+        let authorization = search_start + relative;
+        let before_ok = authorization == 0
+            || !matches!(
+                lower.as_bytes()[authorization - 1],
+                b'a'..=b'z' | b'0'..=b'9' | b'_'
+            );
+        let mut rest = lower[authorization + "authorization".len()..].trim_start();
+        if matches!(rest.as_bytes().first(), Some(b'"' | b'\'' | b'`')) {
+            rest = rest[1..].trim_start();
+        }
+        if before_ok && (rest.starts_with(':') || rest.starts_with('=')) {
+            rest = rest[1..].trim_start().trim_start_matches(['"', '\'', '`']);
+            if let Some(value) = rest.strip_prefix("bearer") {
+                if value.chars().next().is_some_and(char::is_whitespace) {
+                    let value = value.trim_start();
+                    let end = value
+                        .find(|character: char| {
+                            character.is_whitespace()
+                                || matches!(
+                                    character,
+                                    '"' | '\'' | '`' | ',' | ';' | ')' | ']' | '}'
+                                )
+                        })
+                        .unwrap_or(value.len());
+                    if !placeholder_documentation_value(&value[..end]) {
+                        return true;
+                    }
+                }
+            }
+        }
+        search_start = authorization + "authorization".len();
+    }
+    false
+}
+
+fn aws_access_key_like(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() < 20 {
+        return false;
+    }
+    for start in 0..=bytes.len() - 20 {
+        if !matches!(&bytes[start..start + 4], b"AKIA" | b"ASIA") {
+            continue;
+        }
+        let before_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+        let end = start + 20;
+        let after_ok = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if before_ok
+            && after_ok
+            && bytes[start + 4..end]
+                .iter()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn secret_like_documentation(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    (lower.contains("-----begin ") && lower.contains("private key-----"))
+        || aws_access_key_like(value)
+        || value
+            .lines()
+            .any(|line| bearer_authorization_like(line) || assigned_secret_like(line))
+}
+
+fn build_concept_documentation_corpus(
+    language: &str,
+    mut candidates: Vec<RawConceptDocumentation>,
+) -> PendingConceptCorpus {
+    let language_supported = crate::store::concept_documentation_language_supported(language);
+    let mut corpus = PendingConceptCorpus {
+        language_supported,
+        ..PendingConceptCorpus::default()
+    };
+    if !language_supported {
+        return corpus;
+    }
+
+    candidates.sort_by_key(|candidate| candidate.symbol_index);
+    let mut documents = BTreeMap::<usize, String>::new();
+    for candidate in candidates {
+        if secret_like_documentation(&candidate.text) {
+            corpus.secret_omitted = corpus.secret_omitted.saturating_add(1);
+            continue;
+        }
+        let Some(normalized) = normalize_concept_documentation(&candidate.text) else {
+            corpus.size_omitted = corpus.size_omitted.saturating_add(1);
+            continue;
+        };
+        let mut size_limited = candidate.size_limited || normalized.truncated;
+        if normalized.value.is_empty() {
+            if size_limited {
+                corpus.size_omitted = corpus.size_omitted.saturating_add(1);
+            }
+            continue;
+        }
+        let document = documents.entry(candidate.symbol_index).or_default();
+        let mut seen_terms = document
+            .split(' ')
+            .filter(|term| !term.is_empty())
+            .map(str::to_string)
+            .collect::<HashSet<_>>();
+        for term in normalized.value.split(' ') {
+            if !seen_terms.insert(term.to_string()) {
+                continue;
+            }
+            let separator = usize::from(!document.is_empty());
+            if document
+                .len()
+                .saturating_add(separator)
+                .saturating_add(term.len())
+                > crate::store::CONCEPT_DOCUMENTATION_MAX_BYTES
+            {
+                size_limited = true;
+                break;
+            }
+            if separator == 1 {
+                document.push(' ');
+            }
+            document.push_str(term);
+        }
+        if size_limited {
+            corpus.size_omitted = corpus.size_omitted.saturating_add(1);
+        }
+    }
+
+    let mut aggregate_bytes = 0usize;
+    for (symbol_index, documentation_search) in documents {
+        if documentation_search.is_empty() {
+            continue;
+        }
+        if aggregate_bytes.saturating_add(documentation_search.len())
+            > CONCEPT_DOCUMENTATION_FILE_MAX_BYTES
+        {
+            corpus.size_omitted = corpus.size_omitted.saturating_add(1);
+            continue;
+        }
+        aggregate_bytes += documentation_search.len();
+        corpus.documents.push(PendingConceptDocumentation {
+            symbol_index,
+            documentation_search,
+        });
+    }
+    corpus
 }
 
 /// Map a file extension to a language extractor.
@@ -193,6 +504,16 @@ pub struct IndexStats {
     pub concept_orphans_purged: u32,
     /// True when this run rebuilt an older concept-normalization contract.
     pub concept_contract_rebuilt: bool,
+    /// Languages whose owned documentation contributes normalized concept terms.
+    pub concept_documentation_supported_languages: String,
+    /// Searchable documentation documents present after the run.
+    pub concept_documentation_indexed: u32,
+    /// Candidates omitted because they matched a credential pattern.
+    pub concept_documentation_secret_omitted: u32,
+    /// Candidates truncated or omitted by per-symbol/per-file size limits.
+    pub concept_documentation_size_omitted: u32,
+    /// Indexed source files whose language has no documentation collector.
+    pub concept_documentation_unsupported_language_files: u32,
     pub duration_ms: u128,
 }
 
@@ -462,7 +783,7 @@ impl Indexer {
         // collection retained every PendingFile until parsing the whole repository.
         for batch in to_parse.chunks(PARSE_BATCH_SIZE) {
             ensure_indexing_active(store)?;
-            let parsed: Vec<(PathBuf, Result<PendingFile, IndexError>)> = if limits
+            let parsed: Vec<(PathBuf, Result<IndexedPendingFile, IndexError>)> = if limits
                 == IndexLimits::MANUAL
             {
                 batch
@@ -471,7 +792,7 @@ impl Indexer {
                         let extractor = extractor_for_path(path)?;
                         Some((
                             path.clone(),
-                            parse_one(path, &self.root, extractor.as_ref()),
+                            parse_one_with_concepts(path, &self.root, extractor.as_ref()),
                         ))
                     })
                     .collect()
@@ -486,7 +807,7 @@ impl Indexer {
                         };
                         Some((
                             path.clone(),
-                            parse_one_controlled(
+                            parse_one_with_concepts_controlled(
                                 path,
                                 &self.root,
                                 root_capability
@@ -513,13 +834,15 @@ impl Indexer {
                     .to_string_lossy()
                     .replace('\\', "/");
                 match outcome {
-                    Ok(pending) => {
-                        stats.symbols_total += pending.symbols.len() as u32;
-                        stats.edges_total += pending.edges.len() as u32;
-                        if let Some(lang) = guess_language_for(&pending.path) {
+                    Ok(indexed) => {
+                        stats.symbols_total += indexed.pending.symbols.len() as u32;
+                        stats.edges_total += indexed.pending.edges.len() as u32;
+                        if let Some(lang) = guess_language_for(&indexed.pending.path) {
                             *stats.by_language.entry(lang.to_string()).or_insert(0) += 1;
                         }
-                        match store.commit_file(pending) {
+                        match store
+                            .commit_file_with_concepts(indexed.pending, indexed.documentation)
+                        {
                             Ok(()) => {
                                 stats.files_indexed += 1;
                                 #[cfg(test)]
@@ -593,6 +916,16 @@ impl Indexer {
                 .concept_count()
                 .map_err(|error| IndexError::Other(error.to_string()))?;
         }
+        let documentation = store
+            .concept_documentation_stats()
+            .map_err(|error| IndexError::Other(error.to_string()))?;
+        stats.concept_documentation_supported_languages =
+            crate::store::CONCEPT_DOCUMENTATION_SUPPORTED_LANGUAGES.to_string();
+        stats.concept_documentation_indexed = documentation.indexed_documents;
+        stats.concept_documentation_secret_omitted = documentation.secret_omitted;
+        stats.concept_documentation_size_omitted = documentation.size_omitted;
+        stats.concept_documentation_unsupported_language_files =
+            documentation.unsupported_language_files;
 
         stats.duration_ms = start.elapsed().map(|d| d.as_millis()).unwrap_or(0);
         Ok(stats)
@@ -886,10 +1219,10 @@ impl Indexer {
         ensure_indexing_active(store)?;
         let extractor = extractor_for_path(path)
             .ok_or_else(|| IndexError::Parse(format!("no extractor for {path:?}")))?;
-        let pending = parse_one(path, &self.root, extractor.as_ref())?;
+        let indexed = parse_one_with_concepts(path, &self.root, extractor.as_ref())?;
         ensure_indexing_active(store)?;
         store
-            .commit_file(pending)
+            .commit_file_with_concepts(indexed.pending, indexed.documentation)
             .map_err(|e| IndexError::Other(e.to_string()))
     }
 }
@@ -1469,6 +1802,21 @@ pub(crate) fn parse_one(
     parse_blob(&rel, &source.bytes, source.modified_millis, extractor)
 }
 
+fn parse_one_with_concepts(
+    path: &Path,
+    root: &Path,
+    extractor: &dyn LanguageExtractor,
+) -> Result<IndexedPendingFile, IndexError> {
+    let source = read_source_bounded(path, root, ReadControl::default())?;
+    let rel = path
+        .strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    parse_blob_with_concepts(&rel, &source.bytes, source.modified_millis, extractor)
+}
+
+#[cfg(test)]
 fn parse_one_controlled(
     path: &Path,
     root: &Path,
@@ -1497,6 +1845,34 @@ fn parse_one_controlled(
         .replace('\\', "/");
 
     parse_blob(&rel, &source.bytes, source.modified_millis, extractor)
+}
+
+fn parse_one_with_concepts_controlled(
+    path: &Path,
+    root: &Path,
+    root_capability: &RootCapability,
+    expected_identity: StableFileIdentity,
+    extractor: &dyn LanguageExtractor,
+    control: ReadControl<'_>,
+) -> Result<IndexedPendingFile, IndexError> {
+    let source = read_regular_file_expected(
+        root_capability,
+        path,
+        MAX_INDEXABLE_FILE_SIZE,
+        MAX_INDEXABLE_FILE_SIZE,
+        control,
+        Some(expected_identity),
+    )
+    .map_err(index_error_from_read)?;
+    if is_binary_content(&source.bytes[..source.bytes.len().min(BINARY_SNIFF_BYTES as usize)]) {
+        return Err(IndexError::Skipped(IndexSkipReason::Binary));
+    }
+    let rel = path
+        .strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    parse_blob_with_concepts(&rel, &source.bytes, source.modified_millis, extractor)
 }
 
 pub(crate) fn source_admission_mtime(root: &Path, path: &Path) -> Result<i64, IndexError> {
@@ -1611,6 +1987,25 @@ pub(crate) fn parse_blob(
     mtime: i64,
     extractor: &dyn LanguageExtractor,
 ) -> Result<PendingFile, IndexError> {
+    parse_blob_internal(rel_path, source, mtime, extractor, false).map(|parsed| parsed.pending)
+}
+
+fn parse_blob_with_concepts(
+    rel_path: &str,
+    source: &[u8],
+    mtime: i64,
+    extractor: &dyn LanguageExtractor,
+) -> Result<IndexedPendingFile, IndexError> {
+    parse_blob_internal(rel_path, source, mtime, extractor, true)
+}
+
+fn parse_blob_internal(
+    rel_path: &str,
+    source: &[u8],
+    mtime: i64,
+    extractor: &dyn LanguageExtractor,
+    collect_documentation: bool,
+) -> Result<IndexedPendingFile, IndexError> {
     let parser_source = source_for_parser(source)?;
     let mut parser = Parser::new();
     let language = extractor.language();
@@ -1645,7 +2040,36 @@ pub(crate) fn parse_blob(
     let module_index = pending.symbols.len() - 1;
 
     extractor.extract(&tree, parser_source.as_ref(), &mut pending, module_index);
-    Ok(pending)
+    let candidates = if collect_documentation {
+        match pending.language.as_str() {
+            "rust" => rust_lang::collect_concept_documentation(
+                &tree,
+                parser_source.as_ref(),
+                &pending,
+                module_index,
+            ),
+            "python" => python::collect_concept_documentation(
+                &tree,
+                parser_source.as_ref(),
+                &pending,
+                module_index,
+            ),
+            "typescript" | "tsx" => {
+                typescript::collect_concept_documentation(&tree, parser_source.as_ref(), &pending)
+            }
+            "javascript" => {
+                javascript::collect_concept_documentation(&tree, parser_source.as_ref(), &pending)
+            }
+            _ => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+    let documentation = build_concept_documentation_corpus(&pending.language, candidates);
+    Ok(IndexedPendingFile {
+        pending,
+        documentation,
+    })
 }
 
 #[derive(Debug)]
@@ -1732,6 +2156,410 @@ mod incremental_tests {
             "git {args:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn documentation_matches(store: &Store, term: &str) -> Vec<String> {
+        store
+            .search_concepts(&format!("\"{term}\""), 50)
+            .unwrap()
+            .into_iter()
+            .filter(|hit| hit.documentation_matched)
+            .map(|hit| hit.name)
+            .collect()
+    }
+
+    #[test]
+    fn rust_concept_documentation_attaches_outer_and_module_docs_only() {
+        let (dir, db) = setup("rust_concept_documentation");
+        fs::write(
+            dir.join("owned.rs"),
+            "//! crate atlasquartz routing\n\
+             // license ordinaryquartz\n\
+             /// retryquartz handler\n\
+             #[inline]\n\
+             fn accepted() {}\n\
+             /** ledgerquartz model */\n\
+             struct Ledger;\n\
+             /// outermodulequartz docs\n\
+             mod nested {\n\
+                 //! innermodulequartz docs\n\
+             }\n\
+             /// blankgapquartz ignored\n\
+             \n\
+             fn blank_gap() {}\n\
+             // linecommentquartz ignored\n\
+             fn ordinary() {}\n\
+             fn trailing() {} /// trailingquartz ignored\n",
+        )
+        .unwrap();
+        let mut store = Store::open(&db).unwrap();
+        Indexer::new(&dir).index_all(&mut store, true).unwrap();
+
+        assert_eq!(documentation_matches(&store, "atlasquartz"), ["<module>"]);
+        assert_eq!(documentation_matches(&store, "retryquartz"), ["accepted"]);
+        assert_eq!(documentation_matches(&store, "ledgerquartz"), ["Ledger"]);
+        assert_eq!(
+            documentation_matches(&store, "outermodulequartz"),
+            ["nested"]
+        );
+        assert_eq!(
+            documentation_matches(&store, "innermodulequartz"),
+            ["nested"]
+        );
+        for rejected in [
+            "ordinaryquartz",
+            "blankgapquartz",
+            "linecommentquartz",
+            "trailingquartz",
+        ] {
+            assert!(
+                documentation_matches(&store, rejected).is_empty(),
+                "unexpected Rust documentation match for {rejected}"
+            );
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn python_concept_documentation_attaches_only_owned_plain_docstrings() {
+        let (dir, db) = setup("python_concept_documentation");
+        fs::write(
+            dir.join("owned.py"),
+            r#"# comment before module docs
+"""modulequartz compass"""
+
+def marker(fn):
+    return fn
+
+@marker
+async def accepted():
+    """asyncquartz orbit"""
+    return 1
+
+class Owned:
+    """classquartz prism"""
+    def method(self):
+        """methodquartz amber"""
+        return 1
+
+def fstring():
+    f"""fstringquartz {1}"""
+
+def later():
+    value = 1
+    """laterquartz"""
+
+def assigned():
+    value = """assignedquartz"""
+
+def concatenated(value):
+    "concatquartz" + value
+"#,
+        )
+        .unwrap();
+        let mut store = Store::open(&db).unwrap();
+        Indexer::new(&dir).index_all(&mut store, true).unwrap();
+
+        assert_eq!(documentation_matches(&store, "modulequartz"), ["<module>"]);
+        assert_eq!(documentation_matches(&store, "asyncquartz"), ["accepted"]);
+        assert_eq!(documentation_matches(&store, "classquartz"), ["Owned"]);
+        assert_eq!(documentation_matches(&store, "methodquartz"), ["method"]);
+        for rejected in [
+            "fstringquartz",
+            "laterquartz",
+            "assignedquartz",
+            "concatquartz",
+        ] {
+            assert!(
+                documentation_matches(&store, rejected).is_empty(),
+                "unexpected Python documentation match for {rejected}"
+            );
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn js_ts_concept_documentation_attaches_immediate_jsdoc_through_export() {
+        let (dir, db) = setup("js_ts_concept_documentation");
+        fs::write(
+            dir.join("owned.ts"),
+            "/** @file headerquartz */\n\
+             function headerTarget() {}\n\
+             /** Copyright licensequartz */\n\
+             function licenseTarget() {}\n\
+             /** exportquartz handler */\n\
+             export function accepted() {}\n\
+             /** classquartz service */\n\
+             export class Service {\n\
+                 /** methodquartz action */\n\
+                 run() {}\n\
+             }\n\
+             /** variablequartz callback */\n\
+             export const Handler = () => 1;\n\
+             /** blankgapquartz ignored */\n\
+             \n\
+             function blankGap() {}\n\
+             /* ordinaryquartz ignored */\n\
+             function ordinary() {}\n\
+             function trailing() {} /** trailingquartz ignored */\n\
+             /** stalequartz ignored */\n\
+             const value = 1;\n\
+             function afterValue() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("owned.js"),
+            "/** javascriptquartz export */\nexport function jsAccepted() {}\n",
+        )
+        .unwrap();
+        let mut store = Store::open(&db).unwrap();
+        Indexer::new(&dir).index_all(&mut store, true).unwrap();
+
+        assert_eq!(documentation_matches(&store, "exportquartz"), ["accepted"]);
+        assert_eq!(documentation_matches(&store, "classquartz"), ["Service"]);
+        assert_eq!(documentation_matches(&store, "methodquartz"), ["run"]);
+        assert_eq!(documentation_matches(&store, "variablequartz"), ["Handler"]);
+        assert_eq!(
+            documentation_matches(&store, "javascriptquartz"),
+            ["jsAccepted"]
+        );
+        for rejected in [
+            "blankgapquartz",
+            "ordinaryquartz",
+            "trailingquartz",
+            "stalequartz",
+            "headerquartz",
+            "licensequartz",
+        ] {
+            assert!(
+                documentation_matches(&store, rejected).is_empty(),
+                "unexpected JS/TS documentation match for {rejected}"
+            );
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn concept_documentation_secret_patterns_omit_whole_candidates() {
+        let (dir, db) = setup("concept_documentation_secrets");
+        fs::write(
+            dir.join("secrets.py"),
+            r#"def private_material():
+    """privatecanary -----BEGIN PRIVATE KEY----- material"""
+
+def aws_material():
+    """awscanary AKIAIOSFODNN7EXAMPLE"""
+
+def bearer_material():
+    """bearercanary Authorization: Bearer livecredential123"""
+
+def json_bearer_material():
+    """jsonbearercanary {"Authorization": "Bearer jsoncredential789"}"""
+
+def password_material():
+    """passwordcanary password = livecredential456"""
+
+def api_key_material():
+    """apiassignmentcanary stripe_api_key = liveexamplecredential"""
+
+def prose():
+    """rotationquartz explains token buckets and password rotation"""
+
+def bearer_prose():
+    """bearerwordquartz Authorization: Bearerish explanation"""
+
+def placeholder():
+    """placeholderquartz token = placeholder"""
+"#,
+        )
+        .unwrap();
+        let mut store = Store::open(&db).unwrap();
+        Indexer::new(&dir).index_all(&mut store, true).unwrap();
+
+        for omitted in [
+            "privatecanary",
+            "awscanary",
+            "bearercanary",
+            "jsonbearercanary",
+            "passwordcanary",
+            "apiassignmentcanary",
+            "livecredential123",
+            "livecredential456",
+            "liveexamplecredential",
+            "jsoncredential789",
+        ] {
+            assert!(
+                documentation_matches(&store, omitted).is_empty(),
+                "secret-like candidate leaked {omitted}"
+            );
+        }
+        assert_eq!(documentation_matches(&store, "rotationquartz"), ["prose"]);
+        assert_eq!(
+            documentation_matches(&store, "bearerwordquartz"),
+            ["bearer_prose"]
+        );
+        assert_eq!(
+            documentation_matches(&store, "placeholderquartz"),
+            ["placeholder"]
+        );
+        let stats = store.concept_documentation_stats().unwrap();
+        assert_eq!(stats.indexed_documents, 3);
+        assert_eq!(stats.secret_omitted, 6);
+        assert_eq!(
+            store
+                .meta_value(crate::store::CONCEPT_DOCUMENTATION_SECRET_OMITTED_META_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("6")
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn concept_documentation_utf8_and_file_caps_are_stable() {
+        let (utf8_dir, utf8_db) = setup("concept_documentation_utf8");
+        let long_doc = format!(
+            "def bounded():\n    \"\"\"utf8quartz {}\"\"\"\n",
+            "界".repeat(900)
+        );
+        fs::write(utf8_dir.join("bounded.py"), long_doc).unwrap();
+        let mut utf8_store = Store::open(&utf8_db).unwrap();
+        Indexer::new(&utf8_dir)
+            .index_all(&mut utf8_store, true)
+            .unwrap();
+        assert_eq!(
+            documentation_matches(&utf8_store, "utf8quartz"),
+            ["bounded"]
+        );
+        assert_eq!(
+            utf8_store
+                .concept_documentation_stats()
+                .unwrap()
+                .size_omitted,
+            1
+        );
+        let utf8_connection = rusqlite::Connection::open(&utf8_db).unwrap();
+        let document_bytes: i64 = utf8_connection
+            .query_row(
+                "SELECT length(CAST(documentation_search AS BLOB))
+                 FROM symbol_concepts WHERE documentation_search <> ''",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(document_bytes <= 512);
+        drop(utf8_connection);
+        fs::remove_dir_all(&utf8_dir).ok();
+
+        let (aggregate_dir, aggregate_db) = setup("concept_documentation_aggregate");
+        let alpha_word = |mut value: usize| {
+            let mut word = String::from("w");
+            for _ in 0..7 {
+                word.push((b'a' + (value % 26) as u8) as char);
+                value /= 26;
+            }
+            word
+        };
+        let mut source = String::new();
+        for symbol in 0..150usize {
+            source.push_str(&format!("/** aggregatequartz{symbol} "));
+            for term in 0..48usize {
+                source.push_str(&alpha_word(symbol * 64 + term));
+                source.push(' ');
+            }
+            source.push_str(&format!("*/\nfunction item_{symbol}() {{}}\n"));
+        }
+        fs::write(aggregate_dir.join("aggregate.js"), source).unwrap();
+        let mut aggregate_store = Store::open(&aggregate_db).unwrap();
+        Indexer::new(&aggregate_dir)
+            .index_all(&mut aggregate_store, true)
+            .unwrap();
+        let stats = aggregate_store.concept_documentation_stats().unwrap();
+        assert!(stats.indexed_documents > 0 && stats.indexed_documents < 150);
+        assert_eq!(
+            stats.size_omitted,
+            150u32.saturating_sub(stats.indexed_documents)
+        );
+        assert_eq!(
+            documentation_matches(&aggregate_store, "aggregatequartz0"),
+            ["item_0"]
+        );
+        assert!(documentation_matches(&aggregate_store, "aggregatequartz149").is_empty());
+        fs::remove_dir_all(&aggregate_dir).ok();
+    }
+
+    #[test]
+    fn concept_documentation_comment_edit_rename_delete_and_failed_commit_are_atomic() {
+        let (dir, db) = setup("concept_documentation_lifecycle");
+        let original = dir.join("original.py");
+        fs::write(
+            &original,
+            "def handler():\n    \"\"\"oldquartz behavior\"\"\"\n",
+        )
+        .unwrap();
+        let mut store = Store::open(&db).unwrap();
+        let indexer = Indexer::new(&dir);
+        indexer.index_all(&mut store, true).unwrap();
+        assert_eq!(documentation_matches(&store, "oldquartz"), ["handler"]);
+
+        fs::write(
+            &original,
+            "def handler():\n    \"\"\"watchquartz behavior\"\"\"\n",
+        )
+        .unwrap();
+        indexer.index_one(&mut store, &original).unwrap();
+        assert!(documentation_matches(&store, "oldquartz").is_empty());
+        assert_eq!(documentation_matches(&store, "watchquartz"), ["handler"]);
+
+        let renamed = dir.join("renamed.py");
+        fs::rename(&original, &renamed).unwrap();
+        indexer.index_all(&mut store, false).unwrap();
+        let renamed_hits = store.search_concepts("\"watchquartz\"", 10).unwrap();
+        assert_eq!(renamed_hits.len(), 1);
+        assert_eq!(renamed_hits[0].path, "renamed.py");
+
+        fs::remove_file(&renamed).unwrap();
+        indexer.index_all(&mut store, false).unwrap();
+        assert!(documentation_matches(&store, "watchquartz").is_empty());
+
+        let failed = dir.join("failed.py");
+        fs::write(
+            &failed,
+            "def failed():\n    \"\"\"stablequartz behavior\"\"\"\n",
+        )
+        .unwrap();
+        indexer.index_all(&mut store, true).unwrap();
+        fs::write(
+            &failed,
+            "def failed():\n    \"\"\"unstablequartz behavior\"\"\"\n",
+        )
+        .unwrap();
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_concept_documentation_commit
+                 BEFORE INSERT ON symbols
+                 WHEN new.file_path = 'failed.py' BEGIN
+                     SELECT RAISE(ABORT, 'forced documentation commit failure');
+                 END;",
+            )
+            .unwrap();
+        drop(connection);
+        assert!(indexer.index_one(&mut store, &failed).is_err());
+        assert!(!store.concept_contract_current().unwrap());
+        assert_eq!(
+            crate::mcp::build_concept_current(&mut store, "stablequartz", 10),
+            Err(crate::queries::ConceptError::IndexStale)
+        );
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch("DROP TRIGGER fail_concept_documentation_commit")
+            .unwrap();
+        drop(connection);
+        indexer.index_all(&mut store, true).unwrap();
+        assert!(documentation_matches(&store, "stablequartz").is_empty());
+        assert_eq!(documentation_matches(&store, "unstablequartz"), ["failed"]);
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

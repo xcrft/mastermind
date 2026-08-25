@@ -5365,6 +5365,11 @@ mod tests {
     }
 
     fn brief_repo(name: &str) -> (PathBuf, Store) {
+        let escaped_source_path = if cfg!(windows) {
+            "src/é quoted.py"
+        } else {
+            "src/é\"quoted.py"
+        };
         let root = impact_repo(
             name,
             &[
@@ -5376,7 +5381,7 @@ mod tests {
                     "src/test_app.py",
                     "from src.app import target\n\ndef test_target():\n    assert target() == 1\n",
                 ),
-                ("src/é\"quoted.py", "def unicode_target():\n    return 1\n"),
+                (escaped_source_path, "def unicode_target():\n    return 1\n"),
                 (
                     "CONTEXT.md",
                     "# Target decision\nDO_NOT_OUTPUT_HISTORY_BODY target caller details.\n",
@@ -5390,7 +5395,7 @@ mod tests {
         );
         write_impact_file(
             &root,
-            "src/é\"quoted.py",
+            escaped_source_path,
             "def unicode_target():\n    return 2\n",
         );
         let store = index_impact(&root, name);

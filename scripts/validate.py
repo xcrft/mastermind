@@ -51,7 +51,9 @@ WIKILINK_RE = re.compile(r"\[\[([a-z][a-z0-9-]*)\]\]")
 RELATIVE_LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 MMCG_REFERENCE_RE = re.compile(r"\bmmcg_[a-z_]+\b")
+SUBAGENT_MODELS = {"haiku", "sonnet", "opus"}
 SUBAGENT_EFFORT_LEVELS = {"low", "medium", "high", "xhigh", "max"}
+SUBAGENT_MAX_TURNS = 100
 
 
 @dataclass
@@ -225,25 +227,8 @@ def validate_artifact(a: Artifact) -> list[Issue]:
                 )
 
     if a.path.parent.name == "subagents":
-        max_turns = a.frontmatter.get("maxTurns")
-        if max_turns is not None and (
-            isinstance(max_turns, bool) or not isinstance(max_turns, int) or max_turns < 1
-        ):
-            issues.append(
-                Issue(a.path, "error", "subagent 'maxTurns' must be a positive integer")
-            )
-
-        effort = a.frontmatter.get("effort")
-        if effort is not None and (
-            not isinstance(effort, str) or effort not in SUBAGENT_EFFORT_LEVELS
-        ):
-            issues.append(
-                Issue(
-                    a.path,
-                    "error",
-                    f"subagent 'effort' must be one of {sorted(SUBAGENT_EFFORT_LEVELS)}, got {effort!r}",
-                )
-            )
+        for message in _subagent_runtime_contract_messages(a.frontmatter):
+            issues.append(Issue(a.path, "error", message))
 
     return issues
 
@@ -525,6 +510,56 @@ def _runtime_tool_names(value: object) -> list[str]:
     return []
 
 
+def _subagent_runtime_contract_messages(frontmatter: dict) -> list[str]:
+    messages: list[str] = []
+
+    model = frontmatter.get("model")
+    if not isinstance(model, str) or model not in SUBAGENT_MODELS:
+        messages.append(
+            f"subagent 'model' must be one of {sorted(SUBAGENT_MODELS)}, got {model!r}"
+        )
+
+    tools_value = frontmatter.get("tools")
+    valid_tools_shape = isinstance(tools_value, str) or (
+        isinstance(tools_value, list)
+        and all(isinstance(entry, str) for entry in tools_value)
+    )
+    runtime_tools = _runtime_tool_names(tools_value)
+    if not valid_tools_shape or not runtime_tools:
+        messages.append("subagent 'tools' must be an explicit non-empty allowlist")
+    elif len(runtime_tools) != len(set(runtime_tools)):
+        messages.append("subagent 'tools' allowlist contains duplicate entries")
+
+    max_turns = frontmatter.get("maxTurns")
+    if (
+        isinstance(max_turns, bool)
+        or not isinstance(max_turns, int)
+        or not 1 <= max_turns <= SUBAGENT_MAX_TURNS
+    ):
+        messages.append(
+            f"subagent 'maxTurns' must be an integer from 1 to {SUBAGENT_MAX_TURNS}"
+        )
+
+    effort = frontmatter.get("effort")
+    if not isinstance(effort, str) or effort not in SUBAGENT_EFFORT_LEVELS:
+        messages.append(
+            f"subagent 'effort' must be one of {sorted(SUBAGENT_EFFORT_LEVELS)}, got {effort!r}"
+        )
+
+    servers = frontmatter.get("mcpServers")
+    valid_servers_shape = (
+        isinstance(servers, list)
+        and all(isinstance(server, str) for server in servers)
+    ) or (
+        isinstance(servers, dict)
+        and all(isinstance(server, str) for server in servers)
+    )
+    if servers is not None and not valid_servers_shape:
+        messages.append("subagent 'mcpServers' must be a list or mapping when present")
+
+    return messages
+
+
 def _mcp_server_names(value: object) -> list[str]:
     if isinstance(value, list):
         return [entry for entry in value if isinstance(entry, str)]
@@ -543,36 +578,34 @@ def _subagent_mmcg_contract_messages(
         tool for tool in runtime_tools if tool.startswith("mcp__mmcg__")
     )
     messages: list[str] = []
+    all_referenced = set(MMCG_REFERENCE_RE.findall(body))
 
     if "mmcg" not in servers:
-        if grants:
+        if grants or all_referenced:
             messages.append(
-                "grants mmcg MCP tools but does not declare `mcpServers: [mmcg]`"
+                "uses mmcg tools but does not declare `mcpServers: [mmcg]`"
             )
-        return messages
 
-    if not grants:
+    if "mmcg" in servers and not grants:
         messages.append(
             "declares `mcpServers: [mmcg]` but its `tools` allowlist grants no "
             "`mcp__mmcg__mmcg_*` tools"
         )
-        return messages
 
-    wildcard = "mcp__mmcg__*"
-    if wildcard in grants:
+    wildcards = {grant for grant in grants if "*" in grant}
+    for wildcard in sorted(wildcards):
         messages.append(
-            "uses broad `mcp__mmcg__*`; grant only the mmcg tools this role needs"
+            f"uses broad `{wildcard}`; grant only the exact mmcg tools this role needs"
         )
 
     granted_mmcg = {
         grant.removeprefix("mcp__mmcg__")
         for grant in grants
-        if grant != wildcard
+        if grant not in wildcards
     }
     for granted in sorted(granted_mmcg - known_tools):
         messages.append(f"grants unknown mmcg tool `{granted}`")
 
-    all_referenced = set(MMCG_REFERENCE_RE.findall(body))
     for unknown in sorted(all_referenced - known_tools):
         messages.append(f"prompt references unknown mmcg tool `{unknown}`")
     referenced = all_referenced & known_tools
@@ -585,19 +618,44 @@ def _subagent_mmcg_contract_messages(
 
 
 def validate_subagent_mmcg_fixture(known_tools: set[str]) -> list[Issue]:
+    bounded = {
+        "model": "haiku",
+        "tools": "Read, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_search",
+        "mcpServers": ["mmcg"],
+        "maxTurns": 12,
+        "effort": "low",
+    }
     broken = {
+        **bounded,
         "mcpServers": ["mmcg"],
         "tools": "Read, Grep",
     }
     missing_reference = {
+        **bounded,
         "mcpServers": ["mmcg"],
         "tools": "Read, mcp__mmcg__mmcg_status",
     }
-    valid = {
-        "mcpServers": ["mmcg"],
-        "tools": "Read, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_search",
-    }
+    malformed_enums = {**bounded, "model": [], "effort": {}}
+    missing_server = {**bounded, "mcpServers": []}
+    wildcard = {**bounded, "tools": "Read, mcp__mmcg__*"}
     checks = (
+        not _subagent_runtime_contract_messages(bounded),
+        all(
+            field in " ".join(_subagent_runtime_contract_messages({}))
+            for field in ("model", "tools", "maxTurns", "effort")
+        ),
+        all(
+            field in " ".join(
+                _subagent_runtime_contract_messages(malformed_enums)
+            )
+            for field in ("model", "effort")
+        ),
+        any(
+            "mcpServers" in message
+            for message in _subagent_runtime_contract_messages(
+                {**bounded, "mcpServers": "mmcg"}
+            )
+        ),
         bool(_subagent_mmcg_contract_messages(broken, "mmcg_search", known_tools)),
         any(
             "prompt references `mmcg_search`" in message
@@ -605,7 +663,21 @@ def validate_subagent_mmcg_fixture(known_tools: set[str]) -> list[Issue]:
                 missing_reference, "Use mmcg_search.", known_tools
             )
         ),
-        not _subagent_mmcg_contract_messages(valid, "Use mmcg_search.", known_tools),
+        any(
+            "does not declare `mcpServers: [mmcg]`" in message
+            for message in _subagent_mmcg_contract_messages(
+                missing_server, "Use mmcg_search.", known_tools
+            )
+        ),
+        any(
+            "uses broad `mcp__mmcg__*`" in message
+            for message in _subagent_mmcg_contract_messages(
+                wildcard, "Use mmcg_search.", known_tools
+            )
+        ),
+        not _subagent_mmcg_contract_messages(
+            bounded, "Use mmcg_search.", known_tools
+        ),
     )
     if all(checks):
         return []

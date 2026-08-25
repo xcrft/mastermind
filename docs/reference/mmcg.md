@@ -191,7 +191,10 @@ mmcg ui --since main --sarif semgrep.sarif --sarif codeql.sarif \
   --junit junit.xml --otel traces.json
 
 # Health-check the project setup (index, gitignore, CLAUDE.md, MCP config,
-# `mmcg serve` handshake). Exit code 1 if any check fails — wire into CI.
+# `mmcg serve` handshake, and installed Mastermind agent runtime contracts).
+# Agent checks cover model, explicit tools, bounded turns/effort, MCP
+# registration, exact known mmcg grants, and prompt-required tools.
+# Exit code 1 if any check fails — wire into CI.
 mmcg doctor                                          # human-readable report
 mmcg doctor --json                                   # machine-parseable
 

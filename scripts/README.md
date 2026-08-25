@@ -24,6 +24,8 @@ npm, or model-backed test suites. CI executes it on every change.
 ### Contracts it protects
 
 - artifact frontmatter, names, versions, domains, links, and template mirrors;
+- bounded subagent runtime contracts: explicit model, tools, turn/effort limits,
+  MCP scoping, exact known grants, and every mmcg tool referenced by the prompt;
 - exact MCP tool count plus read/write annotations, and parity of the public
   declarative-fact schema with its CLI/MCP/Lens ingestion boundary;
 - portable skill adapters and one behavioral eval case per shipped skill;

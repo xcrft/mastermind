@@ -4,7 +4,8 @@
 //! and JSON serialization for the MCP layer.
 
 use crate::store::{
-    FileEntry, MapBoundaryMatch, MapBoundaryScope, ProjectHistoryHit, Store, Symbol, TaskSpecHit,
+    FileEntry, InterruptSource, MapBoundaryMatch, MapBoundaryScope, ProjectHistoryHit, Store,
+    Symbol, TaskSpecHit,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -440,14 +441,37 @@ pub fn history(
     kind: Option<&str>,
     top: u32,
 ) -> rusqlite::Result<HistorySearchResponse> {
-    let observed = store.search_project_history(query, kind, top)?;
-    let skipped_artifacts = store
-        .meta_value("project_history_skipped")?
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0);
-    let truncated = store
-        .meta_value("project_history_truncated")?
-        .is_some_and(|value| value == "true");
+    let data_version_before = store.data_version()?;
+    store.begin_read_snapshot()?;
+    let snapshot = (|| {
+        let observed = store.search_project_history(query, kind, top)?;
+        let skipped_artifacts = store
+            .meta_value("project_history_skipped")?
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        let truncated = store
+            .meta_value("project_history_truncated")?
+            .is_some_and(|value| value == "true");
+        let freshness = store
+            .meta_value("index_root")?
+            .map(PathBuf::from)
+            .map(|root| crate::indexer::Indexer::new(root).project_history_freshness(store))
+            .map(|result| match result {
+                Ok(crate::indexer::ProjectHistoryFreshness::Fresh) => "fresh",
+                Ok(crate::indexer::ProjectHistoryFreshness::Stale) => "stale",
+                Ok(crate::indexer::ProjectHistoryFreshness::Incomplete) => "incomplete",
+                Ok(crate::indexer::ProjectHistoryFreshness::SnapshotChanged) => "snapshot_changed",
+                Err(_) => "incomplete",
+            })
+            .unwrap_or("stale");
+        Ok::<_, rusqlite::Error>((observed, skipped_artifacts, truncated, freshness))
+    })();
+    let end_result = store.end_read_snapshot();
+    let (observed, skipped_artifacts, truncated, mut freshness) = snapshot?;
+    end_result?;
+    if store.data_version()? != data_version_before {
+        freshness = "snapshot_changed";
+    }
     Ok(HistorySearchResponse {
         query: query.to_string(),
         kind: kind.map(str::to_string),
@@ -457,7 +481,7 @@ pub fn history(
         source_of_truth: "Markdown artifacts at the returned paths; this FTS index is derived",
         skipped_artifacts,
         truncated,
-        freshness: "not checked by this query; run mastermind index after Markdown changes",
+        freshness,
     })
 }
 
@@ -480,6 +504,16 @@ pub fn symbols_changed_since(
     git_ref: &str,
 ) -> Result<crate::diff::SymbolDiff, crate::diff::DiffError> {
     crate::diff::symbols_changed_since(store, repo_root, git_ref)
+}
+
+pub(crate) fn symbols_changed_since_controlled(
+    store: &Store,
+    repo_root: &std::path::Path,
+    git_ref: &str,
+    deadline: Option<std::time::Instant>,
+    interrupted: Option<&dyn Fn() -> bool>,
+) -> Result<crate::diff::SymbolDiff, crate::diff::DiffError> {
+    crate::diff::symbols_changed_since_controlled(store, repo_root, git_ref, deadline, interrupted)
 }
 
 pub const CHANGE_SEED_LIMIT: usize = 200;
@@ -725,6 +759,98 @@ impl std::fmt::Display for ChangeImpactError {
 
 impl std::error::Error for ChangeImpactError {}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CheckedSnapshotToken {
+    data_version: u64,
+    structural_worktree_token: String,
+    history_inventory_token: String,
+}
+
+struct StoreReadSnapshot<'a> {
+    store: &'a Store,
+    active: bool,
+}
+
+impl<'a> StoreReadSnapshot<'a> {
+    fn begin(store: &'a Store) -> rusqlite::Result<Self> {
+        store.begin_read_snapshot()?;
+        Ok(Self {
+            store,
+            active: true,
+        })
+    }
+
+    fn finish(mut self) -> rusqlite::Result<()> {
+        self.store.end_read_snapshot()?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for StoreReadSnapshot<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = self.store.end_read_snapshot();
+        }
+    }
+}
+
+fn history_snapshot_error(error: crate::indexer::IndexError) -> ChangeImpactError {
+    match error {
+        crate::indexer::IndexError::Cancelled | crate::indexer::IndexError::DeadlineExceeded => {
+            ChangeImpactError::GitTimeout
+        }
+        crate::indexer::IndexError::SnapshotChanged => ChangeImpactError::SnapshotChanged,
+        _ => ChangeImpactError::IndexStale,
+    }
+}
+
+pub(crate) fn checked_snapshot_token(
+    store: &Store,
+    repository_root: &Path,
+    structural_worktree_token: &str,
+) -> Result<CheckedSnapshotToken, ChangeImpactError> {
+    let data_version = store
+        .data_version()
+        .map_err(|_| ChangeImpactError::SnapshotChanged)?;
+    let (history_inventory_token, freshness) = crate::indexer::Indexer::new(repository_root)
+        .live_project_history_inventory(store)
+        .map_err(history_snapshot_error)?;
+    if freshness == crate::indexer::ProjectHistoryFreshness::SnapshotChanged {
+        return Err(ChangeImpactError::SnapshotChanged);
+    }
+    Ok(CheckedSnapshotToken {
+        data_version,
+        structural_worktree_token: structural_worktree_token.to_string(),
+        history_inventory_token,
+    })
+}
+
+fn validate_checked_snapshot(
+    store: &Store,
+    repository_root: &Path,
+    expected: &CheckedSnapshotToken,
+    structural_worktree_token: &str,
+) -> Result<(), ChangeImpactError> {
+    if structural_worktree_token != expected.structural_worktree_token
+        || store
+            .data_version()
+            .map_err(|_| ChangeImpactError::SnapshotChanged)?
+            != expected.data_version
+    {
+        return Err(ChangeImpactError::SnapshotChanged);
+    }
+    let (history_inventory_token, freshness) = crate::indexer::Indexer::new(repository_root)
+        .live_project_history_inventory(store)
+        .map_err(history_snapshot_error)?;
+    if freshness == crate::indexer::ProjectHistoryFreshness::SnapshotChanged
+        || history_inventory_token != expected.history_inventory_token
+    {
+        return Err(ChangeImpactError::SnapshotChanged);
+    }
+    Ok(())
+}
+
 impl From<crate::diff::WorkingTreeDiffError> for ChangeImpactError {
     fn from(error: crate::diff::WorkingTreeDiffError) -> Self {
         match error {
@@ -950,6 +1076,20 @@ fn work_limited_collection<T>(items: Vec<T>) -> Collection<T> {
     }
 }
 
+fn consume_graph_precision_interrupt(
+    store: &Store,
+    had_parent_budget: bool,
+    interrupt_before: Option<InterruptSource>,
+) -> bool {
+    match store.interrupt_source() {
+        None => true,
+        Some(InterruptSource::Budget) if !had_parent_budget && interrupt_before.is_none() => {
+            store.consume_budget_interrupt()
+        }
+        Some(InterruptSource::Budget | InterruptSource::Cancel) => false,
+    }
+}
+
 pub fn change_impact(
     store: &Store,
     requested_root: &Path,
@@ -965,6 +1105,11 @@ pub fn change_impact(
         .map_err(|_| ChangeImpactError::RootMismatch)?;
     let repository_root =
         owning_repository(&requested_root).ok_or(ChangeImpactError::RootMismatch)?;
+    let data_version_before = store
+        .data_version()
+        .map_err(|_| ChangeImpactError::SnapshotChanged)?;
+    let read_snapshot =
+        StoreReadSnapshot::begin(store).map_err(|_| ChangeImpactError::SnapshotChanged)?;
     let stored_root = store
         .meta_value("index_root")
         .map_err(|_| ChangeImpactError::IndexStale)?
@@ -975,6 +1120,8 @@ pub fn change_impact(
     if stored_root != repository_root {
         return Err(ChangeImpactError::RootMismatch);
     }
+    let root_capability = crate::bounded_fs::RootCapability::open(&repository_root)
+        .map_err(|_| ChangeImpactError::SnapshotChanged)?;
     let scope = requested_root
         .strip_prefix(&repository_root)
         .ok()
@@ -982,15 +1129,39 @@ pub fn change_impact(
         .map(|value| value.to_string_lossy().replace('\\', "/"))
         .unwrap_or_else(|| ".".to_string());
 
-    let working = crate::diff::symbols_changed_in_worktree(store, &repository_root, git_ref)?;
+    let interrupted = || store.work_interrupted();
+    let working = crate::diff::symbols_changed_in_worktree_controlled(
+        store,
+        &repository_root,
+        git_ref,
+        store.request_deadline(),
+        Some(&interrupted),
+    )?;
     for file in &working.files {
         if file.status == "deleted"
             || crate::indexer::extractor_for_path(Path::new(&file.path)).is_none()
         {
             continue;
         }
-        let bytes = std::fs::read(repository_root.join(&file.path))
-            .map_err(|_| ChangeImpactError::SnapshotChanged)?;
+        let bytes = crate::bounded_fs::read_regular_file_with_capability(
+            &root_capability,
+            Path::new(&file.path),
+            crate::indexer::MAX_INDEXABLE_FILE_SIZE,
+            crate::indexer::MAX_INDEXABLE_FILE_SIZE,
+            crate::bounded_fs::ReadControl {
+                deadline: store.request_deadline(),
+                interrupted: Some(&interrupted),
+            },
+        )
+        .map_err(|error| match error {
+            crate::bounded_fs::BoundedReadError::TooLarge { .. } => ChangeImpactError::IndexStale,
+            crate::bounded_fs::BoundedReadError::Interrupted
+            | crate::bounded_fs::BoundedReadError::DeadlineExceeded => {
+                ChangeImpactError::GitTimeout
+            }
+            _ => ChangeImpactError::SnapshotChanged,
+        })?
+        .bytes;
         let digest = crate::hex::encode(&Sha256::digest(bytes));
         let stored = store
             .file_content_sha256(&file.path)
@@ -1054,33 +1225,34 @@ pub fn change_impact(
         .into_iter()
         .collect();
 
-    let data_version_before = store
-        .data_version()
-        .map_err(|_| ChangeImpactError::SnapshotChanged)?;
-    store
-        .begin_read_snapshot()
-        .map_err(|_| ChangeImpactError::SnapshotChanged)?;
+    let checked_snapshot =
+        checked_snapshot_token(store, &repository_root, &working.snapshot_token)?;
 
     let mut precision_notes = vec!["focused_tests_do_not_replace_full_gate".to_string()];
     let graph_seed_overflow = seed_names.len() > CHANGE_SEED_LIMIT;
-    let graph_rows = if seed_names.is_empty() || graph_seed_overflow {
-        Vec::new()
+    let graph_had_parent_budget = store.work_budget_depth() > 0;
+    let graph_interrupt_before = store.interrupt_source();
+    let (graph_rows, graph_budget_exhausted) = if seed_names.is_empty() || graph_seed_overflow {
+        (Vec::new(), false)
     } else {
         match store.impact_of_many(&seed_names, max_depth, IMPACT_WORK_LIMIT, None) {
-            Ok(rows) => rows,
+            Ok(rows) => (rows, false),
             Err(rusqlite::Error::SqliteFailure(error, _))
-                if error.code == rusqlite::ErrorCode::OperationInterrupted =>
+                if error.code == rusqlite::ErrorCode::OperationInterrupted
+                    && consume_graph_precision_interrupt(
+                        store,
+                        graph_had_parent_budget,
+                        graph_interrupt_before,
+                    ) =>
             {
                 precision_notes.push("graph_work_limit".to_string());
-                Vec::new()
+                (Vec::new(), true)
             }
-            Err(_) => {
-                let _ = store.end_read_snapshot();
-                return Err(ChangeImpactError::SnapshotChanged);
-            }
+            Err(_) => return Err(ChangeImpactError::SnapshotChanged),
         }
     };
-    let graph_overflow = graph_seed_overflow || graph_rows.len() >= IMPACT_WORK_LIMIT;
+    let graph_overflow =
+        graph_seed_overflow || graph_budget_exhausted || graph_rows.len() >= IMPACT_WORK_LIMIT;
     if graph_seed_overflow {
         precision_notes.push("changed_seed_work_limit".to_string());
     } else if graph_rows.len() >= IMPACT_WORK_LIMIT {
@@ -1348,25 +1520,36 @@ pub fn change_impact(
 
     #[cfg(test)]
     run_impact_test_hook(ImpactTestStage::BeforeDataVersionRecheck);
-    store
-        .end_read_snapshot()
+    read_snapshot
+        .finish()
         .map_err(|_| ChangeImpactError::SnapshotChanged)?;
-    let data_version_after = store
+    if store
         .data_version()
-        .map_err(|_| ChangeImpactError::SnapshotChanged)?;
-    if data_version_before != data_version_after {
+        .map_err(|_| ChangeImpactError::SnapshotChanged)?
+        != data_version_before
+    {
         return Err(ChangeImpactError::SnapshotChanged);
     }
     #[cfg(test)]
     run_impact_test_hook(ImpactTestStage::BeforeGitSnapshotRecheck);
-    if crate::diff::current_head_oid(&repository_root)? != working.head_oid {
-        return Err(ChangeImpactError::SnapshotChanged);
-    }
-    let rechecked =
-        crate::diff::symbols_changed_in_worktree(store, &repository_root, &working.baseline_oid)?;
-    if rechecked.snapshot_token != working.snapshot_token || rechecked.files != working.files {
-        return Err(ChangeImpactError::SnapshotChanged);
-    }
+    crate::diff::validate_working_tree_snapshot_controlled(
+        &repository_root,
+        &working.baseline_oid,
+        &working.head_oid,
+        &working.files,
+        &working.snapshot_token,
+        store.request_deadline(),
+        Some(&interrupted),
+    )?;
+    validate_checked_snapshot(
+        store,
+        &repository_root,
+        &checked_snapshot,
+        &working.snapshot_token,
+    )?;
+    root_capability
+        .verify()
+        .map_err(|_| ChangeImpactError::SnapshotChanged)?;
 
     precision_notes.sort();
     precision_notes.dedup();
@@ -4115,6 +4298,50 @@ mod tests {
         assert!(limited.truncated);
         assert_eq!(limited.total, None);
         assert_eq!(limited.truncation_reason.as_deref(), Some("work_limit"));
+    }
+
+    #[test]
+    fn unguarded_change_impact_recovers_its_local_graph_budget() {
+        let root = impact_repo(
+            "unguarded_local_graph_limit",
+            &[("src/app.py", "def value():\n    return 1\n")],
+        );
+        write_impact_file(&root, "src/app.py", "def value():\n    return 2\n");
+        let store = index_impact(&root, "unguarded_local_graph_limit");
+        for index in 0..256 {
+            let caller = store
+                .insert_symbol(
+                    &format!("dense_caller_{index}"),
+                    "function",
+                    "src/generated.py",
+                    index + 1,
+                    index + 1,
+                    None,
+                    None,
+                )
+                .unwrap();
+            store
+                .insert_edge(caller, None, "value", "calls", index + 1)
+                .unwrap();
+        }
+        let _local_budget =
+            crate::store::override_impact_precision_budget(crate::store::WorkBudget {
+                deadline: None,
+                op_ticks: Some(1),
+            });
+
+        let response = change_impact(&store, &root, "HEAD", 3, 100).unwrap();
+        assert!(response
+            .precision_notes
+            .iter()
+            .any(|note| note == "graph_work_limit"));
+        assert!(response.impact.truncated);
+        assert_eq!(
+            response.impact.truncation_reason.as_deref(),
+            Some("work_limit")
+        );
+        assert_eq!(store.interrupt_source(), None);
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

@@ -4100,30 +4100,25 @@ pub(crate) fn stale_paths(root: &Path, db: &Path, cap: usize) -> Option<Vec<Stri
         if crate::indexer::extractor_for_path(&path).is_none() {
             continue;
         }
-        let admission_failed = match crate::indexer::source_admission(&path) {
-            Ok(()) => false,
+        let admitted_mtime = match crate::indexer::source_admission_mtime(root, &path) {
+            Ok(mtime) => Some(mtime),
             Err(crate::indexer::IndexError::Skipped(_)) => continue,
-            Err(_) => true,
+            Err(_) => None,
         };
         let Ok(relative) = path.strip_prefix(root) else {
             continue;
         };
         let relative = relative.to_string_lossy().replace('\\', "/");
         seen.insert(relative.clone());
-        if admission_failed {
+        if admitted_mtime.is_none() {
             stale.push(relative);
             if stale.len() >= cap {
                 return Some(stale);
             }
             continue;
         }
-        let fs_mtime = path
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|mtime| mtime.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|duration| duration.as_millis() as i64);
-        if fs_mtime.is_some_and(|mtime| indexed.get(&relative).is_none_or(|stored| mtime > *stored))
+        if admitted_mtime
+            .is_some_and(|mtime| indexed.get(&relative).is_none_or(|stored| mtime > *stored))
         {
             stale.push(relative);
             if stale.len() >= cap {
@@ -4132,7 +4127,11 @@ pub(crate) fn stale_paths(root: &Path, db: &Path, cap: usize) -> Option<Vec<Stri
         }
     }
     for indexed_path in indexed.keys() {
-        if !seen.contains(indexed_path) && !root.join(indexed_path).exists() {
+        let remains_regular =
+            std::fs::symlink_metadata(root.join(indexed_path)).is_ok_and(|metadata| {
+                metadata.file_type().is_file() && !metadata.file_type().is_symlink()
+            });
+        if !seen.contains(indexed_path) && !remains_regular {
             stale.push(indexed_path.clone());
             if stale.len() >= cap {
                 break;
@@ -4141,6 +4140,124 @@ pub(crate) fn stale_paths(root: &Path, db: &Path, cap: usize) -> Option<Vec<Stri
     }
     stale.sort();
     Some(stale)
+}
+
+pub(crate) fn stale_paths_controlled(
+    store: &crate::store::Store,
+    root: &Path,
+    cap: usize,
+    source_cap: usize,
+    source_bytes_cap: u64,
+    control: crate::bounded_fs::ReadControl<'_>,
+) -> Result<Vec<String>, crate::indexer::IndexError> {
+    if cap == 0 {
+        return Ok(Vec::new());
+    }
+    control
+        .check()
+        .map_err(crate::indexer::index_error_from_read)?;
+    let root_capability = crate::bounded_fs::RootCapability::open(root)
+        .map_err(crate::indexer::index_error_from_read)?;
+    let indexed_entries = store
+        .file_mtimes_bounded(source_cap)
+        .map_err(|error| crate::indexer::IndexError::Other(error.to_string()))?
+        .ok_or(crate::indexer::IndexError::LimitExceeded {
+            dimension: "source_candidates",
+            cap: source_cap as u64,
+        })?;
+    let indexed: HashMap<String, i64> = indexed_entries.into_iter().collect();
+    let candidates =
+        crate::indexer::source_candidates_bounded(&root_capability, source_cap, control)?;
+    let mut declared_bytes = 0_u64;
+    let mut seen = HashSet::new();
+    let mut stale = Vec::new();
+    for path in candidates {
+        control
+            .check()
+            .map_err(crate::indexer::index_error_from_read)?;
+        if crate::indexer::extractor_for_path(&path).is_none() {
+            continue;
+        }
+        let relative = path
+            .strip_prefix(root_capability.canonical_root())
+            .map_err(|_| crate::indexer::IndexError::SnapshotChanged)?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let admitted = match crate::indexer::source_admission_with_capability(
+            &root_capability,
+            &path,
+            control,
+        ) {
+            Ok(file) => file,
+            Err(crate::indexer::IndexError::Skipped(_)) => continue,
+            Err(crate::indexer::IndexError::Cancelled) => {
+                return Err(crate::indexer::IndexError::Cancelled)
+            }
+            Err(crate::indexer::IndexError::DeadlineExceeded) => {
+                return Err(crate::indexer::IndexError::DeadlineExceeded)
+            }
+            Err(crate::indexer::IndexError::LimitExceeded { dimension, cap }) => {
+                return Err(crate::indexer::IndexError::LimitExceeded { dimension, cap })
+            }
+            Err(_) => {
+                stale.push(relative.clone());
+                seen.insert(relative);
+                if stale.len() >= cap {
+                    return Ok(stale);
+                }
+                continue;
+            }
+        };
+        declared_bytes = declared_bytes.checked_add(admitted.declared_len).ok_or(
+            crate::indexer::IndexError::LimitExceeded {
+                dimension: "source_declared_bytes",
+                cap: source_bytes_cap,
+            },
+        )?;
+        if declared_bytes > source_bytes_cap {
+            return Err(crate::indexer::IndexError::LimitExceeded {
+                dimension: "source_declared_bytes",
+                cap: source_bytes_cap,
+            });
+        }
+        seen.insert(relative.clone());
+        if indexed
+            .get(&relative)
+            .is_none_or(|stored| admitted.modified_millis > *stored)
+        {
+            stale.push(relative);
+            if stale.len() >= cap {
+                return Ok(stale);
+            }
+        }
+    }
+    for indexed_path in indexed.keys() {
+        control
+            .check()
+            .map_err(crate::indexer::index_error_from_read)?;
+        if seen.contains(indexed_path) {
+            continue;
+        }
+        let remains_regular = crate::bounded_fs::read_regular_file_with_capability(
+            &root_capability,
+            Path::new(indexed_path),
+            u64::MAX,
+            0,
+            control,
+        )
+        .is_ok();
+        if !remains_regular {
+            stale.push(indexed_path.clone());
+            if stale.len() >= cap {
+                break;
+            }
+        }
+    }
+    root_capability
+        .verify()
+        .map_err(crate::indexer::index_error_from_read)?;
+    stale.sort();
+    Ok(stale)
 }
 
 fn scan_install(root: &Path) -> InstallInfo {

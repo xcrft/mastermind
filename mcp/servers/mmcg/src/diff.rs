@@ -28,6 +28,7 @@
 //! - Per-file resolution: a symbol moved `a.py`→`b.py` shows as removed-from-a
 //!   + added-to-b, not "moved".
 
+use crate::bounded_fs::{read_regular_file, BoundedReadError, ReadControl, RootCapability};
 use crate::indexer::{extractor_for_path, parse_blob, MAX_INDEXABLE_FILE_SIZE};
 use crate::store::{Store, Symbol};
 use serde::Serialize;
@@ -46,15 +47,12 @@ use std::time::{Duration, Instant};
 
 pub const CHANGE_FILE_LIMIT: usize = 10_000;
 pub const GIT_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
+const MAX_GIT_REF_BYTES: usize = 1024;
 const CAT_FILE_RESPONSE_OVERHEAD: usize = 128;
 const BASELINE_BLOB_BATCH_OUTPUT_LIMIT: usize =
     MAX_INDEXABLE_FILE_SIZE as usize + CAT_FILE_RESPONSE_OVERHEAD;
 const BASELINE_BLOB_TOTAL_LIMIT: usize = 64 * 1024 * 1024;
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Default `run_git` / `git_show_blob` subprocess deadline when
-/// `MMCG_GIT_TIMEOUT_MS` is unset — distinct from `GIT_TIMEOUT` above, which
-/// bounds the separate `run_bounded_git` worktree-diff path.
-const DEFAULT_RUN_GIT_TIMEOUT_MS: u64 = 30_000;
 /// Must stay a real `sleep`. `park_timeout` returns instantly when the thread
 /// holds an unpark token, and the sibling drain threads talk over `mpsc`, which
 /// parks and unparks this very thread — a stray token turns the wait into a
@@ -68,7 +66,6 @@ type SelectedSymbolKeys = (BTreeSet<SymbolKey>, BTreeSet<SymbolKey>);
 thread_local! {
     static TEST_GIT_INVOCATION: RefCell<Option<(std::path::PathBuf, Vec<OsString>)>> = const { RefCell::new(None) };
     static TEST_GIT_TIMEOUT: RefCell<Option<Duration>> = const { RefCell::new(None) };
-    static TEST_RUN_GIT_TIMEOUT: RefCell<Option<Duration>> = const { RefCell::new(None) };
 }
 
 fn git_timeout() -> Duration {
@@ -77,22 +74,6 @@ fn git_timeout() -> Duration {
         return timeout;
     }
     GIT_TIMEOUT
-}
-
-/// Deadline for `run_git` / `git_show_blob` — read from `MMCG_GIT_TIMEOUT_MS`
-/// (default 30,000ms) on every call so it can't go stale within a long-lived
-/// process; test-overridable via the same pattern as `git_timeout`.
-fn run_git_timeout() -> Duration {
-    #[cfg(test)]
-    if let Some(timeout) = TEST_RUN_GIT_TIMEOUT.with(|value| *value.borrow()) {
-        return timeout;
-    }
-    let ms = std::env::var("MMCG_GIT_TIMEOUT_MS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or(DEFAULT_RUN_GIT_TIMEOUT_MS);
-    Duration::from_millis(ms)
 }
 
 fn git_command(args: &[&str]) -> Command {
@@ -245,16 +226,56 @@ pub fn symbols_changed_since(
     repo_root: &Path,
     git_ref: &str,
 ) -> Result<SymbolDiff, DiffError> {
-    validate_ref(repo_root, git_ref)?;
+    symbols_changed_since_controlled(store, repo_root, git_ref, None, None)
+}
 
-    let files_in_diff = git_diff_name_only(repo_root, git_ref)?;
-    Ok(symbol_diff_over_files(
-        store,
+pub(crate) fn symbols_changed_since_controlled(
+    store: &Store,
+    repo_root: &Path,
+    git_ref: &str,
+    deadline: Option<Instant>,
+    interrupted: Option<&dyn Fn() -> bool>,
+) -> Result<SymbolDiff, DiffError> {
+    let deadline = deadline.or_else(|| Some(Instant::now() + git_timeout()));
+    let root = RootCapability::open(repo_root)
+        .map_err(|_| DiffError::GitFailed("snapshot_changed".into()))?;
+    let baseline_oid = resolve_commit_controlled(repo_root, git_ref, deadline, interrupted)
+        .map_err(|error| worktree_scope_error(git_ref, error))?;
+    let head_oid = resolve_head_controlled(repo_root, deadline, interrupted)
+        .map_err(|error| worktree_scope_error(git_ref, error))?;
+    let (files_in_diff, truncated) =
+        git_diff_name_only_controlled(repo_root, &baseline_oid, &head_oid, deadline, interrupted)
+            .map_err(|error| worktree_scope_error(git_ref, error))?;
+    let parseable_paths = files_in_diff
+        .iter()
+        .filter(|path| extractor_for_path(Path::new(path)).is_some())
+        .cloned()
+        .collect::<Vec<_>>();
+    let old_blobs = baseline_blobs_for_paths_controlled(
         repo_root,
-        git_ref,
+        &baseline_oid,
+        &parseable_paths,
+        deadline,
+        interrupted,
+    )
+    .map_err(|error| worktree_scope_error(git_ref, error))?;
+    let diff = symbol_diff_over_blobs(
+        store,
         git_ref,
         files_in_diff,
-    ))
+        truncated,
+        &old_blobs,
+        deadline,
+        interrupted,
+    )?;
+    let current_head = resolve_head_controlled(repo_root, deadline, interrupted)
+        .map_err(|error| worktree_scope_error(git_ref, error))?;
+    root.verify()
+        .map_err(|_| DiffError::GitFailed("snapshot_changed".into()))?;
+    if current_head != head_oid {
+        return Err(DiffError::GitFailed("snapshot_changed".into()));
+    }
+    Ok(diff)
 }
 
 /// Same symbol comparison as [`symbols_changed_since`], but the file scope is
@@ -275,48 +296,53 @@ pub fn symbols_changed_since_worktree(
     repo_root: &Path,
     git_ref: &str,
 ) -> Result<SymbolDiff, DiffError> {
-    let baseline_oid =
-        resolve_commit(repo_root, git_ref).map_err(|e| worktree_scope_error(git_ref, e))?;
-    let (files, _files_total, _truncated, _skipped_non_utf8) =
-        collect_worktree_paths(repo_root, &baseline_oid)
-            .map_err(|e| worktree_scope_error(git_ref, e))?;
-
-    // Blobs come from the resolved oid so the old side can't drift if the ref
-    // moves mid-audit; `git_ref` stays the caller-facing label.
-    let files_in_diff = files.into_iter().map(|file| file.path).collect();
-    Ok(symbol_diff_over_files(
+    symbols_changed_in_worktree_controlled(
         store,
         repo_root,
-        &baseline_oid,
         git_ref,
-        files_in_diff,
-    ))
+        Some(Instant::now() + git_timeout()),
+        None,
+    )
+    .map(|diff| diff.diff)
+    .map_err(|error| worktree_scope_error(git_ref, error))
 }
 
 fn worktree_scope_error(git_ref: &str, error: WorkingTreeDiffError) -> DiffError {
     match error {
         WorkingTreeDiffError::InvalidRef => DiffError::GitRefMissing(git_ref.to_string()),
-        other => DiffError::GitFailed(format!("worktree file scope: {other}")),
+        WorkingTreeDiffError::GitTimeout => DiffError::GitTimeout,
+        WorkingTreeDiffError::GitOutputLimit => DiffError::GitFailed("git_output_limit".into()),
+        WorkingTreeDiffError::SnapshotChanged => DiffError::GitFailed("snapshot_changed".into()),
+        WorkingTreeDiffError::IndexStale => DiffError::GitFailed("index_stale".into()),
+        WorkingTreeDiffError::GitUnavailable => DiffError::GitNotFound,
     }
 }
 
-/// `blob_ref` resolves the old side (`git show <blob_ref>:<path>`); `label` is
-/// what the caller asked for and is echoed back in [`SymbolDiff::git_ref`].
-fn symbol_diff_over_files(
+fn symbol_diff_over_blobs(
     store: &Store,
-    repo_root: &Path,
-    blob_ref: &str,
     label: &str,
     files_in_diff: Vec<String>,
-) -> SymbolDiff {
-    let truncated = files_in_diff.len() > CHANGE_FILE_LIMIT;
+    truncated: bool,
+    old_blobs: &BTreeMap<String, Option<Vec<u8>>>,
+    deadline: Option<Instant>,
+    interrupted: Option<&dyn Fn() -> bool>,
+) -> Result<SymbolDiff, DiffError> {
     let mut added: Vec<SymbolRef> = Vec::new();
     let mut removed: Vec<SymbolRef> = Vec::new();
     let mut signature_changed: Vec<SignatureChange> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
 
-    for rel in files_in_diff.iter().take(CHANGE_FILE_LIMIT) {
-        match diff_file(store, repo_root, blob_ref, rel) {
+    for rel in &files_in_diff {
+        if interrupted.is_some_and(|check| check())
+            || deadline.is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(DiffError::GitTimeout);
+        }
+        match diff_file_from_blob(
+            store,
+            rel,
+            old_blobs.get(rel).and_then(|blob| blob.as_deref()),
+        ) {
             Ok(per_file) => {
                 added.extend(per_file.added);
                 removed.extend(per_file.removed);
@@ -331,7 +357,7 @@ fn symbol_diff_over_files(
     removed.sort_by(|a, b| (a.file.as_str(), a.line).cmp(&(b.file.as_str(), b.line)));
     signature_changed.sort_by(|a, b| (a.file.as_str(), &a.name).cmp(&(b.file.as_str(), &b.name)));
 
-    SymbolDiff {
+    Ok(SymbolDiff {
         git_ref: label.to_string(),
         files_in_diff,
         added,
@@ -339,7 +365,7 @@ fn symbol_diff_over_files(
         signature_changed,
         errors,
         truncated,
-    }
+    })
 }
 
 pub fn symbols_changed_in_worktree(
@@ -347,12 +373,43 @@ pub fn symbols_changed_in_worktree(
     repo_root: &Path,
     git_ref: &str,
 ) -> Result<WorkingTreeSymbolDiff, WorkingTreeDiffError> {
-    let baseline_oid = resolve_commit(repo_root, git_ref)?;
-    let head_oid = resolve_head(repo_root)?;
+    symbols_changed_in_worktree_controlled(store, repo_root, git_ref, None, None)
+}
+
+pub(crate) fn symbols_changed_in_worktree_controlled(
+    store: &Store,
+    repo_root: &Path,
+    git_ref: &str,
+    deadline: Option<Instant>,
+    interrupted: Option<&dyn Fn() -> bool>,
+) -> Result<WorkingTreeSymbolDiff, WorkingTreeDiffError> {
+    let baseline_oid = resolve_commit_controlled(repo_root, git_ref, deadline, interrupted)?;
+    let head_oid = resolve_head_controlled(repo_root, deadline, interrupted)?;
     let (files, files_total, files_truncated, skipped_non_utf8_paths) =
-        collect_worktree_paths(repo_root, &baseline_oid)?;
-    let snapshot_token = working_tree_snapshot_token(repo_root, &head_oid, &files)?;
-    let old_blobs = baseline_blobs(repo_root, &baseline_oid, &files)?;
+        collect_worktree_paths_controlled(repo_root, &baseline_oid, deadline, interrupted)?;
+    let snapshot_token = working_tree_snapshot_token_controlled(
+        repo_root,
+        &head_oid,
+        &files,
+        deadline,
+        interrupted,
+    )?;
+    let paths = files
+        .iter()
+        .filter(|file| extractor_for_path(Path::new(&file.path)).is_some())
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    let mut old_blobs = files
+        .iter()
+        .map(|file| (file.path.clone(), None))
+        .collect::<BTreeMap<_, _>>();
+    old_blobs.extend(baseline_blobs_for_paths_controlled(
+        repo_root,
+        &baseline_oid,
+        &paths,
+        deadline,
+        interrupted,
+    )?);
 
     let mut added = Vec::new();
     let mut removed = Vec::new();
@@ -411,7 +468,25 @@ pub fn symbols_changed_in_worktree(
             }
         }
 
-        let current_bytes = std::fs::read(repo_root.join(rel)).ok();
+        let current_bytes = if file.status == "deleted" {
+            None
+        } else {
+            let control = ReadControl {
+                deadline,
+                interrupted,
+            };
+            Some(
+                read_regular_file(
+                    repo_root,
+                    Path::new(rel),
+                    MAX_INDEXABLE_FILE_SIZE,
+                    MAX_INDEXABLE_FILE_SIZE,
+                    control,
+                )
+                .map_err(working_tree_read_error)?
+                .bytes,
+            )
+        };
         let (selected_old, selected_new) = match (old_blob, current_bytes.as_deref()) {
             (Some(old), Some(current)) => {
                 deepest_changed_symbol_keys(old, current, &old_symbols, &new_symbols)
@@ -485,6 +560,16 @@ pub fn symbols_changed_in_worktree(
 
 fn line_chunks(bytes: &[u8]) -> Vec<&[u8]> {
     bytes.split_inclusive(|byte| *byte == b'\n').collect()
+}
+
+fn working_tree_read_error(error: BoundedReadError) -> WorkingTreeDiffError {
+    match error {
+        BoundedReadError::Interrupted | BoundedReadError::DeadlineExceeded => {
+            WorkingTreeDiffError::GitTimeout
+        }
+        BoundedReadError::TooLarge { .. } => WorkingTreeDiffError::IndexStale,
+        _ => WorkingTreeDiffError::SnapshotChanged,
+    }
 }
 
 fn deepest_changed_symbol_keys(
@@ -594,6 +679,7 @@ fn bounded_reader<R: Read + Send + 'static>(
     receiver
 }
 
+#[allow(dead_code)]
 fn run_bounded_git(
     repo: &Path,
     args: &[&str],
@@ -619,6 +705,17 @@ pub(crate) fn run_bounded_git_with_limit_until(
     deadline: Option<Instant>,
 ) -> Result<BoundedGitOutput, WorkingTreeDiffError> {
     run_bounded_git_controlled(repo, args, input, output_limit, deadline, None)
+}
+
+pub(crate) fn run_bounded_git_with_control(
+    repo: &Path,
+    args: &[&str],
+    input: Option<&[u8]>,
+    output_limit: usize,
+    deadline: Option<Instant>,
+    interrupted: Option<&dyn Fn() -> bool>,
+) -> Result<BoundedGitOutput, WorkingTreeDiffError> {
+    run_bounded_git_controlled(repo, args, input, output_limit, deadline, interrupted)
 }
 
 fn run_bounded_git_controlled(
@@ -706,15 +803,32 @@ fn run_bounded_git_controlled(
     })
 }
 
+#[cfg(test)]
 fn resolve_commit(repo: &Path, git_ref: &str) -> Result<String, WorkingTreeDiffError> {
-    if git_ref.is_empty() || git_ref.starts_with('-') || git_ref.contains('\0') {
+    resolve_commit_controlled(repo, git_ref, None, None)
+}
+
+fn resolve_commit_controlled(
+    repo: &Path,
+    git_ref: &str,
+    deadline: Option<Instant>,
+    interrupted: Option<&dyn Fn() -> bool>,
+) -> Result<String, WorkingTreeDiffError> {
+    if git_ref.is_empty()
+        || git_ref.len() > MAX_GIT_REF_BYTES
+        || git_ref.starts_with('-')
+        || git_ref.contains('\0')
+    {
         return Err(WorkingTreeDiffError::InvalidRef);
     }
     let commit = format!("{git_ref}^{{commit}}");
-    let output = run_bounded_git(
+    let output = run_bounded_git_controlled(
         repo,
         &["rev-parse", "--verify", "--end-of-options", &commit],
         None,
+        GIT_OUTPUT_LIMIT,
+        deadline,
+        interrupted,
     )?;
     if !output.success {
         return Err(WorkingTreeDiffError::InvalidRef);
@@ -751,6 +865,66 @@ fn resolve_head_controlled(
     Ok(oid.trim().to_ascii_lowercase())
 }
 
+fn git_diff_name_only_controlled(
+    repo: &Path,
+    baseline_oid: &str,
+    head_oid: &str,
+    deadline: Option<Instant>,
+    interrupted: Option<&dyn Fn() -> bool>,
+) -> Result<(Vec<String>, bool), WorkingTreeDiffError> {
+    let output = run_bounded_git_controlled(
+        repo,
+        &[
+            "-c",
+            "diff.external=",
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            baseline_oid,
+            head_oid,
+            "--",
+        ],
+        None,
+        GIT_OUTPUT_LIMIT,
+        deadline,
+        interrupted,
+    )?;
+    if !output.success {
+        return Err(WorkingTreeDiffError::InvalidRef);
+    }
+
+    let mut retained = BTreeSet::new();
+    let mut truncated = false;
+    for raw in nul_fields(&output.stdout) {
+        if interrupted.is_some_and(|check| check()) {
+            return Err(WorkingTreeDiffError::GitTimeout);
+        }
+        if is_mastermind_runtime_artifact(raw) {
+            continue;
+        }
+        let path = std::str::from_utf8(raw)
+            .map_err(|_| WorkingTreeDiffError::SnapshotChanged)?
+            .replace('\\', "/");
+        let parsed = Path::new(&path);
+        if parsed.is_absolute()
+            || parsed
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(WorkingTreeDiffError::SnapshotChanged);
+        }
+        if retained.len() < CHANGE_FILE_LIMIT {
+            retained.insert(path);
+        } else if !retained.contains(&path) {
+            truncated = true;
+        }
+    }
+    Ok((retained.into_iter().collect(), truncated))
+}
+
 pub(crate) fn current_head_oid(repo: &Path) -> Result<String, WorkingTreeDiffError> {
     resolve_head(repo)
 }
@@ -761,6 +935,7 @@ fn nul_fields(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
         .filter(|field| !field.is_empty())
 }
 
+#[cfg(test)]
 fn collect_worktree_paths(
     repo: &Path,
     baseline_oid: &str,
@@ -871,6 +1046,7 @@ fn is_mastermind_runtime_artifact(path: &[u8]) -> bool {
     )
 }
 
+#[allow(dead_code)]
 fn baseline_blobs(
     repo: &Path,
     baseline_oid: &str,
@@ -894,6 +1070,7 @@ fn baseline_blobs(
 /// size of a large diff cannot trip the per-process output limit. Missing
 /// paths are returned as `None`, which is how temporal rewind represents files
 /// added after the baseline.
+#[allow(dead_code)]
 pub(crate) fn baseline_blobs_for_paths(
     repo: &Path,
     baseline_oid: &str,
@@ -1192,6 +1369,7 @@ pub(crate) fn validate_working_tree_snapshot_controlled(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(crate) fn working_tree_snapshot_token(
     repo: &Path,
     head_oid: &str,
@@ -1230,8 +1408,18 @@ fn working_tree_snapshot_token_controlled(
         digest.update(file.status.as_bytes());
         digest.update([0]);
         if file.status != "deleted" {
-            let bytes = std::fs::read(repo.join(&file.path))
-                .map_err(|_| WorkingTreeDiffError::SnapshotChanged)?;
+            let bytes = read_regular_file(
+                repo,
+                Path::new(&file.path),
+                MAX_INDEXABLE_FILE_SIZE,
+                MAX_INDEXABLE_FILE_SIZE,
+                ReadControl {
+                    deadline,
+                    interrupted,
+                },
+            )
+            .map_err(working_tree_read_error)?
+            .bytes;
             digest.update(Sha256::digest(bytes));
         }
     }
@@ -1244,11 +1432,10 @@ struct PerFileDiff {
     signature_changed: Vec<SignatureChange>,
 }
 
-fn diff_file(
+fn diff_file_from_blob(
     store: &Store,
-    repo_root: &Path,
-    git_ref: &str,
     rel_path: &str,
+    old_blob: Option<&[u8]>,
 ) -> Result<PerFileDiff, String> {
     let extractor = extractor_for_path(Path::new(rel_path));
 
@@ -1261,17 +1448,12 @@ fn diff_file(
         .filter(|s| s.kind != "module")
         .collect();
 
-    // Old side: parse blob at `git_ref`. Missing blob = file didn't exist at ref.
-    let old_blob = match git_show_blob(repo_root, git_ref, rel_path) {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => Vec::new(),
-        Err(e) => return Err(e),
-    };
-
-    let old_symbols: Vec<crate::store::PendingSymbol> = if old_blob.is_empty() {
+    // Old blobs were fetched in bounded `cat-file --batch` groups against one
+    // resolved commit. Missing means the file did not exist at the baseline.
+    let old_symbols: Vec<crate::store::PendingSymbol> = if old_blob.is_none_or(<[u8]>::is_empty) {
         Vec::new()
     } else if let Some(ext) = extractor {
-        let pending = parse_blob(rel_path, &old_blob, 0, ext.as_ref())
+        let pending = parse_blob(rel_path, old_blob.expect("checked above"), 0, ext.as_ref())
             .map_err(|e| format!("parse old blob: {e}"))?;
         pending
             .symbols
@@ -1344,119 +1526,6 @@ fn diff_file(
     })
 }
 
-// ----- git plumbing -------------------------------------------------------
-
-/// Spawn `command`, poll it with `try_wait` while draining stdout/stderr on
-/// background threads (so a full pipe can't masquerade as a hang), and kill
-/// it if it hasn't exited by `deadline`.
-fn run_with_deadline(
-    mut command: Command,
-    deadline: Duration,
-) -> Result<std::process::Output, DiffError> {
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let start = Instant::now();
-    let mut child = command.spawn().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            DiffError::GitNotFound
-        } else {
-            DiffError::GitFailed(e.to_string())
-        }
-    })?;
-    let stdout_pipe = child
-        .stdout
-        .take()
-        .ok_or_else(|| DiffError::GitFailed("no stdout pipe".to_string()))?;
-    let stderr_pipe = child
-        .stderr
-        .take()
-        .ok_or_else(|| DiffError::GitFailed("no stderr pipe".to_string()))?;
-    let stdout_rx = spawn_drain(stdout_pipe);
-    let stderr_rx = spawn_drain(stderr_pipe);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if start.elapsed() < deadline => {
-                std::thread::sleep(CHILD_POLL_INTERVAL);
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(DiffError::GitTimeout);
-            }
-            Err(e) => return Err(DiffError::GitFailed(e.to_string())),
-        }
-    };
-    let stdout = stdout_rx.recv().unwrap_or_default();
-    let stderr = stderr_rx.recv().unwrap_or_default();
-    Ok(std::process::Output {
-        status,
-        stdout,
-        stderr,
-    })
-}
-
-fn spawn_drain<R: Read + Send + 'static>(mut reader: R) -> mpsc::Receiver<Vec<u8>> {
-    let (sender, receiver) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut buffer = Vec::new();
-        let _ = reader.read_to_end(&mut buffer);
-        let _ = sender.send(buffer);
-    });
-    receiver
-}
-
-fn run_git(repo: &Path, args: &[&str]) -> Result<std::process::Output, DiffError> {
-    let mut command = git_command(args);
-    command.current_dir(repo);
-    run_with_deadline(command, run_git_timeout())
-}
-
-fn validate_ref(repo: &Path, git_ref: &str) -> Result<(), DiffError> {
-    let out = run_git(repo, &["rev-parse", "--verify", git_ref])?;
-    if !out.status.success() {
-        return Err(DiffError::GitRefMissing(git_ref.to_string()));
-    }
-    Ok(())
-}
-
-fn git_diff_name_only(repo: &Path, git_ref: &str) -> Result<Vec<String>, DiffError> {
-    let range = format!("{git_ref}..HEAD");
-    let out = run_git(repo, &["diff", "--name-only", &range])?;
-    if !out.status.success() {
-        return Err(DiffError::GitFailed(
-            String::from_utf8_lossy(&out.stderr).to_string(),
-        ));
-    }
-    let s = String::from_utf8_lossy(&out.stdout);
-    let mut files: Vec<String> = s
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect();
-    files.sort();
-    files.dedup();
-    Ok(files)
-}
-
-/// `Ok(None)` when the file didn't exist at `git_ref` (treated as "added in
-/// HEAD"). `Ok(Some(bytes))` is the raw blob content.
-fn git_show_blob(repo: &Path, git_ref: &str, rel_path: &str) -> Result<Option<Vec<u8>>, String> {
-    let spec = format!("{git_ref}:{rel_path}");
-    let mut command = git_command(&["show", &spec]);
-    command.current_dir(repo);
-    let out = run_with_deadline(command, run_git_timeout()).map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-        // git returns "fatal: path '...' does not exist in '<ref>'" for a new
-        // file. Treat as no-blob, not failure.
-        if stderr.contains("does not exist") || stderr.contains("exists on disk, but not in") {
-            return Ok(None);
-        }
-        return Err(format!("git show failed: {}", stderr.trim()));
-    }
-    Ok(Some(out.stdout))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1472,7 +1541,6 @@ mod tests {
         fn drop(&mut self) {
             TEST_GIT_INVOCATION.with(|value| value.borrow_mut().take());
             TEST_GIT_TIMEOUT.with(|value| value.borrow_mut().take());
-            TEST_RUN_GIT_TIMEOUT.with(|value| value.borrow_mut().take());
         }
     }
 
@@ -1485,7 +1553,6 @@ mod tests {
             ));
         });
         TEST_GIT_TIMEOUT.with(|value| *value.borrow_mut() = Some(timeout));
-        TEST_RUN_GIT_TIMEOUT.with(|value| *value.borrow_mut() = Some(timeout));
         GitInvocationGuard
     }
 
@@ -2010,28 +2077,6 @@ mod tests {
         let _ = fs::remove_file(pid_file);
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn git_timeout_kills_stuck_subprocess() {
-        // The fake `git` is a PATH shim that sleeps past the deadline.
-        let repo = env::temp_dir();
-        let _guard = override_git(
-            "python3",
-            &["-c", "import signal; signal.pause()"],
-            Duration::from_millis(50),
-        );
-
-        let started = Instant::now();
-        let result = run_git(&repo, &["ignored"]);
-        assert!(matches!(result, Err(DiffError::GitTimeout)));
-        assert!(started.elapsed() < Duration::from_secs(1));
-
-        let started = Instant::now();
-        let result = git_show_blob(&repo, "HEAD", "ignored.py");
-        assert!(result.is_err());
-        assert!(started.elapsed() < Duration::from_secs(1));
-    }
-
     #[test]
     fn symbols_changed_since_caps_file_loop() {
         let dir = init_repo("change_file_limit");
@@ -2092,6 +2137,30 @@ mod tests {
         let store = indexed_worktree(&dir);
         let error = symbols_changed_in_worktree(store.store(), &dir, "--help").unwrap_err();
         assert_eq!(error, WorkingTreeDiffError::InvalidRef);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn commit_resolver_rejects_oversized_and_non_commit_refs() {
+        let dir = init_repo("bounded_commit_ref");
+        write(&dir, "x.py", "def x():\n    pass\n");
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+        assert_eq!(
+            resolve_commit(&dir, &"a".repeat(MAX_GIT_REF_BYTES + 1)),
+            Err(WorkingTreeDiffError::InvalidRef)
+        );
+        let output = Command::new("git")
+            .args(["rev-parse", "HEAD:x.py"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let blob = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(
+            resolve_commit(&dir, blob.trim()),
+            Err(WorkingTreeDiffError::InvalidRef)
+        );
         fs::remove_dir_all(&dir).ok();
     }
 

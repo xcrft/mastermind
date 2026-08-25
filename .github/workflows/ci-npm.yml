@@ -155,7 +155,7 @@ jobs:
             for CLIENT_ROOT in .claude .codex; do
               ./node_modules/.bin/mastermind workflow audit \
                 --root "$MASTERMIND_WORKFLOW_HOME/$CLIENT_ROOT" --json > "workflow-audit-${PROFILE}-${CLIENT_ROOT#.}.json"
-              PROFILE="$PROFILE" CLIENT_ROOT="$CLIENT_ROOT" python3 -c 'import json, os; path = f"workflow-audit-{os.environ[\"PROFILE\"]}-{os.environ[\"CLIENT_ROOT\"].lstrip(\".\")}.json"; report = json.load(open(path)); assert report["schema_version"] == 1, report; assert report["complete"], report; assert report["profile"] == os.environ["PROFILE"], report; assert not [item for item in report["diagnostics"] if item["severity"] == "error"], report'
+              PROFILE="$PROFILE" CLIENT_ROOT="$CLIENT_ROOT" python3 -c 'import json, os; path = "workflow-audit-{}-{}.json".format(os.environ["PROFILE"], os.environ["CLIENT_ROOT"].lstrip(".")); report = json.load(open(path)); assert report["schema_version"] == 1, report; assert report["complete"], report; assert report["profile"] == os.environ["PROFILE"], report; assert not [item for item in report["diagnostics"] if item["severity"] == "error"], report'
             done
           done
           echo "✓ all workflow install profiles audit cleanly"

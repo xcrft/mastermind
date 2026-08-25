@@ -38,6 +38,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are covered by deterministic and model-backed evals.
 
 ### Fixed
+- Repository source, change-impact, and project-history reads now use one
+  descriptor-relative no-follow reader with regular-file, identity, size,
+  deadline, and cancellation checks. History persists an atomic bounded
+  inventory digest and reports live `fresh`, `stale`, `incomplete`, or
+  `snapshot_changed` state independently from structural freshness.
+- A single absolute MCP request budget now spans the initial query, at most one
+  managed refresh and retry, Git, filesystem work, private snapshots, and
+  serialization. Automatic refresh is capped at 20,000 candidates and 512 MiB
+  declared bytes and returns `refresh_limit_exceeded` when bounded out.
+- Custom MCP indexes open read-only and are never migrated or given sidecars;
+  incompatible schemas return `schema_incompatible`. Git refs are length- and
+  option-safe and resolve to a validated commit OID before later commands;
+  commit-range symbol diffs now share one deadline, bounded NUL-delimited file
+  inventory, and capped batched baseline-blob reads.
 - Shipped Claude subagents grant only the exact `mmcg` tools each role needs
   and carry bounded `maxTurns` and `effort` settings. Auditor evals exercise the
   shipped custom-agent runtime contract instead of a separate handwritten MCP

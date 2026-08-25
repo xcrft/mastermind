@@ -19,7 +19,7 @@ use rusqlite::{
 use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -28,7 +28,6 @@ use std::time::{Duration, Instant};
 const SCHEMA_VERSION: &str = "7";
 const READ_ONLY_SNAPSHOT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const READ_ONLY_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(60);
-const SNAPSHOT_COPY_BUFFER_BYTES: usize = 1024 * 1024;
 
 fn row_u64(row: &rusqlite::Row<'_>, index: usize) -> SqlResult<u64> {
     let value = row.get::<_, i64>(index)?;
@@ -64,6 +63,42 @@ impl WorkBudget {
             }
         }
     }
+}
+
+fn impact_precision_budget() -> WorkBudget {
+    #[cfg(test)]
+    if let Some(budget) = IMPACT_PRECISION_BUDGET_OVERRIDE.with(Cell::get) {
+        return budget;
+    }
+    WorkBudget {
+        deadline: Some(Duration::from_secs(2)),
+        op_ticks: Some(250_000),
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static IMPACT_PRECISION_BUDGET_OVERRIDE: Cell<Option<WorkBudget>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct ImpactPrecisionBudgetOverride {
+    previous: Option<WorkBudget>,
+}
+
+#[cfg(test)]
+impl Drop for ImpactPrecisionBudgetOverride {
+    fn drop(&mut self) {
+        IMPACT_PRECISION_BUDGET_OVERRIDE.with(|slot| slot.set(self.previous));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn override_impact_precision_budget(
+    budget: WorkBudget,
+) -> ImpactPrecisionBudgetOverride {
+    let previous = IMPACT_PRECISION_BUDGET_OVERRIDE.with(|slot| slot.replace(Some(budget)));
+    ImpactPrecisionBudgetOverride { previous }
 }
 
 /// Which mechanism raised a `SQLITE_INTERRUPT`-shaped error on the connection:
@@ -532,12 +567,14 @@ pub struct Store {
     ops_counter: Arc<AtomicU64>,
     interrupt_source: Arc<AtomicU8>,
     default_budget: Cell<WorkBudget>,
+    managed_root: Option<PathBuf>,
+    serve_root: Option<PathBuf>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 struct SourceFileState {
     len: u64,
-    modified: Option<std::time::SystemTime>,
+    identity: crate::bounded_fs::StableFileIdentity,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -596,68 +633,75 @@ fn sqlite_sidecar_path(db_path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
-fn source_file_state(path: &Path) -> SqlResult<SourceFileState> {
-    let metadata = std::fs::metadata(path).map_err(|error| sqlite_io_error("read index", error))?;
+fn sqlite_bounded_error(
+    context: &str,
+    error: crate::bounded_fs::BoundedReadError,
+) -> rusqlite::Error {
+    match error {
+        crate::bounded_fs::BoundedReadError::TooLarge { .. } => sqlite_snapshot_too_large(),
+        crate::bounded_fs::BoundedReadError::SnapshotChanged => sqlite_snapshot_changed(),
+        crate::bounded_fs::BoundedReadError::DeadlineExceeded
+        | crate::bounded_fs::BoundedReadError::Interrupted => sqlite_snapshot_timeout(),
+        crate::bounded_fs::BoundedReadError::Io(error) => sqlite_io_error(context, error),
+        error => sqlite_io_error(
+            context,
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string()),
+        ),
+    }
+}
+
+fn source_file_state(
+    root: &crate::bounded_fs::RootCapability,
+    path: &Path,
+    control: crate::bounded_fs::ReadControl<'_>,
+) -> SqlResult<SourceFileState> {
+    let file =
+        crate::bounded_fs::read_regular_file_with_capability(root, path, u64::MAX, 0, control)
+            .map_err(|error| sqlite_bounded_error("read index", error))?;
     Ok(SourceFileState {
-        len: metadata.len(),
-        modified: metadata.modified().ok(),
+        len: file.declared_len,
+        identity: file.identity,
     })
 }
 
-fn optional_source_file_state(path: &Path) -> SqlResult<Option<SourceFileState>> {
-    match std::fs::metadata(path) {
-        Ok(metadata) => Ok(Some(SourceFileState {
-            len: metadata.len(),
-            modified: metadata.modified().ok(),
+fn optional_source_file_state(
+    root: &crate::bounded_fs::RootCapability,
+    path: &Path,
+    control: crate::bounded_fs::ReadControl<'_>,
+) -> SqlResult<Option<SourceFileState>> {
+    match crate::bounded_fs::read_regular_file_with_capability(root, path, u64::MAX, 0, control) {
+        Ok(file) => Ok(Some(SourceFileState {
+            len: file.declared_len,
+            identity: file.identity,
         })),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(sqlite_io_error("read index sidecar", error)),
+        Err(crate::bounded_fs::BoundedReadError::Io(error))
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(sqlite_bounded_error("read index sidecar", error)),
     }
 }
 
 fn index_file_state(db_path: &Path) -> SqlResult<IndexFileState> {
-    Ok(IndexFileState {
-        database: source_file_state(db_path)?,
-        wal: optional_source_file_state(&sqlite_sidecar_path(db_path, "-wal"))?,
-    })
+    index_file_state_with_control(db_path, crate::bounded_fs::ReadControl::default())
 }
 
-fn copy_file_bounded(
-    source: &Path,
-    destination: &Path,
-    budget: SnapshotCopyBudget,
-    copied: &mut u64,
-) -> SqlResult<()> {
-    if Instant::now() >= budget.deadline {
-        return Err(sqlite_snapshot_timeout());
-    }
-    let mut input = std::fs::File::open(source)
-        .map_err(|error| sqlite_io_error("open index snapshot source", error))?;
-    let mut output = std::fs::File::create(destination)
-        .map_err(|error| sqlite_io_error("create private index snapshot", error))?;
-    let mut buffer = vec![0u8; SNAPSHOT_COPY_BUFFER_BYTES];
-    loop {
-        if Instant::now() >= budget.deadline {
-            return Err(sqlite_snapshot_timeout());
-        }
-        let read_len = input
-            .read(&mut buffer)
-            .map_err(|error| sqlite_io_error("read index snapshot source", error))?;
-        if read_len == 0 {
-            break;
-        }
-        let read_bytes = u64::try_from(read_len).map_err(|_| sqlite_snapshot_too_large())?;
-        *copied = copied
-            .checked_add(read_bytes)
-            .filter(|value| *value <= budget.max_bytes)
-            .ok_or_else(sqlite_snapshot_too_large)?;
-        output
-            .write_all(&buffer[..read_len])
-            .map_err(|error| sqlite_io_error("write private index snapshot", error))?;
-    }
-    output
-        .flush()
-        .map_err(|error| sqlite_io_error("flush private index snapshot", error))
+fn index_file_state_with_control(
+    db_path: &Path,
+    control: crate::bounded_fs::ReadControl<'_>,
+) -> SqlResult<IndexFileState> {
+    let absolute = std::path::absolute(db_path)
+        .map_err(|error| sqlite_io_error("resolve index path", error))?;
+    let parent = absolute
+        .parent()
+        .ok_or_else(|| rusqlite::Error::InvalidPath(absolute.clone()))?;
+    let root = crate::bounded_fs::RootCapability::open(parent)
+        .map_err(|error| sqlite_bounded_error("open index parent", error))?;
+    Ok(IndexFileState {
+        database: source_file_state(&root, &absolute, control)?,
+        wal: optional_source_file_state(&root, &sqlite_sidecar_path(&absolute, "-wal"), control)?,
+    })
 }
 
 fn copy_index_snapshot(
@@ -667,7 +711,21 @@ fn copy_index_snapshot(
     if Instant::now() >= budget.deadline {
         return Err(sqlite_snapshot_timeout());
     }
-    let before = index_file_state(db_path)?;
+    let absolute = std::path::absolute(db_path)
+        .map_err(|error| sqlite_io_error("resolve index path", error))?;
+    let parent = absolute
+        .parent()
+        .ok_or_else(|| rusqlite::Error::InvalidPath(absolute.clone()))?;
+    let root = crate::bounded_fs::RootCapability::open(parent)
+        .map_err(|error| sqlite_bounded_error("open index parent", error))?;
+    let control = crate::bounded_fs::ReadControl {
+        deadline: Some(budget.deadline),
+        interrupted: None,
+    };
+    let before = IndexFileState {
+        database: source_file_state(&root, &absolute, control)?,
+        wal: optional_source_file_state(&root, &sqlite_sidecar_path(&absolute, "-wal"), control)?,
+    };
     let expected_bytes = before
         .database
         .len
@@ -680,19 +738,57 @@ fn copy_index_snapshot(
         .prefix("mastermind-lens-index-")
         .tempdir()
         .map_err(|error| sqlite_io_error("create private index snapshot", error))?;
-    let file_name = db_path
+    let file_name = absolute
         .file_name()
-        .ok_or_else(|| rusqlite::Error::InvalidPath(db_path.to_path_buf()))?;
+        .ok_or_else(|| rusqlite::Error::InvalidPath(absolute.clone()))?;
     let snapshot_path = snapshot_dir.path().join(file_name);
-    let source_wal = sqlite_sidecar_path(db_path, "-wal");
+    let source_wal = sqlite_sidecar_path(&absolute, "-wal");
     let snapshot_wal = sqlite_sidecar_path(&snapshot_path, "-wal");
 
-    let mut copied = 0;
-    copy_file_bounded(db_path, &snapshot_path, budget, &mut copied)?;
+    let mut copied = 0_u64;
+    let mut database_output = std::fs::File::create(&snapshot_path)
+        .map_err(|error| sqlite_io_error("create private index snapshot", error))?;
+    let database = crate::bounded_fs::copy_regular_file_with_capability(
+        &root,
+        &absolute,
+        budget.max_bytes,
+        control,
+        Some(before.database.identity),
+        &mut database_output,
+    )
+    .map_err(|error| sqlite_bounded_error("copy index snapshot", error))?;
+    database_output
+        .flush()
+        .map_err(|error| sqlite_io_error("flush private index snapshot", error))?;
+    copied = copied
+        .checked_add(database.declared_len)
+        .filter(|value| *value <= budget.max_bytes)
+        .ok_or_else(sqlite_snapshot_too_large)?;
     if before.wal.as_ref().is_some_and(|wal| wal.len > 0) {
-        copy_file_bounded(&source_wal, &snapshot_wal, budget, &mut copied)?;
+        let mut wal_output = std::fs::File::create(&snapshot_wal)
+            .map_err(|error| sqlite_io_error("create private WAL snapshot", error))?;
+        let wal = crate::bounded_fs::copy_regular_file_with_capability(
+            &root,
+            &source_wal,
+            budget.max_bytes.saturating_sub(copied),
+            control,
+            before.wal.as_ref().map(|wal| wal.identity),
+            &mut wal_output,
+        )
+        .map_err(|error| sqlite_bounded_error("copy index WAL snapshot", error))?;
+        wal_output
+            .flush()
+            .map_err(|error| sqlite_io_error("flush private WAL snapshot", error))?;
+        copied
+            .checked_add(wal.declared_len)
+            .filter(|value| *value <= budget.max_bytes)
+            .ok_or_else(sqlite_snapshot_too_large)?;
     }
-    if index_file_state(db_path)? == before {
+    let after = IndexFileState {
+        database: source_file_state(&root, &absolute, control)?,
+        wal: optional_source_file_state(&root, &sqlite_sidecar_path(&absolute, "-wal"), control)?,
+    };
+    if after == before {
         return Ok((snapshot_dir, snapshot_path));
     }
     Err(sqlite_snapshot_changed())
@@ -712,6 +808,7 @@ fn open_private_index_snapshot(
     Ok((connection, snapshot_dir))
 }
 
+#[cfg(test)]
 fn encode_sqlite_uri_path(path: &[u8]) -> Vec<u8> {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut encoded = Vec::with_capacity(path.len());
@@ -741,36 +838,7 @@ fn encode_sqlite_uri_path(path: &[u8]) -> Vec<u8> {
     encoded
 }
 
-#[cfg(unix)]
-fn immutable_sqlite_uri(db_path: &Path) -> SqlResult<PathBuf> {
-    use std::ffi::OsString;
-    use std::os::unix::ffi::{OsStrExt, OsStringExt};
-
-    let absolute = std::path::absolute(db_path)
-        .map_err(|_| rusqlite::Error::InvalidPath(db_path.to_path_buf()))?;
-    let mut uri = b"file:".to_vec();
-    uri.extend(encode_sqlite_uri_path(absolute.as_os_str().as_bytes()));
-    uri.extend_from_slice(b"?mode=ro&immutable=1&cache=private");
-    Ok(PathBuf::from(OsString::from_vec(uri)))
-}
-
-#[cfg(not(unix))]
-fn immutable_sqlite_uri(db_path: &Path) -> SqlResult<PathBuf> {
-    let absolute = std::path::absolute(db_path)
-        .map_err(|_| rusqlite::Error::InvalidPath(db_path.to_path_buf()))?;
-    let text = absolute
-        .to_str()
-        .ok_or_else(|| rusqlite::Error::InvalidPath(absolute.clone()))?;
-    let path = windows_sqlite_uri_path(text)
-        .ok_or_else(|| rusqlite::Error::InvalidPath(absolute.clone()))?;
-    let mut uri = b"file:".to_vec();
-    uri.extend(path);
-    uri.extend_from_slice(b"?mode=ro&immutable=1&cache=private");
-    let uri = String::from_utf8(uri).map_err(|_| rusqlite::Error::InvalidPath(absolute))?;
-    Ok(PathBuf::from(uri))
-}
-
-#[cfg(any(test, not(unix)))]
+#[cfg(test)]
 fn windows_sqlite_uri_path(text: &str) -> Option<Vec<u8>> {
     if text
         .get(..8)
@@ -790,7 +858,151 @@ fn windows_sqlite_uri_path(text: &str) -> Option<Vec<u8>> {
     Some(path)
 }
 
+fn connection_index_root(connection: &Connection) -> SqlResult<Option<String>> {
+    let meta_exists = connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'",
+            [],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if !meta_exists {
+        return Ok(None);
+    }
+    connection
+        .query_row("SELECT value FROM meta WHERE key='index_root'", [], |row| {
+            row.get(0)
+        })
+        .optional()
+}
+
 impl Store {
+    /// MCP serving may refresh only the canonical repository-owned index.
+    /// Explicit custom paths are opened through the non-mutating snapshot
+    /// reader, including when their schema is incompatible.
+    pub fn open_for_serve(
+        db_path: impl AsRef<Path>,
+        managed_root: Option<&Path>,
+    ) -> SqlResult<Self> {
+        let db_path = db_path.as_ref();
+        let Some(managed_root) = managed_root else {
+            return Self::open_read_only(db_path);
+        };
+        let root = crate::bounded_fs::RootCapability::open(managed_root)
+            .map_err(|error| sqlite_bounded_error("open managed repository root", error))?;
+        let expected = root.canonical_root().join(".mastermind/mmcg.db");
+        let requested_expected = root.requested_root().join(".mastermind/mmcg.db");
+        let selected = std::path::absolute(db_path)
+            .map_err(|error| sqlite_io_error("resolve managed index", error))?;
+        if selected != expected && selected != requested_expected {
+            let mut store = Self::open_read_only(&selected)?;
+            store.serve_root = Some(root.canonical_root().to_path_buf());
+            return Ok(store);
+        }
+        root.ensure_directory(Path::new(".mastermind"))
+            .map_err(|error| sqlite_bounded_error("create managed index directory", error))?;
+        let state =
+            crate::bounded_fs::RootCapability::open(&root.canonical_root().join(".mastermind"))
+                .map_err(|error| sqlite_bounded_error("open managed index directory", error))?;
+        let existing_identity = match crate::bounded_fs::read_regular_file_with_capability(
+            &state,
+            &expected,
+            u64::MAX,
+            0,
+            crate::bounded_fs::ReadControl::default(),
+        ) {
+            Ok(file) => Some(file.identity),
+            Err(crate::bounded_fs::BoundedReadError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                None
+            }
+            Err(error) => return Err(sqlite_bounded_error("inspect managed index", error)),
+        };
+        if existing_identity.is_some() {
+            let mut snapshot = Self::open_read_only(&expected)?;
+            let authorized = snapshot
+                .meta_value("index_root")?
+                .and_then(|stored| PathBuf::from(stored).canonicalize().ok())
+                .is_some_and(|stored| stored == root.canonical_root());
+            if !authorized {
+                snapshot.serve_root = Some(root.canonical_root().to_path_buf());
+                return Ok(snapshot);
+            }
+            drop(snapshot);
+        }
+        let mut created_file = None;
+        let expected_identity = match existing_identity {
+            Some(identity) => identity,
+            None => {
+                let (file, identity) =
+                    crate::bounded_fs::create_regular_file_with_capability(&state, &expected)
+                        .map_err(|error| sqlite_bounded_error("create managed index", error))?;
+                created_file = Some(file);
+                identity
+            }
+        };
+        let connection = Connection::open_with_flags(
+            &expected,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        root.verify()
+            .map_err(|error| sqlite_bounded_error("verify managed repository root", error))?;
+        state
+            .verify()
+            .map_err(|error| sqlite_bounded_error("verify managed index directory", error))?;
+        let opened_file = crate::bounded_fs::read_regular_file_with_capability(
+            &state,
+            &expected,
+            u64::MAX,
+            0,
+            crate::bounded_fs::ReadControl::default(),
+        )
+        .map_err(|error| sqlite_bounded_error("verify managed index identity", error))?;
+        let identity_matches = if existing_identity.is_some() {
+            opened_file.identity == expected_identity
+        } else {
+            opened_file.identity.same_object(expected_identity)
+        };
+        if !identity_matches {
+            return Err(sqlite_snapshot_changed());
+        }
+        drop(created_file);
+        if existing_identity.is_some() {
+            let authorized = connection_index_root(&connection)?
+                .and_then(|stored| PathBuf::from(stored).canonicalize().ok())
+                .is_some_and(|stored| stored == root.canonical_root());
+            if !authorized {
+                drop(connection);
+                let mut store = Self::open_read_only(&expected)?;
+                store.serve_root = Some(root.canonical_root().to_path_buf());
+                return Ok(store);
+            }
+        }
+        connection.execute_batch(
+            r#"
+            PRAGMA foreign_keys = ON;
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
+            PRAGMA busy_timeout = 5000;
+            PRAGMA cache_size = -65536;
+            "#,
+        )?;
+        let mut store = Self::from_connection(connection, expected, None);
+        store.managed_root = Some(root.canonical_root().to_path_buf());
+        store.serve_root = Some(root.canonical_root().to_path_buf());
+        store.init_schema()?;
+        root.verify()
+            .map_err(|error| sqlite_bounded_error("verify managed repository root", error))?;
+        state
+            .verify()
+            .map_err(|error| sqlite_bounded_error("verify managed index directory", error))?;
+        Ok(store)
+    }
+
     pub fn open(db_path: impl AsRef<Path>) -> SqlResult<Self> {
         let db_path = db_path.as_ref().to_path_buf();
         if let Some(parent) = db_path.parent() {
@@ -822,9 +1034,9 @@ impl Store {
     /// a database, creates WAL/SHM sidecars, changes journal settings, or runs
     /// schema initialization. A missing or outdated index remains an explicit
     /// operator error instead of a read-only command mutating repository state
-    /// while diagnosing it. A checkpointed database uses an immutable direct
-    /// connection. An active WAL is copied into a private temporary snapshot so
-    /// uncheckpointed rows remain visible without touching the source sidecars.
+    /// while diagnosing it. The database and active WAL are copied through
+    /// no-follow handles into one bounded private snapshot, so source sidecars
+    /// remain untouched and special files cannot block SQLite startup.
     /// Long-running callers must reject a result if the source database or WAL
     /// changes during the query, as Lens does around each refresh.
     pub fn open_read_only(db_path: impl AsRef<Path>) -> SqlResult<Self> {
@@ -836,37 +1048,10 @@ impl Store {
         request_deadline: Option<Instant>,
     ) -> SqlResult<Self> {
         let requested_path = db_path.as_ref();
-        let db_path = requested_path
-            .canonicalize()
+        let db_path = std::path::absolute(requested_path)
             .map_err(|error| sqlite_io_error("resolve read-only index", error))?;
         let snapshot_budget = SnapshotCopyBudget::for_request(request_deadline);
-        let before = index_file_state(&db_path)?;
-        let (conn, snapshot_dir) = if before.wal.as_ref().is_some_and(|wal| wal.len > 0) {
-            let (conn, snapshot_dir) = open_private_index_snapshot(&db_path, snapshot_budget)?;
-            (conn, Some(snapshot_dir))
-        } else {
-            match immutable_sqlite_uri(&db_path) {
-                Ok(uri) => {
-                    let conn = Connection::open_with_flags(
-                        &uri,
-                        OpenFlags::SQLITE_OPEN_READ_ONLY
-                            | OpenFlags::SQLITE_OPEN_URI
-                            | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                            | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE,
-                    )?;
-                    if index_file_state(&db_path)? != before {
-                        return Err(sqlite_snapshot_changed());
-                    }
-                    (conn, None)
-                }
-                Err(rusqlite::Error::InvalidPath(_)) => {
-                    let (conn, snapshot_dir) =
-                        open_private_index_snapshot(&db_path, snapshot_budget)?;
-                    (conn, Some(snapshot_dir))
-                }
-                Err(error) => return Err(error),
-            }
-        };
+        let (conn, snapshot_dir) = open_private_index_snapshot(&db_path, snapshot_budget)?;
         conn.execute_batch(
             r#"
             PRAGMA foreign_keys = ON;
@@ -875,7 +1060,7 @@ impl Store {
             PRAGMA query_only = ON;
             "#,
         )?;
-        Ok(Self::from_connection(conn, db_path, snapshot_dir))
+        Ok(Self::from_connection(conn, db_path, Some(snapshot_dir)))
     }
 
     /// Clone the exact connection snapshot into a private writable database.
@@ -899,7 +1084,15 @@ impl Store {
             .prefix("mastermind-temporal-index-")
             .tempdir()
             .map_err(|error| sqlite_io_error("create temporal index snapshot", error))?;
-        let snapshot_path = snapshot_dir.path().join("mmcg.db");
+        // A managed source connection carries SQLITE_OPEN_NOFOLLOW. SQLite
+        // applies that policy to `VACUUM INTO` as well, so canonicalize the
+        // private directory first on systems where the temp root (for example
+        // macOS `/var`) is itself a symlink.
+        let snapshot_path = snapshot_dir
+            .path()
+            .canonicalize()
+            .map_err(|error| sqlite_io_error("resolve temporal index snapshot", error))?
+            .join("mmcg.db");
         let query_only = self
             .conn
             .query_row("PRAGMA query_only", [], |row| row.get::<_, i64>(0))?
@@ -939,7 +1132,27 @@ impl Store {
     }
 
     pub fn schema_current(&self) -> SqlResult<bool> {
+        let meta_exists: bool = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'",
+                [],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if !meta_exists {
+            return Ok(false);
+        }
         Ok(self.meta_value("schema_version")?.as_deref() == Some(SCHEMA_VERSION))
+    }
+
+    pub(crate) fn managed_root(&self) -> Option<&Path> {
+        self.managed_root.as_deref()
+    }
+
+    pub(crate) fn serve_root(&self) -> Option<&Path> {
+        self.serve_root.as_deref()
     }
 
     fn from_connection(
@@ -955,6 +1168,8 @@ impl Store {
             ops_counter: Arc::new(AtomicU64::new(0)),
             interrupt_source: Arc::new(AtomicU8::new(INTERRUPT_NONE)),
             default_budget: Cell::new(WorkBudget::from_millis(DEFAULT_SERVE_BUDGET_MS)),
+            managed_root: None,
+            serve_root: None,
         }
     }
 
@@ -987,6 +1202,20 @@ impl Store {
                 cap.saturating_sub(used)
             }),
         }
+    }
+
+    /// Absolute deadline of the active outer request. Filesystem and Git work
+    /// consume this exact deadline instead of converting the default duration
+    /// into a fresh allowance for each phase.
+    pub(crate) fn request_deadline(&self) -> Option<Instant> {
+        self.guard_stack
+            .borrow()
+            .last()
+            .and_then(|frame| frame.deadline)
+    }
+
+    pub(crate) fn work_budget_depth(&self) -> usize {
+        self.guard_stack.borrow().len()
     }
 
     /// Cooperative check for non-SQL phases inside a guarded graph request.
@@ -1129,6 +1358,34 @@ impl Store {
         result
     }
 
+    /// Run a deliberately narrower, recoverable precision budget below an
+    /// already-active request guard. If only this local frame expires, consume
+    /// its budget marker after restoring the still-live parent. Request expiry
+    /// and cancellation remain marked for the transport to map normally.
+    fn with_local_work_budget<T>(
+        &self,
+        budget: WorkBudget,
+        f: impl FnOnce() -> SqlResult<T>,
+    ) -> SqlResult<T> {
+        let had_parent = self.work_budget_depth() > 0;
+        let interrupt_before = self.interrupt_source.load(Ordering::SeqCst);
+        let result = self.with_work_budget(budget, f);
+        let parent_expired = self
+            .guard_stack
+            .borrow()
+            .last()
+            .is_some_and(|frame| frame.expired(&self.ops_counter));
+        if had_parent && interrupt_before == INTERRUPT_NONE && !parent_expired {
+            let _ = self.interrupt_source.compare_exchange(
+                INTERRUPT_BUDGET,
+                INTERRUPT_NONE,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
+        }
+        result
+    }
+
     fn interrupted_error() -> rusqlite::Error {
         rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_INTERRUPT),
@@ -1146,6 +1403,27 @@ impl Store {
             INTERRUPT_CANCEL => Some(InterruptSource::Cancel),
             _ => None,
         }
+    }
+
+    pub(crate) fn interrupt_source(&self) -> Option<InterruptSource> {
+        match self.interrupt_source.load(Ordering::SeqCst) {
+            INTERRUPT_BUDGET => Some(InterruptSource::Budget),
+            INTERRUPT_CANCEL => Some(InterruptSource::Cancel),
+            _ => None,
+        }
+    }
+
+    /// Consume a handled budget marker without clearing a cancel that won the
+    /// race. Reserved for recoverable local precision limits.
+    pub(crate) fn consume_budget_interrupt(&self) -> bool {
+        self.interrupt_source
+            .compare_exchange(
+                INTERRUPT_BUDGET,
+                INTERRUPT_NONE,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
     }
 
     /// A cloneable, cross-thread handle that marks the interrupt source as
@@ -2483,6 +2761,20 @@ impl Store {
         rows.next()?.map(|r| r.get(0)).transpose()
     }
 
+    pub(crate) fn file_mtimes_bounded(&self, cap: usize) -> SqlResult<Option<Vec<(String, i64)>>> {
+        let fetch = cap.saturating_add(1).min(i64::MAX as usize) as i64;
+        let mut statement = self
+            .conn
+            .prepare("SELECT path, indexed_at FROM files ORDER BY path LIMIT ?1")?;
+        let rows = statement.query_map([fetch], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let mut entries = rows.collect::<SqlResult<Vec<_>>>()?;
+        if entries.len() > cap {
+            return Ok(None);
+        }
+        entries.shrink_to_fit();
+        Ok(Some(entries))
+    }
+
     /// Stored structural fingerprint for a file path, or `None` if never indexed.
     /// Files indexed before 0.28 return `Some("")` (column backfilled with `''`);
     /// callers should treat that as `first-seen`.
@@ -2782,11 +3074,8 @@ impl Store {
             None => SqlValue::Null,
         });
 
-        let budget = WorkBudget {
-            deadline: Some(Duration::from_secs(2)),
-            op_ticks: Some(250_000),
-        };
-        self.with_work_budget(budget, || {
+        let budget = impact_precision_budget();
+        self.with_local_work_budget(budget, || {
             let mut statement = self.conn.prepare(&sql)?;
             let rows = statement.query_map(rusqlite::params_from_iter(values), |row| {
                 Ok(SeedImpact {
@@ -3833,6 +4122,19 @@ impl Store {
     /// this after scanning the supported Markdown sources, which also removes
     /// stale rows after a rename or deletion.
     pub fn replace_project_history(&mut self, entries: &[ProjectHistoryEntry]) -> SqlResult<()> {
+        self.replace_project_history_snapshot(entries, 0, false, "")
+    }
+
+    /// Replace the derived history rows and their inventory contract in one
+    /// transaction. Readers can therefore never observe a new FTS corpus with
+    /// the previous freshness token (or the reverse).
+    pub(crate) fn replace_project_history_snapshot(
+        &mut self,
+        entries: &[ProjectHistoryEntry],
+        skipped: u32,
+        truncated: bool,
+        inventory_token: &str,
+    ) -> SqlResult<()> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute("DELETE FROM project_history_fts", [])?;
         {
@@ -3843,6 +4145,23 @@ impl Store {
             for entry in entries {
                 stmt.execute(params![entry.path, entry.kind, entry.title, entry.body])?;
             }
+        }
+        for (key, value) in [
+            ("project_history_skipped", skipped.to_string()),
+            (
+                "project_history_truncated",
+                if truncated { "true" } else { "false" }.to_string(),
+            ),
+            (
+                "project_history_inventory_token",
+                inventory_token.to_string(),
+            ),
+        ] {
+            tx.execute(
+                "INSERT INTO meta(key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![key, value],
+            )?;
         }
         tx.commit()
     }
@@ -4380,6 +4699,8 @@ mod tests {
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};
     use std::env;
+    #[cfg(unix)]
+    use std::process::Command;
 
     /// Unique path per test — parallel tests can't share the file.
     fn tmp_db(test_name: &str) -> PathBuf {
@@ -4654,7 +4975,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn read_only_open_follows_a_symlink_to_the_active_wal() {
+    fn read_only_open_rejects_a_symlinked_database() {
         use std::os::unix::fs::symlink;
 
         let directory = tempfile::tempdir().unwrap();
@@ -4675,16 +4996,108 @@ mod tests {
         symlink(&path, &alias).unwrap();
         let before = directory_bytes(directory.path());
 
-        let read_only = Store::open_read_only(&alias).unwrap();
-        assert!(read_only
-            .search_symbols("only_in_target_wal", None, None)
-            .unwrap()
-            .iter()
-            .any(|symbol| symbol.name == "only_in_target_wal"));
-        drop(read_only);
+        assert!(Store::open_read_only(&alias).is_err());
 
         assert_eq!(directory_bytes(directory.path()), before);
         drop(writer);
+    }
+
+    #[test]
+    fn managed_serve_open_authorizes_only_the_repository_index() {
+        let root = tempfile::tempdir().unwrap();
+        let expected = root.path().join(".mastermind/mmcg.db");
+        let managed = Store::open_for_serve(&expected, Some(root.path())).unwrap();
+        let canonical_root = root.path().canonicalize().unwrap();
+
+        assert_eq!(managed.managed_root(), Some(canonical_root.as_path()));
+        assert_eq!(managed.serve_root(), Some(canonical_root.as_path()));
+        assert!(managed.schema_current().unwrap());
+        assert!(expected.is_file());
+    }
+
+    #[test]
+    fn managed_serve_open_preserves_mismatched_existing_database() {
+        let root = tempfile::tempdir().unwrap();
+        let unrelated = tempfile::tempdir().unwrap();
+        let state = root.path().join(".mastermind");
+        std::fs::create_dir(&state).unwrap();
+        let expected = state.join("mmcg.db");
+        {
+            let source = Store::open(&expected).unwrap();
+            source
+                .set_meta(
+                    "index_root",
+                    unrelated.path().canonicalize().unwrap().to_str().unwrap(),
+                )
+                .unwrap();
+            source
+                .insert_symbol("preserved", "function", "src/lib.rs", 1, 2, None, None)
+                .unwrap();
+        }
+        let before = directory_bytes(&state);
+
+        let served = Store::open_for_serve(&expected, Some(root.path())).unwrap();
+        let canonical_root = root.path().canonicalize().unwrap();
+        assert!(served.managed_root().is_none());
+        assert_eq!(served.serve_root(), Some(canonical_root.as_path()));
+        assert_eq!(served.symbol_count().unwrap(), 1);
+        assert!(served
+            .insert_symbol("forbidden", "function", "src/lib.rs", 3, 4, None, None)
+            .is_err());
+        drop(served);
+
+        assert_eq!(directory_bytes(&state), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_serve_open_rejects_symlinked_state_and_database() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let victim = tempfile::tempdir().unwrap();
+        symlink(victim.path(), root.path().join(".mastermind")).unwrap();
+        let expected = root.path().join(".mastermind/mmcg.db");
+        assert!(Store::open_for_serve(&expected, Some(root.path())).is_err());
+        assert!(std::fs::read_dir(victim.path()).unwrap().next().is_none());
+
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join(".mastermind");
+        std::fs::create_dir(&state).unwrap();
+        let victim_path = victim.path().join("victim.db");
+        {
+            let victim_store = Store::open(&victim_path).unwrap();
+            victim_store.set_meta("sentinel", "unchanged").unwrap();
+        }
+        let before = std::fs::read(&victim_path).unwrap();
+        let expected = state.join("mmcg.db");
+        symlink(&victim_path, &expected).unwrap();
+        assert!(Store::open_for_serve(&expected, Some(root.path())).is_err());
+        assert_eq!(std::fs::read(&victim_path).unwrap(), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_serve_open_rejects_fifo_without_blocking() {
+        use std::os::unix::fs::FileTypeExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join(".mastermind");
+        std::fs::create_dir(&state).unwrap();
+        let expected = state.join("mmcg.db");
+        assert!(Command::new("mkfifo")
+            .arg(&expected)
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::fs::symlink_metadata(&expected)
+            .unwrap()
+            .file_type()
+            .is_fifo());
+
+        let started = Instant::now();
+        assert!(Store::open_for_serve(&expected, Some(root.path())).is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
@@ -6279,6 +6692,59 @@ mod tests {
         );
         store.pop_work_budget();
         store.pop_work_budget();
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn local_precision_budget_clears_only_its_own_interrupt_marker() {
+        fn long_query(store: &Store) -> SqlResult<i64> {
+            store
+                .conn
+                .prepare(
+                    "WITH RECURSIVE cnt(x) AS (
+                         SELECT 1
+                         UNION ALL
+                         SELECT x + 1 FROM cnt WHERE x < 100000000
+                     )
+                     SELECT count(*) FROM cnt",
+                )?
+                .query_row([], |row| row.get(0))
+        }
+
+        let path = tmp_db("local_precision_budget_marker");
+        let store = Store::open(&path).unwrap();
+
+        assert!(!store.push_work_budget(WorkBudget {
+            deadline: None,
+            op_ticks: Some(1_000),
+        }));
+        let local = store.with_local_work_budget(
+            WorkBudget {
+                deadline: None,
+                op_ticks: Some(1),
+            },
+            || long_query(&store),
+        );
+        assert_sqlite_interrupted(&local);
+        assert_eq!(store.interrupt_source(), None);
+        assert!(!store.work_interrupted());
+        store.pop_work_budget();
+
+        assert!(!store.push_work_budget(WorkBudget {
+            deadline: None,
+            op_ticks: Some(1),
+        }));
+        let inherited = store.with_local_work_budget(
+            WorkBudget {
+                deadline: None,
+                op_ticks: Some(1_000),
+            },
+            || long_query(&store),
+        );
+        assert_sqlite_interrupted(&inherited);
+        assert_eq!(store.interrupt_source(), Some(InterruptSource::Budget));
+        store.pop_work_budget();
+        assert_eq!(store.take_interrupt_source(), Some(InterruptSource::Budget));
         std::fs::remove_file(&path).ok();
     }
 

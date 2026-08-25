@@ -635,6 +635,8 @@ fn validated_index_paths(
             ChangeImpactError::RootMismatch,
         ));
     }
+    let root_capability =
+        crate::bounded_fs::RootCapability::open(root).map_err(|_| LensError::IndexStale)?;
 
     let indexed_files = store
         .files_under(None, None)
@@ -655,18 +657,38 @@ fn validated_index_paths(
             return Err(LensError::IndexStale);
         }
         let source_path = root.join(relative);
-        let metadata = source_path.metadata().map_err(|_| LensError::IndexStale)?;
-        if !metadata.is_file() || metadata.len() > crate::indexer::MAX_INDEXABLE_FILE_SIZE {
-            return Err(LensError::IndexStale);
-        }
-        let source_mtime = metadata
-            .modified()
-            .ok()
-            .and_then(|mtime| mtime.duration_since(SystemTime::UNIX_EPOCH).ok())
-            .map(|duration| duration.as_millis() as i64);
-        if source_mtime != Some(indexed_file.indexed_at) {
-            let bytes = std::fs::read(&source_path).map_err(|_| LensError::IndexStale)?;
-            let digest = crate::hex::encode(&Sha256::digest(bytes));
+        let control = crate::bounded_fs::ReadControl {
+            deadline,
+            interrupted: None,
+        };
+        let inspected = crate::bounded_fs::read_regular_file_with_capability(
+            &root_capability,
+            &source_path,
+            crate::indexer::MAX_INDEXABLE_FILE_SIZE,
+            0,
+            control,
+        )
+        .map_err(|error| match error {
+            crate::bounded_fs::BoundedReadError::DeadlineExceeded => LensError::AnalysisTimeout,
+            _ => LensError::IndexStale,
+        })?;
+        if inspected.modified_millis != indexed_file.indexed_at {
+            let source = crate::bounded_fs::read_regular_file_expected(
+                &root_capability,
+                &source_path,
+                crate::indexer::MAX_INDEXABLE_FILE_SIZE,
+                crate::indexer::MAX_INDEXABLE_FILE_SIZE,
+                control,
+                Some(inspected.identity),
+            )
+            .map_err(|error| match error {
+                crate::bounded_fs::BoundedReadError::DeadlineExceeded => LensError::AnalysisTimeout,
+                _ => LensError::IndexStale,
+            })?;
+            if source.declared_len != inspected.declared_len {
+                return Err(LensError::IndexStale);
+            }
+            let digest = crate::hex::encode(&Sha256::digest(source.bytes));
             let stored_digest = store
                 .file_content_sha256(&indexed_path)
                 .map_err(|_| LensError::IndexStale)?;
@@ -701,8 +723,15 @@ fn validated_index_paths(
         if indexed_paths.contains(&normalized) {
             continue;
         }
-        match crate::indexer::source_admission(&root.join(&relative)) {
-            Ok(()) => return Err(LensError::IndexStale),
+        match crate::indexer::source_admission_with_capability(
+            &root_capability,
+            &root.join(&relative),
+            crate::bounded_fs::ReadControl {
+                deadline,
+                interrupted: None,
+            },
+        ) {
+            Ok(_) => return Err(LensError::IndexStale),
             Err(crate::indexer::IndexError::Skipped(_)) => {}
             Err(_) => return Err(LensError::IndexStale),
         }
@@ -715,6 +744,7 @@ fn read_audit_narrative(
     root: &Path,
     expected_binding: &AuditNarrativeBinding,
     valid_components: &HashSet<String>,
+    deadline: Option<Instant>,
 ) -> Option<AuditNarrative> {
     const MAX_BYTES: u64 = 256 * 1024;
     const CAP_SUMMARY: usize = 2000;
@@ -730,16 +760,28 @@ fn read_audit_narrative(
     const CAP_SCENARIO: usize = 600;
     const CAP_EVIDENCE: usize = 500;
 
-    let path = std::env::var("MMCG_AUDIT_NARRATIVE")
+    let configured = std::env::var("MMCG_AUDIT_NARRATIVE")
         .ok()
         .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.join(".mastermind").join("audit-narrative.json"));
-    let metadata = std::fs::symlink_metadata(&path).ok()?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > MAX_BYTES {
-        return None;
-    }
-    let bytes = std::fs::read(&path).ok()?;
+        .map(PathBuf::from);
+    let path = match configured {
+        Some(path) if path.is_absolute() => path,
+        Some(path) => root.join(path),
+        None => root.join(".mastermind").join("audit-narrative.json"),
+    };
+    let capability = crate::bounded_fs::RootCapability::open(root).ok()?;
+    let bytes = crate::bounded_fs::read_regular_file_with_capability(
+        &capability,
+        &path,
+        MAX_BYTES,
+        MAX_BYTES,
+        crate::bounded_fs::ReadControl {
+            deadline,
+            interrupted: None,
+        },
+    )
+    .ok()?
+    .bytes;
     let raw: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     if raw
         .get("schema_version")
@@ -1344,7 +1386,7 @@ fn build_snapshot_until(
         .iter()
         .map(|component| component.path.clone())
         .collect::<HashSet<_>>();
-    let narrative = read_audit_narrative(&root, &narrative_binding, &valid_components);
+    let narrative = read_audit_narrative(&root, &narrative_binding, &valid_components, deadline);
 
     let audit = LensAudit {
         dead_code: LensDeadCode {
@@ -2311,6 +2353,34 @@ mod tests {
             .iter()
             .any(|field| field == "binding"));
         assert_eq!(schema["$defs"]["binding"]["additionalProperties"], false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_rejects_a_symlinked_audit_narrative() {
+        use std::os::unix::fs::symlink;
+
+        let (repo, _index_dir, index_path) = fixture();
+        let mastermind = repo.path().join(".mastermind");
+        fs::create_dir_all(&mastermind).unwrap();
+        let store = Store::open_read_only(&index_path).unwrap();
+        let initial = build_snapshot(&store, repo.path(), &options()).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let sidecar = outside.path().join("narrative.json");
+        fs::write(
+            &sidecar,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "binding": initial.audit.narrative_binding,
+                "summary": "must not cross the repository boundary"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        symlink(&sidecar, mastermind.join("audit-narrative.json")).unwrap();
+
+        let snapshot = build_snapshot(&store, repo.path(), &options()).unwrap();
+        assert!(snapshot.audit.narrative.is_none());
     }
 
     #[test]

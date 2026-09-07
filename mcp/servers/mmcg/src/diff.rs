@@ -289,7 +289,6 @@ pub(crate) fn symbols_changed_since_controlled(
         .map_err(|error| worktree_scope_error(git_ref, error))?;
     let head_oid = resolve_head_controlled(repo_root, deadline, interrupted)
         .map_err(|error| worktree_scope_error(git_ref, error))?;
-    require_current_extractor(store).map_err(|error| worktree_scope_error(git_ref, error))?;
     let (files_in_diff, truncated) =
         git_diff_name_only_controlled(repo_root, &baseline_oid, &head_oid, deadline, interrupted)
             .map_err(|error| worktree_scope_error(git_ref, error))?;
@@ -298,6 +297,9 @@ pub(crate) fn symbols_changed_since_controlled(
         .filter(|path| extractor_for_path(Path::new(path)).is_some())
         .cloned()
         .collect::<Vec<_>>();
+    if !parseable_paths.is_empty() {
+        require_current_extractor(store).map_err(|error| worktree_scope_error(git_ref, error))?;
+    }
     let old_blobs = baseline_blobs_for_paths_controlled(
         repo_root,
         &baseline_oid,
@@ -443,7 +445,6 @@ pub(crate) fn symbols_changed_in_worktree_controlled(
 ) -> Result<WorkingTreeSymbolDiff, WorkingTreeDiffError> {
     let baseline_oid = resolve_commit_controlled(repo_root, git_ref, deadline, interrupted)?;
     let head_oid = resolve_head_controlled(repo_root, deadline, interrupted)?;
-    require_current_extractor(store)?;
     let (files, files_total, files_truncated, skipped_non_utf8_paths) =
         collect_worktree_paths_controlled(repo_root, &baseline_oid, deadline, interrupted)?;
     let snapshot_token = working_tree_snapshot_token_controlled(
@@ -458,6 +459,9 @@ pub(crate) fn symbols_changed_in_worktree_controlled(
         .filter(|file| extractor_for_path(Path::new(&file.path)).is_some())
         .map(|file| file.path.clone())
         .collect::<Vec<_>>();
+    if !paths.is_empty() {
+        require_current_extractor(store)?;
+    }
     let mut old_blobs = files
         .iter()
         .map(|file| (file.path.clone(), None))
@@ -2068,6 +2072,36 @@ mod tests {
         assert_eq!(total, Some(2));
         assert!(!truncated);
         assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn text_only_symbol_diff_does_not_require_an_extractor_index() {
+        let dir = init_repo("text_only_no_index");
+        write(&dir, "notes.txt", "before\n");
+        run(&dir, &["add", "notes.txt"]);
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+        run(&dir, &["tag", "baseline"]);
+        write(&dir, "notes.txt", "after\n");
+        let database = tempfile::tempdir().unwrap();
+        let store = Store::open(database.path().join("graph.db")).unwrap();
+        assert!(!store.extractor_contract_current().unwrap());
+        let assert_text_change = |diff: &SymbolDiff| {
+            assert_eq!(diff.files_in_diff, vec!["notes.txt"]);
+            assert!(diff.added.is_empty());
+            assert!(diff.removed.is_empty());
+            assert!(diff.signature_changed.is_empty());
+            assert!(diff.errors.is_empty());
+            assert!(!diff.truncated);
+        };
+        let worktree = symbols_changed_in_worktree(&store, &dir, "baseline").unwrap();
+        assert_text_change(&worktree.diff);
+        assert!(worktree.body_changed.is_empty());
+        assert_text_change(&symbols_changed_since_worktree(&store, &dir, "baseline").unwrap());
+        run(&dir, &["add", "notes.txt"]);
+        run(&dir, &["commit", "-q", "-m", "text only"]);
+        assert_text_change(&symbols_changed_since(&store, &dir, "baseline").unwrap());
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

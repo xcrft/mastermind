@@ -32,7 +32,7 @@ pub fn dispatch(q: QueryCmd, index_path: &Path) -> Result<(), Box<dyn std::error
                 eprintln!("  - generated dynamically (Python metaclass, TS decorators, macros)");
                 eprintln!("  - file not in index (check extension or .gitignore)");
                 eprintln!("  - language parser limitation (C++ macros, Rust proc-macros)");
-                eprintln!("  - wrong name (try a prefix: mmcg query search {query})");
+                eprintln!("  - wrong exact name (try: mmcg concept <search terms>)");
                 eprintln!("\nTry:");
                 eprintln!("  mastermind query files --prefix <dir>");
                 eprintln!("  mastermind index --force .");

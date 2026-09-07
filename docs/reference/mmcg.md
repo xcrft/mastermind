@@ -282,6 +282,7 @@ mmcg query callers SomeFn --edge-kind imports     # who imports the symbol
 mmcg query callers callback --edge-kind references # function-value/macro references
 mmcg query callees parse_one
 mmcg query callees process --file src/second.rs --line 12  # select a returned candidate
+mmcg query explain process --language rust          # diagnose definition and edge-count scope
 mmcg query impact extract --depth 3
 mmcg query files --prefix src/indexer
 mmcg query outline src/store.rs                    # symbol tree of one file
@@ -293,6 +294,38 @@ mmcg query api-surface src/runtime/                # symbols under prefix used e
 mmcg concept "payment retry handler" --top 10
 mmcg concept "payment retry handler" --top 10 --format json
 ```
+
+### Explaining symbol queries
+
+`mmcg query explain <name>` returns raw exact-name definitions and diagnostic
+counts for `calls`. `--language` filters both definitions and incoming source
+symbols. Returned language identifiers can be reused as filters, including
+`tsx` for `.tsx` files and `typescript` for `.ts` files.
+
+The response now has `schema_version: 2`. Compared with the previous unversioned
+output, `callee_count` and `edge_precision` are nullable when there is no unique
+definition. Consumers must check `match_status` before using that summary:
+
+| `match_status` | `matched` | `callee_count` / `edge_precision` |
+|---|---|---|
+| `matched` | One raw definition | Its outgoing count and language precision; zero means no indexed call pairs were found |
+| `ambiguous` | All same-name definitions after the language filter | Both `null`; use `query callees` with an exact candidate file and declaration start line |
+| `not_found` | Empty | Both `null`; no outgoing measurement was made |
+
+`caller_count_scope: "name_or_type_candidates"` identifies the unchanged incoming
+count: distinct containing source symbols with compatible edges to the queried
+name or type prefix. It is not specific to a definition and can be positive even
+without an indexed definition. The language filter restricts incoming sources;
+target-kind compatibility still considers all same-name definitions. Repeated
+call sites in one source symbol count once. `callee_count` instead counts distinct
+`(target name, call line)` pairs of the one matched definition. `edge_precision`
+and `limitations` describe only that definition's outgoing extraction;
+`precision_notes` retains general dependency and count-scope caveats in every
+response. Empty results do not prove absence of runtime dependencies.
+
+Partial-class declarations stay separate in `matched`; `query search` may group
+compatible declarations. Storage and query failures exit with an error instead
+of producing a successful JSON response with a zero count.
 
 ### Local symbol concept search
 

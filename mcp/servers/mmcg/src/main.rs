@@ -993,12 +993,12 @@ enum QueryCmd {
         #[arg(long)]
         language: Option<String>,
     },
-    /// Debug a symbol query: show matched symbol IDs, files, edge counts,
-    /// source-language edge precision, and known limitations. Useful when
-    /// mmcg returns unexpected results or you want to understand the trust
-    /// level of a callers/callees result.
+    /// Debug a symbol query: raw definitions, name-based incoming counts and
+    /// outgoing counts/precision only for a unique definition. Schema v2 uses
+    /// null outgoing summaries for ambiguous or missing definitions.
     Explain {
         name: String,
+        /// Filter definitions and incoming source symbols by indexed language.
         #[arg(long)]
         language: Option<String>,
     },

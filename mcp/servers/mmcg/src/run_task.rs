@@ -3182,6 +3182,14 @@ verify:
     #[test]
     fn spec_change_requires_explicit_preflight_without_losing_implemented_diff() {
         let (root, spec, db) = preflight_fixture();
+        let body = fs::read_to_string(&spec).unwrap();
+        // Text files need explicit scope; the prose path heuristic is for
+        // recognized source extensions and does not infer a .txt touch.
+        fs::write(
+            &spec,
+            format!("---\ntouches:\n  - file: src.txt\n---\n{body}"),
+        )
+        .unwrap();
         assert_eq!(
             run(
                 &spec,

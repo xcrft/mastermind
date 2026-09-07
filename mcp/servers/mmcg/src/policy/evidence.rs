@@ -4,6 +4,9 @@ use super::{
     FAMILY_API, FAMILY_CYCLES, FAMILY_IMPACT, FAMILY_IMPORT_GRAPH, FAMILY_OWNERSHIP, FAMILY_TESTS,
     FAMILY_WORKFLOW,
 };
+use crate::bounded_fs::{
+    self, BoundedPathKind, BoundedReadError, ReadControl, RootCapability, StableFileIdentity,
+};
 use crate::diff::{run_bounded_git_with_limit, WorkingTreeDiffError};
 use crate::evidence::{EvidenceExtensionOptions, EvidenceOptions};
 use crate::indexer::{extractor_for_path, parse_blob, MAX_INDEXABLE_FILE_SIZE};
@@ -11,13 +14,14 @@ use crate::queries::{ChangeImpactResponse, ImpactEngine};
 use crate::run_task::RunState;
 use crate::store::{PendingFile, Store};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const IMPORT_EDGE_LIMIT: usize = 50_000;
 const BASELINE_CYCLE_FILE_LIMIT: usize = 500;
 const BASELINE_CYCLE_BYTE_LIMIT: usize = 32 * 1024 * 1024;
 const WORKFLOW_TASK_LIMIT: usize = 1_000;
 const WORKFLOW_ARTIFACT_BYTE_LIMIT: u64 = 1024 * 1024;
+const WORKFLOW_TOTAL_BYTE_LIMIT: u64 = 32 * 1024 * 1024;
 
 pub(super) fn collect(
     store: &Store,
@@ -209,17 +213,17 @@ pub(super) fn collect(
         .rules
         .iter()
         .any(|rule| matches!(rule.kind, PolicyRuleKind::StrictWorkflow { .. }));
-    let strict_workflow_files = if needs_workflow {
-        let (files, workflow_gaps) = collect_workflow_evidence(
+    let (mut strict_workflow_files, workflow_snapshot) = if needs_workflow {
+        let (files, workflow_gaps, snapshot) = collect_workflow_evidence(
             root,
             &options.workflow_evidence_path,
             &impact.baseline.baseline_oid,
             &relevant_workflow_paths,
         );
         gaps.extend(workflow_gaps);
-        files
+        (files, snapshot)
     } else {
-        BTreeMap::new()
+        (BTreeMap::new(), None)
     };
 
     crate::lens::validate_index_snapshot(store, root, None)
@@ -235,6 +239,10 @@ pub(super) fn collect(
             "policy_snapshot_changed",
             "repository or index evidence changed during evaluation",
         ));
+    }
+    if workflow_snapshot.is_some_and(|snapshot| snapshot.verify().is_err()) {
+        strict_workflow_files.clear();
+        gaps.push(workflow_changed_gap());
     }
 
     gaps.sort();
@@ -616,68 +624,90 @@ fn collect_workflow_evidence(
     requested: &Path,
     baseline_oid: &str,
     relevant_files: &BTreeSet<String>,
-) -> (BTreeMap<String, Vec<String>>, Vec<EvidenceGap>) {
+) -> WorkflowEvidence {
     if relevant_files.is_empty() {
-        return (BTreeMap::new(), Vec::new());
+        return (BTreeMap::new(), Vec::new(), None);
     }
     let path = if requested.is_absolute() {
         requested.to_path_buf()
     } else {
         root.join(requested)
     };
-    if !path.exists() {
-        return (BTreeMap::new(), Vec::new());
-    }
-    let metadata = match std::fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => metadata,
-        _ => {
+    let capability = match RootCapability::open(&path) {
+        Ok(capability) => capability,
+        Err(BoundedReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (BTreeMap::new(), Vec::new(), None);
+        }
+        Err(error) => {
             return (
                 BTreeMap::new(),
                 vec![gap(
                     FAMILY_WORKFLOW,
                     "workflow_evidence_invalid",
-                    "Workflow evidence must be a real directory, not a symlink.",
+                    format!("Workflow evidence directory is unavailable: {error}"),
                 )],
+                None,
             )
         }
     };
-    let _ = metadata;
-    let mut task_dirs = match std::fs::read_dir(&path) {
-        Ok(entries) => entries
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .collect::<Vec<_>>(),
-        Err(_) => {
+    let task_names = match bounded_fs::read_directory_names_with_capability(
+        &capability,
+        capability.canonical_root(),
+        WORKFLOW_TASK_LIMIT,
+        ReadControl::default(),
+    ) {
+        Ok(names) => names,
+        Err(error) => {
             return (
                 BTreeMap::new(),
                 vec![gap(
                     FAMILY_WORKFLOW,
-                    "workflow_evidence_unreadable",
-                    "Workflow evidence directory could not be read.",
+                    if matches!(error, BoundedReadError::TooLarge { .. }) {
+                        "workflow_task_limit"
+                    } else {
+                        "workflow_evidence_unreadable"
+                    },
+                    format!("Workflow evidence directory could not be enumerated: {error}"),
                 )],
+                None,
             )
         }
     };
-    task_dirs.sort();
     let mut gaps = Vec::new();
-    if task_dirs.len() > WORKFLOW_TASK_LIMIT {
-        task_dirs.truncate(WORKFLOW_TASK_LIMIT);
-        gaps.push(gap(
-            FAMILY_WORKFLOW,
-            "workflow_task_limit",
-            "Workflow evidence exceeded the 1,000-task work limit.",
-        ));
-    }
+    let mut artifacts = WorkflowArtifacts::new(capability, ReadControl::default());
+    let mut task_kinds = Vec::new();
 
     let mut files: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for task_dir in task_dirs {
-        if !is_real_directory(&task_dir) {
-            continue;
+    for task_name in &task_names {
+        let task_dir = path.join(task_name);
+        match bounded_fs::inspect_path_kind_with_capability(
+            &artifacts.root,
+            &task_dir,
+            ReadControl::default(),
+        ) {
+            Ok(BoundedPathKind::Directory) => {
+                task_kinds.push((task_dir.clone(), BoundedPathKind::Directory))
+            }
+            Ok(BoundedPathKind::RegularFile) => {
+                task_kinds.push((task_dir, BoundedPathKind::RegularFile));
+                continue;
+            }
+            result => {
+                gaps.push(gap(
+                    FAMILY_WORKFLOW,
+                    "workflow_evidence_unreadable",
+                    format!(
+                        "Workflow task directory `{}` is unavailable: {result:?}",
+                        task_dir.display()
+                    ),
+                ));
+                continue;
+            }
         }
         let spec_path = task_dir.join("spec.md");
         let state_path = task_dir.join("state.json");
         let audit_path = task_dir.join("audit.md");
-        let Some(spec_body) = read_small_regular_file(&spec_path) else {
+        let Some(spec_body) = read_workflow_artifact(&mut artifacts, &spec_path, &mut gaps) else {
             continue;
         };
         let parsed = crate::spec::parse_str(&spec_path.to_string_lossy(), &spec_body);
@@ -687,15 +717,24 @@ fn collect_workflow_evidence(
         if frontmatter.mode.as_deref() != Some("strict") {
             continue;
         }
-        let touches = frontmatter
+        let Some(touches) = frontmatter
             .touches
             .iter()
-            .filter_map(|touch| normalize_evidence_path(&touch.file))
-            .collect::<BTreeSet<_>>();
+            .map(|touch| normalize_evidence_path(&touch.file))
+            .collect::<Option<BTreeSet<_>>>()
+        else {
+            gaps.push(gap(
+                FAMILY_WORKFLOW,
+                "workflow_touch_path_invalid",
+                "Workflow spec contains an invalid declared touch path.",
+            ));
+            continue;
+        };
         if touches.is_disjoint(relevant_files) {
             continue;
         }
-        let Some(state_body) = read_small_regular_file(&state_path) else {
+        let Some(state_body) = read_workflow_artifact(&mut artifacts, &state_path, &mut gaps)
+        else {
             continue;
         };
         let Ok(state) = serde_json::from_str::<RunState>(&state_body) else {
@@ -710,7 +749,7 @@ fn collect_workflow_evidence(
         if !state_spec_matches(&state.spec_path, &spec_path, &task_dir) {
             continue;
         }
-        let Some(audit) = read_small_regular_file(&audit_path) else {
+        let Some(audit) = read_workflow_artifact(&mut artifacts, &audit_path, &mut gaps) else {
             continue;
         };
         if !audit
@@ -724,7 +763,12 @@ fn collect_workflow_evidence(
             continue;
         };
         let touch_files = touches.iter().cloned().collect::<Vec<_>>();
-        match crate::run_task::strict_workflow_snapshot(root, baseline_oid, &touch_files) {
+        match crate::run_task::strict_workflow_snapshot_for_version(
+            root,
+            baseline_oid,
+            &touch_files,
+            state.held_snapshot_version,
+        ) {
             Ok(current_snapshot) if current_snapshot == expected_snapshot => {}
             Ok(_) => continue,
             Err(message) => {
@@ -748,20 +792,69 @@ fn collect_workflow_evidence(
                 .push(evidence_path.clone());
         }
     }
+    let snapshot = WorkflowEvidenceSnapshot {
+        artifacts,
+        task_names,
+        task_kinds,
+    };
+    if snapshot.verify().is_err() {
+        gaps.push(workflow_changed_gap());
+        files.clear();
+    }
     for paths in files.values_mut() {
         paths.sort();
         paths.dedup();
     }
-    (files, gaps)
+    (files, gaps, Some(snapshot))
+}
+
+type WorkflowEvidence = (
+    BTreeMap<String, Vec<String>>,
+    Vec<EvidenceGap>,
+    Option<WorkflowEvidenceSnapshot>,
+);
+
+struct WorkflowEvidenceSnapshot {
+    artifacts: WorkflowArtifacts<'static>,
+    task_names: Vec<std::ffi::OsString>,
+    task_kinds: Vec<(PathBuf, BoundedPathKind)>,
+}
+
+impl WorkflowEvidenceSnapshot {
+    fn verify(&self) -> Result<(), BoundedReadError> {
+        let names = bounded_fs::read_directory_names_with_capability(
+            &self.artifacts.root,
+            self.artifacts.root.canonical_root(),
+            WORKFLOW_TASK_LIMIT,
+            ReadControl::default(),
+        )?;
+        if names != self.task_names {
+            return Err(BoundedReadError::SnapshotChanged);
+        }
+        for (path, expected) in &self.task_kinds {
+            let kind = bounded_fs::inspect_path_kind_with_capability(
+                &self.artifacts.root,
+                path,
+                ReadControl::default(),
+            )?;
+            if kind != *expected {
+                return Err(BoundedReadError::SnapshotChanged);
+            }
+        }
+        self.artifacts.verify()
+    }
+}
+
+fn workflow_changed_gap() -> EvidenceGap {
+    gap(
+        FAMILY_WORKFLOW,
+        "workflow_evidence_changed",
+        "Workflow artifacts changed during evaluation; retry with a stable evidence directory.",
+    )
 }
 
 fn state_spec_matches(state_spec: &str, current_spec: &Path, task_dir: &Path) -> bool {
-    if Path::new(state_spec)
-        .canonicalize()
-        .ok()
-        .zip(current_spec.canonicalize().ok())
-        .is_some_and(|(state, current)| state == current)
-    {
+    if Path::new(state_spec) == current_spec {
         return true;
     }
     let Some(task_id) = task_dir.file_name().and_then(|name| name.to_str()) else {
@@ -772,21 +865,106 @@ fn state_spec_matches(state_spec: &str, current_spec: &Path, task_dir: &Path) ->
     normalized == suffix || normalized.ends_with(&format!("/{suffix}"))
 }
 
-fn is_real_directory(path: &Path) -> bool {
-    std::fs::symlink_metadata(path)
-        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+struct WorkflowArtifacts<'a> {
+    root: RootCapability,
+    control: ReadControl<'a>,
+    total_bytes: u64,
+    snapshots: Vec<(PathBuf, StableFileIdentity, String)>,
+    missing: Vec<PathBuf>,
 }
 
-fn read_small_regular_file(path: &Path) -> Option<String> {
-    let metadata = std::fs::symlink_metadata(path).ok()?;
-    if !metadata.is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.len() == 0
-        || metadata.len() > WORKFLOW_ARTIFACT_BYTE_LIMIT
-    {
-        return None;
+impl<'a> WorkflowArtifacts<'a> {
+    fn new(root: RootCapability, control: ReadControl<'a>) -> Self {
+        Self {
+            root,
+            control,
+            total_bytes: 0,
+            snapshots: Vec::new(),
+            missing: Vec::new(),
+        }
     }
-    std::fs::read_to_string(path).ok()
+
+    fn read(&mut self, path: &Path) -> Result<Option<String>, BoundedReadError> {
+        let limit = WORKFLOW_ARTIFACT_BYTE_LIMIT.min(WORKFLOW_TOTAL_BYTE_LIMIT - self.total_bytes);
+        let file = match bounded_fs::read_regular_file_with_capability(
+            &self.root,
+            path,
+            limit,
+            limit,
+            self.control,
+        ) {
+            Ok(file) => file,
+            Err(BoundedReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.missing.push(path.to_path_buf());
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        self.total_bytes += file.declared_len;
+        let body = String::from_utf8(file.bytes).map_err(|error| {
+            BoundedReadError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        })?;
+        self.snapshots.push((
+            path.to_path_buf(),
+            file.identity,
+            crate::run_task::hash_text(&body),
+        ));
+        Ok(Some(body))
+    }
+
+    fn verify(&self) -> Result<(), BoundedReadError> {
+        self.root.verify()?;
+        for (path, identity, expected_hash) in &self.snapshots {
+            let file = bounded_fs::read_regular_file_expected(
+                &self.root,
+                path,
+                WORKFLOW_ARTIFACT_BYTE_LIMIT,
+                WORKFLOW_ARTIFACT_BYTE_LIMIT,
+                self.control,
+                Some(*identity),
+            )?;
+            let body =
+                String::from_utf8(file.bytes).map_err(|_| BoundedReadError::SnapshotChanged)?;
+            if crate::run_task::hash_text(&body) != *expected_hash {
+                return Err(BoundedReadError::SnapshotChanged);
+            }
+        }
+        for path in &self.missing {
+            match bounded_fs::read_regular_file_with_capability(
+                &self.root,
+                path,
+                0,
+                0,
+                self.control,
+            ) {
+                Err(BoundedReadError::Io(error))
+                    if error.kind() == std::io::ErrorKind::NotFound => {}
+                _ => return Err(BoundedReadError::SnapshotChanged),
+            }
+        }
+        self.root.verify()
+    }
+}
+
+fn read_workflow_artifact(
+    artifacts: &mut WorkflowArtifacts<'_>,
+    path: &Path,
+    gaps: &mut Vec<EvidenceGap>,
+) -> Option<String> {
+    match artifacts.read(path) {
+        Ok(body) => body,
+        Err(error) => {
+            gaps.push(gap(
+                FAMILY_WORKFLOW,
+                "workflow_evidence_unreadable",
+                format!(
+                    "Workflow artifact `{}` is unavailable: {error}",
+                    path.display()
+                ),
+            ));
+            None
+        }
+    }
 }
 
 fn normalize_evidence_path(path: &str) -> Option<String> {
@@ -801,12 +979,12 @@ fn normalize_evidence_path(path: &str) -> Option<String> {
     {
         None
     } else {
-        Some(
-            path.split('/')
-                .filter(|part| !part.is_empty() && *part != ".")
-                .collect::<Vec<_>>()
-                .join("/"),
-        )
+        let normalized = path
+            .split('/')
+            .filter(|part| !part.is_empty() && *part != ".")
+            .collect::<Vec<_>>()
+            .join("/");
+        (!normalized.is_empty()).then_some(normalized)
     }
 }
 
@@ -815,6 +993,342 @@ mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
     use std::fs;
+
+    fn external_workflow_fixture(version: u32) -> (tempfile::TempDir, tempfile::TempDir, String) {
+        let repo = tempfile::tempdir().unwrap();
+        let evidence = tempfile::tempdir().unwrap();
+        run(repo.path(), &["init", "-b", "main"]);
+        for (key, value) in [
+            ("user.email", "policy@example.com"),
+            ("user.name", "Policy Test"),
+            ("commit.gpgsign", "false"),
+            ("core.autocrlf", "false"),
+        ] {
+            run(repo.path(), &["config", key, value]);
+        }
+        fs::write(repo.path().join("critical.txt"), "before\n").unwrap();
+        run(repo.path(), &["add", "."]);
+        run(repo.path(), &["commit", "-qm", "baseline"]);
+        let baseline = output(repo.path(), &["rev-parse", "HEAD"]);
+        fs::write(repo.path().join("critical.txt"), "after\n").unwrap();
+        let task = evidence.path().join("001-critical");
+        fs::create_dir(&task).unwrap();
+        let spec = "---\nmode: strict\ntouches:\n  - file: critical.txt\n---\n# Critical\n";
+        fs::write(task.join("spec.md"), spec).unwrap();
+        fs::write(task.join("audit.md"), "✅ Held — spec.md\n").unwrap();
+        let snapshot = crate::run_task::strict_workflow_snapshot_for_version(
+            repo.path(),
+            &baseline,
+            &["critical.txt".into()],
+            version,
+        )
+        .unwrap();
+        let mut state = serde_json::json!({
+            "status": "learned", "spec_path": "/original/checkout/.mastermind/tasks/001-critical/spec.md",
+            "spec_hash": crate::run_task::hash_text(spec), "baseline_ref": baseline,
+            "held_snapshot_sha256": snapshot, "started_at": 1,
+        });
+        if version != 1 {
+            state["held_snapshot_version"] = version.into();
+        }
+        fs::write(task.join("state.json"), serde_json::to_vec(&state).unwrap()).unwrap();
+        (repo, evidence, baseline)
+    }
+
+    fn external_workflow(repo: &Path, evidence: &Path, baseline: &str) -> WorkflowEvidence {
+        collect_workflow_evidence(
+            repo,
+            evidence,
+            baseline,
+            &BTreeSet::from(["critical.txt".into()]),
+        )
+    }
+
+    #[test]
+    fn external_workflow_evidence_preserves_versions_and_survives_commit() {
+        for version in [1, 2] {
+            let (repo, evidence, baseline) = external_workflow_fixture(version);
+            let (approved, gaps, receipt) =
+                external_workflow(repo.path(), evidence.path(), &baseline);
+            assert!(gaps.is_empty(), "{gaps:?}");
+            assert!(approved.contains_key("critical.txt"));
+            receipt.unwrap().verify().unwrap();
+            run(repo.path(), &["add", "critical.txt"]);
+            let (staged, gaps, _) = external_workflow(repo.path(), evidence.path(), &baseline);
+            assert!(gaps.is_empty(), "{gaps:?}");
+            if version == 1 {
+                assert!(
+                    staged.is_empty(),
+                    "legacy evidence must not be silently upgraded"
+                );
+            } else {
+                assert_eq!(staged, approved);
+                run(repo.path(), &["commit", "-qm", "implementation"]);
+                let (committed, gaps, _) =
+                    external_workflow(repo.path(), evidence.path(), &baseline);
+                assert!(gaps.is_empty(), "{gaps:?}");
+                assert_eq!(committed, approved);
+            }
+        }
+    }
+
+    #[test]
+    fn external_workflow_does_not_fall_back_or_drop_invalid_touches() {
+        for mutation in ["unknown_version", "wrong_version", "invalid_touch"] {
+            let (repo, evidence, baseline) = external_workflow_fixture(2);
+            let task = evidence.path().join("001-critical");
+            let state_path = task.join("state.json");
+            let mut state: serde_json::Value =
+                serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+            if mutation == "invalid_touch" {
+                let spec = "---\nmode: strict\ntouches:\n  - file: critical.txt\n  - file: ../escape\n---\n# Critical\n";
+                fs::write(task.join("spec.md"), spec).unwrap();
+                state["spec_hash"] = crate::run_task::hash_text(spec).into();
+            } else if mutation == "wrong_version" {
+                state["held_snapshot_sha256"] =
+                    crate::run_task::strict_workflow_snapshot_for_version(
+                        repo.path(),
+                        &baseline,
+                        &["critical.txt".into()],
+                        1,
+                    )
+                    .unwrap()
+                    .into();
+            } else {
+                state["held_snapshot_version"] = 999.into();
+            }
+            fs::write(state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+            let (files, gaps, _) = external_workflow(repo.path(), evidence.path(), &baseline);
+            assert!(files.is_empty(), "{mutation}");
+            if mutation != "wrong_version" {
+                assert!(!gaps.is_empty(), "{mutation}");
+            }
+        }
+    }
+
+    #[test]
+    fn workflow_receipt_detects_changes_after_collection() {
+        for mutation in [
+            "edit",
+            "delete",
+            "replace",
+            "missing_appears",
+            "kind_changes",
+        ] {
+            let (repo, evidence, baseline) = external_workflow_fixture(2);
+            let audit = evidence.path().join("001-critical/audit.md");
+            let extra = evidence.path().join("pending");
+            if mutation == "missing_appears" {
+                fs::create_dir(&extra).unwrap();
+            } else if mutation == "kind_changes" {
+                fs::write(&extra, "not a task").unwrap();
+            }
+            let (files, gaps, receipt) = external_workflow(repo.path(), evidence.path(), &baseline);
+            assert!(files.contains_key("critical.txt"));
+            assert!(gaps.is_empty(), "{gaps:?}");
+            let receipt = receipt.unwrap();
+            match mutation {
+                "edit" => fs::write(&audit, "✅ Held — different evidence\n").unwrap(),
+                "delete" => fs::remove_file(&audit).unwrap(),
+                "replace" => {
+                    let bytes = fs::read(&audit).unwrap();
+                    fs::rename(&audit, audit.with_file_name("audit.old")).unwrap();
+                    fs::write(&audit, bytes).unwrap();
+                }
+                "missing_appears" => fs::write(extra.join("spec.md"), "# New task\n").unwrap(),
+                "kind_changes" => {
+                    fs::remove_file(&extra).unwrap();
+                    fs::create_dir(&extra).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(receipt.verify().is_err(), "{mutation}");
+        }
+    }
+
+    #[test]
+    fn policy_rechecks_external_artifacts_after_the_final_impact_read() {
+        let (repo, evidence, baseline) = external_workflow_fixture(2);
+        fs::write(
+            repo.path().join("helper.py"),
+            "def helper():\n    return 1\n",
+        )
+        .unwrap();
+        fs::write(
+            repo.path().join("mastermind-policy.yml"),
+            "rules:\n  - id: workflow\n    critical: critical.txt\n    require_workflow: strict\n",
+        )
+        .unwrap();
+        fs::create_dir(repo.path().join(".mastermind")).unwrap();
+        let mut store = Store::open(&repo.path().join(".mastermind/mmcg.db")).unwrap();
+        crate::indexer::Indexer::new(repo.path())
+            .index_all(&mut store, true)
+            .unwrap();
+        let options = CheckOptions {
+            since: baseline,
+            config_path: "mastermind-policy.yml".into(),
+            codeowners: None,
+            workflow_evidence_path: evidence.path().to_path_buf(),
+            depth: 3,
+            top: 500,
+        };
+        let before = super::super::check(&store, repo.path(), &options).unwrap();
+        assert!(before.complete && before.passed, "{before:?}");
+        let calls = std::cell::Cell::new(0);
+        let engine = |store: &Store, root: &Path, since: &str, depth, top| {
+            let impact = crate::queries::change_impact(store, root, since, depth, top)?;
+            calls.set(calls.get() + 1);
+            if calls.get() == 2 {
+                fs::write(
+                    evidence.path().join("001-critical/audit.md"),
+                    "✅ Held — replaced\n",
+                )
+                .unwrap();
+            }
+            Ok(impact)
+        };
+        let after =
+            super::super::check_with_impact_engine(&store, repo.path(), &options, &engine).unwrap();
+        assert_eq!(calls.get(), 2);
+        assert!(!after.complete && !after.passed, "{after:?}");
+        assert!(after
+            .diagnostics
+            .iter()
+            .any(|gap| gap.code == "workflow_evidence_changed"));
+    }
+
+    #[test]
+    fn workflow_read_errors_remain_incomplete_beside_valid_coverage() {
+        for invalid in ["oversized", "utf8"] {
+            let (repo, evidence, baseline) = external_workflow_fixture(2);
+            let extra = evidence.path().join("invalid");
+            fs::create_dir(&extra).unwrap();
+            let spec = extra.join("spec.md");
+            if invalid == "oversized" {
+                fs::File::create(spec)
+                    .unwrap()
+                    .set_len(WORKFLOW_ARTIFACT_BYTE_LIMIT + 1)
+                    .unwrap();
+            } else {
+                fs::write(spec, [0xff]).unwrap();
+            }
+            let (files, gaps, _) = external_workflow(repo.path(), evidence.path(), &baseline);
+            assert!(files.contains_key("critical.txt"));
+            assert!(
+                gaps.iter()
+                    .any(|gap| gap.code == "workflow_evidence_unreadable"),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_evidence_enforces_directory_and_aggregate_limits() {
+        let evidence = tempfile::tempdir().unwrap();
+        for i in 0..=WORKFLOW_TASK_LIMIT {
+            fs::write(evidence.path().join(format!("task-{i}")), "").unwrap();
+        }
+        let (files, gaps, _) = external_workflow(evidence.path(), evidence.path(), "baseline");
+        assert!(files.is_empty());
+        assert!(gaps.iter().any(|gap| gap.code == "workflow_task_limit"));
+
+        let evidence = tempfile::tempdir().unwrap();
+        let mut artifacts = WorkflowArtifacts::new(
+            RootCapability::open(evidence.path()).unwrap(),
+            ReadControl::default(),
+        );
+        for i in 0..WORKFLOW_TOTAL_BYTE_LIMIT / WORKFLOW_ARTIFACT_BYTE_LIMIT {
+            let path = evidence.path().join(format!("artifact-{i}"));
+            fs::File::create(&path)
+                .unwrap()
+                .set_len(WORKFLOW_ARTIFACT_BYTE_LIMIT)
+                .unwrap();
+            assert!(artifacts.read(&path).unwrap().is_some());
+        }
+        let overflow = evidence.path().join("overflow");
+        fs::write(&overflow, "x").unwrap();
+        assert!(matches!(
+            artifacts.read(&overflow),
+            Err(BoundedReadError::TooLarge { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workflow_evidence_rejects_symlinks_and_special_files() {
+        use std::os::unix::fs::symlink;
+        for invalid in ["root", "task", "artifact", "dangling", "fifo"] {
+            let (repo, evidence, baseline) = external_workflow_fixture(2);
+            let task = evidence.path().join("001-critical");
+            let requested = if invalid == "root" {
+                let link = repo.path().join("linked-evidence");
+                symlink(evidence.path(), &link).unwrap();
+                link
+            } else {
+                match invalid {
+                    "task" => {
+                        let moved = repo.path().join("moved-task");
+                        fs::rename(&task, &moved).unwrap();
+                        symlink(moved, &task).unwrap();
+                    }
+                    "artifact" | "dangling" => {
+                        fs::remove_file(task.join("audit.md")).unwrap();
+                        symlink(
+                            if invalid == "artifact" {
+                                task.join("spec.md")
+                            } else {
+                                task.join("absent")
+                            },
+                            task.join("audit.md"),
+                        )
+                        .unwrap();
+                    }
+                    "fifo" => {
+                        fs::remove_file(task.join("audit.md")).unwrap();
+                        let path = std::ffi::CString::new(
+                            task.join("audit.md").as_os_str().as_encoded_bytes(),
+                        )
+                        .unwrap();
+                        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+                    }
+                    _ => unreachable!(),
+                }
+                evidence.path().to_path_buf()
+            };
+            let (files, gaps, _) = external_workflow(repo.path(), &requested, &baseline);
+            assert!(files.is_empty(), "{invalid}");
+            assert!(!gaps.is_empty(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn workflow_artifact_growth_during_read_is_bounded() {
+        let evidence = tempfile::tempdir().unwrap();
+        let path = evidence.path().join("audit.md");
+        fs::write(&path, "held").unwrap();
+        let calls = std::cell::Cell::new(0);
+        let grow = || {
+            calls.set(calls.get() + 1);
+            if calls.get() == 2 {
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_len(WORKFLOW_ARTIFACT_BYTE_LIMIT + 1)
+                    .unwrap();
+            }
+            false
+        };
+        let mut artifacts = WorkflowArtifacts::new(
+            RootCapability::open(evidence.path()).unwrap(),
+            ReadControl {
+                interrupted: Some(&grow),
+                deadline: None,
+            },
+        );
+        assert!(artifacts.read(&path).is_err());
+        assert!(artifacts.snapshots.is_empty());
+    }
 
     #[test]
     fn held_strict_workflow_evidence_is_bound_to_baseline_and_touched_file() {
@@ -850,6 +1364,7 @@ mod tests {
                 spec_hash: crate::run_task::hash_text(spec_body),
                 baseline_ref: baseline.clone(),
                 held_snapshot_sha256: Some(held_snapshot),
+                held_snapshot_version: crate::run_task::STRICT_SNAPSHOT_VERSION,
                 history_snapshot_sha256: None,
                 started_at: 1,
                 iteration: 1,
@@ -862,7 +1377,7 @@ mod tests {
         fs::write(task.join("audit.md"), "✅ Held — spec.md\n").unwrap();
         let relevant = BTreeSet::from(["services/payment/charge.ts".to_string()]);
 
-        let (files, gaps) = collect_workflow_evidence(
+        let (files, gaps, _) = collect_workflow_evidence(
             root.path(),
             Path::new(".mastermind/tasks"),
             &baseline,
@@ -884,7 +1399,7 @@ mod tests {
             spec_body.hash(&mut legacy);
             state.spec_hash = format!("{:016x}", legacy.finish());
             fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
-            let (legacy_files, legacy_gaps) = collect_workflow_evidence(
+            let (legacy_files, legacy_gaps, _) = collect_workflow_evidence(
                 root.path(),
                 Path::new(".mastermind/tasks"),
                 &baseline,
@@ -901,7 +1416,7 @@ mod tests {
             let mut executable = fs::metadata(&source).unwrap().permissions();
             executable.set_mode(original_mode | 0o111);
             fs::set_permissions(&source, executable).unwrap();
-            let (mode_stale, _) = collect_workflow_evidence(
+            let (mode_stale, _, _) = collect_workflow_evidence(
                 root.path(),
                 Path::new(".mastermind/tasks"),
                 &baseline,
@@ -913,7 +1428,7 @@ mod tests {
             fs::set_permissions(&source, restored).unwrap();
         }
 
-        let (wrong_baseline, _) = collect_workflow_evidence(
+        let (wrong_baseline, _, _) = collect_workflow_evidence(
             root.path(),
             Path::new(".mastermind/tasks"),
             &"2".repeat(40),
@@ -922,7 +1437,7 @@ mod tests {
         assert!(wrong_baseline.is_empty());
 
         fs::write(&source, "export function charge() { return 2; }\n").unwrap();
-        let (stale, gaps) = collect_workflow_evidence(
+        let (stale, gaps, _) = collect_workflow_evidence(
             root.path(),
             Path::new(".mastermind/tasks"),
             &baseline,

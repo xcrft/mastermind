@@ -128,6 +128,13 @@ Post-flight checks:
 - symbol removal or signature drift;
 - index and snapshot consistency.
 
+A held strict task also records a versioned snapshot for architecture-policy
+checks. New v2 snapshots survive staging, commits and CI checkouts when the
+declared files keep the same bytes and Git modes. Export the task directory with
+its `spec.md`, `state.json` and `audit.md`; see the
+[workflow evidence contract](reference/mmcg.md#architecture-policy-as-code-mmcg-policy-check) for
+limits and compatibility.
+
 They do not prove runtime behavior, product quality, visual correctness,
 security, or architectural soundness. Those require tests and human/domain
 review.

@@ -703,7 +703,7 @@ fn collect_workflow_evidence(
         };
         if state.baseline_ref != baseline_oid
             || !matches!(state.status.as_str(), "history_review_required" | "learned")
-            || state.spec_hash != crate::run_task::hash_text(&spec_body)
+            || !crate::run_task::spec_hash_matches(&state.spec_hash, &spec_body)
         {
             continue;
         }
@@ -854,6 +854,7 @@ mod tests {
                 started_at: 1,
                 iteration: 1,
                 allow_no_index: false,
+                strict: true,
             })
             .unwrap(),
         )
@@ -872,6 +873,26 @@ mod tests {
             files["services/payment/charge.ts"],
             [".mastermind/tasks/001-payment"]
         );
+
+        // Existing held records keep their approval across the spec-hash upgrade.
+        {
+            use std::hash::{DefaultHasher, Hash, Hasher};
+            let state_path = task.join("state.json");
+            let mut state: RunState =
+                serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+            let mut legacy = DefaultHasher::new();
+            spec_body.hash(&mut legacy);
+            state.spec_hash = format!("{:016x}", legacy.finish());
+            fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+            let (legacy_files, legacy_gaps) = collect_workflow_evidence(
+                root.path(),
+                Path::new(".mastermind/tasks"),
+                &baseline,
+                &relevant,
+            );
+            assert!(legacy_gaps.is_empty());
+            assert_eq!(legacy_files, files);
+        }
 
         #[cfg(unix)]
         {

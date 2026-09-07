@@ -66,7 +66,18 @@ before commit.
 | `drift` | Work differs from the approved contract | Planner reviews and updates or rejects the drift |
 | `broken` | Required evidence or behavior is missing | Executor fixes the change before another audit |
 
-Post-flight fails closed when the executor report is absent or malformed.
+Post-flight fails closed when the executor report is absent or malformed, or
+the spec differs from the approved pre-flight bytes. Review a changed contract,
+then explicitly repeat `run-task <task>/spec.md --pre-only` before another audit.
+Both `--pre-only` and `--reset` retain the task's original Git baseline, prior
+strict/index options, and iteration count. Already committed implementation
+therefore remains in the audit diff. Failed retries revoke approval and keep
+the counter; `--force-iteration` overrides only that budget. Use a new task for
+a new baseline.
+
+Pre-flight also stops when graph queries fail or dependency-cycle analysis hits
+its work limit. An incomplete result cannot establish zero risk. Cycle analysis
+covers the indexed project, so narrowing the spec alone does not remove this limit.
 
 ## Strict
 

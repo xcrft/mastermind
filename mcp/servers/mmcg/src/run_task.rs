@@ -26,7 +26,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -34,6 +33,7 @@ const STRICT_EVIDENCE_FILE_LIMIT: usize = 1_000;
 const STRICT_EVIDENCE_TOTAL_BYTE_LIMIT: u64 = 32 * 1024 * 1024;
 const STRICT_EVIDENCE_GIT_BYTE_LIMIT: usize = 2 * 1024 * 1024;
 const HISTORY_REVIEW_BYTE_LIMIT: u64 = 1024 * 1024;
+const RUN_STATE_BYTE_LIMIT: u64 = 1024 * 1024;
 
 /// Controller-owned handshake between pre- and post-flight. Canonical task
 /// specs keep it beside the spec as `<task>/state.json`; legacy flat specs use
@@ -53,10 +53,11 @@ pub struct RunState {
     pub last_artifact: Option<String>,
     /// Resolved path to the spec file pre-flight ran against.
     pub spec_path: String,
-    /// Hash of the spec body at pre-flight. Re-checked at post-flight to warn if
-    /// the spec was edited between phases.
+    /// SHA-256 of the approved spec body. Legacy 16-digit hashes remain readable.
+    /// Post-flight requires an exact match or a new explicit pre-flight.
     pub spec_hash: String,
-    /// `git rev-parse HEAD` captured at pre-flight — the audit's `--since`.
+    /// `git rev-parse HEAD` captured at the first pre-flight — the audit's `--since`.
+    /// Retries preserve it so previously committed implementation stays in scope.
     pub baseline_ref: String,
     /// SHA-256 binding a held strict audit to the exact declared touch files.
     /// Older state files deserialize without it and are not accepted as
@@ -69,9 +70,8 @@ pub struct RunState {
     /// Unix epoch seconds at pre-flight.
     pub started_at: u64,
     /// Iteration count — +1 on every pre-flight entry; first fresh run is `1`.
-    /// Survives `--reset` (dispatcher carries the old value forward before
-    /// deleting state). Legacy state files lacking this field deserialize to the
-    /// serde default `0` — "not yet counted".
+    /// Survives `--reset`, `--pre-only` and failed revalidation. Legacy state files
+    /// lacking this field deserialize to `0` — "not yet counted".
     #[serde(default)]
     pub iteration: u32,
     /// Preserve the pre-flight docs/spec-only escape hatch across hand-off so
@@ -79,6 +79,9 @@ pub struct RunState {
     /// index-identity failure.
     #[serde(default)]
     pub allow_no_index: bool,
+    /// Keep explicitly requested strict pre-flight checks on later retries.
+    #[serde(default)]
+    pub strict: bool,
 }
 
 fn default_run_status() -> String {
@@ -92,9 +95,9 @@ fn default_run_status() -> String {
 pub enum Outcome {
     /// Pre-flight passed, state written, hand-off message printed (no `--exec`).
     PreReady,
-    /// `verify_spec` produced errors. State NOT written.
+    /// Pre-flight could not approve the spec. Prior approval is invalidated.
     PreFailed,
-    /// Post-flight clean — release notes emitted, state marked complete.
+    /// Mechanical audit held; semantic review may still be required.
     PostHeld,
     /// Post-flight: warnings only. State kept for retry.
     PostDrift,
@@ -143,7 +146,7 @@ pub struct ReleaseNotes {
 /// as options are added (next likely: `--json`).
 #[derive(Debug, Clone, Copy)]
 pub struct RunOpts {
-    /// Delete any existing state file before deciding which phase to run.
+    /// Restart pre-flight, preserving the task's baseline and iteration budget.
     pub reset: bool,
     /// Force pre-flight; never auto-resume into post-flight.
     pub pre_only: bool,
@@ -623,11 +626,24 @@ fn spec_basename(spec_path: &Path) -> String {
 /// Read + deserialize state. `Ok(None)` when the file is absent — "no prior
 /// pre-flight" is the dominant non-error case.
 pub fn load_state(path: &Path) -> std::io::Result<Option<RunState>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let body = std::fs::read_to_string(path)?;
-    let state: RunState = serde_json::from_str(&body)
+    let parent = path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let body = match bounded_fs::read_regular_file(
+        parent,
+        path,
+        RUN_STATE_BYTE_LIMIT,
+        RUN_STATE_BYTE_LIMIT,
+        ReadControl::default(),
+    ) {
+        Ok(file) => file.bytes,
+        Err(BoundedReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None)
+        }
+        Err(error) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+    };
+    let state: RunState = serde_json::from_slice(&body)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     Ok(Some(state))
 }
@@ -648,14 +664,106 @@ pub fn delete_state(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Deterministic hash of the spec body. `DefaultHasher` is stable within one
-/// Rust toolchain — fine for "did the spec change between pre and post" on the
-/// same machine. Cross-toolchain-upgrade false positives are harmless (warn,
-/// not block).
+/// Stable across toolchains and machines for persisted approval evidence.
 pub(crate) fn hash_text(text: &str) -> String {
-    let mut h = DefaultHasher::new();
-    text.hash(&mut h);
-    format!("{:016x}", h.finish())
+    crate::hex::encode(&Sha256::digest(text.as_bytes()))
+}
+
+pub(crate) fn spec_hash_matches(expected: &str, text: &str) -> bool {
+    if expected.len() == 16 && expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        let mut legacy = DefaultHasher::new();
+        text.hash(&mut legacy);
+        return expected == format!("{:016x}", legacy.finish());
+    }
+    expected == hash_text(text)
+}
+
+fn read_preflight_spec(repo_root: &Path, spec_path: &Path) -> Result<String, String> {
+    let limit = crate::audit_bundle::BUNDLE_INPUT_MAX as u64;
+    let file =
+        bounded_fs::read_regular_file(repo_root, spec_path, limit, limit, ReadControl::default())
+            .map_err(|error| error.to_string())?;
+    String::from_utf8(file.bytes).map_err(|_| "spec is not UTF-8".into())
+}
+
+fn preflight_required_state(state: &RunState, reason: &str) -> RunState {
+    let mut blocked = state.clone();
+    blocked.status = "held".into();
+    blocked.risk = None;
+    blocked.next_step = Some("run_preflight".into());
+    blocked.blocking_reason = Some(reason.into());
+    blocked.last_artifact = Some("spec.md".into());
+    blocked.held_snapshot_sha256 = None;
+    blocked.history_snapshot_sha256 = None;
+    blocked
+}
+
+fn state_matches_spec(repo_root: &Path, spec_path: &Path, state: &RunState) -> bool {
+    let resolved = if spec_path.is_absolute() {
+        spec_path.to_path_buf()
+    } else {
+        repo_root.join(spec_path)
+    };
+    let stored = Path::new(&state.spec_path);
+    if stored == resolved {
+        return true;
+    }
+    let stored = if stored.is_absolute() {
+        stored.to_path_buf()
+    } else {
+        repo_root.join(stored)
+    };
+    if stored
+        .canonicalize()
+        .ok()
+        .zip(resolved.canonicalize().ok())
+        .is_some_and(|(stored, current)| stored == current)
+    {
+        return true;
+    }
+    // Canonical task artifacts can move with a checkout. Legacy basename-keyed
+    // state must match the actual spec path, not another same-named file.
+    let (Ok(root), Ok(current)) = (repo_root.canonicalize(), resolved.canonicalize()) else {
+        return false;
+    };
+    let Ok(task_spec) = current.strip_prefix(root.join(".mastermind/tasks")) else {
+        return false;
+    };
+    if task_spec.components().count() != 2
+        || task_spec.file_name().and_then(|name| name.to_str()) != Some("spec.md")
+    {
+        return false;
+    }
+    let suffix = format!(
+        ".mastermind/tasks/{}",
+        task_spec.to_string_lossy().replace('\\', "/")
+    );
+    let stored = state.spec_path.replace('\\', "/");
+    stored == suffix || stored.ends_with(&format!("/{suffix}"))
+}
+
+fn preflight_baseline(repo_root: &Path, previous: Option<&RunState>) -> Result<String, String> {
+    let Some(previous) = previous else {
+        return git_head(repo_root);
+    };
+    let baseline = &previous.baseline_ref;
+    if !matches!(baseline.len(), 40 | 64) || !baseline.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("saved baseline must be an exact Git object ID".into());
+    }
+    let output = crate::diff::run_bounded_git_with_limit(
+        repo_root,
+        &["rev-parse", "--verify", &format!("{baseline}^{{commit}}")],
+        None,
+        STRICT_EVIDENCE_GIT_BYTE_LIMIT,
+    )
+    .map_err(|error| format!("saved baseline lookup failed: {}", error.code()))?;
+    if !output.success || String::from_utf8_lossy(&output.stdout).trim() != baseline.as_str() {
+        return Err(
+            "saved baseline commit is unavailable; restore its Git history before retrying".into(),
+        );
+    }
+    Ok(baseline.clone())
 }
 
 pub(crate) fn strict_workflow_snapshot(
@@ -687,14 +795,16 @@ pub(crate) fn strict_workflow_snapshot(
         ));
     }
 
-    let root = repo_root
-        .canonicalize()
-        .map_err(|_| "strict-workflow repository root is unavailable".to_string())?;
+    let root = RootCapability::open(repo_root)
+        .map_err(|error| format!("strict-workflow repository root is unavailable: {error}"))?;
     let mut digest = Sha256::new();
     digest.update(b"mastermind-strict-workflow-snapshot-v1\0");
     digest.update(baseline_ref.as_bytes());
     digest.update([0]);
     let mut git_args = vec![
+        "--literal-pathspecs",
+        "-c",
+        "core.fsmonitor=false",
         "-c",
         "diff.external=",
         "diff",
@@ -708,7 +818,7 @@ pub(crate) fn strict_workflow_snapshot(
     ];
     git_args.extend(paths.iter().map(String::as_str));
     let raw = crate::diff::run_bounded_git_with_limit(
-        &root,
+        root.canonical_root(),
         &git_args,
         None,
         STRICT_EVIDENCE_GIT_BYTE_LIMIT,
@@ -725,72 +835,28 @@ pub(crate) fn strict_workflow_snapshot(
     for relative in &paths {
         digest.update(relative.as_bytes());
         digest.update([0]);
-        let mut current = root.clone();
-        let parts = relative.split('/').collect::<Vec<_>>();
-        let mut missing = false;
-        for (index, part) in parts.iter().enumerate() {
-            current.push(part);
-            match std::fs::symlink_metadata(&current) {
-                Ok(metadata) if metadata.file_type().is_symlink() => {
-                    return Err(format!(
-                        "strict-workflow touch path `{relative}` traverses a symlink"
-                    ));
-                }
-                Ok(metadata) if index + 1 < parts.len() && !metadata.is_dir() => {
-                    return Err(format!(
-                        "strict-workflow touch path `{relative}` has a non-directory parent"
-                    ));
-                }
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    missing = true;
-                    break;
-                }
-                Err(_) => {
-                    return Err(format!(
-                        "strict-workflow touch path `{relative}` cannot be inspected"
-                    ));
-                }
+        let limit = (crate::audit_bundle::BUNDLE_INPUT_MAX as u64)
+            .min(STRICT_EVIDENCE_TOTAL_BYTE_LIMIT - total_bytes);
+        let file = match bounded_fs::read_regular_file_with_capability(
+            &root,
+            Path::new(relative),
+            limit,
+            limit,
+            ReadControl::default(),
+        ) {
+            Ok(file) => file,
+            Err(BoundedReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                digest.update(b"missing\0");
+                continue;
             }
-        }
-        if missing {
-            digest.update(b"missing\0");
-            continue;
-        }
-
-        let metadata = std::fs::symlink_metadata(&current)
-            .map_err(|_| format!("strict-workflow touch path `{relative}` cannot be inspected"))?;
-        if !metadata.is_file() {
-            return Err(format!(
-                "strict-workflow touch path `{relative}` is not a regular file"
-            ));
-        }
-        if metadata.len() > crate::audit_bundle::BUNDLE_INPUT_MAX as u64 {
-            return Err(format!(
-                "strict-workflow touch file `{relative}` exceeds the 16 MiB limit"
-            ));
-        }
-        total_bytes = total_bytes
-            .checked_add(metadata.len())
-            .filter(|total| *total <= STRICT_EVIDENCE_TOTAL_BYTE_LIMIT)
-            .ok_or_else(|| {
-                "strict-workflow touch files exceed the 32 MiB total limit".to_string()
-            })?;
+            Err(error) => {
+                return Err(format!("strict-workflow touch file `{relative}`: {error}"));
+            }
+        };
+        total_bytes += file.declared_len;
         digest.update(b"file\0");
-        digest.update(metadata.len().to_le_bytes());
-
-        let mut file = std::fs::File::open(&current)
-            .map_err(|_| format!("strict-workflow touch file `{relative}` cannot be read"))?;
-        let mut buffer = [0u8; 64 * 1024];
-        loop {
-            let read = file
-                .read(&mut buffer)
-                .map_err(|_| format!("strict-workflow touch file `{relative}` cannot be read"))?;
-            if read == 0 {
-                break;
-            }
-            digest.update(&buffer[..read]);
-        }
+        digest.update(file.declared_len.to_le_bytes());
+        digest.update(file.bytes);
         digest.update([0]);
     }
     Ok(crate::hex::encode(&digest.finalize()))
@@ -890,9 +956,8 @@ fn extract_h1_title(body: &str) -> Option<String> {
 }
 
 /// Compute the risk report from a parsed spec + the live index. Pure: no I/O
-/// beyond store queries. Missing/unindexed symbols silently contribute 0 —
-/// verify_spec already surfaces the existence check as an error.
-pub fn compute_risk_report(spec: &ParsedSpec, store: &Store) -> RiskReport {
+/// beyond store queries. Failed or incomplete queries cannot establish zero risk.
+pub fn compute_risk_report(spec: &ParsedSpec, store: &Store) -> Result<RiskReport, String> {
     let mut total_callers: u32 = 0;
     let mut worst: Option<WorstSymbol> = None;
     let mut central: Vec<CentralEntry> = Vec::new();
@@ -901,7 +966,7 @@ pub fn compute_risk_report(spec: &ParsedSpec, store: &Store) -> RiskReport {
         let n = store
             .callers_of(&claim.name, None, None)
             .map(|c| c.len() as u32)
-            .unwrap_or(0);
+            .map_err(|error| format!("caller risk for `{}` is unavailable: {error}", claim.name))?;
         total_callers = total_callers.saturating_add(n);
         if worst.as_ref().is_none_or(|w| n > w.callers) {
             worst = Some(WorstSymbol {
@@ -922,7 +987,15 @@ pub fn compute_risk_report(spec: &ParsedSpec, store: &Store) -> RiskReport {
     // Cycle membership: walk all SCCs of size ≥ 2 in any language; collect
     // mentioned files appearing inside.
     let mentioned: HashSet<&str> = spec.mentioned_files.iter().map(String::as_str).collect();
-    let (cycles, _cycles_truncated) = store.dependency_cycles(None, 2).unwrap_or_default();
+    let (cycles, cycles_truncated) = store
+        .dependency_cycles(None, 2)
+        .map_err(|error| format!("dependency-cycle risk is unavailable: {error}"))?;
+    if cycles_truncated {
+        return Err(
+            "dependency-cycle risk is unknown: the indexed dependency graph exceeds the query limit"
+                .into(),
+        );
+    }
     let mut files_in_cycles: Vec<String> = Vec::new();
     for cycle in cycles {
         for f in cycle {
@@ -932,14 +1005,14 @@ pub fn compute_risk_report(spec: &ParsedSpec, store: &Store) -> RiskReport {
         }
     }
 
-    RiskReport {
+    Ok(RiskReport {
         snapshot_symbols: spec.pre_edit_snapshot.len() as u32,
         total_snapshot_callers: total_callers,
         worst_callers: worst,
         mentioned_files: spec.mentioned_files.len() as u32,
         files_in_cycles,
         top_central_mentioned: central,
-    }
+    })
 }
 
 pub fn render_risk_report(r: &RiskReport) -> String {
@@ -1023,59 +1096,60 @@ pub fn render_release_notes(r: &ReleaseNotes) -> String {
 /// above are independently testable.
 pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts) -> Outcome {
     let state_path = state_file_path(repo_root, spec_path);
-    // Iteration carry-forward: when --reset drops a prior state, snapshot its
-    // iteration FIRST so the next pre-flight resumes the count. Else the budget
-    // is trivially bypassed by repeated --reset.
-    let preserved_iter: u32 = if opts.reset {
-        let prior_iter = load_state(&state_path)
-            .ok()
-            .flatten()
-            .map(|s| s.iteration)
-            .unwrap_or(0);
-        if let Err(e) = delete_state(&state_path) {
-            eprintln!(
-                "warning: --reset failed to delete `{}`: {e}",
-                state_path.display()
-            );
-        }
-        prior_iter
-    } else {
-        0
-    };
-
+    if opts.post_only && (opts.pre_only || opts.reset) {
+        eprintln!("error: --post-only cannot be combined with --pre-only or --reset");
+        return Outcome::PreFailed;
+    }
     let existing = match load_state(&state_path) {
         Ok(s) => s,
         Err(e) => {
             eprintln!(
-                "warning: state file `{}` unreadable ({e}); treating as absent",
+                "error: state file `{}` unreadable ({e}); restore it before retrying to retain the task baseline and iteration budget",
                 state_path.display()
             );
-            None
+            return Outcome::PreFailed;
         }
     };
+    if existing
+        .as_ref()
+        .is_some_and(|state| !state_matches_spec(repo_root, spec_path, state))
+    {
+        eprintln!(
+            "error: saved state belongs to a different spec; use a separate canonical task folder"
+        );
+        return Outcome::PreFailed;
+    }
 
-    // Phase select. `--pre-only` / `--post-only` are explicit overrides;
-    // otherwise state-file presence decides.
-    if opts.post_only {
-        let Some(state) = existing else {
+    // Explicit retries keep the first baseline and the durable iteration count.
+    // Deleting state before validation would lose both on a failed --reset.
+    if opts.pre_only || opts.reset || existing.is_none() {
+        if opts.post_only {
             eprintln!(
                 "error: --post-only requested but no state file at `{}`. Run pre-flight first.",
                 state_path.display()
             );
             return Outcome::PreFailed;
-        };
-        return run_post(spec_path, repo_root, index_path, &state, &state_path);
-    }
-
-    if opts.pre_only || existing.is_none() {
+        }
         return run_pre(
             spec_path,
             repo_root,
             index_path,
             &state_path,
             opts,
-            preserved_iter,
+            existing.as_ref(),
         );
+    }
+
+    let state = existing.as_ref().unwrap();
+    if state.next_step.as_deref() == Some("run_preflight") {
+        eprintln!(
+            "error: this task requires a new pre-flight. Review the spec, then run `mastermind run-task {} --pre-only`. The original baseline and prior strict/index options are retained.",
+            spec_path.display()
+        );
+        return Outcome::PreFailed;
+    }
+    if opts.post_only {
+        return run_post(spec_path, repo_root, index_path, state, &state_path);
     }
 
     if !opts.post_only {
@@ -1184,16 +1258,43 @@ fn run_pre(
     index_path: &Path,
     state_path: &Path,
     opts: RunOpts,
-    preserved_iter: u32,
+    previous: Option<&RunState>,
 ) -> Outcome {
-    // Iteration budget — refuse pre-flight once the spec has been through
-    // `max_iterations` cycles without landing Held. `preserved_iter` carries
-    // forward any count from a state file --reset just dropped; +1 for THIS
-    // attempt.
-    let iteration = preserved_iter.saturating_add(1);
-    if opts.max_iterations > 0 && iteration > opts.max_iterations && !opts.force_iteration {
+    let opts = RunOpts {
+        strict: opts.strict || previous.is_some_and(|state| state.strict),
+        allow_no_index: opts.allow_no_index || previous.is_some_and(|state| state.allow_no_index),
+        ..opts
+    };
+    let iteration = previous
+        .map_or(0, |state| state.iteration)
+        .saturating_add(1);
+    let budget_exhausted = opts.max_iterations > 0 && iteration > opts.max_iterations;
+    // Revalidation removes old approval even when it fails or is interrupted.
+    // A refused attempt leaves the exhausted counter intact for the next call.
+    if let Some(previous) = previous {
+        let mut pending = preflight_required_state(previous, "pre-flight validation is required");
+        if budget_exhausted && !opts.force_iteration {
+            pending.blocking_reason = Some(format!(
+                "iteration budget exhausted (limit {}); review the design before explicitly using --force-iteration",
+                opts.max_iterations
+            ));
+        }
+        pending.strict = opts.strict;
+        pending.allow_no_index = opts.allow_no_index;
+        if !budget_exhausted || opts.force_iteration {
+            pending.iteration = iteration;
+        }
+        if let Err(error) = save_state(state_path, &pending) {
+            eprintln!("error: invalidating previous pre-flight approval: {error}");
+            return Outcome::PreFailed;
+        }
+    }
+    if budget_exhausted {
+        let _ = crate::lessons::append_iteration_budget_candidate(repo_root, spec_path, iteration);
+    }
+    if budget_exhausted && !opts.force_iteration {
         eprintln!(
-            "❌ iteration budget exhausted: this spec has been through {} pre-flight cycle(s) without landing `contract held` (limit: {}).",
+            "❌ iteration budget exhausted: this task has used {} pre-flight attempt(s) (limit: {}).",
             iteration - 1,
             opts.max_iterations
         );
@@ -1201,14 +1302,13 @@ fn run_pre(
         eprintln!(
             "   See `defect-taxonomy.md` in the mastermind-task-planning skill, kind `iteration_budget_exhausted`."
         );
-        let _ = crate::lessons::append_iteration_budget_candidate(repo_root, spec_path, iteration);
         return Outcome::PreFailed;
     }
 
-    let spec_body = match std::fs::read_to_string(spec_path) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("error: reading spec `{}`: {e}", spec_path.display());
+    let spec_body = match read_preflight_spec(repo_root, spec_path) {
+        Ok(body) => body,
+        Err(error) => {
+            eprintln!("error: reading spec `{}`: {error}", spec_path.display());
             return Outcome::PreFailed;
         }
     };
@@ -1221,7 +1321,26 @@ fn run_pre(
     // or empty index, verify-spec silently degrades to file-existence checks and
     // audit-spec to git-diff-only. Escape hatch `--allow-no-index` for docs-only
     // specs.
-    let mut store = Store::open(index_path).ok();
+    let mut store = match std::fs::symlink_metadata(index_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            eprintln!(
+                "❌ Cannot inspect index `{}`: {error}",
+                index_path.display()
+            );
+            return Outcome::PreFailed;
+        }
+        Ok(_) => match Store::open(index_path) {
+            Ok(store) => Some(store),
+            Err(error) => {
+                eprintln!(
+                    "❌ Cannot open existing index `{}`: {error}",
+                    index_path.display()
+                );
+                return Outcome::PreFailed;
+            }
+        },
+    };
     match store.as_ref() {
         None if !opts.allow_no_index => {
             eprintln!(
@@ -1285,7 +1404,7 @@ fn run_pre(
     print!("{}", verify.render_text());
     if verify.has_failures() {
         eprintln!(
-            "❌ verify-spec failed — no state written. Fix errors above and re-run `mastermind run-task`."
+            "❌ verify-spec failed — spec is not approved. Fix errors above and re-run `mastermind run-task <spec> --pre-only`."
         );
         return Outcome::PreFailed;
     }
@@ -1293,21 +1412,31 @@ fn run_pre(
     // 2. risk report (needs an open store for caller counts; without one,
     //    reporting zeros would mislead).
     match &store {
-        Some(s) => print!("{}", render_risk_report(&compute_risk_report(&parsed, s))),
+        Some(store) => match compute_risk_report(&parsed, store) {
+            Ok(risk) => print!("{}", render_risk_report(&risk)),
+            Err(error) => {
+                eprintln!("❌ Risk report is incomplete: {error}. Pre-flight cannot approve this task.");
+                return Outcome::PreFailed;
+            }
+        },
         None => println!(
             "\nRisk Report\n  (no index at `{}` — run `mastermind index .` for blast-radius numbers)",
             index_path.display()
         ),
     }
 
-    // 3. capture HEAD + write state.
-    let head = match git_head(repo_root) {
+    // 3. Keep all implementation since the original pre-flight in audit scope.
+    let head = match preflight_baseline(repo_root, previous) {
         Ok(h) => h,
         Err(e) => {
-            eprintln!("error: capturing git HEAD as baseline ref: {e}");
+            eprintln!("error: resolving task baseline: {e}");
             return Outcome::PreFailed;
         }
     };
+    if read_preflight_spec(repo_root, spec_path).ok().as_ref() != Some(&spec_body) {
+        eprintln!("error: spec changed during pre-flight; review it and retry --pre-only");
+        return Outcome::PreFailed;
+    }
     let declared_risk = parsed
         .frontmatter
         .as_ref()
@@ -1333,6 +1462,7 @@ fn run_pre(
         started_at: timestamp_now(),
         iteration,
         allow_no_index: opts.allow_no_index,
+        strict: opts.strict,
     };
     if let Err(e) = save_state(state_path, &state) {
         eprintln!("error: writing state `{}`: {e}", state_path.display());
@@ -1414,15 +1544,19 @@ fn run_post(
         &state.baseline_ref[..state.baseline_ref.len().min(8)]
     );
 
-    // Spec-drift warning — informative, not a block.
-    let current_hash = hash_text(&spec_body);
-    if current_hash != state.spec_hash {
-        eprintln!(
-            "warning: spec contents changed since pre-flight (hash was {}, now {}). \
-             Audit findings may be inconsistent. Use --reset to start over.",
-            &state.spec_hash[..state.spec_hash.len().min(8)],
-            &current_hash[..current_hash.len().min(8)],
+    if !spec_hash_matches(&state.spec_hash, &spec_body) {
+        let blocked = preflight_required_state(
+            state,
+            "spec changed since approval; review the revised contract and rerun pre-flight",
         );
+        if let Err(error) = save_state(state_path, &blocked) {
+            eprintln!("error: persisting required pre-flight: {error}");
+        }
+        eprintln!(
+            "error: spec changed since pre-flight. Review the revised contract, then run `mastermind run-task {} --pre-only`. The original baseline and prior strict/index options are retained.",
+            spec_path.display(),
+        );
+        return Outcome::PostBroken;
     }
 
     let mut store = match Store::open(index_path) {
@@ -1931,6 +2065,7 @@ verifications: []\n\
             started_at: 123456,
             iteration: 0,
             allow_no_index: true,
+            strict: false,
         };
         save_state(&path, &state).unwrap();
         let loaded = load_state(&path).unwrap().expect("present");
@@ -2215,7 +2350,177 @@ verifications: []\n\
         let c = hash_text("alpha\nbeta\ngamma\n");
         assert_eq!(a, b);
         assert_ne!(a, c);
-        assert_eq!(a.len(), 16); // {:016x}
+        assert_eq!(a.len(), 64);
+        assert_eq!(
+            hash_text("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let mut legacy = DefaultHasher::new();
+        "alpha\nbeta\n".hash(&mut legacy);
+        let legacy_hash = format!("{:016x}", legacy.finish());
+        assert!(spec_hash_matches(&legacy_hash, "alpha\nbeta\n"));
+        assert!(!spec_hash_matches(&legacy_hash, "changed"));
+        assert!(!spec_hash_matches("invalid", "alpha\nbeta\n"));
+    }
+
+    #[test]
+    fn risk_query_failure_is_distinct_from_observed_zero() {
+        for with_snapshot in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let db = root.path().join("idx.db");
+            let store = Store::open(&db).unwrap();
+            let raw = rusqlite::Connection::open(&db).unwrap();
+            raw.execute_batch(
+                "INSERT INTO symbols(id,name,kind,file_path,line_start,line_end,language)
+                 VALUES (1,'target','function','src.py',1,2,'python');",
+            )
+            .unwrap();
+            let mut parsed = spec::parse_str("spec.md", "# Risk\n");
+            if with_snapshot {
+                parsed.pre_edit_snapshot.push(spec::SymbolClaim {
+                    name: "target".into(),
+                    callers: Some(0),
+                    signature: None,
+                    raw: String::new(),
+                });
+            }
+            let healthy = compute_risk_report(&parsed, &store).unwrap();
+            assert_eq!(healthy.total_snapshot_callers, 0);
+            assert!(healthy.files_in_cycles.is_empty());
+            raw.execute_batch("DROP TABLE edges").unwrap();
+            let error = compute_risk_report(&parsed, &store).unwrap_err();
+            assert!(
+                error.contains(if with_snapshot {
+                    "caller risk"
+                } else {
+                    "dependency-cycle risk"
+                }),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn capped_dependency_graph_cannot_report_no_cycles() {
+        let root = tempfile::tempdir().unwrap();
+        let db = root.path().join("idx.db");
+        let store = Store::open(&db).unwrap();
+        let raw = rusqlite::Connection::open(&db).unwrap();
+        // 225 * 224 distinct file pairs exceed the cycle query's 50,000 cap.
+        raw.execute_batch(
+            "WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<225)
+             INSERT INTO symbols(id,name,kind,file_path,line_start,line_end,language)
+             SELECT id,'Shared','class','src_' || id || '.py',1,2,'python' FROM n;
+             INSERT INTO edges(from_id,to_name,kind,line)
+             SELECT id,'Shared','imports',1 FROM symbols;",
+        )
+        .unwrap();
+        let mut parsed = spec::parse_str("spec.md", "# Risk\n");
+        parsed.mentioned_files = vec!["src_1.py".into()];
+        assert!(store.dependency_cycles(None, 2).unwrap().1);
+        assert!(compute_risk_report(&parsed, &store)
+            .unwrap_err()
+            .contains("unknown"));
+    }
+
+    #[test]
+    fn strict_snapshot_retains_v1_framing_for_files_and_deletions() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        for (name, body) in [
+            ("empty.txt", ""),
+            ("gone.txt", "old"),
+            ("source.txt", "before"),
+        ] {
+            fs::write(root.path().join(name), body).unwrap();
+        }
+        git(root.path(), &["add", "-A"]);
+        git(root.path(), &["commit", "-qm", "baseline"]);
+        let baseline = git_head(root.path()).unwrap();
+        fs::remove_file(root.path().join("gone.txt")).unwrap();
+        fs::write(root.path().join("source.txt"), "after").unwrap();
+        let paths = vec!["empty.txt".into(), "gone.txt".into(), "source.txt".into()];
+        let raw = Command::new("git")
+            .current_dir(root.path())
+            .args([
+                "-c",
+                "diff.external=",
+                "diff",
+                "--raw",
+                "--no-abbrev",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                &baseline,
+                "--",
+                "empty.txt",
+                "gone.txt",
+                "source.txt",
+            ])
+            .output()
+            .unwrap();
+        assert!(raw.status.success());
+        let mut legacy = Sha256::new();
+        legacy.update(b"mastermind-strict-workflow-snapshot-v1\0");
+        legacy.update(baseline.as_bytes());
+        legacy.update(b"\0git-raw\0");
+        legacy.update(raw.stdout);
+        legacy.update(b"\0empty.txt\0file\0");
+        legacy.update(0u64.to_le_bytes());
+        legacy.update(b"\0gone.txt\0missing\0source.txt\0file\0");
+        legacy.update(5u64.to_le_bytes());
+        legacy.update(b"after\0");
+        assert_eq!(
+            strict_workflow_snapshot(root.path(), &baseline, &paths).unwrap(),
+            crate::hex::encode(&legacy.finalize())
+        );
+    }
+
+    #[test]
+    fn strict_snapshot_enforces_per_file_and_total_byte_limits() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        git(root.path(), &["add", "-A"]);
+        git(root.path(), &["commit", "-qm", "baseline"]);
+        let baseline = git_head(root.path()).unwrap();
+        let limit = crate::audit_bundle::BUNDLE_INPUT_MAX as u64;
+        let first = fs::File::create(root.path().join("a.txt")).unwrap();
+        first.set_len(limit + 1).unwrap();
+        assert!(strict_workflow_snapshot(root.path(), &baseline, &["a.txt".into()]).is_err());
+        first.set_len(limit).unwrap();
+        fs::File::create(root.path().join("b.txt"))
+            .unwrap()
+            .set_len(limit)
+            .unwrap();
+        let mut paths = vec!["a.txt".into(), "b.txt".into()];
+        assert!(strict_workflow_snapshot(root.path(), &baseline, &paths).is_ok());
+        fs::write(root.path().join("c.txt"), "x").unwrap();
+        paths.push("c.txt".into());
+        assert!(strict_workflow_snapshot(root.path(), &baseline, &paths).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn strict_snapshot_rejects_symlinks_including_dangling_paths() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        git(root.path(), &["add", "-A"]);
+        git(root.path(), &["commit", "-qm", "baseline"]);
+        let baseline = git_head(root.path()).unwrap();
+        fs::create_dir(root.path().join("real")).unwrap();
+        fs::write(root.path().join("real/file.txt"), "file").unwrap();
+        symlink("real", root.path().join("linked")).unwrap();
+        symlink("absent", root.path().join("dangling")).unwrap();
+        for path in ["linked/file.txt", "dangling", "dangling/child.txt"] {
+            assert!(
+                strict_workflow_snapshot(root.path(), &baseline, &[path.into()]).is_err(),
+                "{path}"
+            );
+        }
+        assert!(
+            strict_workflow_snapshot(root.path(), &baseline, &["missing/child.txt".into()]).is_ok()
+        );
     }
 
     #[test]
@@ -2320,7 +2625,7 @@ verifications: []\n\
             .unwrap()
             .expect("pre-flight should have written state");
         assert!(!state.baseline_ref.is_empty());
-        assert!(state.spec_hash.len() == 16);
+        assert_eq!(state.spec_hash.len(), 64);
         assert!(state.spec_path.ends_with("042-thing.md"));
 
         fs::remove_dir_all(&dir).ok();
@@ -2859,6 +3164,335 @@ verify:
         fs::remove_dir_all(&dir).ok();
     }
 
+    fn preflight_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        fs::write(root.path().join("src.txt"), "before\n").unwrap();
+        git(root.path(), &["add", "-A"]);
+        git(root.path(), &["commit", "-qm", "baseline"]);
+        let spec = root.path().join(".mastermind/tasks/001-retry/spec.md");
+        fs::create_dir_all(spec.parent().unwrap()).unwrap();
+        fs::write(&spec,
+            "# Retry\n\n## Goals\n- Edit `src.txt`\n## Alternatives Considered\n- a — rejected: r\n## Tests Plan\n- t\n## Documentation Plan\n- d\n## Observability Plan\n- n/a\n## Performance Considerations\n- O(1)\n"
+        ).unwrap();
+        let db = root.path().join("idx.db");
+        (root, spec, db)
+    }
+
+    #[test]
+    fn spec_change_requires_explicit_preflight_without_losing_implemented_diff() {
+        let (root, spec, db) = preflight_fixture();
+        assert_eq!(
+            run(
+                &spec,
+                root.path(),
+                &db,
+                RunOpts {
+                    pre_only: true,
+                    allow_no_index: true,
+                    ..Default::default()
+                }
+            ),
+            Outcome::PreReady
+        );
+        let state_path = state_file_path(root.path(), &spec);
+        let first = load_state(&state_path).unwrap().unwrap();
+        let approved_body = fs::read_to_string(&spec).unwrap();
+        fs::write(root.path().join("src.txt"), "implemented\n").unwrap();
+        git(root.path(), &["add", "src.txt"]);
+        git(root.path(), &["commit", "-qm", "implementation"]);
+        write_executor_report(&spec, &["src.txt"]);
+        let revised = approved_body.replace("# Retry", "# Revised retry");
+        fs::write(&spec, &revised).unwrap();
+        assert_eq!(
+            run(&spec, root.path(), &db, RunOpts::default()),
+            Outcome::PostBroken
+        );
+        let blocked = load_state(&state_path).unwrap().unwrap();
+        assert_eq!(blocked.status, "held");
+        assert_eq!(blocked.next_step.as_deref(), Some("run_preflight"));
+        assert!(blocked.held_snapshot_sha256.is_none());
+        assert!(blocked.history_snapshot_sha256.is_none());
+        assert!(!spec.with_file_name("audit.md").exists());
+        assert!(!release_file_path(root.path(), &spec).exists());
+
+        // Restoring old bytes alone does not bypass the failed approval gate.
+        fs::write(&spec, &approved_body).unwrap();
+        for post_only in [false, true] {
+            assert_eq!(
+                run(
+                    &spec,
+                    root.path(),
+                    &db,
+                    RunOpts {
+                        post_only,
+                        ..Default::default()
+                    }
+                ),
+                Outcome::PreFailed
+            );
+        }
+        fs::write(&spec, &revised).unwrap();
+        assert_eq!(
+            run(
+                &spec,
+                root.path(),
+                &db,
+                RunOpts {
+                    pre_only: true,
+                    ..Default::default()
+                }
+            ),
+            Outcome::PreReady
+        );
+        let retried = load_state(&state_path).unwrap().unwrap();
+        assert_eq!(retried.baseline_ref, first.baseline_ref);
+        assert_ne!(retried.baseline_ref, git_head(root.path()).unwrap());
+        assert_eq!(retried.iteration, 2);
+        assert!(retried.allow_no_index);
+        assert_eq!(retried.spec_hash, hash_text(&revised));
+        assert!(git_diff_stat(root.path(), &retried.baseline_ref)
+            .unwrap()
+            .contains("src.txt"));
+        assert_eq!(
+            run(&spec, root.path(), &db, RunOpts::default()),
+            Outcome::PostHeld
+        );
+    }
+
+    #[test]
+    fn failed_revalidation_revokes_approval_and_preserves_strict_options() {
+        let (root, spec, db) = preflight_fixture();
+        let body = fs::read_to_string(&spec).unwrap();
+        fs::write(&spec, format!(
+            "---\ntouches:\n  - file: src.txt\n    symbols:\n      - name: target\nverify:\n  - cmd: git status --short\n---\n{body}"
+        )).unwrap();
+        assert_eq!(
+            run(
+                &spec,
+                root.path(),
+                &db,
+                RunOpts {
+                    pre_only: true,
+                    strict: true,
+                    allow_no_index: true,
+                    ..Default::default()
+                }
+            ),
+            Outcome::PreReady
+        );
+        let state_path = state_file_path(root.path(), &spec);
+        let mut approved = load_state(&state_path).unwrap().unwrap();
+        approved.held_snapshot_sha256 = Some("old-held".into());
+        approved.history_snapshot_sha256 = Some("old-history".into());
+        save_state(&state_path, &approved).unwrap();
+        fs::write(&spec, body).unwrap();
+        // This body passes non-strict pre-flight, but retries retain --strict.
+        assert_eq!(
+            run(
+                &spec,
+                root.path(),
+                &db,
+                RunOpts {
+                    pre_only: true,
+                    ..Default::default()
+                }
+            ),
+            Outcome::PreFailed
+        );
+        let failed = load_state(&state_path).unwrap().unwrap();
+        assert_eq!(failed.baseline_ref, approved.baseline_ref);
+        assert_eq!(failed.iteration, 2);
+        assert!(failed.strict && failed.allow_no_index);
+        assert_eq!(failed.status, "held");
+        assert_eq!(failed.next_step.as_deref(), Some("run_preflight"));
+        assert!(failed.held_snapshot_sha256.is_none() && failed.history_snapshot_sha256.is_none());
+    }
+
+    #[test]
+    fn reset_does_not_overwrite_corrupt_state_or_another_specs_state() {
+        let (root, spec, db) = preflight_fixture();
+        let state_path = state_file_path(root.path(), &spec);
+        fs::write(&state_path, "{corrupt state").unwrap();
+        assert_eq!(
+            run(
+                &spec,
+                root.path(),
+                &db,
+                RunOpts {
+                    reset: true,
+                    allow_no_index: true,
+                    ..Default::default()
+                }
+            ),
+            Outcome::PreFailed
+        );
+        assert_eq!(fs::read_to_string(&state_path).unwrap(), "{corrupt state");
+        let body = fs::read_to_string(&spec).unwrap();
+        let first = root.path().join("a/same.md");
+        let second = root.path().join("b/same.md");
+        for path in [&first, &second] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, &body).unwrap();
+        }
+        assert_eq!(
+            run(
+                &first,
+                root.path(),
+                &db,
+                RunOpts {
+                    pre_only: true,
+                    allow_no_index: true,
+                    ..Default::default()
+                }
+            ),
+            Outcome::PreReady
+        );
+        let legacy_state = state_file_path(root.path(), &first);
+        let before = fs::read(&legacy_state).unwrap();
+        assert_eq!(
+            run(
+                &second,
+                root.path(),
+                &db,
+                RunOpts {
+                    reset: true,
+                    allow_no_index: true,
+                    ..Default::default()
+                }
+            ),
+            Outcome::PreFailed
+        );
+        assert_eq!(fs::read(&legacy_state).unwrap(), before);
+    }
+
+    #[test]
+    fn conflicting_phase_flags_preserve_existing_approval() {
+        let (root, spec, db) = preflight_fixture();
+        assert_eq!(
+            run(
+                &spec,
+                root.path(),
+                &db,
+                RunOpts {
+                    pre_only: true,
+                    allow_no_index: true,
+                    ..Default::default()
+                }
+            ),
+            Outcome::PreReady
+        );
+        let state_path = state_file_path(root.path(), &spec);
+        let before = fs::read(&state_path).unwrap();
+        for reset in [false, true] {
+            assert_eq!(
+                run(
+                    &spec,
+                    root.path(),
+                    &db,
+                    RunOpts {
+                        reset,
+                        pre_only: !reset,
+                        post_only: true,
+                        ..Default::default()
+                    }
+                ),
+                Outcome::PreFailed
+            );
+            assert_eq!(fs::read(&state_path).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn preflight_does_not_approve_failed_cycle_query() {
+        let (root, spec, db) = preflight_fixture();
+        fs::write(
+            root.path().join("a.py"),
+            "from b import B\n\ndef A():\n    return 1\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("b.py"),
+            "from a import A\n\ndef B():\n    return 1\n",
+        )
+        .unwrap();
+        let mut store = Store::open(&db).unwrap();
+        Indexer::new(root.path())
+            .index_all(&mut store, false)
+            .unwrap();
+        let raw = rusqlite::Connection::open(&db).unwrap();
+        raw.execute(
+            "UPDATE symbols SET file_path=CAST(file_path AS BLOB) WHERE file_path='a.py'",
+            [],
+        )
+        .unwrap();
+        assert!(store.dependency_cycles(None, 2).is_err());
+        drop(raw);
+        drop(store);
+        assert_eq!(
+            run(
+                &spec,
+                root.path(),
+                &db,
+                RunOpts {
+                    pre_only: true,
+                    ..Default::default()
+                }
+            ),
+            Outcome::PreFailed
+        );
+        assert!(!state_file_path(root.path(), &spec).exists());
+    }
+
+    #[test]
+    fn allow_no_index_does_not_bypass_an_unreadable_existing_database() {
+        let (root, spec, db) = preflight_fixture();
+        fs::write(&db, "not a SQLite database").unwrap();
+        assert_eq!(
+            run(
+                &spec,
+                root.path(),
+                &db,
+                RunOpts {
+                    pre_only: true,
+                    allow_no_index: true,
+                    ..Default::default()
+                }
+            ),
+            Outcome::PreFailed
+        );
+        assert!(!state_file_path(root.path(), &spec).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_state_symlink_cannot_start_a_new_baseline() {
+        use std::os::unix::fs::symlink;
+        let (root, spec, db) = preflight_fixture();
+        let state_path = state_file_path(root.path(), &spec);
+        let target = root.path().join("missing-state-target.json");
+        symlink(&target, &state_path).unwrap();
+        assert!(load_state(&state_path).is_err());
+        assert_eq!(
+            run(
+                &spec,
+                root.path(),
+                &db,
+                RunOpts {
+                    reset: true,
+                    allow_no_index: true,
+                    ..Default::default()
+                }
+            ),
+            Outcome::PreFailed
+        );
+        assert!(fs::symlink_metadata(&state_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!target.exists());
+    }
+
     #[test]
     fn reset_preserves_and_increments_iteration() {
         let dir = tmp("iter_reset");
@@ -2978,6 +3612,27 @@ verify:
             },
         );
         assert_eq!(outcome, Outcome::PreFailed);
+
+        // A refused --reset must not erase the exhausted count. Neither retry
+        // flag can silently start a fresh task on the following invocation.
+        for reset in [true, false] {
+            assert_eq!(
+                run(
+                    &spec_path,
+                    &dir,
+                    &index_path,
+                    RunOpts {
+                        reset,
+                        ..base_opts()
+                    }
+                ),
+                Outcome::PreFailed
+            );
+            let refused = load_state(&state_path).unwrap().unwrap();
+            assert_eq!(refused.iteration, 3);
+            assert_eq!(refused.status, "held");
+            assert_eq!(refused.next_step.as_deref(), Some("run_preflight"));
+        }
 
         // Lesson appended
         let lessons = std::fs::read_to_string(dir.join(".mastermind/tasks/_lessons.md")).unwrap();

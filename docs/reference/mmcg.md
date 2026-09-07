@@ -231,8 +231,8 @@ mmcg new-spec "Rotate signing keys" --mode strict
 #          write .mastermind/releases/<task>.md on Held.
 mmcg run-task .mastermind/tasks/042-feature/spec.md             # hand-off semantics
 mmcg run-task .mastermind/tasks/042-feature/spec.md --exec      # legacy Claude-only `claude -p` convenience
-mmcg run-task .mastermind/tasks/042-feature/spec.md --reset     # drop state, force pre-flight (counter survives)
-mmcg run-task .mastermind/tasks/042-feature/spec.md --pre-only  # never auto-resume into post
+mmcg run-task .mastermind/tasks/042-feature/spec.md --reset     # repeat pre-flight; preserve original baseline and counter
+mmcg run-task .mastermind/tasks/042-feature/spec.md --pre-only  # pre-flight only; same retry guarantees
 mmcg run-task .mastermind/tasks/042-feature/spec.md --post-only # requires state
 mmcg run-task .mastermind/tasks/042-feature/spec.md --allow-no-index  # docs-only / spec-only specs
 mmcg run-task .mastermind/tasks/042-feature/spec.md --strict          # fold strict spec checks into pre-flight
@@ -241,6 +241,8 @@ mmcg run-task .mastermind/tasks/042-feature/spec.md --force-iteration  # bypass 
 # NOTE: without --allow-no-index, pre-flight hard-fails when the index is missing
 # or empty. Gates without a codegraph degrade to file-existence + section checks
 # only — mmcg's value comes from the structural truth layer, not the heuristics.
+# Query errors or an incomplete dependency-cycle graph also block approval.
+# --allow-no-index does not bypass failures in a populated index.
 
 # Initialize a project. Stack detection informs drafting, while CONTEXT stays
 # lean and stack-agnostic; commands and layouts belong in CLAUDE.md.

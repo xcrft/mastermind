@@ -146,6 +146,12 @@ executor writes `<task>/executor-report.md` containing the prose report and the
 canonical schema-v1 tail from [[mastermind-structured-report-contract]]. It
 must not write lifecycle state.
 
+Changing an approved spec blocks post-flight. Review the revised Scope and
+Acceptance Criteria, then explicitly repeat `run-task <task>/spec.md --pre-only`.
+Retries, including `--reset`, retain the original baseline, strict/index options,
+and iteration budget so committed implementation remains visible to the audit.
+A failed retry revokes approval. Start a new task when a new baseline is needed.
+
 Route malformed or partial reports using their evidence and recommended defect
 kind. Stop after three failed execution cycles for the same blocking condition
 and return to design rather than looping.

@@ -159,7 +159,8 @@ mmcg watch
 mmcg status
 
 # Search durable decisions, reports, audits, and lessons. `why` renders an
-# evidence envelope and never invents rationale absent from the records.
+# evidence envelope with history freshness, skipped counts, and truncation.
+# It never invents rationale absent from the records.
 mmcg history "webhook dedupe"
 mmcg history "runtime boundary" --kind audit
 mmcg why "why is webhook dedupe durable?"
@@ -679,7 +680,11 @@ evidence:
   including specs, executor reports, audits, lessons, context, release notes,
   and Markdown decisions under conventional `docs/adr`, `docs/adrs`,
   `docs/decisions`, `adr`, `adrs`, or `.mastermind/decisions` directories.
-  This is enabled by default; `--no-project-knowledge` disables it;
+  Lens verifies the bounded live Markdown inventory before correlating indexed
+  excerpts. Changed or deleted documents suppress history matches with a
+  `project_history_stale` diagnostic; incomplete admission suppresses them with
+  `project_history_incomplete`. Healthy code and other evidence overlays remain
+  available. This is enabled by default; `--no-project-knowledge` disables it;
 - CODEOWNERS from `.github/CODEOWNERS`, repository-root `CODEOWNERS`, or
   `docs/CODEOWNERS` in that order, with `--codeowners PATH` as an override;
 - bounded Git churn and contributor names from the last 200 commits by default,
@@ -732,9 +737,18 @@ file pairs may decorate an already returned static edge in either direction,
 but they never create a node or edge. Overlay switches change emphasis and
 inspector detail only; they do not add or remove codegraph topology. Imported
 artifacts and Git history are parsed in memory. Project knowledge is read from
-the derived SQLite history corpus; Markdown remains authoritative and must be
-re-indexed after changes. Lens writes none of this evidence to source files or
-SQLite.
+the derived SQLite history corpus after its live inventory check; Markdown
+remains authoritative and must be re-indexed after changes. Watch mode refreshes
+history for nested ADR edits, additions, removals, and renames under the same
+decision directories admitted by the indexer. Lens writes none of this evidence
+to source files or SQLite.
+
+The portable [project-history skill](../../skills/workflow/mastermind-project-history/SKILL.md)
+also ships an explicit document evidence snapshot/check helper. It records
+declared document/code relations and invalidates incident edges when a named
+file changes. This is a local research artifact, separate from Lens topology and
+the code-file endpoints required by `mastermind-facts/v1`. Relation labels and
+unchanged hashes do not establish semantic correctness.
 
 ### PR evidence package (`mmcg review export`)
 

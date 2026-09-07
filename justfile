@@ -132,10 +132,11 @@ npm-smoke-native:
     python3 -c 'import json; value=json.load(open("doctor.json")); assert "checks" in value, value'
     echo "Native npm tarball smoke passed for $target ($version)."
 
-# Test audit publication fixtures and the eval harness itself without calling a model.
+# Test audit publication, document snapshots, and eval harnesses without a model or build.
 eval-harness:
     {{PY}} scripts/test_audit_workflow_security.py
-    {{PY}} -m unittest evals/test_runner.py
+    {{PY}} scripts/test_document_graph.py
+    {{PY}} -m unittest evals/test_runner.py evals/test_evidence.py
 
 # Enforce RustSec, license, duplicate, wildcard, and source policy.
 security:

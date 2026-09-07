@@ -1,8 +1,8 @@
 ---
 name: mastermind-project-history
-description: Retrieve and reason from durable project decisions, failed approaches, audits, reports, and lessons without treating provenance, search rank, or user approval as technical proof. Use when asking why a design exists, whether an approach was tried, what supersedes an older decision, or what prior evidence should constrain a new plan.
+description: Retrieve and reason from durable project decisions, failed approaches, audits, reports, and lessons without treating provenance, search rank, or user approval as technical proof. Use when asking why a design exists, whether an approach was tried, what supersedes an older decision, what prior evidence should constrain a new plan, or how to record and check explicit document-to-code evidence links.
 metadata:
-  version: 0.2.1
+  version: 0.3.0
   authors: [mastermind]
   tags: [workflow, history, decisions, provenance, evidence]
 ---
@@ -37,8 +37,11 @@ load-bearing.
 1. Query `mmcg_history` with the narrowest useful terms and optional `kind`.
 2. Read the returned Markdown around each relevant match. Search rank is not
    confidence, and co-occurrence is not causality.
-3. Resolve status and chronology. Prefer an `active` decision over a
-   `superseded` one and follow `Supersedes` links. If status is absent, say so.
+3. Resolve explicit status and supersession links. An accepted or active record
+   can constrain the plan; a proposed record remains a proposal. Follow
+   `Supersedes` links in both directions and inspect the replacement's status.
+   A newer date or filename alone does not replace an accepted decision.
+   If status is absent or records conflict, say so.
    A lesson with status `candidate` is an audit signal awaiting semantic review,
    not active guidance and not proof of a reusable root cause.
 4. Preserve negative history: a relevant rejected alternative, failed attempt,
@@ -53,6 +56,29 @@ load-bearing.
 
 Do not write project history during retrieval. The planner/controller records
 durable knowledge only after post-flight semantic review.
+
+## Reusing document evidence
+
+When a research packet needs reusable links between a decision and current
+code, use the bundled [document graph helper](scripts/document_graph.py).
+Declare only relations supported by a source passage and cite both endpoints.
+The helper records the declared paths, lines, and content hashes in a new local
+artifact under `.mastermind/research/`; it does not edit history or the codegraph.
+See [the commands and contract](references/document-evidence-graph.md).
+
+Before reusing a snapshot, run `check`. A changed or missing endpoint makes
+every incident edge `needs_review`; read the changed source before repeating
+the conclusion. Unaffected edges can remain `current`.
+
+`current` means the named files still match the snapshot. Every edge remains
+`unverified`, including `verified_by`: a hash or relation name cannot establish
+that code obeys a decision or that a test passed. Review semantic claims and
+runtime evidence separately. A `mentions` edge is only a mention.
+
+The graph covers only named files. A newly added superseding ADR is not detected
+by endpoint hashes: search history again before making corpus-wide or current
+policy claims. `revision_changed` is separate from file freshness; even an
+unchanged revision does not prove a clean worktree or complete evidence.
 
 ## Output contract
 

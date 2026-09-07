@@ -118,6 +118,31 @@ test("Codex adapter installs skills without Claude subagents", () => {
   }
 });
 
+test("document graph helper and reference ship to both clients and participate in drift checks", () => {
+  const f = completeFixture();
+  try {
+    for (const client of ["claude", "codex"]) {
+      copyAll({ home: f.home, share: f.share, client, version: "1.0.0", profile: "core" });
+      const relative = "skills/mastermind-project-history";
+      const installed = path.join(f.home, `.${client}`, relative);
+      const source = path.join(f.share, relative);
+      for (const file of ["scripts/document_graph.py", "references/document-evidence-graph.md"]) {
+        assert.equal(
+          fs.readFileSync(path.join(installed, file), "utf8"),
+          fs.readFileSync(path.join(source, file), "utf8"),
+        );
+      }
+      fs.appendFileSync(path.join(installed, "scripts/document_graph.py"), "\n# local edit\n");
+      assert.deepEqual(
+        workflowStatus({ home: f.home, share: f.share, client, version: "1.0.0" })[0].drifted,
+        [relative],
+      );
+    }
+  } finally {
+    f.cleanup();
+  }
+});
+
 test("invalid ownership manifest fails before replacing installed files", () => {
   const f = fixture();
   try {

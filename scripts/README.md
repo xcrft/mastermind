@@ -10,6 +10,7 @@ packaging, release controls, and registry smoke tests.
 |---|---|
 | Full deterministic gate | `just check` |
 | Repository contracts only | `just validate` |
+| Research evidence and eval harnesses, without a build or model | `just eval-harness` |
 | Native npm tarball smoke | `just npm-smoke-native` |
 | Index benchmark | `just benchmark-index` |
 
@@ -79,6 +80,19 @@ def validate_artifact(a: Artifact) -> list[Issue]:
 ```
 
 When you add a check that flags many existing artifacts, **fix them in the same PR** so CI stays green.
+
+## `test_document_graph.py`: research evidence freshness
+
+Exercises the portable history skill's snapshot/check CLI in temporary Git
+repositories: explicit relations, content drift, deleted endpoints, schema
+validation, bounded reads, and path confinement. It uses Python's standard
+library and Git, without compiling mmcg or calling a model.
+
+The runtime helper ships inside
+[`mastermind-project-history`](../skills/workflow/mastermind-project-history/SKILL.md),
+including its [commands and limits](../skills/workflow/mastermind-project-history/references/document-evidence-graph.md).
+The suite checks file identity and invalidation, not the meaning of a declared
+relation or the quality of model reasoning.
 
 ## `configure-github-protections.sh` — live release controls
 

@@ -2669,14 +2669,15 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        fs::create_dir_all(repo.path().join("docs/adr")).unwrap();
+        fs::write(
+            repo.path().join("docs/adr/001-seed.md"),
+            "# Keep seed deterministic\n\nThe contract is implemented in src/lib.rs.\n",
+        )
+        .unwrap();
         let mut writable = Store::open(&index_path).unwrap();
-        writable
-            .replace_project_history(&[crate::store::ProjectHistoryEntry {
-                path: "docs/adr/001-seed.md".into(),
-                kind: "architecture_decision".into(),
-                title: "Keep seed deterministic".into(),
-                body: "The contract is implemented in src/lib.rs.".into(),
-            }])
+        Indexer::new(repo.path())
+            .index_project_history(&mut writable)
             .unwrap();
         drop(writable);
 
@@ -2707,6 +2708,111 @@ mod tests {
             "{json}"
         );
         assert_eq!(json["evidence"]["sources"]["returned"], 3);
+    }
+
+    #[test]
+    fn project_knowledge_omits_edited_and_deleted_adrs_without_hiding_code_evidence() {
+        let (repo, _index_dir, index_path) = fixture();
+        let code = fs::read(repo.path().join("src/lib.rs")).unwrap();
+        let head = crate::diff::current_head_oid(repo.path()).unwrap();
+        fs::create_dir_all(repo.path().join("docs/adr")).unwrap();
+        let adr = repo.path().join("docs/adr/001-seed.md");
+        fs::write(&adr, "# Seed contract\n\nKeep src/lib.rs deterministic.\n").unwrap();
+        fs::write(
+            repo.path().join("junit.xml"),
+            r#"<testsuite><testcase name="seed" file="src/lib.rs"/></testsuite>"#,
+        )
+        .unwrap();
+        let reindex_history = || {
+            let mut store = Store::open(&index_path).unwrap();
+            Indexer::new(repo.path())
+                .index_project_history(&mut store)
+                .unwrap();
+        };
+        let snapshot = || {
+            let store = Store::open_read_only(&index_path).unwrap();
+            serde_json::to_value(
+                build_snapshot_with_evidence_extensions(
+                    &store,
+                    repo.path(),
+                    &options(),
+                    &crate::evidence::EvidenceOptions::default(),
+                    &crate::evidence::EvidenceExtensionOptions {
+                        junit: vec![PathBuf::from("junit.xml")],
+                        project_knowledge: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        reindex_history();
+        let fresh = snapshot();
+        assert!(fresh["impact"]["impact"]["returned"].as_u64().unwrap() > 0);
+
+        for deleted in [false, true] {
+            if deleted {
+                fs::remove_file(&adr).unwrap();
+            } else {
+                fs::write(
+                    &adr,
+                    "# Seed contract\n\nUpdated guidance for src/lib.rs.\n",
+                )
+                .unwrap();
+            }
+            let stale = snapshot();
+            assert_eq!(crate::diff::current_head_oid(repo.path()).unwrap(), head);
+            assert_eq!(fs::read(repo.path().join("src/lib.rs")).unwrap(), code);
+            assert_eq!(stale["impact"]["impact"], fresh["impact"]["impact"]);
+            assert_eq!(stale["evidence"]["partial"], true);
+            let sources = stale["evidence"]["sources"]["items"].as_array().unwrap();
+            let knowledge = sources
+                .iter()
+                .find(|item| item["id"] == "project-knowledge")
+                .unwrap();
+            assert_eq!(knowledge["status"], "stale");
+            assert_eq!(knowledge["facts_returned"], 0);
+            assert!(knowledge["facts_total"].is_null());
+            assert!(sources
+                .iter()
+                .any(|item| item["kind"] == "junit" && item["status"] == "loaded"));
+            let file = stale["evidence"]["files"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["path"] == "src/lib.rs")
+                .unwrap();
+            assert!(file["knowledge"].as_array().unwrap().is_empty());
+            assert_eq!(file["test_results"]["passed"], 1);
+            assert!(stale["evidence"]["diagnostics"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["code"] == "project_history_stale"));
+
+            reindex_history();
+            let recovered = snapshot();
+            let knowledge = recovered["evidence"]["sources"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["id"] == "project-knowledge")
+                .unwrap();
+            assert_eq!(knowledge["status"], "loaded");
+            assert_eq!(knowledge["facts_returned"], if deleted { 0 } else { 1 });
+            if !deleted {
+                assert!(recovered["evidence"]["files"]["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .flat_map(|item| item["knowledge"].as_array().unwrap())
+                    .any(|item| item["excerpt"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Updated guidance")));
+            }
+        }
     }
 
     #[test]

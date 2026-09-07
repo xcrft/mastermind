@@ -192,7 +192,8 @@ pub fn dispatch_why(
     let retrieval_query = natural_language_history_query(query);
     let response = queries::history(&store, &retrieval_query, None, top.clamp(1, 50))?;
     println!("mastermind why — {}\n", safe_line_text(query));
-    println!("Observed");
+    println!("{}", history_snapshot_notice(&response));
+    println!("Observed (indexed matches)");
     if response.observed.is_empty() {
         println!("  No matching durable history was found.");
     } else {
@@ -229,6 +230,19 @@ pub fn dispatch_why(
         );
     }
     Ok(())
+}
+
+fn history_snapshot_notice(response: &queries::HistorySearchResponse) -> String {
+    let mut notice = format!(
+        "History snapshot: {} (skipped artifacts: {}, truncated: {})\n",
+        response.freshness, response.skipped_artifacts, response.truncated
+    );
+    if response.freshness != "fresh" || response.skipped_artifacts > 0 || response.truncated {
+        notice.push_str(
+            "Current history is not fully verified. Resolve skipped artifacts, re-index, and read the current Markdown before relying on these matches.\n",
+        );
+    }
+    notice
 }
 
 fn natural_language_history_query(question: &str) -> String {
@@ -856,6 +870,37 @@ mod map_tests {
         );
         assert_eq!(natural_language_history_query("why is this?"), "");
         assert_eq!(safe_line_text("почему\nтак"), "почему\\nтак");
+    }
+
+    #[test]
+    fn why_discloses_history_freshness_and_incomplete_admission() {
+        for (freshness, skipped_artifacts, truncated) in [
+            ("fresh", 0, false),
+            ("stale", 0, false),
+            ("incomplete", 2, false),
+            ("snapshot_changed", 0, false),
+            ("fresh", 0, true),
+        ] {
+            let response = queries::HistorySearchResponse {
+                query: "storage".into(),
+                kind: None,
+                count: 0,
+                observed: Vec::new(),
+                inference: "retrieval only",
+                source_of_truth: "Markdown",
+                skipped_artifacts,
+                truncated,
+                freshness,
+            };
+            let text = history_snapshot_notice(&response);
+            assert!(text.contains(&format!("History snapshot: {freshness}")));
+            assert!(text.contains(&format!("skipped artifacts: {skipped_artifacts}")));
+            assert!(text.contains(&format!("truncated: {truncated}")));
+            assert_eq!(
+                text.contains("Current history is not fully verified"),
+                freshness != "fresh" || skipped_artifacts > 0 || truncated
+            );
+        }
     }
 
     #[test]

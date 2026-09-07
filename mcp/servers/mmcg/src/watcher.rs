@@ -8,7 +8,9 @@
 //!
 //! Runs in the foreground until stdin closes or Ctrl-C.
 
-use crate::indexer::{extractor_for_path, IndexError, Indexer, SourceMatcher};
+use crate::indexer::{
+    extractor_for_path, IndexError, Indexer, SourceMatcher, PROJECT_DECISION_DIRS,
+};
 use crate::store::Store;
 use notify::event::{ModifyKind, RenameMode};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -73,11 +75,21 @@ fn handle_event(
     pending: &mut HashMap<PathBuf, Instant>,
     store: &mut Store,
 ) {
-    if event
-        .paths
-        .iter()
-        .any(|path| is_project_history_path(path, root))
-    {
+    if matches!(event.kind, EventKind::Access(_)) {
+        return;
+    }
+    let may_replace_directory = matches!(
+        event.kind,
+        EventKind::Create(notify::event::CreateKind::Folder)
+            | EventKind::Create(notify::event::CreateKind::Any)
+            | EventKind::Remove(_)
+            | EventKind::Modify(ModifyKind::Name(_))
+            | EventKind::Any
+    );
+    if event.paths.iter().any(|path| {
+        is_project_history_path(path, root)
+            || (may_replace_directory && is_project_history_container(path, root))
+    }) {
         match indexer.index_project_history(store) {
             Ok(stats) => eprintln!(
                 "[mastermind watch] refreshed {} history entries (skipped {}, truncated {})",
@@ -288,6 +300,19 @@ fn is_project_history_path(path: &Path, root: &Path) -> bool {
     is_context
         || path.starts_with(root.join(".mastermind").join("tasks"))
         || path.starts_with(root.join(".mastermind").join("releases"))
+        || PROJECT_DECISION_DIRS
+            .iter()
+            .any(|relative| path.starts_with(root.join(relative)))
+}
+
+fn is_project_history_container(path: &Path, root: &Path) -> bool {
+    path != root
+        && path.starts_with(root)
+        && PROJECT_DECISION_DIRS
+            .iter()
+            .copied()
+            .chain([".mastermind/tasks", ".mastermind/releases"])
+            .any(|relative| root.join(relative).starts_with(path))
 }
 
 #[cfg(test)]
@@ -353,6 +378,157 @@ mod tests {
         assert_eq!(
             store
                 .search_project_history("idempotency", Some("context"), 10)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn nested_decision_create_edit_rename_and_remove_refresh_history() {
+        for relative in PROJECT_DECISION_DIRS {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().canonicalize().unwrap();
+            std::fs::create_dir_all(root.join(".mastermind")).unwrap();
+            let mut store = Store::open(root.join(".mastermind/mmcg.db")).unwrap();
+            let indexer = Indexer::new(&root);
+            indexer.index_all(&mut store, false).unwrap();
+            let mut matcher = SourceMatcher::new(&root);
+            let mut pending = HashMap::new();
+            let path = root.join(relative).join("nested/001-storage.md");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "# Storage\n\nUse ephemeral state.\n").unwrap();
+            handle_event(
+                notify::Event::new(EventKind::Create(notify::event::CreateKind::File))
+                    .add_path(path.clone()),
+                &root,
+                &indexer,
+                &mut matcher,
+                &mut pending,
+                &mut store,
+            );
+            assert_eq!(
+                store
+                    .search_project_history("ephemeral", Some("architecture_decision"), 10)
+                    .unwrap()
+                    .len(),
+                1,
+                "create under {relative}"
+            );
+
+            std::fs::write(&path, "# Storage\n\nUse durable state.\n").unwrap();
+            handle_event(
+                notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(path.clone()),
+                &root,
+                &indexer,
+                &mut matcher,
+                &mut pending,
+                &mut store,
+            );
+            assert!(store
+                .search_project_history("ephemeral", Some("architecture_decision"), 10)
+                .unwrap()
+                .is_empty());
+            let hits = store
+                .search_project_history("durable", Some("architecture_decision"), 10)
+                .unwrap();
+            assert_eq!(hits.len(), 1, "edit under {relative}");
+
+            let renamed = path.with_file_name("002-storage.md");
+            std::fs::rename(&path, &renamed).unwrap();
+            handle_event(
+                notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+                    .add_path(path)
+                    .add_path(renamed.clone()),
+                &root,
+                &indexer,
+                &mut matcher,
+                &mut pending,
+                &mut store,
+            );
+            let hits = store
+                .search_project_history("durable", Some("architecture_decision"), 10)
+                .unwrap();
+            assert_eq!(hits.len(), 1, "rename under {relative}");
+            assert_eq!(hits[0].path, format!("{relative}/nested/002-storage.md"));
+
+            std::fs::remove_file(&renamed).unwrap();
+            handle_event(
+                notify::Event::new(EventKind::Remove(notify::event::RemoveKind::File))
+                    .add_path(renamed),
+                &root,
+                &indexer,
+                &mut matcher,
+                &mut pending,
+                &mut store,
+            );
+            assert!(store
+                .search_project_history("durable", Some("architecture_decision"), 10)
+                .unwrap()
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn removing_decision_parent_directory_purges_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join(".mastermind")).unwrap();
+        std::fs::create_dir_all(root.join("docs/adr")).unwrap();
+        std::fs::write(root.join("docs/adr/001.md"), "# Durable state\n").unwrap();
+        let mut store = Store::open(root.join(".mastermind/mmcg.db")).unwrap();
+        let indexer = Indexer::new(&root);
+        indexer.index_all(&mut store, false).unwrap();
+        assert_eq!(
+            store
+                .search_project_history("durable", Some("architecture_decision"), 10)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        std::fs::remove_dir_all(root.join("docs")).unwrap();
+        let mut matcher = SourceMatcher::new(&root);
+        let mut pending = HashMap::new();
+        handle_event(
+            notify::Event::new(EventKind::Remove(notify::event::RemoveKind::Folder))
+                .add_path(root.join("docs")),
+            &root,
+            &indexer,
+            &mut matcher,
+            &mut pending,
+            &mut store,
+        );
+        assert!(store
+            .search_project_history("durable", Some("architecture_decision"), 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn reading_history_does_not_trigger_another_index_refresh() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join(".mastermind")).unwrap();
+        let path = root.join("CONTEXT.md");
+        std::fs::write(&path, "# Initial context\n").unwrap();
+        let mut store = Store::open(root.join(".mastermind/mmcg.db")).unwrap();
+        let indexer = Indexer::new(&root);
+        indexer.index_all(&mut store, false).unwrap();
+        std::fs::write(&path, "# Changed context\n").unwrap();
+        let mut matcher = SourceMatcher::new(&root);
+        let mut pending = HashMap::new();
+        handle_event(
+            notify::Event::new(EventKind::Access(notify::event::AccessKind::Read)).add_path(path),
+            &root,
+            &indexer,
+            &mut matcher,
+            &mut pending,
+            &mut store,
+        );
+        assert_eq!(
+            store
+                .search_project_history("initial", Some("context"), 10)
                 .unwrap()
                 .len(),
             1
@@ -580,6 +756,30 @@ mod tests {
         ));
         assert!(!is_project_history_path(
             Path::new("/repo/notes/CONTEXT-archive-2025.md"),
+            root
+        ));
+        for relative in PROJECT_DECISION_DIRS {
+            assert!(is_project_history_path(
+                &root.join(relative).join("nested/001.MD"),
+                root
+            ));
+        }
+        for path in [
+            "docs/adr-backup/001.md",
+            "docs/other.md",
+            "other/adr/001.md",
+        ] {
+            assert!(!is_project_history_path(&root.join(path), root));
+        }
+        assert!(is_project_history_container(&root.join("docs"), root));
+        assert!(is_project_history_container(
+            &root.join(".mastermind"),
+            root
+        ));
+        assert!(!is_project_history_container(root, root));
+        assert!(!is_project_history_container(Path::new("/"), root));
+        assert!(!is_project_history_container(
+            &root.join("docs/other"),
             root
         ));
     }

@@ -1,0 +1,12 @@
+{
+  "id": "document-evidence-boundaries-01",
+  "kind": "research",
+  "revision": "1bc7c3c51e9e9a06799062fbd0dee83899ff3299",
+  "source_allowlist": [
+    "skills/workflow/mastermind-project-history/scripts/document_graph.py",
+    "skills/workflow/mastermind-project-history/SKILL.md",
+    "skills/workflow/mastermind-project-history/references/document-evidence-graph.md"
+  ],
+  "question": "Trace the bundled document-relationship helper from a successful snapshot of a valid manifest to a later check. The manifest relates ADR passages to code, tests and other ADRs. Explain the returned evidence and its use alongside normal project-history/codegraph research, including a change to a named endpoint versus repository changes outside the manifest. Assume a supported platform, a valid Git worktree with HEAD, the same canonical root, and stable inputs during each operation. Which conclusions follow from this workflow and which need additional evidence?",
+  "output_contract": "At most five source-grounded findings with path:line citations. Separate observations, inferences and unknowns. Read source only; do not execute the researched code."
+}

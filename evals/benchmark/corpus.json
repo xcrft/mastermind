@@ -1,0 +1,26 @@
+{
+  "kind": "mastermind-research-corpus",
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "task-phase-continuity-01",
+      "role": "calibration",
+      "coverage": ["historical_defect", "workflow_state", "cross_file_evidence"],
+      "task": "tasks/task-phase-continuity-01.json",
+      "rubric": "rubrics/task-phase-continuity-01.json",
+      "indexed_files": [
+        "mcp/servers/mmcg/src/run_task.rs",
+        "mcp/servers/mmcg/src/verify_spec.rs",
+        "mcp/servers/mmcg/src/audit_spec.rs"
+      ]
+    },
+    {
+      "id": "document-evidence-boundaries-01",
+      "role": "calibration",
+      "coverage": ["correct_behavior", "documentation", "freshness_vs_truth", "coverage_limits"],
+      "task": "tasks/document-evidence-boundaries-01.json",
+      "rubric": "rubrics/document-evidence-boundaries-01.json",
+      "indexed_files": ["skills/workflow/mastermind-project-history/scripts/document_graph.py"]
+    }
+  ]
+}

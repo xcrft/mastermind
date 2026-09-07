@@ -1,0 +1,69 @@
+{
+  "task_id": "document-evidence-boundaries-01",
+  "source_revision": "1bc7c3c51e9e9a06799062fbd0dee83899ff3299",
+  "status": "calibration_key_source_reviewed",
+  "required_knowns": [
+    {
+      "claim": "Relations are explicitly supplied. The snapshot records endpoints, deterministic relation identities, whole endpoint-file hashes and the local repository revision. It does not infer relations or store complete source contents.",
+      "anchors": [
+        "skills/workflow/mastermind-project-history/scripts/document_graph.py:123-141",
+        "skills/workflow/mastermind-project-history/scripts/document_graph.py:388-408",
+        "skills/workflow/mastermind-project-history/scripts/document_graph.py:478-495"
+      ]
+    },
+    {
+      "claim": "A successful check compares whole named endpoint files. Changed content or a recordable endpoint failure (missing, unsafe_path, not_regular or unsupported_text) makes the result and incident edges needs_review; unaffected edges can remain current. Edits outside a cited line still count. Other failures, including byte limits, remain errors rather than freshness results.",
+      "anchors": [
+        "skills/workflow/mastermind-project-history/scripts/document_graph.py:388-414",
+        "skills/workflow/mastermind-project-history/scripts/document_graph.py:498-531"
+      ]
+    },
+    {
+      "claim": "Endpoint freshness, HEAD change and dirty-state reporting are separate. Unchanged named files can yield current with revision_changed=true after an unrelated commit. An unlisted ADR is not added to the graph or semantically assessed; an untracked file can still affect the conservative dirty signal.",
+      "anchors": [
+        "skills/workflow/mastermind-project-history/scripts/document_graph.py:366-385",
+        "skills/workflow/mastermind-project-history/scripts/document_graph.py:498-531",
+        "skills/workflow/mastermind-project-history/SKILL.md:78-81"
+      ]
+    },
+    {
+      "claim": "Relations remain unverified, including verified_by and supersedes. Current does not establish passing tests, implementation compliance, accepted decision status or corpus completeness. Supersession requires reading source and status; provenance does not establish semantic truth.",
+      "anchors": [
+        "skills/workflow/mastermind-project-history/scripts/document_graph.py:433-450",
+        "skills/workflow/mastermind-project-history/SKILL.md:37-52",
+        "skills/workflow/mastermind-project-history/SKILL.md:69-81"
+      ]
+    },
+    {
+      "claim": "Snapshot publishes a new local research JSON artifact without overwriting an existing output; check returns evidence without updating that snapshot. The shipped contract does not import document nodes into codegraph or edit project history. History retrieval and source reading remain separate steps.",
+      "anchors": [
+        "skills/workflow/mastermind-project-history/scripts/document_graph.py:277-307",
+        "skills/workflow/mastermind-project-history/scripts/document_graph.py:478-495",
+        "skills/workflow/mastermind-project-history/scripts/document_graph.py:498-531",
+        "skills/workflow/mastermind-project-history/references/document-evidence-graph.md:3-6",
+        "skills/workflow/mastermind-project-history/SKILL.md:37-43"
+      ]
+    }
+  ],
+  "expected_unknowns": [
+    "The semantic truth of a declared relation, the accepted status of a superseding ADR and actual test results require additional evidence.",
+    "The manifest does not establish whether unlisted contradictory or superseding evidence exists.",
+    "Behavior of external consumers and end-to-end Lens/history integration is outside this source allowlist. No execution was performed."
+  ],
+  "materially_false_claims": [
+    "Check inserts newly discovered ADR nodes or imports document relationships into the native codegraph.",
+    "Current or verified_by proves acceptance, compliance or passing tests.",
+    "Every HEAD change invalidates every graph edge.",
+    "Unchanged HEAD guarantees endpoint freshness or complete evidence.",
+    "All endpoint read failures produce needs_review rather than an error.",
+    "Check rewrites the snapshot or project history, or snapshot overwrites existing output."
+  ],
+  "reviewer_notes": [
+    "A separate read-only agent reviewed the claims and anchors against the exact source revision. The coordinator applied the distinction between an untracked-file dirty signal and semantic graph discovery. This is agent source review, not runtime evidence, human sign-off or model-quality measurement.",
+    "A successful snapshot is an explicit premise: a schema-valid manifest alone does not establish readable files or in-range endpoint lines.",
+    "The conservative dirty signal may change on a metadata-only touch. Do not require a content change or complete unlisted-file discovery from that flag."
+  ],
+  "review_dimensions": ["claim_to_source_support", "critical_evidence_coverage", "material_false_conclusions", "appropriate_unknowns"],
+  "decision_quality": "not_applicable_to_facts_only_research_task",
+  "automatic_quality_score": null
+}

@@ -4937,6 +4937,60 @@ mod checks {
     }
 
     #[test]
+    fn attribute_only_test_changes_survive_both_mcp_protocols() {
+        let baseline = "fn checks_value() { assert_eq!(2 + 2, 4); }\n";
+        let (root, mut store) = impact_fixture_with_source(
+            "attribute_only_projection",
+            "src/lib.rs",
+            baseline,
+            &format!("#[test]\n{baseline}"),
+        );
+        for version in [ProtocolVersion::Current, ProtocolVersion::Legacy] {
+            let mut results = Vec::new();
+            for name in ["mmcg_change_impact", "mmcg_test_impact"] {
+                let result = handle_tools_call(version, &mut store, &json!({
+                    "name": name,
+                    "arguments": { "since": "HEAD", "root": root.to_string_lossy(), "depth": 3, "top": 100 }
+                })).unwrap();
+                assert_eq!(result["isError"], false);
+                let content = unwrap_content(&result);
+                assert_eq!(content["schema_version"], 1);
+                assert_eq!(
+                    content["changes"]["symbols"]["items"],
+                    json!([{
+                        "file": "src/lib.rs", "name": "checks_value", "kind": "function",
+                        "line": 2, "change": "signature_changed"
+                    }])
+                );
+                assert_eq!(content["tests"]["total"], 1);
+                assert_eq!(content["tests"]["truncated"], false);
+                let test = &content["tests"]["items"][0];
+                assert_eq!(test["symbol"]["name"], "checks_value");
+                assert_eq!(test["classification"], "direct");
+                assert_eq!(test["minimum_depth"], 0);
+                assert_eq!(test["confidence"], "high");
+                let evidence = test["evidence"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|e| e["kind"] == "changed_test_symbol")
+                    .unwrap();
+                assert_eq!(evidence["seed"]["change"], "signature_changed");
+                if version == ProtocolVersion::Current {
+                    assert_eq!(result["structuredContent"], content);
+                } else {
+                    assert!(result.get("structuredContent").is_none());
+                }
+                results.push(content);
+            }
+            assert_eq!(results[0]["changes"], results[1]["changes"]);
+            assert_eq!(results[0]["tests"], results[1]["tests"]);
+        }
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn impact_tools_validate_depth_top_and_root() {
         let path = std::env::temp_dir().join("mmcg-mcp-impact-validation.db");
         let _ = std::fs::remove_file(&path);

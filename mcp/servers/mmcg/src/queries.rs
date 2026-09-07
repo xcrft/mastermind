@@ -6451,6 +6451,90 @@ mod checks {
     }
 
     #[test]
+    fn change_impact_tracks_test_attribute_addition_and_removal() {
+        let plain = "fn checks_value() { assert_eq!(2 + 2, 4); }\n";
+        let marked = "#[test]\n// Still belongs to the function.\nfn checks_value() { assert_eq!(2 + 2, 4); }\n";
+        for (label, before, after, is_test, line) in [
+            ("test_attribute_added", plain, marked, true, 3),
+            ("test_attribute_removed", marked, plain, false, 1),
+        ] {
+            let root = impact_repo(label, &[("src/lib.rs", before)]);
+            write_impact_file(&root, "src/lib.rs", after);
+            let store = index_impact(&root, label);
+            let response = change_impact(&store, &root, "HEAD", 3, 100).unwrap();
+            assert_eq!(response.changes.symbols.items.len(), 1);
+            let changed = &response.changes.symbols.items[0];
+            assert_eq!(changed.name, "checks_value");
+            assert_eq!(changed.change, "signature_changed");
+            assert_eq!(changed.line, line);
+            assert!(!response.changes.symbols.truncated);
+            assert!(!response.tests.truncated);
+            if is_test {
+                assert_eq!(response.tests.items.len(), 1);
+                let test = &response.tests.items[0];
+                assert_eq!(test.symbol.name, "checks_value");
+                assert_eq!(test.classification, "direct");
+                assert_eq!(test.minimum_depth, Some(0));
+                assert_eq!(test.confidence, "high");
+                let evidence = test
+                    .evidence
+                    .iter()
+                    .find(|e| e.kind == "changed_test_symbol")
+                    .unwrap();
+                let seed = evidence.seed.as_ref().unwrap();
+                assert_eq!(seed.name, "checks_value");
+                assert_eq!(seed.change, "signature_changed");
+                assert_eq!(seed.line, line);
+            } else {
+                assert!(response.tests.items.is_empty());
+                assert_eq!(response.tests.total, Some(0));
+            }
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn change_impact_attribute_arguments_seed_test_callers() {
+        let baseline = r#"#[cfg(feature = "before")]
+fn value() -> u8 { 1 }
+#[test]
+fn checks_value() { assert_eq!(value(), 1); }
+"#;
+        let root = impact_repo("attribute_arguments", &[("src/lib.rs", baseline)]);
+        write_impact_file(
+            &root,
+            "src/lib.rs",
+            &baseline.replace("\"before\"", "\"after\""),
+        );
+        let store = index_impact(&root, "attribute_arguments");
+        let response = change_impact(&store, &root, "HEAD", 3, 100).unwrap();
+        assert_eq!(response.changes.symbols.items.len(), 1);
+        assert_eq!(response.changes.symbols.items[0].name, "value");
+        assert_eq!(
+            response.changes.symbols.items[0].change,
+            "signature_changed"
+        );
+        assert_eq!(response.tests.items.len(), 1);
+        let test = &response.tests.items[0];
+        assert_eq!(test.symbol.name, "checks_value");
+        assert_eq!(test.classification, "direct");
+        assert_eq!(test.minimum_depth, Some(1));
+        let seed = test
+            .evidence
+            .iter()
+            .find(|e| e.kind == "graph_seed")
+            .unwrap()
+            .seed
+            .as_ref()
+            .unwrap();
+        assert_eq!(seed.name, "value");
+        assert_eq!(seed.change, "signature_changed");
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn change_impact_rejects_stale_or_wrong_root_index() {
         let root = impact_repo(
             "root_stale",

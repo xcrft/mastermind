@@ -1093,6 +1093,22 @@ or given WAL/SHM sidecars by the server. Incompatible custom schemas return
 Tool responses are bounded JSON. Collection responses expose their own count or
 collection metadata; status and workflow responses use named fields.
 
+Rust declaration signatures include their attached outer `#[...]` attributes,
+including arguments. Attribute additions, removals and argument edits therefore
+appear as `signature_changed` in both symbol diff scopes and change/test impact.
+The reported line still points to the declaration. Comments between attributes
+and a declaration do not break ownership or enter its signature; inner
+`#![...]` attributes are not attached to the following declaration. This covers
+the functions/methods, structs, enums, traits, impls and modules emitted by the
+extractor, without expanding macros or adding previously unindexed item kinds.
+
+Diff and impact reject old extractor contracts with `index_stale`; refresh
+indexes for extractor contract v7. After reindexing, refresh exact-signature spec
+snapshots for attributed Rust declarations; a bare `fn ...` snapshot no longer equals the full attributed
+declaration. Preserve multiline signatures in YAML rather than legacy one-line
+snapshot bullets. Adding a test attribute identifies a changed test candidate;
+it does not prove that the test ran or replace the full required gate.
+
 ### Bounded role briefs
 
 `mmcg_brief` and `mastermind brief` call the same builder. CLI JSON is the MCP

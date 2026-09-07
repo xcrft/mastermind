@@ -47,7 +47,7 @@ pub use vue::VueExtractor;
 /// Semantic contract for the extractor output stored in SQLite. Bump this when
 /// an extractor or grammar change can alter symbols, edges, ownership, or paths
 /// without requiring a database schema migration.
-pub const EXTRACTOR_CONTRACT_VERSION: &str = "mmcg-extractors-v6";
+pub const EXTRACTOR_CONTRACT_VERSION: &str = "mmcg-extractors-v7";
 pub const EXTRACTOR_CONTRACT_META_KEY: &str = "extractor_contract_version";
 
 /// Bind a persisted codegraph to the repository it was built from.
@@ -3016,6 +3016,57 @@ def placeholder():
         assert!(store.extractor_contract_current().unwrap());
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rust_attribute_contract_rebuilds_unchanged_signatures_and_redacts_literals() {
+        let (dir, db) = setup("rust_attribute_contract");
+        let source = "#[label(note = r#\"TOPSECRET,[value]\"#)]\nfn candidate() {}\n";
+        fs::write(dir.join("app.rs"), source).unwrap();
+        let mut store = Store::open(&db).unwrap();
+        let indexer = Indexer::new(&dir);
+        indexer.index_all(&mut store, false).unwrap();
+        assert_eq!(
+            indexer.index_all(&mut store, false).unwrap().files_indexed,
+            0
+        );
+
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute(
+                "UPDATE symbols SET signature = 'fn candidate()' WHERE name = 'candidate'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        store
+            .set_meta(EXTRACTOR_CONTRACT_META_KEY, "mmcg-extractors-v6")
+            .unwrap();
+        assert!(!store.extractor_contract_current().unwrap());
+
+        let stats = indexer.index_all(&mut store, false).unwrap();
+        assert_eq!(stats.files_indexed, 1);
+        assert_eq!(stats.files_unchanged, 0);
+        assert!(stats.extractor_contract_rebuilt);
+        assert!(store.extractor_contract_current().unwrap());
+        let symbols = store.symbols_in_file("app.rs").unwrap();
+        let candidate = symbols.iter().find(|s| s.name == "candidate").unwrap();
+        assert_eq!(candidate.line_start, 2);
+        assert_eq!(candidate.decorators.as_deref(), Some(",label,"));
+        assert_eq!(
+            candidate.signature.as_deref(),
+            Some("#[label(note = r#\"TOPSECRET,[value]\"#)] fn candidate()")
+        );
+        assert!(!store
+            .search_concepts("\"candidate\"", 10)
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .search_concepts("\"topsecret\"", 10)
+            .unwrap()
+            .is_empty());
+        drop(store);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

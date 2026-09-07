@@ -289,6 +289,7 @@ pub(crate) fn symbols_changed_since_controlled(
         .map_err(|error| worktree_scope_error(git_ref, error))?;
     let head_oid = resolve_head_controlled(repo_root, deadline, interrupted)
         .map_err(|error| worktree_scope_error(git_ref, error))?;
+    require_current_extractor(store).map_err(|error| worktree_scope_error(git_ref, error))?;
     let (files_in_diff, truncated) =
         git_diff_name_only_controlled(repo_root, &baseline_oid, &head_oid, deadline, interrupted)
             .map_err(|error| worktree_scope_error(git_ref, error))?;
@@ -364,6 +365,17 @@ fn worktree_scope_error(git_ref: &str, error: WorkingTreeDiffError) -> DiffError
     }
 }
 
+fn require_current_extractor(store: &Store) -> Result<(), WorkingTreeDiffError> {
+    if store
+        .extractor_contract_current()
+        .map_err(|_| WorkingTreeDiffError::IndexStale)?
+    {
+        Ok(())
+    } else {
+        Err(WorkingTreeDiffError::IndexStale)
+    }
+}
+
 fn symbol_diff_over_blobs(
     store: &Store,
     label: &str,
@@ -431,6 +443,7 @@ pub(crate) fn symbols_changed_in_worktree_controlled(
 ) -> Result<WorkingTreeSymbolDiff, WorkingTreeDiffError> {
     let baseline_oid = resolve_commit_controlled(repo_root, git_ref, deadline, interrupted)?;
     let head_oid = resolve_head_controlled(repo_root, deadline, interrupted)?;
+    require_current_extractor(store)?;
     let (files, files_total, files_truncated, skipped_non_utf8_paths) =
         collect_worktree_paths_controlled(repo_root, &baseline_oid, deadline, interrupted)?;
     let snapshot_token = working_tree_snapshot_token_controlled(
@@ -2055,6 +2068,84 @@ mod tests {
         assert_eq!(total, Some(2));
         assert!(!truncated);
         assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn rust_outer_attribute_changes_reach_both_symbol_diff_scopes() {
+        let dir = init_repo("rust_attribute_diff");
+        let baseline = r#"fn becomes_test() {}
+#[test]
+fn stops_test() {}
+#[cfg(feature = "before")]
+fn gated() {}
+#[test]
+// Original comment.
+fn stable() {}
+"#;
+        let current = r#"#[test]
+fn becomes_test() {}
+fn stops_test() {}
+#[cfg(feature = "after")]
+fn gated() {}
+#[test]
+// Updated comment.
+fn stable() {}
+"#;
+        write(&dir, "src/lib.rs", baseline);
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+        run(&dir, &["tag", "baseline"]);
+        write(&dir, "src/lib.rs", current);
+        let indexed = indexed_worktree(&dir);
+        let assert_changes = |diff: &SymbolDiff| {
+            assert!(diff.added.is_empty());
+            assert!(diff.removed.is_empty());
+            assert!(diff.errors.is_empty());
+            assert!(!diff.truncated);
+            assert_eq!(diff.signature_changed.len(), 3);
+            for (name, old, new, line) in [
+                (
+                    "becomes_test",
+                    "fn becomes_test()",
+                    "#[test] fn becomes_test()",
+                    2,
+                ),
+                (
+                    "stops_test",
+                    "#[test] fn stops_test()",
+                    "fn stops_test()",
+                    3,
+                ),
+                (
+                    "gated",
+                    "#[cfg(feature = \"before\")] fn gated()",
+                    "#[cfg(feature = \"after\")] fn gated()",
+                    5,
+                ),
+            ] {
+                let change = diff
+                    .signature_changed
+                    .iter()
+                    .find(|s| s.name == name)
+                    .unwrap();
+                assert_eq!(change.file, "src/lib.rs");
+                assert_eq!(change.kind, "function");
+                assert_eq!(change.new_line, line);
+                assert_eq!(change.old_signature.as_deref(), Some(old));
+                assert_eq!(change.new_signature.as_deref(), Some(new));
+            }
+        };
+        let worktree = symbols_changed_in_worktree(indexed.store(), &dir, "baseline").unwrap();
+        assert_changes(&worktree.diff);
+        assert!(worktree.body_changed.is_empty());
+        assert_eq!(worktree.files.len(), 1);
+        assert_changes(&symbols_changed_since_worktree(indexed.store(), &dir, "baseline").unwrap());
+
+        run(&dir, &["add", "src/lib.rs"]);
+        run(&dir, &["commit", "-q", "-m", "attributes only"]);
+        assert_changes(&symbols_changed_since(indexed.store(), &dir, "baseline").unwrap());
+        drop(indexed);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

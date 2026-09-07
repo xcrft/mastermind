@@ -93,17 +93,25 @@ impl RustWalker<'_, '_> {
         let mut pending_attrs = Vec::new();
         for child in node.named_children(&mut cursor) {
             match child.kind() {
-                "attribute_item" | "inner_attribute_item" => {
-                    if let Some(n) = extract_attribute_name(&child, self.source) {
-                        pending_attrs.push(n);
-                    }
-                }
-                _ => self.visit(child, parent_index, take_attrs(&mut pending_attrs)),
+                "attribute_item" => pending_attrs.push(child),
+                // Inner attributes belong to the enclosing item. Comments do
+                // not break the association between outer attributes and an item.
+                "inner_attribute_item" | "line_comment" | "block_comment" => {}
+                _ => self.visit(
+                    child,
+                    parent_index,
+                    take_attrs(&mut pending_attrs, self.source),
+                ),
             }
         }
     }
 
-    fn visit(&mut self, child: Node, parent_index: Option<usize>, attrs: Option<String>) {
+    fn visit(
+        &mut self,
+        child: Node,
+        parent_index: Option<usize>,
+        attrs: Option<DeclarationAttributes>,
+    ) {
         match child.kind() {
             "source_file" | "block" | "declaration_list" => {
                 self.bindings.push(HashSet::new());
@@ -467,18 +475,33 @@ impl RustWalker<'_, '_> {
     }
 }
 
-/// Take accumulated attributes, convert to comma-delimited decorator format.
-fn take_attrs(attrs: &mut Vec<String>) -> Option<String> {
-    if attrs.is_empty() {
-        None
-    } else {
-        let formatted = format!(",{},", attrs.join(","));
-        attrs.clear();
-        Some(formatted)
-    }
+/// Outer attributes retained as marker names and complete declaration text.
+struct DeclarationAttributes {
+    decorators: Option<String>,
+    text: String,
 }
 
-/// Picks `push_def` or `push_def_with_decorators` based on attrs presence.
+fn take_attrs(attrs: &mut Vec<Node<'_>>, source: &[u8]) -> Option<DeclarationAttributes> {
+    if attrs.is_empty() {
+        return None;
+    }
+    let mut names = Vec::new();
+    let mut text = Vec::new();
+    for attr in attrs.drain(..) {
+        if let Some(name) = extract_attribute_name(&attr, source) {
+            names.push(name);
+        }
+        if let Some(value) = node_text(&attr, source) {
+            text.push(value);
+        }
+    }
+    Some(DeclarationAttributes {
+        decorators: (!names.is_empty()).then(|| format!(",{},", names.join(","))),
+        text: text.join(" "),
+    })
+}
+
+/// Include outer attributes in the header while preserving declaration coordinates.
 fn push_def_or_decorated(
     pending: &mut PendingFile,
     name: String,
@@ -486,8 +509,15 @@ fn push_def_or_decorated(
     node: &Node,
     signature: Option<String>,
     parent_index: Option<usize>,
-    decorators: Option<String>,
+    attrs: Option<DeclarationAttributes>,
 ) -> usize {
+    let (signature, decorators) = match attrs {
+        Some(attrs) => (
+            signature.map(|signature| format!("{} {signature}", attrs.text)),
+            attrs.decorators,
+        ),
+        None => (signature, None),
+    };
     if decorators.is_some() {
         push_def_with_decorators(
             pending,
@@ -1121,6 +1151,125 @@ mod tests {
             .iter()
             .filter(|edge| pending.symbols[edge.from_index].name == name)
             .collect()
+    }
+
+    #[test]
+    fn outer_attributes_extend_signatures_without_moving_declarations() {
+        let source = r##"#![allow(dead_code)]
+#[cfg(
+    feature = "checks"
+)]
+// Keep the attribute attached across comments.
+#[label(r#"literal,[value]"#)]
+/* Another comment. */
+#[test]
+fn checks_value() { assert!(true); }
+fn plain() {}
+"##;
+        let pending = fixture("outer_attributes.rs", source);
+        let test = pending
+            .symbols
+            .iter()
+            .find(|s| s.name == "checks_value")
+            .unwrap();
+        assert_eq!(test.line_start, 9);
+        assert_eq!(test.line_end, 9);
+        assert_eq!(test.decorators.as_deref(), Some(",cfg,label,test,"));
+        assert_eq!(
+            test.signature.as_deref(),
+            Some("#[cfg(\n    feature = \"checks\"\n)] #[label(r#\"literal,[value]\"#)] #[test] fn checks_value()")
+        );
+        let plain = pending.symbols.iter().find(|s| s.name == "plain").unwrap();
+        assert_eq!(plain.decorators, None);
+        assert_eq!(plain.signature.as_deref(), Some("fn plain()"));
+        assert_eq!(plain.line_start, 10);
+        assert!(!pending.edges.iter().any(|edge| edge.to_name == "label"));
+    }
+
+    #[test]
+    fn outer_attributes_cover_existing_rust_declaration_kinds() {
+        let pending = fixture(
+            "attributed_items.rs",
+            r#"#[derive(Debug)]
+struct Value;
+#[derive(Clone)]
+enum Choice { One }
+#[cfg(feature = "api")]
+trait Api {}
+#[cfg(feature = "impl")]
+impl Value {
+    #[inline(always)]
+    fn value(&self) {}
+}
+#[cfg(test)]
+mod checks {
+    #![allow(dead_code)]
+    fn plain_nested() {}
+}
+"#,
+        );
+        for (name, kind, line, decorators, signature) in [
+            (
+                "Value",
+                "struct",
+                2,
+                ",derive,",
+                "#[derive(Debug)] struct Value",
+            ),
+            (
+                "Choice",
+                "enum",
+                4,
+                ",derive,",
+                "#[derive(Clone)] enum Choice",
+            ),
+            (
+                "Api",
+                "trait",
+                6,
+                ",cfg,",
+                "#[cfg(feature = \"api\")] trait Api",
+            ),
+            (
+                "Value",
+                "impl",
+                8,
+                ",cfg,",
+                "#[cfg(feature = \"impl\")] impl Value",
+            ),
+            (
+                "value",
+                "method",
+                10,
+                ",inline,",
+                "#[inline(always)] fn value(&self)",
+            ),
+            ("checks", "mod", 13, ",cfg,", "#[cfg(test)] mod checks"),
+        ] {
+            let symbol = pending
+                .symbols
+                .iter()
+                .find(|s| s.name == name && s.kind == kind)
+                .unwrap();
+            assert_eq!(symbol.line_start, line, "{name}/{kind}");
+            assert_eq!(
+                symbol.decorators.as_deref(),
+                Some(decorators),
+                "{name}/{kind}"
+            );
+            assert_eq!(
+                symbol.signature.as_deref(),
+                Some(signature),
+                "{name}/{kind}"
+            );
+        }
+        let nested = pending
+            .symbols
+            .iter()
+            .find(|s| s.name == "plain_nested")
+            .unwrap();
+        assert_eq!(nested.decorators, None);
+        assert_eq!(nested.signature.as_deref(), Some("fn plain_nested()"));
     }
 
     #[test]

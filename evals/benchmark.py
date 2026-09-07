@@ -317,6 +317,11 @@ def validate_task(task: dict) -> dict:
     return task
 
 
+def validate_rubric(task: dict, rubric: dict) -> None:
+    if rubric.get("task_id") != task["id"] or rubric.get("source_revision") != task["revision"]:
+        raise BenchmarkError("rubric_mismatch", "rubric must name this task and its exact source revision")
+
+
 def common_identity(manifest: dict) -> dict:
     return {key: manifest[key] for key in (
         "task", "rubric_sha256", "source_sha256", "model", "limits", "tool_revision"
@@ -390,8 +395,7 @@ def prepare_trial(
     validate_task(task)
     if condition not in CONDITIONS or type(repetition) is not int or repetition < 0:
         raise BenchmarkError("invalid_condition", "invalid condition or repetition")
-    if rubric.get("task_id") != task["id"]:
-        raise BenchmarkError("rubric_mismatch", "rubric belongs to a different task")
+    validate_rubric(task, rubric)
     limits = validate_limits(config.get("limits", {}))
     model = config.get("model")
     if not isinstance(model, str) or not model or model in {"opus", "sonnet", "haiku", "latest"}:
@@ -565,8 +569,10 @@ def verify_prepared(trial: Path, manifest: dict) -> dict:
             or digest(common_identity(manifest)) != manifest["common_sha256"]
             or digest(condition_identity(manifest)) != manifest["condition_sha256"]):
         raise BenchmarkError("manifest_changed", "trial identities do not match the manifest fields")
-    if digest(load_json(trial / "rubric.json")) != manifest["rubric_sha256"]:
+    rubric = load_json(trial / "rubric.json")
+    if digest(rubric) != manifest["rubric_sha256"]:
         raise BenchmarkError("rubric_changed", "rubric changed after preparation")
+    validate_rubric(manifest["task"], rubric)
     request = load_json(trial / "request.json")
     if hashlib.sha256(canonical(request)).hexdigest() != manifest["request_sha256"]:
         raise BenchmarkError("request_changed", "adapter request changed after preparation")

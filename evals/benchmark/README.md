@@ -24,6 +24,11 @@ requested model, adapter identity and budgets share a `common_sha256`.
 including index contracts and declared indexed files. Each trial also hashes
 its actual adapter request, including its unique paths.
 
+The private rubric must name the public task's `id` as `task_id` and its exact
+`revision` as `source_revision`. An absent or different rubric revision is a
+configuration error, so updating the task snapshot cannot silently reuse an old
+answer key. The key's semantic accuracy still requires independent review.
+
 Preparation reads exact Git objects from an explicit file allowlist. It creates
 a new repository with one synthetic commit. The original repository's objects,
 history, local configuration and omitted files are not copied. Allowed blobs

@@ -190,6 +190,8 @@ def configure_case(case: dict, config: dict) -> dict:
     result = copy.deepcopy(config)
     if not isinstance(result, dict):
         raise bench.BenchmarkError("corpus_config", "benchmark config must be an object")
+    if result.get("instruction_path") in case["task"]["source_allowlist"]:
+        raise bench.BenchmarkError("corpus_instruction_source", "portable instruction must stay outside the research source allowlist")
     if "mmcg" in result:
         indexer = result["mmcg"]
         if not isinstance(indexer, dict):

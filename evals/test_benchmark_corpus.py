@@ -11,6 +11,7 @@ from pathlib import Path
 
 from evals import benchmark as bench
 from evals import benchmark_corpus as corpus
+from evals import benchmark_review as review
 from evals import test_benchmark as fixtures
 
 
@@ -176,6 +177,16 @@ class CorpusTests(unittest.TestCase):
         self.assertTrue(result.stderr.startswith("corpus_index_conflict:"), result.stderr)
         self.assertFalse((self.fixture.root / "selected").exists())
 
+    def test_portable_instruction_cannot_leak_into_the_source_baseline(self):
+        self.task["source_allowlist"].append(self.fixture.config["instruction_path"])
+        self.save()
+        result = self.prepare_cli(["--case", "service-01", "--corpus", str(self.path)])
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertTrue(result.stderr.startswith("corpus_instruction_source:"), result.stderr)
+        self.assertFalse((self.fixture.root / "selected").exists())
+        self.assertFalse(list(self.fixture.root.rglob("adapter-called")))
+        self.assertFalse(list(self.fixture.root.rglob("indexer-called")))
+
     def test_custom_corpus_controls_cannot_leak_through_pinned_source(self):
         destination = self.fixture.repo / "benchmark-fixture"
         self.root.rename(destination)
@@ -229,6 +240,66 @@ class CorpusTests(unittest.TestCase):
                 with self.assertRaises(bench.BenchmarkError) as raised:
                     self.check()
                 self.assertEqual(raised.exception.code, "corpus_source_type")
+
+
+@unittest.skipUnless(os.name == "posix" and shutil.which("git"), "requires POSIX and full corpus Git history")
+class BundledCorpusTests(unittest.TestCase):
+    def test_every_published_case_survives_the_prepare_run_review_workflow(self):
+        fixture = fixtures.BenchmarkTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        source_repo = Path(__file__).resolve().parents[1]
+        _, registry = corpus.load_corpus(corpus.DEFAULT_CORPUS)
+        answer = "Fixture answer for artifact round-trip only."
+        fixture.adapter(f"init()\nfinal({answer!r})\n")
+        for entry in registry["cases"]:
+            with self.subTest(case=entry["id"]):
+                fixture.indexer(paths=entry["indexed_files"])
+                config = copy.deepcopy(fixture.config)
+                config["mmcg"].pop("indexed_files")
+                config_path = fixture.root / "config.json"
+                config_path.write_bytes(bench.canonical(config))
+                prepared = subprocess.run([sys.executable, "-m", "evals.benchmark", "prepare",
+                    "--case", entry["id"], "--corpus", str(corpus.DEFAULT_CORPUS),
+                    "--config", str(config_path), "--source-repo", str(source_repo),
+                    "--tool-repo", str(fixture.repo), "--output", str(fixture.root / "batches"),
+                    "--repetitions", "1"], cwd=source_repo, capture_output=True, text=True, timeout=30)
+                self.assertEqual(prepared.returncode, 0, prepared.stderr)
+                batch = Path(prepared.stdout.strip())
+                manifest = bench.load_json(batch / "batch.json")
+                self.assertEqual(manifest["corpus_case"]["id"], entry["id"])
+                self.assertEqual([slot["condition"] for slot in manifest["trials"]], list(bench.CONDITIONS))
+                for slot in manifest["trials"]:
+                    trial = batch / slot["directory"]
+                    trial_manifest = bench.load_json(trial / "manifest.json")
+                    self.assertEqual(trial_manifest["status"], "prepared", trial_manifest.get("setup_error"))
+                    self.assertEqual(bench.run_trial(trial)["run_status"]["state"], "completed")
+
+                output = fixture.root / (entry["id"] + "-review")
+                review.export_review(batch, output)
+                packet = bench.load_json(output / "reviewer/packet.json")
+                self.assertEqual(packet["task"]["id"], entry["id"])
+                self.assertEqual(packet["rubric_sha256"], manifest["corpus_case"]["rubric_sha256"])
+                self.assertEqual({item["path"]: item for item in packet["source_files"]},
+                                 {item["path"]: item for item in manifest["corpus_case"]["source_files"]})
+                assessment = bench.load_json(output / "reviewer/assessment-template.json")
+                assessment["reviewer"] = "fixture-check"
+                for item in assessment["reviews"]:
+                    item["claims"] = [{"quote": answer, "support": "unknown", "anchors": [],
+                        "material_error": False, "rationale": "Transport fixture, not a researched answer."}]
+                    for known in item["knowns"]:
+                        known.update(coverage="missing", rationale="The fixture contains no source findings.")
+                    for unknown in item["unknowns"]:
+                        unknown.update(handling="omitted", rationale="The fixture makes no research assessment.")
+                assessment_path = fixture.root / "assessment.json"
+                assessment_path.write_bytes(bench.canonical(assessment))
+                review.import_assessment(output, assessment_path)
+                status = review.review_status(output)
+                self.assertEqual(status["attempts"], {"planned": 3, "completed": 3, "failed": 0,
+                    "not_run": 0, "unfinished": 0, "missing_artifacts": 0, "with_answer": 3})
+                self.assertEqual(status["reviewed_attempts"], 3)
+                self.assertFalse(status["comparison_accepted"])
+                self.assertIsNone(status["quality_uplift"])
 
 
 if __name__ == "__main__":

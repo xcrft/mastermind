@@ -50,9 +50,10 @@ with sqlite3.connect(index) as db:
         meta['schema_version'] = '7'
     db.executemany('INSERT INTO meta VALUES (?, ?)', meta.items())
     if MODE != 'partial':
-        sha = hashlib.sha256((root / 'src/service.py').read_bytes()).hexdigest()
-        db.execute('INSERT INTO files VALUES (?, ?)',
-                   ('src/service.py', '0' * 64 if MODE == 'wrong_hash' else sha))
+        for path in INDEXED_FILES:
+            sha = hashlib.sha256((root / path).read_bytes()).hexdigest()
+            db.execute('INSERT INTO files VALUES (?, ?)',
+                       (path, '0' * 64 if MODE == 'wrong_hash' else sha))
 if MODE == 'wal':
     index.with_name(index.name + '-wal').write_bytes(b'uncheckpointed')
 if MODE == 'exit_failure':
@@ -115,11 +116,12 @@ class BenchmarkTests(unittest.TestCase):
     def adapter(self, body="init()\nfinal()\n"):
         self.config["adapter"] = self.executable("fake-adapter", ADAPTER_HEADER + textwrap.dedent(body))
 
-    def indexer(self, mode="ok"):
-        body = f"CONTRACT = {CONTRACT!r}\nMODE = {mode!r}\n" + INDEXER_BODY
+    def indexer(self, mode="ok", paths=None):
+        paths = ["src/service.py"] if paths is None else paths
+        body = f"CONTRACT = {CONTRACT!r}\nMODE = {mode!r}\nINDEXED_FILES = {paths!r}\n" + INDEXER_BODY
         pin = self.executable("fake-mmcg", body)
         self.config["mmcg"] = dict(pin, source_revision=self.revision,
-                                   index_contract=CONTRACT, indexed_files=["src/service.py"])
+                                   index_contract=CONTRACT, indexed_files=paths)
 
     def prepare(self, condition="source", **kwargs):
         return bench.prepare_trial(task=kwargs.get("task", self.task), rubric=self.rubric,

@@ -21,6 +21,30 @@
       "task": "tasks/document-evidence-boundaries-01.json",
       "rubric": "rubrics/document-evidence-boundaries-01.json",
       "indexed_files": ["skills/workflow/mastermind-project-history/scripts/document_graph.py"]
+    },
+    {
+      "id": "callees-definition-boundaries-01",
+      "role": "calibration",
+      "coverage": ["correct_behavior", "cross_file_evidence", "definition_ambiguity", "target_resolution", "meaningful_zero"],
+      "task": "tasks/callees-definition-boundaries-01.json",
+      "rubric": "rubrics/callees-definition-boundaries-01.json",
+      "indexed_files": [
+        "mcp/servers/mmcg/src/mcp.rs",
+        "mcp/servers/mmcg/src/queries.rs",
+        "mcp/servers/mmcg/src/store.rs"
+      ]
+    },
+    {
+      "id": "reference-removal-evidence-01",
+      "role": "calibration",
+      "coverage": ["correct_behavior", "cross_file_evidence", "function_value_references", "negative_evidence", "removal_evidence", "coverage_limits"],
+      "task": "tasks/reference-removal-evidence-01.json",
+      "rubric": "rubrics/reference-removal-evidence-01.json",
+      "indexed_files": [
+        "mcp/servers/mmcg/src/indexer/rust_lang.rs",
+        "mcp/servers/mmcg/src/store.rs",
+        "mcp/servers/mmcg/src/queries.rs"
+      ]
     }
   ]
 }

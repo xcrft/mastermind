@@ -1,0 +1,79 @@
+{
+  "task_id": "callees-definition-boundaries-01",
+  "source_revision": "cbc8179320d815c07609f859810b3e64ebc74d48",
+  "status": "calibration_key_source_reviewed",
+  "required_knowns": [
+    {
+      "claim": "The public MCP schema exposes name, file, line, language and edge_kind. The handler requires a supplied file to be a nonempty string and a supplied line to be a positive u32 accompanied by file. It checks index freshness before forwarding the arguments to queries::callees.",
+      "anchors": [
+        "mcp/servers/mmcg/src/mcp.rs:223-226",
+        "mcp/servers/mmcg/src/mcp.rs:1686-1702",
+        "mcp/servers/mmcg/src/mcp.rs:2191-2222"
+      ]
+    },
+    {
+      "claim": "Candidate selection starts with exact-name definitions, optionally filtered by language. name_collision counts these definitions before file/line selectors. File and declaration-start line are equality filters, not substring or containing-range searches. Selectors must leave exactly one definition; file alone need not distinguish declarations within one file.",
+      "anchors": [
+        "mcp/servers/mmcg/src/store.rs:4892-4908",
+        "mcp/servers/mmcg/src/queries.rs:2973-2985"
+      ]
+    },
+    {
+      "claim": "Zero remaining candidates produces not_found, one produces matched, and several produce ambiguous. Only the unique matched definition supplies an ID for the outgoing-edge query. Ambiguous/not_found return no selected definition and no callees; matched can also have an empty callee list. Ambiguity and not_found are successful query-layer outcomes and can be returned with isError=false when the response fits MCP result limits. An oversized payload or envelope instead produces a tool error. isError=false and count=0 alone do not establish that a definition has no dependencies.",
+      "anchors": [
+        "mcp/servers/mmcg/src/queries.rs:2980-3006",
+        "mcp/servers/mmcg/src/mcp.rs:1281-1285",
+        "mcp/servers/mmcg/src/mcp.rs:1557-1585",
+        "mcp/servers/mmcg/src/mcp.rs:1590-1609"
+      ]
+    },
+    {
+      "claim": "For the selected source definition, Store::callees_of returns DISTINCT pairs of stored to_name and edge line, filtered by from_id and edge kind, with calls as the default. It does not join target definitions or use to_id, to_type or target_kind to identify an outgoing target. The returned line is edges.line, not a target declaration line, and count measures returned name/line pairs rather than resolved target definitions or runtime invocations.",
+      "anchors": [
+        "mcp/servers/mmcg/src/store.rs:4982-4998",
+        "mcp/servers/mmcg/src/queries.rs:2985-3006"
+      ]
+    },
+    {
+      "claim": "Selecting one source definition does not upgrade target resolution. edge_precision is derived from that definition's file extension; for .rs it reports medium confidence, syntactic extraction and target_resolution=name_based_candidates. The declared limitations include unresolved trait-object/function-pointer dispatch and unexpanded macros. calls and references are separate filters, references do not prove invocation, and empty results do not prove complete dependency absence.",
+      "anchors": [
+        "mcp/servers/mmcg/src/queries.rs:81-114",
+        "mcp/servers/mmcg/src/queries.rs:200-236",
+        "mcp/servers/mmcg/src/queries.rs:2985-3006"
+      ]
+    }
+  ],
+  "expected_unknowns": [
+    "Without concrete indexed declarations and edges, the actual candidates, selected definition and outgoing entries for a particular request remain unknown.",
+    "This result does not establish which implementation executes at runtime or complete dependency coverage. The extraction implementations and compiler/runtime evidence are outside the source allowlist.",
+    "No execution was performed. The presence of regression tests in these files does not establish their runtime outcome, CI status or installed-binary behavior."
+  ],
+  "materially_false_claims": [
+    "The tool silently selects the first same-named declaration or merges their outgoing edges when the remaining candidates are ambiguous.",
+    "A file selector always resolves ambiguity, or line selects any declaration whose body contains that line.",
+    "name_collision counts outgoing targets or necessarily becomes one after a successful file/line selection.",
+    "An ambiguous response necessarily has isError=true, or count=0 proves that the requested definition has no dependencies.",
+    "Selecting the source definition also selects the exact definitions of all outgoing targets.",
+    "callees[].line identifies the target declaration, or count is the number of resolved target definitions.",
+    "resolution=syntactic or match_status=matched establishes compiler/type resolution.",
+    "The default calls filter includes references, or a references edge proves invocation.",
+    "This research run executed runtime tests or graph queries, or confirmed CI or installed-binary behavior."
+  ],
+  "reviewer_notes": [
+    "A separate read-only agent reviewed the claims and anchors against the exact pinned Git objects; the coordinator independently checked the MCP, query and storage boundaries. This is agent source review, not runtime evidence, human sign-off or a model-quality measurement.",
+    "The public surface in scope is MCP. CLI dispatch, explain, incoming callers, transitive impact and optional SCIP resolution are not required conclusions.",
+    "The key distinguishes selecting the source declaration from resolving outgoing targets. Store::callees_of does not apply the compatibility predicates used by other graph queries.",
+    "The argument claim describes the advertised schema and the handler's explicit file/line checks; it does not claim that every schema constraint is generically enforced at runtime.",
+    "A supplied file and start line can still leave several candidates if multiple declarations share both values. The implementation then remains ambiguous.",
+    "A source-grounded description of a regression test's assertions is valid evidence of the test contract; it must not be described as an observed passing test.",
+    "A second independent source review identified the MCP result-size boundary. Query success must not be generalized into unconditional MCP delivery success; both payload and full envelope are bounded."
+  ],
+  "review_dimensions": [
+    "claim_to_source_support",
+    "critical_evidence_coverage",
+    "material_false_conclusions",
+    "appropriate_unknowns"
+  ],
+  "decision_quality": "not_applicable_to_facts_only_research_task",
+  "automatic_quality_score": null
+}

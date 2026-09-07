@@ -30,7 +30,8 @@ The private rubric must name the public task's `id` as `task_id` and its exact
 `revision` as `source_revision`. An absent or different rubric revision is a
 configuration error, so updating the task snapshot cannot silently reuse an old
 answer key. The checked-in calibration keys have received independent agent source
-review, including phase continuity and document evidence boundaries.
+review, including phase continuity, document evidence, definition selection and
+reference evidence for code-removal reviews.
 This does not establish runtime behavior or grade a model answer. Changing a task
 or key requires fresh trials; their full contents participate in trial identity.
 
@@ -57,10 +58,21 @@ subset the native graph can index:
 |---|---|---|
 | `task-phase-continuity-01` | Historical workflow defect, Held/Drift/Broken outcomes and persistence failures | Three Rust files |
 | `document-evidence-boundaries-01` | Correct helper behavior, explicit document relations, freshness versus truth and coverage limits | Python helper; the two Markdown files remain available to source tools |
+| `callees-definition-boundaries-01` | Definition ambiguity through MCP/query/storage, empty results and source selection versus outgoing target resolution | Three Rust files |
+| `reference-removal-evidence-01` | Rust function values through extraction/storage/queries, calls versus references and evidence needed before removing code | Three Rust files |
 
-Both cases are published calibrations. They are neither held out nor a
-representative sample of research quality. The second case asks what the helper
-establishes and what remains unknown, without assuming that it contains a defect.
+All cases are published calibrations. They are neither held out nor a
+representative sample of research quality. The correct-behavior cases ask what
+the implementation establishes and what remains unknown without assuming that
+it contains a defect. A source-grounded uncertainty statement is not a failed
+answer merely because it does not identify a bug.
+
+The newer graph cases pin `cbc8179320d815c07609f859810b3e64ebc74d48`; the
+original two retain their earlier revision. Each case keeps its own source and
+key identities. In the callees case, selecting a source declaration is distinct
+from resolving outgoing targets. In the reference case, the question traces one
+supported producer form and asks for removal evidence, not a claim that every
+language feature is covered or permission to delete actual code.
 
 Check the corpus without invoking a model, indexer or researched code:
 
@@ -147,6 +159,12 @@ cases. If the config already declares a different subset, preparation fails
 instead of overriding it. `--corpus PATH` selects an alternative registry.
 `batch.json` retains the checked case summary; coverage tags and key content are
 not added to the model request.
+
+Corpus selection also rejects an `instruction_path` listed in the task's
+`source_allowlist`, before creating any trial or invoking the indexer. The source
+baseline must not receive the same declared portable instruction through source
+tools. This is a path-overlap check; it does not detect copied instructions under
+other paths or establish that the benchmark is otherwise free of contamination.
 
 Custom tasks still use `--task PATH --rubric PATH` in place of `--case`. That path
 keeps its existing task/key identity check and defaults the indexed subset to
@@ -361,3 +379,10 @@ and anchors, source and control-file symlinks, historical key leakage from a
 custom corpus, and real CLI selection across all
 three conditions with a fixture indexer and adapter. Invalid selection fails
 before trial creation or runtime invocation.
+
+The bundled-corpus integration test also prepares and runs every published case
+against its real pinned source snapshot, then exports and imports a complete
+review. Its indexer only creates fixture metadata/file inventories and its
+adapter returns explicitly non-research text. These checks verify that shipped
+task/key/index scopes work through the artifact workflow; they do not exercise
+native extraction, evaluate model reasoning or establish semantic review quality.

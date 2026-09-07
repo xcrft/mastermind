@@ -5208,19 +5208,20 @@ impl Store {
                       ))
                )
                AND (
-                   lower(s.file_path) LIKE 'test_%'
-                   OR lower(s.file_path) LIKE '%/test_%'
-                   OR lower(s.file_path) LIKE '%/tests/%'
-                   OR lower(s.file_path) LIKE '%/test/%'
-                   OR lower(s.file_path) LIKE '%/spec/%'
-                   OR lower(s.file_path) LIKE '%.test.%'
-                   OR lower(s.file_path) LIKE '%.spec.%'
-                   OR lower(s.file_path) LIKE '%_test.rs'
-                   OR lower(s.file_path) LIKE '%tests.rs'
-               )
-               AND (
-                   lower(s.name) LIKE 'test%'
-                   OR lower(s.name) IN ('it', 'spec')
+                   ((
+                       lower(s.file_path) LIKE 'test_%'
+                       OR lower(s.file_path) LIKE '%/test_%'
+                       OR lower(s.file_path) LIKE '%/tests/%'
+                       OR lower(s.file_path) LIKE '%/test/%'
+                       OR lower(s.file_path) LIKE '%/spec/%'
+                       OR lower(s.file_path) LIKE '%.test.%'
+                       OR lower(s.file_path) LIKE '%.spec.%'
+                       OR lower(s.file_path) LIKE '%_test.rs'
+                       OR lower(s.file_path) LIKE '%tests.rs'
+                   ) AND (
+                       lower(s.name) LIKE 'test%'
+                       OR lower(s.name) IN ('it', 'spec')
+                   ))
                    OR instr(COALESCE(s.decorators, ''), ',test,') > 0
                    OR instr(COALESCE(s.decorators, ''), ',tokio::test,') > 0
                    OR instr(COALESCE(s.decorators, ''), ',async_std::test,') > 0

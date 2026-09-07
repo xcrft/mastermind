@@ -4024,6 +4024,20 @@ mod tests {
     }
 
     fn impact_fixture(name: &str) -> (std::path::PathBuf, crate::store::Store) {
+        impact_fixture_with_source(
+            name,
+            "src/app.py",
+            "def value():\n    return 1\n",
+            "def value():\n    return 2\n",
+        )
+    }
+
+    fn impact_fixture_with_source(
+        name: &str,
+        path: &str,
+        baseline: &str,
+        current: &str,
+    ) -> (std::path::PathBuf, crate::store::Store) {
         let root =
             std::env::temp_dir().join(format!("mmcg-mcp-impact-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -4044,10 +4058,10 @@ mod tests {
         run(&["config", "user.email", "t@t"]);
         run(&["config", "user.name", "t"]);
         run(&["config", "commit.gpgsign", "false"]);
-        std::fs::write(root.join("src/app.py"), "def value():\n    return 1\n").unwrap();
+        std::fs::write(root.join(path), baseline).unwrap();
         run(&["add", "-A"]);
         run(&["commit", "-q", "-m", "baseline"]);
-        std::fs::write(root.join("src/app.py"), "def value():\n    return 2\n").unwrap();
+        std::fs::write(root.join(path), current).unwrap();
         let db = root.join(".mastermind/mmcg.db");
         let mut store = crate::store::Store::open_for_serve(&db, Some(&root)).unwrap();
         crate::indexer::Indexer::new(&root)
@@ -4848,6 +4862,78 @@ mod tests {
             .collect()
         );
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn inline_test_impact_preserves_candidates_and_evidence_in_both_protocols() {
+        let baseline = r#"fn value() -> u8 {
+    1
+}
+#[cfg(test)]
+mod checks {
+    #[test]
+    fn checks_value() { let _ = super::value(); }
+    #[test]
+    fn isolated_check() { let _ = 17; }
+}
+"#;
+        let (root, mut store) = impact_fixture_with_source(
+            "inline_projection",
+            "src/lib.rs",
+            baseline,
+            &baseline.replacen("    1\n", "    2\n", 1),
+        );
+        for version in [ProtocolVersion::Current, ProtocolVersion::Legacy] {
+            let full = handle_tools_call(
+                version,
+                &mut store,
+                &json!({
+                    "name": "mmcg_change_impact",
+                    "arguments": { "since": "HEAD", "root": root.to_string_lossy(), "depth": 3, "top": 100 }
+                }),
+            ).unwrap();
+            let projected = handle_tools_call(
+                version,
+                &mut store,
+                &json!({
+                    "name": "mmcg_test_impact",
+                    "arguments": { "since": "HEAD", "root": root.to_string_lossy(), "depth": 3, "top": 100 }
+                }),
+            ).unwrap();
+            assert_eq!(full["isError"], false);
+            assert_eq!(projected["isError"], false);
+            let full_content = unwrap_content(&full);
+            let content = unwrap_content(&projected);
+            assert_eq!(content["schema_version"], 1);
+            assert_eq!(content["tests"], full_content["tests"]);
+            assert_eq!(content["tests"]["total"], 2);
+            assert_eq!(content["tests"]["truncated"], false);
+            assert_eq!(
+                content["tests"]["items"][0]["symbol"]["name"],
+                "checks_value"
+            );
+            assert_eq!(content["tests"]["items"][0]["minimum_depth"], 1);
+            let heuristic = &content["tests"]["items"][1];
+            assert_eq!(heuristic["symbol"]["name"], "isolated_check");
+            assert_eq!(heuristic["classification"], "heuristic");
+            assert_eq!(heuristic["confidence"], "low");
+            assert_eq!(heuristic["minimum_depth"], Value::Null);
+            assert_eq!(
+                heuristic["evidence"],
+                json!([{
+                    "kind": "same_component_test_attribute",
+                    "seed": null,
+                    "component": "src"
+                }])
+            );
+            if version == ProtocolVersion::Current {
+                assert_eq!(projected["structuredContent"], content);
+            } else {
+                assert!(projected.get("structuredContent").is_none());
+            }
+        }
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

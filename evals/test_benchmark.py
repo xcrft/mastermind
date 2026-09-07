@@ -89,7 +89,8 @@ class BenchmarkTests(unittest.TestCase):
         self.task = {"id": "service-01", "revision": self.revision, "kind": "research",
                      "source_allowlist": ["src/service.py", "docs/guide.md"],
                      "question": "What does value return?", "output_contract": "Cite path:line."}
-        self.rubric = {"task_id": self.task["id"], "required_fact": "HIDDEN_RUBRIC_CANARY"}
+        self.rubric = {"task_id": self.task["id"], "source_revision": self.revision,
+                       "required_fact": "HIDDEN_RUBRIC_CANARY"}
         self.config = {"model": "fixed-test-model-20260907", "tool_revision": self.revision,
                        "instruction_path": "skills/research/SKILL.md",
                        "limits": {"timeout_seconds": 3}}
@@ -124,6 +125,18 @@ class BenchmarkTests(unittest.TestCase):
         return bench.prepare_trial(task=kwargs.get("task", self.task), rubric=self.rubric,
             config=kwargs.get("config", self.config), source_repo=self.repo, tool_repo=self.repo,
             output=self.root / "trials", condition=condition)
+
+    def test_stale_or_unbound_rubric_is_rejected_before_preparation(self):
+        for revision in ("0" * 40, None):
+            with self.subTest(revision=revision):
+                if revision is None:
+                    self.rubric.pop("source_revision")
+                else:
+                    self.rubric["source_revision"] = revision
+                with self.assertRaises(bench.BenchmarkError) as raised:
+                    self.prepare()
+                self.assertEqual(raised.exception.code, "rubric_mismatch")
+                self.assertFalse((self.root / "trials").exists())
 
     def manifest(self, trial):
         return bench.load_json(trial / "manifest.json")
@@ -182,6 +195,7 @@ class BenchmarkTests(unittest.TestCase):
         self.git("commit", "-qm", "raw source with ignore and attributes")
         task = dict(self.task, revision=self.git("rev-parse", "HEAD").strip(),
                     source_allowlist=["src/service.py", ".gitignore", ".gitattributes"])
+        self.rubric["source_revision"] = task["revision"]
         trial = self.prepare(task=task)
         self.assertEqual(self.manifest(trial)["status"], "prepared")
         self.assertEqual((trial / "source/src/service.py").read_bytes(), raw)
@@ -460,6 +474,7 @@ class BenchmarkTests(unittest.TestCase):
         self.git("commit", "-qm", "symlink fixture")
         task = dict(self.task, revision=self.git("rev-parse", "HEAD").strip(),
                     source_allowlist=["src/link.py"])
+        self.rubric["source_revision"] = task["revision"]
         self.assert_setup_failure(self.prepare(task=task), "source_type")
 
 

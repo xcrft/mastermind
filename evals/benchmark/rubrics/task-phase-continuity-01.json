@@ -1,27 +1,27 @@
 {
   "task_id": "task-phase-continuity-01",
-  "status": "calibration_key_requires_independent_semantic_review",
+  "status": "calibration_key_source_reviewed",
   "source_revision": "1bc7c3c51e9e9a06799062fbd0dee83899ff3299",
   "required_knowns": [
     {
       "claim": "Pre-flight verifies the parsed spec, then persists approved state, its spec hash and the captured HEAD baseline.",
-      "anchors": ["mcp/servers/mmcg/src/run_task.rs:1277-1291", "mcp/servers/mmcg/src/run_task.rs:1303-1336"]
+      "anchors": ["mcp/servers/mmcg/src/run_task.rs:1277-1291", "mcp/servers/mmcg/src/run_task.rs:1303-1340"]
     },
     {
-      "claim": "Explicit post-flight resumes with stored state but parses the current spec and audits it against the saved baseline.",
-      "anchors": ["mcp/servers/mmcg/src/run_task.rs:1059-1067", "mcp/servers/mmcg/src/run_task.rs:1407-1426", "mcp/servers/mmcg/src/run_task.rs:1485-1491"]
-    },
-    {
-      "claim": "A spec-hash mismatch prints a warning. It neither blocks nor requires new pre-flight verification before the audit.",
-      "anchors": ["mcp/servers/mmcg/src/run_task.rs:1417-1428", "mcp/servers/mmcg/src/run_task.rs:1485-1491"]
+      "claim": "Explicit post-flight resumes with stored state but parses the current spec and audits it against the saved baseline. A spec-hash mismatch only prints a warning; it neither blocks nor requires renewed pre-flight verification.",
+      "anchors": ["mcp/servers/mmcg/src/run_task.rs:1059-1067", "mcp/servers/mmcg/src/run_task.rs:1407-1428", "mcp/servers/mmcg/src/run_task.rs:1485-1491"]
     },
     {
       "claim": "The edited contract controls audit scope. Widening touches can remove an UnexpectedFile finding without renewed pre-flight approval. It does not guarantee Held.",
       "anchors": ["mcp/servers/mmcg/src/audit_spec.rs:294-319", "mcp/servers/mmcg/src/audit_spec.rs:417-430"]
     },
     {
-      "claim": "On the would-be Held path, post-flight stability checks cover changes during that phase. A successful Held path can still write release/history artifacts and require semantic review.",
-      "anchors": ["mcp/servers/mmcg/src/run_task.rs:1539-1547", "mcp/servers/mmcg/src/run_task.rs:1571-1597", "mcp/servers/mmcg/src/run_task.rs:1598-1619", "mcp/servers/mmcg/src/run_task.rs:1635-1649"]
+      "claim": "Post-flight first persists audit_required and clears previous evidence snapshots. A completed audit attempts to write audit.md and can yield Held, Drift or Broken. Drift/Broken defer release notes and, if history refresh and state persistence succeed, record drift/broken with planner_review. Earlier infrastructure failures can return PostBroken without saving status=broken.",
+      "anchors": ["mcp/servers/mmcg/src/run_task.rs:1385-1393", "mcp/servers/mmcg/src/run_task.rs:1428-1459", "mcp/servers/mmcg/src/run_task.rs:1498-1533", "mcp/servers/mmcg/src/run_task.rs:1656-1687"]
+    },
+    {
+      "claim": "On the would-be Held path, post-flight stability checks cover changes during that phase. A successful Held path can write release/history artifacts. Its saved final state is history_review_required or learned depending on a review bound to the current history snapshot; Held does not itself complete semantic review.",
+      "anchors": ["mcp/servers/mmcg/src/run_task.rs:1539-1547", "mcp/servers/mmcg/src/run_task.rs:1571-1597", "mcp/servers/mmcg/src/run_task.rs:1598-1619", "mcp/servers/mmcg/src/run_task.rs:1635-1654"]
     }
   ],
   "expected_unknowns": [
@@ -33,9 +33,15 @@
     "Every edited spec reaches Held, or Held automatically means semantic learning is complete.",
     "The during-post snapshot comparison proves continuity with the pre-flight spec.",
     "Pre-flight spec_hash uses SHA-256 at this revision.",
+    "Every PostBroken necessarily saves status=broken or writes audit.md.",
+    "A schema-valid executor report establishes that its factual claims are true.",
     "Runtime tests or CI validated the described scenario."
   ],
-  "reviewer_notes": ["The historical hash_text uses DefaultHasher at mcp/servers/mmcg/src/run_task.rs:655-658."],
+  "reviewer_notes": [
+    "The historical hash_text uses DefaultHasher at mcp/servers/mmcg/src/run_task.rs:655-658.",
+    "A separate read-only agent checked the key against the exact source revision; the coordinator verified the outcome and persistence corrections. This is source review, not a runtime experiment, human sign-off or model-quality measurement.",
+    "The report is parsed separately from auditing its claims at mcp/servers/mmcg/src/run_task.rs:1463-1491 and mcp/servers/mmcg/src/audit_spec.rs:424-429. Index availability does not guarantee successful identity validation or refresh."
+  ],
   "review_dimensions": ["claim_to_source_support", "critical_evidence_coverage", "material_false_conclusions", "appropriate_unknowns"],
   "decision_quality": "not_applicable_to_facts_only_research_task",
   "automatic_quality_score": null

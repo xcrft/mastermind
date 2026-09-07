@@ -7,6 +7,6 @@
     "mcp/servers/mmcg/src/verify_spec.rs",
     "mcp/servers/mmcg/src/audit_spec.rs"
   ],
-  "question": "Trace one canonical task from successful pre-flight (pre_only=true) to a later explicit post-flight (post_only=true). The on-disk spec text is edited between calls. Assume executor-report.md is valid, the repository and index are available, and inputs remain stable during the second call. Which stored and current inputs determine what is checked, and what outcomes, state changes and artifacts can follow?",
+  "question": "Trace one canonical task from successful pre-flight (pre_only=true) to a later explicit post-flight (post_only=true). The on-disk spec text is edited between calls. Assume the saved pre-flight state remains available, executor-report.md is schema-valid (its factual claims are not assumed correct), the repository and index are available, and inputs remain stable during the second call. Which stored and current inputs determine what is checked, and what outcomes, state changes and artifacts can follow?",
   "output_contract": "At most five source-grounded findings with path:line citations. Separate observations, inferences and unknowns. Read source only; do not execute the researched code."
 }

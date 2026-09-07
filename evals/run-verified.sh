@@ -12,6 +12,6 @@ cargo deny --manifest-path mcp/servers/mmcg/Cargo.toml check
 python scripts/validate.py
 python scripts/test_audit_workflow_security.py
 python scripts/test_document_graph.py
-python -m unittest evals/test_runner.py evals/test_evidence.py evals/test_benchmark.py
+python -m unittest evals/test_runner.py evals/test_evidence.py evals/test_benchmark.py evals/test_claude_adapter.py
 npm test --prefix npm/mastermind
 python evals/runner.py "$@"

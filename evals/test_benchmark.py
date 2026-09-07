@@ -183,6 +183,21 @@ class BenchmarkTests(unittest.TestCase):
                 for canary in (b"ANSWER_KEY_CANARY", b"SETTINGS_CANARY", b"AGENT_CONFIG_CANARY"):
                     self.assertNotIn(canary, body)
 
+    def test_prepared_version_one_generic_requests_remain_runnable(self):
+        for condition in ("source", "portable_mmcg"):
+            with self.subTest(condition=condition):
+                trial = self.prepare(condition)
+                manifest = self.manifest(trial)
+                request = bench.load_json(trial / "request.json")
+                manifest["schema_version"] = 1
+                request.pop("projection_revision")
+                if request["mmcg"] is not None:
+                    request["mmcg"] = {key: request["mmcg"][key] for key in ("binary", "index")}
+                manifest["request_sha256"] = bench.digest(request)
+                (trial / "request.json").write_bytes(bench.canonical(request))
+                (trial / "manifest.json").write_bytes(bench.canonical(manifest))
+                self.assertEqual(bench.run_trial(trial)["run_status"]["state"], "completed")
+
     def test_git_projection_keeps_ignored_files_and_attribute_sensitive_bytes(self):
         (self.repo / ".gitignore").write_text("*.py\n")
         (self.repo / ".gitattributes").write_text("*.py text eol=lf\n")

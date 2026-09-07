@@ -2,11 +2,13 @@
 
 `evals/benchmark.py` prepares independent source snapshots and runs a pinned
 executable adapter through a bounded JSON protocol. The deterministic tests use
-small executable adapters and a SQLite-producing indexer. No model calls or
-native builds are part of those tests.
+small executable adapters, a fixture Claude CLI, a real Python MCP broker and a
+SQLite-producing fixture indexer. No model calls or native builds are part of
+those tests.
 
-This is the preparation and transport layer. It does not include a production
-model adapter, a semantic grader, or a measured quality baseline. Every result
+The built-in Claude CLI adapter is runnable with an explicitly pinned CLI and
+API key. It has not been validated against a live model. This layer does not
+include a semantic grader or a measured quality baseline. Every result
 has `comparability.eligible: false`; every batch has
 `comparison_accepted: false` and `quality_uplift: null`.
 
@@ -126,15 +128,20 @@ the runtime or experiment configuration changes.
 
 ## Adapter protocol
 
-The pinned executable receives no arguments. Its working directory is the
+For the generic adapter, the pinned executable receives no arguments. Its working directory is the
 allowlisted source projection; stdin contains one JSON object followed by a
 newline. `request.json` holds that object:
 
 - `protocol: mastermind-research-adapter-v1`;
 - public `task`, `source_root` and file hashes;
+- the synthetic `projection_revision` in manifest version 2;
 - `system_instruction`, `portable_instruction`, `model`, `limits`;
 - `available_tools`: `source_read`, `source_search`, `source_git`, and only in
-  condition three, `mmcg` with its binary and index paths.
+  condition three, `mmcg` with its binary and index paths. Version 2 also includes
+  the pinned native runtime, index hash, contracts and indexed-file inventory.
+
+Previously prepared version 1 generic requests retain their original shape and
+remain runnable. Newly prepared trials use manifest version 2.
 
 The request does not contain the rubric, expected conclusions, other trials, or
 the original repository path. It describes a read-only tool contract. The
@@ -161,10 +168,93 @@ telemetry is nonnegative integer token counts and a positive integer turn count.
 Cost is optional; absent or invalid cost is unknown, never inferred to be zero.
 The observed model and adapter version must match the manifest exactly.
 
+A failed adapter may emit `failure: {"state": "setup_error", "code": "reason"}`
+alongside an empty answer and `model_error: false`. Allowed failure states are
+`setup_error`, `protocol_error`, `identity_mismatch`, `timeout`, `output_limit`,
+`invocation_error`, `model_error` and `budget_exceeded`. Only `model_error` uses
+`model_error: true`. `init.model` may be null when setup fails before observing a
+model. Missing telemetry stays unknown; it is not fabricated for failed runs.
+
 The supervisor enforces wall time and stdout/stderr byte caps. It retains a
 complete final answer only if it fits the answer byte cap. It kills its own
 process group on timeout, output overflow or completion. Token/turn enforcement
 is the adapter's responsibility; the harness reports exceedances separately.
+
+## Built-in Claude CLI adapter
+
+Replace the config's `adapter` object with:
+
+```json
+{
+  "kind": "claude_cli",
+  "cli": {
+    "path": "/absolute/path/to/claude",
+    "sha256": "sha256-of-that-executable",
+    "version": "2.1.236",
+    "origin": "how-this-runtime-was-obtained"
+  }
+}
+```
+
+The command/stream contract was checked against CLI 2.1.236 and the official
+[CLI reference](https://code.claude.com/docs/en/cli-reference),
+[headless guide](https://code.claude.com/docs/en/headless) and
+[SDK message types](https://code.claude.com/docs/en/agent-sdk/typescript).
+Deterministic subprocess tests exercise that contract with a fixture executable;
+they do not establish compatibility with another installed version or a live API.
+
+Preparation copies the adapter and its Python modules into each trial and pins
+every file, the preparation Python executable and the declared Claude binary.
+Python uses `-I -S -B` to disable user/site imports and bytecode writes. Verification
+checks the bundle, sidecar descriptor and executable hashes before and after
+invocation. The CLI's `--version` output and stream version must match the pin.
+This does not attest the interpreter's shared libraries or CLI provenance.
+
+The CLI runs in a new empty `client/` directory with fresh HOME/XDG state, bare
+mode, an explicit system prompt, no built-in tools, no slash commands, empty
+setting sources, no session persistence and one strict MCP configuration. The
+adapter checks the observed tool inventory, server connection, permission mode,
+extensions, working directory and model identities. Managed host policies can
+still affect execution; separate directories are not an OS sandbox.
+
+Bare mode requires an explicitly forwarded `ANTHROPIC_API_KEY`:
+
+```bash
+python3 evals/benchmark.py run /absolute/path/to/batch-id/trial-id \
+  --credential-env ANTHROPIC_API_KEY
+```
+
+The adapter does not read OAuth/keychain credentials or fall back to another
+auth mode. The broker's environment blanks credential variables, and the native
+server receives a fresh environment without credentials. The model prompt
+contains only the public task fields and supplied instructions.
+
+The broker exposes UTF-8 source ranges of at most 200 lines, bounded literal
+search and a frozen Git view with `files`, `log` and `show`. Every path must be in
+the source allowlist; each directory component is opened without following
+symlinks, and the broker retains an immutable source snapshot. Empty files and
+form-feed characters preserve file/AST line numbering.
+
+Only condition three also exposes `mmcg_concept`, `mmcg_search`, `mmcg_outline`,
+`mmcg_files`, `mmcg_callers` and `mmcg_callees`. Arguments cannot change the root,
+index, command, environment or SQL. `mmcg_files.prefix` rejects `%`, `_` and
+backslash because the native implementation treats them as LIKE metacharacters.
+The broker invokes the pinned `--index FILE serve` read-only snapshot path,
+checks index contracts and hashes, and preserves native `isError`, ambiguity,
+freshness, precision notes and truncation. A failed transport is closed before
+the next query. Tool replies are capped at 64 KiB and calls at 128 per server.
+
+The CLI receives `--max-turns`. Output tokens have a per-response CLI cap and a
+live stop when observed cumulative message usage exceeds the trial budget; this
+is **not an exact aggregate token cap** and can overshoot. Repeated cumulative
+updates are counted once. A token-cutoff answer, model switch, permission denial
+or missing success telemetry cannot become `completed`.
+
+`claude-stream.jsonl` retains bounded raw events as they arrive, including tool
+inputs/results, while `trace.jsonl` records normalized tool calls and the terminal
+envelope. Wall time covers version checking and model invocation; the outer
+supervisor also kills nested CLI/MCP processes when the adapter is interrupted.
+These are resource and protocol controls over a trusted CLI, not a host sandbox.
 
 ## Results and review
 
@@ -175,7 +265,7 @@ time are recorded separately from the adapter's investigation time.
 
 | Result field | Meaning |
 |---|---|
-| `run_status` | Setup, timeout, output cap, invocation, protocol, model, identity or input-mutation failure; otherwise `completed` |
+| `run_status` | Setup, timeout, output cap, model budget, invocation, protocol, model, identity or input-mutation failure; otherwise `completed` |
 | `quality` | `not_evaluated`, or `review_pending` when an answer is retained; score is always null |
 | `diagnostics` | Usage completeness, reported tools, budget exceedances, elapsed time, exit code and protocol issues |
 | `comparability` | Always ineligible in this transport slice; records additional failure reasons |
@@ -195,17 +285,20 @@ recorded in every result and prevent any accepted quality comparison.
 The one checked-in task is a calibration of source reading and uncertainty at
 the pinned historical commit. Its private key still requires semantic review;
 it is not a representative or held-out quality benchmark. Before drawing
-conclusions, add a production adapter with enforced tool/file isolation and
+conclusions, validate the adapter with a live API and enforced host isolation and
 verified runtime provenance, independently review additional tasks and keys,
 run all conditions, then review blinded final answers against the same rubric.
 
 ## Deterministic checks
 
 ```bash
-python3 -m unittest evals/test_benchmark.py
+python3 -m unittest evals/test_benchmark.py evals/test_claude_adapter.py
 ```
 
 The tests use real subprocess I/O, disposable Git histories and SQLite indexes.
 They cover source projection, configuration separation, input identity checks,
 failed and partial indexes, full answer retention, timeout and process cleanup,
 malformed protocol events, telemetry separation and counterbalanced preparation.
+The Claude tests also cover actual source/MCP subprocesses, graph result fidelity,
+transport recovery, credentials, pinned bundle tampering, model switches, live
+budget stops, partial stream retention and nested process cleanup.

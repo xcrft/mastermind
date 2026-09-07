@@ -323,9 +323,15 @@ def validate_rubric(task: dict, rubric: dict) -> None:
 
 
 def common_identity(manifest: dict) -> dict:
+    adapter = manifest["adapter"]
+    identity = {key: adapter[key] for key in ("sha256", "version", "origin")}
+    if adapter.get("kind") == "claude_cli":
+        identity.update(kind="claude_cli", bundle=adapter["bundle"],
+                        cli={k: adapter["cli"][k] for k in ("sha256", "version", "origin")},
+                        python={k: adapter["python"][k] for k in ("sha256", "version", "origin")})
     return {key: manifest[key] for key in (
         "task", "rubric_sha256", "source_sha256", "model", "limits", "tool_revision"
-    )} | {"adapter": {key: manifest["adapter"][key] for key in ("sha256", "version", "origin")},
+    )} | {"adapter": identity,
          "neutral_instruction": NEUTRAL_INSTRUCTION}
 
 
@@ -345,7 +351,20 @@ def adapter_request(trial: Path, manifest: dict, instruction: str) -> dict:
     if manifest["condition"] == "portable_mmcg":
         request["available_tools"].append("mmcg")
         request["mmcg"] = {"binary": manifest["indexer"]["path"], "index": str(trial / "index/mmcg.db")}
+    if manifest["schema_version"] >= 2:
+        request["projection_revision"] = manifest["projection_revision"]
+        if request["mmcg"] is not None:
+            request["mmcg"].update(runtime=manifest["indexer"], index_sha256=manifest["index_sha256"],
+                                   index_contract=manifest["index_contract"], indexed_files=manifest["indexed_files"])
     return request
+
+
+def claude_runtime():
+    if __package__:
+        from . import claude_adapter
+    else:
+        import claude_adapter
+    return claude_adapter
 
 
 def validate_index(path: Path, source: Path, files: list[dict], contract: dict,
@@ -406,14 +425,18 @@ def prepare_trial(
     trial.mkdir(mode=0o700)
     env = clean_environment(trial)
     prepared = time.monotonic()
-    manifest = {"kind": "mastermind-research-trial", "schema_version": 1,
+    manifest = {"kind": "mastermind-research-trial", "schema_version": 2,
                 "trial_id": trial.name, "task": task, "condition": condition,
                 "repetition": repetition, "rubric_sha256": digest(rubric),
                 "model": model, "limits": limits, "tool_revision": tool_revision,
                 "status": "setup_failed", "isolation": "host_adapter_unverified"}
     write_new(trial / "rubric.json", rubric)
     try:
-        adapter = runtime_pin(config.get("adapter"), "adapter")
+        spec = config.get("adapter")
+        if isinstance(spec, dict) and spec.get("kind") == "claude_cli":
+            adapter = claude_runtime().prepare_runtime(trial, spec, limits)
+        else:
+            adapter = runtime_pin(spec, "adapter")
         files, projection_revision = export_source(
             source_repo.resolve(), task["revision"], task["source_allowlist"], trial / "source", env,
         )
@@ -499,10 +522,20 @@ def parse_stream(body: bytes, answer_limit: int) -> tuple[dict | None, dict | No
                 issues.append("missing_or_invalid_model_error")
             if not isinstance(event.get("answer"), str):
                 issues.append("missing_answer")
-            elif not event["answer"].strip() and event.get("model_error") is not True:
+            elif not event["answer"].strip() and event.get("model_error") is not True and not event.get("failure"):
                 issues.append("empty_answer")
             elif len(event["answer"].encode("utf-8")) > answer_limit:
                 issues.append("answer_limit")
+            failure = event.get("failure")
+            if failure is not None and (
+                    not isinstance(failure, dict) or set(failure) != {"state", "code"}
+                    or not isinstance(failure.get("state"), str)
+                    or failure.get("state") not in {"setup_error", "protocol_error", "identity_mismatch",
+                        "timeout", "output_limit", "invocation_error", "model_error", "budget_exceeded"}
+                    or not isinstance(failure.get("code"), str)
+                    or not re.fullmatch(r"[a-z][a-z0-9_]{0,95}", failure["code"])
+                    or event.get("model_error") != (failure["state"] == "model_error")):
+                issues.append("invalid_failure")
         else:
             issues.append("unexpected_event")
     if init is None:
@@ -545,7 +578,7 @@ def telemetry(result: dict | None, limits: dict) -> dict:
 
 
 def verify_prepared(trial: Path, manifest: dict) -> dict:
-    if manifest.get("kind") != "mastermind-research-trial" or manifest.get("schema_version") != 1:
+    if manifest.get("kind") != "mastermind-research-trial" or manifest.get("schema_version") not in (1, 2):
         raise BenchmarkError("invalid_manifest", "unknown trial manifest")
     if manifest["trial_id"] != trial.name or manifest["condition"] not in CONDITIONS:
         raise BenchmarkError("invalid_manifest", "trial identity or condition changed")
@@ -586,6 +619,8 @@ def verify_prepared(trial: Path, manifest: dict) -> dict:
     env = clean_environment(trial)
     verify_projection(trial / "source", files, manifest["projection_revision"], env)
     runtime_pin(manifest["adapter"], "adapter")
+    if manifest["adapter"].get("kind") == "claude_cli":
+        claude_runtime().verify_runtime(trial, manifest["adapter"])
     if manifest["condition"] == "portable_mmcg":
         runtime_pin(manifest["indexer"], "mmcg", manifest["tool_revision"])
         if validate_index(trial / "index/mmcg.db", trial / "source", manifest["source_files"],
@@ -623,7 +658,11 @@ def run_trial(trial: Path, credentials: dict[str, str] | None = None) -> dict:
         write_new(trial / "result.json", envelope)
         return envelope
     limits = manifest["limits"]
-    process = run_bounded([manifest["adapter"]["path"]], cwd=trial / "source", env=env,
+    adapter = manifest["adapter"]
+    command = ([adapter["python"]["path"], "-I", "-S", "-B", adapter["path"],
+                "--runtime", str(trial / "adapter-runtime.json")]
+               if adapter.get("kind") == "claude_cli" else [adapter["path"]])
+    process = run_bounded(command, cwd=trial / "source", env=env,
                           stdin=canonical(request) + b"\n", timeout=limits["timeout_seconds"],
                           stdout_limit=limits["trace_bytes"], stderr_limit=limits["stderr_bytes"])
     with (trial / "trace.jsonl").open("xb") as handle:
@@ -639,6 +678,8 @@ def run_trial(trial: Path, credentials: dict[str, str] | None = None) -> dict:
         state, reason = "invocation_error", "nonzero_exit"
     elif issues:
         state, reason = "protocol_error", issues[0]
+    elif result and result.get("failure"):
+        state, reason = result["failure"]["state"], result["failure"]["code"]
     elif result and result.get("model_error"):
         state, reason = "model_error", "adapter_reported_model_error"
     elif init and (init.get("model") != manifest["model"] or init.get("adapter_version") != manifest["adapter"]["version"]):
@@ -652,8 +693,10 @@ def run_trial(trial: Path, credentials: dict[str, str] | None = None) -> dict:
         "elapsed_seconds": process.elapsed_seconds, "setup_seconds": manifest["setup_seconds"],
         "returncode": process.returncode, "trace_bytes": len(process.stdout), "stderr_bytes": len(process.stderr),
         "enforced_limits": ["timeout_seconds", "trace_bytes", "stderr_bytes", "answer_bytes"]}
+    if adapter.get("kind") == "claude_cli" and result:
+        envelope["diagnostics"]["adapter"] = result.get("diagnostics")
     answer = result.get("answer") if result else None
-    if isinstance(answer, str) and len(answer.encode("utf-8")) <= limits["answer_bytes"]:
+    if isinstance(answer, str) and answer.strip() and len(answer.encode("utf-8")) <= limits["answer_bytes"]:
         answer_bytes = answer.encode("utf-8")
         with (trial / "answer.md").open("xb") as handle:
             handle.write(answer_bytes)

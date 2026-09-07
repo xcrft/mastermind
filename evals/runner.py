@@ -1311,14 +1311,14 @@ def _build_mmcg_index(repo: Path) -> None:
 
 
 def _copy_tree_into(src: Path, dst: Path) -> None:
-    """Recursive copy src/* into dst/, creating dst if needed."""
+    """Copy content and modes, leaving fresh mtimes for Git change detection."""
     dst.mkdir(parents=True, exist_ok=True)
     for entry in src.iterdir():
         target = dst / entry.name
         if entry.is_dir():
-            shutil.copytree(entry, target, dirs_exist_ok=True)
+            shutil.copytree(entry, target, dirs_exist_ok=True, copy_function=shutil.copy)
         else:
-            shutil.copy2(entry, target)
+            shutil.copy(entry, target)
 
 
 def teardown_fixture(path: Path) -> None:

@@ -1160,7 +1160,7 @@ mod tests {
         )
         .unwrap();
         fs::create_dir(repo.path().join(".mastermind")).unwrap();
-        let mut store = Store::open(&repo.path().join(".mastermind/mmcg.db")).unwrap();
+        let mut store = Store::open(repo.path().join(".mastermind/mmcg.db")).unwrap();
         crate::indexer::Indexer::new(repo.path())
             .index_all(&mut store, true)
             .unwrap();

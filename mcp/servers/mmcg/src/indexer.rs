@@ -87,6 +87,14 @@ const MAX_HISTORY_ARTIFACT_SIZE: u64 = 1024 * 1024;
 const MAX_HISTORY_ENTRIES: usize = 5_000;
 const MAX_HISTORY_AGGREGATE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_HISTORY_DIRECTORY_ENTRIES: usize = 50_000;
+pub(crate) const PROJECT_DECISION_DIRS: [&str; 6] = [
+    "docs/adr",
+    "docs/adrs",
+    "docs/decisions",
+    "adr",
+    "adrs",
+    ".mastermind/decisions",
+];
 pub const AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT: usize = 20_000;
 pub const AUTO_REFRESH_SOURCE_AGGREGATE_BYTES: u64 = 512 * 1024 * 1024;
 
@@ -1422,15 +1430,7 @@ fn collect_project_history_candidates(
         }
     }
 
-    let mut decision_roots = [
-        "docs/adr",
-        "docs/adrs",
-        "docs/decisions",
-        "adr",
-        "adrs",
-        ".mastermind/decisions",
-    ]
-    .map(|relative| root_path.join(relative));
+    let mut decision_roots = PROJECT_DECISION_DIRS.map(|relative| root_path.join(relative));
     decision_roots.sort();
     let mut pending = decision_roots.to_vec();
     let mut visited_directories = 0usize;

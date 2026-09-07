@@ -11,6 +11,7 @@ cargo build --release --locked --manifest-path mcp/servers/mmcg/Cargo.toml
 cargo deny --manifest-path mcp/servers/mmcg/Cargo.toml check
 python scripts/validate.py
 python scripts/test_audit_workflow_security.py
+python scripts/test_document_graph.py
 python -m unittest evals/test_runner.py evals/test_evidence.py
 npm test --prefix npm/mastermind
 python evals/runner.py "$@"

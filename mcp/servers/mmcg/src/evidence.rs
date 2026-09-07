@@ -378,6 +378,8 @@ struct SourceInput {
 #[derive(Debug)]
 enum SourceFailure {
     Unavailable,
+    ProjectHistoryStale,
+    ProjectHistoryIncomplete,
     TooLarge,
     Changed,
     InvalidUtf8,
@@ -391,6 +393,8 @@ impl SourceFailure {
     fn code(&self) -> &'static str {
         match self {
             Self::Unavailable => "source_unavailable",
+            Self::ProjectHistoryStale => "project_history_stale",
+            Self::ProjectHistoryIncomplete => "project_history_incomplete",
             Self::TooLarge => "source_too_large",
             Self::Changed => "source_changed",
             Self::InvalidUtf8 => "invalid_utf8",
@@ -406,6 +410,12 @@ impl SourceFailure {
     fn message(&self) -> &'static str {
         match self {
             Self::Unavailable => "The evidence source could not be read.",
+            Self::ProjectHistoryStale => {
+                "Indexed project history no longer matches Markdown; its matches were omitted. Run `mastermind index .` and refresh."
+            }
+            Self::ProjectHistoryIncomplete => {
+                "Project history could not be fully verified; its matches were omitted. Resolve skipped or unreadable Markdown artifacts, re-index, and refresh."
+            }
             Self::TooLarge => "The evidence source exceeds the 32 MiB read limit.",
             Self::Changed => "The evidence source changed while Lens was reading it.",
             Self::InvalidUtf8 => "The evidence source is not valid UTF-8.",
@@ -639,36 +649,9 @@ fn collect_internal(
         collector.notes.push(EvidencePrecisionNote {
             source_id: "project-knowledge",
             code: "derived_history_snapshot",
-            message: "Project knowledge is correlated only by exact repository-path mentions from the derived history index; Markdown remains authoritative and must be re-indexed after changes.".into(),
+            message: "Project knowledge is correlated only by exact repository-path mentions from a verified history snapshot. Stale or incompletely verified history is omitted; Markdown remains authoritative.".into(),
         });
-        match store.and_then(|store| {
-            let (entries, bounded_truncated) = store
-                .project_history_entries_bounded(MAX_KNOWLEDGE_ARTIFACTS, MAX_KNOWLEDGE_BYTES)
-                .ok()?;
-            let skipped = store
-                .meta_value("project_history_skipped")
-                .ok()?
-                .and_then(|value| value.parse::<u32>().ok())
-                .unwrap_or(0);
-            let indexed_truncated = store
-                .meta_value("project_history_truncated")
-                .ok()?
-                .is_some_and(|value| value == "true");
-            Some((entries, skipped, bounded_truncated || indexed_truncated))
-        }) {
-            Some((entries, skipped, truncated)) => collector.load_project_knowledge(
-                &entries,
-                skipped,
-                truncated,
-                "project-knowledge".into(),
-            ),
-            None => collector.source_error(
-                "project-knowledge".into(),
-                "project_knowledge",
-                "Indexed project knowledge".into(),
-                SourceFailure::Unavailable,
-            ),
-        }
+        collector.load_indexed_project_knowledge(store);
     }
 
     if include_normalized_facts {
@@ -852,7 +835,11 @@ impl Collector<'_> {
             id,
             kind,
             label,
-            status: "error",
+            status: match failure {
+                SourceFailure::ProjectHistoryStale => "stale",
+                SourceFailure::ProjectHistoryIncomplete => "partial",
+                _ => "error",
+            },
             facts_total: None,
             facts_returned: 0,
             files_matched: 0,
@@ -1570,17 +1557,61 @@ impl Collector<'_> {
         self.source_done(id, "otel", label, stats);
     }
 
+    fn load_indexed_project_knowledge(&mut self, store: Option<&crate::store::Store>) {
+        use crate::indexer::{IndexError, Indexer, ProjectHistoryFreshness};
+
+        let id = "project-knowledge".to_string();
+        let label = "Indexed project knowledge".to_string();
+        let Some(store) = store else {
+            return self.source_error(id, "project_knowledge", label, SourceFailure::Unavailable);
+        };
+        let snapshot = store.with_work_budget(
+            crate::store::WorkBudget {
+                deadline: self
+                    .deadline
+                    .map(|deadline| deadline.saturating_duration_since(Instant::now())),
+                op_ticks: None,
+            },
+            || {
+                let version = store.data_version()?;
+                let (entries, truncated) = store.project_history_entries_bounded(
+                    MAX_KNOWLEDGE_ARTIFACTS,
+                    MAX_KNOWLEDGE_BYTES,
+                )?;
+                let mut freshness = Indexer::new(self.root).project_history_freshness(store);
+                if store.data_version()? != version {
+                    freshness = Ok(ProjectHistoryFreshness::SnapshotChanged);
+                }
+                Ok((entries, truncated, freshness))
+            },
+        );
+        let failure = match snapshot {
+            Ok((entries, truncated, Ok(ProjectHistoryFreshness::Fresh))) => {
+                return self.load_project_knowledge(&entries, truncated, id);
+            }
+            Ok((_, _, Ok(ProjectHistoryFreshness::Stale))) => SourceFailure::ProjectHistoryStale,
+            Ok((_, _, Ok(ProjectHistoryFreshness::Incomplete))) => {
+                SourceFailure::ProjectHistoryIncomplete
+            }
+            Ok((_, _, Ok(ProjectHistoryFreshness::SnapshotChanged)))
+            | Ok((_, _, Err(IndexError::SnapshotChanged))) => SourceFailure::Changed,
+            Ok((_, _, Err(IndexError::DeadlineExceeded))) => SourceFailure::Deadline,
+            _ if self.deadline_reached() => SourceFailure::Deadline,
+            _ => SourceFailure::ProjectHistoryIncomplete,
+        };
+        self.source_error(id, "project_knowledge", label, failure);
+    }
+
     fn load_project_knowledge(
         &mut self,
         entries: &[crate::store::ProjectHistoryEntry],
-        skipped: u32,
         truncated: bool,
         id: String,
     ) {
         let label = "Indexed project knowledge".to_string();
         if self.relevant.is_empty() {
             let stats = SourceStats {
-                partial: skipped > 0 || truncated,
+                partial: truncated,
                 ..SourceStats::default()
             };
             return self.source_done(id, "project_knowledge", label, stats);
@@ -1612,7 +1643,7 @@ impl Collector<'_> {
             }
         };
         let mut stats = SourceStats {
-            partial: skipped > 0 || truncated,
+            partial: truncated,
             ..SourceStats::default()
         };
         let mut sorted = entries.iter().collect::<Vec<_>>();
@@ -1664,18 +1695,11 @@ impl Collector<'_> {
                 stats.files.insert(path);
             }
         }
-        if skipped > 0 {
-            self.diagnostic(
-                id.clone(),
-                "project_knowledge_skipped",
-                format!("{skipped} project-knowledge artifacts were skipped during indexing."),
-            );
-        }
         if truncated {
             self.diagnostic(
                 id.clone(),
                 "project_knowledge_index_truncated",
-                "The indexed project-knowledge corpus reached its 5,000-artifact limit.",
+                "Some project-knowledge artifacts were omitted by the artifact or byte limit.",
             );
         }
         if stats.work_limited {
@@ -3089,7 +3113,7 @@ mod tests {
         ];
 
         let mut collector = collector(root.path(), &["src/pay.rs"]);
-        collector.load_project_knowledge(&entries, 0, false, "project-knowledge".into());
+        collector.load_project_knowledge(&entries, false, "project-knowledge".into());
         let snapshot = collector.finish(0);
 
         assert_eq!(snapshot.sources.items[0].facts_total, Some(2));
@@ -3106,6 +3130,68 @@ mod tests {
         assert!(!knowledge
             .iter()
             .any(|item| item.artifact_path == ".mastermind/tasks/_lessons.md"));
+    }
+
+    #[test]
+    fn project_knowledge_omits_matches_when_history_admission_is_incomplete() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("docs/adr")).unwrap();
+        fs::write(
+            root.path().join("docs/adr/001-payment.md"),
+            "# Payment boundary\n\nThe decision covers src/pay.rs.\n",
+        )
+        .unwrap();
+        fs::write(root.path().join("docs/adr/002-unreadable.md"), [0xff]).unwrap();
+        let mut store = crate::store::Store::open(root.path().join("mmcg.db")).unwrap();
+        let stats = crate::indexer::Indexer::new(root.path())
+            .index_project_history(&mut store)
+            .unwrap();
+        assert_eq!(stats.indexed, 1);
+        assert_eq!(stats.skipped, 1);
+
+        let mut collector = collector(root.path(), &["src/pay.rs"]);
+        collector.load_indexed_project_knowledge(Some(&store));
+        let snapshot = collector.finish(0);
+
+        assert!(snapshot.partial);
+        assert_eq!(snapshot.sources.items[0].status, "partial");
+        assert_eq!(snapshot.sources.items[0].facts_returned, 0);
+        assert_eq!(snapshot.sources.items[0].facts_total, None);
+        assert!(snapshot.files.items.is_empty());
+        assert!(snapshot
+            .diagnostics
+            .items
+            .iter()
+            .any(|item| item.code == "project_history_incomplete"));
+    }
+
+    #[test]
+    fn project_knowledge_freshness_respects_the_evidence_deadline() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join("CONTEXT.md"),
+            "# Payment boundary\n\nThe decision covers src/pay.rs.\n",
+        )
+        .unwrap();
+        let mut store = crate::store::Store::open(root.path().join("mmcg.db")).unwrap();
+        crate::indexer::Indexer::new(root.path())
+            .index_project_history(&mut store)
+            .unwrap();
+        let mut collector = collector(root.path(), &["src/pay.rs"]);
+        collector.deadline = Some(Instant::now());
+        collector.load_indexed_project_knowledge(Some(&store));
+        let snapshot = collector.finish(0);
+
+        assert!(snapshot.partial);
+        assert_eq!(snapshot.sources.items[0].status, "error");
+        assert_eq!(snapshot.sources.items[0].facts_returned, 0);
+        assert!(snapshot.files.items.is_empty());
+        assert!(snapshot
+            .diagnostics
+            .items
+            .iter()
+            .any(|item| item.code == "deadline_exceeded"));
+        assert_eq!(store.work_budget_depth(), 0);
     }
 
     #[test]

@@ -8,7 +8,7 @@ those tests.
 
 The built-in Claude CLI adapter is runnable with an explicitly pinned CLI and
 API key. It has not been validated against a live model. This layer does not
-include a semantic grader or a measured quality baseline. Every result
+include an automatic semantic grader or a measured quality baseline. Every result
 has `comparability.eligible: false`; every batch has
 `comparison_accepted: false` and `quality_uplift: null`.
 
@@ -322,6 +322,12 @@ research finding. Conversely, a successful process or valid citation syntax
 does not prove the answer's reasoning. A valid partial answer can remain
 available for review even when invocation or input verification fails.
 
+The [offline review workflow](REVIEW.md) exports all planned attempts into a
+blinded reviewer folder, checks source/answer identities and retains independent
+claim-level assessments. It does not invoke runtimes or mutate the original run
+results. Reviewer judgments and runtime status remain separate; importing a
+review does not make the experiment comparable or produce a quality score.
+
 The generic adapter runs as the host user. Separate directories, filtered
 environment, read-only file modes and hash checks are **not an OS sandbox**: an
 adapter could read sibling rubrics, escape its process group or access unrelated
@@ -339,7 +345,7 @@ run all conditions, then review blinded final answers against the same rubric.
 ## Deterministic checks
 
 ```bash
-python3 -m unittest evals/test_benchmark.py evals/test_claude_adapter.py evals/test_benchmark_corpus.py
+python3 -m unittest evals/test_benchmark.py evals/test_claude_adapter.py evals/test_benchmark_corpus.py evals/test_benchmark_review.py
 python3 -m evals.benchmark_corpus --source-repo .
 ```
 

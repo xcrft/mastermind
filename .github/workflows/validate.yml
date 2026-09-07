@@ -37,7 +37,7 @@ jobs:
         run: python scripts/validate.py
 
       - name: Test eval harness
-        run: python -m unittest evals/test_runner.py evals/test_evidence.py evals/test_benchmark.py evals/test_claude_adapter.py evals/test_benchmark_corpus.py
+        run: python -m unittest evals/test_runner.py evals/test_evidence.py evals/test_benchmark.py evals/test_claude_adapter.py evals/test_benchmark_corpus.py evals/test_benchmark_review.py
 
       - name: Check research calibration corpus
         run: python -m evals.benchmark_corpus --source-repo .

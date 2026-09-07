@@ -18,6 +18,7 @@
 //!   alone. Re-mining is user-invoked — there is no silent online update.
 
 use super::store::{self, Counts};
+use crate::diff::repository_git_command;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -66,6 +67,19 @@ pub fn mine(
     force: bool,
     deep: bool,
 ) -> Result<SeedOutcome, Box<dyn std::error::Error>> {
+    let db_path = store::ProfileStore::db_path().ok_or("could not resolve home directory")?;
+    mine_to_paths(repo_root, author, force, deep, &db_path, &profile_path()?)
+}
+
+fn mine_to_paths(
+    repo_root: &Path,
+    author: Option<String>,
+    force: bool,
+    deep: bool,
+    db_path: &Path,
+    path: &Path,
+) -> Result<SeedOutcome, Box<dyn std::error::Error>> {
+    let repo_key = repository_key(repo_root)?;
     let author = match author {
         Some(a) => a,
         None => resolve_git_author(repo_root)?,
@@ -85,14 +99,15 @@ pub fn mine(
     accumulate(&lines, &commit_msgs, &mut counts);
 
     // Accumulate into the user-global store, then render from the aggregate.
-    let db = store::ProfileStore::db_path().ok_or("could not resolve home directory")?;
-    let mut db = store::ProfileStore::open(&db)?;
+    let mut db = store::ProfileStore::open(db_path)?;
+    if !force {
+        ensure_owner_compatible(&db, &author, &prov.identities)?;
+    }
     if force {
         db.reset()?;
     }
     let pruned = prune_stale(&mut db)?;
-    ensure_owner_compatible(&db, &author, &prov.identities)?;
-    let repo_key = repo_root.to_string_lossy().to_string();
+    let aliases = legacy_repository_keys(&db, &repo_key)?;
     db.upsert_repo(
         &repo_key,
         &store::RepoProvenance {
@@ -106,6 +121,7 @@ pub fn mine(
         },
         &prov.identities,
         &counts,
+        &aliases,
     )?;
 
     let agg = db.aggregate()?;
@@ -126,10 +142,9 @@ pub fn mine(
         None
     };
 
-    let path = profile_path()?;
     // `--force` is a full owner/profile replacement, so carrying manual or
     // interpreted prose from the previous owner would be cross-person leakage.
-    let existing = read_existing_profile(&path, force);
+    let existing = read_existing_profile(path, force);
     let manual = existing.as_deref().and_then(extract_manual);
     let synthesized = generated_interpreted.is_some();
     let interpreted =
@@ -144,7 +159,7 @@ pub fn mine(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, &markdown)?;
+    std::fs::write(path, &markdown)?;
 
     Ok(SeedOutcome::Enriched {
         repo_commits: prov.commits_total as i64,
@@ -156,6 +171,47 @@ pub fn mine(
         synthesized,
         empty: rules.is_empty(),
     })
+}
+
+/// Subdirectories and linked worktrees share one contribution. Independent
+/// clones have different common directories and remain separate repositories.
+fn repository_key(root: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let out = repository_git_command()
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output()?;
+    if !out.status.success() {
+        return Err(format!(
+            "git repository identity failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )
+        .into());
+    }
+    let output = String::from_utf8(out.stdout)?;
+    let path = output.strip_suffix('\n').unwrap_or(&output);
+    let path = path.strip_suffix('\r').unwrap_or(path);
+    Ok(Path::new(path)
+        .canonicalize()?
+        .to_string_lossy()
+        .into_owned())
+}
+
+/// Older profiles used checkout paths as keys. Prefer the most recently mined
+/// alias for freshness until the next mine replaces all aliases atomically.
+fn legacy_repository_keys(
+    db: &store::ProfileStore,
+    key: &str,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let mut repos = db.list_repos()?;
+    repos.sort_by(|(a, at), (b, bt)| bt.cmp(at).then(a.cmp(b)));
+    Ok(repos
+        .into_iter()
+        .filter(|(candidate, _)| {
+            candidate != key && repository_key(Path::new(candidate)).ok().as_deref() == Some(key)
+        })
+        .map(|(candidate, _)| candidate)
+        .collect())
 }
 
 /// Seconds since the Unix epoch (clock is fine in the binary, unlike workflows).
@@ -309,9 +365,22 @@ pub fn staleness(root: &Path) -> Staleness {
         Ok(d) => d,
         Err(_) => return Staleness::Absent,
     };
-    let key = root.to_string_lossy().to_string();
-    let (author, sha, date) = match db.repo_meta(&key) {
-        Ok(Some(m)) => m,
+    staleness_for_repo(root, &db)
+}
+
+fn staleness_for_repo(root: &Path, db: &store::ProfileStore) -> Staleness {
+    let key = match repository_key(root) {
+        Ok(key) => key,
+        Err(_) => return Staleness::Absent,
+    };
+    let meta = db.repo_meta(&key).ok().flatten().or_else(|| {
+        legacy_repository_keys(db, &key)
+            .ok()?
+            .into_iter()
+            .find_map(|alias| db.repo_meta(&alias).ok().flatten())
+    });
+    let (author, sha, date) = match meta {
+        Some(m) => m,
         _ => return Staleness::Absent, // this repo never contributed
     };
     let mined_through = date.unwrap_or_else(|| "unknown".to_string());
@@ -331,12 +400,13 @@ pub fn staleness(root: &Path) -> Staleness {
 /// Count the author's commits in a `<rev>..HEAD` range. `None` if the range is
 /// invalid (e.g. the SHA isn't in this repo's history).
 fn count_commits_range(root: &Path, author: &str, range: &str) -> Option<usize> {
-    let out = Command::new("git")
+    let out = repository_git_command()
         .arg("-C")
         .arg(root)
         .args([
             "log",
             "--no-merges",
+            "--fixed-strings",
             &format!("--author={author}"),
             range,
             "--oneline",
@@ -349,7 +419,7 @@ fn count_commits_range(root: &Path, author: &str, range: &str) -> Option<usize> 
 }
 
 fn git_config(root: &Path, key: &str) -> Option<String> {
-    let out = Command::new("git")
+    let out = repository_git_command()
         .arg("-C")
         .arg(root)
         .args(["config", key])
@@ -374,12 +444,13 @@ fn resolve_git_author(root: &Path) -> Result<String, Box<dyn std::error::Error>>
 /// Count the author's commits, the date span, and the distinct identities
 /// (emails) the filter matched — over the *full* history.
 fn collect_provenance(root: &Path, author: &str) -> Result<Provenance, Box<dyn std::error::Error>> {
-    let out = Command::new("git")
+    let out = repository_git_command()
         .arg("-C")
         .arg(root)
         .args([
             "log",
             "--no-merges",
+            "--fixed-strings",
             &format!("--author={author}"),
             // author date (ISO) · email · full SHA, US-separated
             "--pretty=format:%aI%x1f%ae%x1f%H",
@@ -426,12 +497,13 @@ fn git_log_patch(
     author: &str,
     cap: usize,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let out = Command::new("git")
+    let out = repository_git_command()
         .arg("-C")
         .arg(root)
         .args([
             "log",
             "--no-merges",
+            "--fixed-strings",
             &format!("--author={author}"),
             "-p",
             "--unified=0",
@@ -467,12 +539,13 @@ fn collect_commits(
     author: &str,
     cap: usize,
 ) -> Result<Vec<Commit>, Box<dyn std::error::Error>> {
-    let out = Command::new("git")
+    let out = repository_git_command()
         .arg("-C")
         .arg(root)
         .args([
             "log",
             "--no-merges",
+            "--fixed-strings",
             &format!("--author={author}"),
             &format!("-n{cap}"),
             // RS (1e) between commits, US (1f) between subject and body.
@@ -1384,6 +1457,382 @@ fn render_profile(
 mod tests {
     use super::*;
 
+    fn fixture_git(root: &Path, args: &[&str]) -> String {
+        let mut command = Command::new("git");
+        for (name, _) in std::env::vars_os() {
+            if name.to_string_lossy().starts_with("GIT_") {
+                command.env_remove(name);
+            }
+        }
+        let out = command
+            .arg("-C")
+            .arg(root)
+            .args(["-c", "commit.gpgsign=false", "-c", "core.hooksPath="])
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", root.join(".unused-global-git-config"))
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    fn fixture_repository(root: &Path, author: &str) -> String {
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        fixture_git(root, &["init", "-q"]);
+        fixture_git(root, &["config", "user.name", author]);
+        fixture_git(root, &["config", "user.email", "author@example.test"]);
+        let body: String = (0..10)
+            .map(|i| format!("    let sample_{i} = {i};\n"))
+            .collect();
+        std::fs::write(
+            root.join("src/sample.rs"),
+            format!("fn sample() {{\n{body}}}\n"),
+        )
+        .unwrap();
+        fixture_git(root, &["add", "src/sample.rs"]);
+        fixture_git(root, &["commit", "-qm", "feat: own sample"]);
+        fixture_git(root, &["rev-parse", "HEAD"])
+    }
+
+    #[test]
+    fn author_substring_is_literal_in_every_history_query() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let own_sha = fixture_repository(&root, "A. User");
+        std::fs::write(
+            root.join("src/other.rs"),
+            "pub const OTHER_AUTHOR_SENTINEL: bool = true;\n",
+        )
+        .unwrap();
+        fixture_git(&root, &["add", "src/other.rs"]);
+        fixture_git(
+            &root,
+            &[
+                "commit",
+                "-qm",
+                "fix: another author",
+                "--author=Ax User <other@example.test>",
+            ],
+        );
+        fixture_git(
+            &root,
+            &[
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "chore: bracketed author",
+                "--author=Alex [Team] <team@example.test>",
+            ],
+        );
+
+        let provenance = collect_provenance(&root, "A. User").unwrap();
+        assert_eq!(provenance.commits_total, 1);
+        assert_eq!(provenance.identities, vec!["author@example.test"]);
+        let patch = git_log_patch(&root, "A. User", COMMIT_SAMPLE_CAP).unwrap();
+        assert!(patch.contains("let sample_0"));
+        assert!(!patch.contains("OTHER_AUTHOR_SENTINEL"));
+        let commits = collect_commits(&root, "A. User", COMMIT_SAMPLE_CAP).unwrap();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].subject, "feat: own sample");
+        assert_eq!(
+            count_commits_range(&root, "A. User", &format!("{own_sha}..HEAD")),
+            Some(0)
+        );
+        assert_eq!(
+            collect_provenance(&root, "Alex [Team]")
+                .unwrap()
+                .commits_total,
+            1
+        );
+    }
+
+    #[test]
+    fn remine_unifies_worktrees_subdirectories_and_legacy_contributions() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let subdir = root.join("src");
+        let sha = fixture_repository(&root, "Alex [Team]");
+        let worktree = dir.path().join("worktree");
+        fixture_git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                "-q",
+                worktree.to_str().unwrap(),
+            ],
+        );
+        let db_path = dir.path().join("style.db");
+        let profile = dir.path().join("style.md");
+        let provenance = store::RepoProvenance {
+            author: "Alex [Team]".into(),
+            commits_total: 1,
+            commits_sampled: 1,
+            added_lines_sampled: 12,
+            latest_sha: Some(sha),
+            latest_date: Some("2026-01-01".into()),
+            mined_at_epoch: now_epoch(),
+        };
+        {
+            let mut db = store::ProfileStore::open(&db_path).unwrap();
+            for alias in [&root, &subdir] {
+                db.upsert_repo(
+                    &alias.canonicalize().unwrap().to_string_lossy(),
+                    &provenance,
+                    &["author@example.test".into()],
+                    &Counts::from([("indent.space".into(), 10)]),
+                    &[],
+                )
+                .unwrap();
+            }
+            assert_eq!(db.aggregate().unwrap().counts["indent.space"], 20);
+            assert!(matches!(
+                staleness_for_repo(&worktree, &db),
+                Staleness::Fresh { .. }
+            ));
+        }
+
+        for checkout in [&worktree, &subdir, &root] {
+            let outcome = mine_to_paths(checkout, None, false, false, &db_path, &profile).unwrap();
+            assert!(matches!(
+                outcome,
+                SeedOutcome::Enriched {
+                    repos: 1,
+                    commits: 1,
+                    ..
+                }
+            ));
+            let db = store::ProfileStore::open(&db_path).unwrap();
+            let aggregate = db.aggregate().unwrap();
+            assert_eq!(aggregate.counts["indent.space"], 10);
+            assert!(derive_indentation(&aggregate.counts).is_none());
+            assert!(matches!(
+                staleness_for_repo(checkout, &db),
+                Staleness::Fresh { .. }
+            ));
+        }
+        fixture_git(&root, &["worktree", "remove", worktree.to_str().unwrap()]);
+        let mut db = store::ProfileStore::open(&db_path).unwrap();
+        assert!(prune_stale(&mut db).unwrap().is_empty());
+        assert_eq!(
+            db.list_repos().unwrap()[0].0,
+            repository_key(&root).unwrap()
+        );
+    }
+
+    #[test]
+    fn ambient_git_routing_preserves_unrelated_contributions() {
+        const CHILD_FIXTURE: &str = "MMCG_PROFILE_ROUTING_CHILD_FIXTURE";
+        const CHILD_DONE: &str = "profile routing child completed";
+        if let Some(case) = std::env::var_os(CHILD_FIXTURE) {
+            let case = PathBuf::from(case);
+            let base = case.parent().unwrap();
+            let first = base.join("first");
+            let second = base.join("second");
+            let first_key = repository_key(&first).unwrap();
+            let second_key = repository_key(&second).unwrap();
+            assert_ne!(first_key, second_key);
+            let old_second_key = second
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            let second_sha = fixture_git(&second, &["rev-parse", "HEAD"]);
+            let before_second = fixture_git(&second, &["rev-parse", "HEAD^"]);
+            assert_eq!(
+                git_config(&second, "user.name").as_deref(),
+                Some("Second Alias")
+            );
+            assert_eq!(
+                collect_provenance(&second, "Second Alias")
+                    .unwrap()
+                    .commits_total,
+                2
+            );
+            assert!(git_log_patch(&second, "Second Alias", 400)
+                .unwrap()
+                .contains("SECOND_REPOSITORY_SENTINEL"));
+            assert_eq!(
+                collect_commits(&second, "Second Alias", 400).unwrap().len(),
+                2
+            );
+            assert_eq!(
+                count_commits_range(&second, "Second Alias", &format!("{before_second}..HEAD")),
+                Some(1)
+            );
+
+            let db_path = case.join("style.db");
+            let profile = case.join("style.md");
+            mine_to_paths(&first, None, false, false, &db_path, &profile).unwrap();
+            {
+                let db = store::ProfileStore::open(&db_path).unwrap();
+                assert!(db.repo_meta(&old_second_key).unwrap().is_some());
+                assert_eq!(db.aggregate().unwrap().counts["foreign.marker"], 7);
+            }
+            mine_to_paths(&second, None, false, false, &db_path, &profile).unwrap();
+            let db = store::ProfileStore::open(&db_path).unwrap();
+            assert_eq!(db.aggregate().unwrap().repos, 2);
+            assert_eq!(db.aggregate().unwrap().commits_total, 3);
+            let (author, sha, _) = db.repo_meta(&second_key).unwrap().unwrap();
+            assert_eq!(author, "Second Alias");
+            assert_eq!(sha.as_deref(), Some(second_sha.as_str()));
+            assert!(matches!(
+                staleness_for_repo(&second, &db),
+                Staleness::Fresh { .. }
+            ));
+            println!("{CHILD_DONE}");
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        fixture_repository(&first, "First Alias");
+        fixture_repository(&second, "Second Alias");
+        std::fs::write(
+            second.join("src/second.rs"),
+            "pub const SECOND_REPOSITORY_SENTINEL: bool = true;\n",
+        )
+        .unwrap();
+        fixture_git(&second, &["add", "src/second.rs"]);
+        fixture_git(&second, &["commit", "-qm", "feat: second repository only"]);
+        let git_dir = first.join(".git");
+        for (name, variables) in [
+            ("git_dir", vec![("GIT_DIR", git_dir.clone())]),
+            ("common_dir", vec![("GIT_COMMON_DIR", git_dir.clone())]),
+            (
+                "all_routes",
+                vec![
+                    ("GIT_DIR", git_dir.clone()),
+                    ("GIT_COMMON_DIR", git_dir.clone()),
+                    ("GIT_WORK_TREE", first.clone()),
+                    ("GIT_INDEX_FILE", git_dir.join("index")),
+                    ("GIT_OBJECT_DIRECTORY", git_dir.join("objects")),
+                    ("GIT_ALTERNATE_OBJECT_DIRECTORIES", git_dir.join("objects")),
+                ],
+            ),
+        ] {
+            let case = dir.path().join(name);
+            std::fs::create_dir(&case).unwrap();
+            {
+                let mut db = store::ProfileStore::open(&case.join("style.db")).unwrap();
+                db.upsert_repo(
+                    &second.canonicalize().unwrap().to_string_lossy(),
+                    &store::RepoProvenance {
+                        author: "Second Alias".into(),
+                        commits_total: 2,
+                        commits_sampled: 2,
+                        added_lines_sampled: 13,
+                        latest_sha: Some(fixture_git(&second, &["rev-parse", "HEAD"])),
+                        latest_date: Some("2026-01-01".into()),
+                        mined_at_epoch: now_epoch(),
+                    },
+                    &["author@example.test".into()],
+                    &Counts::from([("foreign.marker".into(), 7)]),
+                    &[],
+                )
+                .unwrap();
+            }
+
+            // Isolate ambient variables in a child so parallel tests keep their environment.
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            for (variable, _) in std::env::vars_os() {
+                if variable.to_string_lossy().starts_with("GIT_") {
+                    child.env_remove(variable);
+                }
+            }
+            child
+                .args([
+                    "--exact",
+                    "miner::profile::tests::ambient_git_routing_preserves_unrelated_contributions",
+                    "--nocapture",
+                ])
+                .env(CHILD_FIXTURE, &case)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env(
+                    "GIT_CONFIG_GLOBAL",
+                    dir.path().join(".unused-global-git-config"),
+                )
+                .env("GIT_CONFIG_COUNT", "1")
+                .env("GIT_CONFIG_KEY_0", "user.name")
+                .env("GIT_CONFIG_VALUE_0", "Wrong Ambient Alias");
+            for (variable, value) in variables {
+                child.env(variable, value);
+            }
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{name}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains(CHILD_DONE));
+        }
+    }
+
+    #[test]
+    fn owner_rejection_precedes_retention_and_preserves_prose_until_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("bob");
+        fixture_repository(&root, "Bob");
+        for (name, exists) in [("gone", false), ("aged", true)] {
+            let old_repo = dir.path().join(name);
+            if exists {
+                std::fs::create_dir(&old_repo).unwrap();
+            }
+            let db_path = dir.path().join(format!("{name}.db"));
+            let profile = dir.path().join(format!("{name}.md"));
+            let previous = format!(
+                "{MANUAL_START}\nAlice's manual choice\n{MANUAL_END}\n\
+                 {MANAGED_START}\n## Design patterns & tendencies (interpreted)\n\
+                 Alice's portrait\n\n---\nFooter\n{MANAGED_END}\n"
+            );
+            std::fs::write(&profile, &previous).unwrap();
+            {
+                let mut db = store::ProfileStore::open(&db_path).unwrap();
+                db.upsert_repo(
+                    &old_repo.to_string_lossy(),
+                    &store::RepoProvenance {
+                        author: "Alice".into(),
+                        commits_total: 1,
+                        commits_sampled: 1,
+                        added_lines_sampled: 1,
+                        latest_sha: None,
+                        latest_date: None,
+                        mined_at_epoch: if exists { 1 } else { now_epoch() },
+                    },
+                    &["alice@example.test".into()],
+                    &Counts::from([("indent.tab".into(), 10)]),
+                    &[],
+                )
+                .unwrap();
+            }
+
+            let error = match mine_to_paths(&root, None, false, false, &db_path, &profile) {
+                Err(error) => error,
+                Ok(_) => panic!("a different owner must not bypass the guard through retention"),
+            };
+            assert!(error.to_string().contains("refusing to mix people"));
+            assert_eq!(std::fs::read_to_string(&profile).unwrap(), previous);
+            {
+                let db = store::ProfileStore::open(&db_path).unwrap();
+                assert_eq!(db.owner_signals().unwrap().0, vec!["Alice"]);
+                assert_eq!(db.aggregate().unwrap().counts["indent.tab"], 10);
+            }
+
+            mine_to_paths(&root, None, true, false, &db_path, &profile).unwrap();
+            let db = store::ProfileStore::open(&db_path).unwrap();
+            assert_eq!(db.owner_signals().unwrap().0, vec!["Bob"]);
+            assert!(!std::fs::read_to_string(&profile).unwrap().contains("Alice"));
+        }
+    }
+
     fn spaces(lang: Lang, n: usize, body: &str, count: usize) -> Vec<AddedLine> {
         (0..count)
             .map(|_| AddedLine {
@@ -1641,6 +2090,7 @@ diff --git a/app/bar.ts b/app/bar.ts
             },
             &["alice@example.com".into()],
             &Counts::new(),
+            &[],
         )
         .unwrap();
 

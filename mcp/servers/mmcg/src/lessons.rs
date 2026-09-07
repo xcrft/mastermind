@@ -16,9 +16,9 @@ const HEADER: &str = "# Project lessons\n\n\
 Reusable project knowledge, newest at the bottom. Mechanical audit events enter\n\
 as `candidate`; they are not active guidance until semantic review replaces the\n\
 pending lesson and changes the status to `active`, `resolved`, or `superseded`.\n\n\
-A repeat of an already-recorded event refreshes that entry — newer evidence, a\n\
-higher occurrence count — instead of adding a sibling. Reviewed entries are\n\
-never rewritten.\n\n\
+A repeat updates Observed, Last seen, Occurrences, and Latest event evidence.\n\
+Semantic fields and review notes are preserved. Reviewed entries are never\n\
+rewritten.\n\n\
 Required fields: Status, Task, Kind, Provenance, Evidence, Supersedes,\n\
 Occurrences, Last seen, and Reusable lesson.\n\n";
 
@@ -146,8 +146,13 @@ fn append_candidate(repo_root: &Path, candidate: Candidate) -> std::io::Result<b
 /// reopen or overwrite it.
 fn merge_candidate(body: &str, candidate: &Candidate) -> Option<String> {
     let heading = format!("## {}", candidate.id);
-    let lines: Vec<&str> = body.lines().collect();
-    let Some(start) = lines.iter().position(|line| line.trim() == heading) else {
+    let lines: Vec<&str> = body.split_inclusive('\n').collect();
+    let visible = crate::context_doctor::prose_lines(body);
+    let Some(start) = visible
+        .iter()
+        .find(|line| line.text.trim_end() == heading)
+        .map(|line| line.index)
+    else {
         let mut merged = if body.is_empty() {
             HEADER.to_string()
         } else {
@@ -161,57 +166,99 @@ fn merge_candidate(body: &str, candidate: &Candidate) -> Option<String> {
         return Some(merged);
     };
 
-    let end = lines[start + 1..]
+    let end = visible
         .iter()
-        .position(|line| line.starts_with("## "))
-        .map_or(lines.len(), |offset| start + 1 + offset);
+        .find(|line| line.index > start && line.text.starts_with("## "))
+        .map_or(lines.len(), |line| line.index);
     let section = &lines[start..end];
-    if field(section, "Status") != Some("candidate") {
+    let metadata_lines: Vec<_> = visible
+        .iter()
+        .filter(|line| line.index >= start && line.index < end)
+        .take_while(|line| !line.text.starts_with("### "))
+        .collect();
+    let metadata: Vec<_> = metadata_lines.iter().map(|line| line.text).collect();
+    if !field(&metadata, "Status")
+        .is_some_and(|value| value.trim_matches('`').eq_ignore_ascii_case("candidate"))
+    {
         return None;
     }
     let today = today_ymd();
-    let created = field(section, "Created").unwrap_or(&today).to_string();
-    let occurrences = field(section, "Occurrences")
+    let occurrences = field(&metadata, "Occurrences")
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(1)
         .saturating_add(1);
 
-    let mut merged = String::new();
-    for line in &lines[..start] {
-        merged.push_str(line);
-        merged.push('\n');
+    let updates = [
+        ("Last seen", today),
+        ("Occurrences", occurrences.to_string()),
+        ("Observed", candidate.observed.clone()),
+        ("Latest event evidence", candidate.evidence.clone()),
+    ];
+    let positions: Vec<Option<usize>> = updates
+        .iter()
+        .map(|(name, _)| {
+            let prefix = format!("- **{name}:**");
+            metadata_lines
+                .iter()
+                .find(|line| line.text.starts_with(&prefix))
+                .map(|line| line.index - start)
+        })
+        .collect();
+    let newline = if section[0].ends_with("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut merged = lines[..start].concat();
+    for (index, line) in section.iter().enumerate() {
+        if index == 1 {
+            for ((name, value), position) in updates.iter().zip(&positions) {
+                if position.is_none() {
+                    merged.push_str(&format!("- **{name}:** {value}{newline}"));
+                }
+            }
+        }
+        if let Some(update) = positions
+            .iter()
+            .position(|position| *position == Some(index))
+        {
+            let (name, value) = &updates[update];
+            let ending = if line.ends_with("\r\n") {
+                "\r\n"
+            } else if line.ends_with('\n') {
+                "\n"
+            } else {
+                ""
+            };
+            merged.push_str(&format!("- **{name}:** {value}{ending}"));
+        } else {
+            merged.push_str(line);
+        }
     }
-    // `render_entry` opens with a blank line, so drop the one already sitting
-    // between the previous entry and this heading to avoid doubling it.
-    while merged.ends_with("\n\n") {
-        merged.pop();
-    }
-    merged.push_str(&render_entry(candidate, &created, occurrences));
-    for line in &lines[end..] {
-        merged.push_str(line);
-        merged.push('\n');
-    }
+    merged.push_str(&lines[end..].concat());
     Some(merged)
 }
 
 fn render_entry(candidate: &Candidate, created: &str, occurrences: u32) -> String {
     format!(
-        "\n## {}\n\n- **Created:** {created}\n- **Last seen:** {}\n- **Occurrences:** {occurrences}\n- **Status:** candidate\n- **Task:** `{}`\n- **Kind:** `{}`\n- **Observed:** {}\n- **Provenance:** mastermind controller\n- **Evidence:** {}\n- **Supersedes:** none\n- **Reusable lesson:** pending semantic review\n",
+        "\n## {}\n\n- **Created:** {created}\n- **Last seen:** {}\n- **Occurrences:** {occurrences}\n- **Status:** candidate\n- **Task:** `{}`\n- **Kind:** `{}`\n- **Observed:** {}\n- **Latest event evidence:** {}\n- **Provenance:** mastermind controller\n- **Evidence:** {}\n- **Supersedes:** none\n- **Reusable lesson:** pending semantic review\n",
         candidate.id,
         today_ymd(),
         candidate.task_id,
         candidate.kind,
         candidate.observed,
         candidate.evidence,
+        candidate.evidence,
     )
 }
 
 fn field<'a>(section: &[&'a str], name: &str) -> Option<&'a str> {
-    let prefix = format!("- **{name}:** ");
-    section
+    let prefix = format!("- **{name}:**");
+    let mut values = section
         .iter()
-        .find_map(|line| line.strip_prefix(prefix.as_str()))
-        .map(str::trim)
+        .filter_map(|line| line.trim().strip_prefix(prefix.as_str()).map(str::trim));
+    let value = values.next()?;
+    values.next().is_none().then_some(value)
 }
 
 fn verdict_label(verdict: Verdict) -> &'static str {
@@ -474,6 +521,155 @@ mod tests {
         assert!(!body2.contains("1× scope creep"));
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn repeated_audit_preserves_candidate_review_fields_notes_and_other_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = PathBuf::from(".mastermind/tasks/042-name/spec.md");
+        let first = report(
+            Verdict::Drift,
+            vec![Finding::UnexpectedFile {
+                file: "src/extra.rs".into(),
+            }],
+        );
+        assert!(append_audit_candidate(dir.path(), &spec, &first).unwrap());
+        let lessons = dir.path().join(".mastermind/tasks/_lessons.md");
+        let original = fs::read_to_string(&lessons).unwrap();
+        let mut reviewed = original
+            .lines()
+            .filter(|line| !line.starts_with("- **Latest event evidence:**"))
+            .map(|line| {
+                if line.starts_with("- **Created:**") {
+                    "- **Created:** 1999-01-01"
+                } else if line.starts_with("- **Last seen:**") {
+                    "- **Last seen:** 1999-01-02"
+                } else if line.starts_with("- **Provenance:**") {
+                    "- **Provenance:** planner draft awaiting runtime verification"
+                } else if line.starts_with("- **Evidence:**") {
+                    "- **Evidence:** `manual-runtime-report.md`; unresolved counterexample"
+                } else if line.starts_with("- **Supersedes:**") {
+                    "- **Supersedes:** lesson-prior"
+                } else if line.starts_with("- **Reusable lesson:**") {
+                    "- **Reusable lesson:** Provisional cause: ownership must remain explicit."
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        let notes = "\r\n\r\n### Review notes\r\nPreserve this counterexample while verification is pending.  \r\n```markdown\r\n- **Occurrences:** 99\r\n```\r\n";
+        let sibling = "\r\n## lesson-unrelated\r\n\r\n- **Status:** active\r\n- **Reusable lesson:** Preserve this reviewed entry exactly.\r\n";
+        reviewed.push_str(notes);
+        reviewed.push_str(sibling);
+        fs::write(&lessons, &reviewed).unwrap();
+        let task = dir.path().join(spec.parent().unwrap());
+        fs::create_dir_all(&task).unwrap();
+        fs::write(task.join("audit.md"), "New mechanical audit evidence.\n").unwrap();
+        let later = report(
+            Verdict::Broken,
+            vec![Finding::SnapshotSymbolGone {
+                symbol: "foo".into(),
+            }],
+        );
+
+        assert!(append_audit_candidate(dir.path(), &spec, &later).unwrap());
+        let merged = fs::read_to_string(&lessons).unwrap();
+        for preserved in [
+            "- **Created:** 1999-01-01\r\n",
+            "- **Provenance:** planner draft awaiting runtime verification\r\n",
+            "- **Evidence:** `manual-runtime-report.md`; unresolved counterexample\r\n",
+            "- **Supersedes:** lesson-prior\r\n",
+            "- **Reusable lesson:** Provisional cause: ownership must remain explicit.",
+            notes,
+            sibling,
+        ] {
+            assert!(
+                merged.contains(preserved),
+                "missing {preserved:?}: {merged}"
+            );
+        }
+        assert!(!merged.contains("- **Last seen:** 1999-01-02"));
+        assert!(merged.contains("- **Occurrences:** 2\r\n"));
+        assert!(merged.contains("- **Observed:** contract broken; 1× snapshot symbol gone\r\n"));
+        assert!(merged.contains("- **Latest event evidence:** `.mastermind/tasks/042-name/spec.md`; `.mastermind/tasks/042-name/audit.md`\r\n"));
+        assert_eq!(merged.matches("- **Latest event evidence:**").count(), 1);
+
+        assert!(append_audit_candidate(dir.path(), &spec, &later).unwrap());
+        let repeated = fs::read_to_string(&lessons).unwrap();
+        assert!(repeated.contains("- **Occurrences:** 3\r\n"));
+        assert_eq!(repeated.matches("- **Latest event evidence:**").count(), 1);
+        assert!(repeated.contains(notes));
+        assert!(repeated.ends_with(sibling));
+    }
+
+    #[test]
+    fn repeated_audit_updates_the_live_candidate_after_a_complete_copied_example() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = PathBuf::from(".mastermind/tasks/042-name/spec.md");
+        let first = report(
+            Verdict::Drift,
+            vec![Finding::UnexpectedFile {
+                file: "src/extra.rs".into(),
+            }],
+        );
+        assert!(append_audit_candidate(dir.path(), &spec, &first).unwrap());
+        let lessons = dir.path().join(".mastermind/tasks/_lessons.md");
+        let original = fs::read_to_string(&lessons).unwrap();
+        let entry_start = original.find("## lesson-").unwrap();
+        let live = original[entry_start..].replace('\n', "\r\n").replace(
+            "- **Reusable lesson:** pending semantic review",
+            "- **Reusable lesson:** Provisional rule awaiting the second audit.",
+        );
+        let heading = format!("## {}", stable_id("042-name", "audit_contract_failure", ""));
+        let reviewed = live
+            .replacen(&heading, "## lesson-reviewed", 1)
+            .replace("- **Status:** candidate", "- **Status:** active");
+        let copied = live.replace("- **Occurrences:** 1", "- **Occurrences:** 41");
+        let later = report(
+            Verdict::Broken,
+            vec![Finding::SnapshotSymbolGone {
+                symbol: "foo".into(),
+            }],
+        );
+        for example in [
+            format!("```markdown\r\n{copied}```\r\n"),
+            format!("~~~markdown\r\n{copied}~~~\r\n"),
+            format!("<!--\r\n{copied}-->\r\n"),
+            copied.lines().map(|line| format!("> {line}\r\n")).collect(),
+            copied
+                .lines()
+                .map(|line| format!("    {line}\r\n"))
+                .collect(),
+        ] {
+            let prefix = format!("# Project lessons\r\n\r\n{reviewed}\r\n### Review notes\r\nThe complete old candidate below is an example.  \r\n{example}\r\n");
+            let sibling = "\r\n## lesson-unrelated\r\n\r\n- **Status:** resolved\r\n- **Reusable lesson:** Retain the reviewed resolution.\r\n";
+            fs::write(&lessons, format!("{prefix}{live}{sibling}")).unwrap();
+
+            assert!(append_audit_candidate(dir.path(), &spec, &later).unwrap());
+            let merged = fs::read_to_string(&lessons).unwrap();
+            assert!(merged.starts_with(&prefix), "rewrote the reviewed notes");
+            assert!(merged.ends_with(sibling));
+            let changed = &merged[prefix.len()..merged.len() - sibling.len()];
+            assert_eq!(changed.matches(&heading).count(), 1);
+            assert!(changed.contains("- **Occurrences:** 2\r\n"));
+            assert!(
+                changed.contains("- **Observed:** contract broken; 1× snapshot symbol gone\r\n")
+            );
+            assert!(changed.contains(
+                "- **Reusable lesson:** Provisional rule awaiting the second audit.\r\n"
+            ));
+
+            // With only the example present, append a real record without
+            // treating the copied heading as an existing candidate.
+            fs::write(&lessons, &prefix).unwrap();
+            assert!(append_audit_candidate(dir.path(), &spec, &later).unwrap());
+            let appended = fs::read_to_string(&lessons).unwrap();
+            assert!(appended.starts_with(&prefix));
+            let new_entry = &appended[prefix.len()..];
+            assert!(new_entry.contains(&heading));
+            assert!(new_entry.contains("- **Occurrences:** 1\n"));
+        }
     }
 
     #[test]

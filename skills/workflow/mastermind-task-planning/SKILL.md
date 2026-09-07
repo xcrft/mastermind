@@ -201,9 +201,23 @@ Resolve `<task>/history-review.md` before reporting the learning pass complete:
 - set **Context** to `updated` or `not applicable`;
 - set **Lesson** to `updated` or `not applicable`;
 - replace the generated reason with the reviewed reason and retain evidence paths;
+- retain the controller's **Audit snapshot** marker. It binds the review to the
+  iteration, audited spec/report, implementation and audit outputs. Changed or
+  missing evidence requires a new audit; never copy an old marker to close new
+  work. The controller archives a previous review when that binding changes;
 - if an audit created a `candidate` in `_lessons.md`, replace its pending lesson
   and set it to `active`, `resolved`, or `superseded`. Finding counts alone are
   not a reusable lesson.
+
+Repeating a mechanical event may refresh its occurrences, observation and latest
+event evidence. Preserve reviewer-written provenance, evidence, supersedes
+links, provisional lessons and notes; they are not controller-owned counters.
+
+Re-run `mastermind run-task <task>/spec.md` to record completion after updating
+the review. CONTEXT, its archives and lessons may change during this pass;
+explicitly declared implementation/documentation files still require re-audit
+when edited. A completed task remains historical evidence for its audited
+version, not proof of the current checkout.
 
 Commit, push, PR, release, and publication remain separate actions requiring
 explicit user authorization.

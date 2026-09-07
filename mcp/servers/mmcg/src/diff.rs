@@ -76,6 +76,33 @@ fn git_timeout() -> Duration {
     GIT_TIMEOUT
 }
 
+/// Repository commands select their checkout with `current_dir`; ambient Git
+/// routing from a hook or another worktree must not override that selection.
+pub(crate) fn repository_git_command() -> Command {
+    let mut command = Command::new("git");
+    for name in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_SHALLOW_FILE",
+        "GIT_GRAFT_FILE",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_PREFIX",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_INTERNAL_SUPER_PREFIX",
+        "GIT_CONFIG",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_PARAMETERS",
+    ] {
+        command.env_remove(name);
+    }
+    command
+}
+
 fn git_command(args: &[&str]) -> Command {
     #[cfg(test)]
     if let Some((program, prefix)) = TEST_GIT_INVOCATION.with(|value| value.borrow().clone()) {
@@ -83,7 +110,7 @@ fn git_command(args: &[&str]) -> Command {
         command.args(prefix).args(args);
         return command;
     }
-    let mut command = Command::new("git");
+    let mut command = repository_git_command();
     command.args(args);
     command
 }

@@ -706,6 +706,50 @@ class CriticGraderTests(unittest.TestCase):
 
 
 class PromptIsolationTests(unittest.TestCase):
+    def test_fixture_copy_exposes_same_size_changes_despite_matching_source_mtimes(self):
+        with tempfile.TemporaryDirectory(prefix="mmcg-fixture-stat-cache-") as temporary:
+            root = Path(temporary)
+            before, after, repository = (root / name for name in ("before", "after", "repo"))
+            paths = {"root.py", "src/staged.py"}
+            old_timestamp = 946684800
+            for tree, value in ((before, "1"), (after, "3")):
+                for relative in paths:
+                    source = tree / relative
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    source.write_text(f"MAX_ATTEMPTS = {value}\n", encoding="utf-8")
+                    os.utime(source, (old_timestamp, old_timestamp))
+
+            runner._copy_tree_into(before, repository)
+            # Seed an old cached mtime even when the copier correctly uses fresh
+            # timestamps. This makes the regression independent of clock resolution.
+            for relative in paths:
+                os.utime(repository / relative, (old_timestamp, old_timestamp))
+            for arguments in (
+                ["init", "-q", "--initial-branch=main"],
+                ["config", "core.trustctime", "false"],
+                ["config", "core.checkStat", "minimal"],
+                ["add", "-A"],
+                ["commit", "-q", "-m", "baseline"],
+            ):
+                runner._run_git(arguments, repository)
+
+            runner._copy_tree_into(after, repository)
+            for relative in paths:
+                self.assertEqual(
+                    (repository / relative).read_text(encoding="utf-8"), "MAX_ATTEMPTS = 3\n"
+                )
+            changed = subprocess.run(
+                ["git", "diff", "--name-only", "HEAD"],
+                cwd=repository, text=True, capture_output=True, check=True,
+            ).stdout.splitlines()
+            self.assertEqual(set(changed), paths)
+            runner._run_git(["add", "-A"], repository)
+            staged = subprocess.run(
+                ["git", "diff", "--cached", "--name-only"],
+                cwd=repository, text=True, capture_output=True, check=True,
+            ).stdout.splitlines()
+            self.assertEqual(set(staged), paths)
+
     def test_auditor_runs_verify_as_an_exact_standalone_command(self):
         auditor = runner.SUITES["auditor"]["subagent"].read_text(encoding="utf-8")
         self.assertIn("Run each reported\n   `VERIFY` command exactly as written", auditor)

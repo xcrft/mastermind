@@ -5522,7 +5522,11 @@ mod tests {
     #[test]
     fn next_and_resume_route_revoked_approval_to_explicit_preflight() {
         let root = tempfile::tempdir().unwrap();
-        let task = root.path().join(".mastermind/tasks/001-revised");
+        let task = root
+            .path()
+            .join(".mastermind")
+            .join("tasks")
+            .join("001-revised");
         fs::create_dir_all(&task).unwrap();
         let spec = task.join("spec.md");
         fs::write(&spec, "# Revised\n").unwrap();

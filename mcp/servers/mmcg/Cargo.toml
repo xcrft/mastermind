@@ -38,7 +38,7 @@ rusqlite = { version = "0.40", features = ["bundled", "hooks"] }
 
 # tree-sitter — fastest mature parser. Each grammar vendors its own C source.
 # No system tree-sitter library required.
-tree-sitter = "0.26"
+tree-sitter = "0.27"
 tree-sitter-python = "0.25"
 tree-sitter-typescript = "0.23"
 tree-sitter-rust = "0.24"

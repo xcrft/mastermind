@@ -540,7 +540,10 @@ pub(crate) fn read_regular_file_expected(
     }
     control.check()?;
     let after = stable_file_identity(&file).map_err(BoundedReadError::Io)?;
-    let current = open_relative_nofollow(&root.directory, &relative)?;
+    // The file existed when opened. Disappearance or replacement now is a
+    // changed snapshot, never an initially missing optional evidence file.
+    let current = open_relative_nofollow(&root.directory, &relative)
+        .map_err(|_| BoundedReadError::SnapshotChanged)?;
     let current_identity = stable_file_identity(&current).map_err(BoundedReadError::Io)?;
     root.verify()?;
     if before != after || after != current_identity {
@@ -609,7 +612,8 @@ pub(crate) fn copy_regular_file_with_capability(
     }
     control.check()?;
     let after = stable_file_identity(&file).map_err(BoundedReadError::Io)?;
-    let current = open_relative_nofollow(&root.directory, &relative)?;
+    let current = open_relative_nofollow(&root.directory, &relative)
+        .map_err(|_| BoundedReadError::SnapshotChanged)?;
     let current_identity = stable_file_identity(&current).map_err(BoundedReadError::Io)?;
     root.verify()?;
     if before != after || after != current_identity {
@@ -710,6 +714,79 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read.bytes, b"fn main() {}\n");
+    }
+
+    #[test]
+    fn initially_missing_file_remains_distinct_from_changed_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        for path in ["absent.txt", "absent/child.txt"] {
+            assert!(matches!(
+                read_regular_file(root.path(), Path::new(path), 4, 4, ReadControl::default()),
+                Err(BoundedReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deletion_replacement_and_growth_during_reads_fail_closed() {
+        use std::cell::Cell;
+        for copying in [false, true] {
+            for mutation in ["delete", "replace", "grow"] {
+                let root = tempfile::tempdir().unwrap();
+                let path = root.path().join("file.txt");
+                std::fs::write(&path, b"safe").unwrap();
+                let capability = RootCapability::open(root.path()).unwrap();
+                let checks = Cell::new(0);
+                let mutate_after_open = || {
+                    checks.set(checks.get() + 1);
+                    if checks.get() == 2 {
+                        match mutation {
+                            "delete" => std::fs::remove_file(&path).unwrap(),
+                            "replace" => {
+                                let replacement = root.path().join("replacement.txt");
+                                std::fs::write(&replacement, b"evil").unwrap();
+                                std::fs::rename(replacement, &path).unwrap();
+                            }
+                            "grow" => std::fs::write(&path, b"larger than the byte limit").unwrap(),
+                            _ => unreachable!(),
+                        }
+                    }
+                    false
+                };
+                let control = ReadControl {
+                    interrupted: Some(&mutate_after_open),
+                    deadline: None,
+                };
+                let mut destination = Vec::new();
+                let result = if copying {
+                    copy_regular_file_with_capability(
+                        &capability,
+                        Path::new("file.txt"),
+                        4,
+                        control,
+                        None,
+                        &mut destination,
+                    )
+                } else {
+                    read_regular_file_with_capability(
+                        &capability,
+                        Path::new("file.txt"),
+                        4,
+                        4,
+                        control,
+                    )
+                };
+                assert!(
+                    matches!(
+                        result,
+                        Err(BoundedReadError::SnapshotChanged | BoundedReadError::TooLarge { .. })
+                    ),
+                    "{mutation}, copying={copying}: {result:?}"
+                );
+                assert!(destination.len() <= 4);
+            }
+        }
     }
 
     #[test]

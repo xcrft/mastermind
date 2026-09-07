@@ -505,10 +505,10 @@ enum Cmd {
         /// Project root the spec's file paths resolve against. Defaults to cwd.
         #[arg(long, default_value = ".")]
         root: PathBuf,
-        /// Drop existing state and force pre-flight even if state exists.
+        /// Restart pre-flight, preserving the task's original baseline and iteration count.
         #[arg(long)]
         reset: bool,
-        /// Run only pre-flight (verify + risk report + state write); never auto-resume.
+        /// Run only pre-flight; retries preserve the original baseline and iteration count.
         #[arg(long)]
         pre_only: bool,
         /// Run only post-flight (errors if no state file).

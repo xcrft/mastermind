@@ -3664,6 +3664,17 @@ impl WorkflowStatus {
                 .as_ref()
                 .and_then(|s| s.blocking_reason.as_deref())
                 .unwrap_or("see state.json for details");
+            if task.state.as_ref().and_then(|s| s.next_step.as_deref()) == Some("run_preflight") {
+                return Some(NextAction {
+                    description: format!("Task {} — review the spec and repeat pre-flight: {blocking}", task.folder),
+                    command: Some(format!("mastermind run-task {spec} --pre-only")),
+                    claude_prompt: Some(format!(
+                        "Review the revised Mastermind contract at {spec}.\n\nBlocking reason: {blocking}\n\n\
+                         Once the scope and acceptance criteria are approved, run `mastermind run-task {spec} --pre-only`. \
+                         This retains the original baseline and iteration budget. Then update the implementation and executor report before auditing."
+                    )),
+                });
+            }
             return Some(NextAction {
                 description: format!("Task {} — HELD: {}", task.folder, blocking),
                 command: None,
@@ -3972,12 +3983,21 @@ impl WorkflowStatus {
                     .as_ref()
                     .and_then(|s| s.blocking_reason.as_deref())
                     .unwrap_or("reason unknown");
-                format!(
+                if task.state.as_ref().and_then(|s| s.next_step.as_deref()) == Some("run_preflight") {
+                    format!(
+                        "Review the revised Mastermind contract at {spec}.\n\nBlocking reason: {blocking}\n\n\
+                         Once the scope and acceptance criteria are approved, run `mastermind run-task {spec} --pre-only`. \
+                         This retains the original baseline and iteration budget. Then update the implementation and executor report before auditing.",
+                        spec = task.spec_path.display()
+                    )
+                } else {
+                    format!(
                     "This Mastermind task is held:\n{spec}\n\n\
                      Blocking reason: {blocking}\n\n\
                      Review the spec and state.json. Decide: modify the spec to unblock, close the task, or escalate.",
                     spec = task.spec_path.display()
-                )
+                    )
+                }
             }
             TaskPhase::Ready => format!(
                 "Run the Mastermind pre-flight gate for:\n{spec}\n\n  mastermind run-task {spec}",
@@ -5497,6 +5517,31 @@ mod tests {
         assert!(status
             .render_resume_text(None)
             .contains("Resume: 002-audit"));
+    }
+
+    #[test]
+    fn next_and_resume_route_revoked_approval_to_explicit_preflight() {
+        let root = tempfile::tempdir().unwrap();
+        let task = root.path().join(".mastermind/tasks/001-revised");
+        fs::create_dir_all(&task).unwrap();
+        let spec = task.join("spec.md");
+        fs::write(&spec, "# Revised\n").unwrap();
+        fs::write(task.join("executor-report.md"), "old report\n").unwrap();
+        fs::write(
+            task.join("state.json"),
+            r#"{
+            "status":"held", "next_step":"run_preflight",
+            "blocking_reason":"spec changed since approval"
+        }"#,
+        )
+        .unwrap();
+        let status = WorkflowStatus::scan(root.path());
+        assert_eq!(status.tasks[0].phase, TaskPhase::Held);
+        let action = status.next_action().unwrap();
+        let command = format!("mastermind run-task {} --pre-only", spec.display());
+        assert_eq!(action.command.as_deref(), Some(command.as_str()));
+        assert!(status.render_resume_text(None).contains(&command));
+        assert!(action.claude_prompt.unwrap().contains("original baseline"));
     }
 
     #[test]

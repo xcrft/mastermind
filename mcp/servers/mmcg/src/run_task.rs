@@ -24,7 +24,7 @@ use crate::store::Store;
 use crate::verify_spec;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -34,6 +34,7 @@ const STRICT_EVIDENCE_TOTAL_BYTE_LIMIT: u64 = 32 * 1024 * 1024;
 const STRICT_EVIDENCE_GIT_BYTE_LIMIT: usize = 2 * 1024 * 1024;
 const HISTORY_REVIEW_BYTE_LIMIT: u64 = 1024 * 1024;
 const RUN_STATE_BYTE_LIMIT: u64 = 1024 * 1024;
+pub(crate) const STRICT_SNAPSHOT_VERSION: u32 = 2;
 
 /// Controller-owned handshake between pre- and post-flight. Canonical task
 /// specs keep it beside the spec as `<task>/state.json`; legacy flat specs use
@@ -64,6 +65,9 @@ pub struct RunState {
     /// architecture-policy evidence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held_snapshot_sha256: Option<String>,
+    /// Missing in legacy records, which retain their original v1 digest rules.
+    #[serde(default = "legacy_snapshot_version")]
+    pub held_snapshot_version: u32,
     /// The audited inputs and outputs this iteration's semantic review covers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_snapshot_sha256: Option<String>,
@@ -86,6 +90,10 @@ pub struct RunState {
 
 fn default_run_status() -> String {
     "approved".into()
+}
+
+fn legacy_snapshot_version() -> u32 {
+    1
 }
 
 /// End-to-end result. Mapped to exit codes by `main.rs`: every `*Failed` /
@@ -771,6 +779,23 @@ pub(crate) fn strict_workflow_snapshot(
     baseline_ref: &str,
     touch_files: &[String],
 ) -> Result<String, String> {
+    strict_workflow_snapshot_for_version(
+        repo_root,
+        baseline_ref,
+        touch_files,
+        STRICT_SNAPSHOT_VERSION,
+    )
+}
+
+pub(crate) fn strict_workflow_snapshot_for_version(
+    repo_root: &Path,
+    baseline_ref: &str,
+    touch_files: &[String],
+    version: u32,
+) -> Result<String, String> {
+    if !matches!(version, 1 | STRICT_SNAPSHOT_VERSION) {
+        return Err(format!("unsupported strict-workflow snapshot version {version}; re-audit with a supported runtime"));
+    }
     if !matches!(baseline_ref.len(), 40 | 64)
         || !baseline_ref.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
@@ -797,48 +822,67 @@ pub(crate) fn strict_workflow_snapshot(
 
     let root = RootCapability::open(repo_root)
         .map_err(|error| format!("strict-workflow repository root is unavailable: {error}"))?;
+    let first = strict_snapshot_digest(&root, baseline_ref, &paths, version)?;
+    if strict_snapshot_digest(&root, baseline_ref, &paths, version)? != first {
+        return Err("strict-workflow files or Git modes changed during the snapshot".into());
+    }
+    Ok(first)
+}
+
+fn strict_snapshot_digest(
+    root: &RootCapability,
+    baseline_ref: &str,
+    paths: &BTreeSet<String>,
+    version: u32,
+) -> Result<String, String> {
     let mut digest = Sha256::new();
-    digest.update(b"mastermind-strict-workflow-snapshot-v1\0");
+    digest.update(format!("mastermind-strict-workflow-snapshot-v{version}\0").as_bytes());
     digest.update(baseline_ref.as_bytes());
     digest.update([0]);
-    let mut git_args = vec![
-        "--literal-pathspecs",
-        "-c",
-        "core.fsmonitor=false",
-        "-c",
-        "diff.external=",
-        "diff",
-        "--raw",
-        "--no-abbrev",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--no-renames",
-        baseline_ref,
-        "--",
-    ];
-    git_args.extend(paths.iter().map(String::as_str));
-    let raw = crate::diff::run_bounded_git_with_limit(
-        root.canonical_root(),
-        &git_args,
-        None,
-        STRICT_EVIDENCE_GIT_BYTE_LIMIT,
-    )
-    .map_err(|error| format!("strict-workflow git snapshot failed: {}", error.code()))?;
-    if !raw.success {
-        return Err("strict-workflow baseline is unavailable".into());
-    }
-    digest.update(b"git-raw\0");
-    digest.update(raw.stdout);
-    digest.update([0]);
+    let git_modes = if version == 1 {
+        let mut git_args = vec![
+            "--literal-pathspecs",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "diff.external=",
+            "diff",
+            "--raw",
+            "--no-abbrev",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            baseline_ref,
+            "--",
+        ];
+        git_args.extend(paths.iter().map(String::as_str));
+        digest.update(b"git-raw\0");
+        digest.update(strict_snapshot_git(root, &git_args)?);
+        digest.update([0]);
+        None
+    } else {
+        let commit = strict_snapshot_git(
+            root,
+            &[
+                "rev-parse",
+                "--verify",
+                &format!("{baseline_ref}^{{commit}}"),
+            ],
+        )?;
+        if String::from_utf8_lossy(&commit).trim() != baseline_ref {
+            return Err("strict-workflow baseline must identify an available commit".into());
+        }
+        Some(strict_snapshot_modes(root, paths)?)
+    };
     let mut total_bytes = 0u64;
 
-    for relative in &paths {
+    for relative in paths {
         digest.update(relative.as_bytes());
         digest.update([0]);
         let limit = (crate::audit_bundle::BUNDLE_INPUT_MAX as u64)
             .min(STRICT_EVIDENCE_TOTAL_BYTE_LIMIT - total_bytes);
         let file = match bounded_fs::read_regular_file_with_capability(
-            &root,
+            root,
             Path::new(relative),
             limit,
             limit,
@@ -855,11 +899,119 @@ pub(crate) fn strict_workflow_snapshot(
         };
         total_bytes += file.declared_len;
         digest.update(b"file\0");
+        if let Some((trust_filemode, modes)) = &git_modes {
+            if modes
+                .get(relative)
+                .is_some_and(|mode| !matches!(mode.as_str(), "100644" | "100755"))
+            {
+                return Err(format!(
+                    "strict-workflow touch `{relative}` has an unsupported Git file type"
+                ));
+            }
+            let mode = if *trust_filemode {
+                #[cfg(unix)]
+                {
+                    if file.identity.attributes() & 0o100 != 0 {
+                        "100755"
+                    } else {
+                        "100644"
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    return Err("strict-workflow cannot observe executable bits on this platform with core.filemode=true".into());
+                }
+            } else {
+                modes.get(relative).map(String::as_str).unwrap_or("100644")
+            };
+            digest.update(mode.as_bytes());
+            digest.update([0]);
+        }
         digest.update(file.declared_len.to_le_bytes());
         digest.update(file.bytes);
         digest.update([0]);
     }
     Ok(crate::hex::encode(&digest.finalize()))
+}
+
+fn strict_snapshot_git(root: &RootCapability, args: &[&str]) -> Result<Vec<u8>, String> {
+    let output = crate::diff::run_bounded_git_with_limit(
+        root.canonical_root(),
+        args,
+        None,
+        STRICT_EVIDENCE_GIT_BYTE_LIMIT,
+    )
+    .map_err(|error| format!("strict-workflow Git evidence failed: {}", error.code()))?;
+    if !output.success {
+        return Err("strict-workflow Git evidence is unavailable".into());
+    }
+    Ok(output.stdout)
+}
+
+fn strict_snapshot_modes(
+    root: &RootCapability,
+    paths: &BTreeSet<String>,
+) -> Result<(bool, BTreeMap<String, String>), String> {
+    let config = strict_snapshot_git(
+        root,
+        &[
+            "config",
+            "--type=bool",
+            "--default=true",
+            "--get",
+            "core.filemode",
+        ],
+    )?;
+    let trust_filemode = match String::from_utf8_lossy(&config).trim() {
+        "true" => true,
+        "false" => false,
+        _ => return Err("strict-workflow core.filemode is invalid".into()),
+    };
+    let mut args = vec![
+        "--literal-pathspecs",
+        "-c",
+        "core.fsmonitor=false",
+        "ls-files",
+        "--stage",
+        "-z",
+        "--",
+    ];
+    args.extend(paths.iter().map(String::as_str));
+    let output = strict_snapshot_git(root, &args)?;
+    let mut modes = BTreeMap::new();
+    for record in output
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let record =
+            std::str::from_utf8(record).map_err(|_| "strict-workflow index path is not UTF-8")?;
+        let (header, path) = record
+            .split_once('\t')
+            .ok_or("invalid strict-workflow index entry")?;
+        if !paths.contains(path) {
+            return Err("strict-workflow touch paths must identify individual files".into());
+        }
+        let fields = header.split_ascii_whitespace().collect::<Vec<_>>();
+        if fields.len() != 3 || fields[2] != "0" {
+            return Err(format!(
+                "strict-workflow index has unresolved stages for `{path}`"
+            ));
+        }
+        let mode = match fields[0] {
+            mode @ ("100644" | "100755" | "120000" | "160000") => mode,
+            _ => {
+                return Err(format!(
+                    "strict-workflow index mode is unsupported for `{path}`"
+                ))
+            }
+        };
+        if modes.insert(path.to_string(), mode.to_string()).is_some() {
+            return Err(format!(
+                "strict-workflow index has duplicate entries for `{path}`"
+            ));
+        }
+    }
+    Ok((trust_filemode, modes))
 }
 
 fn timestamp_now() -> u64 {
@@ -1458,6 +1610,7 @@ fn run_pre(
         spec_hash: hash_text(&spec_body),
         baseline_ref: head.clone(),
         held_snapshot_sha256: None,
+        held_snapshot_version: STRICT_SNAPSHOT_VERSION,
         history_snapshot_sha256: None,
         started_at: timestamp_now(),
         iteration,
@@ -1779,6 +1932,7 @@ fn run_post(
         complete.blocking_reason = None;
         complete.last_artifact = Some("history-review.md".into());
         complete.held_snapshot_sha256 = held_snapshot_sha256;
+        complete.held_snapshot_version = STRICT_SNAPSHOT_VERSION;
         complete.history_snapshot_sha256 = Some(history_snapshot);
         if let Err(error) = save_state(state_path, &complete) {
             eprintln!(
@@ -2061,6 +2215,7 @@ verifications: []\n\
             spec_hash: "deadbeefcafef00d".into(),
             baseline_ref: "abc1234".into(),
             held_snapshot_sha256: Some("feedface".into()),
+            held_snapshot_version: STRICT_SNAPSHOT_VERSION,
             history_snapshot_sha256: Some("reviewed-snapshot".into()),
             started_at: 123456,
             iteration: 0,
@@ -2073,6 +2228,18 @@ verifications: []\n\
         assert_eq!(loaded.spec_hash, state.spec_hash);
         assert_eq!(loaded.baseline_ref, state.baseline_ref);
         assert_eq!(loaded.held_snapshot_sha256, state.held_snapshot_sha256);
+        assert_eq!(loaded.held_snapshot_version, STRICT_SNAPSHOT_VERSION);
+        let mut legacy = serde_json::to_value(&state).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("held_snapshot_version");
+        assert_eq!(
+            serde_json::from_value::<RunState>(legacy)
+                .unwrap()
+                .held_snapshot_version,
+            1
+        );
         assert_eq!(
             loaded.history_snapshot_sha256,
             state.history_snapshot_sha256
@@ -2424,6 +2591,195 @@ verifications: []\n\
     }
 
     #[test]
+    fn strict_snapshot_v2_survives_staging_commit_and_detached_checkout() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        git(root.path(), &["config", "core.autocrlf", "false"]);
+        for (name, body) in [
+            ("source.txt", "before\n"),
+            ("gone.txt", "delete\n"),
+            ("old.txt", "rename\n"),
+        ] {
+            fs::write(root.path().join(name), body).unwrap();
+        }
+        git(root.path(), &["add", "-A"]);
+        git(root.path(), &["commit", "-qm", "baseline"]);
+        let baseline = git_head(root.path()).unwrap();
+        fs::write(root.path().join("source.txt"), "after\n").unwrap();
+        fs::remove_file(root.path().join("gone.txt")).unwrap();
+        fs::rename(root.path().join("old.txt"), root.path().join("renamed.txt")).unwrap();
+        fs::write(root.path().join("empty.txt"), "").unwrap();
+        let paths = [
+            "source.txt",
+            "gone.txt",
+            "old.txt",
+            "renamed.txt",
+            "empty.txt",
+        ]
+        .map(String::from)
+        .to_vec();
+        let approved = strict_workflow_snapshot(root.path(), &baseline, &paths).unwrap();
+        let legacy =
+            strict_workflow_snapshot_for_version(root.path(), &baseline, &paths, 1).unwrap();
+        git(root.path(), &["add", "-A"]);
+        assert_eq!(
+            strict_workflow_snapshot(root.path(), &baseline, &paths).unwrap(),
+            approved
+        );
+        assert_ne!(
+            strict_workflow_snapshot_for_version(root.path(), &baseline, &paths, 1).unwrap(),
+            legacy
+        );
+        git(root.path(), &["commit", "-qm", "implementation"]);
+        assert_eq!(
+            strict_workflow_snapshot(root.path(), &baseline, &paths).unwrap(),
+            approved
+        );
+
+        let checkout_parent = tempfile::tempdir().unwrap();
+        let checkout = checkout_parent.path().join("ci");
+        git(
+            root.path(),
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                checkout.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        assert_eq!(
+            strict_workflow_snapshot(&checkout, &baseline, &paths).unwrap(),
+            approved
+        );
+        fs::write(checkout.join("source.txt"), "after\r\n").unwrap();
+        assert_ne!(
+            strict_workflow_snapshot(&checkout, &baseline, &paths).unwrap(),
+            approved
+        );
+        fs::write(checkout.join("source.txt"), "after\n").unwrap();
+        fs::write(checkout.join("gone.txt"), "").unwrap();
+        assert_ne!(
+            strict_workflow_snapshot(&checkout, &baseline, &paths).unwrap(),
+            approved
+        );
+        fs::remove_file(checkout.join("gone.txt")).unwrap();
+        assert_ne!(
+            strict_workflow_snapshot(&checkout, &baseline, &paths[..4]).unwrap(),
+            approved
+        );
+        assert!(strict_workflow_snapshot_for_version(&checkout, &baseline, &paths, 999).is_err());
+        assert!(strict_workflow_snapshot(&checkout, &"0".repeat(40), &paths).is_err());
+    }
+
+    #[test]
+    fn strict_snapshot_v2_uses_index_modes_when_filemode_is_disabled() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        git(root.path(), &["config", "core.filemode", "false"]);
+        git(root.path(), &["add", "-A"]);
+        git(root.path(), &["commit", "-qm", "baseline"]);
+        let baseline = git_head(root.path()).unwrap();
+        fs::write(root.path().join("run.sh"), "echo test").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                root.path().join("run.sh"),
+                fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+        let paths = vec!["run.sh".into()];
+        let approved = strict_workflow_snapshot(root.path(), &baseline, &paths).unwrap();
+        git(root.path(), &["add", "run.sh"]);
+        assert_eq!(
+            strict_workflow_snapshot(root.path(), &baseline, &paths).unwrap(),
+            approved
+        );
+        git(root.path(), &["update-index", "--chmod=+x", "run.sh"]);
+        let executable = strict_workflow_snapshot(root.path(), &baseline, &paths).unwrap();
+        assert_ne!(executable, approved);
+        git(root.path(), &["commit", "-qm", "executable"]);
+        assert_eq!(
+            strict_workflow_snapshot(root.path(), &baseline, &paths).unwrap(),
+            executable
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn strict_snapshot_v2_tracks_owner_execute_bit_and_literal_paths() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        git(root.path(), &["config", "core.filemode", "true"]);
+        git(root.path(), &["add", "-A"]);
+        git(root.path(), &["commit", "-qm", "baseline"]);
+        let baseline = git_head(root.path()).unwrap();
+        let name = ":(glob)run*.sh";
+        let source = root.path().join(name);
+        fs::write(&source, "echo test").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o644)).unwrap();
+        let paths = vec![name.into()];
+        let plain = strict_workflow_snapshot(root.path(), &baseline, &paths).unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o654)).unwrap();
+        assert_eq!(
+            strict_workflow_snapshot(root.path(), &baseline, &paths).unwrap(),
+            plain
+        );
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o744)).unwrap();
+        let executable = strict_workflow_snapshot(root.path(), &baseline, &paths).unwrap();
+        assert_ne!(executable, plain);
+        git(root.path(), &["--literal-pathspecs", "add", "--", name]);
+        assert_eq!(
+            strict_workflow_snapshot(root.path(), &baseline, &paths).unwrap(),
+            executable
+        );
+    }
+
+    #[test]
+    fn strict_snapshot_v2_rejects_indexed_symlinks_materialized_as_regular_files() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        git(root.path(), &["config", "core.filemode", "false"]);
+        git(root.path(), &["config", "core.symlinks", "false"]);
+        fs::write(root.path().join("link.txt"), "target.txt").unwrap();
+        git(root.path(), &["add", "-A"]);
+        git(root.path(), &["commit", "-qm", "baseline"]);
+        let baseline = git_head(root.path()).unwrap();
+        let paths = vec!["link.txt".into()];
+        assert!(strict_workflow_snapshot(root.path(), &baseline, &paths).is_ok());
+        let blob = Command::new("git")
+            .current_dir(root.path())
+            .args(["rev-parse", "HEAD:link.txt"])
+            .output()
+            .unwrap();
+        assert!(blob.status.success());
+        let blob = String::from_utf8(blob.stdout).unwrap();
+        git(
+            root.path(),
+            &[
+                "update-index",
+                "--cacheinfo",
+                &format!("120000,{},link.txt", blob.trim()),
+            ],
+        );
+        assert_eq!(
+            fs::read(root.path().join("link.txt")).unwrap(),
+            b"target.txt"
+        );
+        assert!(strict_workflow_snapshot(root.path(), &baseline, &paths)
+            .unwrap_err()
+            .contains("Git file type"));
+        fs::remove_file(root.path().join("link.txt")).unwrap();
+        assert!(
+            strict_workflow_snapshot(root.path(), &baseline, &paths).is_ok(),
+            "deleting an indexed link needs no file read"
+        );
+    }
+
+    #[test]
     fn strict_snapshot_retains_v1_framing_for_files_and_deletions() {
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
@@ -2471,7 +2827,7 @@ verifications: []\n\
         legacy.update(5u64.to_le_bytes());
         legacy.update(b"after\0");
         assert_eq!(
-            strict_workflow_snapshot(root.path(), &baseline, &paths).unwrap(),
+            strict_workflow_snapshot_for_version(root.path(), &baseline, &paths, 1).unwrap(),
             crate::hex::encode(&legacy.finalize())
         );
     }

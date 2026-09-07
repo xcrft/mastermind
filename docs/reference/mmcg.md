@@ -920,10 +920,29 @@ Evaluation is diff-first:
   held state carries a SHA-256 snapshot of every declared touch, so editing a
   critical file after the audit invalidates the evidence.
 
+New held states use `held_snapshot_version: 2`. The digest binds the exact
+baseline commit, normalized touch paths, file bytes, missing files and effective
+Git executable modes. Staging or committing the same files preserves it, including
+in a separate CI checkout with the same bytes and modes. Line-ending conversion
+or clean/smudge filters that change those bytes require another audit. With
+`core.filemode=false`, the index supplies executable modes; untracked files start
+as `100644`, matching Git. Present symlinks, Git symlink placeholders and submodules
+are not supported as regular-file evidence.
+
+States without a version retain the original v1 digest rules, including their
+sensitivity to staging. Re-run post-flight on the intended final files to issue
+a v2 snapshot; an existing semantic review may need renewal. Unsupported versions
+fail closed. A failed v2 comparison never falls back to v1.
+
 The default workflow evidence directory is `.mastermind/tasks`; CI must restore
 the canonical task artifacts or point `--workflow-evidence PATH` at the
-downloaded evidence directory. CODEOWNERS is discovered in GitHub priority
-order, or overridden with `--codeowners PATH`.
+downloaded evidence directory. An absolute directory outside the checkout is
+supported. Its layout is `<directory>/<task-id>/{spec.md,state.json,audit.md}`;
+Action `*.bundle.json` files are a different format. Reads use one directory
+capability, reject symlink components below it and recheck the complete read set
+after repository/index validation. Unreadable artifacts make evaluation incomplete
+even when another task supplies coverage. CODEOWNERS is discovered in GitHub
+priority order, or overridden with `--codeowners PATH`.
 
 Policy topology stays on the fast default syntactic graph in v1. Imported SCIP
 and runtime overlays retain their provenance for Lens but do not add or remove
@@ -934,7 +953,8 @@ execution.
 Impact defaults are depth 3 and top 500 for policy checks. Override them with
 `--depth 1..5` and `--top 1..500`. Import/cycle work is capped at 50,000 file
 edges; baseline cycle comparison is capped at 500 files and 32 MiB; workflow
-evidence is capped at 1,000 tasks and 1 MiB per artifact. A strict snapshot can
+evidence is capped at 1,000 directory entries, 1 MiB per artifact and 32 MiB total
+per read pass (including specs for unrelated tasks). A strict snapshot can
 bind at most 1,000 touch files, 16 MiB each and 32 MiB total. Reports stop at
 1,000 total results (reserving one result for the fail-closed diagnostic) and
 become incomplete rather than allocating unbounded SARIF. Any relevant cap, stale index, concurrent snapshot

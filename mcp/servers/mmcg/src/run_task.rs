@@ -10,13 +10,14 @@
 //! 4. `audit_spec` — post-flight drift: scope creep, snapshot drift, silent
 //!    removals, missing planned tests.
 //! 5. **Release notes draft** — H1 + Goals + Tests Plan + `git diff --stat` of
-//!    baseline-to-HEAD. To stdout AND `.mastermind/releases/<basename>.md` on Held.
+//!    baseline-to-worktree. To stdout AND `.mastermind/releases/<basename>.md` on Held.
 //!
 //! State persists beside a canonical task spec as `<task>/state.json`, so every
 //! task has one controller-owned lifecycle record. Legacy flat specs keep using
 //! `.mastermind/run-state/<basename>.json` to avoid a shared `tasks/state.json`.
 
 use crate::audit_spec;
+use crate::bounded_fs::{self, BoundedReadError, ReadControl, RootCapability};
 use crate::indexer::{validate_index_root, Indexer};
 use crate::spec::{self, ParsedSpec};
 use crate::store::Store;
@@ -32,6 +33,7 @@ use std::process::Command;
 const STRICT_EVIDENCE_FILE_LIMIT: usize = 1_000;
 const STRICT_EVIDENCE_TOTAL_BYTE_LIMIT: u64 = 32 * 1024 * 1024;
 const STRICT_EVIDENCE_GIT_BYTE_LIMIT: usize = 2 * 1024 * 1024;
+const HISTORY_REVIEW_BYTE_LIMIT: u64 = 1024 * 1024;
 
 /// Controller-owned handshake between pre- and post-flight. Canonical task
 /// specs keep it beside the spec as `<task>/state.json`; legacy flat specs use
@@ -61,6 +63,9 @@ pub struct RunState {
     /// architecture-policy evidence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held_snapshot_sha256: Option<String>,
+    /// The audited inputs and outputs this iteration's semantic review covers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_snapshot_sha256: Option<String>,
     /// Unix epoch seconds at pre-flight.
     pub started_at: u64,
     /// Iteration count — +1 on every pre-flight entry; first fresh run is `1`.
@@ -230,19 +235,58 @@ fn ensure_history_review(
     repo_root: &Path,
     spec_path: &Path,
     release_path: &Path,
+    snapshot: &str,
 ) -> std::io::Result<bool> {
     let path = history_review_file_path(repo_root, spec_path);
-    if std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "refusing to write history review through a symlink",
-        ));
-    }
-    if path.exists() {
-        return Ok(false);
-    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
+    }
+    let root = RootCapability::open(repo_root).map_err(std::io::Error::other)?;
+    match bounded_fs::read_regular_file_with_capability(
+        &root,
+        &path,
+        HISTORY_REVIEW_BYTE_LIMIT,
+        HISTORY_REVIEW_BYTE_LIMIT,
+        ReadControl::default(),
+    ) {
+        Ok(previous) => {
+            let same_snapshot = std::str::from_utf8(&previous.bytes)
+                .ok()
+                .and_then(history_review_fields)
+                .is_some_and(|fields| fields.get("Audit snapshot").copied() == Some(snapshot));
+            if same_snapshot {
+                return Ok(false);
+            }
+            // Keep the exact previous review for provenance before replacing
+            // its dispositions with a review of the new audited inputs.
+            let archive = path.with_file_name(format!(
+                "{}.{}.md",
+                path.file_stem().unwrap_or_default().to_string_lossy(),
+                crate::hex::encode(&Sha256::digest(&previous.bytes)),
+            ));
+            match bounded_fs::read_regular_file_with_capability(
+                &root,
+                &archive,
+                HISTORY_REVIEW_BYTE_LIMIT,
+                HISTORY_REVIEW_BYTE_LIMIT,
+                ReadControl::default(),
+            ) {
+                Ok(existing) if existing.bytes == previous.bytes => {}
+                Err(BoundedReadError::Io(error))
+                    if error.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    crate::audit_bundle::write_atomic(&archive, &previous.bytes, false)
+                        .map_err(std::io::Error::other)?;
+                }
+                _ => {
+                    return Err(std::io::Error::other(
+                        "history review archive is unavailable",
+                    ))
+                }
+            }
+        }
+        Err(BoundedReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(std::io::Error::other(error)),
     }
     let spec = display_relative(repo_root, spec_path);
     let release = display_relative(repo_root, release_path);
@@ -255,13 +299,15 @@ fn ensure_history_review(
         "# History review — {}\n\n\
 Complete this after semantic review. Replace each `pending` with `updated` or\n\
 `not applicable`; do not create ceremonial CONTEXT or lesson entries.\n\n\
+- **Audit snapshot:** {snapshot}\n\
 - **Context:** pending\n\
 - **Lesson:** pending\n\
 - **Reason:** semantic review required\n\
 - **Evidence:** `{spec}`; `{audit}`; `{release}`\n",
         spec_basename(spec_path),
     );
-    std::fs::write(path, body)?;
+    crate::audit_bundle::write_atomic(&path, body.as_bytes(), false)
+        .map_err(std::io::Error::other)?;
     Ok(true)
 }
 
@@ -270,15 +316,19 @@ Complete this after semantic review. Replace each `pending` with `updated` or\n\
 /// authoritative; lifecycle commands derive completion from it instead of
 /// treating post-flight success as semantic review.
 pub fn history_review_complete(review_path: &Path) -> bool {
-    let Ok(body) = std::fs::read_to_string(review_path) else {
+    history_review_complete_for_snapshot(review_path, None)
+}
+
+/// Legacy reviews have no binding. Newly audited reviews must retain the
+/// controller's snapshot marker as well as explicit semantic dispositions.
+pub fn history_review_complete_for_snapshot(review_path: &Path, snapshot: Option<&str>) -> bool {
+    let Ok(body) = read_history_review(review_path) else {
         return false;
     };
-    let field = |name: &str| {
-        let prefix = format!("- **{name}:**");
-        body.lines()
-            .find_map(|line| line.trim().strip_prefix(&prefix))
-            .map(str::trim)
+    let Some(fields) = history_review_fields(&body) else {
+        return false;
     };
+    let field = |name: &str| fields.get(name).copied();
     let disposition_complete = |value: Option<&str>| {
         value.is_some_and(|value| {
             matches!(
@@ -293,6 +343,244 @@ pub fn history_review_complete(review_path: &Path) -> bool {
     disposition_complete(field("Context"))
         && disposition_complete(field("Lesson"))
         && reason_reviewed
+        && snapshot.is_none_or(|expected| field("Audit snapshot") == Some(expected))
+}
+
+fn read_history_review(path: &Path) -> Result<String, String> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let file = path.file_name().ok_or("history review has no file name")?;
+    let read = bounded_fs::read_regular_file(
+        parent,
+        Path::new(file),
+        HISTORY_REVIEW_BYTE_LIMIT,
+        HISTORY_REVIEW_BYTE_LIMIT,
+        ReadControl::default(),
+    )
+    .map_err(|error| error.to_string())?;
+    String::from_utf8(read.bytes).map_err(|_| "history review is not UTF-8".into())
+}
+
+fn history_review_fields(body: &str) -> Option<std::collections::BTreeMap<&'static str, &str>> {
+    let mut fields = std::collections::BTreeMap::new();
+    for line in crate::context_doctor::prose_lines(body) {
+        for name in ["Context", "Lesson", "Reason", "Audit snapshot"] {
+            if let Some(value) = line.text.strip_prefix(&format!("- **{name}:**")) {
+                if fields.insert(name, value.trim()).is_some() {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(fields)
+}
+
+struct HistoryInputs {
+    snapshot: String,
+    spec_body: String,
+    executor_body: String,
+}
+
+fn history_input_snapshot(
+    repo_root: &Path,
+    spec_path: &Path,
+    state: &RunState,
+) -> Result<HistoryInputs, String> {
+    if !matches!(state.baseline_ref.len(), 40 | 64)
+        || !state
+            .baseline_ref
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("history review requires an exact baseline object ID".into());
+    }
+    let root = RootCapability::open(repo_root).map_err(|error| error.to_string())?;
+    let mut digest = Sha256::new();
+    digest.update(b"mastermind-history-inputs-v1\0");
+    digest.update(state.baseline_ref.as_bytes());
+    digest.update(state.iteration.to_le_bytes());
+    digest.update(state.started_at.to_le_bytes());
+    let mut bytes_left = STRICT_EVIDENCE_TOTAL_BYTE_LIMIT;
+    let spec = display_relative(repo_root, spec_path);
+    let report = display_relative(repo_root, &spec_path.with_file_name("executor-report.md"));
+    let mut read_input = |path: &str| -> Result<String, String> {
+        let file = hash_history_file(&root, path, true, &mut digest, &mut bytes_left)?
+            .ok_or_else(|| format!("history input `{path}` is missing"))?;
+        String::from_utf8(file.bytes).map_err(|_| format!("history input `{path}` is not UTF-8"))
+    };
+    let spec_body = read_input(&spec)?;
+    let executor_body = read_input(&report)?;
+    if executor_body.len() as u64 > HISTORY_REVIEW_BYTE_LIMIT {
+        return Err("executor report exceeds the 1 MiB limit".into());
+    }
+    let parsed = spec::parse_str(&spec, &spec_body);
+    let mut paths = BTreeSet::new();
+    let declared = match parsed.frontmatter.as_ref() {
+        Some(fm) if fm.has_file_scope() => fm
+            .touches
+            .iter()
+            .map(|touch| touch.file.clone())
+            .chain(fm.expected_docs.iter().cloned())
+            .collect::<Vec<_>>(),
+        _ => parsed.mentioned_files.clone(),
+    };
+    for file in declared {
+        paths.insert(
+            crate::audit_bundle::normalize_relative_path(Path::new(&file))
+                .map_err(|_| format!("invalid history snapshot path `{file}`"))?,
+        );
+    }
+    // Match the audit's working-tree scope, including files the executor did
+    // not declare. Semantic history outputs are allowed to change after audit.
+    for args in [
+        vec![
+            "--literal-pathspecs",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "diff.external=",
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            &state.baseline_ref,
+            "--",
+        ],
+        vec![
+            "--literal-pathspecs",
+            "-c",
+            "core.fsmonitor=false",
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
+    ] {
+        let output = crate::diff::run_bounded_git_with_limit(
+            repo_root,
+            &args,
+            None,
+            STRICT_EVIDENCE_GIT_BYTE_LIMIT,
+        )
+        .map_err(|error| format!("history snapshot Git inventory: {}", error.code()))?;
+        if !output.success {
+            return Err("history snapshot Git inventory failed".into());
+        }
+        for raw in output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|raw| !raw.is_empty())
+        {
+            let file = std::str::from_utf8(raw)
+                .map_err(|_| "history snapshot contains a non-UTF-8 path")?;
+            let file = crate::audit_bundle::normalize_relative_path(Path::new(file))
+                .map_err(|_| "history snapshot contains an invalid path")?;
+            let semantic_output = file == "CONTEXT.md"
+                || (!file.contains('/')
+                    && file.starts_with("CONTEXT-archive-")
+                    && file.ends_with(".md"));
+            if !file.starts_with(".mastermind/") && (!semantic_output || paths.contains(&file)) {
+                paths.insert(file);
+            }
+        }
+    }
+    // Artifacts outside .mastermind (legacy flat specs) are bound separately.
+    for artifact in [
+        spec,
+        report,
+        display_relative(repo_root, &spec_path.with_file_name("audit.md")),
+        display_relative(repo_root, &release_file_path(repo_root, spec_path)),
+        display_relative(repo_root, &history_review_file_path(repo_root, spec_path)),
+        display_relative(repo_root, &state_file_path(repo_root, spec_path)),
+    ] {
+        paths.remove(&artifact);
+    }
+    if paths.len() > STRICT_EVIDENCE_FILE_LIMIT {
+        return Err("history snapshot exceeds the 1000-file limit".into());
+    }
+    for file in paths {
+        let _ = hash_history_file(&root, &file, false, &mut digest, &mut bytes_left)?;
+    }
+    Ok(HistoryInputs {
+        snapshot: crate::hex::encode(&digest.finalize()),
+        spec_body,
+        executor_body,
+    })
+}
+
+fn hash_history_file(
+    root: &RootCapability,
+    path: &str,
+    required: bool,
+    digest: &mut Sha256,
+    bytes_left: &mut u64,
+) -> Result<Option<bounded_fs::BoundedFile>, String> {
+    digest.update(path.as_bytes());
+    digest.update([0]);
+    let limit = (*bytes_left).min(crate::audit_bundle::BUNDLE_INPUT_MAX as u64);
+    let file = match bounded_fs::read_regular_file_with_capability(
+        root,
+        Path::new(path),
+        limit,
+        limit,
+        ReadControl::default(),
+    ) {
+        Ok(file) => {
+            *bytes_left -= file.declared_len;
+            digest.update(b"file\0");
+            digest.update(file.identity.attributes().to_le_bytes());
+            digest.update(file.declared_len.to_le_bytes());
+            digest.update(&file.bytes);
+            Some(file)
+        }
+        Err(BoundedReadError::Io(error))
+            if !required && error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            digest.update(b"missing\0");
+            None
+        }
+        Err(error) => return Err(format!("history snapshot `{path}`: {error}")),
+    };
+    digest.update([0]);
+    Ok(file)
+}
+
+fn history_audit_snapshot(
+    repo_root: &Path,
+    spec_path: &Path,
+    inputs: &str,
+) -> Result<String, String> {
+    let root = RootCapability::open(repo_root).map_err(|error| error.to_string())?;
+    let mut digest = Sha256::new();
+    digest.update(b"mastermind-history-audit-v1\0");
+    digest.update(inputs.as_bytes());
+    let mut bytes_left = STRICT_EVIDENCE_TOTAL_BYTE_LIMIT;
+    for path in [
+        spec_path.with_file_name("audit.md"),
+        release_file_path(repo_root, spec_path),
+    ] {
+        let _ = hash_history_file(
+            &root,
+            &display_relative(repo_root, &path),
+            true,
+            &mut digest,
+            &mut bytes_left,
+        )?;
+    }
+    Ok(crate::hex::encode(&digest.finalize()))
+}
+
+fn current_history_snapshot(
+    repo_root: &Path,
+    spec_path: &Path,
+    state: &RunState,
+) -> Result<String, String> {
+    let inputs = history_input_snapshot(repo_root, spec_path, state)?;
+    history_audit_snapshot(repo_root, spec_path, &inputs.snapshot)
 }
 
 fn refresh_durable_history(store: &mut Store, repo_root: &Path) -> Result<u32, String> {
@@ -516,7 +804,7 @@ fn timestamp_now() -> u64 {
 }
 
 fn git_head(repo_root: &Path) -> Result<String, String> {
-    let out = Command::new("git")
+    let out = crate::diff::repository_git_command()
         .args(["rev-parse", "HEAD"])
         .current_dir(repo_root)
         .output()
@@ -531,18 +819,60 @@ fn git_head(repo_root: &Path) -> Result<String, String> {
 }
 
 fn git_diff_stat(repo_root: &Path, baseline_ref: &str) -> Result<String, String> {
-    let out = Command::new("git")
-        .args(["diff", "--stat", &format!("{baseline_ref}..HEAD")])
-        .current_dir(repo_root)
-        .output()
-        .map_err(|e| format!("git diff --stat: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "git diff --stat: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+    let run = |args: &[&str]| {
+        let output = crate::diff::run_bounded_git_with_limit(
+            repo_root,
+            args,
+            None,
+            STRICT_EVIDENCE_GIT_BYTE_LIMIT,
+        )
+        .map_err(|error| format!("release diff: {}", error.code()))?;
+        if !output.success {
+            return Err("release diff: Git command failed".to_string());
+        }
+        Ok(output.stdout)
+    };
+    let stat = run(&[
+        "-c",
+        "core.fsmonitor=false",
+        "diff",
+        "--stat",
+        "--no-ext-diff",
+        "--no-textconv",
+        baseline_ref,
+        "--",
+        ".",
+        ":(exclude).mastermind",
+    ])?;
+    let mut body = String::from_utf8(stat)
+        .map_err(|_| "release diff is not UTF-8")?
+        .trim_end()
+        .to_string();
+    let raw = run(&[
+        "-c",
+        "core.fsmonitor=false",
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "-z",
+    ])?;
+    let mut untracked = BTreeSet::new();
+    for path in raw.split(|byte| *byte == 0).filter(|path| !path.is_empty()) {
+        let path = std::str::from_utf8(path).map_err(|_| "untracked release path is not UTF-8")?;
+        if !path.starts_with(".mastermind/") {
+            let path = crate::audit_bundle::normalize_relative_path(Path::new(path))
+                .map_err(|_| "untracked release path is invalid")?;
+            untracked.insert(path);
+        }
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+    if !untracked.is_empty() {
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        body.push_str("Untracked files:\n");
+        body.push_str(&untracked.into_iter().collect::<Vec<_>>().join("\n"));
+    }
+    Ok(body)
 }
 
 /// First `# Title` line BEFORE any `##` section header. None when absent.
@@ -750,16 +1080,39 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts)
 
     if !opts.post_only {
         if let Some(state) = existing.as_ref() {
-            if state.status == "learned" {
+            let review_path = history_review_file_path(repo_root, spec_path);
+            let review_complete = history_review_complete_for_snapshot(
+                &review_path,
+                state.history_snapshot_sha256.as_deref(),
+            );
+            if state.status == "learned" && review_complete {
                 println!(
                     "Task already complete — state is `{}`. Use --reset to start a new iteration or --post-only to re-audit.",
                     state_path.display()
                 );
                 return Outcome::PostHeld;
             }
-            if state.status == "history_review_required" {
-                let review_path = history_review_file_path(repo_root, spec_path);
-                if history_review_complete(&review_path) {
+            if matches!(state.status.as_str(), "learned" | "history_review_required") {
+                let snapshot = current_history_snapshot(repo_root, spec_path, state);
+                if state.history_snapshot_sha256.is_none()
+                    || snapshot.as_ref().ok() != state.history_snapshot_sha256.as_ref()
+                {
+                    let reason = snapshot.err().unwrap_or_else(|| {
+                        "audited inputs changed or have no review binding".into()
+                    });
+                    let mut stale = state.clone();
+                    stale.status = "audit_required".into();
+                    stale.next_step = Some("run_audit".into());
+                    stale.blocking_reason = Some(reason.clone());
+                    stale.held_snapshot_sha256 = None;
+                    stale.history_snapshot_sha256 = None;
+                    if let Err(error) = save_state(&state_path, &stale) {
+                        eprintln!("error: persisting required re-audit: {error}");
+                    }
+                    eprintln!("error: history review cannot close this task: {reason}. Re-run run-task to audit the current work.");
+                    return Outcome::PostBroken;
+                }
+                if review_complete {
                     let mut store = match Store::open(index_path) {
                         Ok(store) => store,
                         Err(error) => {
@@ -776,6 +1129,18 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts)
                         );
                         return Outcome::PostBroken;
                     }
+                    if current_history_snapshot(repo_root, spec_path, state)
+                        .ok()
+                        .as_ref()
+                        != state.history_snapshot_sha256.as_ref()
+                        || !history_review_complete_for_snapshot(
+                            &review_path,
+                            state.history_snapshot_sha256.as_deref(),
+                        )
+                    {
+                        eprintln!("error: audited inputs or semantic review changed during history refresh; re-run run-task");
+                        return Outcome::PostBroken;
+                    }
                     let mut completed = state.clone();
                     completed.status = "learned".into();
                     completed.next_step = Some("close".into());
@@ -789,6 +1154,15 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts)
                     }
                     println!("Task complete — semantic history review is resolved.");
                 } else {
+                    if state.status == "learned" {
+                        let mut pending = state.clone();
+                        pending.status = "history_review_required".into();
+                        pending.next_step = Some("review_history".into());
+                        if let Err(error) = save_state(&state_path, &pending) {
+                            eprintln!("error: persisting required semantic review: {error}");
+                            return Outcome::PostBroken;
+                        }
+                    }
                     println!(
                         "Mechanical audit is held; semantic history review is still required at `{}`.",
                         review_path.display()
@@ -955,6 +1329,7 @@ fn run_pre(
         spec_hash: hash_text(&spec_body),
         baseline_ref: head.clone(),
         held_snapshot_sha256: None,
+        history_snapshot_sha256: None,
         started_at: timestamp_now(),
         iteration,
         allow_no_index: opts.allow_no_index,
@@ -1005,13 +1380,32 @@ fn run_post(
     state: &RunState,
     state_path: &Path,
 ) -> Outcome {
-    let spec_body = match std::fs::read_to_string(spec_path) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("error: reading spec `{}`: {e}", spec_path.display());
+    // A failed explicit re-audit must not leave an earlier learned state
+    // eligible for completion or architecture-policy evidence.
+    let mut auditing = state.clone();
+    auditing.status = "audit_required".into();
+    auditing.next_step = Some("run_audit".into());
+    auditing.held_snapshot_sha256 = None;
+    auditing.history_snapshot_sha256 = None;
+    if let Err(error) = save_state(state_path, &auditing) {
+        eprintln!("error: persisting audit-required state: {error}");
+        return Outcome::PostBroken;
+    }
+    let inputs = match history_input_snapshot(repo_root, spec_path, state) {
+        Ok(inputs) => inputs,
+        Err(error) => {
+            eprintln!("error: cannot bind the spec, executor report and implementation: {error}");
+            auditing.status = "held".into();
+            auditing.risk = Some("medium".into());
+            auditing.next_step = Some("planner_review".into());
+            auditing.blocking_reason = Some(format!("audit inputs unavailable: {error}"));
+            auditing.last_artifact = Some("spec.md".into());
+            let _ = save_state(state_path, &auditing);
             return Outcome::PostBroken;
         }
     };
+    let inputs_before_audit = inputs.snapshot;
+    let spec_body = inputs.spec_body;
     let parsed = spec::parse_str(&spec_path.display().to_string(), &spec_body);
 
     println!(
@@ -1070,14 +1464,14 @@ fn run_post(
         .parent()
         .unwrap_or(spec_path)
         .join("executor-report.md");
-    let executor_report = match crate::executor_report::parse_file(&report_path) {
+    let executor_report = match crate::executor_report::parse_str(&inputs.executor_body) {
         Ok(report) => report,
         Err(error) => {
             eprintln!(
                 "error: post-flight requires a canonical executor report at `{}`: {error}",
                 report_path.display()
             );
-            let mut failed = state.clone();
+            let mut failed = auditing.clone();
             failed.status = "held".into();
             failed.risk = Some("medium".into());
             failed.next_step = Some("planner_review".into());
@@ -1109,7 +1503,7 @@ fn run_post(
             "error: failed to persist `{}`: {error}",
             audit_path.display()
         );
-        let mut failed = state.clone();
+        let mut failed = auditing.clone();
         failed.status = "held".into();
         failed.risk = Some("high".into());
         failed.next_step = Some("planner_review".into());
@@ -1143,6 +1537,15 @@ fn run_post(
     }
 
     if matches!(outcome, Outcome::PostHeld) {
+        if history_input_snapshot(repo_root, spec_path, state)
+            .ok()
+            .map(|inputs| inputs.snapshot)
+            .as_deref()
+            != Some(inputs_before_audit.as_str())
+        {
+            eprintln!("error: audit inputs changed during post-flight; re-audit the current work");
+            return Outcome::PostBroken;
+        }
         let held_snapshot_sha256 = match parsed.frontmatter.as_ref() {
             Some(frontmatter)
                 if frontmatter.mode.as_deref() == Some("strict")
@@ -1192,15 +1595,25 @@ fn run_post(
             return Outcome::PostBroken;
         }
         println!("Release notes saved to {}", release_path.display());
-        if let Err(error) =
-            ensure_history_review(repo_root, spec_path, &release_path).map(|created| {
-                if created {
-                    println!(
-                        "History review saved to {}",
-                        history_review_file_path(repo_root, spec_path).display()
-                    );
+        let history_snapshot =
+            match history_audit_snapshot(repo_root, spec_path, &inputs_before_audit) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    eprintln!("error: cannot bind the history review: {error}");
+                    return Outcome::PostBroken;
                 }
-            })
+            };
+        if let Err(error) =
+            ensure_history_review(repo_root, spec_path, &release_path, &history_snapshot).map(
+                |created| {
+                    if created {
+                        println!(
+                            "History review saved to {}",
+                            history_review_file_path(repo_root, spec_path).display()
+                        );
+                    }
+                },
+            )
         {
             eprintln!("error: failed to create history review: {error}");
             return Outcome::PostBroken;
@@ -1209,9 +1622,19 @@ fn run_post(
             eprintln!("error: refreshing durable post-flight history: {error}");
             return Outcome::PostBroken;
         }
+        if current_history_snapshot(repo_root, spec_path, state)
+            .ok()
+            .as_deref()
+            != Some(history_snapshot.as_str())
+        {
+            eprintln!(
+                "error: audit evidence changed while recording history; re-audit the current work"
+            );
+            return Outcome::PostBroken;
+        }
         let review_path = history_review_file_path(repo_root, spec_path);
         let mut complete = state.clone();
-        if history_review_complete(&review_path) {
+        if history_review_complete_for_snapshot(&review_path, Some(&history_snapshot)) {
             complete.status = "learned".into();
             complete.next_step = Some("close".into());
         } else {
@@ -1222,6 +1645,7 @@ fn run_post(
         complete.blocking_reason = None;
         complete.last_artifact = Some("history-review.md".into());
         complete.held_snapshot_sha256 = held_snapshot_sha256;
+        complete.history_snapshot_sha256 = Some(history_snapshot);
         if let Err(error) = save_state(state_path, &complete) {
             eprintln!(
                 "error: persisting post-flight state `{}`: {error}",
@@ -1234,7 +1658,7 @@ fn run_post(
             eprintln!("error: refreshing durable failed-audit history: {error}");
             return Outcome::PostBroken;
         }
-        let mut failed = state.clone();
+        let mut failed = auditing.clone();
         failed.status = match outcome {
             Outcome::PostDrift => "drift",
             _ => "broken",
@@ -1503,6 +1927,7 @@ verifications: []\n\
             spec_hash: "deadbeefcafef00d".into(),
             baseline_ref: "abc1234".into(),
             held_snapshot_sha256: Some("feedface".into()),
+            history_snapshot_sha256: Some("reviewed-snapshot".into()),
             started_at: 123456,
             iteration: 0,
             allow_no_index: true,
@@ -1513,11 +1938,241 @@ verifications: []\n\
         assert_eq!(loaded.spec_hash, state.spec_hash);
         assert_eq!(loaded.baseline_ref, state.baseline_ref);
         assert_eq!(loaded.held_snapshot_sha256, state.held_snapshot_sha256);
+        assert_eq!(
+            loaded.history_snapshot_sha256,
+            state.history_snapshot_sha256
+        );
         assert_eq!(loaded.started_at, state.started_at);
         assert!(loaded.allow_no_index);
         delete_state(&path).unwrap();
         assert!(load_state(&path).unwrap().is_none());
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn history_review_requires_unambiguous_prose_and_matching_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("history-review.md");
+        let complete = "- **Context:** updated\n- **Lesson:** not applicable\n- **Reason:** documented retry semantics\n";
+        for invalid in [
+            format!("```markdown\n{complete}```\n"),
+            format!("~~~\n{complete}~~~\n"),
+            format!("<!--\n{complete}-->\n"),
+            complete
+                .lines()
+                .map(|line| format!("    {line}\n"))
+                .collect(),
+            complete.lines().map(|line| format!("> {line}\n")).collect(),
+            format!("{complete}- **Context:** pending\n"),
+            format!("{complete}- **Reason:** another answer\n"),
+        ] {
+            fs::write(&path, invalid).unwrap();
+            assert!(!history_review_complete(&path));
+        }
+        fs::write(&path, format!("```md\n{complete}```\n{complete}")).unwrap();
+        assert!(history_review_complete(&path));
+        assert!(!history_review_complete_for_snapshot(
+            &path,
+            Some("current")
+        ));
+        fs::write(
+            &path,
+            format!(
+                "- **Audit snapshot:** current\r\n{}",
+                complete.replace('\n', "\r\n")
+            ),
+        )
+        .unwrap();
+        assert!(history_review_complete_for_snapshot(&path, Some("current")));
+        assert!(!history_review_complete_for_snapshot(
+            &path,
+            Some("foreign")
+        ));
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(HISTORY_REVIEW_BYTE_LIMIT + 1)
+            .unwrap();
+        assert!(!history_review_complete(&path));
+    }
+
+    fn history_snapshot_fixture() -> (tempfile::TempDir, PathBuf, RunState) {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::write(root.path().join("src/lib.py"), "def value(): return 0\n").unwrap();
+        git(root.path(), &["add", "-A"]);
+        git(root.path(), &["commit", "-qm", "baseline"]);
+        let spec = root.path().join(".mastermind/tasks/001-review/spec.md");
+        fs::create_dir_all(spec.parent().unwrap()).unwrap();
+        let body = "---\nmode: strict\ntouches:\n  - file: src/lib.py\n---\n# Value\n";
+        fs::write(&spec, body).unwrap();
+        write_executor_report(&spec, &["src/lib.py"]);
+        fs::write(spec.with_file_name("audit.md"), "✅ Held — Value\n").unwrap();
+        let release = release_file_path(root.path(), &spec);
+        fs::create_dir_all(release.parent().unwrap()).unwrap();
+        fs::write(release, "# Value\nAudit: Held\n").unwrap();
+        fs::write(root.path().join("src/lib.py"), "def value(): return 1\n").unwrap();
+        let state: RunState = serde_json::from_value(serde_json::json!({
+            "status": "history_review_required", "spec_path": spec.to_string_lossy(),
+            "spec_hash": hash_text(body), "baseline_ref": git_head(root.path()).unwrap(),
+            "started_at": 1, "iteration": 1
+        }))
+        .unwrap();
+        (root, spec, state)
+    }
+
+    #[test]
+    fn history_binding_tracks_audited_bytes_and_iteration_not_staging_or_history_outputs() {
+        let (root, spec, state) = history_snapshot_fixture();
+        let snapshot = current_history_snapshot(root.path(), &spec, &state).unwrap();
+        for (path, body) in [
+            ("CONTEXT.md", "durable decision\n"),
+            ("CONTEXT-archive-2026.md", "older decisions\n"),
+            (".mastermind/tasks/_lessons.md", "reviewed lesson\n"),
+        ] {
+            fs::write(root.path().join(path), body).unwrap();
+        }
+        assert_eq!(
+            current_history_snapshot(root.path(), &spec, &state).unwrap(),
+            snapshot
+        );
+        git(root.path(), &["add", "-A"]);
+        git(root.path(), &["commit", "-qm", "same reviewed bytes"]);
+        assert_eq!(
+            current_history_snapshot(root.path(), &spec, &state).unwrap(),
+            snapshot
+        );
+        let mut next = state.clone();
+        next.iteration += 1;
+        assert_ne!(
+            current_history_snapshot(root.path(), &spec, &next).unwrap(),
+            snapshot
+        );
+        for path in [
+            root.path().join("src/lib.py"),
+            spec.clone(),
+            spec.with_file_name("executor-report.md"),
+            spec.with_file_name("audit.md"),
+            release_file_path(root.path(), &spec),
+        ] {
+            let before = fs::read(&path).unwrap();
+            let mut changed = before.clone();
+            changed.extend_from_slice(b"changed\n");
+            fs::write(&path, changed).unwrap();
+            assert_ne!(
+                current_history_snapshot(root.path(), &spec, &state).unwrap(),
+                snapshot,
+                "{}",
+                path.display()
+            );
+            fs::write(&path, before).unwrap();
+        }
+        fs::write(
+            root.path().join("src/new.py"),
+            "new untracked implementation\n",
+        )
+        .unwrap();
+        assert_ne!(
+            current_history_snapshot(root.path(), &spec, &state).unwrap(),
+            snapshot
+        );
+        fs::remove_file(root.path().join("src/new.py")).unwrap();
+        let body = fs::read_to_string(&spec).unwrap().replace(
+            "  - file: src/lib.py",
+            "  - file: src/lib.py\n  - file: CONTEXT.md",
+        );
+        fs::write(&spec, body).unwrap();
+        let declared_context = current_history_snapshot(root.path(), &spec, &state).unwrap();
+        fs::write(
+            root.path().join("CONTEXT.md"),
+            "changed declared documentation\n",
+        )
+        .unwrap();
+        assert_ne!(
+            current_history_snapshot(root.path(), &spec, &state).unwrap(),
+            declared_context
+        );
+        fs::remove_file(spec.with_file_name("executor-report.md")).unwrap();
+        assert!(current_history_snapshot(root.path(), &spec, &state).is_err());
+    }
+
+    #[test]
+    fn changed_audit_generation_archives_review_and_requires_new_dispositions() {
+        let (root, spec, state) = history_snapshot_fixture();
+        let release = release_file_path(root.path(), &spec);
+        let snapshot = current_history_snapshot(root.path(), &spec, &state).unwrap();
+        assert!(ensure_history_review(root.path(), &spec, &release, &snapshot).unwrap());
+        let review = history_review_file_path(root.path(), &spec);
+        let body = fs::read_to_string(&review)
+            .unwrap()
+            .replace("pending", "not applicable")
+            .replace(
+                "**Reason:** semantic review required",
+                "**Reason:** reviewed implementation; no durable lesson",
+            );
+        fs::write(&review, &body).unwrap();
+        assert!(history_review_complete_for_snapshot(
+            &review,
+            Some(&snapshot)
+        ));
+        assert!(!ensure_history_review(root.path(), &spec, &release, &snapshot).unwrap());
+        assert_eq!(fs::read_to_string(&review).unwrap(), body);
+        // The rendered Held audit is unchanged, but the function body differs.
+        fs::write(root.path().join("src/lib.py"), "def value(): return 2\n").unwrap();
+        let new_snapshot = current_history_snapshot(root.path(), &spec, &state).unwrap();
+        assert_ne!(new_snapshot, snapshot);
+        assert!(ensure_history_review(root.path(), &spec, &release, &new_snapshot).unwrap());
+        assert!(!history_review_complete_for_snapshot(
+            &review,
+            Some(&new_snapshot)
+        ));
+        let archive = review.with_file_name(format!(
+            "history-review.{}.md",
+            crate::hex::encode(&Sha256::digest(body.as_bytes()))
+        ));
+        assert_eq!(fs::read_to_string(archive).unwrap(), body);
+    }
+
+    #[test]
+    fn history_snapshot_rejects_oversized_and_linked_inputs() {
+        let (root, spec, state) = history_snapshot_fixture();
+        let source = root.path().join("src/lib.py");
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_len(crate::audit_bundle::BUNDLE_INPUT_MAX as u64 + 1)
+            .unwrap();
+        assert!(current_history_snapshot(root.path(), &spec, &state).is_err());
+        #[cfg(unix)]
+        {
+            fs::remove_file(&source).unwrap();
+            std::os::unix::fs::symlink("../.mastermind/tasks/001-review/spec.md", &source).unwrap();
+            assert!(current_history_snapshot(root.path(), &spec, &state).is_err());
+        }
+    }
+
+    #[test]
+    fn release_summary_includes_uncommitted_and_untracked_implementation() {
+        let (root, spec, state) = history_snapshot_fixture();
+        fs::write(root.path().join("src/new.py"), "def added(): pass\n").unwrap();
+        let summary = git_diff_stat(root.path(), &state.baseline_ref).unwrap();
+        assert!(summary.contains("src/lib.py"), "{summary}");
+        assert!(
+            summary.contains("Untracked files:\nsrc/new.py"),
+            "{summary}"
+        );
+        assert!(!summary.contains(".mastermind"), "{summary}");
+        git(root.path(), &["add", ".mastermind", "src/lib.py"]);
+        fs::write(
+            spec.with_file_name("audit.md"),
+            "updated working artifact\n",
+        )
+        .unwrap();
+        let staged = git_diff_stat(root.path(), &state.baseline_ref).unwrap();
+        assert_eq!(staged, summary);
     }
 
     #[test]
@@ -1949,16 +2604,20 @@ verify:
         assert!(review.contains("**Context:** pending"));
         assert!(review.contains("**Lesson:** pending"));
 
-        // A normal re-run of a completed task is idempotent. Explicit
-        // --post-only remains available when the user really wants a re-audit.
+        // Losing an audited input while review is pending requires re-audit.
         fs::remove_file(spec_path.parent().unwrap().join("executor-report.md")).unwrap();
         assert_eq!(
             run(&spec_path, &dir, &index_path, RunOpts::default()),
-            Outcome::PostHeld
+            Outcome::PostBroken
         );
         assert_eq!(
             load_state(&state_path).unwrap().unwrap().status,
-            "history_review_required"
+            "audit_required"
+        );
+        write_executor_report(&spec_path, &["src/lib.py"]);
+        assert_eq!(
+            run(&spec_path, &dir, &index_path, RunOpts::default()),
+            Outcome::PostHeld
         );
 
         fs::write(
@@ -1968,7 +2627,13 @@ verify:
         .unwrap();
         fs::write(
             &review_path,
-            "- **Context:** updated\n- **Lesson:** not applicable\n- **Reason:** captured zebra routing in CONTEXT.md\n",
+            review
+                .replace("**Context:** pending", "**Context:** updated")
+                .replace("**Lesson:** pending", "**Lesson:** not applicable")
+                .replace(
+                    "**Reason:** semantic review required",
+                    "**Reason:** captured zebra routing in CONTEXT.md",
+                ),
         )
         .unwrap();
         assert_eq!(
@@ -1985,6 +2650,32 @@ verify:
                 .any(|entry| entry.path == "CONTEXT.md"),
             "semantic completion must refresh edited durable history before reporting learned"
         );
+        drop(store);
+        // A completed historical task is stable as later work changes the
+        // checkout. An explicit re-audit must clear completion before failing.
+        fs::write(dir.join("src/lib.py"), "def unrelated_later_work(): pass\n").unwrap();
+        fs::remove_file(spec_path.with_file_name("executor-report.md")).unwrap();
+        assert_eq!(
+            run(&spec_path, &dir, &index_path, RunOpts::default()),
+            Outcome::PostHeld
+        );
+        assert_eq!(load_state(&state_path).unwrap().unwrap().status, "learned");
+        assert_eq!(
+            run(
+                &spec_path,
+                &dir,
+                &index_path,
+                RunOpts {
+                    post_only: true,
+                    ..RunOpts::default()
+                }
+            ),
+            Outcome::PostBroken
+        );
+        let failed = load_state(&state_path).unwrap().unwrap();
+        assert_ne!(failed.status, "learned");
+        assert!(failed.history_snapshot_sha256.is_none());
+        assert!(failed.held_snapshot_sha256.is_none());
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -2031,10 +2722,10 @@ verify:
         let state = load_state(&state_path).unwrap().unwrap();
         assert_eq!(state.status, "held");
         assert_eq!(state.next_step.as_deref(), Some("planner_review"));
-        assert_eq!(
-            state.blocking_reason.as_deref(),
-            Some("executor report missing or invalid")
-        );
+        assert!(state
+            .blocking_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("executor-report.md")));
 
         fs::remove_dir_all(&dir).ok();
     }

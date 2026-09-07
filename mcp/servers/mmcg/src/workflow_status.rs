@@ -3509,6 +3509,8 @@ impl TaskPhase {
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct TaskState {
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_snapshot_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub risk: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3624,7 +3626,8 @@ impl WorkflowStatus {
                     "Review the completed Mastermind task at {}.\n\n\
                      Read audit.md and history-review.md. Decide whether CONTEXT.md and a durable lesson need updates. \
                      In {}, replace Context and Lesson `pending` with `updated` or `not applicable`, \
-                     and replace the generated Reason with the concrete rationale. Then run \
+                     and replace the generated Reason with the concrete rationale. Retain the Audit snapshot marker; \
+                     changed audit inputs require re-audit. Then run \
                      `mastermind run-task {}` to persist completion.",
                     task_dir.display(),
                     review.display(),
@@ -3958,7 +3961,8 @@ impl WorkflowStatus {
                 "Complete semantic history review for:\n{spec}\n\n\
                  Read {dir}/audit.md and {dir}/history-review.md. Replace both pending dispositions \
                  with `updated` or `not applicable`, replace the generated Reason with the concrete rationale, \
-                 then run `mastermind run-task {spec}` to persist completion.",
+                 retain the Audit snapshot marker, then run `mastermind run-task {spec}` to persist completion. \
+                 Changed audit inputs require re-audit.",
                 spec = task.spec_path.display(),
                 dir = task_dir.display()
             ),
@@ -4388,10 +4392,10 @@ fn detect_phase(
         return match s.status.as_str() {
             "history_review_required" => TaskPhase::AwaitingHistoryReview,
             "learned"
-                if task_dir.join("history-review.md").is_file()
-                    && !crate::run_task::history_review_complete(
-                        &task_dir.join("history-review.md"),
-                    ) =>
+                if !crate::run_task::history_review_complete_for_snapshot(
+                    &task_dir.join("history-review.md"),
+                    s.history_snapshot_sha256.as_deref(),
+                ) =>
             {
                 TaskPhase::AwaitingHistoryReview
             }
@@ -4400,16 +4404,6 @@ fn detect_phase(
             "approved" | "executing" => TaskPhase::AwaitingExecutor,
             "held" | "drift" | "broken" => TaskPhase::Held,
             _ => TaskPhase::Ready,
-        };
-    }
-
-    if task_dir.join("audit.md").is_file() {
-        return if task_dir.join("history-review.md").is_file()
-            && !crate::run_task::history_review_complete(&task_dir.join("history-review.md"))
-        {
-            TaskPhase::AwaitingHistoryReview
-        } else {
-            TaskPhase::Complete
         };
     }
 
@@ -5361,6 +5355,7 @@ mod tests {
         fs::write(task_dir.join("executor-report.md"), "report\n").unwrap();
         let state = TaskState {
             status: "approved".into(),
+            history_snapshot_sha256: None,
             risk: Some("low".into()),
             next_step: Some("run_executor".into()),
             blocking_reason: None,
@@ -5393,8 +5388,9 @@ mod tests {
             "- **Context:** pending\n- **Lesson:** pending\n- **Reason:** semantic review required\n",
         )
         .unwrap();
-        let state = TaskState {
+        let mut state = TaskState {
             status: "learned".into(),
+            history_snapshot_sha256: None,
             risk: Some("low".into()),
             next_step: Some("close".into()),
             blocking_reason: None,
@@ -5415,7 +5411,44 @@ mod tests {
             detect_phase(&spec_path, &None, Some(&state)),
             TaskPhase::Complete
         );
+        state.history_snapshot_sha256 = Some("current".into());
+        assert_eq!(
+            detect_phase(&spec_path, &None, Some(&state)),
+            TaskPhase::AwaitingHistoryReview
+        );
+        fs::write(task_dir.join("history-review.md"), "- **Audit snapshot:** foreign\n- **Context:** updated\n- **Lesson:** not applicable\n- **Reason:** reviewed\n").unwrap();
+        assert_eq!(
+            detect_phase(&spec_path, &None, Some(&state)),
+            TaskPhase::AwaitingHistoryReview
+        );
+        fs::remove_file(task_dir.join("history-review.md")).unwrap();
+        assert_eq!(
+            detect_phase(&spec_path, &None, Some(&state)),
+            TaskPhase::AwaitingHistoryReview
+        );
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn orphan_audit_does_not_complete_or_mask_an_inflight_task() {
+        let root = tempfile::tempdir().unwrap();
+        let task = root.path().join(".mastermind/tasks/001-orphan");
+        fs::create_dir_all(&task).unwrap();
+        let spec = task.join("spec.md");
+        fs::write(&spec, "# Orphan\n").unwrap();
+        fs::write(
+            task.join("history-review.md"),
+            "- **Context:** updated\n- **Lesson:** not applicable\n- **Reason:** reviewed\n",
+        )
+        .unwrap();
+        for verdict in ["✅ Held", "⚠️ Drift", "❌ Broken"] {
+            fs::write(task.join("audit.md"), verdict).unwrap();
+            assert_eq!(detect_phase(&spec, &None, None), TaskPhase::Ready);
+            assert_eq!(
+                detect_phase(&spec, &Some(spec.clone()), None),
+                TaskPhase::AwaitingExecutor
+            );
+        }
     }
 
     #[test]

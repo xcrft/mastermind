@@ -252,10 +252,12 @@ mmcg init --no-seed-style  # do not enrich ~/.mastermind/style.md
 
 # Build or refresh the user-global personal style profile. No init required.
 mmcg miner profile .
-mmcg miner profile . --author "Ada Lovelace"  # explicit git author filter
+mmcg miner profile . --author "Ada Lovelace"  # literal substring of author name/email
 mmcg miner profile . --deep                    # explicit claude -p compatibility path
 # --force intentionally replaces the whole profile, including preserved prose;
 # it is not refresh.
+# Subdirectories and linked worktrees share one repository contribution.
+# Independent clones remain separate; repeated samples do not prove quality.
 
 # Preview or apply one supported MCP client target.
 mmcg setup claude --scope user                            # dry-run via native `claude mcp`

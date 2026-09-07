@@ -86,6 +86,10 @@ pub(crate) struct StableFileIdentity {
 }
 
 impl StableFileIdentity {
+    pub(crate) fn attributes(self) -> u64 {
+        self.attributes
+    }
+
     pub(crate) fn same_object(self, other: Self) -> bool {
         self.volume == other.volume && self.index == other.index
     }

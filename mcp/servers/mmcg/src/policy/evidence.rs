@@ -850,6 +850,7 @@ mod tests {
                 spec_hash: crate::run_task::hash_text(spec_body),
                 baseline_ref: baseline.clone(),
                 held_snapshot_sha256: Some(held_snapshot),
+                history_snapshot_sha256: None,
                 started_at: 1,
                 iteration: 1,
                 allow_no_index: false,

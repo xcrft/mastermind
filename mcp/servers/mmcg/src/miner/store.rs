@@ -83,16 +83,22 @@ impl ProfileStore {
         Ok(Self { conn })
     }
 
-    /// Replace `repo_key`'s contribution in one transaction — idempotent, so
-    /// re-mining the same repo updates rather than double-counts.
+    /// Replace `repo_key`'s contribution and remove its legacy checkout aliases
+    /// in one transaction, so re-mining never sums the old and new identities.
     pub fn upsert_repo(
         &mut self,
         repo_key: &str,
         prov: &RepoProvenance,
         identities: &[String],
         counts: &Counts,
+        aliases: &[String],
     ) -> SqlResult<()> {
         let tx = self.conn.transaction()?;
+        for alias in aliases {
+            tx.execute("DELETE FROM counter WHERE repo_key = ?1", params![alias])?;
+            tx.execute("DELETE FROM identity WHERE repo_key = ?1", params![alias])?;
+            tx.execute("DELETE FROM repo WHERE repo_key = ?1", params![alias])?;
+        }
         tx.execute("DELETE FROM counter WHERE repo_key = ?1", params![repo_key])?;
         tx.execute(
             "DELETE FROM identity WHERE repo_key = ?1",
@@ -279,6 +285,7 @@ mod tests {
             &prov(Some("aaa"), 0),
             &["a@x".into()],
             &counts(&[("indent.space", 30), ("indent.tab", 2)]),
+            &[],
         )
         .unwrap();
         s.upsert_repo(
@@ -286,6 +293,7 @@ mod tests {
             &prov(Some("bbb"), 0),
             &["b@x".into()],
             &counts(&[("indent.space", 20), ("indent.tab", 8)]),
+            &[],
         )
         .unwrap();
 
@@ -310,9 +318,9 @@ mod tests {
     fn reupsert_replaces_not_doubles() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = ProfileStore::open(&dir.path().join("style.db")).unwrap();
-        s.upsert_repo("/a", &prov(None, 0), &[], &counts(&[("x", 10)]))
+        s.upsert_repo("/a", &prov(None, 0), &[], &counts(&[("x", 10)]), &[])
             .unwrap();
-        s.upsert_repo("/a", &prov(None, 0), &[], &counts(&[("x", 99)]))
+        s.upsert_repo("/a", &prov(None, 0), &[], &counts(&[("x", 99)]), &[])
             .unwrap();
         let agg = s.aggregate().unwrap();
         assert_eq!(agg.repos, 1);
@@ -320,10 +328,49 @@ mod tests {
     }
 
     #[test]
+    fn failed_alias_replacement_keeps_the_previous_contribution() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = ProfileStore::open(&dir.path().join("style.db")).unwrap();
+        s.upsert_repo(
+            "/checkout",
+            &prov(Some("old"), 0),
+            &["author@example.test".into()],
+            &counts(&[("x", 10)]),
+            &[],
+        )
+        .unwrap();
+        s.conn
+            .execute_batch(
+                "CREATE TRIGGER reject_new_key BEFORE INSERT ON repo
+                 WHEN NEW.repo_key = '/canonical.git'
+                 BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END;",
+            )
+            .unwrap();
+
+        assert!(s
+            .upsert_repo(
+                "/canonical.git",
+                &prov(Some("new"), 1),
+                &[],
+                &counts(&[("x", 99)]),
+                &["/checkout".into()],
+            )
+            .is_err());
+        let aggregate = s.aggregate().unwrap();
+        assert_eq!(aggregate.repos, 1);
+        assert_eq!(aggregate.counts["x"], 10);
+        assert_eq!(aggregate.identities, vec!["author@example.test"]);
+        assert_eq!(
+            s.repo_latest_sha("/checkout").unwrap().as_deref(),
+            Some("old")
+        );
+    }
+
+    #[test]
     fn reset_wipes_everything() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = ProfileStore::open(&dir.path().join("style.db")).unwrap();
-        s.upsert_repo("/a", &prov(None, 0), &[], &counts(&[("x", 10)]))
+        s.upsert_repo("/a", &prov(None, 0), &[], &counts(&[("x", 10)]), &[])
             .unwrap();
         s.reset().unwrap();
         let agg = s.aggregate().unwrap();
@@ -335,9 +382,9 @@ mod tests {
     fn list_and_prune_retention() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = ProfileStore::open(&dir.path().join("style.db")).unwrap();
-        s.upsert_repo("/fresh", &prov(None, 1000), &[], &counts(&[("x", 10)]))
+        s.upsert_repo("/fresh", &prov(None, 1000), &[], &counts(&[("x", 10)]), &[])
             .unwrap();
-        s.upsert_repo("/old", &prov(None, 1), &[], &counts(&[("x", 5)]))
+        s.upsert_repo("/old", &prov(None, 1), &[], &counts(&[("x", 5)]), &[])
             .unwrap();
 
         let listed = s.list_repos().unwrap();

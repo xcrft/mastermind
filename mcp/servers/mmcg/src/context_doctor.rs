@@ -137,15 +137,15 @@ impl Report {
 pub fn run(root: &Path) -> Report {
     let context_path = root.join("CONTEXT.md");
     let body = std::fs::read_to_string(&context_path).ok();
-    let learned_tasks = learned_task_dirs(&root.join(".mastermind/tasks"));
+    let review_tasks = history_review_task_dirs(&root.join(".mastermind/tasks"));
     let checks = vec![
         check_exists(&context_path),
         check_placeholders(body.as_deref()),
         check_minimum_content(body.as_deref()),
         check_core_sections(body.as_deref()),
         check_decision_schema(body.as_deref()),
-        check_history_review(&learned_tasks),
-        check_lessons_file(root, &learned_tasks),
+        check_history_review(&review_tasks),
+        check_lessons_file(root, &review_tasks),
     ];
     Report::from_checks(root, checks)
 }
@@ -386,34 +386,31 @@ fn check_history_review(tasks: &[PathBuf]) -> Check {
             .and_then(|name| name.to_str())
             .unwrap_or("unknown");
         let review_path = task.join("history-review.md");
-        let Ok(body) = std::fs::read_to_string(&review_path) else {
+        if !review_path.is_file() {
             unresolved.push(format!("{task_name}: missing"));
             continue;
+        }
+        let state = match read_task_state(task) {
+            Ok(state) => state,
+            Err(_) => {
+                unresolved.push(format!("{task_name}: unreadable task state"));
+                continue;
+            }
         };
-        let context = field_value(&body, "Context");
-        let lesson = field_value(&body, "Lesson");
-        let reason = field_value(&body, "Reason");
-        let valid = |value: Option<&str>| {
-            value.is_some_and(|value| {
-                matches!(normalized(value).as_str(), "updated" | "not applicable")
-            })
-        };
-        if !valid(context) || !valid(lesson) {
-            unresolved.push(format!("{task_name}: pending disposition"));
-        } else if reason.is_none_or(|value| {
-            value.trim().is_empty() || normalized(value) == "semantic review required"
-        }) {
-            unresolved.push(format!("{task_name}: reason not reviewed"));
+        let snapshot = state
+            .as_ref()
+            .and_then(|state| state.history_snapshot_sha256.as_deref());
+        if !crate::run_task::history_review_complete_for_snapshot(&review_path, snapshot) {
+            unresolved.push(format!(
+                "{task_name}: incomplete, ambiguous, or mismatched review"
+            ));
         }
     }
     if unresolved.is_empty() {
         Check {
             name: "history review",
             status: Status::Ok,
-            message: format!(
-                "{} completed task(s) have explicit dispositions",
-                tasks.len()
-            ),
+            message: format!("{} task review(s) have explicit dispositions", tasks.len()),
             hint: None,
         }
     } else {
@@ -481,16 +478,31 @@ fn check_lessons_file(root: &Path, tasks: &[PathBuf]) -> Check {
     let mut candidates = 0;
     let mut malformed = Vec::new();
     for (title, block) in &entries {
-        let missing: Vec<&str> = REQUIRED_LESSON_FIELDS
+        let mut problems: Vec<String> = REQUIRED_LESSON_FIELDS
             .iter()
             .copied()
-            .filter(|field| !has_field(block, field))
+            .filter(|field| {
+                field_value(block, field).is_none_or(|value| normalized(value).is_empty())
+            })
+            .map(|field| format!("missing, empty, or repeated {field}"))
             .collect();
-        if !missing.is_empty() {
-            malformed.push(format!("{title}: {}", missing.join(", ")));
-        }
-        if field_value(block, "Status").is_some_and(|value| normalized(value) == "candidate") {
+        let status = field_value(block, "Status").map(normalized);
+        if status.as_deref() == Some("candidate") {
             candidates += 1;
+        } else if matches!(
+            status.as_deref(),
+            Some("active" | "resolved" | "superseded")
+        ) {
+            for field in ["Provenance", "Evidence", "Reusable lesson"] {
+                if field_value(block, field).is_some_and(pending_lesson_value) {
+                    problems.push(format!("{field} still awaits review"));
+                }
+            }
+        } else {
+            problems.push("Status must be candidate, active, resolved, or superseded".into());
+        }
+        if !problems.is_empty() {
+            malformed.push(format!("{title}: {}", problems.join(", ")));
         }
     }
     if !malformed.is_empty() {
@@ -498,7 +510,7 @@ fn check_lessons_file(root: &Path, tasks: &[PathBuf]) -> Check {
             name: "lessons quality",
             status: Status::Warn,
             message: format!("malformed entries: {}", malformed.join("; ")),
-            hint: Some("add the missing lifecycle and evidence fields".into()),
+            hint: Some("use a supported status and complete the lifecycle and evidence fields; keep unreviewed lessons as candidate".into()),
         }
     } else if candidates > 0 {
         Check {
@@ -520,7 +532,7 @@ fn check_lessons_file(root: &Path, tasks: &[PathBuf]) -> Check {
     }
 }
 
-fn learned_task_dirs(tasks_dir: &Path) -> Vec<PathBuf> {
+fn history_review_task_dirs(tasks_dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(tasks_dir) else {
         return Vec::new();
     };
@@ -530,13 +542,10 @@ fn learned_task_dirs(tasks_dir: &Path) -> Vec<PathBuf> {
         if !path.is_dir() {
             continue;
         }
-        let Ok(body) = std::fs::read_to_string(path.join("state.json")) else {
+        let Ok(Some(state)) = read_task_state(&path) else {
             continue;
         };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
-            continue;
-        };
-        if value.get("status").and_then(|status| status.as_str()) == Some("learned") {
+        if matches!(state.status.as_str(), "learned" | "history_review_required") {
             tasks.push(path);
         }
     }
@@ -544,15 +553,112 @@ fn learned_task_dirs(tasks_dir: &Path) -> Vec<PathBuf> {
     tasks
 }
 
+fn read_task_state(task: &Path) -> std::io::Result<Option<crate::workflow_status::TaskState>> {
+    match std::fs::read_to_string(task.join("state.json")) {
+        Ok(body) => serde_json::from_str(&body)
+            .map(Some)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// A visible Markdown line, retaining its exact original location and bytes.
+pub(crate) struct ProseLine<'a> {
+    pub(crate) offset: usize,
+    pub(crate) index: usize,
+    pub(crate) raw: &'a str,
+    pub(crate) text: &'a str,
+}
+
+/// Scan before slicing into records so quoted headings cannot lose their
+/// opening fence or comment. Lines containing comments are excluded in full.
+pub(crate) fn prose_lines(body: &str) -> Vec<ProseLine<'_>> {
+    let mut visible = Vec::new();
+    let mut offset = 0;
+    let mut fence = None;
+    let mut comment = false;
+    for (index, raw) in body.split_inclusive('\n').enumerate() {
+        let start = offset;
+        offset += raw.len();
+        let content = raw.trim_end_matches(['\r', '\n']);
+        let indent = content.bytes().take_while(|byte| *byte == b' ').count();
+        let text = &content[indent..];
+        let code_indent = indent > 3 || text.starts_with('\t');
+        let marker = text.as_bytes().first().copied();
+        let width = text
+            .bytes()
+            .take_while(|byte| Some(*byte) == marker)
+            .count();
+        if let Some((character, opening_width)) = fence {
+            if !code_indent
+                && marker == Some(character)
+                && width >= opening_width
+                && text[width..].trim_matches([' ', '\t']).is_empty()
+            {
+                fence = None;
+            }
+            continue;
+        }
+        if comment {
+            let mut remaining = content;
+            while let Some(end) = remaining.find("-->") {
+                comment = false;
+                remaining = &remaining[end + 3..];
+                let Some(start) = remaining.find("<!--") else {
+                    break;
+                };
+                comment = true;
+                remaining = &remaining[start + 4..];
+            }
+            continue;
+        }
+        if code_indent || text.starts_with('>') {
+            continue;
+        }
+        if let Some(character @ (b'`' | b'~')) = marker {
+            if width >= 3 && (character != b'`' || !text[width..].contains('`')) {
+                fence = Some((character, width));
+                continue;
+            }
+        }
+        if let Some(start) = text.find("<!--") {
+            let mut remaining = &text[start + 4..];
+            comment = true;
+            while let Some(end) = remaining.find("-->") {
+                comment = false;
+                remaining = &remaining[end + 3..];
+                let Some(start) = remaining.find("<!--") else {
+                    break;
+                };
+                comment = true;
+                remaining = &remaining[start + 4..];
+            }
+            continue;
+        }
+        visible.push(ProseLine {
+            offset: start,
+            index,
+            raw,
+            text,
+        });
+    }
+    visible
+}
+
 fn markdown_section<'a>(text: &'a str, heading: &str) -> Option<&'a str> {
     let marker = format!("## {heading}");
-    let start = text.find(&marker)? + marker.len();
-    let rest = &text[start..];
-    let end = rest
-        .find("\n## ")
-        .map(|index| index + 1)
-        .unwrap_or(rest.len());
-    Some(&rest[..end])
+    let lines = prose_lines(text);
+    let position = lines
+        .iter()
+        .position(|line| line.text.trim_end() == marker)?;
+    let heading = &lines[position];
+    let start = heading.offset + heading.raw.len();
+    let end = lines[position + 1..]
+        .iter()
+        .find(|line| line.text.starts_with("## "))
+        .map_or(text.len(), |line| line.offset);
+    Some(&text[start..end])
 }
 
 fn level_three_blocks(section: &str) -> Vec<(&str, &str)> {
@@ -568,12 +674,10 @@ fn level_two_blocks(section: &str) -> Vec<(&str, &str)> {
 
 fn markdown_blocks<'a>(text: &'a str, prefix: &str) -> Vec<(&'a str, &'a str)> {
     let mut starts = Vec::new();
-    let mut offset = 0;
-    for line in text.split_inclusive('\n') {
-        if let Some(title) = line.trim_end().strip_prefix(prefix) {
-            starts.push((offset, title));
+    for line in prose_lines(text) {
+        if let Some(title) = line.text.trim_end().strip_prefix(prefix) {
+            starts.push((line.offset, title));
         }
-        offset += line.len();
     }
     starts
         .iter()
@@ -594,12 +698,28 @@ fn has_field(block: &str, field: &str) -> bool {
 
 fn field_value<'a>(body: &'a str, field: &str) -> Option<&'a str> {
     let marker = format!("- **{field}:**");
-    body.lines()
-        .find_map(|line| line.trim().strip_prefix(&marker).map(str::trim))
+    let mut value = None;
+    for line in prose_lines(body) {
+        if let Some(found) = line.text.strip_prefix(&marker).map(str::trim) {
+            if value.is_some() {
+                return None;
+            }
+            value = Some(found);
+        }
+    }
+    value
 }
 
 fn normalized(value: &str) -> String {
     value.trim().trim_matches('`').trim().to_ascii_lowercase()
+}
+
+fn pending_lesson_value(value: &str) -> bool {
+    let value = normalized(value);
+    matches!(
+        value.as_str(),
+        "pending" | "pending semantic review" | "semantic review required" | "todo" | "tbd"
+    ) || !placeholder_tokens(&value).is_empty()
 }
 
 fn skipped(name: &'static str, reason: &str) -> Check {
@@ -627,6 +747,27 @@ mod tests {
 
     fn context() -> &'static str {
         "# Demo — Context\n\n## Identity\n\n**What it is:** A deterministic codegraph and workflow CLI for coding agents.\n\n**What it is not:** A hosted execution platform.\n\n**Primary users:** Open-source maintainers and coding-agent users.\n\n## Active goals\n\n- Preserve evidence-backed workflow state across sessions.\n\n## Decision log\n\n"
+    }
+
+    fn reviewed_lesson(id: &str) -> String {
+        format!("## {id}\n\n- **Status:** active\n- **Task:** `001`\n- **Kind:** audit_contract_failure\n- **Provenance:** planner review\n- **Evidence:** `audit.md`\n- **Supersedes:** none\n- **Reusable lesson:** Scope the implementation before handing off.\n")
+    }
+
+    #[test]
+    fn prose_lines_preserve_offsets_and_reject_indented_fence_closers() {
+        let body = "intro λ\r\n```markdown\r\n    ```\r\n## hidden-indented-close\r\n\t```\r\n## hidden-tab-close\r\n``\r\n## hidden-short-close\r\n``` trailing\r\n## hidden-suffixed-close\r\n   ```` \t\r\n<!--\r\n## hidden-comment\r\n--> <!--\r\n## hidden-second-comment\r\n-->\r\n> ## hidden-quote\r\n    ## hidden-code\r\n \t## hidden-mixed-code\r\n  ## live\r\n- **Status:** candidate\r\n~~~markdown\r\n## hidden-tilde\r\n~~~\r\n```html <!--\r\n## hidden-comment-in-info\r\n```\r\nlast";
+        let visible = prose_lines(body);
+        assert_eq!(
+            visible.iter().map(|line| line.text).collect::<Vec<_>>(),
+            ["intro λ", "## live", "- **Status:** candidate", "last"]
+        );
+        let heading = &visible[1];
+        assert_eq!(heading.raw, "  ## live\r\n");
+        assert_eq!(heading.offset, body.find("  ## live").unwrap());
+        assert_eq!(heading.index, 19);
+        for line in visible {
+            assert_eq!(&body[line.offset..line.offset + line.raw.len()], line.raw);
+        }
     }
 
     #[test]
@@ -669,20 +810,27 @@ mod tests {
     }
 
     #[test]
-    fn completed_task_status_is_parsed_exactly() {
+    fn tasks_requiring_history_review_are_selected_by_exact_status() {
         let dir = tempfile::tempdir().unwrap();
         let tasks = dir.path().join("tasks");
         let learned = tasks.join("001-learned");
-        let unrelated = tasks.join("002-unrelated");
+        let awaiting = tasks.join("002-awaiting");
+        let unrelated = tasks.join("003-unrelated");
         std::fs::create_dir_all(&learned).unwrap();
+        std::fs::create_dir_all(&awaiting).unwrap();
         std::fs::create_dir_all(&unrelated).unwrap();
         std::fs::write(learned.join("state.json"), r#"{"status":"learned"}"#).unwrap();
+        std::fs::write(
+            awaiting.join("state.json"),
+            r#"{"status":"history_review_required"}"#,
+        )
+        .unwrap();
         std::fs::write(
             unrelated.join("state.json"),
             r#"{"status":"held","blocking_reason":"not learned yet"}"#,
         )
         .unwrap();
-        assert_eq!(learned_task_dirs(&tasks), vec![learned]);
+        assert_eq!(history_review_task_dirs(&tasks), vec![learned, awaiting]);
     }
 
     #[test]
@@ -720,5 +868,191 @@ mod tests {
         let check = check_lessons_file(dir.path(), &[]);
         assert_eq!(check.status, Status::Warn);
         assert!(check.message.contains("candidate"));
+    }
+
+    #[test]
+    fn doctor_warns_until_the_awaiting_task_review_is_resolved() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("CONTEXT.md"), context()).unwrap();
+        let task = dir.path().join(".mastermind/tasks/001-awaiting");
+        std::fs::create_dir_all(&task).unwrap();
+        std::fs::write(
+            task.join("state.json"),
+            r#"{"status":"history_review_required"}"#,
+        )
+        .unwrap();
+        let review = task.join("history-review.md");
+        std::fs::write(
+            &review,
+            "- **Context:** pending\n- **Lesson:** pending\n- **Reason:** semantic review required\n",
+        )
+        .unwrap();
+        let report = run(dir.path());
+        assert!(report.checks.iter().any(|check| {
+            check.name == "history review"
+                && check.status == Status::Warn
+                && check.message.contains("001-awaiting")
+        }));
+        std::fs::write(
+            &review,
+            "- **Context:** not applicable\n- **Lesson:** not applicable\n- **Reason:** The verified typo fix adds no durable rule.\n",
+        )
+        .unwrap();
+        let report = run(dir.path());
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.name == "history review" && check.status == Status::Ok));
+    }
+
+    #[test]
+    fn doctor_rejects_quoted_or_ambiguous_review_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let complete = "- **Context:** not applicable\n- **Lesson:** updated\n- **Reason:** Reviewed the boundary rule against the audit.\n";
+        for body in [
+            format!("```markdown\n{complete}```\n"),
+            format!("<!--\n{complete}-->\n"),
+            format!("{complete}- **Lesson:** pending\n"),
+            format!("{complete}- **Reason:** semantic review required\n"),
+        ] {
+            std::fs::write(dir.path().join("history-review.md"), &body).unwrap();
+            assert_eq!(
+                check_history_review(&[dir.path().to_path_buf()]).status,
+                Status::Warn,
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn doctor_requires_the_task_snapshot_when_reviewing_new_audits() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("CONTEXT.md"), context()).unwrap();
+        let task = dir.path().join(".mastermind/tasks/001-awaiting");
+        std::fs::create_dir_all(&task).unwrap();
+        let complete = "- **Context:** not applicable\n- **Lesson:** not applicable\n- **Reason:** The audited typo fix introduces no durable decision.\n";
+        for status in ["history_review_required", "learned"] {
+            std::fs::write(
+                task.join("state.json"),
+                format!(r#"{{"status":"{status}","history_snapshot_sha256":"current"}}"#),
+            )
+            .unwrap();
+            for (marker, expected) in [
+                ("", Status::Warn),
+                ("- **Audit snapshot:** previous\n", Status::Warn),
+                ("- **Audit snapshot:** current\n", Status::Ok),
+            ] {
+                std::fs::write(
+                    task.join("history-review.md"),
+                    format!("{marker}{complete}"),
+                )
+                .unwrap();
+                let report = run(dir.path());
+                let check = report
+                    .checks
+                    .iter()
+                    .find(|check| check.name == "history review")
+                    .unwrap();
+                assert_eq!(check.status, expected, "{status}: {marker}");
+            }
+        }
+        std::fs::write(task.join("state.json"), r#"{"status":"learned"}"#).unwrap();
+        std::fs::write(task.join("history-review.md"), complete).unwrap();
+        assert!(run(dir.path())
+            .checks
+            .iter()
+            .any(|check| check.name == "history review" && check.status == Status::Ok));
+    }
+
+    #[test]
+    fn copied_lessons_in_notes_are_not_records_or_record_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks = dir.path().join(".mastermind/tasks");
+        std::fs::create_dir_all(&tasks).unwrap();
+        let copied = reviewed_lesson("lesson-copy");
+        let reviewed = reviewed_lesson("lesson-reviewed");
+        let pending =
+            reviewed_lesson("lesson-live").replace("Status:** active", "Status:** candidate");
+        for example in [
+            format!("```markdown\n{copied}```\n"),
+            format!("~~~markdown\n{copied}~~~\n"),
+            format!("<!--\n{copied}-->\n"),
+            copied.lines().map(|line| format!("> {line}\n")).collect(),
+            copied.lines().map(|line| format!("    {line}\n")).collect(),
+        ] {
+            let only_example = format!("# Project lessons\n\n{example}");
+            std::fs::write(tasks.join("_lessons.md"), &only_example).unwrap();
+            let check = check_lessons_file(dir.path(), &[]);
+            assert_eq!(check.status, Status::Warn, "{example}");
+            assert!(check.message.contains("no structured entries"), "{example}");
+
+            let notes =
+                format!("# Project lessons\n\n{reviewed}\n### Review notes\n{example}\n{pending}");
+            std::fs::write(tasks.join("_lessons.md"), &notes).unwrap();
+            let blocks = level_two_blocks(&notes);
+            assert_eq!(
+                blocks.iter().map(|(title, _)| *title).collect::<Vec<_>>(),
+                ["lesson-reviewed", "lesson-live"],
+                "{example}"
+            );
+            let check = check_lessons_file(dir.path(), &[]);
+            assert_eq!(check.status, Status::Warn, "{example}");
+            assert_eq!(check.message, "1 candidate lesson(s) await semantic review");
+        }
+    }
+
+    #[test]
+    fn reviewed_lessons_require_a_valid_status_and_completed_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks = dir.path().join(".mastermind/tasks");
+        std::fs::create_dir_all(&tasks).unwrap();
+        let valid = "# Project lessons\n\n## lesson-abc\n\n- **Status:** active\n- **Task:** `001`\n- **Kind:** audit_contract_failure\n- **Provenance:** planner review\n- **Evidence:** `audit.md`\n- **Supersedes:** none\n- **Reusable lesson:** Scope the implementation before handing off.\n";
+        for status in ["active", "resolved", "superseded"] {
+            std::fs::write(
+                tasks.join("_lessons.md"),
+                valid.replace("Status:** active", &format!("Status:** {status}")),
+            )
+            .unwrap();
+            assert_eq!(check_lessons_file(dir.path(), &[]).status, Status::Ok);
+        }
+        for (from, to) in [
+            ("Status:** active", "Status:**"),
+            ("Status:** active", "Status:** unexpected"),
+            ("Evidence:** `audit.md`", "Evidence:** ``"),
+            ("Evidence:** `audit.md`", "Evidence:** TBD"),
+            ("Provenance:** planner review", "Provenance:**"),
+            (
+                "Reusable lesson:** Scope the implementation before handing off.",
+                "Reusable lesson:**",
+            ),
+            (
+                "Reusable lesson:** Scope the implementation before handing off.",
+                "Reusable lesson:** pending semantic review",
+            ),
+            (
+                "Reusable lesson:** Scope the implementation before handing off.",
+                "Reusable lesson:** `<reviewed lesson>`",
+            ),
+        ] {
+            std::fs::write(tasks.join("_lessons.md"), valid.replace(from, to)).unwrap();
+            assert_eq!(
+                check_lessons_file(dir.path(), &[]).status,
+                Status::Warn,
+                "{to}"
+            );
+        }
+        std::fs::write(
+            tasks.join("_lessons.md"),
+            format!("{valid}- **Status:** candidate\n"),
+        )
+        .unwrap();
+        assert_eq!(check_lessons_file(dir.path(), &[]).status, Status::Warn);
+
+        std::fs::write(
+            tasks.join("_lessons.md"),
+            format!("{valid}\n### Rejected example\n~~~markdown\n- **Status:** candidate\n- **Evidence:** pending\n~~~\n<!--\n- **Reusable lesson:** pending\n-->\n"),
+        )
+        .unwrap();
+        assert_eq!(check_lessons_file(dir.path(), &[]).status, Status::Ok);
     }
 }

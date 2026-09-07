@@ -150,10 +150,22 @@ Mechanical drift may create one lesson candidate per task. A candidate records
 the observed failure; it is not reusable guidance until semantic review writes
 the actual lesson and changes its status. Repeated failures refresh the same
 candidate instead of creating duplicates.
+The refresh changes event counts, observations and the latest event evidence;
+it preserves reviewed provenance, evidence, lesson text and review notes.
 
 After a held audit, review `history-review.md` and mark Context and Lesson as
 `updated` or `not applicable` with a concrete reason. This prevents a successful
 diff from silently becoming an invented architectural decision.
+Keep the generated **Audit snapshot** marker and run `mastermind run-task
+<task>/spec.md` to finish. A changed spec, executor report, implementation or
+audit output requires another audit. The controller archives the previous
+review before opening one for changed evidence. Writing CONTEXT, its archives
+and lessons is part of semantic review; declared task files remain bound.
+
+`context-doctor` checks pending and completed tasks, explicit review dispositions,
+allowed lesson statuses and non-placeholder evidence. An `audit.md` file by
+itself does not complete a task. Completed tasks describe the version they
+reviewed; later unrelated work does not reopen them.
 
 ## Deterministic workflow audit
 

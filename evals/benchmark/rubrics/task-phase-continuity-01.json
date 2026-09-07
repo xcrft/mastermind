@@ -1,0 +1,42 @@
+{
+  "task_id": "task-phase-continuity-01",
+  "status": "calibration_key_requires_independent_semantic_review",
+  "source_revision": "1bc7c3c51e9e9a06799062fbd0dee83899ff3299",
+  "required_knowns": [
+    {
+      "claim": "Pre-flight verifies the parsed spec, then persists approved state, its spec hash and the captured HEAD baseline.",
+      "anchors": ["mcp/servers/mmcg/src/run_task.rs:1277-1291", "mcp/servers/mmcg/src/run_task.rs:1303-1336"]
+    },
+    {
+      "claim": "Explicit post-flight resumes with stored state but parses the current spec and audits it against the saved baseline.",
+      "anchors": ["mcp/servers/mmcg/src/run_task.rs:1059-1067", "mcp/servers/mmcg/src/run_task.rs:1407-1426", "mcp/servers/mmcg/src/run_task.rs:1485-1491"]
+    },
+    {
+      "claim": "A spec-hash mismatch prints a warning. It neither blocks nor requires new pre-flight verification before the audit.",
+      "anchors": ["mcp/servers/mmcg/src/run_task.rs:1417-1428", "mcp/servers/mmcg/src/run_task.rs:1485-1491"]
+    },
+    {
+      "claim": "The edited contract controls audit scope. Widening touches can remove an UnexpectedFile finding without renewed pre-flight approval. It does not guarantee Held.",
+      "anchors": ["mcp/servers/mmcg/src/audit_spec.rs:294-319", "mcp/servers/mmcg/src/audit_spec.rs:417-430"]
+    },
+    {
+      "claim": "On the would-be Held path, post-flight stability checks cover changes during that phase. A successful Held path can still write release/history artifacts and require semantic review.",
+      "anchors": ["mcp/servers/mmcg/src/run_task.rs:1539-1547", "mcp/servers/mmcg/src/run_task.rs:1571-1597", "mcp/servers/mmcg/src/run_task.rs:1598-1619", "mcp/servers/mmcg/src/run_task.rs:1635-1649"]
+    }
+  ],
+  "expected_unknowns": [
+    "The actual audit verdict depends on implementation changes and executor claims. No execution occurred.",
+    "Architecture-policy acceptance is outside the source allowlist."
+  ],
+  "materially_false_claims": [
+    "Spec drift necessarily blocks post-flight or automatically reruns verify_spec.",
+    "Every edited spec reaches Held, or Held automatically means semantic learning is complete.",
+    "The during-post snapshot comparison proves continuity with the pre-flight spec.",
+    "Pre-flight spec_hash uses SHA-256 at this revision.",
+    "Runtime tests or CI validated the described scenario."
+  ],
+  "reviewer_notes": ["The historical hash_text uses DefaultHasher at mcp/servers/mmcg/src/run_task.rs:655-658."],
+  "review_dimensions": ["claim_to_source_support", "critical_evidence_coverage", "material_false_conclusions", "appropriate_unknowns"],
+  "decision_quality": "not_applicable_to_facts_only_research_task",
+  "automatic_quality_score": null
+}

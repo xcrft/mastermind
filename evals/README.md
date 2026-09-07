@@ -18,6 +18,7 @@ correctness, or evidence that the behavior survives a long real-world task.
 | `workflow.jsonl` | Planner, executor, and portable skills | Required and forbidden signals |
 | `fixtures/` | Real Git histories for researcher/auditor cases | Exact planted change |
 | `scorecard.md` | Dated full-suite results | Environment and trust notes |
+| `benchmark/` | Three-condition research trial preparation and adapter transport | Full answers retained for semantic review; no quality score yet |
 
 `runner.py` invokes `claude -p`. Researcher and auditor cases load the shipped
 agents through Claude's `--agents` / `--agent` runtime contract, so frontmatter
@@ -61,7 +62,7 @@ Model-backed evals are hand-run, not ordinary CI. CI runs the deterministic
 harness contract through:
 
 ```bash
-python3 -m unittest evals/test_runner.py evals/test_evidence.py
+python3 -m unittest evals/test_runner.py evals/test_evidence.py evals/test_benchmark.py
 ```
 
 ## Reports and token gates
@@ -194,6 +195,13 @@ CLI version, revision, and budgets, and review final reasoning for unsupported
 claims and appropriate abstention. Compare prompt changes only on the same
 case digest. Add unseen tasks and a source-search baseline before optimizing
 skills against scores; do not treat passing parser tests as a model result.
+
+The separate [research benchmark transport](benchmark/README.md) freezes one
+public task, source allowlist, hidden rubric and budgets across source-only,
+portable-instruction and portable-plus-mmcg conditions. It saves full bounded
+answers and separates infrastructure and telemetry from semantic quality. Its
+current trusted-adapter boundary is not an OS sandbox, so all comparison results
+remain ineligible for an uplift claim.
 
 ## Add an auditor case
 

@@ -136,6 +136,18 @@ def source_records(repo: Path, task: dict) -> dict:
     return records
 
 
+def validate_anchors(anchors: list[str], sources: dict) -> None:
+    for anchor in anchors:
+        path, separator, span = anchor.rpartition(":")
+        if not separator or not re.fullmatch(r"[1-9][0-9]{0,9}(?:-[1-9][0-9]{0,9})?", span):
+            raise bench.BenchmarkError("corpus_anchor_invalid", "anchors must be path:line or path:first-last")
+        if path not in sources:
+            raise bench.BenchmarkError("corpus_anchor_scope", "key evidence is outside the model-visible source allowlist")
+        bounds = [int(value) for value in span.split("-")]
+        if not 1 <= bounds[0] <= bounds[-1] <= sources[path]["lines"]:
+            raise bench.BenchmarkError("corpus_anchor_range", f"anchor is outside the pinned source lines: {anchor}")
+
+
 def _case(root: Path, registry: dict, entry: dict, source_repo: Path, registry_name: str) -> dict:
     task = bench.validate_task(bench.load_json(root / entry["task"]))
     if task["id"] != entry["id"]:
@@ -156,15 +168,7 @@ def _case(root: Path, registry: dict, entry: dict, source_repo: Path, registry_n
     if any(path not in task["source_allowlist"] for path in indexed):
         raise bench.BenchmarkError("corpus_index_scope", "indexed files must be an explicit source subset")
     sources = source_records(source_repo, task)
-    for anchor in anchors:
-        path, separator, span = anchor.rpartition(":")
-        if not separator or not re.fullmatch(r"[1-9][0-9]{0,9}(?:-[1-9][0-9]{0,9})?", span):
-            raise bench.BenchmarkError("corpus_anchor_invalid", "anchors must be path:line or path:first-last")
-        if path not in sources:
-            raise bench.BenchmarkError("corpus_anchor_scope", "key evidence is outside the model-visible source allowlist")
-        bounds = [int(value) for value in span.split("-")]
-        if not 1 <= bounds[0] <= bounds[-1] <= sources[path]["lines"]:
-            raise bench.BenchmarkError("corpus_anchor_range", f"anchor is outside the pinned source lines: {anchor}")
+    validate_anchors(anchors, sources)
     summary = {"id": entry["id"], "role": entry["role"], "coverage": entry["coverage"],
                "source_revision": task["revision"], "source_files": list(sources.values()),
                "indexed_files": sorted(indexed), "anchors_checked": len(anchors),

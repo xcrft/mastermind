@@ -11,7 +11,7 @@ workflow:
   activation: conditional
   mutability: read-only
 metadata:
-  version: 0.5.0
+  version: 0.6.0
   authors:
     - mastermind
   tags:
@@ -39,25 +39,30 @@ Score every dimension:
 6. AI slop — no generic padding, hallucinated symbols, decorative taxonomy, or
    fabricated SLA/accuracy/resource targets.
 7. Tests and docs — observable acceptance evidence, relevant tests, docs, and
-   at least two real alternatives for a non-trivial design.
+   plausible alternatives where a real design choice exists.
 
 Use one verdict per dimension:
 
 - `pass`: no material gap. Use a one-line reason when not applicable.
 - `concern`: the approach is sound but needs a concrete guard or detail.
 - `fail`: the approach is materially wrong or unsafe, not merely underspecified.
+- `unknown`: a fact needed to assess this dimension is missing or contradictory.
 
-Ground findings in supplied file/symbol/query evidence. For a code-changing
-design, missing mmcg evidence is a test-and-doc `fail`; also flag any resulting
-ungrounded claim under AI slop. Never invent a concern to fill a row. Mention
-an alternative only when needed to explain a failing dimension.
+Ground findings in files, queries, tests, or runtime evidence. Missing mmcg
+alone is not a failure when source evidence answers the claim. Unsupported
+claims stay unknown; call fabrication a fail only when evidence contradicts
+the claim. Never invent concerns or alternatives to fill rows.
 
 Aggregate deterministically:
 
-- all pass → `ship it`
-- concerns and no fail → `ship with caveats`
-- one fail → `revise`
-- two or more fails, or a correctness fail that invalidates the approach → `rethink`
+- two or more evidenced fails, or a correctness fail invalidating the approach → `rethink`
+- otherwise one evidenced fail → `revise`
+- otherwise any unknown → `insufficient evidence`
+- otherwise any concern → `ship with caveats`
+- otherwise all pass → `ship it`
+
+Known failures remain blocking even with unknowns. Missing facts alone do not
+prove a bad design. For each unknown, name the smallest evidence probe needed.
 
 ## Output
 
@@ -66,24 +71,17 @@ Aggregate deterministically:
 
 | Dimension | Verdict | Evidence |
 |---|---|---|
-| Correctness | pass / concern / fail | <specific evidence> |
-| Performance and scale | pass / concern / fail | <specific evidence> |
-| Observability | pass / concern / fail | <specific evidence> |
-| Compatibility | pass / concern / fail | <specific evidence> |
-| YAGNI | pass / concern / fail | <specific evidence> |
-| AI slop | pass / concern / fail | <specific evidence> |
-| Tests and docs | pass / concern / fail | <specific evidence> |
+<all seven rows: pass / concern / fail / unknown, with evidence or missing fact>
 
 ## Required changes
-- <only concern/fail items: issue, trigger, smallest guard>
+- <concern/fail items: issue, trigger, smallest guard>
 
 ## What would change the verdict
-<one evidence question for the worst dimension>
+<missing facts and bounded probes, or the proof that would reverse a finding>
 
 ## Verdict
-<ship it | ship with caveats | revise | rethink> — <one evidence-bound sentence>
+<ship it | ship with caveats | revise | rethink | insufficient evidence> — <reason>
 ```
 
-Omit `Required changes` when every dimension passes. Keep each table cell to
-one or two sentences. Do not add examples, generic best practices, or repeat
-the proposal.
+Omit `Required changes` without concern/fail items. Keep cells to two sentences.
+The sole final `## Verdict` section ends the response. Do not repeat the proposal.

@@ -42,6 +42,11 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 
+if __package__:
+    from .evidence import answer_lines, check_citations
+else:
+    from evidence import answer_lines, check_citations
+
 try:
     import yaml as _yaml
     _YAML_AVAILABLE = True
@@ -184,6 +189,7 @@ class Result:
     telemetry_issues: list[str] = field(default_factory=list)
     resolved_models: list[str] = field(default_factory=list)
     tool_calls: list[str] = field(default_factory=list)
+    citation_checks: dict | None = None
 
     @property
     def context_tokens(self) -> int:
@@ -575,6 +581,7 @@ def result_report(result: Result) -> dict:
         "cost_usd": result.cost_usd,
         "resolved_models": result.resolved_models,
         "tool_calls": result.tool_calls,
+        "citation_checks": result.citation_checks,
     }
 
 
@@ -897,6 +904,27 @@ def report_comparison_issues(report: object, label: str) -> list[str]:
             case.get("tool_calls"), allow_empty=True, unique=False
         ):
             issues.append(f"{label} case {case_id!r} has invalid tool calls")
+
+        citations = case.get("citation_checks")
+        if citations is not None:
+            counters = ("expected", "matched", "total", "valid")
+            if (
+                not isinstance(citations, dict)
+                or any(not _non_negative_integer(citations.get(key)) for key in counters)
+                or not _string_list(citations.get("issues"), allow_empty=True, unique=False)
+            ):
+                issues.append(f"{label} case {case_id!r} has invalid citation checks")
+            elif (
+                citations["matched"] > citations["expected"]
+                or citations["valid"] > citations["total"]
+                or (not citations["issues"] and (
+                    citations["expected"] == 0
+                    or citations["matched"] != citations["expected"]
+                    or citations["valid"] != citations["total"]
+                ))
+                or (case.get("passed") is True and citations["issues"])
+            ):
+                issues.append(f"{label} case {case_id!r} has inconsistent citation checks")
 
         usage = case.get("usage")
         if not isinstance(usage, dict):
@@ -1505,35 +1533,27 @@ _INTAKE_BLOCK_RE = re.compile(
 )
 
 
-CRITIC_VERDICTS = frozenset({"ship it", "ship with caveats", "revise", "rethink"})
+CRITIC_VERDICTS = frozenset({
+    "ship it", "ship with caveats", "revise", "rethink", "insufficient evidence",
+})
+_CRITIC_VERDICT_PATTERN = "|".join(
+    re.escape(verdict) for verdict in sorted(CRITIC_VERDICTS, key=len, reverse=True)
+)
 _CRITIC_VERDICT_RE = re.compile(
-    r"^(ship with caveats|ship it|revise|rethink)(?=\s*(?:$|[—–:-](?:\s|$)))",
+    rf"^({_CRITIC_VERDICT_PATTERN})(?=\s*(?:$|[—–:-](?:\s|$)))",
     re.I,
 )
 
 
 def extract_critic_verdict(output: str) -> str | None:
     """Read the sole final Verdict section, excluding quoted Markdown examples."""
-    lines: list[str] = []
-    fence: tuple[str, int] | None = None
-    output = re.sub(r"<!--.*?(?:-->|$)", "", output, flags=re.S)
-    for line in output.splitlines():
-        marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
-        if fence is not None:
-            if (
-                marker
-                and marker[1][0] == fence[0]
-                and len(marker[1]) >= fence[1]
-                and not marker[2].strip()
-            ):
-                fence = None
-            continue
-        if marker:
-            fence = (marker[1][0], len(marker[1]))
-            continue
-        if line.startswith(("    ", "\t")) or re.match(r"^ {0,3}>", line):
-            continue
-        lines.append(line.strip())
+    lines = answer_lines(output)
+
+    if any(
+        re.match(r"^(?:[-+*]\s+)?(?:final\s+)?verdict\s*:", re.sub(r"[*_`]", "", line), re.I)
+        for line in lines
+    ):
+        return None
 
     headings = [
         index for index, line in enumerate(lines)
@@ -1550,7 +1570,7 @@ def extract_critic_verdict(output: str) -> str | None:
         if index:
             line = re.sub(r"^(?:[-+*]|\d+[.)])\s+", "", line)
         line = re.sub(
-            r"^(\*\*|__|`|\*|_)(ship with caveats|ship it|revise|rethink)\1(?=\s|$)",
+            rf"^(\*\*|__|`|\*|_)({_CRITIC_VERDICT_PATTERN})\1(?=\s|$)",
             r"\2", line, flags=re.I,
         )
         verdicts.append(_CRITIC_VERDICT_RE.match(line))
@@ -1908,7 +1928,10 @@ def evaluate_case(
                         "no structured audit verdict block found "
                         "(<!-- mastermind:audit-begin --> ... <!-- mastermind:audit-end -->)"
                     )
-            elif suite_name == "critic":
+            elif suite_name == "critic" or (
+                suite_name == "workflow"
+                and case.get("artifact") == "skills/workflow/mastermind-critical-review/SKILL.md"
+            ):
                 invalid_candidates = [
                     candidate for candidate in candidates
                     if candidate.lower() not in CRITIC_VERDICTS
@@ -1965,6 +1988,13 @@ def evaluate_case(
                 passed = False
                 reasons.extend(comment_reasons)
 
+        citation_checks = None
+        if "citations" in expect:
+            citation_checks = check_citations(output, expect["citations"], fixture_path)
+            if citation_checks["issues"]:
+                passed = False
+                reasons.extend(citation_checks["issues"])
+
         if not passed and permission_denials:
             reasons.append(
                 "permission denials: "
@@ -1992,6 +2022,7 @@ def evaluate_case(
             telemetry_issues=list(telemetry["issues"]),
             resolved_models=list(telemetry["resolved_models"]),
             tool_calls=tool_calls,
+            citation_checks=citation_checks,
         )
     finally:
         if prompt_sandbox is not None:

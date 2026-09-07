@@ -263,9 +263,10 @@ You are implementing {description}.
 
 ---
 
-## Alternatives Considered *(MANDATORY — at least 2 entries)*
+## Alternatives Considered
 
-The planner must enumerate ≥ 2 plausible approaches and explain why each was rejected.
+Include only plausible alternatives for a real design choice. Remove unused
+placeholders and explain when no meaningful alternative exists.
 
 ### Alternative A — <name>
 
@@ -386,7 +387,7 @@ VERIFY: `<command>`
 - [ ] All FIND: blocks match current file contents (whitespace-sensitive)
 - [ ] `mmcg_impact` on each changed symbol agrees with stated scope
 - [ ] VERIFY: commands are runnable
-- [ ] **Alternatives Considered has ≥ 2 entries**
+- [ ] **Alternatives Considered covers the real choice without filler**
 - [ ] **Codeflow diagrams** present, nodes mmcg-verified or marked `[NEW]`
 - [ ] **Decision Matrix** filled — exactly one row is `chosen`
 - [ ] **Pre-edit snapshot** filled via mmcg (or deleted if no code symbols)
@@ -398,7 +399,7 @@ VERIFY: `<command>`
 ### Design-time critic verdict
 
 - **Spawn:** <YYYY-MM-DD> — brief: <summary>
-- **Aggregate verdict:** `<ship it | ship with caveats | revise | rethink>`
+- **Aggregate verdict:** `<ship it | ship with caveats | revise | rethink | insufficient evidence>`
 - **Dimension scores:** <paste 7-row table>
 "
     )
@@ -448,16 +449,17 @@ You are implementing {description}.
 - RUN `<typecheck command>` after each phase — must exit 0
 - VERIFY `mmcg_callers` count stays consistent on touched symbols
 
-**Critic findings baked into rules** *(paste concern/fail items from all 3 critic lenses here):*
+**Critic findings baked into rules** *(paste evidenced concern/fail items here):*
 - <security caveat>
 - <performance caveat>
 - <simplicity caveat>
 
 ---
 
-## Alternatives Considered *(MANDATORY — at least 2 entries)*
+## Alternatives Considered
 
-The planner must enumerate ≥ 2 plausible approaches and explain why each was rejected.
+Include only plausible alternatives for a real design choice. Remove unused
+placeholders and explain when no meaningful alternative exists.
 
 ### Alternative A — <name>
 
@@ -612,7 +614,7 @@ VERIFY: `<command>`
 - [ ] All FIND: blocks match current file contents (whitespace-sensitive)
 - [ ] `mmcg_impact` on each changed symbol agrees with stated scope
 - [ ] VERIFY: commands are runnable
-- [ ] **Alternatives Considered has ≥ 2 entries**
+- [ ] **Alternatives Considered covers the real choice without filler**
 - [ ] **Codeflow diagrams** present, all nodes mmcg-verified or marked `[NEW]`
 - [ ] **Decision Matrix** filled — exactly one row is `chosen`
 - [ ] **Risk Register** filled — every high-impact risk has a mitigation
@@ -624,24 +626,21 @@ VERIFY: `<command>`
 - [ ] **Performance Considerations** addressed
 - [ ] **Rollback / Migration** section complete
 
-### Design-time critic verdict (3-lens panel — MANDATORY for strict)
+### Design-time critic verdict (independent review — required for strict)
 
-**Security lens:**
+Use one critic by default. Add separate security/performance/simplicity lenses
+only when their questions are independent; omit unused lens sections.
+
+**Primary review:**
 - **Spawn:** <YYYY-MM-DD> — brief: <summary>
-- **Aggregate verdict:** `<ship it | ship with caveats | revise | rethink>`
+- **Aggregate verdict:** `<ship it | ship with caveats | revise | rethink | insufficient evidence>`
 - **Dimension scores:** <paste 7-row table>
 
-**Performance lens:**
-- **Spawn:** <YYYY-MM-DD>
-- **Aggregate verdict:** `<verdict>`
-- **Dimension scores:** <paste 7-row table>
+**Additional independent lenses:** <results if needed, otherwise remove>
 
-**Simplicity lens:**
-- **Spawn:** <YYYY-MM-DD>
-- **Aggregate verdict:** `<verdict>`
-- **Dimension scores:** <paste 7-row table>
-
-**Combined verdict:** `<ship it | ship with caveats | revise | rethink>`
+**Combined verdict:** `<ship it | ship with caveats | revise | rethink | insufficient evidence>`
+Do not average away blocking findings. Resolve evidenced failures first, then
+material unknowns. `insufficient evidence` returns to research before acceptance.
 **Planner's disagreements (if any):** <if planner overrode any critic finding, document why>
 "
     )

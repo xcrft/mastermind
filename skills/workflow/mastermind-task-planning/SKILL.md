@@ -2,7 +2,7 @@
 name: mastermind-task-planning
 description: Choose the lightest Mastermind workflow that fits the risk, then create an evidence-grounded verified or strict task contract for delegated implementation. Direct work deliberately uses no task spec.
 metadata:
-  version: 0.17.1
+  version: 0.17.2
   authors: [mastermind]
   tags: [workflow, planning, delegation, mmcg, audit]
 ---
@@ -80,6 +80,12 @@ is silent.
 Send reviewers a compact packet: problem, proposed design, concrete codegraph
 evidence, constraints, and only plausible alternatives. Do not paste the whole
 brainstorming transcript.
+
+Resolve the critic's `insufficient evidence` with a bounded research probe
+before accepting the design. Missing facts do not require redesign by
+themselves. `revise` and `rethink` require addressing the evidenced defect;
+unknowns never cancel that finding. Preserve the final verdict and remaining
+unknowns in the handoff rather than converting them to approval.
 
 ## Create a verified contract
 

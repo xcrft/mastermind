@@ -11,7 +11,7 @@ from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
-from evals import runner
+from evals import ablation, runner
 
 
 RESOLVED_MODEL = "claude-opus-test"
@@ -331,6 +331,30 @@ action: passthrough
             loaded = runner.load_report(path)
         self.assertEqual(loaded["kind"], runner.REPORT_KIND)
         self.assertEqual(loaded["cases"], report["cases"])
+
+    def test_report_gate_rejects_inconsistent_citation_scores(self):
+        result = runner.Result(
+            "source-case", "researcher", True, telemetry_complete=True,
+            resolved_models=[RESOLVED_MODEL],
+            citation_checks={"expected": 1, "matched": 1, "total": 1, "valid": 1, "issues": []},
+        )
+        report = runner.build_report(
+            [result], model="opus", suite_filter="researcher", case_filter=None
+        )
+        report["claude_cli_version"] = "test-cli"
+        report["suites"]["researcher"]["case_definition_digest"] = "e" * 64
+        self.assertEqual(runner.report_comparison_issues(report, "test"), [])
+        for update in (
+            {"matched": 0}, {"matched": 2}, {"valid": 2}, {"valid": False},
+            {"expected": 0}, {"issues": ["missing citation"]},
+        ):
+            with self.subTest(update=update):
+                malformed = deepcopy(report)
+                malformed["cases"][0]["citation_checks"].update(update)
+                self.assertTrue(runner.report_comparison_issues(malformed, "test"))
+        legacy = deepcopy(report)
+        del legacy["cases"][0]["citation_checks"]
+        self.assertEqual(runner.report_comparison_issues(legacy, "test"), [])
 
     def test_baseline_gate_requires_quality_and_lower_p50_p95_context(self):
         baseline_results = [
@@ -674,6 +698,8 @@ class CriticGraderTests(unittest.TestCase):
             "## Verdict\nrethink — invalid approach.\n## Verdict\nrethink — repeated.",
             "## Verdict\nrethink or revise — uncertain.",
             "## Verdict\nrethink — invalid approach.\n## Final answer\nship it.",
+            "## Verdict\ninsufficient evidence — unknown.\n\n**Verdict:** ship it",
+            "**Verdict:** rethink\n\n## Verdict\nship it — proceed.",
         ]
         for output in outputs:
             with self.subTest(output=output):
@@ -681,7 +707,7 @@ class CriticGraderTests(unittest.TestCase):
                 self.assertFalse(result.passed, result.reasons)
 
     def test_critic_accepts_exact_contract_verdicts_and_markdown_emphasis(self):
-        for verdict in ("ship it", "ship with caveats", "revise", "rethink"):
+        for verdict in ("ship it", "ship with caveats", "revise", "rethink", "insufficient evidence"):
             for label in (verdict, f"**{verdict}**", f"`{verdict}`"):
                 with self.subTest(label=label):
                     case = {
@@ -696,6 +722,23 @@ class CriticGraderTests(unittest.TestCase):
                     )
                     self.assertTrue(result.passed, result.reasons)
 
+    def test_critic_missing_evidence_is_not_a_design_failure(self):
+        case = {
+            "id": "critic-missing-evidence",
+            "input": {"mmcg_snapshot": "Unavailable"},
+            "expect": {"verdict": "insufficient evidence"},
+        }
+        result = self.evaluate(
+            "The cache invalidation contract has not been inspected.\n\n"
+            "## Verdict\ninsufficient evidence — read the mutation paths first.",
+            case,
+        )
+        self.assertTrue(result.passed, result.reasons)
+        for wrong in ("revise", "rethink", "ship it"):
+            with self.subTest(wrong=wrong):
+                result = self.evaluate(f"## Verdict\n{wrong} — no evidence.", case)
+                self.assertFalse(result.passed)
+
     def test_shipped_critic_cases_expect_aggregate_verdicts(self):
         for line in runner.SUITES["critic"]["cases"].read_text().splitlines():
             case = json.loads(line)
@@ -704,8 +747,65 @@ class CriticGraderTests(unittest.TestCase):
                 verdicts = [verdicts]
             self.assertTrue(set(verdicts) <= runner.CRITIC_VERDICTS, case["id"])
 
+    def test_portable_critic_uses_the_same_final_verdict_grader(self):
+        case = {
+            "id": "portable-critic-evidence",
+            "artifact": "skills/workflow/mastermind-critical-review/SKILL.md",
+            "input": {"prompt": "Only the file name is known."},
+            "expect": {"verdict": "insufficient evidence"},
+        }
+        suite = runner.SUITES["workflow"]
+        for verdict, passed in (("insufficient evidence", True), ("ship it", False)):
+            events = [
+                {"type": "system", "subtype": "init", "model": RESOLVED_MODEL},
+                {
+                    "type": "result", "result": (
+                        "I considered insufficient evidence.\n\n"
+                        f"## Verdict\n{verdict} — assessment of supplied evidence."
+                    ),
+                    "duration_ms": 1, "duration_api_ms": 1, "num_turns": 1,
+                    "total_cost_usd": 0, "modelUsage": {RESOLVED_MODEL: {}},
+                    "usage": {
+                        "input_tokens": 1, "output_tokens": 1,
+                        "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+                    },
+                },
+            ]
+            process = subprocess.CompletedProcess(
+                [], 0, "\n".join(json.dumps(event) for event in events), ""
+            )
+            with self.subTest(verdict=verdict), patch.object(runner.subprocess, "run", return_value=process):
+                result = runner.evaluate_case("opus", "workflow", suite, case, keep_fixtures=False)
+                self.assertEqual(result.passed, passed, result.reasons)
+
 
 class PromptIsolationTests(unittest.TestCase):
+    def test_vanilla_comparison_preserves_uncommitted_fixture_state(self):
+        for staged in ([], ["src/staged.py"]):
+            case = {
+                "fixture": "uncommitted-audit", "baseline_ref": "baseline",
+                "after_ref": "executor-added", "staged_paths": staged,
+                "input": {}, "expect": {"contains": ["changed"]},
+            }
+            fixture = Path("/unused-disposable-fixture")
+            process = subprocess.CompletedProcess([], 0, '{"result":"changed"}', "")
+            with (
+                self.subTest(staged=staged),
+                patch.object(runner, "setup_fixture", return_value=fixture) as setup,
+                patch.object(runner, "teardown_fixture"),
+                patch.object(ablation.subprocess, "run", return_value=process) as invoke,
+            ):
+                self.assertTrue(ablation.run_vanilla("opus", case))
+                setup.assert_called_once_with(
+                    "uncommitted-audit", "baseline", "executor-added", staged_paths=staged
+                )
+                prompt = invoke.call_args.kwargs["input"]
+                self.assertIn("git diff baseline --", prompt)
+                self.assertIn("git ls-files --others --exclude-standard --", prompt)
+                self.assertNotIn("baseline..executor-added", prompt)
+        committed = ablation.vanilla_message({"input": {}}, fixture, "baseline", "after")
+        self.assertIn("git diff baseline..after", committed)
+
     def test_fixture_copy_exposes_same_size_changes_despite_matching_source_mtimes(self):
         with tempfile.TemporaryDirectory(prefix="mmcg-fixture-stat-cache-") as temporary:
             root = Path(temporary)

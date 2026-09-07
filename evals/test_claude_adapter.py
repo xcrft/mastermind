@@ -193,7 +193,7 @@ class ClaudeAdapterTests(unittest.TestCase):
 
     def native(self):
         body = ("import sys\nif sys.argv[3:] == ['serve']:\n" + textwrap.indent(NATIVE_SERVER, "    ")
-                + "    sys.exit(0)\n" + f"CONTRACT = {fixtures.CONTRACT!r}\nMODE = 'ok'\n" + fixtures.INDEXER_BODY)
+                + "    sys.exit(0)\n" + f"CONTRACT = {fixtures.CONTRACT!r}\nMODE = 'ok'\nINDEXED_FILES = ['src/service.py']\n" + fixtures.INDEXER_BODY)
         pin = self.fixture.executable("fake-mmcg", body)
         self.fixture.config["mmcg"] = dict(pin, source_revision=self.fixture.revision,
                                            index_contract=fixtures.CONTRACT, indexed_files=["src/service.py"])

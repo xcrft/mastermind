@@ -1,0 +1,82 @@
+{
+  "task_id": "reference-removal-evidence-01",
+  "source_revision": "cbc8179320d815c07609f859810b3e64ebc74d48",
+  "status": "calibration_key_source_reviewed",
+  "required_knowns": [
+    {
+      "claim": "Recognized, unshadowed callables in supported Rust value positions produce references edges. For a known, unshadowed function name leaf, the value initializer in let callback = leaf is one supported example. Ordinary call expressions outside macro-body reparsing produce calls edges. The store preserves the emitted kind and target metadata and inserts target to_id as NULL rather than resolving it during this commit.",
+      "anchors": [
+        "mcp/servers/mmcg/src/indexer/rust_lang.rs:292-299",
+        "mcp/servers/mmcg/src/indexer/rust_lang.rs:332-339",
+        "mcp/servers/mmcg/src/indexer/rust_lang.rs:361-393",
+        "mcp/servers/mmcg/src/indexer/rust_lang.rs:623-667",
+        "mcp/servers/mmcg/src/indexer/rust_lang.rs:706-725",
+        "mcp/servers/mmcg/src/store.rs:4450-4467"
+      ]
+    },
+    {
+      "claim": "callers defaults to calls and explicitly selecting references chooses that edge kind instead. It returns distinct source symbols, not one result per call site. A matching reference alone need not produce a default callers result. The response preserves edge_kind, name_collision and precision notes.",
+      "anchors": [
+        "mcp/servers/mmcg/src/store.rs:4957-4979",
+        "mcp/servers/mmcg/src/queries.rs:2943-2962"
+      ]
+    },
+    {
+      "claim": "unreferenced excludes symbols with compatible incoming edges across edge kinds, including references, imports and inheritance, rather than testing only default callers. It also applies kind/language filters and excludes module rows, constants when kind is unspecified, and selected test/framework name and decorator patterns. Thus a function can have no default callers yet be absent from unreferenced.",
+      "anchors": [
+        "mcp/servers/mmcg/src/store.rs:480-517",
+        "mcp/servers/mmcg/src/store.rs:518-548",
+        "mcp/servers/mmcg/src/store.rs:5360-5375",
+        "mcp/servers/mmcg/src/queries.rs:3201-3221"
+      ]
+    },
+    {
+      "claim": "Target matching uses the leaf name or recorded type/namespace prefix with syntactic target-class compatibility, not compiler-resolved identity. Same-name definitions can be pooled as candidates. Syntactic extraction and recorded source paths do not establish receiver-type or runtime dispatch resolution.",
+      "anchors": [
+        "mcp/servers/mmcg/src/store.rs:467-495",
+        "mcp/servers/mmcg/src/store.rs:2041-2053",
+        "mcp/servers/mmcg/src/store.rs:4957-4974",
+        "mcp/servers/mmcg/src/queries.rs:80-114"
+      ]
+    },
+    {
+      "claim": "A reference does not prove invocation, and zero callers or an unreferenced candidate does not prove dead code or safe removal. The query response and documented storage limitations preserve uncertainty about missing dependencies, external entry points and runtime registration. Query completeness is separate from extraction completeness.",
+      "anchors": [
+        "mcp/servers/mmcg/src/queries.rs:215-236",
+        "mcp/servers/mmcg/src/queries.rs:3201-3221",
+        "mcp/servers/mmcg/src/store.rs:5346-5357"
+      ]
+    }
+  ],
+  "expected_unknowns": [
+    "Actual runtime invocation, exact compiler-resolved targets and function-pointer or trait-object dispatch are not established by these query paths.",
+    "Whether a particular function is safe to remove requires its actual entry points, registration, external consumers and relevant verification evidence; no concrete removal candidate is supplied.",
+    "No actual index contents, query counts, compilation results, tests or runtime behavior were observed in this source-only task."
+  ],
+  "materially_false_claims": [
+    "The default callers query includes references edges.",
+    "Zero default callers necessarily places a function in unreferenced.",
+    "unreferenced considers only calls, or only calls and references.",
+    "Every unreferenced candidate is proven dead and safe to remove.",
+    "Exclusion from unreferenced proves that a function is invoked.",
+    "A references edge or syntactic precision label proves compiler-resolved identity or runtime invocation.",
+    "An untruncated query establishes complete extraction or runtime reachability.",
+    "This research run executed and validated the researched extraction, queries or tests."
+  ],
+  "reviewer_notes": [
+    "A separate read-only agent reviewed the claims and anchors against the exact pinned Git objects; the coordinator independently checked the extraction, storage and response contracts. This is agent source review, not runtime evidence, human sign-off or a model-quality measurement.",
+    "Require one bounded supported Rust example, not claims that every function-value expression or every language is handled. Other source-supported value forms are equally acceptable; the example in the key is not mandatory wording.",
+    "callers and unreferenced responses do not themselves expose a truncated field here; the generic precision note must not be described as an observed truncated=false result.",
+    "The to_id statement concerns Store::commit_file's insertion path. It does not assert that unrelated index enrichment can never store resolved targets.",
+    "A source-grounded description of test assertions is valid evidence of the test contract, not an observed passing test. The task asks for evidence boundaries, not approval to remove actual code.",
+    "A second independent source review removed the portable research instruction from the source allowlist. The same evidence boundaries are supported by query and storage source, so the baseline need not receive the treatment instruction."
+  ],
+  "review_dimensions": [
+    "claim_to_source_support",
+    "critical_evidence_coverage",
+    "material_false_conclusions",
+    "appropriate_unknowns"
+  ],
+  "decision_quality": "not_applicable_to_facts_only_research_task",
+  "automatic_quality_score": null
+}

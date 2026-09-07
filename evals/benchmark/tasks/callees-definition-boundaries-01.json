@@ -1,0 +1,12 @@
+{
+  "id": "callees-definition-boundaries-01",
+  "kind": "research",
+  "revision": "cbc8179320d815c07609f859810b3e64ebc74d48",
+  "source_allowlist": [
+    "mcp/servers/mmcg/src/mcp.rs",
+    "mcp/servers/mmcg/src/queries.rs",
+    "mcp/servers/mmcg/src/store.rs"
+  ],
+  "question": "How does the public mmcg_callees tool handle a request when multiple Rust declarations share the requested name? Trace the request through the MCP, query and storage implementation, and explain what a caller can conclude from the returned result. Assume index schema/freshness checks and database operations succeed, and inputs remain stable.",
+  "output_contract": "At most five source-grounded findings with path:line citations. Separate observations, inferences and unknowns. Read source only; do not execute the researched code."
+}

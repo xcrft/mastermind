@@ -1,0 +1,12 @@
+{
+  "id": "reference-removal-evidence-01",
+  "kind": "research",
+  "revision": "cbc8179320d815c07609f859810b3e64ebc74d48",
+  "source_allowlist": [
+    "mcp/servers/mmcg/src/indexer/rust_lang.rs",
+    "mcp/servers/mmcg/src/store.rs",
+    "mcp/servers/mmcg/src/queries.rs"
+  ],
+  "question": "Trace how a Rust function used as a value is represented from extraction through storage to queries::callers and queries::unreferenced. Compare the default callers query with an explicit edge_kind=references query, including matching and filtering of results. What would these results justify when reviewing a function for removal, and what additional evidence may matter? Use one supported Rust function-value form as the producer example. Assume successful extraction and persistence of the relevant input and successful queries, with unchanged inputs during research.",
+  "output_contract": "At most five source-grounded findings with path:line citations. Separate observations, inferences and unknowns. Read source only; do not execute the researched code."
+}

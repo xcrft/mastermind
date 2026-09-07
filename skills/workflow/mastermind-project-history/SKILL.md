@@ -2,7 +2,7 @@
 name: mastermind-project-history
 description: Retrieve and reason from durable project decisions, failed approaches, audits, reports, and lessons without treating provenance, search rank, or user approval as technical proof. Use when asking why a design exists, whether an approach was tried, what supersedes an older decision, or what prior evidence should constrain a new plan.
 metadata:
-  version: 0.2.0
+  version: 0.2.1
   authors: [mastermind]
   tags: [workflow, history, decisions, provenance, evidence]
 ---
@@ -17,13 +17,16 @@ artifacts are authoritative; `mmcg_history` is a rebuildable retrieval index.
 The history corpus admits only:
 
 - `CONTEXT.md`
-- `CONTEXT-archive-<YYYY>.md`
+- root-level `CONTEXT-archive-*.md`
 - `.mastermind/tasks/<task>/spec.md`
 - `.mastermind/tasks/<task>/executor-report.md`
 - `.mastermind/tasks/<task>/audit.md`
-- `.mastermind/releases/<task>.md`
+- `.mastermind/releases/<name>.md`
 - legacy `.mastermind/tasks/<task>/release-notes.md`
 - `.mastermind/tasks/_lessons.md`
+- Markdown files, including nested directories, under `docs/adr/`,
+  `docs/adrs/`, `docs/decisions/`, `adr/`, `adrs/`, or
+  `.mastermind/decisions/` (`kind: architecture_decision`)
 
 Arbitrary scratch files are not history. Git history and current runtime code
 may contradict or supersede a record, so inspect them when the answer is

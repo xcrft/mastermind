@@ -472,8 +472,9 @@ fn search_result_carries_precision() {
         .precision
         .as_ref()
         .expect("precision field present");
-    assert_eq!(prec.confidence, "high");
+    assert_eq!(prec.confidence, "medium");
     assert_eq!(prec.resolution, "syntactic");
+    assert_eq!(prec.target_resolution, "name_based_candidates");
 }
 
 /// Edge precision structs carry the right confidence and resolution for each language.
@@ -482,8 +483,12 @@ fn edge_precision_labels() {
     use mmcg::queries::lang_precision;
 
     let rs = lang_precision("src/main.rs");
-    assert_eq!(rs.confidence, "high");
+    assert_eq!(rs.confidence, "medium");
     assert_eq!(rs.resolution, "syntactic");
+    assert!(rs.limitations.contains(&"macros not expanded"));
+    assert!(rs
+        .limitations
+        .contains(&"macro-body and function-value references do not prove invocation"));
 
     let py = lang_precision("app/views.py");
     assert_eq!(py.confidence, "medium");
@@ -494,9 +499,15 @@ fn edge_precision_labels() {
     assert_eq!(cpp.confidence, "low");
     assert!(!cpp.limitations.is_empty());
 
-    let go = lang_precision("server/main.go");
-    assert_eq!(go.confidence, "high");
-    assert!(go.limitations.is_empty());
+    for path in ["server/main.go", "src/App.java", "src/Service.cs"] {
+        let precision = lang_precision(path);
+        assert_eq!(
+            precision.confidence, "medium",
+            "{path} has no semantic resolver"
+        );
+        assert!(!precision.limitations.is_empty());
+        assert_eq!(precision.target_resolution, "name_based_candidates");
+    }
 }
 
 #[test]

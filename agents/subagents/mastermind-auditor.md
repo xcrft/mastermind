@@ -11,7 +11,7 @@ workflow:
   activation: conditional
   mutability: read-only
 metadata:
-  version: 0.7.1
+  version: 0.7.2
   authors: [mastermind]
   tags: [workflow, audit, mmcg, canons]
 ---
@@ -39,9 +39,15 @@ If an input is missing, report `could_not_verify`; do not infer it.
    Use narrower graph calls only for evidence the packet marks omitted or for a
    specific claim the audit must resolve.
 2. Read the spec mode and acceptance criteria.
-3. Compare `git diff --name-status <baseline>...HEAD` with declared and reported
-   files. An unexplained file is scope creep; a reported file absent from the
-   diff is a false claim.
+3. From the repository root, compare `git diff --name-status --no-renames <baseline> --`
+   and `git ls-files --others --exclude-standard --full-name --` with declared
+   and reported files. Audit the current working tree against the baseline,
+   including committed, staged, unstaged, and untracked changes. Read untracked
+   file contents directly; they are absent from the diff. Use
+   `git status --porcelain=v1 --untracked-files=all` to distinguish staging state.
+   Apply the task's declared exclusions and account for pre-existing changes.
+   An unexplained file is scope creep; a reported change absent from this
+   combined inventory is a false claim.
 4. For each reported behavior, inspect the actual changed code. File presence
    alone is not evidence. Literal FIND/CHANGE blocks are checked literally;
    otherwise judge the Acceptance Criteria.

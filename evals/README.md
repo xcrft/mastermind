@@ -11,7 +11,7 @@ correctness, or evidence that the behavior survives a long real-world task.
 
 | File | Target | Expected result |
 |---|---|---|
-| `critic.jsonl` | Design critic | `rethink`, `revise`, or `ship` |
+| `critic.jsonl` | Design critic | `rethink`, `revise`, `ship with caveats`, or `ship it` |
 | `researcher.jsonl` | Codegraph researcher | Cited facts, explicit unknowns, or planner handoff |
 | `auditor.jsonl` | Post-flight auditor | `held`, `drift`, or `broken` |
 | `intake.jsonl` | Prompt intake | `refined`, `passthrough`, or `ask` |
@@ -98,18 +98,21 @@ existing Claude subscription rather than per-token API billing.
 ## Researcher and auditor fixture lifecycle
 
 Each researcher or auditor case names `fixtures/<name>/`, a baseline tag, and an
-after tag. The runner:
+after-tree variant. The runner:
 
 1. creates a temporary Git repository;
 2. commits the fixture baseline and tags it;
-3. replaces the tree with the named after-state, commits, and tags it;
+3. replaces the tree with the named after-state, then commits and tags it by
+   default; when `staged_paths` is present, leaves HEAD at baseline and stages
+   only the listed paths;
 4. indexes the after-state with `mmcg`;
 5. gives the shipped custom agent the temporary repository and a live stdio MCP
    server;
 6. checks the suite's deterministic verdict, phrase, tool identity, and
    tool-turn signals.
 
-The auditor reads the real Git diff and codegraph. The researcher queries the
+The auditor compares baseline to the current working tree and reads untracked
+files separately, covering audits before commit. The researcher queries the
 same graph and reads source before reporting a fact. JSONL cases do not provide
 synthetic diffs or structural answers. The runner prefers the in-tree release
 binary at `mcp/servers/mmcg/target/release/mmcg`, then falls back to `mmcg` on
@@ -122,6 +125,12 @@ cargo build --release --manifest-path mcp/servers/mmcg/Cargo.toml --locked
 ```
 
 ## Add a critic case
+
+`expect.verdict` names one exact aggregate verdict or a list of acceptable
+verdicts. The grader reads the single final `## Verdict` section; mentions in
+prose, table rows, and quoted code examples cannot satisfy it. Missing or
+conflicting final verdicts fail. `concern` and `fail` belong to dimension rows,
+so test those with phrase assertions when needed.
 
 ```jsonc
 {
@@ -162,7 +171,10 @@ Verdict assertions read the YAML block between
 `<!-- mastermind:audit-begin -->` and `<!-- mastermind:audit-end -->`. Missing
 or malformed structured output fails the case. Add a full after-tree under
 `fixtures/<name>/changes/<after_ref>/`; files absent from that tree are deleted
-in the generated commit.
+from the generated working tree. To audit before commit, add
+`"staged_paths": ["src/staged.py"]` to the case. Other modified tracked files
+remain unstaged and new files remain untracked. Use `"staged_paths": []` to
+leave every change unstaged.
 
 ## Add a workflow case
 

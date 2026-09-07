@@ -1,0 +1,1 @@
+MAX_ATTEMPTS = 3

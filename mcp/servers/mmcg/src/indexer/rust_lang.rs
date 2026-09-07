@@ -1,14 +1,11 @@
 //! Rust extractor — functions, structs, enums, traits, impls (with methods),
 //! calls, macro invocations, and use declarations.
 
-use super::common::{
-    line_of, node_text, push_call, push_call_with_type, push_def, push_def_with_decorators,
-    push_import,
-};
+use super::common::{node_text, push_def, push_def_with_decorators, push_import};
 use super::{DocumentationTextBuilder, LanguageExtractor, RawConceptDocumentation};
-use crate::store::PendingFile;
-use std::collections::HashMap;
-use tree_sitter::{Node, Tree};
+use crate::store::{PendingEdge, PendingFile};
+use std::collections::{HashMap, HashSet};
+use tree_sitter::{Node, Parser, Tree};
 
 pub struct RustExtractor;
 
@@ -22,48 +19,128 @@ impl LanguageExtractor for RustExtractor {
     }
 
     fn extract(&self, tree: &Tree, source: &[u8], pending: &mut PendingFile, module_index: usize) {
-        walk(
-            tree.root_node(),
+        let mut known_callables = HashSet::new();
+        collect_callable_names(tree.root_node(), source, &mut known_callables);
+        RustWalker {
             source,
             pending,
-            Some(module_index),
             module_index,
-        );
+            known_callables: &known_callables,
+            bindings: vec![HashSet::new()],
+            item_bindings: vec![],
+            references_only: false,
+            line_offset: 0,
+            macro_depth: 0,
+            macro_budget: &mut MacroBudget::default(),
+        }
+        .visit(tree.root_node(), Some(module_index), None);
     }
 }
 
-fn walk(
-    node: Node,
-    source: &[u8],
-    pending: &mut PendingFile,
-    parent_index: Option<usize>,
+// Macro tokens are opaque to the Rust grammar. Reparse only bounded, valid
+// expression/statement bodies, and preserve their uncertainty as references.
+const MACRO_BODY_BYTE_LIMIT: usize = 64 * 1024;
+const MACRO_PARSE_BYTE_LIMIT: usize = 1024 * 1024;
+const MACRO_PARSE_LIMIT: usize = 256;
+const MACRO_DEPTH_LIMIT: u8 = 8;
+
+struct MacroBudget {
+    bytes: usize,
+    parses: usize,
+}
+
+impl Default for MacroBudget {
+    fn default() -> Self {
+        Self {
+            bytes: MACRO_PARSE_BYTE_LIMIT,
+            parses: MACRO_PARSE_LIMIT,
+        }
+    }
+}
+
+struct RustWalker<'a, 'p> {
+    source: &'a [u8],
+    pending: &'p mut PendingFile,
     module_index: usize,
-) {
-    let mut cursor = node.walk();
-    // Attributes are preceding siblings of the item they decorate. Accumulate;
-    // on the next def-item attach and clear; on any other node clear (stray
-    // attributes don't carry to non-adjacent items).
-    let mut pending_attrs: Vec<String> = Vec::new();
-    for child in node.children(&mut cursor) {
-        match child.kind() {
-            "attribute_item" | "inner_attribute_item" => {
-                if let Some(n) = extract_attribute_name(&child, source) {
-                    pending_attrs.push(n);
+    known_callables: &'a HashSet<String>,
+    bindings: Vec<HashSet<String>>,
+    item_bindings: Vec<HashSet<String>>,
+    references_only: bool,
+    line_offset: u32,
+    macro_depth: u8,
+    macro_budget: &'p mut MacroBudget,
+}
+
+impl RustWalker<'_, '_> {
+    fn line(&self, node: Node) -> u32 {
+        self.line_offset
+            .saturating_add(node.start_position().row as u32 + 1)
+    }
+
+    fn is_bound(&self, name: &str) -> bool {
+        self.bindings
+            .iter()
+            .chain(&self.item_bindings)
+            .any(|scope| scope.contains(name))
+    }
+
+    fn bind_pattern(&mut self, pattern: Node) {
+        collect_pattern_bindings(pattern, self.source, self.bindings.last_mut().unwrap());
+    }
+
+    fn walk(&mut self, node: Node, parent_index: Option<usize>) {
+        let mut cursor = node.walk();
+        let mut pending_attrs = Vec::new();
+        for child in node.named_children(&mut cursor) {
+            match child.kind() {
+                "attribute_item" | "inner_attribute_item" => {
+                    if let Some(n) = extract_attribute_name(&child, self.source) {
+                        pending_attrs.push(n);
+                    }
                 }
-                continue;
+                _ => self.visit(child, parent_index, take_attrs(&mut pending_attrs)),
+            }
+        }
+    }
+
+    fn visit(&mut self, child: Node, parent_index: Option<usize>, attrs: Option<String>) {
+        match child.kind() {
+            "source_file" | "block" | "declaration_list" => {
+                self.bindings.push(HashSet::new());
+                // Item values are visible throughout the block, including inside
+                // nested functions, unlike captured parameters and local variables.
+                let mut item_values = HashSet::new();
+                let mut cursor = child.walk();
+                for item in child.named_children(&mut cursor) {
+                    if matches!(item.kind(), "const_item" | "static_item") {
+                        if let Some(name) = name_field(&item, self.source) {
+                            item_values.insert(name.to_owned());
+                        }
+                    }
+                }
+                self.item_bindings.push(item_values);
+                self.walk(child, parent_index);
+                self.item_bindings.pop();
+                self.bindings.pop();
             }
             "function_item" => {
+                if self.references_only {
+                    return; // A macro's item tokens do not establish a generated function.
+                }
                 let kind = match parent_index {
-                    Some(p) if matches!(pending.symbols[p].kind.as_str(), "impl" | "trait") => {
+                    Some(p)
+                        if matches!(self.pending.symbols[p].kind.as_str(), "impl" | "trait") =>
+                    {
                         "method"
                     }
                     _ => "function",
                 };
-                let name = name_field(&child, source).unwrap_or("<anon>").to_string();
-                let signature = signature_for_function(&child, source);
-                let attrs = take_attrs(&mut pending_attrs);
+                let name = name_field(&child, self.source)
+                    .unwrap_or("<anon>")
+                    .to_string();
+                let signature = signature_for_function(&child, self.source);
                 let idx = push_def_or_decorated(
-                    pending,
+                    self.pending,
                     name,
                     kind,
                     &child,
@@ -71,41 +148,53 @@ fn walk(
                     parent_index,
                     attrs,
                 );
+                let saved_bindings = std::mem::replace(&mut self.bindings, vec![HashSet::new()]);
+                if let Some(parameters) = child.child_by_field_name("parameters") {
+                    self.bind_pattern(parameters);
+                }
                 if let Some(body) = child.child_by_field_name("body") {
-                    walk(body, source, pending, Some(idx), module_index);
+                    self.visit(body, Some(idx), None);
+                }
+                self.bindings = saved_bindings;
+            }
+            "struct_item" | "enum_item" if !self.references_only => {
+                let name = name_field(&child, self.source)
+                    .unwrap_or("<anon>")
+                    .to_string();
+                let sig = signature_until_body_or_semi(&child, self.source);
+                let kind = if child.kind() == "struct_item" {
+                    "struct"
+                } else {
+                    "enum"
+                };
+                push_def_or_decorated(self.pending, name, kind, &child, sig, parent_index, attrs);
+            }
+            "trait_item" if !self.references_only => {
+                let name = name_field(&child, self.source)
+                    .unwrap_or("<anon>")
+                    .to_string();
+                let sig = signature_until_body_or_semi(&child, self.source);
+                let idx = push_def_or_decorated(
+                    self.pending,
+                    name,
+                    "trait",
+                    &child,
+                    sig,
+                    parent_index,
+                    attrs,
+                );
+                if let Some(body) = child.child_by_field_name("body") {
+                    self.visit(body, Some(idx), None);
                 }
             }
-            "struct_item" => {
-                let name = name_field(&child, source).unwrap_or("<anon>").to_string();
-                let sig = signature_until_body_or_semi(&child, source);
-                let attrs = take_attrs(&mut pending_attrs);
-                push_def_or_decorated(pending, name, "struct", &child, sig, parent_index, attrs);
-            }
-            "enum_item" => {
-                let name = name_field(&child, source).unwrap_or("<anon>").to_string();
-                let sig = signature_until_body_or_semi(&child, source);
-                let attrs = take_attrs(&mut pending_attrs);
-                push_def_or_decorated(pending, name, "enum", &child, sig, parent_index, attrs);
-            }
-            "trait_item" => {
-                let name = name_field(&child, source).unwrap_or("<anon>").to_string();
-                let sig = signature_until_body_or_semi(&child, source);
-                let attrs = take_attrs(&mut pending_attrs);
-                let idx =
-                    push_def_or_decorated(pending, name, "trait", &child, sig, parent_index, attrs);
-                if let Some(body) = child.child_by_field_name("body") {
-                    walk(body, source, pending, Some(idx), module_index);
-                }
-            }
-            "impl_item" => {
+            "impl_item" if !self.references_only => {
                 // The impl block becomes a symbol named after its target type;
                 // methods inside parent to this impl symbol.
                 let target_name =
-                    impl_target_name(&child, source).unwrap_or_else(|| "<impl>".to_string());
-                let sig = signature_until_body_or_semi(&child, source);
-                let attrs = take_attrs(&mut pending_attrs);
+                    impl_target_name(&child, self.source).unwrap_or_else(|| "<impl>".to_string());
+                let sig = signature_until_body_or_semi(&child, self.source);
                 let idx = push_def_or_decorated(
-                    pending,
+                    self.pending,
                     target_name,
                     "impl",
                     &child,
@@ -114,55 +203,266 @@ fn walk(
                     attrs,
                 );
                 if let Some(body) = child.child_by_field_name("body") {
-                    walk(body, source, pending, Some(idx), module_index);
+                    self.visit(body, Some(idx), None);
                 }
             }
-            "mod_item" => {
+            "mod_item" if !self.references_only => {
                 // `mod foo { ... }` — container symbol.
-                let name = name_field(&child, source).unwrap_or("<anon>").to_string();
-                let sig = signature_until_body_or_semi(&child, source);
-                let attrs = take_attrs(&mut pending_attrs);
-                let idx =
-                    push_def_or_decorated(pending, name, "mod", &child, sig, parent_index, attrs);
+                let name = name_field(&child, self.source)
+                    .unwrap_or("<anon>")
+                    .to_string();
+                let sig = signature_until_body_or_semi(&child, self.source);
+                let idx = push_def_or_decorated(
+                    self.pending,
+                    name,
+                    "mod",
+                    &child,
+                    sig,
+                    parent_index,
+                    attrs,
+                );
                 if let Some(body) = child.child_by_field_name("body") {
-                    walk(body, source, pending, Some(idx), module_index);
+                    self.visit(body, Some(idx), None);
                 }
+            }
+            "const_item" | "static_item" => {
+                if let Some(value) = child.child_by_field_name("value") {
+                    self.visit(value, parent_index, None);
+                }
+            }
+            "let_declaration" | "let_condition" => {
+                if let Some(value) = child.child_by_field_name("value") {
+                    self.visit(value, parent_index, None);
+                }
+                if let Some(alternative) = child.child_by_field_name("alternative") {
+                    self.visit(alternative, parent_index, None);
+                }
+                if let Some(pattern) = child.child_by_field_name("pattern") {
+                    self.bind_pattern(pattern);
+                }
+            }
+            "closure_expression" => {
+                self.bindings.push(HashSet::new());
+                if let Some(parameters) = child.child_by_field_name("parameters") {
+                    self.bind_pattern(parameters);
+                }
+                if let Some(body) = child.child_by_field_name("body") {
+                    self.visit(body, parent_index, None);
+                }
+                self.bindings.pop();
+            }
+            "for_expression" => {
+                if let Some(value) = child.child_by_field_name("value") {
+                    self.visit(value, parent_index, None);
+                }
+                self.bindings.push(HashSet::new());
+                if let Some(pattern) = child.child_by_field_name("pattern") {
+                    self.bind_pattern(pattern);
+                }
+                if let Some(body) = child.child_by_field_name("body") {
+                    self.visit(body, parent_index, None);
+                }
+                self.bindings.pop();
+            }
+            "if_expression" | "while_expression" => {
+                self.bindings.push(HashSet::new());
+                for field in ["condition", "consequence", "body"] {
+                    if let Some(node) = child.child_by_field_name(field) {
+                        self.visit(node, parent_index, None);
+                    }
+                }
+                self.bindings.pop();
+                if let Some(alternative) = child.child_by_field_name("alternative") {
+                    self.visit(alternative, parent_index, None);
+                }
+            }
+            "match_arm" => {
+                self.bindings.push(HashSet::new());
+                if let Some(pattern) = child.child_by_field_name("pattern") {
+                    self.bind_pattern(pattern);
+                    if let Some(condition) = pattern.child_by_field_name("condition") {
+                        self.visit(condition, parent_index, None);
+                    }
+                }
+                if let Some(value) = child.child_by_field_name("value") {
+                    self.visit(value, parent_index, None);
+                }
+                self.bindings.pop();
             }
             "call_expression" => {
-                pending_attrs.clear();
-                if let Some((name, path, type_prefix)) = call_target_with_type(&child, source) {
-                    push_call_with_type(
-                        pending,
-                        parent_index.unwrap_or(module_index),
-                        name,
-                        path,
-                        type_prefix,
-                        line_of(&child),
-                    );
+                if let Some(function) = child.child_by_field_name("function") {
+                    if let Some(target) = callable_target(function, self.source) {
+                        self.push_target(target, child, parent_index, self.references_only);
+                    }
                 }
-                walk(child, source, pending, parent_index, module_index);
+                self.walk(child, parent_index);
             }
             "macro_invocation" => {
                 if let Some(macro_node) = child.child_by_field_name("macro") {
-                    if let Some(name) = rightmost_identifier(&macro_node, source) {
-                        let full = node_text(&macro_node, source).map(|t| format!("{t}!"));
-                        push_call(
-                            pending,
-                            parent_index.unwrap_or(module_index),
-                            name,
-                            full,
-                            line_of(&child),
+                    if let Some(name) = rightmost_identifier(&macro_node, self.source) {
+                        let path = node_text(&macro_node, self.source).map(|t| format!("{t}!"));
+                        self.push_target(
+                            CallTarget {
+                                name,
+                                path,
+                                type_prefix: None,
+                                kind: "macro",
+                            },
+                            child,
+                            parent_index,
+                            self.references_only,
                         );
                     }
                 }
-                walk(child, source, pending, parent_index, module_index);
+                self.macro_references(child, parent_index);
             }
-            "use_declaration" => {
+            "use_declaration" if !self.references_only => {
                 if let Some(arg) = child.child_by_field_name("argument") {
-                    collect_use_names(&arg, source, pending, module_index, line_of(&child), None);
+                    let line = self.line(child);
+                    collect_use_names(
+                        &arg,
+                        self.source,
+                        self.pending,
+                        self.module_index,
+                        line,
+                        None,
+                    );
                 }
             }
-            _ => walk(child, source, pending, parent_index, module_index),
+            "identifier" | "scoped_identifier" | "generic_function" if is_value_position(child) => {
+                if let Some(target) = callable_target(child, self.source) {
+                    if target.kind == "scoped"
+                        || (target.kind == "function"
+                            && self.known_callables.contains(&target.name))
+                    {
+                        self.push_target(target, child, parent_index, true);
+                    }
+                }
+            }
+            // These contain names, types, or quoted tokens rather than values.
+            "use_declaration"
+            | "macro_definition"
+            | "token_tree"
+            | "attribute_item"
+            | "inner_attribute_item"
+            | "type_arguments"
+            | "type_parameters"
+            | "struct_item"
+            | "enum_item"
+            | "trait_item"
+            | "impl_item"
+            | "mod_item"
+            | "function_signature_item"
+            | "type_item" => {}
+            _ => self.walk(child, parent_index),
+        }
+    }
+
+    fn push_target(
+        &mut self,
+        mut target: CallTarget,
+        node: Node,
+        parent_index: Option<usize>,
+        reference: bool,
+    ) {
+        if target.kind == "function" && self.is_bound(&target.name) {
+            if reference {
+                return;
+            }
+            target.kind = "indirect";
+        }
+        if target.type_prefix.as_deref() == Some("Self") {
+            let mut parent = parent_index;
+            while let Some(index) = parent {
+                let symbol = &self.pending.symbols[index];
+                if symbol.kind == "impl" {
+                    target.type_prefix = Some(symbol.name.clone());
+                    break;
+                }
+                parent = symbol.parent_index;
+            }
+        }
+        self.pending.edges.push(PendingEdge {
+            from_index: parent_index.unwrap_or(self.module_index),
+            to_name: target.name,
+            to_path: target.path,
+            to_type: target.type_prefix,
+            target_kind: Some(target.kind.to_owned()),
+            kind: if reference { "references" } else { "calls" }.to_owned(),
+            line: self.line(node),
+        });
+    }
+
+    fn macro_references(&mut self, node: Node, parent_index: Option<usize>) {
+        if self.macro_depth >= MACRO_DEPTH_LIMIT {
+            return;
+        }
+        let mut cursor = node.walk();
+        let Some(tokens) = node
+            .named_children(&mut cursor)
+            .find(|node| node.kind() == "token_tree")
+        else {
+            return;
+        };
+        let Some(body) = self
+            .source
+            .get(tokens.start_byte().saturating_add(1)..tokens.end_byte().saturating_sub(1))
+        else {
+            return;
+        };
+        if body.len() > MACRO_BODY_BYTE_LIMIT {
+            return;
+        }
+        let mut parser = Parser::new();
+        if parser
+            .set_language(&tree_sitter_rust::LANGUAGE.into())
+            .is_err()
+        {
+            return;
+        }
+        for (prefix, suffix) in [
+            ("fn __mmcg_macro() { let _ = (", "\n); }"),
+            ("fn __mmcg_macro() {", "\n}"),
+        ] {
+            let bytes = prefix.len() + body.len() + suffix.len();
+            if self.macro_budget.parses == 0 || bytes > self.macro_budget.bytes {
+                return;
+            }
+            self.macro_budget.parses -= 1;
+            self.macro_budget.bytes -= bytes;
+            let mut source = Vec::with_capacity(bytes);
+            source.extend_from_slice(prefix.as_bytes());
+            source.extend_from_slice(body);
+            source.extend_from_slice(suffix.as_bytes());
+            let Some(tree) = parser.parse(&source, None) else {
+                return;
+            };
+            if tree.root_node().has_error() {
+                continue;
+            }
+            let Some(block) = tree
+                .root_node()
+                .named_child(0)
+                .and_then(|function| function.child_by_field_name("body"))
+            else {
+                return;
+            };
+            RustWalker {
+                source: &source,
+                pending: self.pending,
+                module_index: self.module_index,
+                known_callables: self.known_callables,
+                bindings: self.bindings.clone(),
+                item_bindings: self.item_bindings.clone(),
+                references_only: true,
+                line_offset: self
+                    .line_offset
+                    .saturating_add(tokens.start_position().row as u32),
+                macro_depth: self.macro_depth + 1,
+                macro_budget: self.macro_budget,
+            }
+            .visit(block, parent_index, None);
+            break;
         }
     }
 }
@@ -266,28 +566,193 @@ fn rightmost_identifier(node: &Node, source: &[u8]) -> Option<String> {
     }
 }
 
-/// Returns (leaf_name, full_path, type_prefix).
-/// - `SessionStore::new()` → ("new", Some("SessionStore::new"), Some("SessionStore"))
-/// - `foo::bar::Baz::new()` → ("new", Some("foo::bar::Baz::new"), Some("Baz"))
-/// - `obj.method()` (field_expression) → ("method", Some("obj.method"), None)  — value receiver, not a type
-/// - `foo()` → ("foo", Some("foo"), None)
-fn call_target_with_type(
-    call_node: &Node,
-    source: &[u8],
-) -> Option<(String, Option<String>, Option<String>)> {
-    let fn_node = call_node.child_by_field_name("function")?;
-    let leaf = rightmost_identifier(&fn_node, source)?;
-    let path = node_text(&fn_node, source).map(String::from);
-    // Type prefix only for scoped_identifier (Type::method). field_expression
-    // (obj.method) has a value receiver, not a type — skip.
-    let type_prefix = if fn_node.kind() == "scoped_identifier" {
-        fn_node
-            .child_by_field_name("path")
-            .and_then(|p| rightmost_identifier(&p, source))
-    } else {
-        None
+struct CallTarget {
+    name: String,
+    path: Option<String>,
+    type_prefix: Option<String>,
+    kind: &'static str,
+}
+
+fn callable_target(mut node: Node, source: &[u8]) -> Option<CallTarget> {
+    let path = node_text(&node, source).map(String::from);
+    // Turbofish type arguments cannot become the target name (`map::<T>`).
+    while matches!(node.kind(), "generic_function" | "parenthesized_expression") {
+        node = if node.kind() == "generic_function" {
+            node.child_by_field_name("function")?
+        } else {
+            node.named_child(0)?
+        };
+    }
+    let (name, type_prefix, kind) = match node.kind() {
+        "identifier" => (node_text(&node, source)?.to_owned(), None, "function"),
+        "field_expression" => (
+            node_text(&node.child_by_field_name("field")?, source)?.to_owned(),
+            None,
+            "method",
+        ),
+        "scoped_identifier" => {
+            let name = node_text(&node.child_by_field_name("name")?, source)?.to_owned();
+            let prefix = node
+                .child_by_field_name("path")
+                .filter(|prefix| {
+                    matches!(
+                        prefix.kind(),
+                        "identifier"
+                            | "scoped_identifier"
+                            | "generic_type"
+                            | "self"
+                            | "super"
+                            | "crate"
+                    )
+                })
+                .and_then(|prefix| rightmost_identifier(&prefix, source));
+            (name, prefix, "scoped")
+        }
+        // `factory()()` and `(callback as fn())()` do not name a directly
+        // resolved function. Their nested expressions are still traversed.
+        _ => return None,
     };
-    Some((leaf, path, type_prefix))
+    Some(CallTarget {
+        name,
+        path,
+        type_prefix,
+        kind,
+    })
+}
+
+fn is_value_position(node: Node) -> bool {
+    let mut wrapped = node;
+    while let Some(parent) = wrapped
+        .parent()
+        .filter(|parent| parent.kind() == "parenthesized_expression")
+    {
+        wrapped = parent;
+    }
+    if wrapped.parent().is_some_and(|parent| {
+        parent.kind() == "call_expression"
+            && parent.child_by_field_name("function") == Some(wrapped)
+    }) {
+        return false;
+    }
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    match parent.kind() {
+        "arguments"
+        | "array_expression"
+        | "tuple_expression"
+        | "return_expression"
+        | "break_expression"
+        | "expression_statement"
+        | "block"
+        | "parenthesized_expression"
+        | "reference_expression"
+        | "unary_expression"
+        | "binary_expression"
+        | "assignment_expression"
+        | "compound_assignment_expr"
+        | "range_expression"
+        | "index_expression"
+        | "await_expression"
+        | "try_expression" => true,
+        "let_declaration"
+        | "const_item"
+        | "static_item"
+        | "field_initializer"
+        | "type_cast_expression"
+        | "match_arm" => parent.child_by_field_name("value") == Some(node),
+        "closure_expression" => parent.child_by_field_name("body") == Some(node),
+        "shorthand_field_initializer" => true,
+        _ => false,
+    }
+}
+
+fn collect_pattern_bindings(node: Node, source: &[u8], bindings: &mut HashSet<String>) {
+    match node.kind() {
+        "identifier" | "self" | "shorthand_field_identifier" => {
+            if let Some(name) = node_text(&node, source) {
+                bindings.insert(name.to_owned());
+            }
+        }
+        "parameter" | "field_pattern" => {
+            if let Some(pattern) = node.child_by_field_name("pattern") {
+                collect_pattern_bindings(pattern, source, bindings);
+            } else if node.kind() == "field_pattern" {
+                if let Some(name) = node.child_by_field_name("name") {
+                    if let Some(name) = node_text(&name, source) {
+                        bindings.insert(name.to_owned());
+                    }
+                }
+            }
+        }
+        "scoped_identifier"
+        | "scoped_type_identifier"
+        | "type_identifier"
+        | "range_pattern"
+        | "const_block" => {}
+        _ => {
+            let type_node = node.child_by_field_name("type");
+            let guard = node.child_by_field_name("condition");
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                if Some(child) != type_node && Some(child) != guard {
+                    collect_pattern_bindings(child, source, bindings);
+                }
+            }
+        }
+    }
+}
+
+fn collect_callable_names(node: Node, source: &[u8], names: &mut HashSet<String>) {
+    match node.kind() {
+        "function_item" | "function_signature_item" | "struct_item" | "enum_item" => {
+            if let Some(name) = name_field(&node, source) {
+                names.insert(name.to_owned());
+            }
+        }
+        "use_declaration" => {
+            if let Some(argument) = node.child_by_field_name("argument") {
+                collect_import_bindings(argument, source, names);
+            }
+            return;
+        }
+        "macro_definition" | "macro_invocation" => return,
+        _ => {}
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_callable_names(child, source, names);
+    }
+}
+
+fn collect_import_bindings(node: Node, source: &[u8], names: &mut HashSet<String>) {
+    match node.kind() {
+        "identifier" | "scoped_identifier" => {
+            if let Some(name) = rightmost_identifier(&node, source) {
+                names.insert(name);
+            }
+        }
+        "use_as_clause" => {
+            if let Some(alias) = node
+                .child_by_field_name("alias")
+                .and_then(|alias| node_text(&alias, source))
+            {
+                names.insert(alias.to_owned());
+            }
+        }
+        "scoped_use_list" => {
+            if let Some(list) = node.child_by_field_name("list") {
+                collect_import_bindings(list, source, names);
+            }
+        }
+        "use_list" => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                collect_import_bindings(child, source, names);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Walk a use-tree (argument of use_declaration), emitting an import edge per
@@ -644,6 +1109,255 @@ mod tests {
     use super::*;
     use crate::indexer::common;
     use crate::indexer::parse_one;
+
+    fn fixture(name: &str, source: &str) -> PendingFile {
+        let path = common::write_tmp("rs", name, source);
+        parse_one(&path, path.parent().unwrap(), &RustExtractor).unwrap()
+    }
+
+    fn outgoing<'a>(pending: &'a PendingFile, name: &str) -> Vec<&'a PendingEdge> {
+        pending
+            .edges
+            .iter()
+            .filter(|edge| pending.symbols[edge.from_index].name == name)
+            .collect()
+    }
+
+    #[test]
+    fn classifies_receiver_scoped_generic_and_indirect_call_targets() {
+        let pending = fixture(
+            "call_targets.rs",
+            r#"
+fn generic<T>() {}
+struct Worker;
+impl Worker {
+    fn associated<T>() {}
+    fn render<T>(&self) {}
+    fn run(&self) { self.render::<Item>(); Self::associated::<Item>(); }
+}
+fn entry(worker: Worker, callback: fn()) {
+    generic::<Item>();
+    worker.render::<Item>();
+    Worker::associated::<Item>();
+    callback();
+    (generic)();
+}
+"#,
+        );
+        let edges = outgoing(&pending, "entry");
+        let classified = edges
+            .iter()
+            .map(|edge| {
+                (
+                    edge.to_name.as_str(),
+                    edge.target_kind.as_deref(),
+                    edge.to_type.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            classified,
+            vec![
+                ("generic", Some("function"), None),
+                ("render", Some("method"), None),
+                ("associated", Some("scoped"), Some("Worker")),
+                ("callback", Some("indirect"), None),
+                ("generic", Some("function"), None),
+            ]
+        );
+        let method = outgoing(&pending, "run");
+        assert_eq!(method[0].target_kind.as_deref(), Some("method"));
+        assert_eq!(method[1].to_name, "associated");
+        assert_eq!(method[1].to_type.as_deref(), Some("Worker"));
+        assert!(pending.edges.iter().all(|edge| edge.to_name != "Item"));
+    }
+
+    #[test]
+    fn records_callback_registries_tuples_and_returned_function_values() {
+        let pending = fixture(
+            "callback_values.rs",
+            r#"
+fn schema_search() {}
+fn handle_search() {}
+fn generic<T>() {}
+static TOOLS: [Tool; 1] = [refreshable_tool("mmcg_search", schema_search, handle_search)];
+static PAIRS: [(fn(), fn()); 1] = [(schema_search, handle_search)];
+fn returned() -> fn() { handle_search }
+fn explicit_return() -> fn() { return schema_search; }
+fn pointers() {
+    let pair = (schema_search as fn(), &handle_search);
+    register(pair);
+    register(generic::<u8>);
+    register(module::external);
+}
+"#,
+        );
+        let module_refs = pending
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.kind == "references" && pending.symbols[edge.from_index].kind == "module"
+            })
+            .map(|edge| edge.to_name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            module_refs,
+            vec![
+                "schema_search",
+                "handle_search",
+                "schema_search",
+                "handle_search"
+            ]
+        );
+        for (function, expected) in [
+            ("returned", "handle_search"),
+            ("explicit_return", "schema_search"),
+        ] {
+            let refs = outgoing(&pending, function);
+            assert_eq!(refs.len(), 1);
+            assert_eq!(refs[0].to_name, expected);
+            assert_eq!(refs[0].kind, "references");
+        }
+        let refs = outgoing(&pending, "pointers")
+            .into_iter()
+            .filter(|edge| edge.kind == "references")
+            .map(|edge| edge.to_name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            refs,
+            vec!["schema_search", "handle_search", "generic", "external"]
+        );
+        assert!(!pending
+            .edges
+            .iter()
+            .any(|edge| edge.to_name == "mmcg_search" || edge.to_name == "pair"));
+    }
+
+    #[test]
+    fn ignores_parameter_local_closure_and_pattern_shadows() {
+        let pending = fixture(
+            "callback_shadows.rs",
+            r#"
+fn target() {}
+fn schema() {}
+fn params(target: fn(), pair: (fn(), fn())) {
+    register(target);
+    target();
+    let (schema, _) = pair;
+    register(schema);
+    register(crate::target);
+}
+fn locals() {
+    register(target);
+    let target = || {};
+    register(target);
+    target();
+    { let schema = 0; register(schema); }
+    register(schema);
+    let first = |target: fn()| register(target);
+    let second = |(schema, _)| register(schema);
+}
+fn branches(values: Vec<fn()>, value: Option<fn()>) {
+    for target in values { register(target); }
+    if let Some(target) = value { register(target); } else { register(target); }
+    while let Some(target) = value { register(target); }
+    match value { Some(target) if check(target) => register(target), _ => register(target) }
+}
+"#,
+        );
+        let refs = |name| {
+            outgoing(&pending, name)
+                .into_iter()
+                .filter(|edge| edge.kind == "references")
+                .map(|edge| edge.to_path.as_deref().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(refs("params"), vec!["crate::target"]);
+        assert_eq!(refs("locals"), vec!["target", "schema"]);
+        assert_eq!(refs("branches"), vec!["target", "target"]);
+        assert!(outgoing(&pending, "params").iter().any(
+            |edge| edge.to_name == "target" && edge.target_kind.as_deref() == Some("indirect")
+        ));
+        assert!(!outgoing(&pending, "params").iter().any(
+            |edge| edge.to_name == "target" && edge.target_kind.as_deref() == Some("function")
+        ));
+    }
+
+    #[test]
+    fn macro_body_references_keep_source_lines_and_containing_function() {
+        let source = "fn target() {}\nfn inner() {}\nfn entry() {\n\
+            println!(\"target() is text\", target());\n\
+            assert_eq!(\n\
+                nested!(target(), inner()),\n\
+                target());\n\
+            vec![target; 2];\n\
+            println!(\"{{target()}}\");\n\
+            opaque! { target => inner };\n\
+        }\n";
+        let pending = fixture("macro_references.rs", source);
+        let target_refs = outgoing(&pending, "entry")
+            .into_iter()
+            .filter(|edge| edge.to_name == "target")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            target_refs.iter().map(|edge| edge.line).collect::<Vec<_>>(),
+            vec![4, 6, 7, 8]
+        );
+        assert!(target_refs.iter().all(
+            |edge| edge.kind == "references" && edge.target_kind.as_deref() == Some("function")
+        ));
+        let inner = pending
+            .edges
+            .iter()
+            .find(|edge| edge.to_name == "inner")
+            .unwrap();
+        assert_eq!(inner.line, 6);
+        assert_eq!(inner.kind, "references");
+        assert_eq!(pending.symbols[inner.from_index].name, "entry");
+        assert!(pending
+            .symbols
+            .iter()
+            .all(|symbol| symbol.name != "__mmcg_macro"));
+    }
+
+    #[test]
+    fn macro_tokens_do_not_turn_strings_comments_patterns_or_shadows_into_edges() {
+        let pending = fixture(
+            "macro_reference_noise.rs",
+            r##"
+fn target() {}
+macro_rules! declare { () => { fn generated() { target(); } } }
+fn shadow(target: fn()) {
+    println!("target()", target);
+    println!("{}", target());
+}
+fn text() {
+    println!(r#"target()"#);
+    println!("{}", 1 /* target() */);
+    opaque! { target => 1 };
+    opaque! { fn generated() { target(); } };
+}
+"##,
+        );
+        assert!(!pending.edges.iter().any(|edge| edge.to_name == "target"));
+        assert!(pending
+            .symbols
+            .iter()
+            .all(|symbol| symbol.name != "generated"));
+    }
+
+    #[test]
+    fn oversized_macro_bodies_preserve_only_the_macro_invocation() {
+        let source = format!(
+            "fn target() {{}}\nfn entry() {{ huge!(\"{}\", target()); }}",
+            "x".repeat(MACRO_BODY_BYTE_LIMIT)
+        );
+        let pending = fixture("macro_reference_limit.rs", &source);
+        let edges = outgoing(&pending, "entry");
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].to_name, "huge");
+        assert_eq!(edges[0].target_kind.as_deref(), Some("macro"));
+    }
 
     #[test]
     fn extracts_function_and_struct() {

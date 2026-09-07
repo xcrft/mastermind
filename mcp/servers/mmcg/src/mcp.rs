@@ -1670,13 +1670,13 @@ fn schema_search() -> Value {
 fn schema_callers() -> Value {
     json!({
         "name": "mmcg_callers",
-        "description": "List symbols that reference the given name. Matches both leaf names (`obj.foo()` → 'foo') AND type prefixes (`SessionStore::new()` → 'SessionStore'). Use before editing to assess blast radius. Pass `language` to filter against monorepo collisions. Pass `edge_kind` (default 'calls') to switch between call/import/inherit edges. Result carries `name_collision` — how many definitions share this name; a value > 1 means the caller set pools across same-named symbols (edges resolve by name), so trust it less.",
+        "description": "List symbols that reference the given name. Matches both leaf names (`obj.foo()` → 'foo') AND type prefixes (`SessionStore::new()` → 'SessionStore'). Use before editing to assess blast radius. Pass `language` to filter against monorepo collisions. Pass `edge_kind` (default 'calls') to switch between call/import/inherit edges or 'references' for function-value and macro-body references. Result carries `name_collision` — how many definitions share this name; a value > 1 means the caller set pools across same-named symbols (edges resolve by name), so trust it less.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "name": { "type": "string", "description": "Name or type to look up" },
                 "language": { "type": "string", "enum": LANGUAGES },
-                "edge_kind": { "type": "string", "enum": ["calls", "imports", "inherits"], "default": "calls", "description": "Which kind of incoming edge to consider" }
+                "edge_kind": { "type": "string", "enum": ["calls", "imports", "inherits", "references"], "default": "calls", "description": "Which kind of incoming edge to consider; references include function values and macro bodies" }
             },
             "required": ["name"]
         }
@@ -1686,15 +1686,18 @@ fn schema_callers() -> Value {
 fn schema_callees() -> Value {
     json!({
         "name": "mmcg_callees",
-        "description": "List names that the given symbol references. Pass `edge_kind` (default 'calls') to switch between call/import/inherit edges.",
+        "description": "List names referenced by one exact symbol definition. If several definitions share the name, returns match_status 'ambiguous', candidates with file/line, and no selected edges. Use file and, if needed, declaration start line to select one candidate. Partial-class declarations remain separate candidates. Pass `edge_kind` (default 'calls') to switch between call/import/inherit edges or 'references' for function-value and macro-body references.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "name": { "type": "string", "description": "Symbol whose outgoing edges you want to inspect" },
+                "file": { "type": "string", "minLength": 1, "description": "Exact relative file path from a candidate, as stored in the index" },
+                "line": { "type": "integer", "minimum": 1, "maximum": 4294967295_u64, "description": "Exact declaration start line from a candidate; requires file" },
                 "language": { "type": "string", "enum": LANGUAGES },
-                "edge_kind": { "type": "string", "enum": ["calls", "imports", "inherits"], "default": "calls" }
+                "edge_kind": { "type": "string", "enum": ["calls", "imports", "inherits", "references"], "default": "calls" }
             },
-            "required": ["name"]
+            "required": ["name"],
+            "dependentRequired": { "line": ["file"] }
         }
     })
 }
@@ -1702,7 +1705,7 @@ fn schema_callees() -> Value {
 fn schema_impact() -> Value {
     json!({
         "name": "mmcg_impact",
-        "description": "Transitive callers of the symbol up to max_depth. Use for blast-radius analysis on widely-called functions. Matches by name OR type prefix (like mmcg_callers). Result carries `name_collision`: a value > 1 means the blast radius is pooled across same-named definitions and over-approximates the real reach — verify before acting on the number. Bounded at 5,001 rows: above that, `truncated: true` is returned alongside the (partial) `impact` list — narrow `max_depth` or add a `language` filter to see the rest.",
+        "description": "Transitive dependency candidates through calls and syntactic references up to max_depth. References include function-value and Rust macro-body usages, not proof of invocation. Targets use names and available syntax/type hints without compiler resolution; `name_collision` reports pooled definitions. `precision_notes` describe missing dynamic/generated edges and extraction limits: empty results or `truncated: false` do not prove complete runtime reachability. At the 5,001-row cap, `truncated: true` marks a partial query result — narrow `max_depth` or add a `language` filter.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -2025,7 +2028,7 @@ fn impact_input_schema(name: &str, description: &str) -> Value {
 fn schema_change_impact() -> Value {
     impact_input_schema(
         "mmcg_change_impact",
-        "Deterministic schema-v1 analysis of working-tree changes, callers, component crossings, and candidate tests.",
+        "Deterministic schema-v1 analysis of working-tree changes, dependency candidates through calls and syntactic references, component crossings, and candidate tests. Precision notes preserve extraction and name-resolution limitations even when no dependencies are returned.",
     )
 }
 
@@ -2189,8 +2192,32 @@ fn handle_callees(store: &mut Store, args: &Value) -> Result<Value, HandlerError
     let name = str_arg(args, "name")?;
     let language = opt_str_arg(args, "language");
     let edge_kind = opt_str_arg(args, "edge_kind");
+    let file = args
+        .get("file")
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|file| !file.is_empty())
+                .ok_or_else(|| HandlerError::InvalidArguments("Invalid argument: file".into()))
+        })
+        .transpose()?;
+    let line = args
+        .get("line")
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|line| u32::try_from(line).ok())
+                .filter(|line| *line > 0 && file.is_some())
+                .ok_or_else(|| {
+                    HandlerError::InvalidArguments(
+                        "Invalid argument: line (positive declaration start line requires file)"
+                            .into(),
+                    )
+                })
+        })
+        .transpose()?;
     ensure_fresh_index(store)?;
-    let r = queries::callees(store, name, language, edge_kind)
+    let r = queries::callees(store, name, language, edge_kind, file, line)
         .map_err(|error| HandlerError::internal("callees_query", error))?;
     serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
@@ -3129,6 +3156,76 @@ mod tests {
             .index_all(&mut store, true)
             .unwrap();
         (root, store)
+    }
+
+    #[test]
+    fn callees_tool_reports_ambiguity_and_respects_candidate_selection() {
+        let (root, mut store) = fresh_test_store();
+        std::fs::write(
+            root.path().join("first.rs"),
+            "fn process() { first_leaf(); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("second.rs"),
+            "fn process() { second_leaf(); }\n",
+        )
+        .unwrap();
+        crate::indexer::Indexer::new(root.path())
+            .index_all(&mut store, true)
+            .unwrap();
+
+        let ambiguous = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({ "name": "mmcg_callees", "arguments": { "name": "process" } }),
+        )
+        .unwrap();
+        assert_eq!(ambiguous["isError"], false);
+        let payload = unwrap_content(&ambiguous);
+        assert_eq!(payload["match_status"], "ambiguous");
+        assert_eq!(payload["name_collision"], 2);
+        assert!(payload["matched"].is_null());
+        assert_eq!(payload["candidates"].as_array().unwrap().len(), 2);
+        assert!(payload["callees"].as_array().unwrap().is_empty());
+
+        let selected = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({
+                "name": "mmcg_callees",
+                "arguments": { "name": "process", "file": "second.rs", "line": 1 }
+            }),
+        )
+        .unwrap();
+        assert_eq!(selected["isError"], false);
+        let payload = unwrap_content(&selected);
+        assert_eq!(payload, selected["structuredContent"]);
+        assert_eq!(payload["match_status"], "matched");
+        assert_eq!(payload["matched"]["file"], "second.rs");
+        assert_eq!(payload["callees"][0]["name"], "second_leaf");
+    }
+
+    #[test]
+    fn callees_tool_rejects_invalid_selectors_before_refresh() {
+        let (root, mut store) = fresh_test_store();
+        std::fs::write(root.path().join("new.rs"), "fn unindexed() {}\n").unwrap();
+        for arguments in [
+            json!({ "name": "process", "file": 7 }),
+            json!({ "name": "process", "file": "" }),
+            json!({ "name": "process", "line": 1 }),
+            json!({ "name": "process", "file": "second.rs", "line": 0 }),
+            json!({ "name": "process", "file": "second.rs", "line": -1 }),
+            json!({ "name": "process", "file": "second.rs", "line": "1" }),
+            json!({ "name": "process", "file": "second.rs", "line": 4294967296_u64 }),
+        ] {
+            let result = handle_callees(&mut store, &arguments);
+            assert!(matches!(result, Err(HandlerError::InvalidArguments(_))));
+        }
+        assert!(store
+            .search_symbols("unindexed", None, None)
+            .unwrap()
+            .is_empty());
     }
 
     #[derive(Default)]

@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-const SCHEMA_VERSION: &str = "7";
+const SCHEMA_VERSION: &str = "8";
 pub const CONCEPT_NORMALIZATION_META_KEY: &str = "concept_normalization_version";
 pub const CONCEPT_NORMALIZATION_VERSION: &str = "mmcg-concepts-v2";
 pub const CONCEPT_DOCUMENTATION_SUPPORTED_LANGUAGES: &str = "javascript,python,rust,tsx,typescript";
@@ -464,18 +464,48 @@ pub(crate) fn is_production_path(path: &str) -> bool {
             .is_some_and(|(stem, _)| stem.ends_with("Test") || stem.ends_with("Tests")))
 }
 
-fn unreferenced_candidates_sql() -> String {
+// Shared by incoming-reference queries and bounded map aggregation. Constraints
+// rule out incompatible syntax; they do not resolve a receiver's runtime type.
+const EDGE_NAME_MATCH_SQL: &str = "e.target_kind IS NULL
+         OR (e.target_kind = 'function' AND target.kind IN ('function', 'struct', 'enum'))
+         OR (e.target_kind = 'method' AND target.kind = 'method')
+         OR (e.target_kind = 'scoped' AND target.kind IN ('function', 'method'))
+         OR (e.target_kind = 'macro' AND target.kind = 'macro')";
+
+const EDGE_TYPE_MATCH_SQL: &str = "e.target_kind IS NULL OR target.kind IN
+    ('struct', 'enum', 'trait', 'impl', 'type', 'type_alias', 'mod')";
+
+// Aggregate compatible target classes before expanding individual definitions.
+// A common method name must cost O(call sites + definitions), not their product.
+fn reference_groups_ctes() -> String {
     format!(
-        "WITH referenced_names AS (
-             SELECT DISTINCT to_name AS nm FROM edges
-             UNION
-             SELECT DISTINCT to_type AS nm FROM edges
-               WHERE to_type IS NOT NULL AND to_type <> ''
+        "target_groups AS MATERIALIZED (
+             SELECT DISTINCT name, kind FROM symbols
+         ), target_refs(nm, target_kind, from_id, kind) AS (
+             SELECT target.name, target.kind, e.from_id, e.kind
+             FROM target_groups target
+             CROSS JOIN edges e INDEXED BY idx_edges_to_name
+             WHERE e.to_name = target.name AND ({EDGE_NAME_MATCH_SQL})
+             UNION ALL
+             SELECT target.name, target.kind, e.from_id, e.kind
+             FROM target_groups target
+             CROSS JOIN edges e INDEXED BY idx_edges_to_type
+             WHERE e.to_type = target.name AND e.to_type IS NOT NULL AND e.to_type <> ''
+               AND ({EDGE_TYPE_MATCH_SQL})
+         )"
+    )
+}
+
+fn unreferenced_candidates_sql() -> String {
+    let references = reference_groups_ctes();
+    format!(
+        "WITH {references}, referenced_symbols AS (
+             SELECT DISTINCT nm, target_kind FROM target_refs
          ),
          candidates AS (
              SELECT {SYMBOL_COLS_S}
              FROM symbols s
-             LEFT JOIN referenced_names r ON r.nm = s.name
+             LEFT JOIN referenced_symbols r ON r.nm = s.name AND r.target_kind = s.kind
              WHERE r.nm IS NULL
                AND (?1 IS NULL OR s.kind = ?1)
                AND (?2 IS NULL OR s.language = ?2)
@@ -611,7 +641,7 @@ pub struct Edge {
     pub from_id: i64,
     pub to_id: Option<i64>,
     pub to_name: String,
-    pub kind: String, // "calls" | "imports" | "inherits"
+    pub kind: String, // "calls" | "references" | "imports" | "inherits"
     pub line: u32,
 }
 
@@ -2018,6 +2048,9 @@ pub struct PendingEdge {
     /// variable). Lets `mmcg_callers <Type>` find Rust constructor and
     /// associated-function calls that would otherwise hide under their leaf name.
     pub to_type: Option<String>,
+    /// Syntactic target constraint: function, method, scoped, macro, or indirect.
+    /// This rules out incompatible definitions without claiming type resolution.
+    pub target_kind: Option<String>,
     pub kind: String,
     pub line: u32,
 }
@@ -3146,6 +3179,7 @@ impl Store {
                 to_name   TEXT NOT NULL,
                 to_path   TEXT,
                 to_type   TEXT,
+                target_kind TEXT,
                 kind      TEXT NOT NULL,
                 line      INTEGER NOT NULL
             );
@@ -3160,6 +3194,11 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_edges_calls_to_type
                 ON edges(to_type, from_id)
                 WHERE kind = 'calls' AND to_type IS NOT NULL AND to_type <> '';
+            CREATE INDEX IF NOT EXISTS idx_edges_impact_to_name
+                ON edges(to_name, from_id) WHERE kind IN ('calls', 'references');
+            CREATE INDEX IF NOT EXISTS idx_edges_impact_to_type
+                ON edges(to_type, from_id)
+                WHERE kind IN ('calls', 'references') AND to_type IS NOT NULL AND to_type <> '';
 
             CREATE TABLE IF NOT EXISTS files (
                 path                    TEXT PRIMARY KEY,
@@ -4411,13 +4450,19 @@ impl Store {
         // Insert edges (to_id left NULL — resolved by name/type during queries).
         {
             let mut stmt = tx.prepare_cached(
-                "INSERT INTO edges(from_id, to_id, to_name, to_path, to_type, kind, line)
-                 VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO edges(from_id, to_id, to_name, to_path, to_type, target_kind, kind, line)
+                 VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?;
             for e in &pending.edges {
                 let from_id = symbol_ids[e.from_index];
                 stmt.execute(params![
-                    from_id, e.to_name, e.to_path, e.to_type, e.kind, e.line
+                    from_id,
+                    e.to_name,
+                    e.to_path,
+                    e.to_type,
+                    e.target_kind,
+                    e.kind,
+                    e.line
                 ])?;
             }
         }
@@ -4891,8 +4936,9 @@ impl Store {
         )
     }
 
-    /// Callers of a symbol — symbols joined to it via an edge matching `to_name`
-    /// OR `to_type`. The `to_type` match catches Rust constructor /
+    /// Callers of a symbol — name/type candidates compatible with the known
+    /// call syntax. Receiver calls cannot bind to free Rust functions. The
+    /// `to_type` match catches Rust constructor /
     /// associated-function calls like `SessionStore::new()` that would otherwise
     /// hide under the leaf name (`new`). Optional `language` filter (defends
     /// against cross-language name collisions in monorepos).
@@ -4901,6 +4947,7 @@ impl Store {
     ///   - `None` → `'calls'` (historical "who calls X")
     ///   - `Some("imports")` → who imports X (returns module pseudo-symbols)
     ///   - `Some("inherits")` → who inherits from X (when extractors emit inherit edges)
+    ///   - `Some("references")` → who refers to X as a value or in macro tokens
     pub fn callers_of(
         &self,
         name: &str,
@@ -4908,11 +4955,22 @@ impl Store {
         edge_kind: Option<&str>,
     ) -> SqlResult<Vec<Symbol>> {
         let sql = format!(
-            "SELECT DISTINCT {SYMBOL_COLS_S}
+            "WITH targets AS MATERIALIZED (
+                 SELECT DISTINCT kind FROM symbols WHERE name = ?1
+             )
+             SELECT DISTINCT {SYMBOL_COLS_S}
              FROM symbols s
              JOIN edges e ON e.from_id = s.id
              WHERE e.kind = COALESCE(?3, 'calls')
                AND (e.to_name = ?1 OR e.to_type = ?1)
+               AND (
+                   NOT EXISTS (SELECT 1 FROM targets)
+                   OR EXISTS (
+                       SELECT 1 FROM targets target
+                       WHERE (e.to_name = ?1 AND ({EDGE_NAME_MATCH_SQL}))
+                          OR (e.to_type = ?1 AND ({EDGE_TYPE_MATCH_SQL}))
+                   )
+               )
                AND (?2 IS NULL OR s.language = ?2)
              ORDER BY s.file_path, s.line_start"
         );
@@ -4939,10 +4997,12 @@ impl Store {
         rows.collect()
     }
 
-    /// Transitive callers up to `max_depth` for one or more seed names — the
+    /// Transitive calls and syntactic references up to `max_depth` for seed names — the
     /// guarded visited-set walk backing both `mmcg_impact` (single seed) and
-    /// `change_impact` (many seeds). Matches `to_name OR to_type` to catch
-    /// type-method calls like `SessionStore::new()`. Bounded on three axes:
+    /// `change_impact` (many seeds). Matches compatible name/type candidates;
+    /// subsequent steps retain the matched symbol's identity. A callback or
+    /// macro reference is potential impact, not a proven runtime invocation.
+    /// Bounded on three axes:
     /// seed count (≤ 200), `max_depth` (1..=10 — mirrors the `mmcg_impact`
     /// tool's advertised cap), and `row_limit` (≤ 5001, the caller's row cap).
     /// Optional `language` restricts every step of the walk (not just the
@@ -4984,46 +5044,64 @@ impl Store {
         let lang_param = names.len() + 3;
         let sql = format!(
             "WITH RECURSIVE seed(seed) AS (VALUES {placeholders}),
+             seed_targets AS MATERIALIZED (
+                 SELECT DISTINCT target.name, target.kind
+                 FROM seed JOIN symbols target ON target.name = seed.seed
+             ),
              walk(seed, sym_id, name, depth, visited) AS (
                  SELECT seed.seed, s.id, s.name, 1, ',' || s.id || ','
                  FROM seed
-                 JOIN edges e INDEXED BY idx_edges_calls_to_name
-                   ON e.to_name = seed.seed AND e.kind = 'calls'
+                 JOIN edges e INDEXED BY idx_edges_impact_to_name
+                   ON e.to_name = seed.seed AND e.kind IN ('calls', 'references')
                  JOIN symbols s ON s.id = e.from_id
                  WHERE (?{lang_param} IS NULL OR s.language = ?{lang_param})
+                   AND (
+                       NOT EXISTS (SELECT 1 FROM seed_targets WHERE name = seed.seed)
+                       OR EXISTS (SELECT 1 FROM seed_targets target
+                                  WHERE target.name = seed.seed AND ({EDGE_NAME_MATCH_SQL}))
+                   )
                UNION ALL
                  SELECT seed.seed, s.id, s.name, 1, ',' || s.id || ','
                  FROM seed
-                 JOIN edges e INDEXED BY idx_edges_calls_to_type
+                 JOIN edges e INDEXED BY idx_edges_impact_to_type
                    ON e.to_type = seed.seed
-                  AND e.kind = 'calls'
+                  AND e.kind IN ('calls', 'references')
                   AND e.to_type IS NOT NULL
                   AND e.to_type <> ''
                  JOIN symbols s ON s.id = e.from_id
                  WHERE (?{lang_param} IS NULL OR s.language = ?{lang_param})
+                   AND (
+                       NOT EXISTS (SELECT 1 FROM seed_targets WHERE name = seed.seed)
+                       OR EXISTS (SELECT 1 FROM seed_targets target
+                                  WHERE target.name = seed.seed AND ({EDGE_TYPE_MATCH_SQL}))
+                   )
                UNION ALL
                  SELECT walk.seed, s.id, s.name, walk.depth + 1,
                         walk.visited || s.id || ','
                  FROM walk
-                 JOIN edges e INDEXED BY idx_edges_calls_to_name
-                   ON e.to_name = walk.name AND e.kind = 'calls'
+                 JOIN edges e INDEXED BY idx_edges_impact_to_name
+                   ON e.to_name = walk.name AND e.kind IN ('calls', 'references')
+                 JOIN symbols target ON target.id = walk.sym_id
                  JOIN symbols s ON s.id = e.from_id
                  WHERE walk.depth < ?{depth_param}
                    AND instr(walk.visited, ',' || s.id || ',') = 0
                    AND (?{lang_param} IS NULL OR s.language = ?{lang_param})
+                   AND ({EDGE_NAME_MATCH_SQL})
                UNION ALL
                  SELECT walk.seed, s.id, s.name, walk.depth + 1,
                         walk.visited || s.id || ','
                  FROM walk
-                 JOIN edges e INDEXED BY idx_edges_calls_to_type
+                 JOIN edges e INDEXED BY idx_edges_impact_to_type
                    ON e.to_type = walk.name
-                  AND e.kind = 'calls'
+                  AND e.kind IN ('calls', 'references')
                   AND e.to_type IS NOT NULL
                   AND e.to_type <> ''
+                 JOIN symbols target ON target.id = walk.sym_id
                  JOIN symbols s ON s.id = e.from_id
                  WHERE walk.depth < ?{depth_param}
                    AND instr(walk.visited, ',' || s.id || ',') = 0
                    AND (?{lang_param} IS NULL OR s.language = ?{lang_param})
+                   AND ({EDGE_TYPE_MATCH_SQL})
              ), minimum AS (
                  SELECT seed, sym_id, MIN(depth) AS depth
                  FROM walk
@@ -5192,24 +5270,16 @@ impl Store {
         production_only: bool,
         limit: usize,
     ) -> SqlResult<Vec<FileInDegree>> {
-        let sql = "WITH raw_refs AS (
-                 SELECT to_name AS nm, COUNT(*) AS edge_count
-                 FROM edges
-                 WHERE to_name <> ''
-                 GROUP BY to_name
-                 UNION ALL
-                 SELECT to_type AS nm, COUNT(*) AS edge_count
-                 FROM edges
-                 WHERE to_type IS NOT NULL AND to_type <> ''
-                 GROUP BY to_type
-             ), refs AS (
-                 SELECT nm, SUM(edge_count) AS edge_count
-                 FROM raw_refs
-                 GROUP BY nm
+        let references = reference_groups_ctes();
+        let sql = format!(
+            "WITH {references}, refs AS (
+                 SELECT nm, target_kind, COUNT(*) AS edge_count
+                 FROM target_refs
+                 GROUP BY nm, target_kind
              )
              SELECT s.file_path AS file, SUM(r.edge_count) AS deg
              FROM refs r
-             JOIN symbols s ON s.name = r.nm
+             JOIN symbols s ON s.name = r.nm AND s.kind = r.target_kind
              WHERE s.kind != 'module'
                AND (
                    ?2 = 'root'
@@ -5222,8 +5292,9 @@ impl Store {
                AND (?3 = 0 OR s.production = 1)
              GROUP BY s.file_path
              ORDER BY deg DESC, s.file_path
-             LIMIT ?4";
-        let mut stmt = self.conn.prepare(sql)?;
+             LIMIT ?4"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![scope, kind, production_only, limit as i64], |r| {
             Ok(FileInDegree {
                 file: r.get(0)?,
@@ -5272,7 +5343,8 @@ impl Store {
         rows.collect()
     }
 
-    /// Symbols no edge references by `to_name` or `to_type`. Excludes synthetic
+    /// Symbols with no compatible call, value, macro, import or inheritance reference.
+    /// These are candidates, not proof of dead code. Excludes synthetic
     /// `<module>` rows (never "called") and symbols with framework-registered
     /// decorators (pytest, FastAPI/Flask routes, Triton/Numba JIT, Click
     /// commands, Celery tasks, Rust `#[test]` / `#[tokio::main]`), plus
@@ -5354,22 +5426,17 @@ impl Store {
         } else {
             format!("{path_prefix}%")
         };
+        let references = reference_groups_ctes();
         let sql = format!(
-            "WITH external_refs AS (
-                 SELECT DISTINCT e.to_name AS nm
-                 FROM edges e
-                 JOIN symbols caller ON caller.id = e.from_id
+            "WITH {references}, external_refs AS (
+                 SELECT DISTINCT r.nm, r.target_kind
+                 FROM target_refs r
+                 JOIN symbols caller ON caller.id = r.from_id
                  WHERE caller.file_path NOT LIKE ?1
-                 UNION
-                 SELECT DISTINCT e.to_type AS nm
-                 FROM edges e
-                 JOIN symbols caller ON caller.id = e.from_id
-                 WHERE caller.file_path NOT LIKE ?1
-                   AND e.to_type IS NOT NULL AND e.to_type <> ''
              )
              SELECT DISTINCT {SYMBOL_COLS_S}
              FROM symbols s
-             JOIN external_refs r ON r.nm = s.name
+             JOIN external_refs r ON r.nm = s.name AND r.target_kind = s.kind
              WHERE s.file_path LIKE ?1
                AND (?2 IS NULL OR s.language = ?2)
                AND s.kind != 'module'
@@ -5411,21 +5478,19 @@ impl Store {
         });
         // In-degree = distinct CALLER symbols, not call sites. Mirrors
         // `mmcg_callers` — 5 calls to `foo` from the same caller count once.
+        let references = reference_groups_ctes();
         let sql = format!(
-            "WITH deg AS (
-                 SELECT nm, COUNT(DISTINCT from_id) AS d FROM (
-                     SELECT to_name AS nm, from_id FROM edges WHERE kind = 'calls'
-                     UNION ALL
-                     SELECT to_type AS nm, from_id FROM edges
-                       WHERE kind = 'calls' AND to_type IS NOT NULL AND to_type <> ''
-                 ) GROUP BY nm
+            "WITH {references}, deg AS (
+                 SELECT nm, target_kind, COUNT(DISTINCT from_id) AS d
+                 FROM target_refs WHERE kind = 'calls'
+                 GROUP BY nm, target_kind
              ),
              defs AS (
                  SELECT name, COUNT(*) AS n FROM symbols WHERE kind != 'module' GROUP BY name
              )
              SELECT {SYMBOL_COLS_S}, deg.d AS in_degree, defs.n AS name_collision
              FROM symbols s
-             JOIN deg  ON deg.nm = s.name
+             JOIN deg ON deg.nm = s.name AND deg.target_kind = s.kind
              JOIN defs ON defs.name = s.name
              WHERE s.kind != 'module'
                AND (?1 IS NULL OR s.file_path LIKE ?1)
@@ -5523,31 +5588,30 @@ impl Store {
         let symbol_scope = in_component("s.file_path");
         let caller_scope = in_component("caller.file_path");
         let sql = format!(
-            "WITH scoped_names(name) AS MATERIALIZED (
-                 SELECT DISTINCT s.name
+            "WITH scoped_targets AS MATERIALIZED (
+                 SELECT DISTINCT s.name, s.kind
                  FROM symbols s INDEXED BY idx_symbols_file
                  WHERE {symbol_scope}
                    AND s.kind != 'module'
                    {symbol_filter}
              ),
-             boundary_names(name) AS MATERIALIZED (
-                 SELECT n.name
-                 FROM scoped_names n
+             boundary_targets AS MATERIALIZED (
+                 SELECT target.name, target.kind
+                 FROM scoped_targets target
                  CROSS JOIN edges e INDEXED BY idx_edges_calls_to_name
                  JOIN symbols caller ON caller.id = e.from_id
-                 WHERE e.to_name = n.name
-                   AND e.kind = 'calls'
+                 WHERE e.to_name = target.name AND e.kind = 'calls'
+                   AND ({EDGE_NAME_MATCH_SQL})
                    AND NOT {caller_scope}
                    {caller_filter}
                  UNION
-                 SELECT n.name
-                 FROM scoped_names n
+                 SELECT target.name, target.kind
+                 FROM scoped_targets target
                  CROSS JOIN edges e INDEXED BY idx_edges_calls_to_type
                  JOIN symbols caller ON caller.id = e.from_id
-                 WHERE e.to_type = n.name
-                   AND e.kind = 'calls'
-                   AND e.to_type IS NOT NULL
-                   AND e.to_type <> ''
+                 WHERE e.to_type = target.name AND e.kind = 'calls'
+                   AND e.to_type IS NOT NULL AND e.to_type <> ''
+                   AND ({EDGE_TYPE_MATCH_SQL})
                    AND NOT {caller_scope}
                    {caller_filter}
              )
@@ -5561,9 +5625,10 @@ impl Store {
                     COALESCE(parent.decorators, '') AS parent_decorators
              FROM symbols s INDEXED BY idx_symbols_file
              LEFT JOIN symbols parent ON parent.id = s.parent_id
+             JOIN boundary_targets target ON target.name = s.name
+                  AND target.kind = s.kind
              WHERE {symbol_scope}
                AND s.kind != 'module'
-               AND s.name IN (SELECT name FROM boundary_names)
                {symbol_filter}
              ORDER BY s.file_path, s.line_start, s.name, s.kind, s.line_end,
                       COALESCE(s.signature, ''), COALESCE(s.decorators, ''),
@@ -5612,132 +5677,10 @@ impl Store {
         top_probe: usize,
         production_only: bool,
     ) -> SqlResult<Vec<MapCentralityRow>> {
-        if kind == "root" {
-            // A whole-index map already contains every definition and every
-            // caller, so joining each call edge back through scoped_names (and
-            // then through caller) only multiplies work. Aggregate the two
-            // target indexes directly, choose at most `top_probe` names by
-            // their first deterministic definition, and expand definitions
-            // only for those candidate names.
-            let caller_join = if production_only {
-                "JOIN symbols caller ON caller.id = edges.from_id"
-            } else {
-                ""
-            };
-            let caller_filter = maybe_production_symbol_filter(production_only, "caller");
-            let collision_filter = maybe_production_symbol_filter(production_only, "collision");
-            let first_filter = maybe_production_symbol_filter(production_only, "first");
-            let result_filter = maybe_production_symbol_filter(production_only, "s");
-            let sql = format!(
-                "WITH callers(nm, from_id) AS (
-                     SELECT edges.to_name, edges.from_id
-                     FROM edges INDEXED BY idx_edges_calls_to_name
-                     {caller_join}
-                     WHERE edges.kind = 'calls'
-                       {caller_filter}
-                     UNION
-                     SELECT edges.to_type, edges.from_id
-                     FROM edges INDEXED BY idx_edges_calls_to_type
-                     {caller_join}
-                     WHERE edges.kind = 'calls'
-                       AND edges.to_type IS NOT NULL
-                       AND edges.to_type <> ''
-                       {caller_filter}
-                 ),
-                 name_degrees AS MATERIALIZED (
-                     SELECT nm, COUNT(*) AS in_degree
-                     FROM callers
-                     GROUP BY nm
-                 ),
-                 collisions AS MATERIALIZED (
-                     SELECT collision.name, COUNT(*) AS name_collision
-                     FROM symbols collision INDEXED BY idx_symbols_name
-                     WHERE collision.kind != 'module'
-                       {collision_filter}
-                     GROUP BY collision.name
-                 ),
-                 name_first AS MATERIALIZED (
-                     SELECT collisions.name,
-                            collisions.name_collision,
-                            (
-                                SELECT first.id
-                                FROM symbols first INDEXED BY idx_symbols_name
-                                LEFT JOIN symbols first_parent ON first_parent.id = first.parent_id
-                                WHERE first.name = collisions.name
-                                  AND first.kind != 'module'
-                                  {first_filter}
-                                ORDER BY first.file_path, first.line_start, first.name,
-                                         first.kind, first.line_end,
-                                         COALESCE(first.signature, ''),
-                                         COALESCE(first.decorators, ''),
-                                         COALESCE(first_parent.file_path, ''),
-                                         COALESCE(first_parent.line_start, -1),
-                                         COALESCE(first_parent.name, ''),
-                                         COALESCE(first_parent.kind, ''),
-                                         COALESCE(first_parent.line_end, -1),
-                                         COALESCE(first_parent.signature, ''),
-                                         COALESCE(first_parent.decorators, '')
-                                LIMIT 1
-                            ) AS first_id
-                     FROM collisions
-                 ),
-                 candidate_names AS MATERIALIZED (
-                     SELECT degrees.nm,
-                            degrees.in_degree,
-                            names.name_collision
-                     FROM name_degrees degrees
-                     JOIN name_first names ON names.name = degrees.nm
-                     JOIN symbols first ON first.id = names.first_id
-                     LEFT JOIN symbols first_parent ON first_parent.id = first.parent_id
-                     ORDER BY (names.name_collision > 1), degrees.in_degree DESC,
-                              first.file_path, first.line_start, first.name,
-                              first.kind, first.line_end,
-                              COALESCE(first.signature, ''),
-                              COALESCE(first.decorators, ''),
-                              COALESCE(first_parent.file_path, ''),
-                              COALESCE(first_parent.line_start, -1),
-                              COALESCE(first_parent.name, ''),
-                              COALESCE(first_parent.kind, ''),
-                              COALESCE(first_parent.line_end, -1),
-                              COALESCE(first_parent.signature, ''),
-                              COALESCE(first_parent.decorators, '')
-                     LIMIT ?1
-                 )
-                 SELECT {SYMBOL_COLS_S},
-                        candidates.in_degree,
-                        candidates.name_collision
-                 FROM candidate_names candidates
-                 JOIN symbols s INDEXED BY idx_symbols_name ON s.name = candidates.nm
-                 LEFT JOIN symbols parent ON parent.id = s.parent_id
-                 WHERE s.kind != 'module'
-                   {result_filter}
-                 ORDER BY (candidates.name_collision > 1),
-                          candidates.in_degree DESC,
-                          s.file_path, s.line_start, s.name, s.kind, s.line_end,
-                          COALESCE(s.signature, ''), COALESCE(s.decorators, ''),
-                          COALESCE(parent.file_path, ''),
-                          COALESCE(parent.line_start, -1),
-                          COALESCE(parent.name, ''), COALESCE(parent.kind, ''),
-                          COALESCE(parent.line_end, -1),
-                          COALESCE(parent.signature, ''),
-                          COALESCE(parent.decorators, '')
-                 LIMIT ?1"
-            );
-            let mut stmt = self.conn.prepare(&sql)?;
-            let rows = stmt.query_map(params![top_probe as i64], |row| {
-                Ok(MapCentralityRow {
-                    symbol: Self::row_to_symbol(row)?,
-                    in_degree: row.get(9)?,
-                    name_collision: row.get(10)?,
-                })
-            })?;
-            return rows.collect();
-        }
-
         let definition_filter = maybe_production_symbol_filter(production_only, "s");
         let caller_filter = maybe_production_symbol_filter(production_only, "caller");
         let sql = format!(
-            "WITH scoped_defs AS (
+            "WITH scoped_defs AS MATERIALIZED (
                  SELECT {SYMBOL_COLS_S},
                         COALESCE(parent.file_path, '') AS parent_file_path,
                         COALESCE(parent.line_start, -1) AS parent_line_start,
@@ -5753,61 +5696,48 @@ impl Store {
                    AND (
                        ?2 = 'root'
                        OR (?2 = 'file' AND s.file_path = ?1)
-                       OR (
-                           ?2 = 'directory'
-                           AND substr(s.file_path, 1, length(?1) + 1) = ?1 || '/'
-                       )
+                       OR (?2 = 'directory' AND s.file_path >= ?1 || '/'
+                           AND s.file_path < ?1 || '0')
                    )
              ),
-             scoped_names AS (
-                 SELECT DISTINCT name
-                 FROM scoped_defs
+             target_groups AS MATERIALIZED (
+                 SELECT DISTINCT name, kind FROM scoped_defs
              ),
-             -- In-degree depends only on a definition's *name* (plus the
-             -- uniform caller-side production_only filter), never on which
-             -- specific def row it is — so aggregate once over the UNION ALL
-             -- of the to_name and to_type edge branches (grouping by to_name
-             -- alone would drop `Type::method()` callers) and join scoped
-             -- names to the dedicated target indexes. This prevents a small
-             -- map scope from scanning every call edge in a monorepo.
-             name_degrees AS (
-                 SELECT nm, COUNT(DISTINCT from_id) AS in_degree FROM (
-                     SELECT e.to_name AS nm, e.from_id
-                     FROM scoped_names n
-                     JOIN edges e INDEXED BY idx_edges_calls_to_name
-                       ON e.to_name = n.name AND e.kind = 'calls'
+             degrees AS MATERIALIZED (
+                 SELECT name, kind, COUNT(DISTINCT from_id) AS in_degree
+                 FROM (
+                     SELECT target.name, target.kind, e.from_id
+                     FROM target_groups target
+                     CROSS JOIN edges e INDEXED BY idx_edges_calls_to_name
                      JOIN symbols caller ON caller.id = e.from_id
-                     WHERE 1 = 1
-                     {caller_filter}
+                     WHERE e.to_name = target.name AND e.kind = 'calls'
+                       AND ({EDGE_NAME_MATCH_SQL})
+                       {caller_filter}
                      UNION ALL
-                     SELECT e.to_type AS nm, e.from_id
-                     FROM scoped_names n
-                     JOIN edges e INDEXED BY idx_edges_calls_to_type
-                       ON e.to_type = n.name
-                      AND e.kind = 'calls'
-                      AND e.to_type IS NOT NULL
-                      AND e.to_type <> ''
+                     SELECT target.name, target.kind, e.from_id
+                     FROM target_groups target
+                     CROSS JOIN edges e INDEXED BY idx_edges_calls_to_type
                      JOIN symbols caller ON caller.id = e.from_id
-                     WHERE 1 = 1
-                     {caller_filter}
-                 ) GROUP BY nm
+                     WHERE e.to_type = target.name AND e.kind = 'calls'
+                       AND e.to_type IS NOT NULL AND e.to_type <> ''
+                       AND ({EDGE_TYPE_MATCH_SQL})
+                       {caller_filter}
+                 ) GROUP BY name, kind
              ),
              collisions AS (
-                 SELECT n.name,
-                        (
-                            SELECT COUNT(*)
-                            FROM symbols s INDEXED BY idx_symbols_name
-                            WHERE s.kind != 'module' AND s.name = n.name
-                            {definition_filter}
-                        ) AS name_collision
-                 FROM scoped_names n
+                 SELECT DISTINCT d.name,
+                        (SELECT COUNT(*) FROM symbols s INDEXED BY idx_symbols_name
+                         WHERE s.kind != 'module' AND s.name = d.name
+                         {definition_filter}) AS name_collision
+                 FROM scoped_defs d
              )
              SELECT d.id, d.name, d.kind, d.file_path, d.line_start, d.line_end,
                     d.signature, d.parent_id, d.decorators,
                     degrees.in_degree, collisions.name_collision
              FROM scoped_defs d
-             JOIN name_degrees degrees ON degrees.nm = d.name
+             JOIN degrees ON degrees.name = d.name AND degrees.kind = d.kind
              JOIN collisions ON collisions.name = d.name
+             WHERE degrees.in_degree > 0
              ORDER BY (collisions.name_collision > 1), degrees.in_degree DESC,
                       d.file_path, d.line_start, d.name,
                       d.kind, d.line_end, COALESCE(d.signature, ''),
@@ -7434,6 +7364,63 @@ mod tests {
             "test_foo is filtered by pytest convention"
         );
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn incoming_aggregations_share_work_across_compatible_definitions() {
+        let path = tmp_db("incoming_compatible_groups");
+        let store = Store::open(&path).unwrap();
+        store.conn.execute_batch("BEGIN").unwrap();
+        for index in 0..300 {
+            store
+                .insert_symbol(
+                    "execute",
+                    "method",
+                    &format!("src/{index}.rs"),
+                    1,
+                    2,
+                    None,
+                    None,
+                )
+                .unwrap();
+            let caller = store
+                .insert_symbol(
+                    &format!("caller_{index}"),
+                    "function",
+                    "entry.rs",
+                    index + 1,
+                    index + 1,
+                    None,
+                    None,
+                )
+                .unwrap();
+            store
+                .insert_edge(caller, None, "execute", "calls", index + 1)
+                .unwrap();
+        }
+        store
+            .conn
+            .execute("UPDATE edges SET target_kind = 'method'", [])
+            .unwrap();
+        store.conn.execute_batch("COMMIT").unwrap();
+        let budget = WorkBudget {
+            deadline: None,
+            op_ticks: Some(300),
+        };
+        let unreferenced = store
+            .with_work_budget(budget, || store.unreferenced(Some("method"), None))
+            .unwrap();
+        assert!(unreferenced.is_empty());
+        let degrees = store
+            .with_work_budget(budget, || store.centrality(None, None, Some("method"), 300))
+            .unwrap();
+        assert_eq!(degrees.len(), 300);
+        assert!(degrees.iter().all(|(_, degree, _)| *degree == 300));
+        let files = store
+            .with_work_budget(budget, || store.file_in_degrees(false, 300))
+            .unwrap();
+        assert_eq!(files.len(), 300);
+        assert!(files.iter().all(|row| row.in_degree == 300));
     }
 
     #[test]

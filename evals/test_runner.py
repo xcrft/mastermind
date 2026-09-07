@@ -1,6 +1,7 @@
 import json
 import io
 import os
+import re
 import shlex
 import subprocess
 import tempfile
@@ -622,12 +623,145 @@ for (let index = 0; index < left.length; index += 1) mismatch |= left[index] ^ r
         self.assertEqual(runner.code_comment_policy_reasons(output, policy), [])
 
 
+class CriticGraderTests(unittest.TestCase):
+    def evaluate(self, output, case=None):
+        if case is None:
+            case = json.loads(runner.SUITES["critic"]["cases"].read_text().splitlines()[0])
+        events = [
+            {"type": "system", "subtype": "init", "model": RESOLVED_MODEL},
+            {
+                "type": "result",
+                "result": output,
+                "duration_ms": 1000,
+                "duration_api_ms": 800,
+                "num_turns": 1,
+                "total_cost_usd": 0,
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                },
+                "modelUsage": {RESOLVED_MODEL: {}},
+            },
+        ]
+        process = subprocess.CompletedProcess(
+            [], 0, "\n".join(json.dumps(event) for event in events), ""
+        )
+        with patch.object(runner.subprocess, "run", return_value=process):
+            return runner.evaluate_case(
+                "opus", "critic", runner.SUITES["critic"], case, keep_fixtures=False
+            )
+
+    def test_critic_grades_the_final_verdict_instead_of_mentions(self):
+        result = self.evaluate(
+            "The proposal contains fabricated targets and AI slop. I considered rethink.\n\n"
+            "## Verdict\nship with caveats — proceed with this design."
+        )
+        self.assertFalse(result.passed)
+        self.assertIn("ship with caveats", " ".join(result.reasons))
+
+    def test_critic_rejects_missing_quoted_or_conflicting_verdicts(self):
+        outputs = [
+            "The verdict should be rethink.",
+            "```markdown\n## Verdict\nrethink — invalid approach.\n```",
+            "~~~~markdown\n## Verdict\nrethink — invalid approach.\n~~~~",
+            "> ## Verdict\n> rethink — invalid approach.",
+            "    ## Verdict\n    rethink — invalid approach.",
+            "## Verdict\nrethink — invalid approach.\n## Verdict\nship with caveats — proceed.",
+            "## Verdict\nrethink — invalid approach.\nship with caveats — proceed.",
+            "## Verdict\nrethink — invalid approach.\n- **ship with caveats** — proceed.",
+            "## Verdict\nrethink — invalid approach.\n## Verdict\nrethink — repeated.",
+            "## Verdict\nrethink or revise — uncertain.",
+            "## Verdict\nrethink — invalid approach.\n## Final answer\nship it.",
+        ]
+        for output in outputs:
+            with self.subTest(output=output):
+                result = self.evaluate("fabricated slop\n\n" + output)
+                self.assertFalse(result.passed, result.reasons)
+
+    def test_critic_accepts_exact_contract_verdicts_and_markdown_emphasis(self):
+        for verdict in ("ship it", "ship with caveats", "revise", "rethink"):
+            for label in (verdict, f"**{verdict}**", f"`{verdict}`"):
+                with self.subTest(label=label):
+                    case = {
+                        "id": "critic-verdict-contract",
+                        "input": {},
+                        "expect": {"verdict": verdict},
+                    }
+                    result = self.evaluate(
+                        "```markdown\n## Verdict\nrethink — quoted example.\n```\n\n"
+                        f"## Verdict\n{label} — evidence determines the outcome.\n",
+                        case,
+                    )
+                    self.assertTrue(result.passed, result.reasons)
+
+    def test_shipped_critic_cases_expect_aggregate_verdicts(self):
+        for line in runner.SUITES["critic"]["cases"].read_text().splitlines():
+            case = json.loads(line)
+            verdicts = case["expect"]["verdict"]
+            if isinstance(verdicts, str):
+                verdicts = [verdicts]
+            self.assertTrue(set(verdicts) <= runner.CRITIC_VERDICTS, case["id"])
+
+
 class PromptIsolationTests(unittest.TestCase):
     def test_auditor_runs_verify_as_an_exact_standalone_command(self):
         auditor = runner.SUITES["auditor"]["subagent"].read_text(encoding="utf-8")
         self.assertIn("Run each reported\n   `VERIFY` command exactly as written", auditor)
         self.assertIn("do not prepend `cd`", auditor)
         self.assertIn("do not append pipes", auditor)
+
+    def test_auditor_file_inventory_covers_staged_unstaged_and_untracked_changes(self):
+        case = next(
+            case for case in map(json.loads, runner.SUITES["auditor"]["cases"].read_text().splitlines())
+            if case["id"] == "a-010-uncommitted-execution-held"
+        )
+        with patch.object(runner, "_build_mmcg_index"):
+            fixture = runner.setup_fixture(
+                case["fixture"], case["baseline_ref"], case["after_ref"],
+                staged_paths=case["staged_paths"],
+            )
+        self.addCleanup(runner.teardown_fixture, fixture)
+        status = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+            cwd=fixture, text=True, capture_output=True, check=True,
+        ).stdout.splitlines()
+        self.assertEqual(set(status), {"M  src/staged.py", " M src/unstaged.py", "?? src/added.py"})
+        committed_diff = subprocess.run(
+            ["git", "diff", "--name-status", "baseline...HEAD"],
+            cwd=fixture, text=True, capture_output=True, check=True,
+        ).stdout
+        self.assertEqual(committed_diff, "")
+        auditor = runner.SUITES["auditor"]["subagent"].read_text(encoding="utf-8")
+        commands = [
+            command.replace("<baseline>", "baseline")
+            for command in re.findall(r"`(git [^`]+)`", auditor)
+            if command.startswith("git diff --name-status ")
+            or command.startswith("git ls-files --others ")
+        ]
+        changed_files = set()
+        for command in commands:
+            result = subprocess.run(
+                shlex.split(command), cwd=fixture, text=True, capture_output=True, check=True
+            )
+            changed_files.update(line.split("\t")[-1] for line in result.stdout.splitlines())
+        self.assertEqual(changed_files, {"src/staged.py", "src/unstaged.py", "src/added.py"})
+
+    def test_auditor_fixture_keeps_committed_mode_as_default(self):
+        with patch.object(runner, "_build_mmcg_index"):
+            fixture = runner.setup_fixture("uncommitted-audit", "baseline", "executor-added")
+        self.addCleanup(runner.teardown_fixture, fixture)
+        status = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+            cwd=fixture, text=True, capture_output=True, check=True,
+        ).stdout
+        self.assertEqual(status, "")
+        changed = subprocess.run(
+            ["git", "diff", "--name-only", "baseline..executor-added"],
+            cwd=fixture, text=True, capture_output=True, check=True,
+        ).stdout.splitlines()
+        self.assertEqual(set(changed), {"src/staged.py", "src/unstaged.py", "src/added.py"})
 
     def test_synthetic_prompt_suites_cannot_inspect_the_maintainer_checkout(self):
         for suite in ("critic", "intake", "workflow"):
@@ -875,7 +1009,23 @@ class PromptIsolationTests(unittest.TestCase):
             has_mmcg=False,
         )
         self.assertNotIn("ANSWER LEAK", rendered)
-        self.assertIn("git diff baseline..after", rendered)
+        self.assertIn("git diff baseline`", rendered)
+        self.assertIn("git ls-files --others --exclude-standard", rendered)
+        self.assertIn("Read untracked file contents directly", rendered)
+
+    def test_uncommitted_auditor_input_does_not_invent_an_executor_commit(self):
+        rendered = runner.render_auditor_input(
+            {"spec_summary": "three files", "executor_report": "complete"},
+            fixture_path=runner.REPO_ROOT,
+            baseline_ref="baseline",
+            after_ref="after",
+            has_mmcg=True,
+            uncommitted=True,
+        )
+        self.assertIn("HEAD remains at the baseline", rendered)
+        self.assertNotIn("Executor commit tag", rendered)
+        self.assertNotIn("`after`", rendered)
+        self.assertIn("current working-tree state", rendered)
 
     def test_frontmatter_is_removed_without_dropping_prompt_body(self):
         text = "---\nname: demo\n---\n\n# Contract\nBody\n"

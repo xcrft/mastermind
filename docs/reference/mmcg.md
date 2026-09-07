@@ -274,7 +274,9 @@ mmcg uninstall --scope all --force                        # also de-register the
 mmcg query search PendingFile
 mmcg query callers commit_file
 mmcg query callers SomeFn --edge-kind imports     # who imports the symbol
+mmcg query callers callback --edge-kind references # function-value/macro references
 mmcg query callees parse_one
+mmcg query callees process --file src/second.rs --line 12  # select a returned candidate
 mmcg query impact extract --depth 3
 mmcg query files --prefix src/indexer
 mmcg query outline src/store.rs                    # symbol tree of one file
@@ -987,9 +989,9 @@ or given WAL/SHM sidecars by the server. Incompatible custom schemas return
 | Tool | Args | What it returns |
 |---|---|---|
 | `mmcg_search` | `name`, optional `kind`, `language`, `collapse_partials` (default `true`) | Symbols matching exactly. Pre-flight "does X exist?" check. Returns location, kind, signature, and any decorators/attributes. C# `partial class` declarations across N files collapse into one hit with a `locations` array of all N declarations; pass `collapse_partials: false` to see every declaration separately. |
-| `mmcg_callers` | `name`, optional `language`, `edge_kind` (default `calls`) | **Containing functions** that reference `name` by the given edge kind. Count = distinct containing units, not distinct call sites (a function with 3 calls to `name` counts once). Use before editing for blast radius. Pass `edge_kind: imports` to find importers via the same tool. |
-| `mmcg_callees` | `name`, optional `language`, `edge_kind` (default `calls`) | Names the symbol references via the given edge kind. |
-| `mmcg_impact` | `name`, optional `max_depth` (1-10, default 2), `language` | Transitive callers via `calls` edges. Full blast radius. Bounded at 5,001 rows: above that, `truncated: true` is returned alongside `row_limit` and the (partial) `impact` list — narrow `max_depth` or add a `language` filter to see the rest. |
+| `mmcg_callers` | `name`, optional `language`, `edge_kind` (default `calls`) | **Containing functions** that reference `name` by the given edge kind. Count = distinct containing units, not distinct call sites (a function with 3 calls to `name` counts once). Pass `edge_kind: imports` for importers or `references` for function-value and Rust macro-body usages. Returns the selected `edge_kind`, per-symbol precision, and `precision_notes`; references are not proof of invocation. |
+| `mmcg_callees` | `name`, optional `language`, `edge_kind` (default `calls`), `file`, `line` (requires `file`) | Outgoing names from one definition. `match_status` is `matched`, `ambiguous`, or `not_found`; ambiguous results contain `candidates` and no selected edges. Select using the exact indexed `file` and declaration start `line`. `name_collision` counts exact-name definitions after the language filter, before location selection. Partial-class declarations remain separate candidates. |
+| `mmcg_impact` | `name`, optional `max_depth` (1-10, default 2), `language` | Transitive dependency candidates through `calls` and syntactic `references` edges. At the 5,001-row cap, `truncated: true` is returned alongside `row_limit` and the partial `impact` list. Narrow `max_depth` or add a `language` filter. `precision_notes` remain present on empty results; `truncated: false` describes query limits, not complete runtime reachability. |
 | `mmcg_imports` | `file` | Names imported by this file's top-level imports — each entry has `name`, `path` (fully-qualified), `line`. |
 | `mmcg_imported_by` | `query`, optional `match: name`(default)/`path`, `language` | Files whose imports reference the given name OR fully-qualified path. Use `match: path` when the leaf name is ambiguous across modules. |
 | `mmcg_symbols_in_file` | `file` | All symbols defined in a file, source order. Flat list. |
@@ -999,7 +1001,7 @@ or given WAL/SHM sidecars by the server. Incompatible custom schemas return
 | `mmcg_scratchpad_append` | `agent`, `kind`, `body` | Append a one-line intent / note / handoff to the cross-agent scratchpad — live in-session channel between Mastermind subagents (planner → executor → auditor). Persists in `.mastermind/mmcg.db`. Body capped at 8 KiB. Cross-session counterpart is `_lessons.md`. |
 | `mmcg_scratchpad_read` | optional `since`, `agent`, `kind`, `limit` | Read recent scratchpad entries, newest first. `since` is a unix timestamp (seconds); omit for the last `limit` entries (default 20, max 200). |
 | `mmcg_change_class` | `file` | Classify a file's last change as `structural`, `cosmetic`, or `first-seen`. Backed by an FNV-1a 64-bit hash of the file's parsed structural shape — line numbers and whitespace excluded. Pre-edit signal for planner and auditor: large diffs that are mostly cosmetic have smaller real scope than line count suggests. |
-| `mmcg_unreferenced` | optional `kind`, `language` | Symbols that no edge references. Dead-code candidates. **Review manually** — see Limitations for false-positive scenarios. |
+| `mmcg_unreferenced` | optional `kind`, `language` | Symbols with no indexed reference candidates, with per-symbol precision and explicit `precision_notes`. These are not proven dead code. **Review manually** — see Limitations for false-positive scenarios. |
 | `mmcg_api_surface` | `prefix`, optional `language` | Symbols under `prefix` referenced from at least one file OUTSIDE `prefix`. Empirical "who-uses-this-module" map; doesn't need declared visibility. |
 | `mmcg_centrality` | optional `prefix`, `language`, `kind`, `top` (default 20) | Rank symbols by in-degree (distinct callers). Pre-flight "where is the gravity" — top hits are the structural attractors of the codebase or a subdirectory. Use to learn what to read first on unfamiliar code. Excludes synthetic `<module>` rows and zero-degree symbols. |
 | `mmcg_semantic` | `symbol`, optional `top` (default 100, max 500) | Compiler-resolved SCIP definitions, references, implementations, type definitions, and explicit provenance. Returns `fallback_active: true` instead of an error when no overlay exists. Stale document facts are omitted with diagnostics. |
@@ -1007,7 +1009,7 @@ or given WAL/SHM sidecars by the server. Incompatible custom schemas return
 | `mmcg_team_map` | `manifest` | Bounded `mastermind-team/v1` graph over pinned local read-only indexes. The locked manifest must be repository-relative, inside the MCP server root, and exactly authorized by `MMCG_TEAM_MANIFEST` plus `MMCG_TEAM_MANIFEST_SHA256`. Nodes are repository-namespaced; internal imports retain Tree-sitter provenance and cross-repository edges are explicit manifest claims. |
 | `mmcg_map` | optional `path` (default `.`), `depth` (1–6, default 2), `top` (1–100, default 20), `production_only` (default `false`) | Schema-v1 architecture briefing with lexical file/directory scope: `%` and `_` are literal bytes, selected-directory components are relative to that directory, root components remain repository-relative, and selected files retain their paths. `production_only` excludes conventional test/fixture/example/generated/vendor path segments and test filenames (`test_*`, `*_test.*`, `*.test.*`, `*.spec.*`, `*Test.*`, `*Tests.*`) before bounded queries run. Hotspots prefer unambiguous definitions before pooled same-name collisions. JSON, text, Mermaid, and CLI SARIF are projections of the same result; Mermaid includes component counts/languages, boundaries, hotspots, and cycle rings, while SARIF exports returned cycles as architecture findings. Caps are 50,000 aggregation paths, 20 languages, 20 components, 20 boundaries/component and 400 globally, 50 entry points, 100 hotspots, 50,000 scoped cycle edges, 50 cycles, and 500 cycle memberships. `path_work_limit` marks path-derived partial aggregates; `top_probe` marks a hotspot or per-component boundary cap+1 probe; `global_probe_limit` marks components whose certainty was prevented by the 401st global boundary row; cycle `work_limit` returns no cycles because SCC analysis was skipped before truncated edges could be analyzed. |
 | `mmcg_temporal` | `since`, optional `root`, `path` (default `.`), `depth` (1–5, default 2), `top` (1–100, default 20), `production_only`, `codeowners` | Schema-v1 base-vs-indexed-worktree architecture delta. It rewinds changed Git blobs only in a private SQLite snapshot and reports components, public boundaries/API, cycles, centrality/hotspot drift, base/head CODEOWNERS changes, exact history review candidates, provenance, limits, and partial diagnostics. A truncated 10,000-file change set fails closed. |
-| `mmcg_change_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Stable schema-v1 analysis of the resolved baseline against staged, unstaged, and untracked content. Reports added/removed/signature/body-changed symbols, batched transitive callers, component crossings, ranked test candidates, a `disciplines` block routing the change to an evidence set, exact collection metadata, caps, and precision notes. Root, SHA-256 index freshness, Git snapshot, and SQLite snapshot checks fail closed with stable codes. |
+| `mmcg_change_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Stable schema-v1 analysis of the resolved baseline against staged, unstaged, and untracked content. Reports added/removed/signature/body-changed symbols, batched dependency candidates through calls and references, component crossings, ranked test candidates, a `disciplines` block routing the change to an evidence set, exact collection metadata, caps, and precision notes. Root, SHA-256 index freshness, Git snapshot, and SQLite snapshot checks fail closed with stable codes. |
 | `mmcg_brief` | `role` (`planner`, `executor`, or `auditor`), `since`, optional `root`, `budget_tokens` (256–8,000; default 2,000) | One deterministic schema-v1 role packet over the checked worktree, structural graph, and project-history inventory. Role changes prefix admission order, not fields. The accepted budget covers the serialized MCP result after JSON escaping, `content.text`, and `structuredContent` duplication. Repository paths and symbol names are capped, control/bidi-escaped untrusted data; source bodies, signatures, literals/defaults, history titles, and excerpts are excluded. |
 | `mmcg_test_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Exact test-focused projection of `mmcg_change_impact`. Changed tests and depth-1 graph tests are direct, deeper graph tests are transitive, and scoped filename candidates are heuristic. Focused candidates never replace the repository's full required gate. |
 | `mmcg_tasks` | `query`, optional `top` (default 10) | Full-text search past task specs (`.mastermind/tasks/<NNN>-<name>/spec.md`). FTS5 MATCH syntax (bare words AND-joined, `"phrases"`, `OR`/`NOT`). Returns paths, titles, and snippet excerpts with `«match»` highlights ranked by BM25. Use as planner pre-flight: "have we touched this area before?" surfaces past designs and prior verdicts. Top-level files prefixed with `_` (e.g. `_lessons.md`) and bare `.md` files at the top of `tasks/` (legacy 0.6.x layout) are intentionally excluded. |
@@ -1172,8 +1174,14 @@ ceiling for code that cannot cooperate.
   Kebab-case and PascalCase tags normalize to PascalCase.
 - Python module constants are direct module-child assignments only. Assignments
   inside control flow, classes, or functions are not constants. Constants are
-  excluded from `mmcg_unreferenced` by default because value reads are not a
-  general edge type; request `kind=constant` explicitly.
+  excluded from `mmcg_unreferenced` by default because Python value reads are
+  not general reference edges; request `kind=constant` explicitly.
+- Rust records known function values and parsed macro-body usages as
+  `references`. These usages do not establish invocation or expand macros.
+  Macro-body reparsing is bounded to 64 KiB per body, 1 MiB of reparsed input
+  and 256 parse attempts per file, and eight nesting levels. Unsupported or
+  over-budget bodies and wildcard-imported function values can be omitted.
+  Query `truncated` fields do not report these extraction omissions.
 - C/C++ parsing has no preprocessor, template instantiation, ADL, or overload
   resolution. Macros such as `TEST(Suite, Name)` are calls, not definitions.
   Header declarations and source definitions remain separate rows. Include
@@ -1184,8 +1192,10 @@ ceiling for code that cannot cooperate.
 
 ### Symbol and edge identity
 
-- Calls resolve by name, not receiver type. `obj.foo()` records `to_name=foo`
-  and literal `to_path=obj.foo`; it does not establish the type of `obj`.
+- Call targets are name-based candidates. Where available, syntax constrains
+  the target kind so a receiver call does not bind a bare free function, but it
+  does not establish receiver type or compiler identity. `obj.foo()` retains
+  `to_name=foo` and literal `to_path=obj.foo`.
 - Default edges store `to_name` and `to_path`, not a resolved cross-file
   `to_id`. A callers query can therefore combine unrelated same-name symbols.
 - Import `match: path` compares literal source spelling. A re-exported
@@ -1203,10 +1213,22 @@ ceiling for code that cannot cooperate.
   over-captured.
 - C# partial declarations collapse only when name, kind, and full namespace
   identity match. Legacy rows without namespace identity stay separate.
-  Callers, callees, impact, and outline remain name-based.
+  `mmcg_callees` selects a declaration by `file` and `line` when needed;
+  outgoing target names and transitive dependencies remain candidates.
+
+Graph precision is at most `medium` for Rust, Go, Java, C#, and other supported
+AST extractors, and `low` for C/C++. `resolution` describes extraction strategy
+(`syntactic` or `heuristic`), while `target_resolution: name_based_candidates`
+states the absence of compiler/type resolution. SCIP evidence has separate
+provenance and does not silently upgrade these default graph queries.
 
 ### Heuristic query semantics
 
+- Impact follows both call and reference candidates, so dependency reach is
+  not runtime call reach. Empty results do not establish absence of
+  dependencies. Precision notes preserve this distinction even when no query
+  limit was reached. Graph-selected tests have at most `medium` confidence;
+  `high` is reserved for a test symbol directly observed to change.
 - `disciplines` derives only path-level signals. Frontend extensions, test
   naming, and migration paths can trigger a discipline; everything else is
   `unclassified`. A migration signal indicates review depth, not destructive

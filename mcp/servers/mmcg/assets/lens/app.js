@@ -2273,6 +2273,11 @@
       && text(state.model.temporalEnvelope.status, "unavailable") === "available";
   }
 
+  function hasChangesWithoutTrace() {
+    return state.model && state.model.nodes.length === 0
+      && (totalOrReturned(state.model.files) > 0 || totalOrReturned(state.model.changedSymbols) > 0);
+  }
+
   function temporalPair(added, removed, changed) {
     const plus = totalOrReturned(collection(added));
     const minus = totalOrReturned(collection(removed));
@@ -2695,6 +2700,28 @@
         complete && !document.getElementById("lens-snapshot")
           ? { label: "Refresh snapshot", handler: function () { loadSnapshot(false); } }
           : { label: "Open precision & limits", handler: openMethodLedger }
+      );
+      setEmptySvg();
+      return;
+    }
+    if (hasChangesWithoutTrace()) {
+      const baseline = text(state.model.baseline.requested_ref, text(state.model.options.since, "the requested baseline"));
+      const scope = text(state.model.options.path, ".");
+      renderTraceContext(
+        "No returned symbol trace",
+        "Baseline " + baseline + " · scope " + scope
+          + (state.model.options.production_only === true ? " · production paths only" : "") + ".",
+        []
+      );
+      elements.traceCount.textContent = metricPresentation(state.model.files).value + " files · 0 trace claims returned";
+      showGraphState(
+        "Changes without a symbol trace",
+        (state.model.files.items.length > 0
+          ? "Review the changed-file list in the inspector. "
+          : "Changed-file paths were not returned. ")
+          + "No symbol trace was returned for these changes."
+          + (snapshotIsPartial() ? " This snapshot is partial; review its limits." : ""),
+        { label: "Open precision & limits", handler: openMethodLedger }
       );
       setEmptySvg();
       return;
@@ -3905,6 +3932,10 @@
     const claim = selectedClaim();
     elements.workspace.classList.toggle("has-selection", Boolean(claim));
     if (!claim) {
+      if (hasChangesWithoutTrace()) {
+        renderChangedFilesInspector();
+        return;
+      }
       const empty = createElement("div", "inspector-empty");
       empty.appendChild(createElement("span", "inspector-empty__crosshair", "+"));
       empty.appendChild(createElement("h3", "", "Select a trace claim"));
@@ -3917,6 +3948,32 @@
     } else {
       renderEdgeInspector(claim);
     }
+  }
+
+  function renderChangedFilesInspector() {
+    const files = state.model.files;
+    const presentation = metricPresentation(files);
+    appendClaimHeading("Changed-file evidence", "Changed files", text(state.model.options.path, "."), null);
+    appendClaimGrid([
+      ["Baseline", text(state.model.baseline.requested_ref, text(state.model.options.since, "Not returned"))],
+      ["Path selection", state.model.options.production_only === true ? "Production paths only" : "All paths in scope"],
+      ["Files", presentation.value],
+      ["File results", presentation.note],
+    ]);
+    appendClaimList(
+      "Returned paths · " + files.items.length + " listed",
+      files.items.map(function (value) {
+        const file = record(value);
+        return text(file.status, "status not returned") + " · " + text(file.path, "path not returned");
+      }),
+      "",
+      "No changed-file paths were returned. Review precision & limits."
+    );
+    appendClaimList(
+      "Trace limits",
+      ["No symbol trace was returned for these changes. Review the diff and precision notes before judging their impact."],
+      ""
+    );
   }
 
   function appendClaimHeading(type, name, file, line, variant) {

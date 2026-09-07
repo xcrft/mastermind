@@ -80,6 +80,25 @@ fn git_timeout() -> Duration {
 /// routing from a hook or another worktree must not override that selection.
 pub(crate) fn repository_git_command() -> Command {
     let mut command = Command::new("git");
+    // The Docker Action supplies protected safe.directory entries through
+    // Git's environment configuration because the checkout has another UID.
+    // Preserve those trust decisions without restoring author/routing config.
+    let config_count = std::env::var("GIT_CONFIG_COUNT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|count| *count <= 128)
+        .unwrap_or(0);
+    for index in 0..config_count {
+        let key = std::env::var(format!("GIT_CONFIG_KEY_{index}"));
+        if !key.is_ok_and(|key| key.eq_ignore_ascii_case("safe.directory")) {
+            continue;
+        }
+        if let Some(value) = std::env::var_os(format!("GIT_CONFIG_VALUE_{index}")) {
+            let mut setting = std::ffi::OsString::from("safe.directory=");
+            setting.push(value);
+            command.arg("-c").arg(setting);
+        }
+    }
     for name in [
         "GIT_DIR",
         "GIT_WORK_TREE",

@@ -1638,6 +1638,7 @@ mod tests {
             let first_key = repository_key(&first).unwrap();
             let second_key = repository_key(&second).unwrap();
             assert_ne!(first_key, second_key);
+            assert!(repository_key(&base.join("untrusted")).is_err());
             let old_second_key = second
                 .canonicalize()
                 .unwrap()
@@ -1695,6 +1696,7 @@ mod tests {
         let second = dir.path().join("second");
         fixture_repository(&first, "First Alias");
         fixture_repository(&second, "Second Alias");
+        fixture_repository(&dir.path().join("untrusted"), "Untrusted Alias");
         std::fs::write(
             second.join("src/second.rs"),
             "pub const SECOND_REPOSITORY_SENTINEL: bool = true;\n",
@@ -1759,9 +1761,14 @@ mod tests {
                     "GIT_CONFIG_GLOBAL",
                     dir.path().join(".unused-global-git-config"),
                 )
-                .env("GIT_CONFIG_COUNT", "1")
+                .env("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+                .env("GIT_CONFIG_COUNT", "3")
                 .env("GIT_CONFIG_KEY_0", "user.name")
-                .env("GIT_CONFIG_VALUE_0", "Wrong Ambient Alias");
+                .env("GIT_CONFIG_VALUE_0", "Wrong Ambient Alias")
+                .env("GIT_CONFIG_KEY_1", "safe.directory")
+                .env("GIT_CONFIG_VALUE_1", &first)
+                .env("GIT_CONFIG_KEY_2", "safe.directory")
+                .env("GIT_CONFIG_VALUE_2", &second);
             for (variable, value) in variables {
                 child.env(variable, value);
             }

@@ -1,0 +1,2 @@
+SESSION_BACKEND = "memory"
+SESSION_DATABASE = None

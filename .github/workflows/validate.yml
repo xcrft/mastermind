@@ -35,7 +35,7 @@ jobs:
         run: python scripts/validate.py
 
       - name: Test eval harness
-        run: python -m unittest evals/test_runner.py
+        run: python -m unittest evals/test_runner.py evals/test_evidence.py
 
       - name: Run audit workflow security fixtures
         run: python scripts/test_audit_workflow_security.py

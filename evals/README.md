@@ -11,7 +11,7 @@ correctness, or evidence that the behavior survives a long real-world task.
 
 | File | Target | Expected result |
 |---|---|---|
-| `critic.jsonl` | Design critic | `rethink`, `revise`, `ship with caveats`, or `ship it` |
+| `critic.jsonl` | Design critic | `rethink`, `revise`, `insufficient evidence`, `ship with caveats`, or `ship it` |
 | `researcher.jsonl` | Codegraph researcher | Cited facts, explicit unknowns, or planner handoff |
 | `auditor.jsonl` | Post-flight auditor | `held`, `drift`, or `broken` |
 | `intake.jsonl` | Prompt intake | `refined`, `passthrough`, or `ask` |
@@ -22,8 +22,9 @@ correctness, or evidence that the behavior survives a long real-world task.
 `runner.py` invokes `claude -p`. Researcher and auditor cases load the shipped
 agents through Claude's `--agents` / `--agent` runtime contract, so frontmatter
 tool scoping is part of the eval instead of a separate handwritten allowlist.
-`test_runner.py` tests the deterministic parser, isolation, runtime contract,
-allowlist, report gate, and fixture machinery without calling a model.
+`test_runner.py` and `test_evidence.py` test the deterministic parser, isolation,
+runtime contract, allowlist, report gate, fixtures, and source citations without
+calling a model.
 
 Every case and suite summary reports turns, input/output tokens, prompt-cache
 creation/read tokens, API time, and Claude CLI reported cost. Retries aggregate
@@ -60,7 +61,7 @@ Model-backed evals are hand-run, not ordinary CI. CI runs the deterministic
 harness contract through:
 
 ```bash
-.venv/bin/python -m unittest evals/test_runner.py
+python3 -m unittest evals/test_runner.py evals/test_evidence.py
 ```
 
 ## Reports and token gates
@@ -130,7 +131,14 @@ cargo build --release --manifest-path mcp/servers/mmcg/Cargo.toml --locked
 verdicts. The grader reads the single final `## Verdict` section; mentions in
 prose, table rows, and quoted code examples cannot satisfy it. Missing or
 conflicting final verdicts fail. `concern` and `fail` belong to dimension rows,
-so test those with phrase assertions when needed.
+along with `pass` and `unknown`, so test those with phrase assertions when
+needed. The portable critical-review workflow uses the same final-section
+grader when its case sets `expect.verdict`.
+
+Missing facts produce `insufficient evidence` unless an independently evidenced
+failure already requires `revise` or `rethink`. A missing graph alone is not a
+design failure when source evidence answers the claim. Verdict format checks
+do not establish that dimension scores or their reasoning are correct.
 
 ```jsonc
 {
@@ -144,6 +152,48 @@ so test those with phrase assertions when needed.
   }
 }
 ```
+
+## Source-backed research cases
+
+`researcher.jsonl` includes a small regression corpus for ambiguous definitions,
+callback registration, docs/code contradictions, superseded ADRs, dynamic
+registration, and natural-language discovery. These are real disposable source
+trees, not a measured product-quality baseline or a representative benchmark.
+The researcher chooses the tool path; cases assert the facts and evidence the
+answer must preserve.
+
+Add source anchors to a case when a named file alone would allow a false pass:
+
+```jsonc
+"expect": {
+  "contains": ["session_count"],
+  "citations": [
+    {"path": "src/session.rs", "anchor": "pub fn session_count("}
+  ]
+}
+```
+
+Each anchor must match exactly one line in the selected fixture tree. The answer
+must cite that line with `path:line` or `path:start-end`, either directly, in
+backticks, or in a Markdown link. Absolute paths inside the disposable fixture
+are accepted. Ranges are limited to 40 lines so a whole-file citation cannot
+satisfy every fact. Fenced/quoted examples do not count. Fabricated files,
+out-of-range lines, and paths outside the fixture fail even when other required
+citations are correct. Definitions and fixtures participate in the existing
+case digest, so edited evidence cannot reuse an old baseline silently.
+
+Case reports add optional `citation_checks` with `expected` and `matched`
+anchors, `total` and `valid` unique citation locations, and failure `issues`.
+`null` means no citation check was requested, not a perfect score. These counts
+measure location validity and required anchor coverage. They do not establish
+that a sentence follows from a source, that every dependency was found, or that
+an architectural decision is correct. Phrase checks remain separate.
+
+To establish a research-quality baseline, run this corpus with a fixed model,
+CLI version, revision, and budgets, and review final reasoning for unsupported
+claims and appropriate abstention. Compare prompt changes only on the same
+case digest. Add unseen tasks and a source-search baseline before optimizing
+skills against scores; do not treat passing parser tests as a model result.
 
 ## Add an auditor case
 
@@ -213,8 +263,8 @@ prompt under evaluation cannot operate on the maintainer checkout.
 
 ## Ablation
 
-`ablation.py` compares planted-defect detection under two conditions on the
-same generated Git repository:
+`ablation.py` runs a diagnostic comparison under two conditions on equivalent
+Git fixture trees, preserving staged, unstaged, and untracked changes:
 
 - `vanilla`: a neutral reviewer with shell access, but no mmcg or Mastermind
   auditor contract;
@@ -227,5 +277,10 @@ python evals/ablation.py
 python evals/ablation.py --with-mastermind
 ```
 
-The score is phrase-based. It can miss subtly incorrect reasoning that happens
+The vanilla column uses phrase checks; the Mastermind column uses the full
+auditor contract, including structured verdict and verification requirements.
+The columns have different grading criteria, so the tool reports no quality
+uplift and never inserts a historical score for a condition it did not run.
+
+Phrase checks can miss subtly incorrect reasoning that happens
 to contain the expected signals; record that limitation with every result.

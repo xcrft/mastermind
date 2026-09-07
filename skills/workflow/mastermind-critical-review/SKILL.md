@@ -2,7 +2,7 @@
 name: mastermind-critical-review
 description: Stress-test a proposed design, task spec, implementation plan, or executor report for false assumptions, broken contracts, scope creep, missing evidence, and high-risk failure modes. Use before drafting sensitive specs, before approving a plan, or when a critic/auditor needs a compact review rubric.
 metadata:
-  version: 0.2.0
+  version: 0.3.0
   authors:
     - mastermind
   tags:
@@ -39,7 +39,9 @@ Do NOT use for raw fact gathering — use [[mastermind-codegraph-research]] firs
 - **Scope** — what the review may challenge.
 - **Lens** (optional) — security, performance, simplicity, migration safety, API compatibility, or testing.
 
-If evidence is missing, say so. Don't invent facts.
+If evidence is missing, say so. Missing mmcg alone does not invalidate a review
+when source, test, or runtime evidence establishes the required facts. An
+unsupported claim is unknown; a claim contradicted by evidence is a finding.
 
 ## Review protocol
 
@@ -63,22 +65,40 @@ Don't inflate severity. If uncertain, say what evidence would change it.
 
 ## Verdict
 
-Exactly one:
+Use the same seven dimensions as `mastermind-critic`: correctness, performance
+and scale, observability, compatibility, YAGNI, AI slop, tests and docs. Score
+each `pass`, `concern` (a concrete guard/detail is needed), `fail` (an evidenced
+defect), or `unknown` (a required fact is missing or contradictory). Mark an
+irrelevant dimension pass with a reason. Never invent concerns or alternatives
+to fill rows. Consider plausible alternatives only when a real choice exists.
 
-- **ship it** — no blocking issues.
-- **ship with caveats** — non-blocking issues only; proceed after noting them.
-- **revise** — one or more P1/P2 must be addressed before execution/approval.
-- **rethink** — the approach is likely wrong or unsafe; redesign required.
-- **insufficient evidence** — required facts are missing; the critique can't complete.
+Aggregate in this order, independent of the severity labels on findings:
+
+1. Two or more evidenced fails, or a correctness fail invalidating the approach
+   → **rethink**.
+2. Otherwise one evidenced fail → **revise**.
+3. Otherwise any unknown → **insufficient evidence**.
+4. Otherwise any concern → **ship with caveats**.
+5. Otherwise all pass → **ship it**.
+
+Unknowns do not erase known failures or prove a design wrong. A P2 evidence gap
+alone cannot force `revise`. Give the smallest factual probe needed to resolve
+each unknown. `insufficient evidence` blocks acceptance until those facts are
+checked; it is not approval with caveats.
 
 ## Output
 
 ```markdown
 ## Critical review
 
-**Verdict:** ship it | ship with caveats | revise | rethink | insufficient evidence
 **Lens:** <default | security | performance | simplicity | migration | API | testing>
 **Scope reviewed:** <one sentence>
+
+### Dimensions
+
+| Dimension | Verdict | Evidence |
+|---|---|---|
+<all seven rows: pass / concern / fail / unknown, with evidence or missing fact>
 
 ### Findings
 
@@ -100,6 +120,9 @@ Exactly one:
 - **Inferred:** <bounded conclusion and why it follows>
 - **Confidence:** high | medium | low — <reason>
 - **Would change the verdict:** <specific evidence or failed/passing proof>
+
+## Verdict
+<ship it | ship with caveats | revise | rethink | insufficient evidence> — <reason>
 ```
 
 Rules:
@@ -108,7 +131,8 @@ Rules:
 - No generic advice. No praise unless evidence-backed.
 - Don't propose a larger architecture unless the current one fails.
 - Prefer "missing evidence" over speculation.
-- No issues → `ship it` with a short explanation.
+- No issues and no material unknowns → `ship it` with a short explanation.
+- End with exactly one `## Verdict` section; do not repeat it in a summary.
 
 ## Related skills
 

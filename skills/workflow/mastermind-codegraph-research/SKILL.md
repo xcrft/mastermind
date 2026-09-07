@@ -2,7 +2,7 @@
 name: mastermind-codegraph-research
 description: Use mmcg before Bash or literal search for repository orientation, natural-language symbol discovery, symbol existence, callers, callees, imports, blast radius, file existence, or stale-index handling.
 metadata:
-  version: 0.3.1
+  version: 0.3.2
   authors:
     - mastermind
   tags:
@@ -30,6 +30,10 @@ re-exports, and cross-language edges can reduce precision.
   for a role) → one `mmcg_brief` before broad discovery.
 - **Concept discovery** (the intent is known but the exact symbol is not) →
   `mmcg_concept`, then an exact structural query on the selected candidate.
+  The query joins normalized terms with `AND`; it is not sentence-level semantic
+  retrieval. Start with one to three distinctive terms from the question. If
+  empty, split a compound concept or remove a term for one scoped retry before
+  reporting a bounded negative. Query only returned symbol names.
 - **Structural discovery** (symbols, indexed callers/callees, imports, bounded blast radius) → mmcg first. It understands syntax better than literal text search, but remains name-based and bounded.
 - **Literal** (string contents, log messages, comments, config values) → `Grep` / `Read`. mmcg doesn't index strings.
 - **Runtime contract** (dynamic dispatch, reflection, generated code, re-exports, cross-language edges, exact branch behavior) → read source and run focused tests.
@@ -49,6 +53,7 @@ re-exports, and cross-language edges can reduce precision.
 | Who imports `X` / this path? | `mmcg_imported_by` |
 | Does this file path exist in the index? | `mmcg_files` |
 | Is the index ready / how stale is it? | `mmcg_status` |
+| What prior rationale or decision records discuss this topic? | `mmcg_history`, then read the cited records |
 | String contents / comments / log lines | `Grep` |
 | File-name / extension globs | `Glob` |
 
@@ -66,6 +71,21 @@ reachability, and an unreferenced candidate is not proof of dead code. Rust
 macro bodies provide bounded syntactic references; macros are not expanded.
 Unsupported or over-budget macro bodies and wildcard-imported function values
 can be omitted. Query truncation does not measure extraction completeness.
+
+Use the smallest evidence set that answers the question. A normal symbol lookup
+may need one source read; a collision, meaningful zero, or contradiction may
+need several. Name the unresolved fact before another scoped query or read.
+For the bounded researcher role, aim for four calls and stop at eight, handing
+off the exact missing evidence. Do not use that allowance to recursively trace
+callers or expand into architectural decisions or broad bug diagnosis.
+
+For documentation claims, read the relevant current implementation and report
+disagreement explicitly. History search retrieves records; it does not decide
+which record is authoritative. Follow ADR supersession links, check each
+status, and compare the accepted decision with current code/configuration.
+Newer dates, file order, and repeated claims do not establish adoption. A
+proposed ADR is not an accepted replacement. The planner owns decisions;
+unresolved bug diagnosis goes to the investigator with observed facts and gaps.
 
 **mmcg-first:** use the graph to find candidate symbols and impact, then read the
 source needed for the decision. Re-check with literal search or another source

@@ -1,26 +1,24 @@
 #!/usr/bin/env python3
 """
-Ablation: does the Mastermind auditor (codegraph + verification discipline)
-catch defects that a capable *vanilla* agent misses?
+Diagnostic comparison of a vanilla review and the Mastermind auditor.
 
 For each adversarial auditor fixture (a planted defect), run two conditions on
-the SAME git fixture and score with the same phrase signal the suite uses:
+equivalent git fixture trees, preserving committed/uncommitted state:
 
   vanilla     — plain `claude -p` with shell access to the repo (git/grep/read)
                 and a neutral "review this change" prompt. NO mmcg, NO auditor
-                system prompt. This is the honest strong baseline ("Claude +
-                grep/read only"), so the delta isolates the marginal value of
-                the codegraph + the auditor contract — not a strawman.
+                system prompt.
   mastermind  — the real auditor path (auditor subagent + live mmcg index).
                 Re-run only with --with-mastermind; otherwise compare against
                 the suite's own result (`runner.py --suite auditor`).
 
-"Caught" = all of the case's expect.contains present AND none of
-expect.not_contains — identical scoring to runner.py. Phrase-match, not an
-LLM judge (same accepted limitation as the suite).
+The vanilla score checks expect.contains and expect.not_contains only. The
+Mastermind score includes its full verdict, verification, and telemetry
+contract. These are different measures; their difference is not quality uplift.
+Neither is an LLM judge or a semantic assessment of the final reasoning.
 
-Golden (no-defect) cases — expect.verdict == "held" — are excluded: there is
-nothing to catch. The metric is catch-rate over planted defects.
+Golden (no-defect) cases — expect.verdict == "held" — are excluded. Counts
+describe these planted-defect cases only, not overall research quality.
 
 Usage:
   python evals/ablation.py                       # vanilla over all defect cases
@@ -36,7 +34,10 @@ import json
 import subprocess
 import sys
 
-import runner
+if __package__:
+    from . import runner
+else:
+    import runner
 
 VANILLA_SYSTEM = (
     "You are a senior engineer doing a pre-merge review of a code change. The "
@@ -53,11 +54,22 @@ VANILLA_SYSTEM = (
 
 def vanilla_message(case: dict, fixture_path, baseline_ref: str, after_ref: str) -> str:
     inp = case["input"]
+    if case.get("staged_paths") is not None:
+        inspection = (
+            "The author's changes are not committed. Compare the baseline with "
+            f"the current working tree using `git diff {baseline_ref} --`, then "
+            "inspect `git ls-files --others --exclude-standard --` and "
+            "`git status --porcelain=v1 --untracked-files=all`.\n\n"
+        )
+    else:
+        inspection = (
+            f"Author's commit tag: `{after_ref}` (after).\n"
+            f"Inspect it with `git diff {baseline_ref}..{after_ref}`.\n\n"
+        )
     return (
         f"Working directory: `{fixture_path}` (a git repo).\n"
         f"Baseline tag: `{baseline_ref}` (before the change).\n"
-        f"Author's commit tag: `{after_ref}` (after).\n"
-        f"Inspect it with `git diff {baseline_ref}..{after_ref}`.\n\n"
+        f"{inspection}"
         f"Author's summary:\n{inp.get('spec_summary', '')}\n\n"
         f"Author's report:\n```\n{inp.get('executor_report', '')}\n```\n\n"
         "Review it. Is the summary accurate and the change safe to merge?"
@@ -73,7 +85,10 @@ def scored_caught(output: str, expect: dict) -> bool:
 
 def run_vanilla(model: str, case: dict) -> bool | None:
     """True if vanilla caught the planted defect, False if missed, None on error."""
-    fixture = runner.setup_fixture(case["fixture"], case["baseline_ref"], case["after_ref"])
+    fixture = runner.setup_fixture(
+        case["fixture"], case["baseline_ref"], case["after_ref"],
+        staged_paths=case.get("staged_paths"),
+    )
     try:
         msg = vanilla_message(case, fixture, case["baseline_ref"], case["after_ref"])
         cmd = [
@@ -134,30 +149,30 @@ def main() -> int:
         print("no defect cases matched")
         return 0
 
-    print(f"\n=== ablation: vanilla vs mastermind over {len(defect_cases)} defect case(s) · {args.model} ===\n")
+    print(f"\n=== diagnostic comparison over {len(defect_cases)} defect case(s) · {args.model} ===\n")
     rows = []
     for c in defect_cases:
         cid = c["id"]
         print(f"  [{cid}] vanilla ...", end=" ", flush=True)
         v = run_vanilla(args.model, c)
-        v_str = "caught" if v else ("MISS" if v is False else "err")
+        v_str = "phrase pass" if v else ("phrase miss" if v is False else "err")
         print(v_str, end="", flush=True)
         m = None
         if args.with_mastermind:
             r = runner.evaluate_case(args.model, "auditor", runner.SUITES["auditor"], c, keep_fixtures=False)
             m = r.passed
-            print(f"  · mastermind {'caught' if m else 'MISS'}", end="")
+            print(f"  · mastermind contract {'pass' if m else 'fail'}", end="")
         print()
         rows.append((cid, v, m))
 
     v_caught = sum(1 for _, v, _ in rows if v)
-    print(f"\n  vanilla caught: {v_caught}/{len(rows)} defects")
+    print(f"\n  vanilla phrase checks passed: {v_caught}/{len(rows)}")
     if args.with_mastermind:
         m_caught = sum(1 for _, _, m in rows if m)
-        print(f"  mastermind caught: {m_caught}/{len(rows)} defects")
-        print(f"  uplift: +{m_caught - v_caught} defects the codegraph+auditor caught that vanilla missed")
+        print(f"  mastermind full contract passed: {m_caught}/{len(rows)}")
+        print("  Different grading contracts: no quality-uplift estimate.")
     else:
-        print("  mastermind baseline: run `python evals/runner.py --suite auditor` (9/9 this session)")
+        print("  mastermind was not run; use --with-mastermind for its full contract result.")
     return 0
 
 

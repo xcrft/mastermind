@@ -17,6 +17,7 @@ requires an independent critic. Send evidence, not the planning transcript.
 - `mmcg_callers <symbol>` → <count and precision notes>
 - `mmcg_impact <symbol>` → <material transitive impact>
 - Repository constraint: <test/runtime/API/operations fact>
+- Contradictions or unknowns: <unresolved claim and smallest probe; omit if none>
 
 ## Plausible alternatives
 - <alternative> — rejected because <evidence-based reason>
@@ -34,6 +35,10 @@ Rules:
 
 - Omit alternatives when there was no real choice; never invent filler options.
 - Preserve stale-index, collision, truncation, and syntactic-graph caveats.
+- Preserve source revision, active/superseded decision status, and whether a
+  claim is observed or inferred. Do not carry an old decision as current proof.
+- `insufficient evidence` returns to research; evidenced `revise`/`rethink`
+  returns to design. Neither is acceptance.
 - Add a diagram only when a multi-component sequence or trust boundary is hard
   to explain in prose.
 - One critic is the default. Use independent security/performance/simplicity

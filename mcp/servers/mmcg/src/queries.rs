@@ -1613,9 +1613,6 @@ fn test_like_path(path: &str) -> bool {
 }
 
 fn test_symbol(symbol: &Symbol) -> bool {
-    if !test_like_path(&symbol.file_path) {
-        return false;
-    }
     let lower_name = symbol.name.to_ascii_lowercase();
     let decorators = symbol.decorators.as_deref().unwrap_or("");
     let lifecycle = [
@@ -1638,8 +1635,8 @@ fn test_symbol(symbol: &Symbol) -> bool {
     {
         return false;
     }
-    lower_name.starts_with("test")
-        || matches!(lower_name.as_str(), "it" | "spec")
+    (test_like_path(&symbol.file_path)
+        && (lower_name.starts_with("test") || matches!(lower_name.as_str(), "it" | "spec")))
         || [
             ",test,",
             ",tokio::test,",
@@ -2056,7 +2053,12 @@ pub fn change_impact(
         for symbol in heuristic_rows.into_iter().filter(test_symbol) {
             let evidence = symbol_evidence(&symbol);
             let heuristic_evidence = TestEvidence {
-                kind: "same_component_test_filename".to_string(),
+                kind: if test_like_path(&symbol.file_path) {
+                    "same_component_test_filename"
+                } else {
+                    "same_component_test_attribute"
+                }
+                .to_string(),
                 seed: None,
                 component: Some(component_for(&symbol.file_path)),
             };
@@ -6287,6 +6289,168 @@ mod tests {
     }
 
     #[test]
+    fn change_impact_classifies_inline_rust_tests() {
+        let baseline = r#"fn target() -> u8 {
+    1
+}
+fn helper() -> u8 { target() }
+fn test_helper() -> u8 { target() }
+#[cfg(test)]
+mod checks {
+    #[test]
+    fn checks_target() { let _ = super::target(); }
+    #[tokio::test]
+    async fn checks_tokio() { let _ = super::target(); }
+    #[async_std::test]
+    async fn checks_async_std() { let _ = super::target(); }
+    #[test]
+    fn checks_via_helper() { let _ = super::helper(); }
+    #[test]
+    fn isolated_check() { let _ = 17; }
+    fn test_unmarked_helper() { let _ = super::target(); }
+}
+"#;
+        let root = impact_repo("inline_rust_tests", &[("src/lib.rs", baseline)]);
+        write_impact_file(
+            &root,
+            "src/lib.rs",
+            &baseline.replacen("    1\n", "    2\n", 1),
+        );
+        let store = index_impact(&root, "inline_rust_tests");
+
+        for depth in [1, 2] {
+            let response = change_impact(&store, &root, "HEAD", depth, 100).unwrap();
+            assert!(response
+                .changes
+                .symbols
+                .items
+                .iter()
+                .any(|symbol| { symbol.name == "target" && symbol.change == "body_changed" }));
+            assert_eq!(response.tests.total, Some(5));
+            assert!(!response.tests.truncated);
+            for name in ["test_helper", "test_unmarked_helper"] {
+                assert!(response
+                    .impact
+                    .items
+                    .iter()
+                    .any(|item| item.symbol.name == name));
+                assert!(!response
+                    .tests
+                    .items
+                    .iter()
+                    .any(|item| item.symbol.name == name));
+            }
+            for name in ["checks_target", "checks_tokio", "checks_async_std"] {
+                let candidate = response
+                    .tests
+                    .items
+                    .iter()
+                    .find(|item| item.symbol.name == name)
+                    .unwrap();
+                assert_eq!(candidate.classification, "direct");
+                assert_eq!(candidate.minimum_depth, Some(1));
+                assert_eq!(candidate.confidence, "medium");
+                assert!(candidate.evidence.iter().any(|evidence| {
+                    evidence.kind == "graph_seed"
+                        && evidence
+                            .seed
+                            .as_ref()
+                            .is_some_and(|seed| seed.name == "target")
+                }));
+            }
+            let transitive = response
+                .tests
+                .items
+                .iter()
+                .find(|item| item.symbol.name == "checks_via_helper")
+                .unwrap();
+            if depth == 1 {
+                assert_eq!(transitive.classification, "heuristic");
+                assert_eq!(transitive.minimum_depth, None);
+                assert_eq!(transitive.confidence, "low");
+            } else {
+                assert_eq!(transitive.classification, "transitive");
+                assert_eq!(transitive.minimum_depth, Some(2));
+                assert_eq!(transitive.confidence, "medium");
+            }
+            let isolated = response
+                .tests
+                .items
+                .iter()
+                .find(|item| item.symbol.name == "isolated_check")
+                .unwrap();
+            assert_eq!(isolated.classification, "heuristic");
+            assert_eq!(isolated.minimum_depth, None);
+            assert_eq!(isolated.confidence, "low");
+            assert_eq!(
+                isolated.evidence,
+                vec![TestEvidence {
+                    kind: "same_component_test_attribute".into(),
+                    seed: None,
+                    component: Some("src".into()),
+                }]
+            );
+            assert!(response.tests.items.iter().all(|candidate| {
+                candidate.symbol.file == "src/lib.rs"
+                    && candidate
+                        .evidence
+                        .iter()
+                        .any(|evidence| evidence.kind == "same_component_test_attribute")
+                    && !candidate
+                        .evidence
+                        .iter()
+                        .any(|evidence| evidence.kind == "same_component_test_filename")
+            }));
+        }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn change_impact_returns_changed_inline_test_at_depth_zero() {
+        let baseline = r#"#[cfg(test)]
+mod checks {
+    #[test]
+    fn checks_value() {
+        let observed = 1;
+        assert_eq!(observed, 1);
+    }
+}
+"#;
+        let root = impact_repo("changed_inline_test", &[("src/lib.rs", baseline)]);
+        write_impact_file(
+            &root,
+            "src/lib.rs",
+            &baseline.replace("let observed = 1;", "let observed = 2;"),
+        );
+        let store = index_impact(&root, "changed_inline_test");
+        let response = change_impact(&store, &root, "HEAD", 3, 100).unwrap();
+        assert!(response
+            .changes
+            .symbols
+            .items
+            .iter()
+            .any(|symbol| { symbol.name == "checks_value" && symbol.change == "body_changed" }));
+        let candidate = response
+            .tests
+            .items
+            .iter()
+            .find(|test| test.symbol.name == "checks_value")
+            .unwrap();
+        assert_eq!(candidate.classification, "direct");
+        assert_eq!(candidate.minimum_depth, Some(0));
+        assert_eq!(candidate.confidence, "high");
+        assert_eq!(
+            candidate
+                .evidence
+                .iter()
+                .map(|evidence| evidence.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["changed_test_symbol", "same_component_test_attribute"]
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn change_impact_rejects_stale_or_wrong_root_index() {
         let root = impact_repo(
             "root_stale",
@@ -6778,6 +6942,127 @@ mod tests {
             1,
             None
         )));
+    }
+
+    #[test]
+    fn inline_test_markers_preserve_scope_exclusions_and_boundaries() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("graph.db")).unwrap();
+        let cases = [
+            ("sync_check", Some(",test,"), true),
+            ("tokio_check", Some(",tokio::test,"), true),
+            ("async_std_check", Some(",async_std::test,"), true),
+            ("fact_check", Some(",Fact,"), true),
+            ("theory_check", Some(",Theory,"), true),
+            ("method_check", Some(",TestMethod,"), true),
+            ("case_check", Some(",TestCase,"), true),
+            ("parameterized_check", Some(",ParameterizedTest,"), true),
+            ("test_helper", None, false),
+            ("test_cfg_helper", Some(",cfg,"), false),
+            ("setup", Some(",test,"), false),
+            ("fixture_check", Some(",fixture,test,"), false),
+            ("pytest_fixture_check", Some(",pytest.fixture,test,"), false),
+            ("setup_attribute_check", Some(",SetUp,test,"), false),
+            ("teardown_attribute_check", Some(",TearDown,test,"), false),
+            (
+                "substring_check",
+                Some(",not_test,tokio::test_extra,"),
+                false,
+            ),
+            ("wrong_case_check", Some(",fact,TOKIO::TEST,"), false),
+        ];
+        for file in ["src/lib.rs", "src_extra/lib.rs", "lib.rs"] {
+            store
+                .commit_file(crate::store::PendingFile {
+                    path: file.into(),
+                    mtime: 1,
+                    content_sha256: String::new(),
+                    language: "rust".into(),
+                    symbols: cases
+                        .iter()
+                        .enumerate()
+                        .map(
+                            |(index, (name, decorators, _))| crate::store::PendingSymbol {
+                                name: (*name).into(),
+                                kind: "function".into(),
+                                line_start: index as u32 + 1,
+                                line_end: index as u32 + 1,
+                                signature: None,
+                                parent_index: None,
+                                decorators: decorators.map(String::from),
+                            },
+                        )
+                        .collect(),
+                    edges: Vec::new(),
+                })
+                .unwrap();
+        }
+        for (name, decorators, expected) in cases {
+            assert_eq!(
+                test_symbol(&mk_sym(name, "function", "src/lib.rs", 1, decorators)),
+                expected,
+                "{name}"
+            );
+        }
+        let rows = store
+            .test_symbols_in_components(&["src".into()], 501)
+            .unwrap();
+        assert_eq!(rows.len(), 8);
+        assert!(rows
+            .iter()
+            .all(|symbol| symbol.file_path == "src/lib.rs" && test_symbol(symbol)));
+        assert_eq!(
+            rows.iter()
+                .map(|symbol| symbol.name.as_str())
+                .collect::<BTreeSet<_>>(),
+            cases
+                .iter()
+                .filter(|(_, _, expected)| *expected)
+                .map(|(name, _, _)| *name)
+                .collect::<BTreeSet<_>>()
+        );
+        let root_rows = store
+            .test_symbols_in_components(&[".".into()], 501)
+            .unwrap();
+        assert_eq!(root_rows.len(), 8);
+        assert!(root_rows.iter().all(|symbol| symbol.file_path == "lib.rs"));
+    }
+
+    #[test]
+    fn inline_tests_survive_component_prefiltering_before_the_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("graph.db")).unwrap();
+        for (file, name, decorators, count) in [
+            ("src/a.rs", "test_helper", None, 501),
+            ("src/z.rs", "checks_value", Some(",test,"), 1),
+        ] {
+            store
+                .commit_file(crate::store::PendingFile {
+                    path: file.into(),
+                    mtime: 1,
+                    content_sha256: String::new(),
+                    language: "rust".into(),
+                    symbols: (0..count)
+                        .map(|index| crate::store::PendingSymbol {
+                            name: format!("{name}_{index}"),
+                            kind: "function".into(),
+                            line_start: index + 1,
+                            line_end: index + 1,
+                            signature: None,
+                            parent_index: None,
+                            decorators: decorators.map(String::from),
+                        })
+                        .collect(),
+                    edges: Vec::new(),
+                })
+                .unwrap();
+        }
+        let rows = store
+            .test_symbols_in_components(&["src".into()], 1)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "checks_value_0");
+        assert!(test_symbol(&rows[0]));
     }
 
     #[test]

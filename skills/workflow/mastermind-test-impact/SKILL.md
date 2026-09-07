@@ -2,7 +2,7 @@
 name: mastermind-test-impact
 description: Build a focused, evidence-backed test plan from `mastermind impact` or `mmcg_test_impact`. Use when deciding which tests to run for a change, explaining direct/transitive/heuristic candidates, or sequencing fast feedback before the repository's required full test gate.
 metadata:
-  version: 0.1.0
+  version: 0.1.1
   authors: [mastermind]
   tags: [workflow, testing, mmcg]
 ---
@@ -25,10 +25,15 @@ that omitted tests are unnecessary.
 
    - `direct`: a changed test symbol at depth 0 or a graph-linked test at depth 1;
    - `transitive`: a graph-linked test at greater depth;
-   - `heuristic`: a filename/component candidate without a proven call path.
+   - `heuristic`: a same-component candidate identified by a test filename or
+     explicit test attribute, without graph evidence linking it to the change
+     in this response.
 
 5. For each test, retain file, symbol, line, depth, confidence, changed-symbol
-   seeds, and structured evidence. Explain collisions or weak language edges.
+   seeds, and structured evidence. Preserve `same_component_test_attribute` for
+   inline attribute matches and `same_component_test_filename` for test-like
+   paths. An attribute identifies a test candidate, not coverage of the change.
+   Explain collisions or weak language edges.
 6. Run focused tests from high to low confidence for fast feedback, then run
    every project-required phase/final gate.
 

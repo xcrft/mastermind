@@ -2,7 +2,7 @@
 name: mastermind-codegraph-research
 description: Use mmcg before Bash or literal search for repository orientation, natural-language symbol discovery, symbol existence, callers, callees, imports, blast radius, file existence, or stale-index handling.
 metadata:
-  version: 0.3.0
+  version: 0.3.1
   authors:
     - mastermind
   tags:
@@ -18,8 +18,9 @@ existence, indexed callers, imports, and bounded blast radius come from a fresh
 mmcg result rather than memory. Exact source contracts and runtime behavior come
 from source reads and tests.
 
-The graph is syntactic evidence: name resolution, dynamic dispatch, reflection,
-generated code, re-exports, and cross-language edges can reduce precision.
+The graph is syntactic evidence with name-based target candidates, without
+compiler/type resolution. Dynamic dispatch, reflection, generated code,
+re-exports, and cross-language edges can reduce precision.
 
 **Never name a symbol, file, caller, or blast radius from memory.** "I think `X` exists" is not evidence; `mmcg_search X` returning a hit is. A spec, audit, or critique built on a guessed symbol fails at the first step that touches real code.
 
@@ -41,14 +42,30 @@ generated code, re-exports, and cross-language edges can reduce precision.
 | Which local symbols match this natural-language concept? | `mmcg_concept` |
 | Does symbol `X` exist? (get `file:line` + signature) | `mmcg_search` |
 | What calls `X`? | `mmcg_callers` |
+| Where is `X` used as a function value or inside a Rust macro body? | `mmcg_callers` with `edge_kind: references` |
 | What does `X` call? | `mmcg_callees` |
-| If I change/rename `X`, what breaks? (transitive) | `mmcg_impact` |
+| Which indexed dependencies may be affected by changing `X`? | `mmcg_impact` |
 | What does file Y import? | `mmcg_imports` |
 | Who imports `X` / this path? | `mmcg_imported_by` |
 | Does this file path exist in the index? | `mmcg_files` |
 | Is the index ready / how stale is it? | `mmcg_status` |
 | String contents / comments / log lines | `Grep` |
 | File-name / extension globs | `Glob` |
+
+`mmcg_callees` selects one definition. Check `match_status`: when `ambiguous`,
+choose a returned candidate using its exact indexed `file` and declaration
+start `line`, then query again. An empty list with `not_found` or `ambiguous`
+does not describe the outgoing edges of a selected symbol.
+
+Callers and callees default to `edge_kind: calls`; use `references` for indexed
+function-value and macro-body usages. References are dependencies to inspect,
+not proof of invocation. Impact traverses both kinds conservatively. Preserve
+`edge_kind`, `target_resolution`, and `precision_notes` with the result. Even
+with `truncated: false`, a zero result does not establish complete runtime
+reachability, and an unreferenced candidate is not proof of dead code. Rust
+macro bodies provide bounded syntactic references; macros are not expanded.
+Unsupported or over-budget macro bodies and wildcard-imported function values
+can be omitted. Query truncation does not measure extraction completeness.
 
 **mmcg-first:** use the graph to find candidate symbols and impact, then read the
 source needed for the decision. Re-check with literal search or another source

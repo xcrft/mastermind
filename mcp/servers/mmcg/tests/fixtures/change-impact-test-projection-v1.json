@@ -57,7 +57,13 @@
     "tests": 500
   },
   "precision_notes": [
-    "focused_tests_do_not_replace_full_gate"
+    "dynamic_generated_and_cross_language_edges_may_be_missing",
+    "empty_result_does_not_prove_no_dependencies",
+    "focused_tests_do_not_replace_full_gate",
+    "heuristic_name_resolution_without_compiler_types",
+    "impact_includes_calls_and_references",
+    "references_do_not_prove_invocation",
+    "truncated_describes_query_limits_not_extraction_completeness"
   ],
   "schema_version": 1,
   "scope": {

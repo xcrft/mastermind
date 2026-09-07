@@ -7,10 +7,11 @@ through your existing Claude Code login — no ANTHROPIC_API_KEY needed, costs
 count against your Claude subscription (flat monthly, not per-token).
 
 Auditor cases use **real git fixtures** — each case names a fixture under
-`evals/fixtures/<name>/` plus two refs (`baseline_ref` + `after_ref`). The
-runner builds a real tmp git repo with those two commits/tags and hands the
-path to the auditor via `--add-dir`. The auditor runs `git diff`, `git log`,
-etc. itself against actual hunks. No synthetic paraphrased diff strings.
+`evals/fixtures/<name>/` plus `baseline_ref` and an `after_ref` tree variant.
+By default both trees become tagged commits. Cases with `staged_paths` leave
+the after-tree uncommitted and stage only the listed paths. The runner hands
+the disposable repository to the auditor via `--add-dir`; the auditor inspects
+real diffs and untracked files. No synthetic paraphrased diff strings.
 
 Usage:
   python evals/runner.py                  # all suites
@@ -1207,12 +1208,22 @@ def _run_git(args: list[str], cwd: Path) -> None:
         )
 
 
-def setup_fixture(fixture_name: str, baseline_ref: str, after_ref: str) -> Path:
-    """Build a real tmp git repo with baseline → after as two tagged commits.
+def setup_fixture(
+    fixture_name: str,
+    baseline_ref: str,
+    after_ref: str,
+    *,
+    staged_paths: list[str] | None = None,
+) -> Path:
+    """Build a real tmp git repo with a tagged baseline and an after-tree.
 
     Layout expected at `evals/fixtures/<name>/`:
         baseline/             — files at the baseline tag
-        changes/<after_ref>/  — files at the after tag (full tree, replaces baseline)
+        changes/<after_ref>/  — full after-tree, replaces baseline
+
+    By default the after-tree is committed and tagged. Passing staged_paths
+    leaves HEAD at baseline, stages those paths, and leaves all other changes
+    unstaged or untracked. An empty list creates an entirely unstaged tree.
 
     Returns the tmp repo path. Caller is responsible for cleanup via
     `teardown_fixture`.
@@ -1226,6 +1237,17 @@ def setup_fixture(fixture_name: str, baseline_ref: str, after_ref: str) -> Path:
         raise FileNotFoundError(f"fixture baseline missing: {baseline_src}")
     if not after_src.is_dir():
         raise FileNotFoundError(f"fixture variant missing: {after_src}")
+    if staged_paths is not None and (
+        not isinstance(staged_paths, list)
+        or any(
+            not isinstance(path, str)
+            or not path
+            or Path(path).is_absolute()
+            or ".." in Path(path).parts
+            for path in staged_paths
+        )
+    ):
+        raise ValueError("staged_paths must be a list of repository-relative paths")
 
     tmp = Path(tempfile.mkdtemp(prefix=f"mmcg-eval-{fixture_name}-"))
 
@@ -1247,9 +1269,12 @@ def setup_fixture(fixture_name: str, baseline_ref: str, after_ref: str) -> Path:
         else:
             entry.unlink()
     _copy_tree_into(after_src, tmp)
-    _run_git(["add", "-A"], tmp)
-    _run_git(["commit", "-q", "-m", f"executor change ({after_ref})", "--allow-empty"], tmp)
-    _run_git(["tag", after_ref], tmp)
+    if staged_paths is None:
+        _run_git(["add", "-A"], tmp)
+        _run_git(["commit", "-q", "-m", f"executor change ({after_ref})", "--allow-empty"], tmp)
+        _run_git(["tag", after_ref], tmp)
+    elif staged_paths:
+        _run_git(["add", "--", *staged_paths], tmp)
 
     # Phase 3: build an mmcg index of the after-tree so the auditor can run
     # real `mmcg_callers` / `mmcg_search` against the working state and
@@ -1429,29 +1454,38 @@ def render_auditor_input(
     baseline_ref: str,
     after_ref: str,
     has_mmcg: bool,
+    uncommitted: bool = False,
 ) -> str:
     """Build the auditor's user message.
 
     Crucially: NO synthetic git_diff. The auditor is told the working
-    directory and the two tag names and is expected to run `git diff`,
-    `git log`, `git show --stat` etc. itself via Bash. When `has_mmcg` is
+    directory and baseline and is expected to inspect the current working
+    tree, including untracked files, itself via Bash and Read. When `has_mmcg` is
     true, the auditor also has live `mmcg_callers` / `mmcg_search` MCP
     tools pointed at an index of the after-tree state.
     """
     mmcg_note = (
         "\n\n**mmcg available:** the working dir has a fresh `.mastermind/mmcg.db` "
-        "indexed at the after-commit state. You can call `mmcg_callers`, "
+        "indexed at the current working-tree state. You can call `mmcg_callers`, "
         "`mmcg_search`, `mmcg_outline` etc. via the MCP tools — use them to "
         "verify the spec's pre-edit symbol snapshot against the current state.\n"
     ) if has_mmcg else "\n"
+    executor_state = (
+        "**Executor state:** changes are uncommitted; HEAD remains at the baseline.\n\n"
+        if uncommitted
+        else f"**Executor commit tag:** `{after_ref}` (also inspect the current working tree)\n\n"
+    )
     return (
         f"Audit the executor's work against the spec.\n\n"
-        f"**Working directory:** `{fixture_path}` — a real git repo with two commits.\n"
+        f"**Working directory:** `{fixture_path}` — a real git repo.\n"
         f"**Baseline tag:** `{baseline_ref}` (state before the executor ran)\n"
-        f"**Executor commit tag:** `{after_ref}` (state after the executor ran)\n\n"
-        f"Use real `git diff {baseline_ref}..{after_ref}`, `git log`, "
-        f"`git show --stat` against this repo. Do NOT trust the executor's "
-        f"narrative — verify each claim against the diff."
+        f"{executor_state}"
+        f"Use real `git diff {baseline_ref}` for tracked changes, "
+        f"`git status --porcelain=v1 --untracked-files=all` for staging state, and "
+        f"`git ls-files --others --exclude-standard` for untracked paths. Read "
+        f"untracked file contents directly; they are absent from `git diff`. "
+        f"Do NOT trust the executor's narrative — verify each claim against "
+        f"the current code."
         f"{mmcg_note}\n"
         f"**Spec summary:**\n{inp.get('spec_summary', '')}\n\n"
         f"**Executor report (what they claim they did):**\n```\n{inp.get('executor_report', '')}\n```"
@@ -1469,6 +1503,60 @@ _INTAKE_BLOCK_RE = re.compile(
     r"<!--\s*mastermind:intake-begin\s*-->.*?```ya?ml(.*?)```.*?<!--\s*mastermind:intake-end\s*-->",
     re.S,
 )
+
+
+CRITIC_VERDICTS = frozenset({"ship it", "ship with caveats", "revise", "rethink"})
+_CRITIC_VERDICT_RE = re.compile(
+    r"^(ship with caveats|ship it|revise|rethink)(?=\s*(?:$|[—–:-](?:\s|$)))",
+    re.I,
+)
+
+
+def extract_critic_verdict(output: str) -> str | None:
+    """Read the sole final Verdict section, excluding quoted Markdown examples."""
+    lines: list[str] = []
+    fence: tuple[str, int] | None = None
+    output = re.sub(r"<!--.*?(?:-->|$)", "", output, flags=re.S)
+    for line in output.splitlines():
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if fence is not None:
+            if (
+                marker
+                and marker[1][0] == fence[0]
+                and len(marker[1]) >= fence[1]
+                and not marker[2].strip()
+            ):
+                fence = None
+            continue
+        if marker:
+            fence = (marker[1][0], len(marker[1]))
+            continue
+        if line.startswith(("    ", "\t")) or re.match(r"^ {0,3}>", line):
+            continue
+        lines.append(line.strip())
+
+    headings = [
+        index for index, line in enumerate(lines)
+        if re.fullmatch(r"##\s+Verdict(?:\s+#+)?", line, re.I)
+    ]
+    if len(headings) != 1:
+        return None
+    body = [line for line in lines[headings[0] + 1:] if line]
+    if not body or any(re.match(r"^#{1,6}\s", line) for line in body):
+        return None
+
+    verdicts = []
+    for index, line in enumerate(body):
+        if index:
+            line = re.sub(r"^(?:[-+*]|\d+[.)])\s+", "", line)
+        line = re.sub(
+            r"^(\*\*|__|`|\*|_)(ship with caveats|ship it|revise|rethink)\1(?=\s|$)",
+            r"\2", line, flags=re.I,
+        )
+        verdicts.append(_CRITIC_VERDICT_RE.match(line))
+    if verdicts[0] is None or sum(match is not None for match in verdicts) != 1:
+        return None
+    return verdicts[0][1].lower()
 
 
 def extract_audit_data(output: str) -> dict | None:
@@ -1623,7 +1711,10 @@ def evaluate_case(
             fixture_name = case["fixture"]
             baseline_ref = case["baseline_ref"]
             after_ref = case["after_ref"]
-            fixture_path = setup_fixture(fixture_name, baseline_ref, after_ref)
+            staged_paths = case.get("staged_paths")
+            fixture_path = setup_fixture(
+                fixture_name, baseline_ref, after_ref, staged_paths=staged_paths
+            )
 
             db_path = fixture_path / ".mastermind" / "mmcg.db"
             has_mmcg = db_path.is_file()
@@ -1645,6 +1736,7 @@ def evaluate_case(
                     baseline_ref=baseline_ref,
                     after_ref=after_ref,
                     has_mmcg=has_mmcg,
+                    uncommitted=staged_paths is not None,
                 )
             else:
                 user_message = render_researcher_input(
@@ -1816,6 +1908,21 @@ def evaluate_case(
                         "no structured audit verdict block found "
                         "(<!-- mastermind:audit-begin --> ... <!-- mastermind:audit-end -->)"
                     )
+            elif suite_name == "critic":
+                invalid_candidates = [
+                    candidate for candidate in candidates
+                    if candidate.lower() not in CRITIC_VERDICTS
+                ]
+                if invalid_candidates:
+                    passed = False
+                    reasons.append(f"invalid expected critic verdicts: {invalid_candidates}")
+                verdict = extract_critic_verdict(output)
+                if verdict is None:
+                    passed = False
+                    reasons.append("no single valid final critic Verdict section found")
+                elif verdict not in {candidate.lower() for candidate in candidates}:
+                    passed = False
+                    reasons.append(f"critic verdict {verdict!r} not in expected {candidates}")
             elif not any(
                 re.search(rf"\b{re.escape(v)}\b", output, re.IGNORECASE)
                 for v in candidates

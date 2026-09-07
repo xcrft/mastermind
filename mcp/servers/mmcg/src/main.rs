@@ -216,7 +216,7 @@ enum Cmd {
         #[arg(long)]
         production_only: bool,
     },
-    /// Analyze changed symbols, affected callers, component crossings, and candidate tests.
+    /// Analyze changes through calls and syntactic references, component crossings, and candidate tests.
     Impact {
         #[arg(long)]
         since: String,
@@ -875,20 +875,26 @@ enum QueryCmd {
         name: String,
         #[arg(long)]
         language: Option<String>,
-        /// Edge kind filter — 'calls' (default), 'imports', or 'inherits'.
+        /// Edge kind filter — 'calls' (default), 'imports', 'inherits', or 'references'.
         #[arg(long)]
         edge_kind: Option<String>,
     },
-    /// List callees of a symbol.
+    /// List callees of one definition; ambiguous names return candidates to select.
     Callees {
         name: String,
+        /// Exact relative file path from a returned candidate.
+        #[arg(long)]
+        file: Option<String>,
+        /// Exact declaration start line from a candidate; requires --file.
+        #[arg(long, requires = "file", value_parser = clap::value_parser!(u32).range(1..))]
+        line: Option<u32>,
         #[arg(long)]
         language: Option<String>,
-        /// Edge kind filter — 'calls' (default), 'imports', or 'inherits'.
+        /// Edge kind filter — 'calls' (default), 'imports', 'inherits', or 'references'.
         #[arg(long)]
         edge_kind: Option<String>,
     },
-    /// Transitive callers (blast radius).
+    /// Transitive dependency candidates through calls and syntactic references.
     Impact {
         name: String,
         #[arg(long, default_value_t = 2)]
@@ -2010,6 +2016,43 @@ mod tests {
             index_path_for_root(Some(std::path::Path::new("custom/index.db")), root),
             PathBuf::from("custom/index.db")
         );
+    }
+
+    #[test]
+    fn callees_cli_accepts_candidate_location_and_rejects_invalid_lines() {
+        let cli = Cli::try_parse_from([
+            "mastermind",
+            "query",
+            "callees",
+            "process",
+            "--file",
+            "second.rs",
+            "--line",
+            "5",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Query(QueryCmd::Callees { name, file: Some(file), line: Some(5), .. })
+                if name == "process" && file == "second.rs"
+        ));
+        assert!(
+            Cli::try_parse_from(["mastermind", "query", "callees", "process", "--line", "5"])
+                .is_err()
+        );
+        for line in ["0", "-1", "4294967296"] {
+            assert!(Cli::try_parse_from([
+                "mastermind",
+                "query",
+                "callees",
+                "process",
+                "--file",
+                "second.rs",
+                "--line",
+                line
+            ])
+            .is_err());
+        }
     }
 
     #[test]

@@ -47,7 +47,7 @@ pub use vue::VueExtractor;
 /// Semantic contract for the extractor output stored in SQLite. Bump this when
 /// an extractor or grammar change can alter symbols, edges, ownership, or paths
 /// without requiring a database schema migration.
-pub const EXTRACTOR_CONTRACT_VERSION: &str = "mmcg-extractors-v5";
+pub const EXTRACTOR_CONTRACT_VERSION: &str = "mmcg-extractors-v6";
 pub const EXTRACTOR_CONTRACT_META_KEY: &str = "extractor_contract_version";
 
 /// Bind a persisted codegraph to the repository it was built from.
@@ -3500,16 +3500,6 @@ pub(crate) mod common {
         pending.symbols.len() - 1
     }
 
-    pub fn push_call(
-        pending: &mut PendingFile,
-        from_index: usize,
-        to_name: String,
-        to_path: Option<String>,
-        line: u32,
-    ) {
-        push_call_with_type(pending, from_index, to_name, to_path, None, line)
-    }
-
     /// When the receiver/namespace is a type (e.g. Rust `SessionStore::new()`),
     /// pass it as `to_type` so `mmcg_callers <Type>` finds these sites.
     pub fn push_call_with_type(
@@ -3525,6 +3515,7 @@ pub(crate) mod common {
             to_name,
             to_path,
             to_type,
+            target_kind: None,
             kind: "calls".to_string(),
             line,
         });
@@ -3542,6 +3533,7 @@ pub(crate) mod common {
             to_name,
             to_path,
             to_type: None,
+            target_kind: None,
             kind: "imports".to_string(),
             line,
         });

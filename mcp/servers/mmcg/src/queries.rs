@@ -32,9 +32,8 @@ pub struct SymbolHit {
     /// `",partial,sealed,"`). Skipped from output when absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decorators: Option<String>,
-    /// Graph-edge precision for this symbol's language. Present on `mmcg_search`
-    /// results; absent on sub-lists (callers, callees), where the parent response
-    /// carries a single `edge_precision`.
+    /// Graph-edge precision for this symbol's language, when the query presents
+    /// it as search, dependency, or unreferenced evidence.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub precision: Option<EdgePrecision>,
 }
@@ -69,25 +68,27 @@ pub struct SearchResponse {
 #[derive(Debug, Serialize)]
 pub struct CallersResponse {
     pub target: String,
+    pub edge_kind: String,
     pub count: u32,
     /// How many definitions share `target`'s name. Edges resolve by name, so
     /// > 1 means these callers pool across several same-named symbols.
     pub name_collision: u32,
     pub callers: Vec<SymbolHit>,
+    pub precision_notes: Vec<String>,
 }
 
 /// Confidence and resolution metadata for a set of graph edges.
 ///
-/// Precision depends on language: Rust and Go are syntactic, high-confidence;
-/// Python and JavaScript heuristic (leaf-name only, no type inference). C/C++ is
-/// syntactic but inherently low-confidence — macros unexpanded, includes unfollowed.
+/// AST extraction does not establish compiler symbol identity. Candidate
+/// resolution is name-based for every language; C/C++ has additional gaps.
 #[derive(Debug, Clone, Serialize)]
 pub struct EdgePrecision {
-    /// `"high"`, `"medium"`, or `"low"`.
+    /// `"medium"`, `"low"`, or `"unknown"` for this name-based graph.
     pub confidence: &'static str,
-    /// `"syntactic"` — straight from AST; `"heuristic"` — leaf-name guessing
-    /// without type resolution.
+    /// Extraction strategy: `"syntactic"` AST edges or `"heuristic"` leaf names.
+    /// Neither value implies type or compiler resolution.
     pub resolution: &'static str,
+    pub target_resolution: &'static str,
     /// Known gaps for this language's edge extraction.
     pub limitations: Vec<&'static str>,
 }
@@ -99,30 +100,50 @@ pub fn lang_precision(file_path: &str) -> EdgePrecision {
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    match ext.as_str() {
+    let mut precision = match ext.as_str() {
         "rs" => EdgePrecision {
-            confidence: "high",
+            confidence: "medium",
             resolution: "syntactic",
-            limitations: vec!["trait-object dynamic dispatch not resolved"],
+            target_resolution: "name_based_candidates",
+            limitations: vec![
+                "trait-object and function-pointer dispatch not resolved",
+                "macros not expanded",
+                "macro-body and function-value references do not prove invocation",
+                "unsupported or over-budget macro bodies may omit references",
+                "wildcard-imported function values not resolved",
+            ],
         },
         "go" => EdgePrecision {
-            confidence: "high",
+            confidence: "medium",
             resolution: "syntactic",
-            limitations: vec![],
+            target_resolution: "name_based_candidates",
+            limitations: vec![
+                "interface and function-value dispatch not resolved",
+                "reflection and generated code not tracked",
+            ],
         },
         "java" => EdgePrecision {
-            confidence: "high",
+            confidence: "medium",
             resolution: "syntactic",
-            limitations: vec!["reflection not tracked", "generics erased at call sites"],
+            target_resolution: "name_based_candidates",
+            limitations: vec![
+                "reflection not tracked",
+                "generics and overloads not resolved at call sites",
+            ],
         },
         "cs" => EdgePrecision {
-            confidence: "high",
+            confidence: "medium",
             resolution: "syntactic",
-            limitations: vec!["reflection not tracked"],
+            target_resolution: "name_based_candidates",
+            limitations: vec![
+                "reflection not tracked",
+                "delegates and overloads not resolved",
+            ],
         },
         "py" | "pyi" => EdgePrecision {
             confidence: "medium",
             resolution: "heuristic",
+            target_resolution: "name_based_candidates",
             limitations: vec![
                 "obj.method() matched by leaf name only — no type inference",
                 "dynamic attributes not tracked",
@@ -131,6 +152,7 @@ pub fn lang_precision(file_path: &str) -> EdgePrecision {
         "ts" | "tsx" => EdgePrecision {
             confidence: "medium",
             resolution: "syntactic",
+            target_resolution: "name_based_candidates",
             limitations: vec![
                 "no type-based dispatch resolution",
                 "dynamic imports not tracked",
@@ -139,11 +161,13 @@ pub fn lang_precision(file_path: &str) -> EdgePrecision {
         "js" | "jsx" | "mjs" | "cjs" => EdgePrecision {
             confidence: "medium",
             resolution: "heuristic",
+            target_resolution: "name_based_candidates",
             limitations: vec!["no type resolution", "dynamic calls not tracked"],
         },
         "vue" => EdgePrecision {
             confidence: "medium",
             resolution: "syntactic",
+            target_resolution: "name_based_candidates",
             limitations: vec![
                 "template attribute expressions not parsed",
                 "auto-imported components produce no edge",
@@ -153,11 +177,13 @@ pub fn lang_precision(file_path: &str) -> EdgePrecision {
         "php" | "phtml" => EdgePrecision {
             confidence: "medium",
             resolution: "syntactic",
+            target_resolution: "name_based_candidates",
             limitations: vec!["dynamic dispatch not tracked"],
         },
         "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh" | "hxx" | "ipp" | "tpp" => EdgePrecision {
             confidence: "low",
             resolution: "syntactic",
+            target_resolution: "name_based_candidates",
             limitations: vec![
                 "macros not expanded",
                 "includes not followed",
@@ -167,9 +193,54 @@ pub fn lang_precision(file_path: &str) -> EdgePrecision {
         _ => EdgePrecision {
             confidence: "unknown",
             resolution: "unknown",
+            target_resolution: "unknown",
             limitations: vec!["unsupported or unrecognized language"],
         },
+    };
+    if precision.target_resolution == "name_based_candidates" {
+        precision.limitations.insert(
+            0,
+            "name-based candidates only; compiler/type resolution absent",
+        );
     }
+    precision
+}
+
+fn symbol_hit_with_precision(symbol: Symbol) -> SymbolHit {
+    let mut hit = SymbolHit::from(symbol);
+    hit.precision = Some(lang_precision(&hit.file));
+    hit
+}
+
+fn graph_precision_notes() -> Vec<String> {
+    [
+        "heuristic_name_resolution_without_compiler_types",
+        "dynamic_generated_and_cross_language_edges_may_be_missing",
+        "empty_result_does_not_prove_no_dependencies",
+        "truncated_describes_query_limits_not_extraction_completeness",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
+}
+
+fn edge_query_precision_notes(edge_kind: &str) -> Vec<String> {
+    let mut notes = graph_precision_notes();
+    match edge_kind {
+        "calls" => {
+            notes.push("function_value_and_macro_body_usages_require_edge_kind_references".into())
+        }
+        "references" => notes.push("references_do_not_prove_invocation".into()),
+        _ => {}
+    }
+    notes
+}
+
+fn impact_precision_notes() -> Vec<String> {
+    let mut notes = graph_precision_notes();
+    notes.push("impact_includes_calls_and_references".into());
+    notes.push("references_do_not_prove_invocation".into());
+    notes
 }
 
 fn lang_from_ext(ext: &str) -> &'static str {
@@ -195,14 +266,32 @@ pub struct CalleesEntry {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CalleesMatchStatus {
+    Matched,
+    Ambiguous,
+    NotFound,
+}
+
+#[derive(Debug, Serialize)]
 pub struct CalleesResponse {
     pub symbol: String,
+    pub edge_kind: String,
+    /// Distinguishes an empty edge list for a selected symbol from no selection.
+    /// A match still does not establish complete runtime reachability.
+    pub match_status: CalleesMatchStatus,
+    /// Definitions with this exact name after the language filter, before selectors.
+    pub name_collision: u32,
+    /// Raw definitions remaining after file/line selection. Partial declarations
+    /// are not collapsed because their outgoing edges belong to individual rows.
+    pub candidates: Vec<SymbolHit>,
     pub matched: Option<SymbolHit>,
     pub count: u32,
     pub callees: Vec<CalleesEntry>,
     /// Edge precision for calls made by this symbol, from its language.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edge_precision: Option<EdgePrecision>,
+    pub precision_notes: Vec<String>,
 }
 
 /// A matched symbol with debug metadata for `mmcg query explain`.
@@ -252,11 +341,12 @@ pub struct ImpactResponse {
     /// symbols and over-approximates real reach.
     pub name_collision: u32,
     /// `true` when the underlying walk hit `row_limit` rows — the result is a
-    /// prefix of the true blast radius, not the whole thing.
+    /// prefix of the candidate dependency graph, not the whole result.
     pub truncated: bool,
     /// The row cap applied to this walk (see `IMPACT_WORK_LIMIT`).
     pub row_limit: u32,
     pub impact: Vec<ImpactEntry>,
+    pub precision_notes: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1380,7 +1470,10 @@ fn component_for(path: &str) -> String {
 
 fn visible_precision(path: &str) -> Vec<String> {
     let precision = lang_precision(path);
-    let mut values = vec![format!("{}:{}", precision.confidence, precision.resolution)];
+    let mut values = vec![
+        format!("{}:{}", precision.confidence, precision.resolution),
+        format!("targets:{}", precision.target_resolution),
+    ];
     values.extend(
         precision
             .limitations
@@ -1728,7 +1821,8 @@ pub fn change_impact(
     let checked_snapshot =
         checked_snapshot_token(store, &repository_root, &working.snapshot_token)?;
 
-    let mut precision_notes = vec!["focused_tests_do_not_replace_full_gate".to_string()];
+    let mut precision_notes = impact_precision_notes();
+    precision_notes.push("focused_tests_do_not_replace_full_gate".into());
     let graph_seed_overflow = seed_names.len() > CHANGE_SEED_LIMIT;
     let graph_had_parent_budget = store.work_budget_depth() > 0;
     let graph_interrupt_before = store.interrupt_source();
@@ -1895,7 +1989,7 @@ pub fn change_impact(
                     }
                     .to_string(),
                     minimum_depth: Some(row.depth),
-                    confidence: if row.depth == 1 { "high" } else { "medium" }.to_string(),
+                    confidence: lang_precision(&row.symbol.file_path).confidence.to_string(),
                     evidence: Vec::new(),
                 });
             if candidate.minimum_depth != Some(0) {
@@ -1903,7 +1997,8 @@ pub fn change_impact(
                     Some(candidate.minimum_depth.unwrap_or(row.depth).min(row.depth));
                 if candidate.minimum_depth == Some(1) {
                     candidate.classification = "direct".to_string();
-                    candidate.confidence = "high".to_string();
+                    candidate.confidence =
+                        lang_precision(&row.symbol.file_path).confidence.to_string();
                 }
             }
             if let Some(seeds) = evidence_by_name.get(&row.seed) {
@@ -2851,16 +2946,19 @@ pub fn callers(
     language: Option<&str>,
     edge_kind: Option<&str>,
 ) -> rusqlite::Result<CallersResponse> {
+    let selected_edge_kind = edge_kind.unwrap_or("calls");
     let callers: Vec<SymbolHit> = store
         .callers_of(name, language, edge_kind)?
         .into_iter()
-        .map(SymbolHit::from)
+        .map(symbol_hit_with_precision)
         .collect();
     Ok(CallersResponse {
         target: name.to_string(),
+        edge_kind: selected_edge_kind.to_string(),
         count: callers.len() as u32,
         name_collision: store.definition_count(name)?,
         callers,
+        precision_notes: edge_query_precision_notes(selected_edge_kind),
     })
 }
 
@@ -2869,13 +2967,24 @@ pub fn callees(
     name: &str,
     language: Option<&str>,
     edge_kind: Option<&str>,
+    file: Option<&str>,
+    line: Option<u32>,
 ) -> rusqlite::Result<CalleesResponse> {
-    let matched = store
-        .search_symbols(name, None, language)?
-        .into_iter()
-        .next();
+    let selected_edge_kind = edge_kind.unwrap_or("calls");
+    let mut candidates = store.search_symbols(name, None, language)?;
+    let name_collision = candidates.len() as u32;
+    candidates.retain(|symbol| {
+        file.is_none_or(|file| symbol.file_path == file)
+            && line.is_none_or(|line| symbol.line_start == line)
+    });
+    let match_status = match candidates.len() {
+        0 => CalleesMatchStatus::NotFound,
+        1 => CalleesMatchStatus::Matched,
+        _ => CalleesMatchStatus::Ambiguous,
+    };
+    let matched = (candidates.len() == 1).then(|| &candidates[0]);
     let edge_precision = matched.as_ref().map(|s| lang_precision(&s.file_path));
-    let callees: Vec<CalleesEntry> = if let Some(ref sym) = matched {
+    let callees: Vec<CalleesEntry> = if let Some(sym) = matched {
         store
             .callees_of(sym.id, edge_kind)?
             .into_iter()
@@ -2886,10 +2995,15 @@ pub fn callees(
     };
     Ok(CalleesResponse {
         symbol: name.to_string(),
-        matched: matched.map(SymbolHit::from),
+        edge_kind: selected_edge_kind.to_string(),
+        match_status,
+        name_collision,
+        matched: matched.cloned().map(SymbolHit::from),
+        candidates: candidates.into_iter().map(SymbolHit::from).collect(),
         count: callees.len() as u32,
         callees,
         edge_precision,
+        precision_notes: edge_query_precision_notes(selected_edge_kind),
     })
 }
 
@@ -2980,7 +3094,7 @@ pub fn impact(
     let impact: Vec<ImpactEntry> = rows
         .into_iter()
         .map(|row| ImpactEntry {
-            symbol: SymbolHit::from(row.symbol),
+            symbol: symbol_hit_with_precision(row.symbol),
             depth: row.depth,
         })
         .collect();
@@ -2992,6 +3106,7 @@ pub fn impact(
         truncated,
         row_limit: IMPACT_WORK_LIMIT as u32,
         impact,
+        precision_notes: impact_precision_notes(),
     })
 }
 
@@ -3080,9 +3195,10 @@ pub struct UnreferencedResponse {
     pub language: Option<String>,
     pub count: u32,
     pub symbols: Vec<SymbolHit>,
+    pub precision_notes: Vec<String>,
 }
 
-/// Symbols nothing references. See `Store::unreferenced` for false-positive caveats.
+/// Symbols with no indexed reference candidates, not proven dead code.
 pub fn unreferenced(
     store: &Store,
     kind: Option<&str>,
@@ -3091,13 +3207,17 @@ pub fn unreferenced(
     let syms: Vec<SymbolHit> = store
         .unreferenced(kind, language)?
         .into_iter()
-        .map(SymbolHit::from)
+        .map(symbol_hit_with_precision)
         .collect();
+    let mut precision_notes = graph_precision_notes();
+    precision_notes.push("unreferenced_candidates_are_not_proven_dead_code".into());
+    precision_notes.push("external_entry_points_and_runtime_registration_may_be_missing".into());
     Ok(UnreferencedResponse {
         kind: kind.map(String::from),
         language: language.map(String::from),
         count: syms.len() as u32,
         symbols: syms,
+        precision_notes,
     })
 }
 
@@ -3905,7 +4025,7 @@ pub fn project_map_with_options(
     let mut precision_notes = vec![
         MapNote {
             code: "syntactic_graph",
-            message: "Call and import edges are syntactic and may miss dynamic dispatch or reflection.",
+            message: "Call and import edges are syntactic candidates and may miss dynamic dispatch, generated code, or reflection.",
         },
         MapNote {
             code: "heuristic_entry_points",
@@ -3913,7 +4033,7 @@ pub fn project_map_with_options(
         },
         MapNote {
             code: "name_resolution",
-            message: "Boundary and cycle edges resolve names syntactically and may over-approximate collisions.",
+            message: "Targets are name-based candidates without compiler type resolution; boundaries, cycles, and hotspots may over-approximate collisions.",
         },
     ];
     if paths_truncated {
@@ -4028,6 +4148,242 @@ mod tests {
         p.push(format!("mmcg-queries-{}-{}.db", std::process::id(), name));
         let _ = std::fs::remove_file(&p);
         p
+    }
+
+    #[test]
+    fn dependency_queries_preserve_limitations_when_no_edges_are_found() {
+        let path = tmp_db("empty_dependency_precision");
+        let store = Store::open(&path).unwrap();
+        let incoming = callers(&store, "missing", None, None).unwrap();
+        let outgoing = callees(&store, "missing", None, None, None, None).unwrap();
+        let affected = impact(&store, "missing", 2, None).unwrap();
+        let candidates = unreferenced(&store, Some("function"), None).unwrap();
+        assert_eq!(incoming.count, 0);
+        assert_eq!(outgoing.count, 0);
+        assert_eq!(affected.count, 0);
+        assert!(!affected.truncated);
+        assert_eq!(candidates.count, 0);
+        for notes in [
+            &incoming.precision_notes,
+            &outgoing.precision_notes,
+            &affected.precision_notes,
+            &candidates.precision_notes,
+        ] {
+            assert!(notes
+                .iter()
+                .any(|note| note == "heuristic_name_resolution_without_compiler_types"));
+            assert!(notes
+                .iter()
+                .any(|note| note == "empty_result_does_not_prove_no_dependencies"));
+        }
+        assert!(affected
+            .precision_notes
+            .iter()
+            .any(|note| note == "impact_includes_calls_and_references"));
+        assert!(candidates
+            .precision_notes
+            .iter()
+            .any(|note| note == "unreferenced_candidates_are_not_proven_dead_code"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn dependency_queries_identify_calls_and_references_without_changing_defaults() {
+        let path = tmp_db("reference_query_precision");
+        let store = Store::open(&path).unwrap();
+        let target = store
+            .insert_symbol("callback", "function", "lib.rs", 1, 1, None, None)
+            .unwrap();
+        let registration = store
+            .insert_symbol("register", "function", "lib.rs", 3, 5, None, None)
+            .unwrap();
+        store
+            .insert_edge(registration, Some(target), "callback", "references", 4)
+            .unwrap();
+        let calls = callers(&store, "callback", None, None).unwrap();
+        assert_eq!(calls.edge_kind, "calls");
+        assert_eq!(calls.count, 0);
+        assert!(calls.precision_notes.iter().any(
+            |note| note == "function_value_and_macro_body_usages_require_edge_kind_references"
+        ));
+        let references = callers(&store, "callback", None, Some("references")).unwrap();
+        assert_eq!(references.edge_kind, "references");
+        assert_eq!(references.count, 1);
+        assert_eq!(
+            references.callers[0].precision.as_ref().unwrap().confidence,
+            "medium"
+        );
+        assert!(references
+            .precision_notes
+            .iter()
+            .any(|note| note == "references_do_not_prove_invocation"));
+        let outgoing = callees(&store, "register", None, Some("references"), None, None).unwrap();
+        assert_eq!(outgoing.edge_kind, "references");
+        assert_eq!(outgoing.count, 1);
+        assert_eq!(
+            outgoing.edge_precision.unwrap().target_resolution,
+            "name_based_candidates"
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn callees_requires_selection_for_duplicate_definitions() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("first.rs"),
+            "fn process() { first_leaf(); }\nfn first_leaf() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("second.rs"),
+            "fn process() { second_leaf(); }\nfn second_leaf() {}\n",
+        )
+        .unwrap();
+        let mut store = Store::open(root.path().join("mmcg.db")).unwrap();
+        crate::indexer::Indexer::new(root.path())
+            .index_all(&mut store, true)
+            .unwrap();
+
+        let ambiguous = callees(&store, "process", None, None, None, None).unwrap();
+        assert!(matches!(
+            ambiguous.match_status,
+            CalleesMatchStatus::Ambiguous
+        ));
+        assert!(ambiguous.matched.is_none());
+        assert!(ambiguous.edge_precision.is_none());
+        assert_eq!(ambiguous.name_collision, 2);
+        assert_eq!(ambiguous.count, 0);
+        assert!(ambiguous.callees.is_empty());
+        assert_eq!(
+            ambiguous
+                .candidates
+                .iter()
+                .map(|candidate| (candidate.file.as_str(), candidate.line))
+                .collect::<Vec<_>>(),
+            vec![("first.rs", 1), ("second.rs", 1)]
+        );
+
+        let selected = callees(&store, "process", None, None, Some("second.rs"), None).unwrap();
+        assert!(matches!(selected.match_status, CalleesMatchStatus::Matched));
+        assert_eq!(selected.name_collision, 2);
+        assert_eq!(selected.matched.unwrap().file, "second.rs");
+        assert_eq!(selected.count, 1);
+        assert_eq!(selected.callees[0].name, "second_leaf");
+
+        let missing = callees(&store, "process", None, None, Some("missing.rs"), None).unwrap();
+        assert!(matches!(missing.match_status, CalleesMatchStatus::NotFound));
+        assert!(missing.matched.is_none());
+        assert!(missing.candidates.is_empty());
+        assert!(missing.callees.is_empty());
+
+        let unique = callees(&store, "first_leaf", None, None, None, None).unwrap();
+        assert!(matches!(unique.match_status, CalleesMatchStatus::Matched));
+        assert!(unique.matched.is_some());
+        assert!(unique.callees.is_empty());
+    }
+
+    #[test]
+    fn callees_selects_same_file_declarations_by_start_line() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("modules.rs"),
+            "mod first {\n    fn process() { first_leaf(); }\n}\n\
+             mod second {\n    fn process() { second_leaf(); }\n}\n",
+        )
+        .unwrap();
+        let mut store = Store::open(root.path().join("mmcg.db")).unwrap();
+        crate::indexer::Indexer::new(root.path())
+            .index_all(&mut store, true)
+            .unwrap();
+        let ambiguous = callees(&store, "process", None, None, Some("modules.rs"), None).unwrap();
+        assert!(matches!(
+            ambiguous.match_status,
+            CalleesMatchStatus::Ambiguous
+        ));
+        assert!(ambiguous.matched.is_none());
+        assert_eq!(ambiguous.candidates.len(), 2);
+
+        let selected = callees(&store, "process", None, None, Some("modules.rs"), Some(5)).unwrap();
+        assert!(matches!(selected.match_status, CalleesMatchStatus::Matched));
+        assert_eq!(selected.matched.unwrap().line, 5);
+        assert_eq!(selected.callees[0].name, "second_leaf");
+
+        let wrong_line =
+            callees(&store, "process", None, None, Some("modules.rs"), Some(6)).unwrap();
+        assert!(matches!(
+            wrong_line.match_status,
+            CalleesMatchStatus::NotFound
+        ));
+        assert!(wrong_line.callees.is_empty());
+    }
+
+    #[test]
+    fn callees_preserves_language_and_edge_kind_filters() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("lib.rs"),
+            "fn process() { rust_leaf(); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("app.py"),
+            "def process():\n    from helpers import python_leaf\n    python_leaf()\n",
+        )
+        .unwrap();
+        let mut store = Store::open(root.path().join("mmcg.db")).unwrap();
+        crate::indexer::Indexer::new(root.path())
+            .index_all(&mut store, true)
+            .unwrap();
+
+        let selected = callees(&store, "process", Some("python"), None, None, None).unwrap();
+        assert!(matches!(selected.match_status, CalleesMatchStatus::Matched));
+        assert_eq!(selected.name_collision, 1);
+        assert_eq!(selected.matched.unwrap().file, "app.py");
+        assert_eq!(selected.callees[0].name, "python_leaf");
+
+        let imports = callees(
+            &store,
+            "process",
+            Some("python"),
+            Some("imports"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(imports.count, 0);
+        assert!(imports.callees.is_empty());
+    }
+
+    #[test]
+    fn callees_does_not_collapse_partial_declarations_before_selection() {
+        let root = tempfile::tempdir().unwrap();
+        for file in ["First.cs", "Second.cs"] {
+            std::fs::write(
+                root.path().join(file),
+                "namespace Shared { partial class Processor {} }\n",
+            )
+            .unwrap();
+        }
+        let mut store = Store::open(root.path().join("mmcg.db")).unwrap();
+        crate::indexer::Indexer::new(root.path())
+            .index_all(&mut store, true)
+            .unwrap();
+
+        let collapsed = search(&store, "Processor", None, Some("csharp"), true).unwrap();
+        assert_eq!(collapsed.results.len(), 1);
+        assert_eq!(collapsed.results[0].locations.as_ref().unwrap().len(), 2);
+        let ambiguous = callees(&store, "Processor", None, None, None, None).unwrap();
+        assert!(matches!(
+            ambiguous.match_status,
+            CalleesMatchStatus::Ambiguous
+        ));
+        assert!(ambiguous.matched.is_none());
+        assert_eq!(ambiguous.candidates.len(), 2);
+        assert!(ambiguous
+            .candidates
+            .iter()
+            .all(|candidate| candidate.locations.is_none()));
     }
 
     fn verified_concept_freshness() -> ConceptFreshness {
@@ -4541,6 +4897,14 @@ mod tests {
             .keys()
             .cloned()
             .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            value["hotspots"]["items"][0]["edge_precision"]["confidence"],
+            "medium"
+        );
+        assert_eq!(
+            value["hotspots"]["items"][0]["edge_precision"]["target_resolution"],
+            "name_based_candidates"
+        );
         assert_eq!(
             hotspot_keys,
             [
@@ -5880,6 +6244,7 @@ mod tests {
             .unwrap();
         assert_eq!(candidate.classification, "direct");
         assert_eq!(candidate.minimum_depth, Some(0));
+        assert_eq!(candidate.confidence, "high");
         assert!(candidate
             .evidence
             .iter()
@@ -5960,9 +6325,16 @@ mod tests {
         write_impact_file(&root, "src/app.py", "def value():\n    return 2\n");
         let store = index_impact(&root, "caveat");
         let response = change_impact(&store, &root, "HEAD", 3, 100).unwrap();
+        assert!(response.impact.items.is_empty());
         assert!(response
             .precision_notes
             .contains(&"focused_tests_do_not_replace_full_gate".to_string()));
+        assert!(response
+            .precision_notes
+            .contains(&"empty_result_does_not_prove_no_dependencies".to_string()));
+        assert!(response
+            .precision_notes
+            .contains(&"references_do_not_prove_invocation".to_string()));
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -6026,7 +6398,10 @@ mod tests {
     #[test]
     fn change_impact_reports_name_collisions_and_edge_precision() {
         let precision = visible_precision("src/lib.rs");
-        assert!(precision.iter().any(|value| value == "high:syntactic"));
+        assert!(precision.iter().any(|value| value == "medium:syntactic"));
+        assert!(precision
+            .iter()
+            .any(|value| value == "targets:name_based_candidates"));
         let path = tmp_db("impact_collision");
         let store = Store::open(&path).unwrap();
         store
@@ -6093,6 +6468,16 @@ mod tests {
         assert_eq!(classes.get("test_direct"), Some(&"direct"));
         assert_eq!(classes.get("test_transitive"), Some(&"transitive"));
         assert_eq!(classes.get("test_heuristic"), Some(&"heuristic"));
+        for candidate in &response.tests.items {
+            assert_eq!(
+                candidate.confidence,
+                if candidate.classification == "heuristic" {
+                    "low"
+                } else {
+                    "medium"
+                }
+            );
+        }
         std::fs::remove_dir_all(root).ok();
     }
 

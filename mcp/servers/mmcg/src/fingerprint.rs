@@ -2,7 +2,7 @@
 //!
 //! Hashes ONLY a file's structural extract — language tag, sorted
 //! `(kind, name, signature)` symbol tuples, sorted
-//! `(kind, from_symbol_name, to_name, to_path)` edge tuples. Line numbers,
+//! `(kind, from_symbol_name, to_name, to_path, to_type, target_kind)` edge tuples. Line numbers,
 //! comments, whitespace, and raw bytes are excluded by design — the whole point
 //! of cosmetic-vs-structural classification.
 //!
@@ -41,7 +41,8 @@ pub fn compute_structural_fingerprint(pending: &PendingFile) -> String {
     sym_parts.sort();
     parts.extend(sym_parts);
 
-    // Edges — kind + from-symbol-name + to-name + to-path. Sorted for
+    // Edges include target type/classification so changing how a name binds
+    // is structural even when its spelling and call-site line stay the same. Sorted for
     // determinism. `from_index` becomes a name lookup so reordering the
     // `symbols` vec doesn't perturb the hash.
     let mut edge_parts: Vec<String> = pending
@@ -54,11 +55,13 @@ pub fn compute_structural_fingerprint(pending: &PendingFile) -> String {
                 .map(|s| s.name.as_str())
                 .unwrap_or("?");
             format!(
-                "E|{}|{}|{}|{}",
+                "E|{}|{}|{}|{}|{}|{}",
                 e.kind,
                 from_sym,
                 e.to_name,
-                e.to_path.as_deref().unwrap_or("")
+                e.to_path.as_deref().unwrap_or(""),
+                e.to_type.as_deref().unwrap_or(""),
+                e.target_kind.as_deref().unwrap_or("")
             )
         })
         .collect();
@@ -92,6 +95,7 @@ mod tests {
             to_name: to_name.into(),
             to_path: None,
             to_type: None,
+            target_kind: None,
             kind: kind.into(),
             line: 1,
         }
@@ -201,6 +205,30 @@ mod tests {
             compute_structural_fingerprint(&a),
             compute_structural_fingerprint(&b),
         );
+    }
+
+    #[test]
+    fn changing_target_classification_or_type_perturbs_fingerprint() {
+        let mut pending = PendingFile {
+            path: "x.rs".into(),
+            mtime: 0,
+            content_sha256: String::new(),
+            language: "rust".into(),
+            symbols: vec![sym("caller", "function", Some("fn caller()"))],
+            edges: vec![edge(0, "run", "calls")],
+        };
+        pending.edges[0].target_kind = Some("function".into());
+        let free_call = compute_structural_fingerprint(&pending);
+        pending.edges[0].target_kind = Some("method".into());
+        assert_ne!(free_call, compute_structural_fingerprint(&pending));
+        pending.edges[0].target_kind = Some("scoped".into());
+        pending.edges[0].to_type = Some("First".into());
+        let first_type = compute_structural_fingerprint(&pending);
+        pending.edges[0].to_type = Some("Second".into());
+        assert_ne!(first_type, compute_structural_fingerprint(&pending));
+        let call = compute_structural_fingerprint(&pending);
+        pending.edges[0].kind = "references".into();
+        assert_ne!(call, compute_structural_fingerprint(&pending));
     }
 
     #[test]

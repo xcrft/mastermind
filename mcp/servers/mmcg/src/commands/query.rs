@@ -629,6 +629,8 @@ fn execute(store: &Store, q: QueryCmd) -> Result<Value, Box<dyn std::error::Erro
         )?)?,
         QueryCmd::Callees {
             name,
+            file,
+            line,
             language,
             edge_kind,
         } => serde_json::to_value(queries::callees(
@@ -636,6 +638,8 @@ fn execute(store: &Store, q: QueryCmd) -> Result<Value, Box<dyn std::error::Erro
             &name,
             language.as_deref(),
             edge_kind.as_deref(),
+            file.as_deref(),
+            line,
         )?)?,
         QueryCmd::Impact {
             name,
@@ -718,6 +722,32 @@ fn execute(store: &Store, q: QueryCmd) -> Result<Value, Box<dyn std::error::Erro
 #[cfg(test)]
 mod map_tests {
     use super::*;
+
+    #[test]
+    fn callees_cli_execution_uses_the_requested_definition() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path().join("mmcg.db")).unwrap();
+        for (file, target) in [("first.rs", "first_leaf"), ("second.rs", "second_leaf")] {
+            let symbol = store
+                .insert_symbol("process", "function", file, 5, 6, None, None)
+                .unwrap();
+            store.insert_edge(symbol, None, target, "calls", 5).unwrap();
+        }
+        let result = execute(
+            &store,
+            QueryCmd::Callees {
+                name: "process".into(),
+                file: Some("second.rs".into()),
+                line: Some(5),
+                language: None,
+                edge_kind: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(result["match_status"], "matched");
+        assert_eq!(result["matched"]["file"], "second.rs");
+        assert_eq!(result["callees"][0]["name"], "second_leaf");
+    }
 
     #[test]
     fn map_renderers_escape_repository_control_syntax() {

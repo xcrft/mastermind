@@ -1214,6 +1214,62 @@ async function main() {
     /Partial · file_limit · 200 shown/i
   );
 
+  const fileOnly = emptyFixture();
+  fileOnly.options.path = "docs";
+  fileOnly.options.production_only = true;
+  fileOnly.impact.changes.files = {
+    total: 19,
+    returned: 19,
+    truncated: false,
+    items: Array.from({ length: 19 }, (_value, index) => ({
+      path: index === 0 ? "docs/<script>alert(1)</script>.md" : "docs/decision-" + index + ".md",
+      status: index === 1 ? "deleted" : "modified",
+    })),
+  };
+  for (const width of [390, 900]) {
+    const fileOnlyHarness = await renderFixture(fileOnly, { width });
+    assert.match(fileOnlyHarness.nodes.get("graph-state").textContent, /Changes without a symbol trace/i);
+    assert.match(fileOnlyHarness.nodes.get("trace-context").textContent, /Baseline main · scope docs · production paths only/i);
+    assert.match(fileOnlyHarness.nodes.get("trace-count").textContent, /19 files · 0 trace claims returned/i);
+    assert.doesNotMatch(fileOnlyHarness.nodes.get("graph-state").textContent, /Reset aperture|filter excludes|No changes in captured scope/i);
+    assert.equal(fileOnlyHarness.nodes.get("trace-graph").querySelectorAll("[data-node-id]").length, 0);
+    assert.equal(fileOnlyHarness.nodes.get("inspector-body").querySelectorAll(".claim-list")[0].querySelectorAll("li").length, 19, "Every returned changed file remains inspectable");
+    assert.match(fileOnlyHarness.nodes.get("inspector-body").textContent, /modified · docs\/<script>alert\(1\)<\/script>\.md/);
+    assert.match(fileOnlyHarness.nodes.get("inspector-body").textContent, /deleted · docs\/decision-1\.md/);
+    assert.equal(fileOnlyHarness.nodes.get("inspector-body").querySelectorAll("script").length, 0, "Changed paths are rendered as text");
+    assert.doesNotMatch(fileOnlyHarness.nodes.get("inspector-body").textContent, /Select a trace claim/i);
+    assert.ok(!fileOnlyHarness.nodes.get("review-workspace").classList.contains("is-zero-change"));
+    fileOnlyHarness.nodes.get("graph-state").querySelectorAll("button")[0].dispatch("click");
+    assert.equal(fileOnlyHarness.nodes.get("method-ledger-disclosure").open, true);
+  }
+
+  const missingTrace = cloneFixtureValue(fileOnly);
+  missingTrace.impact.changes.files = {
+    total: null, returned: 2, observed: 19, truncated: true,
+    truncation_reason: "file_limit", projection_truncated: true,
+    projection_reason: "lens_payload_limit", items: fileOnly.impact.changes.files.items.slice(0, 2),
+  };
+  missingTrace.impact.changes.symbols = {
+    total: 5, returned: 0, truncated: true, truncation_reason: "symbol_limit", items: [],
+  };
+  const missingTraceHarness = await renderFixture(missingTrace);
+  assert.match(missingTraceHarness.nodes.get("graph-state").textContent, /partial/i);
+  assert.match(missingTraceHarness.nodes.get("trace-count").textContent, /≥19 files · 0 trace claims returned/i);
+  assert.match(missingTraceHarness.nodes.get("inspector-body").textContent, /2 listed/i);
+  assert.match(missingTraceHarness.nodes.get("inspector-body").textContent, /Partial · file_limit · 2 shown/i);
+  assert.doesNotMatch(missingTraceHarness.nodes.get("graph-state").textContent, /Reset aperture|filter excludes/i);
+
+  const filteredHarness = await renderFixture(fixture(), { width: 900 });
+  filteredHarness.nodes.get("trace-search").value = "nonexistent-symbol";
+  filteredHarness.nodes.get("trace-search").dispatch("input");
+  assert.match(filteredHarness.nodes.get("graph-state").textContent, /Nothing in this aperture/i);
+  assert.match(filteredHarness.nodes.get("graph-state").textContent, /Reset aperture/i);
+  assert.match(filteredHarness.nodes.get("trace-count").textContent, /0 displayed \/ 3 returned/i);
+  filteredHarness.nodes.get("graph-state").querySelectorAll("button")[0].dispatch("click");
+  assert.equal(filteredHarness.nodes.get("trace-search").value, "");
+  assert.equal(filteredHarness.nodes.get("graph-state").hidden, true);
+  assert.ok(filteredHarness.nodes.get("trace-graph").querySelectorAll("[data-cluster-id]").length > 0);
+
   const empty = emptyFixture();
   const emptyHarness = await renderFixture(empty, { width: 900 });
   assert.match(emptyHarness.nodes.get("instrument-summary").textContent, /No changes were captured/i);

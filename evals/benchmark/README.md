@@ -29,7 +29,10 @@ its actual adapter request, including its unique paths.
 The private rubric must name the public task's `id` as `task_id` and its exact
 `revision` as `source_revision`. An absent or different rubric revision is a
 configuration error, so updating the task snapshot cannot silently reuse an old
-answer key. The key's semantic accuracy still requires independent review.
+answer key. The checked-in calibration key has received independent agent source
+review, including Held/Drift/Broken outcomes and persistence failure boundaries.
+This does not establish runtime behavior or grade a model answer. Changing a task
+or key requires fresh trials; their full contents participate in trial identity.
 
 Preparation reads exact Git objects from an explicit file allowlist. It creates
 a new repository with one synthetic commit. The original repository's objects,
@@ -283,8 +286,8 @@ and origin are declarations, not verified attestations. These limitations are
 recorded in every result and prevent any accepted quality comparison.
 
 The one checked-in task is a calibration of source reading and uncertainty at
-the pinned historical commit. Its private key still requires semantic review;
-it is not a representative or held-out quality benchmark. Before drawing
+the pinned historical commit. Its source-reviewed private key is not a
+representative or held-out quality benchmark. Before drawing
 conclusions, validate the adapter with a live API and enforced host isolation and
 verified runtime provenance, independently review additional tasks and keys,
 run all conditions, then review blinded final answers against the same rubric.

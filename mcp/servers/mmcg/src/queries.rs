@@ -305,24 +305,43 @@ pub struct ExplainSymbol {
     pub language: &'static str,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExplainMatchStatus {
+    Matched,
+    Ambiguous,
+    NotFound,
+}
+
 /// Full debug output for `mmcg query explain <name>`: matched symbol IDs, files,
 /// edge counts, source-language precision, and known limitations.
 #[derive(Debug, Serialize)]
 pub struct ExplainResponse {
+    /// Version 2 makes outgoing summaries null without a unique definition.
+    pub schema_version: u32,
     pub query: String,
+    /// Filters definitions and incoming source symbols, not incoming target identity.
+    pub language: Option<String>,
+    pub edge_kind: &'static str,
+    pub match_status: ExplainMatchStatus,
     /// Every raw symbol row matching the query (before partial-class collapse).
     pub matched: Vec<ExplainSymbol>,
-    /// Direct callers of the first match.
+    /// Distinct source symbols matching name/type candidates, not call sites or
+    /// callers of one definition. May be nonzero even when `matched` is empty.
     pub caller_count: u32,
-    /// Direct callees of the first match.
-    pub callee_count: u32,
-    /// Edge precision from the first matched symbol's language.
-    pub edge_precision: EdgePrecision,
+    pub caller_count_scope: &'static str,
+    /// Distinct (target name, call line) pairs of the unique matched definition.
+    /// Null when no definition is selected; zero means the query found no calls.
+    pub callee_count: Option<u32>,
+    /// Outgoing-edge precision from the unique matched definition's language.
+    pub edge_precision: Option<EdgePrecision>,
     /// Present when multiple partial-class rows share the name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub collapse_note: Option<String>,
-    /// Human-readable limitations — same content as `edge_precision.limitations`.
+    /// Same content as `edge_precision.limitations`, empty without a selection.
     pub limitations: Vec<String>,
+    /// Dependency and count-scope caveats, including when no definition matches.
+    pub precision_notes: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -3013,16 +3032,19 @@ pub fn explain(
     language: Option<&str>,
 ) -> rusqlite::Result<ExplainResponse> {
     let symbols = store.search_symbols(name, None, language)?;
-
-    let first_file = symbols.first().map(|s| s.file_path.as_str()).unwrap_or("");
-    let precision = lang_precision(first_file);
+    let (match_status, selected) = match symbols.as_slice() {
+        [] => (ExplainMatchStatus::NotFound, None),
+        [symbol] => (ExplainMatchStatus::Matched, Some(symbol)),
+        _ => (ExplainMatchStatus::Ambiguous, None),
+    };
+    let precision = selected.map(|symbol| lang_precision(&symbol.file_path));
 
     let caller_count = store.callers_of(name, language, None)?.len() as u32;
-    let callee_count = symbols
-        .first()
-        .and_then(|s| store.callees_of(s.id, None).ok())
-        .map(|v| v.len() as u32)
-        .unwrap_or(0);
+    let callee_count = if let Some(symbol) = selected {
+        Some(store.callees_of(symbol.id, None)?.len() as u32)
+    } else {
+        None
+    };
 
     let partial_count = symbols
         .iter()
@@ -3035,8 +3057,8 @@ pub fn explain(
         .count();
     let collapse_note = if partial_count > 1 {
         Some(format!(
-            "{partial_count} partial-class declarations — collapsed by default; \
-             use query search --no-collapse-partials to see all"
+            "{partial_count} partial-class declarations — listed separately here; \
+             query search groups compatible declarations unless --no-collapse-partials is set"
         ))
     } else {
         None
@@ -3044,36 +3066,48 @@ pub fn explain(
 
     let matched = symbols
         .iter()
-        .map(|s| {
-            let ext = std::path::Path::new(&s.file_path)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
-            ExplainSymbol {
-                id: s.id,
-                name: s.name.clone(),
-                kind: s.kind.clone(),
-                file: s.file_path.clone(),
-                line: s.line_start,
-                language: lang_from_ext(ext),
-            }
+        .map(|s| ExplainSymbol {
+            id: s.id,
+            name: s.name.clone(),
+            kind: s.kind.clone(),
+            file: s.file_path.clone(),
+            line: s.line_start,
+            language: crate::indexer::guess_language_for(&s.file_path).unwrap_or("unknown"),
         })
         .collect();
 
     let limitations = precision
-        .limitations
         .iter()
+        .flat_map(|precision| &precision.limitations)
         .map(|l| l.to_string())
         .collect();
+    let mut precision_notes = edge_query_precision_notes("calls");
+    precision_notes.extend(
+        [
+            "caller_count_counts_distinct_source_symbols_not_call_sites",
+            "caller_count_is_name_or_type_based_not_definition_specific",
+            "caller_language_filter_applies_to_source_symbols",
+            "callee_count_counts_distinct_target_name_and_line_pairs",
+            "edge_precision_describes_unique_definition_outgoing_edges_only",
+        ]
+        .into_iter()
+        .map(String::from),
+    );
 
     Ok(ExplainResponse {
+        schema_version: 2,
         query: name.to_string(),
+        language: language.map(String::from),
+        edge_kind: "calls",
+        match_status,
         matched,
         caller_count,
+        caller_count_scope: "name_or_type_candidates",
         callee_count,
         edge_precision: precision,
         collapse_note,
         limitations,
+        precision_notes,
     })
 }
 

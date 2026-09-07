@@ -20,6 +20,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # Corpus evidence is pinned to historical Git objects.
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -35,7 +37,10 @@ jobs:
         run: python scripts/validate.py
 
       - name: Test eval harness
-        run: python -m unittest evals/test_runner.py evals/test_evidence.py evals/test_benchmark.py evals/test_claude_adapter.py
+        run: python -m unittest evals/test_runner.py evals/test_evidence.py evals/test_benchmark.py evals/test_claude_adapter.py evals/test_benchmark_corpus.py
+
+      - name: Check research calibration corpus
+        run: python -m evals.benchmark_corpus --source-repo .
 
       - name: Test document evidence snapshots
         run: python scripts/test_document_graph.py

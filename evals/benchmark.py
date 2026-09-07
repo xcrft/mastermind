@@ -724,7 +724,7 @@ def run_trial(trial: Path, credentials: dict[str, str] | None = None) -> dict:
     return envelope
 
 
-def prepare_batch(*, repetitions: int = 3, **kwargs) -> Path:
+def prepare_batch(*, repetitions: int = 3, corpus_case: dict | None = None, **kwargs) -> Path:
     if type(repetitions) is not int or not 1 <= repetitions <= 20:
         raise BenchmarkError("invalid_repetitions", "use 1..20 repetitions")
     output = kwargs.pop("output").resolve()
@@ -739,9 +739,12 @@ def prepare_batch(*, repetitions: int = 3, **kwargs) -> Path:
             manifest = load_json(trial / "manifest.json")
             trials.append({"directory": trial.name, "condition": condition, "repetition": repetition,
                            "common_sha256": manifest.get("common_sha256"), "status": manifest["status"]})
-    write_new(batch / "batch.json", {"kind": "mastermind-research-batch", "schema_version": 1,
+    summary = {"kind": "mastermind-research-batch", "schema_version": 1,
               "task_id": kwargs["task"]["id"], "repetitions": repetitions, "trials": trials,
-              "quality_uplift": None, "comparison_accepted": False})
+              "quality_uplift": None, "comparison_accepted": False}
+    if corpus_case is not None:
+        summary["corpus_case"] = corpus_case
+    write_new(batch / "batch.json", summary)
     return batch
 
 
@@ -749,8 +752,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     prepare = sub.add_parser("prepare", help="freeze allowlisted trials; never invoke a model")
-    for name in ("task", "rubric", "config", "source-repo", "tool-repo", "output"):
+    for name in ("config", "source-repo", "tool-repo", "output"):
         prepare.add_argument("--" + name, type=Path, required=True)
+    selection = prepare.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--task", type=Path)
+    selection.add_argument("--case", help="select a checked calibration from the corpus")
+    prepare.add_argument("--rubric", type=Path)
+    prepare.add_argument("--corpus", type=Path, help="corpus registry for --case; defaults to the bundled corpus")
     prepare.add_argument("--repetitions", type=int, default=3)
     execute = sub.add_parser("run", help="invoke the pinned trusted adapter exactly once")
     execute.add_argument("trial", type=Path)
@@ -758,7 +766,28 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "prepare":
-            batch = prepare_batch(task=load_json(args.task), rubric=load_json(args.rubric), config=load_json(args.config),
+            corpus_case = None
+            config = load_json(args.config)
+            if args.case is not None:
+                if args.rubric is not None:
+                    raise BenchmarkError("invalid_selection", "--case uses its bound corpus rubric")
+                if __package__:
+                    from . import benchmark_corpus
+                else:
+                    import benchmark_corpus
+                try:
+                    selected = benchmark_corpus.select_case(args.corpus or benchmark_corpus.DEFAULT_CORPUS, args.case, args.source_repo)
+                    config = benchmark_corpus.configure_case(selected, config)
+                except benchmark_corpus.bench.BenchmarkError as error:
+                    # Script entry points run as __main__; the corpus imports
+                    # the named module, which has a distinct exception class.
+                    raise BenchmarkError(error.code, str(error)) from error
+                task, rubric, corpus_case = selected["task"], selected["rubric"], selected["summary"]
+            else:
+                if args.rubric is None or args.corpus is not None:
+                    raise BenchmarkError("invalid_selection", "--task requires --rubric and cannot use --corpus")
+                task, rubric = load_json(args.task), load_json(args.rubric)
+            batch = prepare_batch(task=task, rubric=rubric, config=config, corpus_case=corpus_case,
                 source_repo=args.source_repo, tool_repo=args.tool_repo, output=args.output, repetitions=args.repetitions)
             print(batch)
             return 0 if all(t["status"] == "prepared" for t in load_json(batch / "batch.json")["trials"]) else 2

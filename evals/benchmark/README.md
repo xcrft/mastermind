@@ -1,4 +1,4 @@
-# Research benchmark transport
+# Research benchmark transport and calibration corpus
 
 `evals/benchmark.py` prepares independent source snapshots and runs a pinned
 executable adapter through a bounded JSON protocol. The deterministic tests use
@@ -29,8 +29,8 @@ its actual adapter request, including its unique paths.
 The private rubric must name the public task's `id` as `task_id` and its exact
 `revision` as `source_revision`. An absent or different rubric revision is a
 configuration error, so updating the task snapshot cannot silently reuse an old
-answer key. The checked-in calibration key has received independent agent source
-review, including Held/Drift/Broken outcomes and persistence failure boundaries.
+answer key. The checked-in calibration keys have received independent agent source
+review, including phase continuity and document evidence boundaries.
 This does not establish runtime behavior or grade a model answer. Changing a task
 or key requires fresh trials; their full contents participate in trial identity.
 
@@ -47,6 +47,43 @@ partial or invalid SQLite database, nonempty WAL/journal, wrong schema/root, or
 an indexed-file inventory whose hashes differ from the declared source subset.
 The subset must account for what that mmcg version indexes; Markdown documents
 remain available to source tools even when they are not indexed.
+
+## Calibration corpus
+
+`corpus.json` binds each public question to its private review key and the source
+subset the native graph can index:
+
+| Case | Coverage | Indexed subset |
+|---|---|---|
+| `task-phase-continuity-01` | Historical workflow defect, Held/Drift/Broken outcomes and persistence failures | Three Rust files |
+| `document-evidence-boundaries-01` | Correct helper behavior, explicit document relations, freshness versus truth and coverage limits | Python helper; the two Markdown files remain available to source tools |
+
+Both cases are published calibrations. They are neither held out nor a
+representative sample of research quality. The second case asks what the helper
+establishes and what remains unknown, without assuming that it contains a defect.
+
+Check the corpus without invoking a model, indexer or researched code:
+
+```bash
+python3 -m evals.benchmark_corpus --source-repo /absolute/path/to/mastermind
+```
+
+The checker requires the pinned commits and blobs to exist in the local Git
+repository. It does not fetch them; a shallow checkout may need its history
+fetched separately. CI supplies full history for this check. Current worktree
+edits do not alter the evidence: the checker reads only the pinned Git objects.
+
+Checks cover task/key identity, required review fields, unscored calibration
+status, source types and byte limits, indexed-file scope and every required
+anchor's path and line range. They reject evidence outside the source allowlist
+and symbolic links in case files or case directories. The JSON report includes
+source hashes and sizes, task/key/corpus hashes and declared coverage. It does
+not include key claims, and it does **not** verify that claims follow from the
+cited lines. Source review is a declared property, not a machine attestation.
+
+For a custom corpus inside the source repository, the registry and every
+registered task/key path are excluded from research source, even if the pinned
+commit contains an older key. Keep those control files out of source allowlists.
 
 ## Prepare trials
 
@@ -78,12 +115,7 @@ Create a local config using actual values in place of these placeholders:
       "schema_version": "8",
       "extractor_contract_version": "mmcg-extractors-v6",
       "concept_normalization_version": "mmcg-concepts-v2"
-    },
-    "indexed_files": [
-      "mcp/servers/mmcg/src/run_task.rs",
-      "mcp/servers/mmcg/src/verify_spec.rs",
-      "mcp/servers/mmcg/src/audit_spec.rs"
-    ]
+    }
   },
   "limits": {
     "timeout_seconds": 300,
@@ -96,19 +128,31 @@ Create a local config using actual values in place of these placeholders:
 }
 ```
 
-The task's source revision and the tool/instruction revision are separate. The
-included calibration task investigates an old, fixed repository commit. Pin the
-instruction and mmcg source together without changing the task revision.
+The task's source revision and the tool/instruction revision are separate. Each
+calibration investigates a fixed repository commit. Pin the instruction and
+mmcg source together without changing the task revision.
 
 ```bash
 python3 evals/benchmark.py prepare \
-  --task evals/benchmark/tasks/task-phase-continuity-01.json \
-  --rubric evals/benchmark/rubrics/task-phase-continuity-01.json \
+  --case document-evidence-boundaries-01 \
   --config /absolute/path/to/local-config.json \
   --source-repo /absolute/path/to/mastermind \
   --tool-repo /absolute/path/to/mastermind \
   --output /absolute/path/to/benchmark-output
 ```
+
+`--case` checks the selected task and key before creating any trial. It supplies
+`mmcg.indexed_files` from the registry so one runtime config can serve different
+cases. If the config already declares a different subset, preparation fails
+instead of overriding it. `--corpus PATH` selects an alternative registry.
+`batch.json` retains the checked case summary; coverage tags and key content are
+not added to the model request.
+
+Custom tasks still use `--task PATH --rubric PATH` in place of `--case`. That path
+keeps its existing task/key identity check and defaults the indexed subset to
+the source allowlist. Supply `mmcg.indexed_files` explicitly when some source
+files are not indexed. Custom selection does not apply the stricter corpus
+schema or imply that the key has been source reviewed.
 
 This creates nine trials by default: three repetitions with rotating condition
 order. `batch.json` records the planned sequence, including setup failures.
@@ -285,9 +329,9 @@ host files. Executable hashes detect mismatched bytes; supplied source revision
 and origin are declarations, not verified attestations. These limitations are
 recorded in every result and prevent any accepted quality comparison.
 
-The one checked-in task is a calibration of source reading and uncertainty at
-the pinned historical commit. Its source-reviewed private key is not a
-representative or held-out quality benchmark. Before drawing
+The checked-in tasks calibrate source reading and uncertainty at their pinned
+commits. Their source-reviewed private keys do not make them a representative or
+held-out quality benchmark. Before drawing
 conclusions, validate the adapter with a live API and enforced host isolation and
 verified runtime provenance, independently review additional tasks and keys,
 run all conditions, then review blinded final answers against the same rubric.
@@ -295,7 +339,8 @@ run all conditions, then review blinded final answers against the same rubric.
 ## Deterministic checks
 
 ```bash
-python3 -m unittest evals/test_benchmark.py evals/test_claude_adapter.py
+python3 -m unittest evals/test_benchmark.py evals/test_claude_adapter.py evals/test_benchmark_corpus.py
+python3 -m evals.benchmark_corpus --source-repo .
 ```
 
 The tests use real subprocess I/O, disposable Git histories and SQLite indexes.
@@ -305,3 +350,8 @@ malformed protocol events, telemetry separation and counterbalanced preparation.
 The Claude tests also cover actual source/MCP subprocesses, graph result fidelity,
 transport recovery, credentials, pinned bundle tampering, model switches, live
 budget stops, partial stream retention and nested process cleanup.
+Corpus tests exercise pinned Git evidence despite worktree edits, invalid keys
+and anchors, source and control-file symlinks, historical key leakage from a
+custom corpus, and real CLI selection across all
+three conditions with a fixture indexer and adapter. Invalid selection fails
+before trial creation or runtime invocation.

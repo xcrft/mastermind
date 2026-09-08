@@ -1960,9 +1960,15 @@ pub fn change_impact(
 
     let mut tests_by_symbol: BTreeMap<SymbolEvidence, TestCandidate> = BTreeMap::new();
     for changed in &changed_symbols {
+        if changed.change == "removed" {
+            continue;
+        }
         let indexed = store.symbols_in_file(&changed.file).unwrap_or_default();
         if let Some(symbol) = indexed.into_iter().find(|symbol| {
-            symbol.name == changed.name && symbol.kind == changed.kind && test_symbol(symbol)
+            symbol.name == changed.name
+                && symbol.kind == changed.kind
+                && symbol.line_start == changed.line
+                && test_symbol(symbol)
         }) {
             let evidence = SeedEvidence {
                 file: changed.file.clone(),
@@ -6661,6 +6667,118 @@ fn checks_value() { assert_eq!(value(), 1); }
             && e.seed
                 .as_ref()
                 .is_some_and(|s| s.name == "test_value" && s.change == "signature_changed")));
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn changed_same_name_tests_keep_their_own_lines_and_evidence() {
+        let baseline = "class TestA:\n    def test_run(self):\n        assert 1 > 0\n\nclass TestB:\n    def test_run(self):\n        assert 2 > 0\n";
+        for (label, current, expected_lines, expected_change) in [
+            (
+                "scoped_test_body",
+                baseline.replace("assert 2", "assert 20"),
+                vec![6],
+                "body_changed",
+            ),
+            (
+                "scoped_test_header",
+                baseline.replace(
+                    "class TestB:\n    def test_run(self):",
+                    "class TestB:\n    def test_run(self, flag=False):",
+                ),
+                vec![6],
+                "signature_changed",
+            ),
+            (
+                "scoped_tests_both",
+                baseline
+                    .replace("assert 1", "assert 10")
+                    .replace("assert 2", "assert 20"),
+                vec![2, 6],
+                "body_changed",
+            ),
+        ] {
+            let root = impact_repo(label, &[("tests/test_scopes.py", baseline)]);
+            write_impact_file(&root, "tests/test_scopes.py", &current);
+            let store = index_impact(&root, label);
+            let response = change_impact(&store, &root, "HEAD", 3, 100).unwrap();
+            let changed = response
+                .changes
+                .symbols
+                .items
+                .iter()
+                .filter(|s| s.name == "test_run")
+                .collect::<Vec<_>>();
+            assert_eq!(
+                changed.iter().map(|s| s.line).collect::<Vec<_>>(),
+                expected_lines
+            );
+            assert!(changed.iter().all(|s| s.change == expected_change));
+            let direct = response
+                .tests
+                .items
+                .iter()
+                .filter(|t| t.symbol.name == "test_run" && t.minimum_depth == Some(0))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                direct.iter().map(|t| t.symbol.line).collect::<Vec<_>>(),
+                expected_lines
+            );
+            for test in direct {
+                assert_eq!(test.classification, "direct");
+                assert_eq!(test.confidence, "high");
+                let evidence = test
+                    .evidence
+                    .iter()
+                    .filter(|e| e.kind == "changed_test_symbol")
+                    .collect::<Vec<_>>();
+                assert_eq!(evidence.len(), 1);
+                let seed = evidence[0].seed.as_ref().unwrap();
+                assert_eq!(seed.line, test.symbol.line);
+                assert_eq!(seed.change, expected_change);
+            }
+            assert!(!response.tests.truncated);
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn removed_test_does_not_mark_a_surviving_same_name_test_at_the_old_line() {
+        let baseline = "class TestA:\n    def test_run(self):\n        assert 1 > 0\n\nclass TestB:\n    def test_run(self):\n        assert 2 > 0\n";
+        let root = impact_repo("removed_scoped_test", &[("tests/test_scopes.py", baseline)]);
+        write_impact_file(
+            &root,
+            "tests/test_scopes.py",
+            "class TestB:\n    def test_run(self):\n        assert 2 > 0\n",
+        );
+        let store = index_impact(&root, "removed_scoped_test");
+        let response = change_impact(&store, &root, "HEAD", 3, 100).unwrap();
+        assert!(response
+            .changes
+            .symbols
+            .items
+            .iter()
+            .any(|s| s.name == "test_run" && s.change == "removed" && s.line == 2));
+        assert!(response
+            .changes
+            .symbols
+            .items
+            .iter()
+            .all(|s| s.change == "removed"));
+        let surviving = response
+            .tests
+            .items
+            .iter()
+            .find(|t| t.symbol.name == "test_run" && t.symbol.line == 2)
+            .unwrap();
+        assert_eq!(surviving.classification, "heuristic");
+        assert_eq!(surviving.minimum_depth, None);
+        assert!(!surviving
+            .evidence
+            .iter()
+            .any(|e| e.kind == "changed_test_symbol"));
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }

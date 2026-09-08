@@ -4041,7 +4041,8 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("mmcg-mcp-impact-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("src")).unwrap();
+        let file = root.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         let run = |args: &[&str]| {
             let output = std::process::Command::new("git")
                 .args(args)
@@ -4058,10 +4059,10 @@ mod tests {
         run(&["config", "user.email", "t@t"]);
         run(&["config", "user.name", "t"]);
         run(&["config", "commit.gpgsign", "false"]);
-        std::fs::write(root.join(path), baseline).unwrap();
+        std::fs::write(&file, baseline).unwrap();
         run(&["add", "-A"]);
         run(&["commit", "-q", "-m", "baseline"]);
-        std::fs::write(root.join(path), current).unwrap();
+        std::fs::write(&file, current).unwrap();
         let db = root.join(".mastermind/mmcg.db");
         let mut store = crate::store::Store::open_for_serve(&db, Some(&root)).unwrap();
         crate::indexer::Indexer::new(&root)

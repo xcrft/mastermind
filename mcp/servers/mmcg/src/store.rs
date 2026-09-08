@@ -9483,6 +9483,13 @@ mod tests {
 
     #[test]
     fn python_decorator_redaction_keeps_types_after_division_and_strings() {
+        let commented = concept_signature_terms_for(
+            "src/fixture.py",
+            "@label('TOPSECRET') # TOPSECRET\ndef candidate(value: ImportantType) -> ResultType",
+        );
+        assert!(commented.iter().any(|term| term == "importanttype"));
+        assert!(commented.iter().any(|term| term == "resulttype"));
+        assert!(!commented.iter().any(|term| term.contains("topsecret")));
         for decorator in [
             "@repeat(8 // 2)",
             "@label('TOPSECRET,other')",

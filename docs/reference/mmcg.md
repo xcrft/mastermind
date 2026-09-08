@@ -1103,7 +1103,9 @@ the functions/methods, structs, enums, traits, impls and modules emitted by the
 extractor, without expanding macros or adding previously unindexed item kinds.
 
 Python signatures also include the full text of attached decorators, in source
-order, including multiline arguments. Adding, removing, reordering or changing
+order, including multiline arguments. Decorators and the declaration are separated
+by newlines so trailing comments cannot hide the next part during normalization.
+Adding, removing, reordering or changing
 decorators therefore produces `signature_changed` for functions, async functions,
 methods and classes. Coordinates still point to `def`/`class`, marker names remain
 separate, and decorator-expression calls retain their parent scope. A method
@@ -1111,7 +1113,7 @@ decorator edit can additionally select its containing class as `body_changed`.
 
 When changed files require source extraction, diff and impact reject old
 extractor contracts with `index_stale`. Text-only diff needs no extractor index.
-Refresh indexes for extractor contract v8. After reindexing, refresh exact-signature
+Refresh indexes for extractor contract v9. After reindexing, refresh exact-signature
 spec snapshots for decorated Python and attributed Rust declarations; bare
 `def ...` / `fn ...` snapshots no longer equal the full declaration.
 Preserve multiline signatures in YAML rather than legacy one-line

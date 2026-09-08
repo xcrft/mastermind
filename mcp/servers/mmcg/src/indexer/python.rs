@@ -463,7 +463,7 @@ fn extract_signature(node: &Node, source: &[u8]) -> Option<String> {
         {
             if let Some(text) = node_text(&decorator, source) {
                 signature.push_str(text);
-                signature.push(' ');
+                signature.push('\n');
             }
         }
     }
@@ -728,10 +728,10 @@ def plain():
         let path = common::write_tmp("py", "decorator_signatures.py", source);
         let pending = parse_one(&path, path.parent().unwrap(), &PythonExtractor).unwrap();
         for (name, kind, line, decorators, signature) in [
-            ("Suite", "class", 2, Some(",registry.group,"), "@registry.group(\"suite\") class Suite"),
-            ("evaluate", "method", 9, Some(",cache,staticmethod,"), "@cache(\n        factory(\"secret\"),\n        key=r\"raw\\path\",\n    ) @staticmethod async def evaluate(value: str) -> str"),
-            ("candidate", "function", 15, Some(",wrap,wrap,"), "@wrap(\"outer\") @wrap(\"inner\") def candidate()"),
-            ("conditional", "function", 19, None, "@(factory if ready else fallback) def conditional()"),
+            ("Suite", "class", 2, Some(",registry.group,"), "@registry.group(\"suite\")\nclass Suite"),
+            ("evaluate", "method", 9, Some(",cache,staticmethod,"), "@cache(\n        factory(\"secret\"),\n        key=r\"raw\\path\",\n    )\n@staticmethod\nasync def evaluate(value: str) -> str"),
+            ("candidate", "function", 15, Some(",wrap,wrap,"), "@wrap(\"outer\")\n@wrap(\"inner\")\ndef candidate()"),
+            ("conditional", "function", 19, None, "@(factory if ready else fallback)\ndef conditional()"),
             ("plain", "function", 22, None, "def plain()"),
         ] {
             let symbol = pending.symbols.iter().find(|s| s.name == name).unwrap();

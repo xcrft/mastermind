@@ -28,6 +28,7 @@
 
 use crate::diff::{self, DiffError, SymbolDiff};
 use crate::spec::{ParsedSpec, SymbolClaim};
+use crate::spec_symbols::{self, Resolved, Scope, Unresolved};
 use crate::store::Store;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
@@ -71,6 +72,12 @@ pub enum Finding {
     /// Symbol present in pre-edit snapshot has no current entry in mmcg —
     /// renamed, deleted, or moved out of the indexed tree.
     SnapshotSymbolGone { symbol: String },
+    /// Identity is ambiguous, malformed, or unavailable from the index.
+    SnapshotUnresolved {
+        symbol: String,
+        reason: String,
+        matches: Option<usize>,
+    },
     /// Symbol disappeared between baseline and HEAD AND the spec text doesn't
     /// mention the name anywhere — silent breaking change. Spec should
     /// acknowledge intentional removals in Goals / Notes.
@@ -153,6 +160,7 @@ impl Report {
                 | Finding::PlannedTestNotAdded { .. }
                 | Finding::VacuousTestClaim { .. } => "⚠️ ",
                 Finding::SnapshotSymbolGone { .. }
+                | Finding::SnapshotUnresolved { .. }
                 | Finding::RemovedSymbolNotAcknowledged { .. }
                 | Finding::ClaimedSymbolMissing { .. }
                 | Finding::HallucinatedSymbol { .. }
@@ -208,6 +216,16 @@ fn render_finding(f: &Finding) -> String {
         }
         Finding::SnapshotSymbolGone { symbol } => {
             format!("snapshot_symbol_gone: `{symbol}` was in pre-edit snapshot, gone from index")
+        }
+        Finding::SnapshotUnresolved {
+            symbol,
+            reason,
+            matches,
+        } => {
+            let count = matches
+                .map(|count| format!(" ({count} matching declarations)"))
+                .unwrap_or_default();
+            format!("snapshot_unresolved: {symbol}: {reason}{count} — verify the index and declaration scope")
         }
         Finding::RemovedSymbolNotAcknowledged { symbol, file } => {
             format!("removed_symbol_not_acknowledged: `{symbol}` deleted from `{file}` but spec doesn't mention it — potential silent breaking change")
@@ -330,7 +348,32 @@ pub fn run(
     // 2. Pre-edit snapshot drift — for every claim with a count, compare
     //    against live callers_of.
     for claim in &spec.pre_edit_snapshot {
-        check_snapshot_claim(claim, store, &mut findings);
+        check_snapshot_claim(claim, spec, store, &mut findings);
+    }
+
+    // Explicit frontmatter signatures/counts are snapshots too. Bare touches
+    // remain pre-edit existence/scope declarations, which can name removals.
+    if let Some(frontmatter) = &spec.frontmatter {
+        for touch in &frontmatter.touches {
+            for symbol in &touch.symbols {
+                if symbol.signature().is_none() && symbol.callers().is_none() {
+                    continue;
+                }
+                let scope = Scope {
+                    name: symbol.name(),
+                    file: Some(symbol.file().unwrap_or(&touch.file)),
+                    language: symbol.language().or(touch.language.as_deref()),
+                };
+                check_current_snapshot(
+                    symbol.name(),
+                    symbol.callers(),
+                    symbol.signature(),
+                    spec_symbols::resolve(store, symbol.name(), &[scope]),
+                    store,
+                    &mut findings,
+                );
+            }
+        }
     }
 
     // 3. Removed-symbol-not-acknowledged — for each symbol gone in the git diff,
@@ -829,6 +872,7 @@ impl Bundle {
                     Finding::SnapshotCallerDrift { .. }
                         | Finding::SnapshotSignatureDrift { .. }
                         | Finding::SnapshotSymbolGone { .. }
+                        | Finding::SnapshotUnresolved { .. }
                 )
             })
             .cloned()
@@ -1251,6 +1295,7 @@ fn build_human_summary(
             .filter(|f| matches!(
                 f,
                 Finding::SnapshotSymbolGone { .. }
+                    | Finding::SnapshotUnresolved { .. }
                     | Finding::RemovedSymbolNotAcknowledged { .. }
                     | Finding::ClaimedSymbolMissing { .. }
                     | Finding::HallucinatedSymbol { .. }
@@ -1266,6 +1311,7 @@ fn build_human_summary(
             .filter(|f| !matches!(
                 f,
                 Finding::SnapshotSymbolGone { .. }
+                    | Finding::SnapshotUnresolved { .. }
                     | Finding::RemovedSymbolNotAcknowledged { .. }
                     | Finding::ClaimedSymbolMissing { .. }
                     | Finding::HallucinatedSymbol { .. }
@@ -1278,42 +1324,74 @@ fn build_human_summary(
     )
 }
 
-fn check_snapshot_claim(claim: &SymbolClaim, store: &Store, findings: &mut Vec<Finding>) {
-    let hits = match store.search_symbols(&claim.name, None, None) {
-        Ok(rows) => rows,
-        Err(_) => return,
+fn check_snapshot_claim(
+    claim: &SymbolClaim,
+    spec: &ParsedSpec,
+    store: &Store,
+    findings: &mut Vec<Finding>,
+) {
+    check_current_snapshot(
+        &claim.name,
+        claim.callers,
+        claim.signature.as_deref(),
+        spec_symbols::resolve_snapshot(store, spec, claim),
+        store,
+        findings,
+    );
+}
+
+fn check_current_snapshot(
+    name: &str,
+    callers: Option<u32>,
+    signature: Option<&str>,
+    resolved: Result<Resolved, Unresolved>,
+    store: &Store,
+    findings: &mut Vec<Finding>,
+) {
+    let resolved = match resolved {
+        Ok(resolved) => resolved,
+        Err(error) if error.reason == "missing" => {
+            findings.push(Finding::SnapshotSymbolGone {
+                symbol: name.to_string(),
+            });
+            return;
+        }
+        Err(error) => {
+            findings.push(Finding::SnapshotUnresolved {
+                symbol: name.to_string(),
+                reason: error.reason.to_string(),
+                matches: error.matches,
+            });
+            return;
+        }
     };
-    if hits.is_empty() {
-        findings.push(Finding::SnapshotSymbolGone {
-            symbol: claim.name.clone(),
-        });
-        return;
-    }
-    if let Some(spec_count) = claim.callers {
-        let live = match store.callers_of(&claim.name, None, None) {
-            Ok(callers) => callers.len() as u32,
-            Err(_) => return,
-        };
-        if live != spec_count {
-            findings.push(Finding::SnapshotCallerDrift {
-                symbol: claim.name.clone(),
-                spec_says: spec_count,
-                index_says: live,
+    if let Some(declared) = signature {
+        if resolved.symbol.signature.as_deref() != Some(declared) {
+            findings.push(Finding::SnapshotSignatureDrift {
+                symbol: name.to_string(),
+                spec_says: declared.to_string(),
+                index_says: resolved.symbol.signature.clone(),
             });
         }
     }
-    // Signature comparison — same any-match rule as verify_spec (accept if at
-    // least one of multiple matches still matches the claim).
-    if let Some(spec_sig) = &claim.signature {
-        let live_sigs: Vec<Option<String>> = hits.iter().map(|s| s.signature.clone()).collect();
-        let any_match = live_sigs
-            .iter()
-            .any(|s| s.as_deref() == Some(spec_sig.as_str()));
-        if !any_match {
-            findings.push(Finding::SnapshotSignatureDrift {
-                symbol: claim.name.clone(),
-                spec_says: spec_sig.clone(),
-                index_says: live_sigs.into_iter().flatten().next(),
+    if let Some(declared) = callers {
+        let live = match store.callers_of(&resolved.symbol.name, resolved.language.as_deref(), None)
+        {
+            Ok(rows) => rows.len() as u32,
+            Err(_) => {
+                findings.push(Finding::SnapshotUnresolved {
+                    symbol: name.to_string(),
+                    reason: "caller_query_failed".to_string(),
+                    matches: None,
+                });
+                return;
+            }
+        };
+        if live != declared {
+            findings.push(Finding::SnapshotCallerDrift {
+                symbol: name.to_string(),
+                spec_says: declared,
+                index_says: live,
             });
         }
     }
@@ -1324,6 +1402,7 @@ fn compute_verdict(findings: &[Finding]) -> Verdict {
         matches!(
             f,
             Finding::SnapshotSymbolGone { .. }
+                | Finding::SnapshotUnresolved { .. }
                 | Finding::RemovedSymbolNotAcknowledged { .. }
                 | Finding::ClaimedSymbolMissing { .. }
                 | Finding::HallucinatedSymbol { .. }

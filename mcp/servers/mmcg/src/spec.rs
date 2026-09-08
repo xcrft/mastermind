@@ -223,6 +223,7 @@ pub struct FindBlock {
 
 #[derive(Debug, Serialize, Clone)]
 pub struct SymbolClaim {
+    /// Declared name, including lexical qualification such as B.run or B::run.
     pub name: String,
     /// Caller count recorded at snapshot time. None if the bullet didn't say
     /// (e.g., just `- \`foo\` — added in this spec`).
@@ -382,17 +383,10 @@ fn extract_snapshot(body: &str) -> Vec<SymbolClaim> {
             continue;
         };
         let full = &after_dash[start + 1..start + 1 + end_rel];
-        // Leaf, for matching mmcg_search (mmcg indexes the leaf regardless of
-        // how the planner spelled it).
-        let leaf = full
-            .rsplit(&['.', ':'][..])
-            .next()
-            .unwrap_or(full)
-            .to_string();
         let callers = extract_caller_count(after_dash);
         let signature = extract_signature(after_dash);
         out.push(SymbolClaim {
-            name: leaf,
+            name: full.to_string(),
             callers,
             signature,
             raw: trimmed.to_string(),
@@ -887,7 +881,7 @@ id: \"1\"
     }
 
     #[test]
-    fn snapshot_handles_qualified_names_taking_leaf() {
+    fn snapshot_preserves_qualified_names() {
         let body = "## Pre-edit symbol snapshot\n\
                     - `pkg.module.foo` — 4 callers\n\
                     - `Type::method` — 2 callers\n";
@@ -897,7 +891,6 @@ id: \"1\"
             .iter()
             .map(|c| c.name.as_str())
             .collect();
-        assert!(names.contains(&"foo"), "dotted name → leaf");
-        assert!(names.contains(&"method"), "::-qualified → leaf");
+        assert_eq!(names, vec!["pkg.module.foo", "Type::method"]);
     }
 }

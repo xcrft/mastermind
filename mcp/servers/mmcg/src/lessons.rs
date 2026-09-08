@@ -356,6 +356,7 @@ fn summarize_findings(findings: &[Finding]) -> String {
             Finding::SnapshotCallerDrift { .. } => "caller drift",
             Finding::SnapshotSignatureDrift { .. } => "signature drift",
             Finding::SnapshotSymbolGone { .. } => "snapshot symbol gone",
+            Finding::SnapshotUnresolved { .. } => "snapshot unresolved",
             Finding::RemovedSymbolNotAcknowledged { .. } => "silent symbol removal",
             Finding::PlannedTestNotAdded { .. } => "planned test missing",
             Finding::ClaimedSymbolMissing { .. } => "claimed symbol missing",

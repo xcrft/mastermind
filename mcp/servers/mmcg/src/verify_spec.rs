@@ -14,6 +14,7 @@
 //! blast radius is a flag for the planner to read, not a block.
 
 use crate::spec::{self, ParsedSpec, SymbolClaim, TouchEntry};
+use crate::spec_symbols::{self, Resolved, Scope, Unresolved};
 use crate::store::Store;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -100,6 +101,12 @@ pub enum Finding {
         spec_says: String,
         index_says: Option<String>,
     },
+    /// The declared snapshot has no unique, usable identity in the index.
+    SnapshotUnresolved {
+        symbol: String,
+        reason: String,
+        matches: Option<usize>,
+    },
     /// FIND block payload not in the target file — spec is stale or the executor
     /// fails at phase 1. Whitespace-sensitive substring match.
     FindBlockMismatch {
@@ -174,7 +181,7 @@ fn render_finding(f: &Finding) -> String {
         Finding::MissingSymbol {
             symbol, section, ..
         } => {
-            format!("missing_symbol: `{symbol}` (claimed in {section}) — `mmcg_search {symbol}` returns nothing")
+            format!("missing_symbol: {symbol} (claimed in {section}) — no declaration matches its scope")
         }
         Finding::MissingFile { file } => format!("missing_file: `{file}` not on disk"),
         Finding::EmptyMandatorySection { section } => {
@@ -194,7 +201,7 @@ fn render_finding(f: &Finding) -> String {
             spec_says,
             index_says,
         } => {
-            format!("snapshot_drift: spec says `{symbol}` has {spec_says} callers, index says {index_says} — re-run `mmcg_callers {symbol}`")
+            format!("snapshot_drift: spec says {symbol} has {spec_says} callers, index says {index_says} — refresh the snapshot caller count")
         }
         Finding::SnapshotSignatureDrift {
             symbol,
@@ -202,7 +209,17 @@ fn render_finding(f: &Finding) -> String {
             index_says,
         } => {
             let live = index_says.as_deref().unwrap_or("<no signature stored>");
-            format!("snapshot_signature_drift: spec says `{symbol}` signature is `{spec_says}`, index says `{live}` — re-run `mmcg_search {symbol}`")
+            format!("snapshot_signature_drift: spec says {symbol} signature is {spec_says}, index says {live} — refresh the declaration snapshot")
+        }
+        Finding::SnapshotUnresolved {
+            symbol,
+            reason,
+            matches,
+        } => {
+            let count = matches
+                .map(|count| format!(" ({count} matching declarations)"))
+                .unwrap_or_default();
+            format!("snapshot_unresolved: {symbol}: {reason}{count} — verify the index and declaration scope")
         }
         Finding::FindBlockMismatch {
             file,
@@ -224,7 +241,7 @@ fn render_finding(f: &Finding) -> String {
             language,
         } => {
             let lang = language.as_deref().unwrap_or("<any>");
-            format!("missing_symbol_at_file: `{symbol}` not found at `{file}` (language={lang}) — file/language scoping from frontmatter.touches catches collisions the heuristic would miss")
+            format!("missing_symbol_at_file: {symbol} not found at {file} (language={lang})")
         }
         Finding::StrictViolation { reason } => format!("strict: {reason}"),
     }
@@ -327,12 +344,12 @@ pub fn run(spec: &ParsedSpec, store: Option<&Store>, repo_root: &Path) -> Report
 
     // 3. Pre-edit snapshot symbols: existence, caller-count drift, blast radius.
     //    Two sources, both contribute findings:
-    //    a) heuristic `## Pre-edit symbol snapshot` bullets (name-only search)
+    //    a) heuristic `## Pre-edit symbol snapshot` bullets with lexical qualification
     //    b) frontmatter `touches[].symbols` with file+language scoping —
-    //       catches monorepo collisions (a) misses.
+    //       constrains matching snapshots to the declared file and language.
     if let Some(store) = store {
         for claim in &spec.pre_edit_snapshot {
-            check_symbol_claim(claim, store, &mut errors, &mut warnings);
+            check_symbol_claim(claim, spec, store, &mut errors, &mut warnings);
         }
         if let Some(fm) = &spec.frontmatter {
             for touch in &fm.touches {
@@ -385,67 +402,88 @@ pub fn run(spec: &ParsedSpec, store: Option<&Store>, repo_root: &Path) -> Report
 
 fn check_symbol_claim(
     claim: &SymbolClaim,
+    spec: &ParsedSpec,
     store: &Store,
     errors: &mut Vec<Finding>,
     warnings: &mut Vec<Finding>,
 ) {
-    let hits = match store.search_symbols(&claim.name, None, None) {
-        Ok(rows) => rows,
-        Err(_) => return,
-    };
-    if hits.is_empty() {
-        errors.push(Finding::MissingSymbol {
+    match spec_symbols::resolve_snapshot(store, spec, claim) {
+        Ok(resolved) => check_resolved_claim(
+            &claim.name,
+            claim.callers,
+            claim.signature.as_deref(),
+            resolved,
+            store,
+            errors,
+            warnings,
+        ),
+        Err(error) if error.reason == "missing" => errors.push(Finding::MissingSymbol {
             symbol: claim.name.clone(),
             section: "Pre-edit symbol snapshot".to_string(),
             raw: claim.raw.clone(),
-        });
-        return;
+        }),
+        Err(error) => errors.push(unresolved_finding(&claim.name, error)),
     }
-    // Caller-count check — spec's stated count vs the live index.
-    let live_callers = match store.callers_of(&claim.name, None, None) {
-        Ok(callers) => callers.len() as u32,
-        Err(_) => return,
-    };
-    if let Some(spec_count) = claim.callers {
-        if spec_count != live_callers {
-            errors.push(Finding::SnapshotCallerCountDrift {
-                symbol: claim.name.clone(),
-                spec_says: spec_count,
-                index_says: live_callers,
+}
+
+fn unresolved_finding(name: &str, error: Unresolved) -> Finding {
+    Finding::SnapshotUnresolved {
+        symbol: name.to_string(),
+        reason: error.reason.to_string(),
+        matches: error.matches,
+    }
+}
+
+fn check_resolved_claim(
+    name: &str,
+    callers: Option<u32>,
+    signature: Option<&str>,
+    resolved: Resolved,
+    store: &Store,
+    errors: &mut Vec<Finding>,
+    warnings: &mut Vec<Finding>,
+) {
+    if let Some(declared) = signature {
+        if resolved.symbol.signature.as_deref() != Some(declared) {
+            errors.push(Finding::SnapshotSignatureDrift {
+                symbol: name.to_string(),
+                spec_says: declared.to_string(),
+                index_says: resolved.symbol.signature.clone(),
             });
         }
     }
-    // Signature check — if the bullet recorded one, some matching symbol's live
-    // signature must equal it. Multiple matches (C# partial-class collisions,
-    // monorepo same-name across languages) pass if ANY matches; the planner has
-    // the language filter to disambiguate elsewhere.
-    if let Some(spec_sig) = &claim.signature {
-        let live_sigs: Vec<Option<String>> = hits.iter().map(|s| s.signature.clone()).collect();
-        let any_match = live_sigs
-            .iter()
-            .any(|s| s.as_deref() == Some(spec_sig.as_str()));
-        if !any_match {
-            errors.push(Finding::SnapshotSignatureDrift {
-                symbol: claim.name.clone(),
-                spec_says: spec_sig.clone(),
-                index_says: live_sigs.into_iter().flatten().next(),
+    // Counts retain the graph's name/type-candidate scope. Qualification
+    // selects the declaration for signature checks, not definition-bound edges.
+    let live_callers =
+        match store.callers_of(&resolved.symbol.name, resolved.language.as_deref(), None) {
+            Ok(rows) => rows.len() as u32,
+            Err(_) => {
+                errors.push(Finding::SnapshotUnresolved {
+                    symbol: name.to_string(),
+                    reason: "caller_query_failed".to_string(),
+                    matches: None,
+                });
+                return;
+            }
+        };
+    if let Some(declared) = callers {
+        if declared != live_callers {
+            errors.push(Finding::SnapshotCallerCountDrift {
+                symbol: name.to_string(),
+                spec_says: declared,
+                index_says: live_callers,
             });
         }
     }
     if live_callers >= BLAST_RADIUS_WARN {
         warnings.push(Finding::LargeBlastRadius {
-            symbol: claim.name.clone(),
+            symbol: name.to_string(),
             callers: live_callers,
             threshold: BLAST_RADIUS_WARN,
         });
     }
 }
 
-/// Validate one `frontmatter.touches[]` entry — listed symbols must exist at the
-/// declared file path (and language, if given). Catches the leaf-name collision
-/// false positive the heuristic `pre_edit_snapshot` path can't see:
-/// `handleWebhook` exists in many controllers, but the spec says THIS one is at
-/// `src/billing/billing.controller.ts`.
 fn check_frontmatter_touch(
     touch: &TouchEntry,
     store: &Store,
@@ -454,59 +492,29 @@ fn check_frontmatter_touch(
 ) {
     for sym in &touch.symbols {
         let name = sym.name();
-        // Inherit file/language from the touch entry unless the Detailed variant
-        // overrides them.
-        let file = sym.file().unwrap_or(touch.file.as_str());
+        let file = sym.file().unwrap_or(&touch.file);
         let language = sym.language().or(touch.language.as_deref());
-
-        let hits = match store.search_symbols(name, None, language) {
-            Ok(rows) => rows,
-            Err(_) => continue, // store error — surfaced elsewhere in verify_spec
+        let scope = Scope {
+            name,
+            file: Some(file),
+            language,
         };
-        let scoped: Vec<_> = hits.into_iter().filter(|s| s.file_path == file).collect();
-        if scoped.is_empty() {
-            errors.push(Finding::MissingSymbolAtFile {
+        match spec_symbols::resolve(store, name, &[scope]) {
+            Ok(resolved) => check_resolved_claim(
+                name,
+                sym.callers(),
+                sym.signature(),
+                resolved,
+                store,
+                errors,
+                warnings,
+            ),
+            Err(error) if error.reason == "missing" => errors.push(Finding::MissingSymbolAtFile {
                 symbol: name.to_string(),
                 file: file.to_string(),
                 language: language.map(str::to_string),
-            });
-            continue;
-        }
-        // Caller-count drift — same any-file scoping as the heuristic path.
-        // Caller counts are inherently cross-file: we filter symbol hits by file
-        // for existence, but don't attribute callers to a specific definition.
-        if let Some(declared) = sym.callers() {
-            let live = match store.callers_of(name, language, None) {
-                Ok(callers) => callers.len() as u32,
-                Err(_) => continue,
-            };
-            if declared != live {
-                errors.push(Finding::SnapshotCallerCountDrift {
-                    symbol: name.to_string(),
-                    spec_says: declared,
-                    index_says: live,
-                });
-            }
-            if live >= BLAST_RADIUS_WARN {
-                warnings.push(Finding::LargeBlastRadius {
-                    symbol: name.to_string(),
-                    callers: live,
-                    threshold: BLAST_RADIUS_WARN,
-                });
-            }
-        }
-        // Signature drift — must match at least one scoped hit.
-        if let Some(declared_sig) = sym.signature() {
-            let live_sigs: Vec<Option<String>> =
-                scoped.iter().map(|s| s.signature.clone()).collect();
-            let any_match = live_sigs.iter().any(|s| s.as_deref() == Some(declared_sig));
-            if !any_match {
-                errors.push(Finding::SnapshotSignatureDrift {
-                    symbol: name.to_string(),
-                    spec_says: declared_sig.to_string(),
-                    index_says: live_sigs.into_iter().flatten().next(),
-                });
-            }
+            }),
+            Err(error) => errors.push(unresolved_finding(name, error)),
         }
     }
 }

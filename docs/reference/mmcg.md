@@ -1093,6 +1093,18 @@ or given WAL/SHM sidecars by the server. Incompatible custom schemas return
 Tool responses are bounded JSON. Collection responses expose their own count or
 collection metadata; status and workflow responses use named fields.
 
+Symbol diff matches declarations within their matched parent scopes, retaining
+same-name methods in different classes and trait impls. Matching ignores line
+shifts and uses signatures to preserve identity when declarations are reordered.
+Within one scope/name/kind group, identical signatures match first; repeated
+identical signatures are paired in source order. A single remaining pair is a
+signature change. Multiple unmatched declarations remain explicit removals/additions
+because their pairing is ambiguous. Moving a declaration to a different parent is
+also removal/addition.
+Changed-test evidence uses the current declaration line and never rematches a
+removed test to a surviving same-name declaration. Graph propagation and spec
+snapshot matching retain their existing name-based precision limits.
+
 Rust declaration signatures include their attached outer `#[...]` attributes,
 including arguments. Attribute additions, removals and argument edits therefore
 appear as `signature_changed` in both symbol diff scopes and change/test impact.

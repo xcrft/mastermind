@@ -9,7 +9,7 @@
 //! 1. `git diff --name-only <ref>..HEAD` → files changed in the range
 //! 2. For each file, fetch its blob at `<ref>` via `git show <ref>:<path>`
 //! 3. Parse the old blob through the same extractor (see [`parse_blob`])
-//! 4. Compare old (path, name, kind) set against `Store::symbols_in_file`
+//! 4. Match declarations by lexical parent, name and kind against the index
 //!
 //! [`symbols_changed_since_worktree`] runs steps 2–4 over a `<ref>` → **working
 //! tree** file scope instead (uncommitted and untracked changes included).
@@ -36,7 +36,7 @@ use sha2::{Digest, Sha256};
 use similar::{capture_diff_slices, Algorithm, DiffTag};
 #[cfg(test)]
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 #[cfg(test)]
 use std::ffi::OsString;
 use std::io::{Read, Write};
@@ -59,8 +59,236 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 /// spin that burns a core until the git deadline expires.
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
-type SymbolKey = (String, String);
-type SelectedSymbolKeys = (BTreeSet<SymbolKey>, BTreeSet<SymbolKey>);
+type SelectedDeclarations = (BTreeSet<usize>, BTreeSet<usize>);
+
+#[derive(Clone, Copy)]
+struct Declaration<'a> {
+    name: &'a str,
+    kind: &'a str,
+    signature: Option<&'a str>,
+    line_start: u32,
+    line_end: u32,
+    parent: Option<usize>,
+}
+
+impl Declaration<'_> {
+    fn symbol_ref(&self, file: &str) -> SymbolRef {
+        SymbolRef {
+            file: file.to_string(),
+            name: self.name.to_string(),
+            kind: self.kind.to_string(),
+            line: self.line_start,
+            signature: self.signature.map(str::to_string),
+        }
+    }
+}
+
+fn pending_declarations(symbols: &[crate::store::PendingSymbol]) -> Vec<Declaration<'_>> {
+    symbols
+        .iter()
+        .map(|symbol| Declaration {
+            name: &symbol.name,
+            kind: &symbol.kind,
+            signature: symbol.signature.as_deref(),
+            line_start: symbol.line_start,
+            line_end: symbol.line_end,
+            parent: symbol.parent_index,
+        })
+        .collect()
+}
+
+fn indexed_declarations(symbols: &[Symbol]) -> Result<Vec<Declaration<'_>>, &'static str> {
+    let positions: HashMap<_, _> = symbols.iter().enumerate().map(|(i, s)| (s.id, i)).collect();
+    symbols
+        .iter()
+        .map(|symbol| {
+            let parent = symbol
+                .parent_id
+                .map(|id| {
+                    positions
+                        .get(&id)
+                        .copied()
+                        .ok_or("symbol parent is missing from its file")
+                })
+                .transpose()?;
+            Ok(Declaration {
+                name: &symbol.name,
+                kind: &symbol.kind,
+                signature: symbol.signature.as_deref(),
+                line_start: symbol.line_start,
+                line_end: symbol.line_end,
+                parent,
+            })
+        })
+        .collect()
+}
+
+struct DeclarationTree {
+    roots: Vec<usize>,
+    children: Vec<Vec<usize>>,
+}
+
+fn declaration_tree(symbols: &[Declaration<'_>]) -> Result<DeclarationTree, &'static str> {
+    let mut roots = Vec::new();
+    let mut children = vec![Vec::new(); symbols.len()];
+    for (index, symbol) in symbols.iter().enumerate() {
+        if let Some(parent) = symbol.parent {
+            children
+                .get_mut(parent)
+                .ok_or("symbol parent is out of bounds")?
+                .push(index);
+        } else {
+            roots.push(index);
+        }
+    }
+    // Every declaration has at most one parent. A cycle is unreachable from
+    // the roots, so this also validates deep trees without recursive traversal.
+    let mut reachable = 0;
+    let mut pending = roots.clone();
+    while let Some(index) = pending.pop() {
+        reachable += 1;
+        pending.extend(children[index].iter().copied());
+    }
+    if reachable != symbols.len() {
+        return Err("symbol parent cycle");
+    }
+    Ok(DeclarationTree { roots, children })
+}
+
+#[derive(Default)]
+struct DeclarationMatches {
+    paired: Vec<(usize, usize)>,
+    added: Vec<usize>,
+    removed: Vec<usize>,
+}
+
+fn match_declarations(
+    old: &[Declaration<'_>],
+    new: &[Declaration<'_>],
+) -> Result<DeclarationMatches, &'static str> {
+    let old_tree = declaration_tree(old)?;
+    let new_tree = declaration_tree(new)?;
+    let mut pending = VecDeque::from([(old_tree.roots.as_slice(), new_tree.roots.as_slice())]);
+    let mut matches = DeclarationMatches::default();
+    while let Some((before, after)) = pending.pop_front() {
+        let siblings = match_siblings(old, new, before, after);
+        for (before, after) in siblings.paired {
+            pending.push_back((&old_tree.children[before], &new_tree.children[after]));
+            if new[after].kind != "module" {
+                matches.paired.push((before, after));
+            }
+        }
+        for before in siblings.removed {
+            pending.push_back((&old_tree.children[before], &[]));
+            if old[before].kind != "module" {
+                matches.removed.push(before);
+            }
+        }
+        for after in siblings.added {
+            pending.push_back((&[], &new_tree.children[after]));
+            if new[after].kind != "module" {
+                matches.added.push(after);
+            }
+        }
+    }
+    Ok(matches)
+}
+
+/// Match parents before their children. Distinct impl blocks may share a type
+/// name, but methods belong to the particular matched impl, not just that name.
+fn match_siblings(
+    old: &[Declaration<'_>],
+    new: &[Declaration<'_>],
+    before: &[usize],
+    after: &[usize],
+) -> DeclarationMatches {
+    type SiblingGroup = (Vec<usize>, Vec<usize>);
+    let mut groups: BTreeMap<(&str, &str), SiblingGroup> = BTreeMap::new();
+    for &index in before {
+        groups
+            .entry((old[index].name, old[index].kind))
+            .or_default()
+            .0
+            .push(index);
+    }
+    for &index in after {
+        groups
+            .entry((new[index].name, new[index].kind))
+            .or_default()
+            .1
+            .push(index);
+    }
+    let mut matches = DeclarationMatches::default();
+    for (mut before, mut after) in groups.into_values() {
+        before.sort_by_key(|&i| (old[i].line_start, old[i].line_end));
+        after.sort_by_key(|&i| (new[i].line_start, new[i].line_end));
+        let mut by_signature: BTreeMap<Option<&str>, VecDeque<usize>> = BTreeMap::new();
+        for index in before {
+            by_signature
+                .entry(old[index].signature)
+                .or_default()
+                .push_back(index);
+        }
+        let mut unmatched_new = Vec::new();
+        for index in after {
+            if let Some(previous) = by_signature
+                .get_mut(&new[index].signature)
+                .and_then(VecDeque::pop_front)
+            {
+                matches.paired.push((previous, index));
+            } else {
+                unmatched_new.push(index);
+            }
+        }
+        let unmatched_old: Vec<_> = by_signature.into_values().flatten().collect();
+        if unmatched_old.len() == 1 && unmatched_new.len() == 1 {
+            matches.paired.push((unmatched_old[0], unmatched_new[0]));
+        } else {
+            // Multiple edited overloads cannot be paired reliably. Retain every
+            // declaration as added/removed instead of selecting a first match.
+            matches.removed.extend(unmatched_old);
+            matches.added.extend(unmatched_new);
+        }
+    }
+    matches
+}
+
+fn compare_declarations(
+    file: &str,
+    old: &[Declaration<'_>],
+    new: &[Declaration<'_>],
+    matches: &DeclarationMatches,
+) -> PerFileDiff {
+    PerFileDiff {
+        added: matches
+            .added
+            .iter()
+            .map(|&i| new[i].symbol_ref(file))
+            .collect(),
+        removed: matches
+            .removed
+            .iter()
+            .map(|&i| old[i].symbol_ref(file))
+            .collect(),
+        signature_changed: matches
+            .paired
+            .iter()
+            .filter(|&&(before, after)| old[before].signature != new[after].signature)
+            .map(|&(before, after)| {
+                let old = &old[before];
+                let new = &new[after];
+                SignatureChange {
+                    file: file.to_string(),
+                    name: new.name.to_string(),
+                    kind: new.kind.to_string(),
+                    old_signature: old.signature.map(str::to_string),
+                    new_signature: new.signature.map(str::to_string),
+                    new_line: new.line_start,
+                }
+            })
+            .collect(),
+    }
+}
 
 #[cfg(test)]
 thread_local! {
@@ -415,7 +643,9 @@ fn symbol_diff_over_blobs(
     // Stable output order.
     added.sort_by(|a, b| (a.file.as_str(), a.line).cmp(&(b.file.as_str(), b.line)));
     removed.sort_by(|a, b| (a.file.as_str(), a.line).cmp(&(b.file.as_str(), b.line)));
-    signature_changed.sort_by(|a, b| (a.file.as_str(), &a.name).cmp(&(b.file.as_str(), &b.name)));
+    signature_changed.sort_by(|a, b| {
+        (a.file.as_str(), &a.name, a.new_line).cmp(&(b.file.as_str(), &b.name, b.new_line))
+    });
 
     Ok(SymbolDiff {
         git_ref: label.to_string(),
@@ -482,54 +712,26 @@ pub(crate) fn symbols_changed_in_worktree_controlled(
 
     for file in &files {
         let rel = &file.path;
-        let new_symbols: Vec<Symbol> = store
+        let new_symbols = store
             .symbols_in_file(rel)
-            .map_err(|_| WorkingTreeDiffError::IndexStale)?
-            .into_iter()
-            .filter(|s| s.kind != "module")
-            .collect();
+            .map_err(|_| WorkingTreeDiffError::IndexStale)?;
         let old_blob = old_blobs.get(rel).and_then(|v| v.as_deref());
         let old_symbols = match (old_blob, extractor_for_path(Path::new(rel))) {
             (Some(bytes), Some(extractor)) => parse_blob(rel, bytes, 0, extractor.as_ref())
-                .map(|p| {
-                    p.symbols
-                        .into_iter()
-                        .filter(|s| s.kind != "module")
-                        .collect::<Vec<_>>()
-                })
+                .map(|p| p.symbols)
                 .map_err(|_| WorkingTreeDiffError::IndexStale)?,
             _ => Vec::new(),
         };
 
-        let mut old_by_key = BTreeMap::new();
-        for symbol in &old_symbols {
-            old_by_key
-                .entry((symbol.name.clone(), symbol.kind.clone()))
-                .or_insert(symbol);
-        }
-        let mut new_by_key = BTreeMap::new();
-        for symbol in &new_symbols {
-            new_by_key
-                .entry((symbol.name.clone(), symbol.kind.clone()))
-                .or_insert(symbol);
-        }
-
-        for (key, symbol) in &new_by_key {
-            if !old_by_key.contains_key(key) {
-                added.push(SymbolRef::from((*symbol).clone()));
-            }
-        }
-        for (key, symbol) in &old_by_key {
-            if !new_by_key.contains_key(key) {
-                removed.push(SymbolRef {
-                    file: rel.clone(),
-                    name: symbol.name.clone(),
-                    kind: symbol.kind.clone(),
-                    line: symbol.line_start,
-                    signature: symbol.signature.clone(),
-                });
-            }
-        }
+        let old_declarations = pending_declarations(&old_symbols);
+        let new_declarations =
+            indexed_declarations(&new_symbols).map_err(|_| WorkingTreeDiffError::IndexStale)?;
+        let matches = match_declarations(&old_declarations, &new_declarations)
+            .map_err(|_| WorkingTreeDiffError::IndexStale)?;
+        let per_file = compare_declarations(rel, &old_declarations, &new_declarations, &matches);
+        added.extend(per_file.added);
+        removed.extend(per_file.removed);
+        signature_changed.extend(per_file.signature_changed);
 
         let current_bytes = if file.status == "deleted" {
             None
@@ -552,31 +754,22 @@ pub(crate) fn symbols_changed_in_worktree_controlled(
         };
         let (selected_old, selected_new) = match (old_blob, current_bytes.as_deref()) {
             (Some(old), Some(current)) => {
-                deepest_changed_symbol_keys(old, current, &old_symbols, &new_symbols)
+                deepest_changed_declarations(old, current, &old_declarations, &new_declarations)
             }
             _ => (BTreeSet::new(), BTreeSet::new()),
         };
-        for (key, new_symbol) in &new_by_key {
-            let Some(old_symbol) = old_by_key.get(key) else {
-                continue;
-            };
+        for (old_index, new_index) in matches.paired {
+            let old_symbol = &old_declarations[old_index];
+            let new_symbol = &new_declarations[new_index];
             if old_symbol.signature != new_symbol.signature {
-                signature_changed.push(SignatureChange {
-                    file: rel.clone(),
-                    name: new_symbol.name.clone(),
-                    kind: new_symbol.kind.clone(),
-                    old_signature: old_symbol.signature.clone(),
-                    new_signature: new_symbol.signature.clone(),
-                    new_line: new_symbol.line_start,
-                });
                 continue;
             }
-            if selected_old.contains(key) || selected_new.contains(key) {
+            if selected_old.contains(&old_index) || selected_new.contains(&new_index) {
                 if let (Some(old), Some(current)) = (old_blob, current_bytes.as_deref()) {
                     let old_slice = line_slice(old, old_symbol.line_start, old_symbol.line_end);
                     let new_slice = line_slice(current, new_symbol.line_start, new_symbol.line_end);
                     if old_slice != new_slice {
-                        body_changed.push(SymbolRef::from((*new_symbol).clone()));
+                        body_changed.push(new_symbol.symbol_ref(rel));
                     }
                 }
             }
@@ -635,12 +828,12 @@ fn working_tree_read_error(error: BoundedReadError) -> WorkingTreeDiffError {
     }
 }
 
-fn deepest_changed_symbol_keys(
+fn deepest_changed_declarations(
     old: &[u8],
     current: &[u8],
-    old_symbols: &[crate::store::PendingSymbol],
-    new_symbols: &[Symbol],
-) -> SelectedSymbolKeys {
+    old_symbols: &[Declaration<'_>],
+    new_symbols: &[Declaration<'_>],
+) -> SelectedDeclarations {
     let old_lines = line_chunks(old);
     let new_lines = line_chunks(current);
     let mut selected_old = BTreeSet::new();
@@ -653,38 +846,44 @@ fn deepest_changed_symbol_keys(
         if !old_range.is_empty() {
             let start = old_range.start as u32 + 1;
             let end = old_range.end as u32;
-            if let Some(symbol) = old_symbols
+            if let Some((index, _)) = old_symbols
                 .iter()
-                .filter(|symbol| symbol.line_start <= start && symbol.line_end >= end)
-                .min_by_key(|symbol| {
+                .enumerate()
+                .filter(|(_, symbol)| {
+                    symbol.kind != "module" && symbol.line_start <= start && symbol.line_end >= end
+                })
+                .min_by_key(|(_, symbol)| {
                     (
                         symbol.line_end.saturating_sub(symbol.line_start),
                         symbol.line_start,
-                        symbol.name.as_str(),
-                        symbol.kind.as_str(),
+                        symbol.name,
+                        symbol.kind,
                     )
                 })
             {
-                selected_old.insert((symbol.name.clone(), symbol.kind.clone()));
+                selected_old.insert(index);
             }
         }
         let new_range = operation.new_range();
         if !new_range.is_empty() {
             let start = new_range.start as u32 + 1;
             let end = new_range.end as u32;
-            if let Some(symbol) = new_symbols
+            if let Some((index, _)) = new_symbols
                 .iter()
-                .filter(|symbol| symbol.line_start <= start && symbol.line_end >= end)
-                .min_by_key(|symbol| {
+                .enumerate()
+                .filter(|(_, symbol)| {
+                    symbol.kind != "module" && symbol.line_start <= start && symbol.line_end >= end
+                })
+                .min_by_key(|(_, symbol)| {
                     (
                         symbol.line_end.saturating_sub(symbol.line_start),
                         symbol.line_start,
-                        symbol.name.as_str(),
-                        symbol.kind.as_str(),
+                        symbol.name,
+                        symbol.kind,
                     )
                 })
             {
-                selected_new.insert((symbol.name.clone(), symbol.kind.clone()));
+                selected_new.insert(index);
             }
         }
     }
@@ -1513,12 +1712,9 @@ fn diff_file_from_blob(
 
     // New side: from the live index. Empty if the file was deleted in HEAD or
     // never indexed.
-    let new_symbols: Vec<Symbol> = store
+    let new_symbols = store
         .symbols_in_file(rel_path)
-        .map_err(|e| format!("symbols_in_file failed: {e}"))?
-        .into_iter()
-        .filter(|s| s.kind != "module")
-        .collect();
+        .map_err(|e| format!("symbols_in_file failed: {e}"))?;
 
     // Old blobs were fetched in bounded `cat-file --batch` groups against one
     // resolved commit. Missing means the file did not exist at the baseline.
@@ -1527,75 +1723,22 @@ fn diff_file_from_blob(
     } else if let Some(ext) = extractor {
         let pending = parse_blob(rel_path, old_blob.expect("checked above"), 0, ext.as_ref())
             .map_err(|e| format!("parse old blob: {e}"))?;
-        pending
-            .symbols
-            .into_iter()
-            .filter(|s| s.kind != "module")
-            .collect()
+        pending.symbols
     } else {
         // No extractor for this extension — can't diff symbols. Empty old side;
         // everything in new side becomes "added".
         Vec::new()
     };
 
-    // Key by (name, kind). Same name+kind twice in one file is a
-    // partial-class-style anomaly; accept the first match.
-    let mut old_by_key: HashMap<(String, String), &crate::store::PendingSymbol> = HashMap::new();
-    for s in &old_symbols {
-        old_by_key
-            .entry((s.name.clone(), s.kind.clone()))
-            .or_insert(s);
-    }
-    let mut new_by_key: HashMap<(String, String), &Symbol> = HashMap::new();
-    for s in &new_symbols {
-        new_by_key
-            .entry((s.name.clone(), s.kind.clone()))
-            .or_insert(s);
-    }
-
-    let mut added: Vec<SymbolRef> = Vec::new();
-    let mut removed: Vec<SymbolRef> = Vec::new();
-    let mut signature_changed: Vec<SignatureChange> = Vec::new();
-
-    // Added: in new, not in old.
-    for ((name, kind), s) in &new_by_key {
-        if !old_by_key.contains_key(&(name.clone(), kind.clone())) {
-            added.push(SymbolRef::from((*s).clone()));
-        }
-    }
-    // Removed: in old, not in new. Synthesize SymbolRef from PendingSymbol.
-    for ((name, kind), s) in &old_by_key {
-        if !new_by_key.contains_key(&(name.clone(), kind.clone())) {
-            removed.push(SymbolRef {
-                file: rel_path.to_string(),
-                name: name.clone(),
-                kind: kind.clone(),
-                line: s.line_start,
-                signature: s.signature.clone(),
-            });
-        }
-    }
-    // Signature changed: in both, but signature differs.
-    for ((name, kind), new_s) in &new_by_key {
-        if let Some(old_s) = old_by_key.get(&(name.clone(), kind.clone())) {
-            if old_s.signature != new_s.signature {
-                signature_changed.push(SignatureChange {
-                    file: rel_path.to_string(),
-                    name: name.clone(),
-                    kind: kind.clone(),
-                    old_signature: old_s.signature.clone(),
-                    new_signature: new_s.signature.clone(),
-                    new_line: new_s.line_start,
-                });
-            }
-        }
-    }
-
-    Ok(PerFileDiff {
-        added,
-        removed,
-        signature_changed,
-    })
+    let old_declarations = pending_declarations(&old_symbols);
+    let new_declarations = indexed_declarations(&new_symbols)?;
+    let matches = match_declarations(&old_declarations, &new_declarations)?;
+    Ok(compare_declarations(
+        rel_path,
+        &old_declarations,
+        &new_declarations,
+        &matches,
+    ))
 }
 
 #[cfg(test)]
@@ -2302,6 +2445,209 @@ def body_only(): return 2
         assert_changes(&symbols_changed_since(indexed.store(), &dir, "baseline").unwrap());
         drop(indexed);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn same_name_methods_keep_scope_in_both_diff_scopes() {
+        let baseline = "class A:\n    def run(self):\n        return 1\n\nclass B:\n    def run(self):\n        return 2\n";
+        for (label, current, signature_line, body_line) in [
+            ("scoped_header", baseline.replace("class B:\n    def run(self):", "class B:\n    def run(self, flag=False):"), Some(6), None),
+            ("scoped_body", baseline.replace("return 2", "return 3"), None, Some(6)),
+            ("scoped_shift", format!("# Added heading.\n\n{}", baseline.replace("return 2", "return 3")), None, Some(8)),
+            ("scoped_reorder", "class B:\n    def run(self):\n        return 2\n\nclass A:\n    def run(self):\n        return 1\n".to_string(), None, None),
+        ] {
+            let dir = init_repo(label);
+            write(&dir, "service.py", baseline);
+            run(&dir, &["add", "-A"]);
+            run(&dir, &["commit", "-q", "-m", "baseline"]);
+            run(&dir, &["tag", "baseline"]);
+            write(&dir, "service.py", &current);
+            let indexed = indexed_worktree(&dir);
+            let assert_diff = |diff: &SymbolDiff| {
+                assert!(diff.added.is_empty(), "{label}: {diff:?}");
+                assert!(diff.removed.is_empty(), "{label}: {diff:?}");
+                assert!(diff.errors.is_empty());
+                assert!(!diff.truncated);
+                assert_eq!(diff.signature_changed.len(), usize::from(signature_line.is_some()), "{label}");
+                if let Some(line) = signature_line {
+                    let change = &diff.signature_changed[0];
+                    assert_eq!(change.name, "run");
+                    assert_eq!(change.kind, "method");
+                    assert_eq!(change.new_line, line);
+                    assert_eq!(change.old_signature.as_deref(), Some("def run(self)"));
+                    assert_eq!(change.new_signature.as_deref(), Some("def run(self, flag=False)"));
+                }
+            };
+            let worktree = symbols_changed_in_worktree(indexed.store(), &dir, "baseline").unwrap();
+            assert_diff(&worktree.diff);
+            assert_eq!(worktree.body_changed.len(), usize::from(body_line.is_some()), "{label}: {worktree:?}");
+            if let Some(line) = body_line {
+                assert_eq!(worktree.body_changed[0].name, "run");
+                assert_eq!(worktree.body_changed[0].kind, "method");
+                assert_eq!(worktree.body_changed[0].line, line);
+            }
+            assert_diff(&symbols_changed_since_worktree(indexed.store(), &dir, "baseline").unwrap());
+            run(&dir, &["add", "service.py"]);
+            run(&dir, &["commit", "-q", "-m", "current"]);
+            assert_diff(&symbols_changed_since(indexed.store(), &dir, "baseline").unwrap());
+            drop(indexed);
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn nested_same_name_functions_keep_each_enclosing_scope() {
+        let baseline = "def first():\n    def helper():\n        return 1\n    return helper()\n\ndef second():\n    def helper():\n        return 2\n    return helper()\n";
+        let dir = init_repo("nested_scope_identity");
+        write(&dir, "service.py", baseline);
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+        write(
+            &dir,
+            "service.py",
+            &baseline.replace("return 2", "return 3"),
+        );
+        let indexed = indexed_worktree(&dir);
+        let changed = symbols_changed_in_worktree(indexed.store(), &dir, "HEAD").unwrap();
+        assert!(changed.diff.signature_changed.is_empty());
+        assert_eq!(changed.body_changed.len(), 1);
+        assert_eq!(changed.body_changed[0].name, "helper");
+        assert_eq!(changed.body_changed[0].line, 7);
+        drop(indexed);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn parent_signature_change_preserves_unchanged_child_identity() {
+        let baseline = "class Service:\n    def run(self):\n        return 1\n";
+        let current = "class Service(Base):\n    def run(self):\n        return 1\n";
+        let dir = init_repo("parent_header_identity");
+        write(&dir, "service.py", baseline);
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+        run(&dir, &["tag", "baseline"]);
+        write(&dir, "service.py", current);
+        let indexed = indexed_worktree(&dir);
+        let assert_diff = |diff: &SymbolDiff| {
+            assert!(diff.errors.is_empty());
+            assert!(diff.added.is_empty());
+            assert!(diff.removed.is_empty());
+            assert_eq!(diff.signature_changed.len(), 1);
+            let change = &diff.signature_changed[0];
+            assert_eq!(change.name, "Service");
+            assert_eq!(change.kind, "class");
+            assert_eq!(change.new_line, 1);
+            assert_eq!(change.old_signature.as_deref(), Some("class Service"));
+            assert_eq!(change.new_signature.as_deref(), Some("class Service(Base)"));
+        };
+        let worktree = symbols_changed_in_worktree(indexed.store(), &dir, "baseline").unwrap();
+        assert_diff(&worktree.diff);
+        assert!(worktree.body_changed.is_empty());
+        run(&dir, &["add", "service.py"]);
+        run(&dir, &["commit", "-q", "-m", "change parent header"]);
+        assert_diff(&symbols_changed_since(indexed.store(), &dir, "baseline").unwrap());
+        drop(indexed);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn same_name_impl_parents_do_not_hide_a_moved_trait_override() {
+        let baseline = "trait Alpha { fn run(&self) {} }\ntrait Beta { fn run(&self) {} }\nstruct Service;\nimpl Alpha for Service {\n    fn run(&self) {}\n}\nimpl Beta for Service {}\n";
+        let current = "trait Alpha { fn run(&self) {} }\ntrait Beta { fn run(&self) {} }\nstruct Service;\nimpl Alpha for Service {}\nimpl Beta for Service {\n    fn run(&self) {}\n}\n";
+        let dir = init_repo("trait_impl_identity");
+        write(&dir, "src/lib.rs", baseline);
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+        run(&dir, &["tag", "baseline"]);
+        write(&dir, "src/lib.rs", current);
+        let indexed = indexed_worktree(&dir);
+        let assert_diff = |diff: &SymbolDiff| {
+            assert!(diff.errors.is_empty());
+            assert!(diff.signature_changed.is_empty());
+            assert_eq!(diff.removed.len(), 1, "{diff:?}");
+            assert_eq!(diff.added.len(), 1, "{diff:?}");
+            assert_eq!(diff.removed[0].name, "run");
+            assert_eq!(diff.removed[0].line, 5);
+            assert_eq!(diff.added[0].name, "run");
+            assert_eq!(diff.added[0].line, 6);
+        };
+        assert_diff(&symbols_changed_since_worktree(indexed.store(), &dir, "baseline").unwrap());
+        run(&dir, &["add", "src/lib.rs"]);
+        run(&dir, &["commit", "-q", "-m", "move override"]);
+        assert_diff(&symbols_changed_since(indexed.store(), &dir, "baseline").unwrap());
+        drop(indexed);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn declaration_matching_retains_overloads_and_rejects_invalid_parents() {
+        fn declaration(signature: &str, line: u32) -> Declaration<'_> {
+            Declaration {
+                name: "run",
+                kind: "method",
+                signature: Some(signature),
+                line_start: line,
+                line_end: line,
+                parent: None,
+            }
+        }
+        let old = [declaration("run(int)", 1), declaration("run(str)", 2)];
+        let new = [
+            declaration("run(str)", 10),
+            declaration("run(bool)", 11),
+            declaration("run(int)", 12),
+        ];
+        let matches = match_declarations(&old, &new).unwrap();
+        assert_eq!(matches.paired, vec![(1, 0), (0, 2)]);
+        assert_eq!(matches.added, vec![1]);
+        assert!(matches.removed.is_empty());
+
+        let new = [declaration("run(int)", 5), declaration("run(bool)", 6)];
+        let matches = match_declarations(&old, &new).unwrap();
+        let diff = compare_declarations("service.cs", &old, &new, &matches);
+        assert_eq!(diff.signature_changed.len(), 1);
+        assert_eq!(diff.signature_changed[0].new_line, 6);
+        assert_eq!(
+            diff.signature_changed[0].old_signature.as_deref(),
+            Some("run(str)")
+        );
+
+        let new = [declaration("run(bool)", 5), declaration("run(float)", 6)];
+        let matches = match_declarations(&old, &new).unwrap();
+        assert!(matches.paired.is_empty());
+        assert_eq!(matches.added.len(), 2);
+        assert_eq!(matches.removed.len(), 2);
+        let repeated = [declaration("run(int)", 1), declaration("run(int)", 2)];
+        assert_eq!(match_declarations(&repeated, &[]).unwrap().removed.len(), 2);
+        assert_eq!(match_declarations(&[], &repeated).unwrap().added.len(), 2);
+
+        let mut child = declaration("run(int)", 1);
+        child.parent = Some(1);
+        let parent = Declaration {
+            name: "Scope",
+            kind: "class",
+            ..declaration("class Scope", 2)
+        };
+        assert_eq!(
+            match_declarations(
+                &[child, parent],
+                &[
+                    parent,
+                    Declaration {
+                        parent: Some(0),
+                        ..child
+                    }
+                ]
+            )
+            .unwrap()
+            .paired
+            .len(),
+            2
+        );
+        child.parent = Some(0);
+        assert!(match_declarations(&[child], &[]).is_err());
+        child.parent = Some(2);
+        assert!(match_declarations(&[child], &[]).is_err());
     }
 
     #[test]

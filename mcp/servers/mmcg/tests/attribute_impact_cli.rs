@@ -214,3 +214,64 @@ fn cli_rejects_old_python_decorator_signatures_until_index_refresh() {
     );
     drop(store);
 }
+
+#[test]
+fn cli_same_name_methods_keep_the_changed_declaration_and_test() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    git(root, &["init", "-q", "--initial-branch=main"]);
+    git(root, &["config", "user.email", "test@example.com"]);
+    git(root, &["config", "user.name", "Test"]);
+    git(root, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(root.join(".gitignore"), "graph.db*\n").unwrap();
+    std::fs::create_dir(root.join("tests")).unwrap();
+    let baseline = "class TestA:\n    def test_run(self):\n        assert 1 > 0\n\nclass TestB:\n    def test_run(self):\n        assert 2 > 0\n";
+    std::fs::write(root.join("tests/test_scopes.py"), baseline).unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "baseline"]);
+    git(root, &["tag", "baseline"]);
+    let current = baseline.replace(
+        "class TestB:\n    def test_run(self):",
+        "class TestB:\n    def test_run(self, flag=False):",
+    );
+    std::fs::write(root.join("tests/test_scopes.py"), current).unwrap();
+    let mut store = Store::open(root.join("graph.db")).unwrap();
+    Indexer::new(root).index_all(&mut store, false).unwrap();
+    let impact = success(root, &["impact", "--since", "baseline", "--format", "json"]);
+    assert_eq!(
+        impact["changes"]["symbols"]["items"],
+        json!([{
+            "file": "tests/test_scopes.py", "name": "test_run", "kind": "method",
+            "line": 6, "change": "signature_changed"
+        }])
+    );
+    let direct = impact["tests"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|test| test["minimum_depth"] == 0)
+        .collect::<Vec<_>>();
+    assert_eq!(direct.len(), 1);
+    assert_eq!(direct[0]["symbol"]["line"], 6);
+    let evidence = direct[0]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "changed_test_symbol")
+        .unwrap();
+    assert_eq!(evidence["seed"]["line"], 6);
+    git(root, &["add", "tests/test_scopes.py"]);
+    git(root, &["commit", "-q", "-m", "change later method"]);
+    let diff = success(root, &["query", "symbols-changed-since", "baseline"]);
+    assert!(diff["added"].as_array().unwrap().is_empty());
+    assert!(diff["removed"].as_array().unwrap().is_empty());
+    assert_eq!(
+        diff["signature_changed"],
+        json!([{
+            "file": "tests/test_scopes.py", "name": "test_run", "kind": "method",
+            "old_signature": "def test_run(self)", "new_signature": "def test_run(self, flag=False)",
+            "new_line": 6
+        }])
+    );
+    drop(store);
+}

@@ -4937,57 +4937,74 @@ mod checks {
     }
 
     #[test]
-    fn attribute_only_test_changes_survive_both_mcp_protocols() {
-        let baseline = "fn checks_value() { assert_eq!(2 + 2, 4); }\n";
-        let (root, mut store) = impact_fixture_with_source(
-            "attribute_only_projection",
-            "src/lib.rs",
-            baseline,
-            &format!("#[test]\n{baseline}"),
-        );
-        for version in [ProtocolVersion::Current, ProtocolVersion::Legacy] {
-            let mut results = Vec::new();
-            for name in ["mmcg_change_impact", "mmcg_test_impact"] {
-                let result = handle_tools_call(version, &mut store, &json!({
+    fn attribute_and_decorator_test_changes_survive_both_mcp_protocols() {
+        let rust_baseline = "fn checks_value() { assert_eq!(2 + 2, 4); }\n";
+        let rust_current = format!("#[test]\n{rust_baseline}");
+        let python_baseline = "@pytest.mark.parametrize(\"value\", [1])\ndef test_value(value):\n    assert value > 0\n";
+        let python_current = python_baseline.replace("[1]", "[2]");
+        for (label, path, baseline, current, symbol_name, line) in [
+            (
+                "attribute_only_projection",
+                "src/lib.rs",
+                rust_baseline,
+                rust_current.as_str(),
+                "checks_value",
+                2,
+            ),
+            (
+                "python_decorator_projection",
+                "tests/test_values.py",
+                python_baseline,
+                python_current.as_str(),
+                "test_value",
+                2,
+            ),
+        ] {
+            let (root, mut store) = impact_fixture_with_source(label, path, baseline, current);
+            for version in [ProtocolVersion::Current, ProtocolVersion::Legacy] {
+                let mut results = Vec::new();
+                for name in ["mmcg_change_impact", "mmcg_test_impact"] {
+                    let result = handle_tools_call(version, &mut store, &json!({
                     "name": name,
                     "arguments": { "since": "HEAD", "root": root.to_string_lossy(), "depth": 3, "top": 100 }
                 })).unwrap();
-                assert_eq!(result["isError"], false);
-                let content = unwrap_content(&result);
-                assert_eq!(content["schema_version"], 1);
-                assert_eq!(
-                    content["changes"]["symbols"]["items"],
-                    json!([{
-                        "file": "src/lib.rs", "name": "checks_value", "kind": "function",
-                        "line": 2, "change": "signature_changed"
-                    }])
-                );
-                assert_eq!(content["tests"]["total"], 1);
-                assert_eq!(content["tests"]["truncated"], false);
-                let test = &content["tests"]["items"][0];
-                assert_eq!(test["symbol"]["name"], "checks_value");
-                assert_eq!(test["classification"], "direct");
-                assert_eq!(test["minimum_depth"], 0);
-                assert_eq!(test["confidence"], "high");
-                let evidence = test["evidence"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|e| e["kind"] == "changed_test_symbol")
-                    .unwrap();
-                assert_eq!(evidence["seed"]["change"], "signature_changed");
-                if version == ProtocolVersion::Current {
-                    assert_eq!(result["structuredContent"], content);
-                } else {
-                    assert!(result.get("structuredContent").is_none());
+                    assert_eq!(result["isError"], false);
+                    let content = unwrap_content(&result);
+                    assert_eq!(content["schema_version"], 1);
+                    assert_eq!(
+                        content["changes"]["symbols"]["items"],
+                        json!([{
+                            "file": path, "name": symbol_name, "kind": "function",
+                            "line": line, "change": "signature_changed"
+                        }])
+                    );
+                    assert_eq!(content["tests"]["total"], 1);
+                    assert_eq!(content["tests"]["truncated"], false);
+                    let test = &content["tests"]["items"][0];
+                    assert_eq!(test["symbol"]["name"], symbol_name);
+                    assert_eq!(test["classification"], "direct");
+                    assert_eq!(test["minimum_depth"], 0);
+                    assert_eq!(test["confidence"], "high");
+                    let evidence = test["evidence"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|e| e["kind"] == "changed_test_symbol")
+                        .unwrap();
+                    assert_eq!(evidence["seed"]["change"], "signature_changed");
+                    if version == ProtocolVersion::Current {
+                        assert_eq!(result["structuredContent"], content);
+                    } else {
+                        assert!(result.get("structuredContent").is_none());
+                    }
+                    results.push(content);
                 }
-                results.push(content);
+                assert_eq!(results[0]["changes"], results[1]["changes"]);
+                assert_eq!(results[0]["tests"], results[1]["tests"]);
             }
-            assert_eq!(results[0]["changes"], results[1]["changes"]);
-            assert_eq!(results[0]["tests"], results[1]["tests"]);
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
         }
-        drop(store);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -47,7 +47,7 @@ pub use vue::VueExtractor;
 /// Semantic contract for the extractor output stored in SQLite. Bump this when
 /// an extractor or grammar change can alter symbols, edges, ownership, or paths
 /// without requiring a database schema migration.
-pub const EXTRACTOR_CONTRACT_VERSION: &str = "mmcg-extractors-v7";
+pub const EXTRACTOR_CONTRACT_VERSION: &str = "mmcg-extractors-v8";
 pub const EXTRACTOR_CONTRACT_META_KEY: &str = "extractor_contract_version";
 
 /// Bind a persisted codegraph to the repository it was built from.
@@ -3067,6 +3067,87 @@ def placeholder():
             .is_empty());
         drop(store);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn python_decorator_contract_rebuilds_signatures_and_preserves_redacted_types() {
+        let (dir, db) = setup("python_decorator_contract");
+        let source = r#"@repeat(8 // 2)
+@label('TOPSECRET,other')
+@raw(r"before\"TOPSECRET")
+@keyword(value='TOPSECRET,other', raw=r"before\"TOPSECRET")
+def candidate(value: ImportantType) -> ResultType:
+    return value
+"#;
+        fs::write(dir.join("app.py"), source).unwrap();
+        let mut store = Store::open(&db).unwrap();
+        let indexer = Indexer::new(&dir);
+        indexer.index_all(&mut store, false).unwrap();
+        assert_eq!(
+            indexer.index_all(&mut store, false).unwrap().files_indexed,
+            0
+        );
+
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection.execute(
+            "UPDATE symbols SET signature = 'def candidate(value: ImportantType) -> ResultType' WHERE name = 'candidate'",
+            [],
+        ).unwrap();
+        drop(connection);
+        store
+            .set_meta(EXTRACTOR_CONTRACT_META_KEY, "mmcg-extractors-v7")
+            .unwrap();
+        assert!(!store.extractor_contract_current().unwrap());
+        let stats = indexer.index_all(&mut store, false).unwrap();
+        assert!(stats.extractor_contract_rebuilt);
+        assert_eq!(stats.files_indexed, 1);
+        assert_eq!(stats.files_unchanged, 0);
+        assert!(store.extractor_contract_current().unwrap());
+        let symbols = store.symbols_in_file("app.py").unwrap();
+        let candidate = symbols.iter().find(|s| s.name == "candidate").unwrap();
+        assert_eq!(candidate.line_start, 5);
+        assert_eq!(
+            candidate.decorators.as_deref(),
+            Some(",repeat,label,raw,keyword,")
+        );
+        assert_eq!(
+            candidate.signature.as_deref(),
+            Some(
+                r#"@repeat(8 // 2) @label('TOPSECRET,other') @raw(r"before\"TOPSECRET") @keyword(value='TOPSECRET,other', raw=r"before\"TOPSECRET") def candidate(value: ImportantType) -> ResultType"#
+            )
+        );
+        for query in ["\"importanttype\"", "\"resulttype\""] {
+            let hits = store.search_concepts(query, 10).unwrap();
+            assert!(
+                hits.iter().any(|hit| hit.name == "candidate"
+                    && hit.path == "app.py"
+                    && hit.signature_matched),
+                "{query}: {hits:?}"
+            );
+        }
+        assert!(store
+            .search_concepts("\"topsecret\"", 10)
+            .unwrap()
+            .is_empty());
+        store
+            .set_meta(
+                crate::store::CONCEPT_NORMALIZATION_META_KEY,
+                "mmcg-concepts-v2",
+            )
+            .unwrap();
+        assert!(store.extractor_contract_current().unwrap());
+        assert!(!store.concept_contract_current().unwrap());
+        let stats = indexer.index_all(&mut store, false).unwrap();
+        assert!(stats.concept_contract_rebuilt);
+        assert!(!stats.extractor_contract_rebuilt);
+        assert_eq!(stats.files_indexed, 1);
+        assert!(store.concept_contract_current().unwrap());
+        assert!(store
+            .search_concepts("\"topsecret\"", 10)
+            .unwrap()
+            .is_empty());
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

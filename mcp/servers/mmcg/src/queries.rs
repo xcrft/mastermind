@@ -6535,6 +6535,137 @@ fn checks_value() { assert_eq!(value(), 1); }
     }
 
     #[test]
+    fn change_impact_tracks_python_decorator_edits_on_tests() {
+        let plain = "import pytest\ndef test_value(value):\n    assert value > 0\n";
+        let marked = "import pytest\n@pytest.mark.parametrize(\"value\", [1])\ndef test_value(value):\n    assert value > 0\n";
+        let changed = marked.replace("[1]", "[2]");
+        for (label, before, after, line) in [
+            ("python_decorator_added", plain, marked, 3),
+            ("python_decorator_removed", marked, plain, 2),
+            ("python_decorator_arguments", marked, changed.as_str(), 3),
+        ] {
+            let root = impact_repo(label, &[("tests/test_values.py", before)]);
+            write_impact_file(&root, "tests/test_values.py", after);
+            let store = index_impact(&root, label);
+            let response = change_impact(&store, &root, "HEAD", 3, 100).unwrap();
+            assert_eq!(response.changes.symbols.items.len(), 1);
+            let changed = &response.changes.symbols.items[0];
+            assert_eq!(changed.name, "test_value");
+            assert_eq!(changed.change, "signature_changed");
+            assert_eq!(changed.line, line);
+            assert!(!response.changes.symbols.truncated);
+            assert_eq!(response.tests.total, Some(1));
+            assert!(!response.tests.truncated);
+            let test = &response.tests.items[0];
+            assert_eq!(test.symbol.name, "test_value");
+            assert_eq!(test.classification, "direct");
+            assert_eq!(test.minimum_depth, Some(0));
+            assert_eq!(test.confidence, "high");
+            let seed = test
+                .evidence
+                .iter()
+                .find(|e| e.kind == "changed_test_symbol")
+                .unwrap()
+                .seed
+                .as_ref()
+                .unwrap();
+            assert_eq!(seed.name, "test_value");
+            assert_eq!(seed.change, "signature_changed");
+            assert_eq!(seed.line, line);
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn change_impact_python_decorator_arguments_seed_test_callers() {
+        let baseline = "@cache(timeout=1)\ndef value():\n    return 1\n";
+        let root = impact_repo(
+            "python_decorator_callers",
+            &[
+                ("src/app.py", baseline),
+                (
+                    "src/test_app.py",
+                    "from src.app import value\ndef test_value():\n    assert value() == 1\n",
+                ),
+            ],
+        );
+        write_impact_file(
+            &root,
+            "src/app.py",
+            &baseline.replace("timeout=1", "timeout=2"),
+        );
+        let store = index_impact(&root, "python_decorator_callers");
+        let response = change_impact(&store, &root, "HEAD", 3, 100).unwrap();
+        assert_eq!(response.changes.symbols.items.len(), 1);
+        assert_eq!(response.changes.symbols.items[0].name, "value");
+        assert_eq!(
+            response.changes.symbols.items[0].change,
+            "signature_changed"
+        );
+        let test = response
+            .tests
+            .items
+            .iter()
+            .find(|t| t.symbol.name == "test_value")
+            .unwrap();
+        assert_eq!(test.classification, "direct");
+        assert_eq!(test.minimum_depth, Some(1));
+        let seed = test
+            .evidence
+            .iter()
+            .find(|e| e.kind == "graph_seed")
+            .unwrap()
+            .seed
+            .as_ref()
+            .unwrap();
+        assert_eq!(seed.name, "value");
+        assert_eq!(seed.change, "signature_changed");
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn change_impact_python_method_decorator_keeps_containing_class_seed() {
+        let baseline = "class TestSuite:\n    @pytest.mark.parametrize(\"value\", [1])\n    def test_value(self, value):\n        assert value > 0\n    def test_other(self):\n        assert True\n";
+        let root = impact_repo(
+            "python_method_decorator",
+            &[("tests/test_values.py", baseline)],
+        );
+        write_impact_file(
+            &root,
+            "tests/test_values.py",
+            &baseline.replace("[1]", "[2]"),
+        );
+        let store = index_impact(&root, "python_method_decorator");
+        let response = change_impact(&store, &root, "HEAD", 3, 100).unwrap();
+        let seeds = &response.changes.symbols.items;
+        assert!(seeds.iter().any(|s| s.name == "test_value"
+            && s.kind == "method"
+            && s.change == "signature_changed"
+            && s.line == 3));
+        // The decorator is outside the method range but inside the class body.
+        assert!(seeds
+            .iter()
+            .any(|s| s.name == "TestSuite" && s.change == "body_changed"));
+        assert!(!seeds.iter().any(|s| s.name == "test_other"));
+        let test = response
+            .tests
+            .items
+            .iter()
+            .find(|t| t.symbol.name == "test_value")
+            .unwrap();
+        assert_eq!(test.classification, "direct");
+        assert_eq!(test.minimum_depth, Some(0));
+        assert!(test.evidence.iter().any(|e| e.kind == "changed_test_symbol"
+            && e.seed
+                .as_ref()
+                .is_some_and(|s| s.name == "test_value" && s.change == "signature_changed")));
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn change_impact_rejects_stale_or_wrong_root_index() {
         let root = impact_repo(
             "root_stale",

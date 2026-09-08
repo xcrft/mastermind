@@ -1102,13 +1102,26 @@ and a declaration do not break ownership or enter its signature; inner
 the functions/methods, structs, enums, traits, impls and modules emitted by the
 extractor, without expanding macros or adding previously unindexed item kinds.
 
+Python signatures also include the full text of attached decorators, in source
+order, including multiline arguments. Adding, removing, reordering or changing
+decorators therefore produces `signature_changed` for functions, async functions,
+methods and classes. Coordinates still point to `def`/`class`, marker names remain
+separate, and decorator-expression calls retain their parent scope. A method
+decorator edit can additionally select its containing class as `body_changed`.
+
 When changed files require source extraction, diff and impact reject old
 extractor contracts with `index_stale`. Text-only diff needs no extractor index.
-Refresh indexes for extractor contract v7. After reindexing, refresh exact-signature
-spec snapshots for attributed Rust declarations; a bare `fn ...` snapshot no longer
-equals the full attributed declaration. Preserve multiline signatures in YAML rather than legacy one-line
+Refresh indexes for extractor contract v8. After reindexing, refresh exact-signature
+spec snapshots for decorated Python and attributed Rust declarations; bare
+`def ...` / `fn ...` snapshots no longer equal the full declaration.
+Preserve multiline signatures in YAML rather than legacy one-line
 snapshot bullets. Adding a test attribute identifies a changed test candidate;
 it does not prove that the test ran or replace the full required gate.
+
+Concept normalization v3 treats Python `//` as division and preserves Python
+quote escaping, keeping declaration types searchable while omitting decorator
+literals. An older concept corpus also requires refresh, even when the extractor
+contract is current.
 
 ### Bounded role briefs
 

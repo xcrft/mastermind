@@ -448,14 +448,27 @@ fn extract_signature(node: &Node, source: &[u8]) -> Option<String> {
         return None;
     }
     let text = std::str::from_utf8(&source[start..header_end]).ok()?;
-    let trimmed = text
-        .trim_end_matches(|c: char| c == ':' || c.is_whitespace())
-        .to_string();
+    let trimmed = text.trim_end_matches(|c: char| c == ':' || c.is_whitespace());
     if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
+        return None;
     }
+    let mut signature = String::new();
+    // Decorator arguments affect behavior even when marker names and the def
+    // header are unchanged. Keep coordinates on the inner declaration.
+    if let Some(parent) = node.parent().filter(|p| p.kind() == "decorated_definition") {
+        let mut cursor = parent.walk();
+        for decorator in parent
+            .named_children(&mut cursor)
+            .filter(|child| child.kind() == "decorator")
+        {
+            if let Some(text) = node_text(&decorator, source) {
+                signature.push_str(text);
+                signature.push(' ');
+            }
+        }
+    }
+    signature.push_str(trimmed);
+    Some(signature)
 }
 
 fn plain_docstring_body<'a>(node: &Node, source: &'a [u8]) -> Option<&'a str> {
@@ -684,6 +697,73 @@ mod tests {
             .find(|s| s.name == "simple")
             .expect("simple symbol");
         assert_eq!(simple.decorators.as_deref(), Some(",property,"));
+    }
+
+    #[test]
+    fn decorator_signatures_preserve_text_coordinates_and_call_owners() {
+        let source = r#"@registry.group("suite")
+class Suite:
+    @cache(
+        factory("secret"),
+        key=r"raw\path",
+    )
+    # Keep the method's decorators across comments.
+    @staticmethod
+    async def evaluate(value: str) -> str:
+        return render(value)
+
+@wrap("outer")
+# Keep the stack order.
+@wrap("inner")
+def candidate():
+    return compute()
+
+@(factory if ready else fallback)
+def conditional():
+    pass
+
+def plain():
+    return 1
+"#;
+        let path = common::write_tmp("py", "decorator_signatures.py", source);
+        let pending = parse_one(&path, path.parent().unwrap(), &PythonExtractor).unwrap();
+        for (name, kind, line, decorators, signature) in [
+            ("Suite", "class", 2, Some(",registry.group,"), "@registry.group(\"suite\") class Suite"),
+            ("evaluate", "method", 9, Some(",cache,staticmethod,"), "@cache(\n        factory(\"secret\"),\n        key=r\"raw\\path\",\n    ) @staticmethod async def evaluate(value: str) -> str"),
+            ("candidate", "function", 15, Some(",wrap,wrap,"), "@wrap(\"outer\") @wrap(\"inner\") def candidate()"),
+            ("conditional", "function", 19, None, "@(factory if ready else fallback) def conditional()"),
+            ("plain", "function", 22, None, "def plain()"),
+        ] {
+            let symbol = pending.symbols.iter().find(|s| s.name == name).unwrap();
+            assert_eq!(symbol.kind, kind, "{name}");
+            assert_eq!(symbol.line_start, line, "{name}");
+            assert_eq!(symbol.decorators.as_deref(), decorators, "{name}");
+            assert_eq!(symbol.signature.as_deref(), Some(signature), "{name}");
+        }
+        let calls = pending
+            .edges
+            .iter()
+            .filter(|e| e.kind == "calls")
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 7);
+        for (target, owner, line) in [
+            ("registry.group", 0, 1),
+            ("cache", 1, 3),
+            ("factory", 1, 4),
+            ("render", 2, 10),
+            ("wrap", 0, 12),
+            ("wrap", 0, 14),
+            ("compute", 3, 16),
+        ] {
+            assert!(
+                calls
+                    .iter()
+                    .any(|edge| edge.to_path.as_deref() == Some(target)
+                        && edge.from_index == owner
+                        && edge.line == line),
+                "{target} at {line}: {calls:?}"
+            );
+        }
     }
 
     #[test]

@@ -2183,6 +2183,128 @@ fn stable() {}
     }
 
     #[test]
+    fn python_decorator_changes_reach_both_symbol_diff_scopes() {
+        let dir = init_repo("python_decorator_diff");
+        let baseline = r#"def added(): pass
+@label("old")
+def removed(): pass
+@pytest.mark.parametrize("value", [1])
+def test_value(value): pass
+@outer
+@inner
+def reordered(): pass
+@route(
+    "/before",
+)
+async def handler(): pass
+@label("before")
+class Suite: pass
+@label("fixed")
+# Original comment.
+def stable(): pass
+@label("fixed")
+def body_only(): return 1
+"#;
+        let current = r#"@label("new")
+def added(): pass
+def removed(): pass
+@pytest.mark.parametrize("value", [2])
+def test_value(value): pass
+@inner
+@outer
+def reordered(): pass
+@route(
+    "/after",
+)
+async def handler(): pass
+@label("after")
+class Suite: pass
+@label("fixed")
+# Updated comment.
+def stable(): pass
+@label("fixed")
+def body_only(): return 2
+"#;
+        write(&dir, "tests/test_values.py", baseline);
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+        run(&dir, &["tag", "baseline"]);
+        write(&dir, "tests/test_values.py", current);
+        let indexed = indexed_worktree(&dir);
+        let assert_changes = |diff: &SymbolDiff| {
+            assert!(diff.added.is_empty());
+            assert!(diff.removed.is_empty());
+            assert!(diff.errors.is_empty());
+            assert!(!diff.truncated);
+            assert_eq!(diff.signature_changed.len(), 6);
+            for (name, kind, line, old, new) in [
+                (
+                    "added",
+                    "function",
+                    2,
+                    "def added()",
+                    "@label(\"new\") def added()",
+                ),
+                (
+                    "removed",
+                    "function",
+                    3,
+                    "@label(\"old\") def removed()",
+                    "def removed()",
+                ),
+                (
+                    "test_value",
+                    "function",
+                    5,
+                    "@pytest.mark.parametrize(\"value\", [1]) def test_value(value)",
+                    "@pytest.mark.parametrize(\"value\", [2]) def test_value(value)",
+                ),
+                (
+                    "reordered",
+                    "function",
+                    8,
+                    "@outer @inner def reordered()",
+                    "@inner @outer def reordered()",
+                ),
+                (
+                    "handler",
+                    "function",
+                    12,
+                    "@route(\n    \"/before\",\n) async def handler()",
+                    "@route(\n    \"/after\",\n) async def handler()",
+                ),
+                (
+                    "Suite",
+                    "class",
+                    14,
+                    "@label(\"before\") class Suite",
+                    "@label(\"after\") class Suite",
+                ),
+            ] {
+                let change = diff
+                    .signature_changed
+                    .iter()
+                    .find(|s| s.name == name)
+                    .unwrap();
+                assert_eq!(change.kind, kind, "{name}");
+                assert_eq!(change.new_line, line, "{name}");
+                assert_eq!(change.old_signature.as_deref(), Some(old), "{name}");
+                assert_eq!(change.new_signature.as_deref(), Some(new), "{name}");
+            }
+        };
+        let worktree = symbols_changed_in_worktree(indexed.store(), &dir, "baseline").unwrap();
+        assert_changes(&worktree.diff);
+        assert_eq!(worktree.body_changed.len(), 1);
+        assert_eq!(worktree.body_changed[0].name, "body_only");
+        assert_changes(&symbols_changed_since_worktree(indexed.store(), &dir, "baseline").unwrap());
+        run(&dir, &["add", "tests/test_values.py"]);
+        run(&dir, &["commit", "-q", "-m", "decorators and body"]);
+        assert_changes(&symbols_changed_since(indexed.store(), &dir, "baseline").unwrap());
+        drop(indexed);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn body_change_selects_only_deepest_enclosing_symbol() {
         let dir = init_repo("deepest_nested_engine");
         write(

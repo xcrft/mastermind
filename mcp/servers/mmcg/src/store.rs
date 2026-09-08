@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 const SCHEMA_VERSION: &str = "8";
 pub const CONCEPT_NORMALIZATION_META_KEY: &str = "concept_normalization_version";
-pub const CONCEPT_NORMALIZATION_VERSION: &str = "mmcg-concepts-v2";
+pub const CONCEPT_NORMALIZATION_VERSION: &str = "mmcg-concepts-v3";
 pub const CONCEPT_DOCUMENTATION_SUPPORTED_LANGUAGES: &str = "javascript,python,rust,tsx,typescript";
 pub const CONCEPT_DOCUMENTATION_INDEXED_META_KEY: &str = "concept_documentation_indexed_count";
 pub const CONCEPT_DOCUMENTATION_SECRET_OMITTED_META_KEY: &str =
@@ -874,7 +874,7 @@ struct SignatureDialect {
     csharp_raw_strings: bool,
     interpolated_strings: bool,
     javascript_regex: bool,
-    python_defaults: bool,
+    python_syntax: bool,
     php_heredoc: bool,
     cpp_operators: bool,
 }
@@ -887,7 +887,7 @@ fn signature_dialect(path: &str) -> SignatureDialect {
         csharp_raw_strings: language == "csharp",
         interpolated_strings: matches!(language, "python" | "csharp"),
         javascript_regex: matches!(language, "javascript" | "typescript" | "tsx" | "vue"),
-        python_defaults: language == "python",
+        python_syntax: language == "python",
         php_heredoc: language == "php",
         cpp_operators: language == "cpp",
     }
@@ -1032,7 +1032,7 @@ fn quoted_signature_end(characters: &[char], start: usize, dialect: SignatureDia
         || !characters[prefix_start - 1].is_alphanumeric() && characters[prefix_start - 1] != '_';
     let interpolated = dialect.interpolated_strings
         && prefix_boundary
-        && (dialect.python_defaults && matches!(prefix.as_str(), "f" | "fr" | "rf")
+        && (dialect.python_syntax && matches!(prefix.as_str(), "f" | "fr" | "rf")
             || dialect.csharp_raw_strings && matches!(prefix.as_str(), "$" | "$@" | "@$"));
     let doubled_quote_escape = dialect.csharp_raw_strings && prefix.contains('@');
     let mut interpolation_depth = 0usize;
@@ -1155,7 +1155,15 @@ fn cpp_raw_signature_end(characters: &[char], start: usize) -> Option<usize> {
     Some(characters.len())
 }
 
-fn raw_signature_end(characters: &[char], start: usize) -> Option<usize> {
+fn raw_signature_end(
+    characters: &[char],
+    start: usize,
+    dialect: SignatureDialect,
+) -> Option<usize> {
+    // Python raw strings still escape quotes, unlike Rust/C++ raw strings.
+    if dialect.python_syntax {
+        return None;
+    }
     rust_raw_signature_end(characters, start).or_else(|| cpp_raw_signature_end(characters, start))
 }
 
@@ -1336,7 +1344,7 @@ fn comment_signature_end(
                     .map_or(characters.len(), |offset| content_start + offset),
             )
         }
-        (Some('/'), Some('/')) => {
+        (Some('/'), Some('/')) if !dialect.python_syntax => {
             let content_start = start + usize::from(characters[start] == '/') + 1;
             Some(
                 characters[content_start..]
@@ -1345,7 +1353,7 @@ fn comment_signature_end(
                     .map_or(characters.len(), |offset| content_start + offset),
             )
         }
-        (Some('/'), Some('*')) => {
+        (Some('/'), Some('*')) if !dialect.python_syntax => {
             let mut index = start + 2;
             let mut depth = 1usize;
             while index + 1 < characters.len() {
@@ -1440,7 +1448,7 @@ fn generic_angle_has_close(characters: &[char], start: usize) -> bool {
     let (mut angles, mut parentheses, mut brackets, mut braces) = (1usize, 0usize, 0usize, 0usize);
     let mut index = start + 1;
     while index < characters.len() {
-        if let Some(end) = raw_signature_end(characters, index) {
+        if let Some(end) = raw_signature_end(characters, index, SignatureDialect::default()) {
             index = end;
             continue;
         }
@@ -1563,7 +1571,7 @@ fn skip_signature_default(
                 continue;
             }
         }
-        if let Some(end) = raw_signature_end(characters, index) {
+        if let Some(end) = raw_signature_end(characters, index, dialect) {
             index = end;
             regex_allowed = false;
             continue;
@@ -1577,7 +1585,10 @@ fn skip_signature_default(
             index = end;
             continue;
         }
-        if characters[index] == '\'' && rust_lifetime_start(characters, index) {
+        if !dialect.python_syntax
+            && characters[index] == '\''
+            && rust_lifetime_start(characters, index)
+        {
             index += 1;
             regex_allowed = false;
             continue;
@@ -1594,7 +1605,7 @@ fn skip_signature_default(
                 continue;
             }
         }
-        if dialect.python_defaults
+        if dialect.python_syntax
             && (parentheses, brackets, braces, angles) == base_depth
             && characters[index..].starts_with(&['l', 'a', 'm', 'b', 'd', 'a'])
             && (index == 0
@@ -1644,14 +1655,14 @@ fn skip_signature_default(
                 angles -= 1;
                 regex_allowed = false;
             }
-            ':' if dialect.python_defaults
+            ':' if dialect.python_syntax
                 && python_lambda_parameters > 0
                 && (parentheses, brackets, braces, angles) == base_depth =>
             {
                 python_lambda_parameters -= 1;
                 regex_allowed = true;
             }
-            ',' if dialect.python_defaults
+            ',' if dialect.python_syntax
                 && python_lambda_parameters > 0
                 && (parentheses, brackets, braces, angles) == base_depth =>
             {
@@ -1697,7 +1708,7 @@ fn redact_signature(value: &str, dialect: SignatureDialect) -> Option<String> {
                 continue;
             }
         }
-        if let Some(end) = raw_signature_end(&characters, index) {
+        if let Some(end) = raw_signature_end(&characters, index, dialect) {
             output.push(' ');
             index = end;
             regex_allowed = false;
@@ -1714,7 +1725,10 @@ fn redact_signature(value: &str, dialect: SignatureDialect) -> Option<String> {
             index = end;
             continue;
         }
-        if characters[index] == '\'' && rust_lifetime_start(&characters, index) {
+        if !dialect.python_syntax
+            && characters[index] == '\''
+            && rust_lifetime_start(&characters, index)
+        {
             output.push(characters[index]);
             index += 1;
             regex_allowed = false;
@@ -9465,6 +9479,33 @@ mod tests {
         assert!(expanded.iter().any(|term| term == "i\u{307}value"));
         assert!(expanded.iter().any(|term| term == "i\u{307}"));
         assert!(expanded.iter().any(|term| term == "value"));
+    }
+
+    #[test]
+    fn python_decorator_redaction_keeps_types_after_division_and_strings() {
+        for decorator in [
+            "@repeat(8 // 2)",
+            "@label('TOPSECRET,other')",
+            r#"@label(r"before\"TOPSECRET")"#,
+            "@label(value='TOPSECRET,other')",
+            r#"@label(value=r"before\"TOPSECRET")"#,
+            "@repeat(value=8 // 2)",
+            "@repeat(8 // 2,\n # TOPSECRET\n other=4)",
+        ] {
+            let signature =
+                format!("{decorator} def candidate(value: ImportantType) -> ResultType");
+            let terms = concept_signature_terms_for("src/fixture.py", &signature);
+            for expected in ["importanttype", "resulttype"] {
+                assert!(
+                    terms.iter().any(|term| term == expected),
+                    "{signature:?}: {terms:?}"
+                );
+            }
+            assert!(
+                !terms.iter().any(|term| term.contains("topsecret")),
+                "{signature:?}: {terms:?}"
+            );
+        }
     }
 
     #[test]

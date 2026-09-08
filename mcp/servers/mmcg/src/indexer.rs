@@ -47,7 +47,7 @@ pub use vue::VueExtractor;
 /// Semantic contract for the extractor output stored in SQLite. Bump this when
 /// an extractor or grammar change can alter symbols, edges, ownership, or paths
 /// without requiring a database schema migration.
-pub const EXTRACTOR_CONTRACT_VERSION: &str = "mmcg-extractors-v8";
+pub const EXTRACTOR_CONTRACT_VERSION: &str = "mmcg-extractors-v9";
 pub const EXTRACTOR_CONTRACT_META_KEY: &str = "extractor_contract_version";
 
 /// Bind a persisted codegraph to the repository it was built from.
@@ -3078,6 +3078,10 @@ def placeholder():
 @keyword(value='TOPSECRET,other', raw=r"before\"TOPSECRET")
 def candidate(value: ImportantType) -> ResultType:
     return value
+
+@label("public") # TOPSECRET
+def commented(value: OtherType) -> FinalType:
+    return value
 "#;
         fs::write(dir.join("app.py"), source).unwrap();
         let mut store = Store::open(&db).unwrap();
@@ -3094,15 +3098,17 @@ def candidate(value: ImportantType) -> ResultType:
             [],
         ).unwrap();
         drop(connection);
-        store
-            .set_meta(EXTRACTOR_CONTRACT_META_KEY, "mmcg-extractors-v7")
-            .unwrap();
-        assert!(!store.extractor_contract_current().unwrap());
-        let stats = indexer.index_all(&mut store, false).unwrap();
-        assert!(stats.extractor_contract_rebuilt);
-        assert_eq!(stats.files_indexed, 1);
-        assert_eq!(stats.files_unchanged, 0);
-        assert!(store.extractor_contract_current().unwrap());
+        for old_contract in ["mmcg-extractors-v7", "mmcg-extractors-v8"] {
+            store
+                .set_meta(EXTRACTOR_CONTRACT_META_KEY, old_contract)
+                .unwrap();
+            assert!(!store.extractor_contract_current().unwrap());
+            let stats = indexer.index_all(&mut store, false).unwrap();
+            assert!(stats.extractor_contract_rebuilt);
+            assert_eq!(stats.files_indexed, 1);
+            assert_eq!(stats.files_unchanged, 0);
+            assert!(store.extractor_contract_current().unwrap());
+        }
         let symbols = store.symbols_in_file("app.py").unwrap();
         let candidate = symbols.iter().find(|s| s.name == "candidate").unwrap();
         assert_eq!(candidate.line_start, 5);
@@ -3113,7 +3119,11 @@ def candidate(value: ImportantType) -> ResultType:
         assert_eq!(
             candidate.signature.as_deref(),
             Some(
-                r#"@repeat(8 // 2) @label('TOPSECRET,other') @raw(r"before\"TOPSECRET") @keyword(value='TOPSECRET,other', raw=r"before\"TOPSECRET") def candidate(value: ImportantType) -> ResultType"#
+                r#"@repeat(8 // 2)
+@label('TOPSECRET,other')
+@raw(r"before\"TOPSECRET")
+@keyword(value='TOPSECRET,other', raw=r"before\"TOPSECRET")
+def candidate(value: ImportantType) -> ResultType"#
             )
         );
         for query in ["\"importanttype\"", "\"resulttype\""] {
@@ -3122,6 +3132,14 @@ def candidate(value: ImportantType) -> ResultType:
                 hits.iter().any(|hit| hit.name == "candidate"
                     && hit.path == "app.py"
                     && hit.signature_matched),
+                "{query}: {hits:?}"
+            );
+        }
+        for query in ["\"othertype\"", "\"finaltype\""] {
+            let hits = store.search_concepts(query, 10).unwrap();
+            assert!(
+                hits.iter()
+                    .any(|hit| hit.name == "commented" && hit.signature_matched),
                 "{query}: {hits:?}"
             );
         }

@@ -207,8 +207,8 @@ fn cli_rejects_old_python_decorator_signatures_until_index_refresh() {
         diff["signature_changed"],
         json!([{
             "file": "tests/test_values.py", "name": "test_value", "kind": "function",
-            "old_signature": "@pytest.mark.parametrize(\"value\", [1]) def test_value(value)",
-            "new_signature": "@pytest.mark.parametrize(\"value\", [2]) def test_value(value)",
+            "old_signature": "@pytest.mark.parametrize(\"value\", [1])\ndef test_value(value)",
+            "new_signature": "@pytest.mark.parametrize(\"value\", [2])\ndef test_value(value)",
             "new_line": 3
         }])
     );

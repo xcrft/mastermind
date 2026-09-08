@@ -4922,6 +4922,29 @@ impl Store {
         rows.collect()
     }
 
+    /// Raw named-declaration candidates for spec resolution. Compound namespace
+    /// names and nested namespace nodes must expose the same final component.
+    pub(crate) fn spec_symbol_candidates(
+        &self,
+        name: &str,
+        language: Option<&str>,
+    ) -> SqlResult<Vec<Symbol>> {
+        let sql = format!(
+            "SELECT {SYMBOL_COLS} FROM symbols
+             WHERE name = ?1 AND (?2 IS NULL OR language = ?2)
+             UNION ALL
+             SELECT {SYMBOL_COLS} FROM symbols
+             WHERE kind = 'namespace' AND name != ?1
+               AND (substr(name, -length(?1) - 1) = '.' || ?1
+                    OR substr(name, -length(?1) - 2) = '::' || ?1)
+               AND (?2 IS NULL OR language = ?2)
+             ORDER BY file_path, line_start"
+        );
+        let mut statement = self.conn.prepare(&sql)?;
+        let rows = statement.query_map(params![name, language], Self::row_to_symbol)?;
+        rows.collect()
+    }
+
     /// Fully-qualified namespace ancestor chain for a symbol. Extractors record
     /// nested namespaces as ordinary parent symbols, so `AppA.Common` must not
     /// collapse with `AppB.Common` merely because the nearest node is named

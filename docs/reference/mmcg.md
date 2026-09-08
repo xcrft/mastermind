@@ -1102,8 +1102,34 @@ signature change. Multiple unmatched declarations remain explicit removals/addit
 because their pairing is ambiguous. Moving a declaration to a different parent is
 also removal/addition.
 Changed-test evidence uses the current declaration line and never rematches a
-removed test to a surviving same-name declaration. Graph propagation and spec
-snapshot matching retain their existing name-based precision limits.
+removed test to a surviving same-name declaration. Graph propagation retains its
+existing name/type-based precision limits.
+
+Spec snapshot names retain lexical qualification, such as B.run or B::run.
+Verification and audit resolve that declaration before comparing its recorded
+signature. An unqualified name that matches several declarations produces
+snapshot_unresolved, including when one candidate still has the old signature.
+File and language constraints from matching frontmatter touches also apply to
+snapshot bullets. A missing qualifier never falls back to a leaf-name match.
+Malformed names, broken parent chains, failed queries and an index update during
+declaration resolution are unresolved, not successful checks. Verification fails;
+audit returns Broken. A uniquely
+resolved signature change remains Drift in the post-execution audit.
+
+Audit checks recorded signatures and caller counts in both markdown snapshots
+and frontmatter touches. Bare touches remain pre-edit existence and file-scope
+declarations. Recorded snapshots of removed symbols retain the existing
+SnapshotSymbolGone behavior; removal acknowledgement is a separate check.
+Caller counts and risk totals still describe name/type graph candidates in the
+declared language, not edges bound to one selected declaration.
+
+Qualification follows extracted lexical parents. C# namespace segments are
+equivalent whether stored as one qualified namespace or nested namespaces.
+Synthetic file modules do not represent package names, and package scope is not
+inferred from a file path. Rust impl blocks provide method scope but are not
+separate named type definitions. Multiple trait implementations, overloads,
+constructors and partial declarations can remain ambiguous; snapshots of impl
+blocks themselves are not supported by the named-declaration resolver.
 
 Rust declaration signatures include their attached outer `#[...]` attributes,
 including arguments. Attribute additions, removals and argument edits therefore

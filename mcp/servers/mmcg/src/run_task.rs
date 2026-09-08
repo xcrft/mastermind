@@ -1115,8 +1115,15 @@ pub fn compute_risk_report(spec: &ParsedSpec, store: &Store) -> Result<RiskRepor
     let mut central: Vec<CentralEntry> = Vec::new();
 
     for claim in &spec.pre_edit_snapshot {
+        let resolved =
+            crate::spec_symbols::resolve_snapshot(store, spec, claim).map_err(|error| {
+                format!(
+                    "snapshot identity for '{}' is unavailable: {}",
+                    claim.name, error.reason
+                )
+            })?;
         let n = store
-            .callers_of(&claim.name, None, None)
+            .callers_of(&resolved.symbol.name, resolved.language.as_deref(), None)
             .map(|c| c.len() as u32)
             .map_err(|error| format!("caller risk for `{}` is unavailable: {error}", claim.name))?;
         total_callers = total_callers.saturating_add(n);

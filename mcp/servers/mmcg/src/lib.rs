@@ -16,6 +16,7 @@ pub mod context_doctor;
 pub mod diff;
 pub mod doctor;
 pub mod evidence;
+mod executor_claims;
 pub mod executor_report;
 pub mod fact_adapter;
 pub mod fact_signature;

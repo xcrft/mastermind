@@ -1461,6 +1461,44 @@ Without `--changed-only`, the command retains its compatibility behavior and
 walks all task specs. Bundle publication always requires a canonical
 `executor-report.md`, even if the explicit requirement flag is omitted.
 
+### Executor claim evidence
+
+`audit-spec --executor-report ... --json` includes ordered `claim_checks` with
+the complete original claim, its zero-based index, `verified`, `failed`, or
+`unresolved` status, and either evidence or a finding. An omitted field means
+claims were not evaluated; `[]` means an empty report was evaluated. Canonical
+executor input remains schema v1.
+
+`function_added` must select one exact lexical declaration before comparing a
+signature. It must also correspond to a current declaration introduced in that
+file by the baseline diff. A body edit, signature edit, or matching overload is
+insufficient. Indistinguishable parent declarations and edited overload sets
+produce `executor_claim_unresolved`; existing declarations produce
+`claimed_symbol_not_added`. Addition evidence records the file, line and exact
+baseline OID. This is not move detection across files.
+
+`integration` supports `relation: calls` (also the default). Both endpoints must
+resolve uniquely. Evidence preserves call target kind/type and requires one
+compatible indexed candidate across files in the source language; `to_file`
+cannot hide another compatible target. The result is explicitly
+`compatible_call_candidate` with `name_based_candidates` precision. It does not
+establish compiler binding, receiver type, alias resolution or a runtime call.
+Callbacks/references, unsupported relations, unresolved prefixes and ambiguous
+candidates cannot satisfy it.
+
+Changed source files and claim endpoint files must match the index content
+hashes and parse without recovery. Query failures, stale files, incomplete
+diffs, index changes, and exceeded claim/query budgets remain unresolved and
+make the audit `broken`. The same outcomes drive CI and controller postflight.
+
+Schema-v3 bundles retain their field layout and add the two finding kinds above
+to the publisher's strict whitelist. Verified/failed claim labels carry ordinal
+positions, so repeated names with different files or signatures remain separate.
+Bundle creation requires outcomes for the exact complete claim sequence;
+unchecked or substituted reports produce a broken bundle with no verified
+claims. `mmcg_queries` provides inspection entry points for verified claims,
+not an execution trace.
+
 ### Schema-v3 audit envelopes
 
 `mastermind audit-spec ... --bundle evidence.json` seals the mechanical report as canonical JSON with a manifest SHA-256 digest. A valid digest is tamper-evidence, not provenance: verification succeeds only with a complete exact repository/baseline/head/root/clean-worktree policy, a required Ed25519 signature rooted in an allowlisted non-revoked key ID, or both. `mastermind audit verify ... --integrity-only` is labelled untrusted and reports authenticity and policy as `not_evaluated`.

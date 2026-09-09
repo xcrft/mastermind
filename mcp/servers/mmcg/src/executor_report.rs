@@ -10,7 +10,7 @@ const LEGACY_END: &str = "mastermind:executor-end";
 const MAX_EXECUTOR_REPORT_BYTES: u64 = 1024 * 1024;
 
 /// A single claim an executor made in its schema-v1 structured report tail.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Claim {
     FunctionAdded {

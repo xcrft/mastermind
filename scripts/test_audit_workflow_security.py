@@ -402,6 +402,49 @@ class InlineVerifierSchemaTests(unittest.TestCase):
                 value["manifest"]["snapshot_drift"] = [finding]
                 self.assert_rejected(value)
 
+    def test_executor_unresolved_findings_validate_claim_identity_and_counts(self):
+        for claim_index, matches in ((None, None), (0, 0), (255, 2)):
+            value = self.envelope()
+            finding = {"kind": "executor_claim_unresolved", "claim_index": claim_index,
+                       "reason": "claim_checks_mismatch", "matches": matches}
+            value["manifest"]["verdict"] = "broken"
+            value["manifest"]["discrepancies"] = [finding]
+            result, _, _ = self.run_verifier(value=self.reseal(value))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for field in ("claim_index", "matches"):
+                for invalid in (True, -1, 2.5, 2 ** 64, "2"):
+                    broken = copy.deepcopy(value)
+                    broken["manifest"]["discrepancies"][0][field] = invalid
+                    self.assert_rejected(broken)
+            for field in finding:
+                broken = copy.deepcopy(value)
+                del broken["manifest"]["discrepancies"][0][field]
+                self.assert_rejected(broken)
+            broken = copy.deepcopy(value)
+            broken["manifest"]["discrepancies"][0]["extra"] = True
+            self.assert_rejected(broken)
+            value["manifest"]["snapshot_drift"] = [finding]
+            self.assert_rejected(value)
+
+    def test_executor_not_added_finding_preserves_nullable_safe_file_scope(self):
+        for file in (None, "src/service.py"):
+            value = self.envelope()
+            finding = {"kind": "claimed_symbol_not_added", "symbol": "B.run", "file": file}
+            value["manifest"]["verdict"] = "broken"
+            value["manifest"]["discrepancies"] = [finding]
+            result, _, _ = self.run_verifier(value=self.reseal(value))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for invalid in (True, "../service.py", "/service.py", r"src\service.py"):
+                broken = copy.deepcopy(value)
+                broken["manifest"]["discrepancies"][0]["file"] = invalid
+                self.assert_rejected(broken)
+            for field in finding:
+                broken = copy.deepcopy(value)
+                del broken["manifest"]["discrepancies"][0][field]
+                self.assert_rejected(broken)
+            value["manifest"]["snapshot_drift"] = [finding]
+            self.assert_rejected(value)
+
     def test_every_nested_family_rejects_added_deleted_and_wrong_type(self):
         family_paths = [
             ("manifest",),

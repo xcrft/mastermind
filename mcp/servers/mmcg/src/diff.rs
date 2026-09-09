@@ -29,7 +29,9 @@
 //!   + added-to-b, not "moved".
 
 use crate::bounded_fs::{read_regular_file, BoundedReadError, ReadControl, RootCapability};
-use crate::indexer::{extractor_for_path, parse_blob, MAX_INDEXABLE_FILE_SIZE};
+use crate::indexer::{
+    extractor_for_path, parse_baseline_blob, parse_blob, MAX_INDEXABLE_FILE_SIZE,
+};
 use crate::store::{Store, Symbol};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -160,6 +162,8 @@ struct DeclarationMatches {
     paired: Vec<(usize, usize)>,
     added: Vec<usize>,
     removed: Vec<usize>,
+    uncertain_added: BTreeSet<usize>,
+    uncertain_pairing: BTreeSet<usize>,
 }
 
 fn match_declarations(
@@ -168,26 +172,35 @@ fn match_declarations(
 ) -> Result<DeclarationMatches, &'static str> {
     let old_tree = declaration_tree(old)?;
     let new_tree = declaration_tree(new)?;
-    let mut pending = VecDeque::from([(old_tree.roots.as_slice(), new_tree.roots.as_slice())]);
+    let mut pending =
+        VecDeque::from([(old_tree.roots.as_slice(), new_tree.roots.as_slice(), false)]);
     let mut matches = DeclarationMatches::default();
-    while let Some((before, after)) = pending.pop_front() {
+    while let Some((before, after, uncertain_parent)) = pending.pop_front() {
         let siblings = match_siblings(old, new, before, after);
         for (before, after) in siblings.paired {
-            pending.push_back((&old_tree.children[before], &new_tree.children[after]));
+            pending.push_back((
+                &old_tree.children[before],
+                &new_tree.children[after],
+                uncertain_parent || siblings.uncertain_pairing.contains(&after),
+            ));
             if new[after].kind != "module" {
                 matches.paired.push((before, after));
             }
         }
         for before in siblings.removed {
-            pending.push_back((&old_tree.children[before], &[]));
+            pending.push_back((&old_tree.children[before], &[], uncertain_parent));
             if old[before].kind != "module" {
                 matches.removed.push(before);
             }
         }
         for after in siblings.added {
-            pending.push_back((&[], &new_tree.children[after]));
+            let uncertain = uncertain_parent || siblings.uncertain_added.contains(&after);
+            pending.push_back((&[], &new_tree.children[after], uncertain));
             if new[after].kind != "module" {
                 matches.added.push(after);
+                if uncertain {
+                    matches.uncertain_added.insert(after);
+                }
             }
         }
     }
@@ -222,6 +235,22 @@ fn match_siblings(
     for (mut before, mut after) in groups.into_values() {
         before.sort_by_key(|&i| (old[i].line_start, old[i].line_end));
         after.sort_by_key(|&i| (new[i].line_start, new[i].line_end));
+        let mut counts: BTreeMap<Option<&str>, (usize, usize)> = BTreeMap::new();
+        for &index in &before {
+            counts.entry(old[index].signature).or_default().0 += 1;
+        }
+        for &index in &after {
+            counts.entry(new[index].signature).or_default().1 += 1;
+        }
+        // FIFO keeps the public diff deterministic, but indistinguishable
+        // parents cannot prove which descendant was introduced.
+        if counts
+            .values()
+            .any(|&(old, new)| old > 0 && new > 0 && (old > 1 || new > 1))
+        {
+            matches.uncertain_pairing.extend(after.iter().copied());
+            matches.uncertain_added.extend(after.iter().copied());
+        }
         let mut by_signature: BTreeMap<Option<&str>, VecDeque<usize>> = BTreeMap::new();
         for index in before {
             by_signature
@@ -246,6 +275,11 @@ fn match_siblings(
         } else {
             // Multiple edited overloads cannot be paired reliably. Retain every
             // declaration as added/removed instead of selecting a first match.
+            if !unmatched_old.is_empty() {
+                matches
+                    .uncertain_added
+                    .extend(unmatched_new.iter().copied());
+            }
             matches.removed.extend(unmatched_old);
             matches.added.extend(unmatched_new);
         }
@@ -680,21 +714,38 @@ pub(crate) fn symbols_changed_in_worktree_controlled(
     deadline: Option<Instant>,
     interrupted: Option<&dyn Fn() -> bool>,
 ) -> Result<WorkingTreeSymbolDiff, WorkingTreeDiffError> {
-    symbols_changed_in_worktree_with_removals(store, repo_root, git_ref, deadline, interrupted)
-        .map(|(diff, _)| diff)
+    symbols_changed_in_worktree_with_declarations(
+        store,
+        repo_root,
+        git_ref,
+        deadline,
+        interrupted,
+        false,
+    )
+    .map(|(diff, _)| diff)
 }
 
 /// Baseline parser ordinals retain identity even when declarations share a
 /// file, line, name and signature. This sidecar is not part of the public diff.
 pub(crate) type RemovedDeclarations = BTreeMap<String, Vec<usize>>;
 
-pub(crate) fn symbols_changed_in_worktree_with_removals(
+#[derive(Default)]
+pub(crate) struct DeclarationChanges {
+    pub removed: RemovedDeclarations,
+    pub added: BTreeSet<i64>,
+    pub uncertain_added: BTreeSet<i64>,
+    pub unavailable_additions: BTreeMap<String, &'static str>,
+    pub current_files: BTreeSet<String>,
+}
+
+pub(crate) fn symbols_changed_in_worktree_with_declarations(
     store: &Store,
     repo_root: &Path,
     git_ref: &str,
     deadline: Option<Instant>,
     interrupted: Option<&dyn Fn() -> bool>,
-) -> Result<(WorkingTreeSymbolDiff, RemovedDeclarations), WorkingTreeDiffError> {
+    prove_additions: bool,
+) -> Result<(WorkingTreeSymbolDiff, DeclarationChanges), WorkingTreeDiffError> {
     let baseline_oid = resolve_commit_controlled(repo_root, git_ref, deadline, interrupted)?;
     let head_oid = resolve_head_controlled(repo_root, deadline, interrupted)?;
     let (files, files_total, files_truncated, skipped_non_utf8_paths) =
@@ -731,7 +782,7 @@ pub(crate) fn symbols_changed_in_worktree_with_removals(
     let mut signature_changed = Vec::new();
     let mut body_changed = Vec::new();
     let mut errors = Vec::new();
-    let mut removed_declarations = BTreeMap::new();
+    let mut declarations = DeclarationChanges::default();
 
     for file in &files {
         let rel = &file.path;
@@ -746,6 +797,9 @@ pub(crate) fn symbols_changed_in_worktree_with_removals(
             _ => Vec::new(),
         };
 
+        if file.status != "deleted" && extractor_for_path(Path::new(rel)).is_some() {
+            declarations.current_files.insert(rel.clone());
+        }
         let old_declarations = pending_declarations(&old_symbols);
         let new_declarations =
             indexed_declarations(&new_symbols).map_err(|_| WorkingTreeDiffError::IndexStale)?;
@@ -753,7 +807,16 @@ pub(crate) fn symbols_changed_in_worktree_with_removals(
             .map_err(|_| WorkingTreeDiffError::IndexStale)?;
         let per_file = compare_declarations(rel, &old_declarations, &new_declarations, &matches);
         if !matches.removed.is_empty() {
-            removed_declarations.insert(rel.clone(), matches.removed.clone());
+            declarations
+                .removed
+                .insert(rel.clone(), matches.removed.clone());
+        }
+        for &index in &matches.added {
+            if matches.uncertain_added.contains(&index) {
+                declarations.uncertain_added.insert(new_symbols[index].id);
+            } else {
+                declarations.added.insert(new_symbols[index].id);
+            }
         }
         added.extend(per_file.added);
         removed.extend(per_file.removed);
@@ -778,6 +841,27 @@ pub(crate) fn symbols_changed_in_worktree_with_removals(
                 .bytes,
             )
         };
+        if prove_additions && !matches.added.is_empty() {
+            if let Some(extractor) = extractor_for_path(Path::new(rel)) {
+                for (bytes, reason) in [
+                    (old_blob, "baseline_parse_failed"),
+                    (current_bytes.as_deref(), "current_parse_failed"),
+                ] {
+                    if bytes.is_some_and(|bytes| {
+                        parse_baseline_blob(rel, bytes, extractor.as_ref()).is_err()
+                    }) {
+                        declarations
+                            .unavailable_additions
+                            .insert(rel.clone(), reason);
+                        break;
+                    }
+                }
+            } else {
+                declarations
+                    .unavailable_additions
+                    .insert(rel.clone(), "addition_language_unavailable");
+            }
+        }
         let (selected_old, selected_new) = match (old_blob, current_bytes.as_deref()) {
             (Some(old), Some(current)) => {
                 deepest_changed_declarations(old, current, &old_declarations, &new_declarations)
@@ -839,7 +923,7 @@ pub(crate) fn symbols_changed_in_worktree_with_removals(
             body_changed,
             snapshot_token,
         },
-        removed_declarations,
+        declarations,
     ))
 }
 

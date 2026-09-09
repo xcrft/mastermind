@@ -2069,6 +2069,21 @@ pub struct PendingEdge {
     pub line: u32,
 }
 
+#[derive(Debug)]
+pub(crate) struct CallWitness {
+    pub line: u32,
+    pub to_path: Option<String>,
+    pub to_type: Option<String>,
+    pub target_kind: Option<String>,
+    pub match_basis: &'static str,
+}
+
+pub(crate) enum CallCandidateEvidence {
+    Unique(CallWitness),
+    Missing,
+    Unresolved(&'static str),
+}
+
 pub struct Store {
     conn: Connection,
     _snapshot_dir: Option<tempfile::TempDir>,
@@ -5032,6 +5047,175 @@ impl Store {
             Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?))
         })?;
         rows.collect()
+    }
+
+    pub(crate) fn symbol_language(&self, id: i64) -> SqlResult<String> {
+        self.conn
+            .query_row("SELECT language FROM symbols WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+    }
+
+    /// A unique compatible indexed candidate, not compiler or runtime binding.
+    /// Explicit target scope cannot discard compatible definitions in other files.
+    pub(crate) fn call_candidate_evidence(
+        &self,
+        from: &Symbol,
+        selected: &Symbol,
+        language: &str,
+    ) -> SqlResult<CallCandidateEvidence> {
+        const EDGE_LIMIT: usize = 128;
+        struct Call {
+            to_id: Option<i64>,
+            name: String,
+            line: u32,
+            path: Option<String>,
+            prefix: Option<String>,
+            kind: Option<String>,
+        }
+        let mut edges = self.conn.prepare(
+            "SELECT to_id, to_name, line, to_path, to_type, target_kind FROM edges
+             WHERE from_id = ?1 AND kind = 'calls' AND (to_name = ?2 OR to_type = ?2)
+             ORDER BY line, id LIMIT ?3",
+        )?;
+        let calls = edges
+            .query_map(params![from.id, selected.name, EDGE_LIMIT + 1], |row| {
+                Ok(Call {
+                    to_id: row.get(0)?,
+                    name: row.get(1)?,
+                    line: row.get(2)?,
+                    path: row.get(3)?,
+                    prefix: row.get(4)?,
+                    kind: row.get(5)?,
+                })
+            })?
+            .collect::<SqlResult<Vec<_>>>()?;
+        const TARGET_LIMIT: usize = 128;
+        let mut candidates = self.conn.prepare(&format!(
+            "WITH e(to_id, to_name, to_type, target_kind) AS (VALUES (?1, ?2, ?3, ?4))
+             SELECT target.id, target.kind, target.file_path, target.parent_id
+             FROM e JOIN symbols target ON target.name = ?5 AND target.language = ?6
+             WHERE target.kind NOT IN ('module', 'impl')
+               AND (e.to_id IS NULL OR target.id = e.to_id)
+               AND ((?7 = 'name' AND e.to_name = target.name AND ({EDGE_NAME_MATCH_SQL}))
+                    OR (?7 = 'type' AND e.to_type = target.name AND ({EDGE_TYPE_MATCH_SQL})))
+             ORDER BY target.id LIMIT ?8"
+        ))?;
+        let mut parent_query = self
+            .conn
+            .prepare("SELECT name, file_path, parent_id FROM symbols WHERE id = ?1")?;
+        let mut unresolved = None;
+        for call in calls.iter().take(EDGE_LIMIT) {
+            let basis = if call.name == selected.name {
+                "name"
+            } else {
+                "type"
+            };
+            let scoped = basis == "name" && call.kind.as_deref() == Some("scoped");
+            if scoped
+                && matches!(
+                    call.prefix.as_deref(),
+                    None | Some("" | "crate" | "self" | "super" | "Self")
+                )
+            {
+                unresolved = Some("call_target_scope_unresolved");
+                continue;
+            }
+            let targets = candidates
+                .query_map(
+                    params![
+                        call.to_id,
+                        call.name,
+                        call.prefix,
+                        call.kind,
+                        selected.name,
+                        language,
+                        basis,
+                        TARGET_LIMIT + 1
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<i64>>(3)?,
+                        ))
+                    },
+                )?
+                .collect::<SqlResult<Vec<_>>>()?;
+            if targets.len() > TARGET_LIMIT {
+                unresolved = Some("call_target_limit");
+                continue;
+            }
+            let mut ids = Vec::new();
+            let mut malformed = false;
+            for (id, kind, file, parent) in targets {
+                // Validate ancestry before narrowing by a prefix. Corruption
+                // must not hide a competing method and manufacture uniqueness.
+                if language == "rust" && kind == "method" && parent.is_none() {
+                    malformed = true;
+                    break;
+                }
+                let mut current = parent;
+                let mut seen = HashSet::from([id]);
+                let mut immediate_name = None;
+                while let Some(parent_id) = current {
+                    if seen.len() >= 64 || !seen.insert(parent_id) {
+                        malformed = true;
+                        break;
+                    }
+                    let row = parent_query
+                        .query_row([parent_id], |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, Option<i64>>(2)?,
+                            ))
+                        })
+                        .optional()?;
+                    let Some((name, parent_file, next)) = row else {
+                        malformed = true;
+                        break;
+                    };
+                    if parent_file != file {
+                        malformed = true;
+                        break;
+                    }
+                    if immediate_name.is_none() {
+                        immediate_name = Some(name);
+                    }
+                    current = next;
+                }
+                if malformed {
+                    break;
+                }
+                if !scoped || immediate_name.as_deref() == call.prefix.as_deref() {
+                    ids.push(id);
+                }
+            }
+            if malformed {
+                unresolved = Some("call_target_parent_invalid");
+            } else if ids.len() > 1 {
+                unresolved = Some("call_target_ambiguous");
+            } else if ids.first().is_some_and(|id| *id == selected.id) {
+                return Ok(CallCandidateEvidence::Unique(CallWitness {
+                    line: call.line,
+                    to_path: call.path.clone(),
+                    to_type: call.prefix.clone(),
+                    target_kind: call.kind.clone(),
+                    match_basis: basis,
+                }));
+            } else if scoped || !ids.is_empty() {
+                unresolved = Some("call_target_scope_unresolved");
+            }
+        }
+        if calls.len() > EDGE_LIMIT {
+            unresolved = Some("call_candidate_limit");
+        }
+        Ok(match unresolved {
+            Some(reason) => CallCandidateEvidence::Unresolved(reason),
+            None => CallCandidateEvidence::Missing,
+        })
     }
 
     /// Transitive calls and syntactic references up to `max_depth` for seed names — the

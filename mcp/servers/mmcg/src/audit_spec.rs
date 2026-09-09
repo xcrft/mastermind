@@ -27,6 +27,9 @@
 //! deliberately out of scope for v1.
 
 use crate::diff::{self, DiffError, SymbolDiff};
+use crate::executor_claims;
+pub use crate::executor_claims::{ClaimCheck, ClaimEvidence, ClaimStatus};
+use crate::executor_report::{Claim, ExecutorReport};
 use crate::spec::{ParsedSpec, SymbolClaim};
 use crate::spec_removals;
 use crate::spec_symbols::{self, Resolved, Scope, Unresolved};
@@ -99,8 +102,18 @@ pub enum Finding {
         symbol: String,
         file: Option<String>,
     },
-    /// Executor claimed X calls existing Y but Y has no definition anywhere in
-    /// the index — Y was hallucinated.
+    /// The selected current declaration was not introduced by this diff.
+    ClaimedSymbolNotAdded {
+        symbol: String,
+        file: Option<String>,
+    },
+    /// A claim could not be checked with complete, unambiguous evidence.
+    ExecutorClaimUnresolved {
+        claim_index: Option<usize>,
+        reason: String,
+        matches: Option<usize>,
+    },
+    /// The integration claim has no matching target definition in its scope.
     HallucinatedSymbol {
         from_symbol: String,
         to_symbol: String,
@@ -142,6 +155,9 @@ pub struct Report {
     /// Raw symbol-level diff of baseline → working tree — pasted in so the LLM
     /// auditor has full context for semantic judgment.
     pub symbol_diff: Option<SymbolDiff>,
+    /// None means executor claims were not evaluated; Some([]) is an evaluated empty list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claim_checks: Option<Vec<ClaimCheck>>,
 }
 
 impl Report {
@@ -172,6 +188,8 @@ impl Report {
                 | Finding::RemovedSymbolNotAcknowledged { .. }
                 | Finding::RemovalAcknowledgementUnresolved { .. }
                 | Finding::ClaimedSymbolMissing { .. }
+                | Finding::ClaimedSymbolNotAdded { .. }
+                | Finding::ExecutorClaimUnresolved { .. }
                 | Finding::HallucinatedSymbol { .. }
                 | Finding::MissingCallEdge { .. }
                 | Finding::ClaimedSignatureMismatch { .. }
@@ -264,17 +282,37 @@ fn render_finding(f: &Finding) -> String {
                 .unwrap_or_default();
             format!("claimed_symbol_missing: executor claimed they added `{symbol}`{loc} but it has no definition in the index")
         }
+        Finding::ClaimedSymbolNotAdded { symbol, file } => {
+            let location = file
+                .as_deref()
+                .map(|file| format!(" in {file}"))
+                .unwrap_or_default();
+            format!("claimed_symbol_not_added: {symbol}{location} was not introduced by this diff")
+        }
+        Finding::ExecutorClaimUnresolved {
+            claim_index,
+            reason,
+            matches,
+        } => {
+            let claim = claim_index
+                .map(|index| format!("claim {}", index + 1))
+                .unwrap_or_else(|| "executor report".into());
+            let count = matches
+                .map(|count| format!(" ({count} matching declarations)"))
+                .unwrap_or_default();
+            format!("executor_claim_unresolved: {claim}: {reason}{count}")
+        }
         Finding::HallucinatedSymbol {
             from_symbol,
             to_symbol,
         } => {
-            format!("hallucinated_symbol: executor claimed `{from_symbol}` calls existing `{to_symbol}` but `{to_symbol}` has no definition in the index — it was hallucinated")
+            format!("hallucinated_symbol: executor claimed `{from_symbol}` calls `{to_symbol}` but no target definition matches the claimed scope in the index")
         }
         Finding::MissingCallEdge {
             from_symbol,
             to_symbol,
         } => {
-            format!("missing_call_edge: executor claimed `{from_symbol}` calls `{to_symbol}` but no call edge from `{from_symbol}` to `{to_symbol}` exists in the index")
+            format!("missing_call_edge: no compatible call candidate connects the selected `{from_symbol}` and `{to_symbol}` declarations in the index")
         }
         Finding::VacuousTestClaim { cmd, reason } => {
             format!("vacuous_test_claim: `{cmd}` claimed passed but {reason}")
@@ -317,7 +355,7 @@ pub fn run(
     repo_root: &Path,
     git_ref: &str,
 ) -> Result<Report, DiffError> {
-    run_internal(spec, store, repo_root, git_ref, false).map(|(report, _)| report)
+    run_internal(spec, store, repo_root, git_ref, false, None).map(|(report, _)| report)
 }
 
 fn run_internal(
@@ -326,6 +364,7 @@ fn run_internal(
     repo_root: &Path,
     git_ref: &str,
     verify_postflight: bool,
+    executor_report: Option<&ExecutorReport>,
 ) -> Result<(Report, Option<crate::verify_spec::Report>), DiffError> {
     // Worktree-scoped, not `<ref>..HEAD` — post-flight audits work that has not
     // been committed yet. See the module header.
@@ -333,22 +372,30 @@ fn run_internal(
     let index_version = store
         .data_version()
         .map_err(|_| DiffError::GitFailed("index_version_unavailable".into()))?;
-    if spec
-        .frontmatter
-        .as_ref()
-        .is_some_and(|frontmatter| !frontmatter.breaking_changes.removed_symbols.is_empty())
+    let has_claims = executor_report.is_some_and(|report| !report.claims.is_empty());
+    if (has_claims
+        || spec
+            .frontmatter
+            .as_ref()
+            .is_some_and(|frontmatter| !frontmatter.breaking_changes.removed_symbols.is_empty()))
         && !store
             .extractor_contract_current()
             .map_err(|_| DiffError::GitFailed("index_stale".into()))?
     {
         return Err(DiffError::GitFailed("index_stale".into()));
     }
-    let (worktree, removed) = diff::symbols_changed_in_worktree_with_removals(
+    let (worktree, declarations) = diff::symbols_changed_in_worktree_with_declarations(
         store,
         repo_root,
         git_ref,
         Some(deadline),
         None,
+        executor_report.is_some_and(|report| {
+            report
+                .claims
+                .iter()
+                .any(|claim| matches!(claim, Claim::FunctionAdded { .. }))
+        }),
     )
     .map_err(|error| diff::worktree_scope_error(git_ref, error))?;
     let symbol_diff = &worktree.diff;
@@ -357,7 +404,7 @@ fn run_internal(
         spec,
         repo_root,
         &worktree.baseline_oid,
-        &removed,
+        &declarations.removed,
         deadline,
         !worktree.files_truncated
             && worktree.skipped_non_utf8_paths == 0
@@ -539,7 +586,25 @@ fn run_internal(
             &deleted_files,
         )
     });
-    if removal_plan.is_some() {
+    let claim_checks = executor_report.map(|report| {
+        let checks = executor_claims::evaluate(
+            report,
+            &executor_claims::Context {
+                store,
+                changes: &declarations,
+                repo_root,
+                baseline_oid: &worktree.baseline_oid,
+                complete: !worktree.files_truncated
+                    && worktree.skipped_non_utf8_paths == 0
+                    && symbol_diff.errors.is_empty(),
+                deadline,
+            },
+        );
+        findings.extend(checks.iter().filter_map(|check| check.finding.clone()));
+        check_vacuous_tests(report, repo_root, &mut findings);
+        checks
+    });
+    if removal_plan.is_some() || has_claims {
         diff::validate_working_tree_snapshot_controlled(
             repo_root,
             &worktree.baseline_oid,
@@ -566,6 +631,7 @@ fn run_internal(
             verdict,
             findings,
             symbol_diff: Some(worktree.diff),
+            claim_checks,
         },
         verification,
     ))
@@ -580,20 +646,16 @@ pub fn run_ci_with_report(
     git_ref: &str,
     executor_report: Option<&crate::executor_report::ExecutorReport>,
 ) -> Result<(crate::verify_spec::Report, Report), DiffError> {
-    let (mut report, verification) = run_internal(spec, store, repo_root, git_ref, true)?;
-    if let Some(executor_report) = executor_report {
-        check_executor_claims(executor_report, store, &mut report.findings);
-        check_vacuous_tests(executor_report, repo_root, &mut report.findings);
-        report.verdict = compute_verdict(&report.findings);
-    }
+    let (report, verification) =
+        run_internal(spec, store, repo_root, git_ref, true, executor_report)?;
     Ok((verification.expect("CI verification requested"), report))
 }
 
 /// Run Phase A checks + executor-report mechanical checks.
 ///
 /// `executor_report == None` is equivalent to `run()`. When present, adds:
-///  - Integration-claim verifier (2.2): hallucinated symbol, missing call edge
-///  - Symbol-add verifier (2.1): claimed symbol not in index
+///  - Per-claim declaration-addition and compatible-call-candidate evidence
+///  - Unresolved outcomes for stale, ambiguous or unavailable source evidence
 ///  - Vacuous test detector (2.3): test command claimed passed, no test files
 pub fn run_with_report(
     spec: &ParsedSpec,
@@ -602,117 +664,35 @@ pub fn run_with_report(
     git_ref: &str,
     executor_report: Option<&crate::executor_report::ExecutorReport>,
 ) -> Result<Report, DiffError> {
-    let mut report = run(spec, store, repo_root, git_ref)?;
-
-    if let Some(er) = executor_report {
-        check_executor_claims(er, store, &mut report.findings);
-        check_vacuous_tests(er, repo_root, &mut report.findings);
-        report.verdict = compute_verdict(&report.findings);
-    }
-
-    Ok(report)
+    run_internal(spec, store, repo_root, git_ref, false, executor_report).map(|(report, _)| report)
 }
 
 fn norm_path(p: &str) -> String {
     p.replace('\\', "/").trim_start_matches("./").to_string()
 }
 
-fn norm_paths_eq(stored: &str, claimed: &str) -> bool {
-    norm_path(stored) == norm_path(claimed)
-}
-
-fn check_executor_claims(
-    er: &crate::executor_report::ExecutorReport,
-    store: &Store,
-    findings: &mut Vec<Finding>,
-) {
-    use crate::executor_report::Claim;
-
-    for claim in &er.claims {
-        match claim {
-            Claim::FunctionAdded {
-                symbol,
-                file,
-                signature,
-            } => {
-                let all_hits = store.search_symbols(symbol, None, None).unwrap_or_default();
-                let hits: Vec<_> = if let Some(f) = file {
-                    all_hits
-                        .into_iter()
-                        .filter(|s| norm_paths_eq(&s.file_path, f))
-                        .collect()
-                } else {
-                    all_hits
-                };
-                if hits.is_empty() {
-                    findings.push(Finding::ClaimedSymbolMissing {
-                        symbol: symbol.clone(),
-                        file: file.clone(),
-                    });
-                    continue;
-                }
-                if let Some(claimed_sig) = signature {
-                    let any_match = hits
-                        .iter()
-                        .any(|s| s.signature.as_deref() == Some(claimed_sig.as_str()));
-                    if !any_match {
-                        findings.push(Finding::ClaimedSignatureMismatch {
-                            symbol: symbol.clone(),
-                            file: file.clone(),
-                            claimed: claimed_sig.clone(),
-                            actual: hits.first().and_then(|s| s.signature.clone()),
-                        });
-                    }
-                }
-            }
-            Claim::Integration {
-                from,
-                from_file,
-                to,
-                to_file,
-                ..
-            } => {
-                let all_to_hits = store.search_symbols(to, None, None).unwrap_or_default();
-                let to_hits: Vec<_> = if let Some(tf) = to_file {
-                    all_to_hits
-                        .into_iter()
-                        .filter(|s| norm_paths_eq(&s.file_path, tf))
-                        .collect()
-                } else {
-                    all_to_hits
-                };
-                if to_hits.is_empty() {
-                    findings.push(Finding::HallucinatedSymbol {
-                        from_symbol: from.clone(),
-                        to_symbol: to.clone(),
-                    });
-                    continue;
-                }
-                let all_from = store.search_symbols(from, None, None).unwrap_or_default();
-                let from_syms: Vec<_> = if let Some(ff) = from_file {
-                    all_from
-                        .into_iter()
-                        .filter(|s| norm_paths_eq(&s.file_path, ff))
-                        .collect()
-                } else {
-                    all_from
-                };
-                let call_exists = from_syms.iter().any(|s| {
-                    store
-                        .callees_of(s.id, None)
-                        .unwrap_or_default()
-                        .iter()
-                        .any(|(name, _)| name == to)
-                });
-                if !call_exists {
-                    findings.push(Finding::MissingCallEdge {
-                        from_symbol: from.clone(),
-                        to_symbol: to.clone(),
-                    });
-                }
-            }
+fn claim_label(index: usize, claim: &Claim) -> String {
+    let scoped = |name: &str, file: Option<&str>| {
+        file.map(|file| format!("{name}@{}", norm_path(file)))
+            .unwrap_or_else(|| name.into())
+    };
+    let label = match claim {
+        Claim::FunctionAdded { symbol, file, .. } => {
+            format!("function_added:{}", scoped(symbol, file.as_deref()))
         }
-    }
+        Claim::Integration {
+            from,
+            from_file,
+            to,
+            to_file,
+            ..
+        } => format!(
+            "integration_candidate:{}→{}",
+            scoped(from, from_file.as_deref()),
+            scoped(to, to_file.as_deref()),
+        ),
+    };
+    format!("claim[{}] {label}", index + 1)
 }
 
 fn check_vacuous_tests(
@@ -966,7 +946,7 @@ pub struct Bundle {
     pub verified_claims: Vec<String>,
     /// Executor claims that failed at least one mechanical check.
     pub failed_claims: Vec<String>,
-    /// Logical mmcg queries issued during the audit (human inspection).
+    /// Query entry points for inspecting verified claims, not an execution trace.
     pub mmcg_queries: Vec<String>,
     /// Verify commands extracted from the executor report.
     pub commands: Vec<String>,
@@ -1039,85 +1019,75 @@ impl Bundle {
         let mut verified_claims: Vec<String> = Vec::new();
         let mut failed_claims: Vec<String> = Vec::new();
 
-        if let Some(er) = executor_report {
-            use crate::executor_report::Claim;
-            for claim in &er.claims {
-                match claim {
-                    Claim::FunctionAdded { symbol, file, .. } => {
-                        let q = format!("mmcg_search {symbol}");
-                        if !mmcg_queries.contains(&q) {
-                            mmcg_queries.push(q);
-                        }
-                        let norm_file = file.as_deref().map(norm_path);
-                        let label = norm_file
-                            .as_deref()
-                            .map(|f| format!("function_added:{symbol}@{f}"))
-                            .unwrap_or_else(|| format!("function_added:{symbol}"));
-                        let failed = report.findings.iter().any(|f| match f {
-                            Finding::ClaimedSymbolMissing {
-                                symbol: s,
-                                file: ff,
-                            } => s == symbol && norm_file == ff.as_deref().map(norm_path),
-                            Finding::ClaimedSignatureMismatch {
-                                symbol: s,
-                                file: ff,
-                                ..
-                            } => s == symbol && norm_file == ff.as_deref().map(norm_path),
-                            _ => false,
-                        });
-                        if failed {
-                            failed_claims.push(label);
-                        } else {
-                            verified_claims.push(label);
-                        }
-                    }
-                    Claim::Integration {
-                        from,
-                        from_file,
-                        to,
-                        to_file,
-                        ..
-                    } => {
-                        for name in [to.as_str(), from.as_str()] {
-                            let q = format!("mmcg_search {name}");
-                            if !mmcg_queries.contains(&q) {
-                                mmcg_queries.push(q);
-                            }
-                        }
-                        let callees_q = format!("mmcg_callees {from}");
-                        if !mmcg_queries.contains(&callees_q) {
-                            mmcg_queries.push(callees_q);
-                        }
-                        let norm_ff = from_file.as_deref().map(norm_path);
-                        let norm_tf = to_file.as_deref().map(norm_path);
-                        let label = match (norm_ff.as_deref(), norm_tf.as_deref()) {
-                            (Some(ff), Some(tf)) => {
-                                format!("integration:{from}@{ff}→{to}@{tf}")
-                            }
-                            (Some(ff), None) => format!("integration:{from}@{ff}→{to}"),
-                            (None, Some(tf)) => format!("integration:{from}→{to}@{tf}"),
-                            (None, None) => format!("integration:{from}→{to}"),
-                        };
-                        let failed = report.findings.iter().any(|f| match f {
-                            Finding::HallucinatedSymbol {
-                                from_symbol: fs,
-                                to_symbol: ts,
-                            } => fs == from && ts == to,
-                            Finding::MissingCallEdge {
-                                from_symbol: fs,
-                                to_symbol: ts,
-                            } => fs == from && ts == to,
-                            _ => false,
-                        });
-                        if failed {
-                            failed_claims.push(label);
-                        } else {
-                            verified_claims.push(label);
-                        }
+        let mut discrepancies = report.findings.clone();
+        let claims: Vec<_> = match executor_report {
+            Some(executor) => executor.claims.iter().collect(),
+            None => report
+                .claim_checks
+                .iter()
+                .flatten()
+                .map(|check| &check.claim)
+                .collect(),
+        };
+        let checks_match = report.claim_checks.as_ref().is_some_and(|checks| {
+            checks.len() == claims.len()
+                && checks
+                    .iter()
+                    .zip(&claims)
+                    .enumerate()
+                    .all(|(index, (check, claim))| {
+                        check.claim_index == index && check.claim == **claim
+                    })
+        });
+        let binding_failed =
+            !checks_match && (executor_report.is_some() || report.claim_checks.is_some());
+        if binding_failed {
+            discrepancies.push(Finding::ExecutorClaimUnresolved {
+                claim_index: None,
+                reason: if report.claim_checks.is_none() {
+                    "claims_not_evaluated"
+                } else {
+                    "claim_checks_mismatch"
+                }
+                .into(),
+                matches: None,
+            });
+        }
+        for (index, claim) in claims.iter().enumerate() {
+            let label = claim_label(index, claim);
+            let checked =
+                checks_match.then(|| &report.claim_checks.as_ref().expect("checked claims")[index]);
+            let verified = checked.is_some_and(|check| {
+                check.status == ClaimStatus::Verified
+                    && check.evidence.is_some()
+                    && check.finding.is_none()
+            });
+            if verified {
+                verified_claims.push(label);
+            } else {
+                failed_claims.push(label);
+            }
+            let queries = match claim {
+                Claim::FunctionAdded { symbol, .. } => vec![format!("mmcg_search {symbol}")],
+                Claim::Integration { from, to, .. } => vec![
+                    format!("mmcg_search {from}"),
+                    format!("mmcg_search {to}"),
+                    format!("mmcg_callees {from}"),
+                ],
+            };
+            if verified {
+                for query in queries {
+                    if !mmcg_queries.contains(&query) {
+                        mmcg_queries.push(query);
                     }
                 }
             }
         }
+        let verdict = if binding_failed || !failed_claims.is_empty() {
+            Verdict::Broken
+        } else {
+            report.verdict
+        };
 
         let commands: Vec<String> = executor_report
             .map(|er| er.verify.iter().map(|v| v.cmd.clone()).collect())
@@ -1125,10 +1095,11 @@ impl Bundle {
 
         let head = resolve_head_sha(root);
 
-        let human_summary = build_human_summary(report, &failed_claims, &verified_claims);
+        let human_summary =
+            build_human_summary(verdict, &discrepancies, &failed_claims, &verified_claims);
 
         Self {
-            verdict: format!("{:?}", report.verdict).to_lowercase(),
+            verdict: format!("{verdict:?}").to_lowercase(),
             spec: report.spec.clone(),
             baseline: report.git_ref.clone(),
             head,
@@ -1140,7 +1111,7 @@ impl Bundle {
             mmcg_queries,
             commands,
             human_summary,
-            discrepancies: report.findings.clone(),
+            discrepancies,
             snapshot_drift,
             git_ref: report.git_ref.clone(),
             executor_report_path: executor_report_path.map(str::to_string),
@@ -1408,19 +1379,17 @@ fn resolve_head_sha(root: Option<&Path>) -> String {
 }
 
 fn build_human_summary(
-    report: &Report,
+    verdict: Verdict,
+    findings: &[Finding],
     failed_claims: &[String],
     verified_claims: &[String],
 ) -> String {
-    let verdict_str = match report.verdict {
+    let verdict_str = match verdict {
         Verdict::Held => "HELD",
         Verdict::Drift => "DRIFT",
         Verdict::Broken => "BROKEN",
     };
-    let n_findings = report.findings.len();
-    if n_findings == 0 {
-        return format!("Mastermind audit: {verdict_str} — all checks passed");
-    }
+    let n_findings = findings.len();
     if !failed_claims.is_empty() {
         return format!(
             "Mastermind audit: {verdict_str} — {} claim(s) failed, {} passed",
@@ -1428,10 +1397,12 @@ fn build_human_summary(
             verified_claims.len()
         );
     }
+    if n_findings == 0 {
+        return format!("Mastermind audit: {verdict_str} — all checks passed");
+    }
     format!(
         "Mastermind audit: {verdict_str} — {n_findings} finding(s) ({} errors, {} warnings)",
-        report
-            .findings
+        findings
             .iter()
             .filter(|f| matches!(
                 f,
@@ -1440,6 +1411,8 @@ fn build_human_summary(
                     | Finding::RemovedSymbolNotAcknowledged { .. }
                     | Finding::RemovalAcknowledgementUnresolved { .. }
                     | Finding::ClaimedSymbolMissing { .. }
+                    | Finding::ClaimedSymbolNotAdded { .. }
+                    | Finding::ExecutorClaimUnresolved { .. }
                     | Finding::HallucinatedSymbol { .. }
                     | Finding::MissingCallEdge { .. }
                     | Finding::ClaimedSignatureMismatch { .. }
@@ -1447,8 +1420,7 @@ fn build_human_summary(
                     | Finding::ObservedZeroTests { .. }
             ))
             .count(),
-        report
-            .findings
+        findings
             .iter()
             .filter(|f| !matches!(
                 f,
@@ -1457,6 +1429,8 @@ fn build_human_summary(
                     | Finding::RemovedSymbolNotAcknowledged { .. }
                     | Finding::RemovalAcknowledgementUnresolved { .. }
                     | Finding::ClaimedSymbolMissing { .. }
+                    | Finding::ClaimedSymbolNotAdded { .. }
+                    | Finding::ExecutorClaimUnresolved { .. }
                     | Finding::HallucinatedSymbol { .. }
                     | Finding::MissingCallEdge { .. }
                     | Finding::ClaimedSignatureMismatch { .. }
@@ -1564,6 +1538,8 @@ fn compute_verdict(findings: &[Finding]) -> Verdict {
                 | Finding::RemovedSymbolNotAcknowledged { .. }
                 | Finding::RemovalAcknowledgementUnresolved { .. }
                 | Finding::ClaimedSymbolMissing { .. }
+                | Finding::ClaimedSymbolNotAdded { .. }
+                | Finding::ExecutorClaimUnresolved { .. }
                 | Finding::HallucinatedSymbol { .. }
                 | Finding::MissingCallEdge { .. }
                 | Finding::ClaimedSignatureMismatch { .. }
@@ -1714,6 +1690,7 @@ mod tests {
             verdict: Verdict::Held,
             findings: Vec::new(),
             symbol_diff: None,
+            claim_checks: None,
         };
 
         let value = serde_json::to_value(Bundle::from_report(&report, None)).unwrap();
@@ -2078,9 +2055,9 @@ breaking_changes:
         assert_eq!(norm_path("src/foo.ts"), "src/foo.ts");
         assert_eq!(norm_path(r"src\foo.ts"), "src/foo.ts");
         assert_eq!(norm_path(r".\src\foo.ts"), "src/foo.ts");
-        assert!(norm_paths_eq("./src/foo.ts", "src/foo.ts"));
-        assert!(norm_paths_eq(r"src\foo.ts", "src/foo.ts"));
-        assert!(!norm_paths_eq("src/foo.ts", "src/bar.ts"));
+        assert_eq!(norm_path("./src/foo.ts"), norm_path("src/foo.ts"));
+        assert_eq!(norm_path(r"src\foo.ts"), norm_path("src/foo.ts"));
+        assert_ne!(norm_path("src/foo.ts"), norm_path("src/bar.ts"));
     }
 
     #[test]
@@ -2242,14 +2219,30 @@ breaking_changes:
             verify: vec![],
         };
 
-        let mut findings = Vec::new();
-        check_executor_claims(&er, &store, &mut findings);
+        let checks = executor_claims::evaluate(
+            &er,
+            &executor_claims::Context {
+                store: &store,
+                changes: &diff::DeclarationChanges::default(),
+                repo_root: &dir,
+                baseline_oid: "baseline",
+                complete: true,
+                deadline: Instant::now() + std::time::Duration::from_secs(10),
+            },
+        );
+        let findings: Vec<_> = checks
+            .into_iter()
+            .filter_map(|check| check.finding)
+            .collect();
         assert!(
             !findings
                 .iter()
                 .any(|f| matches!(f, Finding::ClaimedSymbolMissing { .. })),
             "./src/checkout.go claim should match stored src/checkout.go"
         );
+        assert!(findings
+            .iter()
+            .any(|finding| matches!(finding, Finding::ClaimedSymbolNotAdded { .. })));
         fs::remove_dir_all(&dir).ok();
     }
 

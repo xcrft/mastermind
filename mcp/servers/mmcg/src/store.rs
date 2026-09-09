@@ -5079,16 +5079,19 @@ impl Store {
              ORDER BY line, id LIMIT ?3",
         )?;
         let calls = edges
-            .query_map(params![from.id, selected.name, EDGE_LIMIT + 1], |row| {
-                Ok(Call {
-                    to_id: row.get(0)?,
-                    name: row.get(1)?,
-                    line: row.get(2)?,
-                    path: row.get(3)?,
-                    prefix: row.get(4)?,
-                    kind: row.get(5)?,
-                })
-            })?
+            .query_map(
+                params![from.id, selected.name, (EDGE_LIMIT + 1) as i64],
+                |row| {
+                    Ok(Call {
+                        to_id: row.get(0)?,
+                        name: row.get(1)?,
+                        line: row.get(2)?,
+                        path: row.get(3)?,
+                        prefix: row.get(4)?,
+                        kind: row.get(5)?,
+                    })
+                },
+            )?
             .collect::<SqlResult<Vec<_>>>()?;
         const TARGET_LIMIT: usize = 128;
         let mut candidates = self.conn.prepare(&format!(
@@ -5131,7 +5134,7 @@ impl Store {
                         selected.name,
                         language,
                         basis,
-                        TARGET_LIMIT + 1
+                        (TARGET_LIMIT + 1) as i64
                     ],
                     |row| {
                         Ok((

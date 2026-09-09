@@ -94,7 +94,17 @@ jobs:
       # `apt install` once. arm64-musl on ubuntu-24.04-arm uses the same package.
       - name: Install musl-tools (musl targets only)
         if: matrix.install_musl
-        run: sudo apt-get update -qq && sudo apt-get install -yq musl-tools
+        run: |
+          # musl-tools needs Ubuntu archives; unrelated vendor indexes can fail independently.
+          test -s /etc/apt/sources.list.d/ubuntu.sources
+          musl_apt_sources=$(mktemp -d)
+          trap 'rmdir "$musl_apt_sources"' EXIT
+          musl_apt_options=(
+            -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources
+            -o "Dir::Etc::sourceparts=$musl_apt_sources"
+          )
+          sudo apt-get "${musl_apt_options[@]}" update -qq
+          sudo apt-get "${musl_apt_options[@]}" install -yq musl-tools
 
       - name: Cache cargo registry + target
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

@@ -1292,6 +1292,10 @@ fn git_bytes(
 }
 
 fn relative_binding_path(root: &Path, path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    #[cfg(target_os = "macos")]
+    let normalized = crate::audit_bundle::normalize_macos_system_alias(path);
+    #[cfg(target_os = "macos")]
+    let path = normalized.as_path();
     let relative = if path.is_absolute() {
         path.strip_prefix(root)
             .map_err(|_| "audit input path is outside root")?

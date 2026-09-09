@@ -634,6 +634,10 @@ fn executor_claim_failures_reach_cli_ci_envelopes_and_controller_state() {
             "--json",
         ]);
         assert_eq!(output.status.success(), actual_addition, "{output:?}");
+        assert!(
+            envelope_path.is_file(),
+            "bundle was not written: {output:?}"
+        );
         let report: Value = serde_json::from_slice(&output.stdout).unwrap();
         let envelope: Value =
             serde_json::from_slice(&std::fs::read(envelope_path).unwrap()).unwrap();

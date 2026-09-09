@@ -1153,7 +1153,7 @@ where
 }
 
 #[cfg(target_os = "macos")]
-fn normalize_macos_system_alias(path: &Path) -> PathBuf {
+pub(crate) fn normalize_macos_system_alias(path: &Path) -> PathBuf {
     // macOS exposes these immutable root aliases as symlinks. Normalize only
     // the OS-owned aliases; arbitrary caller-controlled symlink parents remain
     // rejected by the descriptor-relative O_NOFOLLOW walk below.

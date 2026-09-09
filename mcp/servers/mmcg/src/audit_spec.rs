@@ -1294,7 +1294,9 @@ fn git_bytes(
 fn relative_binding_path(root: &Path, path: &Path) -> Result<String, Box<dyn std::error::Error>> {
     #[cfg(target_os = "macos")]
     let normalized = crate::audit_bundle::normalize_macos_system_alias(path);
-    #[cfg(target_os = "macos")]
+    #[cfg(windows)]
+    let normalized = normalize_windows_audit_input(path)?;
+    #[cfg(any(target_os = "macos", windows))]
     let path = normalized.as_path();
     let relative = if path.is_absolute() {
         path.strip_prefix(root)
@@ -1303,6 +1305,36 @@ fn relative_binding_path(root: &Path, path: &Path) -> Result<String, Box<dyn std
         path
     };
     Ok(crate::audit_bundle::normalize_relative_path(relative)?)
+}
+
+#[cfg(windows)]
+fn normalize_windows_audit_input(
+    path: &Path,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    use std::os::windows::fs::MetadataExt;
+    use std::path::{Component, PathBuf};
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    if !path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    let mut cursor = PathBuf::new();
+    for component in path.components() {
+        cursor.push(component.as_os_str());
+        match component {
+            Component::Prefix(_) | Component::RootDir => {}
+            Component::Normal(_) => {
+                let metadata = std::fs::symlink_metadata(&cursor)?;
+                if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                    return Err("audit input contains a reparse point".into());
+                }
+            }
+            _ => return Err("unsafe audit input path component".into()),
+        }
+    }
+    // Expand short (8.3) names and the verbatim prefix like the canonical root.
+    // Reparse points must be rejected before resolving the input spelling.
+    Ok(path.canonicalize()?)
 }
 
 fn read_bound_input(path: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {

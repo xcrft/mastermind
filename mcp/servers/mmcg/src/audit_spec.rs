@@ -28,11 +28,13 @@
 
 use crate::diff::{self, DiffError, SymbolDiff};
 use crate::spec::{ParsedSpec, SymbolClaim};
+use crate::spec_removals;
 use crate::spec_symbols::{self, Resolved, Scope, Unresolved};
 use crate::store::Store;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -78,10 +80,16 @@ pub enum Finding {
         reason: String,
         matches: Option<usize>,
     },
-    /// Symbol disappeared between baseline and HEAD AND the spec text doesn't
-    /// mention the name anywhere — silent breaking change. Spec should
-    /// acknowledge intentional removals in Goals / Notes.
+    /// A removed baseline declaration has no matching acknowledgement.
+    /// Legacy prose matching applies only to specs without frontmatter.
     RemovedSymbolNotAcknowledged { symbol: String, file: String },
+    /// A structured removal acknowledgement cannot identify its baseline target.
+    RemovalAcknowledgementUnresolved {
+        symbol: String,
+        file: Option<String>,
+        reason: String,
+        matches: Option<usize>,
+    },
     /// Tests Plan names a test (`test_foo`, `it('bar')`, etc.) absent from
     /// `symbol_diff.added` — executor skipped it or the planned name was wrong.
     PlannedTestNotAdded { test: String },
@@ -162,6 +170,7 @@ impl Report {
                 Finding::SnapshotSymbolGone { .. }
                 | Finding::SnapshotUnresolved { .. }
                 | Finding::RemovedSymbolNotAcknowledged { .. }
+                | Finding::RemovalAcknowledgementUnresolved { .. }
                 | Finding::ClaimedSymbolMissing { .. }
                 | Finding::HallucinatedSymbol { .. }
                 | Finding::MissingCallEdge { .. }
@@ -228,7 +237,22 @@ fn render_finding(f: &Finding) -> String {
             format!("snapshot_unresolved: {symbol}: {reason}{count} — verify the index and declaration scope")
         }
         Finding::RemovedSymbolNotAcknowledged { symbol, file } => {
-            format!("removed_symbol_not_acknowledged: `{symbol}` deleted from `{file}` but spec doesn't mention it — potential silent breaking change")
+            format!("removed_symbol_not_acknowledged: `{symbol}` deleted from `{file}` without a matching removal acknowledgement")
+        }
+        Finding::RemovalAcknowledgementUnresolved {
+            symbol,
+            file,
+            reason,
+            matches,
+        } => {
+            let file = file
+                .as_deref()
+                .map(|file| format!(" in {file}"))
+                .unwrap_or_default();
+            let count = matches
+                .map(|count| format!(" ({count} matching declarations)"))
+                .unwrap_or_default();
+            format!("removal_acknowledgement_unresolved: {symbol}{file}: {reason}{count}")
         }
         Finding::PlannedTestNotAdded { test } => {
             format!("planned_test_not_added: Tests Plan named `{test}` but the diff doesn't show a new function with that name")
@@ -293,10 +317,62 @@ pub fn run(
     repo_root: &Path,
     git_ref: &str,
 ) -> Result<Report, DiffError> {
+    run_internal(spec, store, repo_root, git_ref, false).map(|(report, _)| report)
+}
+
+fn run_internal(
+    spec: &ParsedSpec,
+    store: &Store,
+    repo_root: &Path,
+    git_ref: &str,
+    verify_postflight: bool,
+) -> Result<(Report, Option<crate::verify_spec::Report>), DiffError> {
     // Worktree-scoped, not `<ref>..HEAD` — post-flight audits work that has not
     // been committed yet. See the module header.
-    let symbol_diff = diff::symbols_changed_since_worktree(store, repo_root, git_ref)?;
+    let deadline = Instant::now() + diff::git_timeout();
+    let index_version = store
+        .data_version()
+        .map_err(|_| DiffError::GitFailed("index_version_unavailable".into()))?;
+    if spec
+        .frontmatter
+        .as_ref()
+        .is_some_and(|frontmatter| !frontmatter.breaking_changes.removed_symbols.is_empty())
+        && !store
+            .extractor_contract_current()
+            .map_err(|_| DiffError::GitFailed("index_stale".into()))?
+    {
+        return Err(DiffError::GitFailed("index_stale".into()));
+    }
+    let (worktree, removed) = diff::symbols_changed_in_worktree_with_removals(
+        store,
+        repo_root,
+        git_ref,
+        Some(deadline),
+        None,
+    )
+    .map_err(|error| diff::worktree_scope_error(git_ref, error))?;
+    let symbol_diff = &worktree.diff;
     let mut findings: Vec<Finding> = Vec::new();
+    let removal_plan = spec_removals::Plan::build(
+        spec,
+        repo_root,
+        &worktree.baseline_oid,
+        &removed,
+        deadline,
+        !worktree.files_truncated
+            && worktree.skipped_non_utf8_paths == 0
+            && symbol_diff.errors.is_empty(),
+    );
+    if let Some(plan) = &removal_plan {
+        for error in &plan.errors {
+            findings.push(Finding::RemovalAcknowledgementUnresolved {
+                symbol: error.name.clone(),
+                file: error.file.clone(),
+                reason: error.error.reason.to_string(),
+                matches: error.error.matches,
+            });
+        }
+    }
 
     // 1. File scope check — symmetric difference of declared files vs the files
     //    that differ from the baseline on disk.
@@ -323,6 +399,10 @@ pub fn run(
         }
         _ => spec.mentioned_files.clone(),
     };
+    let spec_files_owned: Vec<_> = spec_files_owned
+        .into_iter()
+        .map(|file| spec_symbols::normalize_file(&file).unwrap_or(file))
+        .collect();
     let spec_files: HashSet<&str> = spec_files_owned.iter().map(String::as_str).collect();
     let diff_files: HashSet<&str> = symbol_diff
         .files_in_diff
@@ -348,7 +428,13 @@ pub fn run(
     // 2. Pre-edit snapshot drift — for every claim with a count, compare
     //    against live callers_of.
     for claim in &spec.pre_edit_snapshot {
-        check_snapshot_claim(claim, spec, store, &mut findings);
+        check_snapshot_claim(
+            claim,
+            &spec_symbols::snapshot_scopes(spec, claim),
+            store,
+            removal_plan.as_ref(),
+            &mut findings,
+        );
     }
 
     // Explicit frontmatter signatures/counts are snapshots too. Bare touches
@@ -364,38 +450,25 @@ pub fn run(
                     file: Some(symbol.file().unwrap_or(&touch.file)),
                     language: symbol.language().or(touch.language.as_deref()),
                 };
-                check_current_snapshot(
-                    symbol.name(),
-                    symbol.callers(),
-                    symbol.signature(),
-                    spec_symbols::resolve(store, symbol.name(), &[scope]),
+                let claim = SymbolClaim {
+                    name: symbol.name().to_string(),
+                    callers: symbol.callers(),
+                    signature: symbol.signature().map(str::to_string),
+                    raw: String::new(),
+                };
+                check_snapshot_claim(
+                    &claim,
+                    &[scope],
                     store,
+                    removal_plan.as_ref(),
                     &mut findings,
                 );
             }
         }
     }
 
-    // 3. Removed-symbol-not-acknowledged — for each symbol gone in the git diff,
-    //    decide: deliberate removal or silent breaking change?
-    //
-    //    Resolution order:
-    //    a) Frontmatter + `breaking_changes.removed_symbols` non-empty →
-    //       AUTHORITATIVE. Exact-name match; anything else is flagged. No
-    //       lowercase-substring fuzz, no false positives from incidental
-    //       mentions like `Do not remove old_api`.
-    //    b) Frontmatter but no `removed_symbols` → strict mode: ANY removed
-    //       non-module symbol is flagged (forces the planner to ack removals).
-    //    c) No frontmatter → legacy lowercase-substring heuristic. Imprecise;
-    //       planners encouraged to migrate to frontmatter.
-    let frontmatter_acks: Option<std::collections::HashSet<String>> =
-        spec.frontmatter.as_ref().map(|fm| {
-            fm.breaking_changes
-                .removed_symbols
-                .iter()
-                .map(|s| s.name().to_string())
-                .collect()
-        });
+    // Structured acknowledgements refer to exact baseline parser ordinals.
+    // Keep the legacy prose heuristic only for specs without frontmatter.
     let spec_body_lower = spec
         .sections
         .values()
@@ -403,24 +476,34 @@ pub fn run(
         .collect::<Vec<_>>()
         .join("\n")
         .to_lowercase();
-    for removed in &symbol_diff.removed {
-        // Module-level synthetic symbols are an artifact of file removal, not a
-        // public API delete — skip.
-        if removed.kind == "module" {
-            continue;
-        }
-        let acknowledged = match &frontmatter_acks {
-            // Frontmatter → exact match against breaking_changes list. Empty list
-            // flows through here and flags everything (strict mode, intended).
-            Some(acks) => acks.contains(&removed.name),
-            // No frontmatter → legacy lowercase-substring fallback.
-            None => spec_body_lower.contains(&removed.name.to_lowercase()),
-        };
-        if !acknowledged {
-            findings.push(Finding::RemovedSymbolNotAcknowledged {
-                symbol: removed.name.clone(),
-                file: removed.file.clone(),
+    let scoped_remaining = match removal_plan.as_ref().map(|plan| plan.unacknowledged()) {
+        Some(Ok(remaining)) => Some(remaining),
+        Some(Err(error)) => {
+            findings.push(Finding::RemovalAcknowledgementUnresolved {
+                symbol: "<baseline removals>".into(),
+                file: None,
+                reason: error.reason.to_string(),
+                matches: error.matches,
             });
+            None
+        }
+        None => None,
+    };
+    if let Some(remaining) = scoped_remaining {
+        for (file, symbol) in remaining {
+            findings.push(Finding::RemovedSymbolNotAcknowledged { symbol, file });
+        }
+    } else {
+        for removed in &symbol_diff.removed {
+            if removed.kind != "module"
+                && (spec.frontmatter.is_some()
+                    || !spec_body_lower.contains(&removed.name.to_lowercase()))
+            {
+                findings.push(Finding::RemovedSymbolNotAcknowledged {
+                    symbol: removed.name.clone(),
+                    file: removed.file.clone(),
+                });
+            }
         }
     }
 
@@ -441,14 +524,69 @@ pub fn run(
         }
     }
 
+    let verification = verify_postflight.then(|| {
+        let deleted_files = worktree
+            .files
+            .iter()
+            .filter(|file| file.status == "deleted")
+            .map(|file| file.path.as_str())
+            .collect();
+        crate::verify_spec::run_with_removals(
+            spec,
+            Some(store),
+            repo_root,
+            removal_plan.as_ref(),
+            &deleted_files,
+        )
+    });
+    if removal_plan.is_some() {
+        diff::validate_working_tree_snapshot_controlled(
+            repo_root,
+            &worktree.baseline_oid,
+            &worktree.head_oid,
+            &worktree.files,
+            &worktree.snapshot_token,
+            Some(deadline),
+            None,
+        )
+        .map_err(|error| diff::worktree_scope_error(git_ref, error))?;
+        if store
+            .data_version()
+            .map_err(|_| DiffError::GitFailed("index_version_unavailable".into()))?
+            != index_version
+        {
+            return Err(DiffError::GitFailed("index_changed".into()));
+        }
+    }
     let verdict = compute_verdict(&findings);
-    Ok(Report {
-        spec: spec.path.clone(),
-        git_ref: git_ref.to_string(),
-        verdict,
-        findings,
-        symbol_diff: Some(symbol_diff),
-    })
+    Ok((
+        Report {
+            spec: spec.path.clone(),
+            git_ref: git_ref.to_string(),
+            verdict,
+            findings,
+            symbol_diff: Some(worktree.diff),
+        },
+        verification,
+    ))
+}
+
+/// CI checks completed work. Only baseline-proven acknowledged removals are
+/// exempt from the preflight verifier's current-symbol/file requirements.
+pub fn run_ci_with_report(
+    spec: &ParsedSpec,
+    store: &Store,
+    repo_root: &Path,
+    git_ref: &str,
+    executor_report: Option<&crate::executor_report::ExecutorReport>,
+) -> Result<(crate::verify_spec::Report, Report), DiffError> {
+    let (mut report, verification) = run_internal(spec, store, repo_root, git_ref, true)?;
+    if let Some(executor_report) = executor_report {
+        check_executor_claims(executor_report, store, &mut report.findings);
+        check_vacuous_tests(executor_report, repo_root, &mut report.findings);
+        report.verdict = compute_verdict(&report.findings);
+    }
+    Ok((verification.expect("CI verification requested"), report))
 }
 
 /// Run Phase A checks + executor-report mechanical checks.
@@ -892,7 +1030,10 @@ impl Bundle {
                     })
                     .unwrap_or_else(|| s.mentioned_files.clone())
             })
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .map(|file| spec_symbols::normalize_file(&file).unwrap_or(file))
+            .collect();
 
         let mut mmcg_queries: Vec<String> = Vec::new();
         let mut verified_claims: Vec<String> = Vec::new();
@@ -1297,6 +1438,7 @@ fn build_human_summary(
                 Finding::SnapshotSymbolGone { .. }
                     | Finding::SnapshotUnresolved { .. }
                     | Finding::RemovedSymbolNotAcknowledged { .. }
+                    | Finding::RemovalAcknowledgementUnresolved { .. }
                     | Finding::ClaimedSymbolMissing { .. }
                     | Finding::HallucinatedSymbol { .. }
                     | Finding::MissingCallEdge { .. }
@@ -1313,6 +1455,7 @@ fn build_human_summary(
                 Finding::SnapshotSymbolGone { .. }
                     | Finding::SnapshotUnresolved { .. }
                     | Finding::RemovedSymbolNotAcknowledged { .. }
+                    | Finding::RemovalAcknowledgementUnresolved { .. }
                     | Finding::ClaimedSymbolMissing { .. }
                     | Finding::HallucinatedSymbol { .. }
                     | Finding::MissingCallEdge { .. }
@@ -1326,15 +1469,30 @@ fn build_human_summary(
 
 fn check_snapshot_claim(
     claim: &SymbolClaim,
-    spec: &ParsedSpec,
+    scopes: &[Scope<'_>],
     store: &Store,
+    removals: Option<&spec_removals::Plan>,
     findings: &mut Vec<Finding>,
 ) {
+    if let Some(removals) = removals {
+        match removals.accepts_snapshot(&claim.name, scopes, claim.signature.as_deref()) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                findings.push(Finding::SnapshotUnresolved {
+                    symbol: claim.name.clone(),
+                    reason: format!("baseline_{}", error.reason),
+                    matches: error.matches,
+                });
+                return;
+            }
+        }
+    }
     check_current_snapshot(
         &claim.name,
         claim.callers,
         claim.signature.as_deref(),
-        spec_symbols::resolve_snapshot(store, spec, claim),
+        spec_symbols::resolve(store, &claim.name, scopes),
         store,
         findings,
     );
@@ -1404,6 +1562,7 @@ fn compute_verdict(findings: &[Finding]) -> Verdict {
             Finding::SnapshotSymbolGone { .. }
                 | Finding::SnapshotUnresolved { .. }
                 | Finding::RemovedSymbolNotAcknowledged { .. }
+                | Finding::RemovalAcknowledgementUnresolved { .. }
                 | Finding::ClaimedSymbolMissing { .. }
                 | Finding::HallucinatedSymbol { .. }
                 | Finding::MissingCallEdge { .. }

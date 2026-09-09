@@ -47,7 +47,7 @@ pub use vue::VueExtractor;
 /// Semantic contract for the extractor output stored in SQLite. Bump this when
 /// an extractor or grammar change can alter symbols, edges, ownership, or paths
 /// without requiring a database schema migration.
-pub const EXTRACTOR_CONTRACT_VERSION: &str = "mmcg-extractors-v9";
+pub const EXTRACTOR_CONTRACT_VERSION: &str = "mmcg-extractors-v10";
 pub const EXTRACTOR_CONTRACT_META_KEY: &str = "extractor_contract_version";
 
 /// Bind a persisted codegraph to the repository it was built from.
@@ -1987,7 +1987,18 @@ pub(crate) fn parse_blob(
     mtime: i64,
     extractor: &dyn LanguageExtractor,
 ) -> Result<PendingFile, IndexError> {
-    parse_blob_internal(rel_path, source, mtime, extractor, false).map(|parsed| parsed.pending)
+    parse_blob_internal(rel_path, source, mtime, extractor, false, false)
+        .map(|parsed| parsed.pending)
+}
+
+/// Baseline uniqueness needs a complete syntax tree. Keep normal indexing's
+/// recovery behavior, but reject recovered trees for removal authorization.
+pub(crate) fn parse_baseline_blob(
+    rel_path: &str,
+    source: &[u8],
+    extractor: &dyn LanguageExtractor,
+) -> Result<PendingFile, IndexError> {
+    parse_blob_internal(rel_path, source, 0, extractor, false, true).map(|parsed| parsed.pending)
 }
 
 fn parse_blob_with_concepts(
@@ -1996,7 +2007,7 @@ fn parse_blob_with_concepts(
     mtime: i64,
     extractor: &dyn LanguageExtractor,
 ) -> Result<IndexedPendingFile, IndexError> {
-    parse_blob_internal(rel_path, source, mtime, extractor, true)
+    parse_blob_internal(rel_path, source, mtime, extractor, true, false)
 }
 
 fn parse_blob_internal(
@@ -2005,6 +2016,7 @@ fn parse_blob_internal(
     mtime: i64,
     extractor: &dyn LanguageExtractor,
     collect_documentation: bool,
+    reject_syntax_errors: bool,
 ) -> Result<IndexedPendingFile, IndexError> {
     let parser_source = source_for_parser(source)?;
     let mut parser = Parser::new();
@@ -2015,6 +2027,12 @@ fn parse_blob_internal(
     let tree = parser
         .parse(parser_source.as_ref(), None)
         .ok_or_else(|| IndexError::Parse("tree-sitter parse returned None".to_string()))?;
+    if reject_syntax_errors && tree.root_node().has_error() {
+        return Err(IndexError::Parse("baseline contains syntax errors".into()));
+    }
+    if reject_syntax_errors && extractor.name() == "vue" {
+        vue::validate_baseline_scripts(&tree, parser_source.as_ref())?;
+    }
 
     let line_count = parser_source.iter().filter(|&&b| b == b'\n').count() as u32 + 1;
     let language = guess_language_for(rel_path).unwrap_or("").to_string();

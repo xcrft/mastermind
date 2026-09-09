@@ -206,7 +206,9 @@ jobs:
               "snapshot_caller_drift": ({"kind", "symbol", "spec_says", "index_says"}, {"symbol": "text", "spec_says": "u32", "index_says": "u32"}),
               "snapshot_signature_drift": ({"kind", "symbol", "spec_says", "index_says"}, {"symbol": "text", "spec_says": "text", "index_says": "nullable"}),
               "snapshot_symbol_gone": ({"kind", "symbol"}, {"symbol": "text"}),
+              "snapshot_unresolved": ({"kind", "symbol", "reason", "matches"}, {"symbol": "text", "reason": "text", "matches": "nullable_u64"}),
               "removed_symbol_not_acknowledged": ({"kind", "symbol", "file"}, {"symbol": "text", "file": "path"}),
+              "removal_acknowledgement_unresolved": ({"kind", "symbol", "file", "reason", "matches"}, {"symbol": "text", "file": "nullable", "reason": "text", "matches": "nullable_u64"}),
               "planned_test_not_added": ({"kind", "test"}, {"test": "text"}),
               "claimed_symbol_missing": ({"kind", "symbol", "file"}, {"symbol": "text", "file": "nullable_path"}),
               "hallucinated_symbol": ({"kind", "from_symbol", "to_symbol"}, {"from_symbol": "text", "to_symbol": "text"}),
@@ -219,7 +221,7 @@ jobs:
           def finding(value, label, snapshot_only=False):
               if type(value) is not dict or type(value.get("kind")) is not str or value["kind"] not in finding_shapes:
                   raise SystemExit("invalid " + label)
-              if snapshot_only and value["kind"] not in {"snapshot_caller_drift", "snapshot_signature_drift", "snapshot_symbol_gone"}:
+              if snapshot_only and value["kind"] not in {"snapshot_caller_drift", "snapshot_signature_drift", "snapshot_symbol_gone", "snapshot_unresolved"}:
                   raise SystemExit("invalid snapshot drift kind")
               keys, fields = finding_shapes[value["kind"]]
               exact(value, keys, label)
@@ -231,6 +233,8 @@ jobs:
                   elif kind == "nullable_path":
                       if item is not None: relative_path(item, label)
                   elif kind == "u32": integer(item, label, 0, 4294967295)
+                  elif kind == "nullable_u64":
+                      if item is not None: integer(item, label, 0, 18446744073709551615)
                   elif kind == "i32": integer(item, label, -2147483648, 2147483647)
           def finding_list(value, label, snapshot_only=False):
               if type(value) is not list:

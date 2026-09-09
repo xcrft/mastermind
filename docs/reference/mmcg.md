@@ -1118,10 +1118,53 @@ resolved signature change remains Drift in the post-execution audit.
 
 Audit checks recorded signatures and caller counts in both markdown snapshots
 and frontmatter touches. Bare touches remain pre-edit existence and file-scope
-declarations. Recorded snapshots of removed symbols retain the existing
-SnapshotSymbolGone behavior; removal acknowledgement is a separate check.
+declarations. A recorded snapshot can be intentionally removed only when
+`breaking_changes.removed_symbols` uniquely identifies the same declaration
+in the baseline and the diff proves that exact declaration was removed.
+Otherwise its absence remains SnapshotSymbolGone/Broken. Removing a class does
+not implicitly acknowledge its methods.
 Caller counts and risk totals still describe name/type graph candidates in the
 declared language, not edges bound to one selected declaration.
+
+Removal acknowledgements accept qualified names and optional file/language scope:
+
+```yaml
+breaking_changes:
+  removed_symbols:
+    - name: B.run
+      file: service.py
+      language: python
+      signature: "def run(self)"
+```
+
+A supplied signature is checked after unique identity is established; matching
+one overload's signature cannot choose it from several declarations. Bare names
+remain supported when unique in the baseline. An unresolved acknowledgement is
+`removal_acknowledgement_unresolved` and makes the audit Broken. The public
+symbol-diff JSON stays unchanged; internal baseline parser ordinals distinguish
+even same-line declarations with identical names and signatures.
+
+Acknowledgements or snapshots without a file scope search all tracked regular
+files with supported extractors, including unchanged files. File-scoped checks read
+only the required baseline files. Syntax errors, unsupported path encoding,
+incomplete diffs and unavailable baseline objects cannot certify uniqueness.
+Reads share one deadline and are capped at 10,000 source files, 4 MiB of tree
+metadata, 5 MiB per blob, 64 MiB of blobs and 200,000 declarations. Git replacement
+refs are ignored and baseline reads do not fetch missing objects. If the global
+inventory is incomplete, use precise file scopes or repair the baseline input.
+Vue baseline admission also checks its embedded script tree. Multiple script
+blocks, external scripts and unsupported script languages remain incomplete
+until the extractor can cover them. Quoted `lang="ts"` now selects the actual
+TypeScript parser; extractor contract v10 invalidates older indexed output.
+
+`mmcg ci` uses the same proved removal identity when checking snapshots and
+touches after execution. It also accepts a deleted touched file when all its
+removed declarations are acknowledged. Other missing files, expected docs,
+mandatory sections and FIND checks remain enforced. Standalone
+`verify-spec` remains a pre-execution gate and requires those targets to exist.
+File scope treats leading `./` and path separators consistently across current
+symbols, baseline declarations and deleted-file checks. Invalid relative scopes
+cannot grant a deletion exception, including aliases of required docs.
 
 Qualification follows extracted lexical parents. C# namespace segments are
 equivalent whether stored as one qualified namespace or nested namespaces.
@@ -1130,6 +1173,12 @@ inferred from a file path. Rust impl blocks provide method scope but are not
 separate named type definitions. Multiple trait implementations, overloads,
 constructors and partial declarations can remain ambiguous; snapshots of impl
 blocks themselves are not supported by the named-declaration resolver.
+An impl removal has one separate structural selector: an explicit file and its
+complete exact baseline header, for example
+`{name: B, file: service.rs, signature: "impl Marker for B"}`. This selects one
+impl block without treating it as another definition of B. Multiple identical
+impl headers remain ambiguous; the type and each removed child need their own
+acknowledgement. This signature selector does not apply to method overloads.
 
 Rust declaration signatures include their attached outer `#[...]` attributes,
 including arguments. Attribute additions, removals and argument edits therefore

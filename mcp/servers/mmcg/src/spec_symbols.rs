@@ -17,14 +17,14 @@ pub(crate) struct Resolved {
     pub language: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Unresolved {
     pub reason: &'static str,
     pub matches: Option<usize>,
 }
 
 impl Unresolved {
-    fn unavailable(reason: &'static str) -> Self {
+    pub(crate) fn unavailable(reason: &'static str) -> Self {
         Self {
             reason,
             matches: None,
@@ -32,7 +32,7 @@ impl Unresolved {
     }
 }
 
-fn components(name: &str) -> Result<Vec<&str>, Unresolved> {
+pub(crate) fn components(name: &str) -> Result<Vec<&str>, Unresolved> {
     let parts: Vec<_> = name.split("::").flat_map(|part| part.split('.')).collect();
     if parts
         .iter()
@@ -41,6 +41,18 @@ fn components(name: &str) -> Result<Vec<&str>, Unresolved> {
         return Err(Unresolved::unavailable("invalid_qualification"));
     }
     Ok(parts)
+}
+
+pub(crate) fn normalize_file(file: &str) -> Result<String, Unresolved> {
+    let file = file.replace('\\', "/");
+    let file = file.trim_start_matches("./");
+    if file.is_empty()
+        || file.contains('\0')
+        || file.split('/').any(|part| matches!(part, "" | "." | ".."))
+    {
+        return Err(Unresolved::unavailable("invalid_file_scope"));
+    }
+    Ok(file.to_string())
 }
 
 pub(crate) fn touch_scopes(touch: &TouchEntry) -> impl Iterator<Item = Scope<'_>> {
@@ -125,6 +137,7 @@ fn resolve_candidates(
     let mut after_lookup = Some(after_lookup);
     for scope in scopes {
         let scoped_name = components(scope.name)?;
+        let scoped_file = scope.file.map(normalize_file).transpose()?;
         if scoped_name.last() != Some(leaf) {
             continue;
         }
@@ -138,7 +151,9 @@ fn resolve_candidates(
             // An impl is a lexical container for methods, not another named
             // definition of its target type. Keep it in the ancestry cache.
             if matches!(symbol.kind.as_str(), "module" | "impl")
-                || scope.file.is_some_and(|file| symbol.file_path != file)
+                || scoped_file
+                    .as_ref()
+                    .is_some_and(|file| symbol.file_path != *file)
             {
                 continue;
             }

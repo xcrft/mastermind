@@ -378,6 +378,30 @@ class InlineVerifierSchemaTests(unittest.TestCase):
         self.assertEqual(output, "verifier-identity=mastermind-inline-schema-v3-verifier-v1\n")
         self.assertFalse(verified)
 
+    def test_unresolved_findings_preserve_nullable_match_counts(self):
+        for kind in ("snapshot_unresolved", "removal_acknowledgement_unresolved"):
+            for count in (None, 0, 2):
+                with self.subTest(kind=kind, count=count):
+                    value = self.envelope()
+                    finding = {"kind": kind, "symbol": "B.run", "reason": "ambiguous", "matches": count}
+                    if kind == "removal_acknowledgement_unresolved":
+                        finding["file"] = "../invalid-scope.py"
+                    value["manifest"]["verdict"] = "broken"
+                    value["manifest"]["discrepancies"] = [finding]
+                    value["manifest"]["snapshot_drift"] = [finding] if kind == "snapshot_unresolved" else []
+                    result, _, _ = self.run_verifier(value=self.reseal(value))
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    for invalid in (True, -1, 2.5, 2 ** 64, "2"):
+                        broken = copy.deepcopy(value)
+                        broken["manifest"]["discrepancies"][0]["matches"] = invalid
+                        self.assert_rejected(broken)
+                    broken = copy.deepcopy(value)
+                    broken["manifest"]["discrepancies"][0]["extra"] = True
+                    self.assert_rejected(broken)
+            if kind == "removal_acknowledgement_unresolved":
+                value["manifest"]["snapshot_drift"] = [finding]
+                self.assert_rejected(value)
+
     def test_every_nested_family_rejects_added_deleted_and_wrong_type(self):
         family_paths = [
             ("manifest",),

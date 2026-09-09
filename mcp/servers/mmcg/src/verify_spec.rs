@@ -14,6 +14,7 @@
 //! blast radius is a flag for the planner to read, not a block.
 
 use crate::spec::{self, ParsedSpec, SymbolClaim, TouchEntry};
+use crate::spec_removals;
 use crate::spec_symbols::{self, Resolved, Scope, Unresolved};
 use crate::store::Store;
 use serde::Serialize;
@@ -291,6 +292,16 @@ pub fn strict_check(spec: &ParsedSpec) -> Vec<Finding> {
 /// `repo_root` to resolve file existence. `store` optional — `None` skips the
 /// symbol-existence + blast-radius checks (verify-spec outside an indexed project).
 pub fn run(spec: &ParsedSpec, store: Option<&Store>, repo_root: &Path) -> Report {
+    run_with_removals(spec, store, repo_root, None, &HashSet::new())
+}
+
+pub(crate) fn run_with_removals(
+    spec: &ParsedSpec,
+    store: Option<&Store>,
+    repo_root: &Path,
+    removals: Option<&spec_removals::Plan>,
+    deleted_files: &HashSet<&str>,
+) -> Report {
     let mut errors: Vec<Finding> = Vec::new();
     let mut warnings: Vec<Finding> = Vec::new();
 
@@ -336,8 +347,21 @@ pub fn run(spec: &ParsedSpec, store: Option<&Store>, repo_root: &Path) -> Report
         _ => spec.mentioned_files.clone(),
     };
     for rel in &files_to_check {
-        let abs = repo_root.join(rel);
-        if !abs.exists() {
+        let normalized = spec_symbols::normalize_file(rel);
+        let abs = repo_root.join(normalized.as_deref().unwrap_or(rel));
+        let acknowledged_deletion = normalized.is_ok_and(|file| {
+            deleted_files.contains(file.as_str())
+                && removals.is_some_and(|removals| removals.accepts_file_removal(&file))
+                && spec.frontmatter.as_ref().is_some_and(|frontmatter| {
+                    frontmatter.touches.iter().any(|touch| {
+                        spec_symbols::normalize_file(&touch.file)
+                            .is_ok_and(|candidate| candidate == file)
+                    }) && !frontmatter.expected_docs.iter().any(|doc| {
+                        spec_symbols::normalize_file(doc).is_ok_and(|candidate| candidate == file)
+                    })
+                })
+        });
+        if !abs.exists() && !acknowledged_deletion {
             errors.push(Finding::MissingFile { file: rel.clone() });
         }
     }
@@ -349,11 +373,11 @@ pub fn run(spec: &ParsedSpec, store: Option<&Store>, repo_root: &Path) -> Report
     //       constrains matching snapshots to the declared file and language.
     if let Some(store) = store {
         for claim in &spec.pre_edit_snapshot {
-            check_symbol_claim(claim, spec, store, &mut errors, &mut warnings);
+            check_symbol_claim(claim, spec, store, removals, &mut errors, &mut warnings);
         }
         if let Some(fm) = &spec.frontmatter {
             for touch in &fm.touches {
-                check_frontmatter_touch(touch, store, &mut errors, &mut warnings);
+                check_frontmatter_touch(touch, store, removals, &mut errors, &mut warnings);
             }
         }
     }
@@ -404,9 +428,19 @@ fn check_symbol_claim(
     claim: &SymbolClaim,
     spec: &ParsedSpec,
     store: &Store,
+    removals: Option<&spec_removals::Plan>,
     errors: &mut Vec<Finding>,
     warnings: &mut Vec<Finding>,
 ) {
+    if skip_removed_claim(
+        &claim.name,
+        &spec_symbols::snapshot_scopes(spec, claim),
+        claim.signature.as_deref(),
+        removals,
+        errors,
+    ) {
+        return;
+    }
     match spec_symbols::resolve_snapshot(store, spec, claim) {
         Ok(resolved) => check_resolved_claim(
             &claim.name,
@@ -431,6 +465,29 @@ fn unresolved_finding(name: &str, error: Unresolved) -> Finding {
         symbol: name.to_string(),
         reason: error.reason.to_string(),
         matches: error.matches,
+    }
+}
+
+fn skip_removed_claim(
+    name: &str,
+    scopes: &[Scope<'_>],
+    signature: Option<&str>,
+    removals: Option<&spec_removals::Plan>,
+    errors: &mut Vec<Finding>,
+) -> bool {
+    let Some(removals) = removals else {
+        return false;
+    };
+    match removals.accepts_snapshot(name, scopes, signature) {
+        Ok(accepted) => accepted,
+        Err(error) => {
+            errors.push(Finding::SnapshotUnresolved {
+                symbol: name.to_string(),
+                reason: format!("baseline_{}", error.reason),
+                matches: error.matches,
+            });
+            true
+        }
     }
 }
 
@@ -487,6 +544,7 @@ fn check_resolved_claim(
 fn check_frontmatter_touch(
     touch: &TouchEntry,
     store: &Store,
+    removals: Option<&spec_removals::Plan>,
     errors: &mut Vec<Finding>,
     warnings: &mut Vec<Finding>,
 ) {
@@ -499,6 +557,9 @@ fn check_frontmatter_touch(
             file: Some(file),
             language,
         };
+        if skip_removed_claim(name, &[scope], sym.signature(), removals, errors) {
+            continue;
+        }
         match spec_symbols::resolve(store, name, &[scope]) {
             Ok(resolved) => check_resolved_claim(
                 name,

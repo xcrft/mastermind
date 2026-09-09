@@ -296,7 +296,7 @@ thread_local! {
     static TEST_GIT_TIMEOUT: RefCell<Option<Duration>> = const { RefCell::new(None) };
 }
 
-fn git_timeout() -> Duration {
+pub(crate) fn git_timeout() -> Duration {
     #[cfg(test)]
     if let Some(timeout) = TEST_GIT_TIMEOUT.with(|value| *value.borrow()) {
         return timeout;
@@ -359,6 +359,13 @@ fn git_command(args: &[&str]) -> Command {
     }
     let mut command = repository_git_command();
     command.args(args);
+    // Diff and baseline reads must interpret the same literal objects, and a
+    // missing promisor object must not initiate a network fetch.
+    command
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_ALLOW_PROTOCOL", "")
+        .env("GIT_TERMINAL_PROMPT", "0");
     command
 }
 
@@ -584,7 +591,7 @@ pub fn symbols_changed_since_worktree(
     .map_err(|error| worktree_scope_error(git_ref, error))
 }
 
-fn worktree_scope_error(git_ref: &str, error: WorkingTreeDiffError) -> DiffError {
+pub(crate) fn worktree_scope_error(git_ref: &str, error: WorkingTreeDiffError) -> DiffError {
     match error {
         WorkingTreeDiffError::InvalidRef => DiffError::GitRefMissing(git_ref.to_string()),
         WorkingTreeDiffError::GitTimeout => DiffError::GitTimeout,
@@ -673,6 +680,21 @@ pub(crate) fn symbols_changed_in_worktree_controlled(
     deadline: Option<Instant>,
     interrupted: Option<&dyn Fn() -> bool>,
 ) -> Result<WorkingTreeSymbolDiff, WorkingTreeDiffError> {
+    symbols_changed_in_worktree_with_removals(store, repo_root, git_ref, deadline, interrupted)
+        .map(|(diff, _)| diff)
+}
+
+/// Baseline parser ordinals retain identity even when declarations share a
+/// file, line, name and signature. This sidecar is not part of the public diff.
+pub(crate) type RemovedDeclarations = BTreeMap<String, Vec<usize>>;
+
+pub(crate) fn symbols_changed_in_worktree_with_removals(
+    store: &Store,
+    repo_root: &Path,
+    git_ref: &str,
+    deadline: Option<Instant>,
+    interrupted: Option<&dyn Fn() -> bool>,
+) -> Result<(WorkingTreeSymbolDiff, RemovedDeclarations), WorkingTreeDiffError> {
     let baseline_oid = resolve_commit_controlled(repo_root, git_ref, deadline, interrupted)?;
     let head_oid = resolve_head_controlled(repo_root, deadline, interrupted)?;
     let (files, files_total, files_truncated, skipped_non_utf8_paths) =
@@ -709,6 +731,7 @@ pub(crate) fn symbols_changed_in_worktree_controlled(
     let mut signature_changed = Vec::new();
     let mut body_changed = Vec::new();
     let mut errors = Vec::new();
+    let mut removed_declarations = BTreeMap::new();
 
     for file in &files {
         let rel = &file.path;
@@ -729,6 +752,9 @@ pub(crate) fn symbols_changed_in_worktree_controlled(
         let matches = match_declarations(&old_declarations, &new_declarations)
             .map_err(|_| WorkingTreeDiffError::IndexStale)?;
         let per_file = compare_declarations(rel, &old_declarations, &new_declarations, &matches);
+        if !matches.removed.is_empty() {
+            removed_declarations.insert(rel.clone(), matches.removed.clone());
+        }
         added.extend(per_file.added);
         removed.extend(per_file.removed);
         signature_changed.extend(per_file.signature_changed);
@@ -789,29 +815,32 @@ pub(crate) fn symbols_changed_in_worktree_controlled(
 
     let files_in_diff = files.iter().map(|file| file.path.clone()).collect();
     let files_returned = files.len() as u32;
-    Ok(WorkingTreeSymbolDiff {
-        git_ref: git_ref.to_string(),
-        baseline_oid,
-        head_oid,
-        includes_worktree: true,
-        includes_untracked: true,
-        files_total,
-        files_returned,
-        files_truncated,
-        skipped_non_utf8_paths,
-        files,
-        diff: SymbolDiff {
+    Ok((
+        WorkingTreeSymbolDiff {
             git_ref: git_ref.to_string(),
-            files_in_diff,
-            added,
-            removed,
-            signature_changed,
-            errors,
-            truncated: files_truncated,
+            baseline_oid,
+            head_oid,
+            includes_worktree: true,
+            includes_untracked: true,
+            files_total,
+            files_returned,
+            files_truncated,
+            skipped_non_utf8_paths,
+            files,
+            diff: SymbolDiff {
+                git_ref: git_ref.to_string(),
+                files_in_diff,
+                added,
+                removed,
+                signature_changed,
+                errors,
+                truncated: files_truncated,
+            },
+            body_changed,
+            snapshot_token,
         },
-        body_changed,
-        snapshot_token,
-    })
+        removed_declarations,
+    ))
 }
 
 fn line_chunks(bytes: &[u8]) -> Vec<&[u8]> {

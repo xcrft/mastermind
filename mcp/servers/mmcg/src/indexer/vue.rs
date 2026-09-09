@@ -1,7 +1,7 @@
 //! Vue SFC extractor — the file is the component; its script re-parses as TS/JS.
 
 use super::common::{node_text, push_call_with_type};
-use super::LanguageExtractor;
+use super::{IndexError, LanguageExtractor};
 use crate::store::PendingFile;
 use tree_sitter::{Node, Parser, Tree};
 
@@ -78,32 +78,7 @@ fn extract_script(
     let Some(script) = find_first(root, "script_element") else {
         return;
     };
-    let Some(body) = find_first(&script, "raw_text") else {
-        return;
-    };
-
-    let mut isolated = vec![b' '; source.len()];
-    for (offset, byte) in source.iter().enumerate() {
-        if *byte == b'\n' {
-            isolated[offset] = b'\n';
-        }
-    }
-    let (start, end) = (body.start_byte(), body.end_byte());
-    if end > source.len() || start >= end {
-        return;
-    }
-    isolated[start..end].copy_from_slice(&source[start..end]);
-
-    let language = if script_is_typescript(&script, source) {
-        tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
-    } else {
-        tree_sitter_javascript::LANGUAGE.into()
-    };
-    let mut parser = Parser::new();
-    if parser.set_language(&language).is_err() {
-        return;
-    }
-    let Some(script_tree) = parser.parse(&isolated, None) else {
+    let Ok(Some((script_tree, isolated))) = parse_script(&script, source) else {
         return;
     };
     super::typescript::walk(
@@ -115,10 +90,76 @@ fn extract_script(
     );
 }
 
-fn script_is_typescript(script: &Node, source: &[u8]) -> bool {
-    let Some(start_tag) = find_first(script, "start_tag") else {
-        return false;
+pub(super) fn validate_baseline_scripts(tree: &Tree, source: &[u8]) -> Result<(), IndexError> {
+    let root = tree.root_node();
+    let mut cursor = root.walk();
+    let mut scripts = root
+        .children(&mut cursor)
+        .filter(|child| child.kind() == "script_element");
+    let Some(script) = scripts.next() else {
+        return Ok(());
     };
+    if scripts.next().is_some() {
+        return Err(IndexError::Parse(
+            "baseline Vue extraction supports only one script block".into(),
+        ));
+    }
+    if script_attribute(&script, source, "src").is_some()
+        || script_attribute(&script, source, "lang")
+            .is_some_and(|language| !matches!(language, "js" | "javascript" | "ts"))
+    {
+        return Err(IndexError::Parse(
+            "baseline Vue script source or language is unsupported".into(),
+        ));
+    }
+    if let Some((script_tree, _)) = parse_script(&script, source)? {
+        if script_tree.root_node().has_error() {
+            return Err(IndexError::Parse(
+                "baseline Vue script contains syntax errors".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn parse_script(script: &Node, source: &[u8]) -> Result<Option<(Tree, Vec<u8>)>, IndexError> {
+    let Some(body) = find_first(script, "raw_text") else {
+        return Ok(None);
+    };
+
+    let mut isolated = vec![b' '; source.len()];
+    for (offset, byte) in source.iter().enumerate() {
+        if *byte == b'\n' {
+            isolated[offset] = b'\n';
+        }
+    }
+    let (start, end) = (body.start_byte(), body.end_byte());
+    if end > source.len() || start >= end {
+        return Err(IndexError::Parse("invalid Vue script range".into()));
+    }
+    isolated[start..end].copy_from_slice(&source[start..end]);
+
+    let language = if script_is_typescript(script, source) {
+        tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
+    } else {
+        tree_sitter_javascript::LANGUAGE.into()
+    };
+    let mut parser = Parser::new();
+    parser
+        .set_language(&language)
+        .map_err(|error| IndexError::Parse(error.to_string()))?;
+    let script_tree = parser
+        .parse(&isolated, None)
+        .ok_or_else(|| IndexError::Parse("Vue script parse returned None".into()))?;
+    Ok(Some((script_tree, isolated)))
+}
+
+fn script_is_typescript(script: &Node, source: &[u8]) -> bool {
+    script_attribute(script, source, "lang").is_some_and(|value| value.starts_with("ts"))
+}
+
+fn script_attribute<'a>(script: &Node, source: &'a [u8], wanted: &str) -> Option<&'a str> {
+    let start_tag = find_first(script, "start_tag")?;
     let mut cursor = start_tag.walk();
     for attribute in start_tag.children(&mut cursor) {
         if attribute.kind() != "attribute" {
@@ -127,15 +168,19 @@ fn script_is_typescript(script: &Node, source: &[u8]) -> bool {
         let name = find_first(&attribute, "attribute_name")
             .and_then(|n| node_text(&n, source))
             .unwrap_or("");
-        if name != "lang" {
+        if !name.eq_ignore_ascii_case(wanted) {
             continue;
         }
         let value = find_first(&attribute, "attribute_value")
+            .or_else(|| {
+                find_first(&attribute, "quoted_attribute_value")
+                    .and_then(|quoted| find_first(&quoted, "attribute_value"))
+            })
             .and_then(|n| node_text(&n, source))
             .unwrap_or("");
-        return value.starts_with("ts");
+        return Some(value);
     }
-    false
+    None
 }
 
 fn extract_template(root: &Node, source: &[u8], pending: &mut PendingFile, parent_index: usize) {

@@ -35,6 +35,7 @@ pub mod sarif_export;
 pub mod scip_overlay;
 pub mod setup;
 pub mod spec;
+mod spec_removals;
 mod spec_symbols;
 pub mod store;
 pub mod team;

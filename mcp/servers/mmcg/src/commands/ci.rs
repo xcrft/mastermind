@@ -127,16 +127,6 @@ pub fn run(opts: CiOpts, index_path: &Path) -> Result<bool, Box<dyn std::error::
             }
         };
 
-        let verify_report = mmcg::verify_spec::run(&parsed, Some(&store), &root);
-        if verify_report.has_failures() {
-            eprintln!("  [FAIL] {spec_name} — verify-spec errors:");
-            for line in verify_report.render_text().lines() {
-                eprintln!("         {line}");
-            }
-            all_ok = false;
-            continue;
-        }
-
         let executor_report_path = spec_path
             .parent()
             .map(|d| d.join("executor-report.md"))
@@ -165,7 +155,7 @@ pub fn run(opts: CiOpts, index_path: &Path) -> Result<bool, Box<dyn std::error::
             }
         };
 
-        let audit_report = match mmcg::audit_spec::run_with_report(
+        let (verify_report, audit_report) = match mmcg::audit_spec::run_ci_with_report(
             &parsed,
             &store,
             &root,
@@ -179,6 +169,21 @@ pub fn run(opts: CiOpts, index_path: &Path) -> Result<bool, Box<dyn std::error::
                 continue;
             }
         };
+
+        if verify_report.has_failures() {
+            eprintln!("  [FAIL] {spec_name} — verify-spec errors:");
+            for line in verify_report.render_text().lines() {
+                eprintln!("         {line}");
+            }
+            for finding in &audit_report.findings {
+                eprintln!(
+                    "         {}",
+                    mmcg::audit_spec::render_finding_text(finding)
+                );
+            }
+            all_ok = false;
+            continue;
+        }
 
         let verdict_str = match audit_report.verdict {
             mmcg::audit_spec::Verdict::Held => "HELD",

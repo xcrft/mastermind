@@ -176,6 +176,7 @@ id: \"{id}\"
 title: {title_yaml}
 mode: lite
 risk: low
+creates: []
 ---
 
 # Task {id}: {description}
@@ -215,7 +216,7 @@ VERIFY: `<command>`
 
 ### Pre-flight validation
 
-- [ ] All **File:** paths exist
+- [ ] Existing **File:** paths exist; additions are declared in `creates`
 - [ ] FIND: blocks match current file contents
 - [ ] VERIFY: commands are runnable
 "
@@ -385,7 +386,7 @@ VERIFY: `<command>`
 
 ### Pre-flight validation
 
-- [ ] All **File:** paths exist in the working tree
+- [ ] Existing **File:** paths exist; additions are declared in `creates`
 - [ ] All named symbols verified via `mmcg_search`
 - [ ] All FIND: blocks match current file contents (whitespace-sensitive)
 - [ ] `mmcg_impact` on each changed symbol agrees with stated scope
@@ -613,7 +614,7 @@ VERIFY: `<command>`
 
 ### Pre-flight validation
 
-- [ ] All **File:** paths exist in the working tree
+- [ ] Existing **File:** paths exist; additions are declared in `creates`
 - [ ] All named symbols verified via `mmcg_search`
 - [ ] All FIND: blocks match current file contents (whitespace-sensitive)
 - [ ] `mmcg_impact` on each changed symbol agrees with stated scope

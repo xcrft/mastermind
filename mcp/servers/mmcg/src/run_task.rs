@@ -1834,12 +1834,11 @@ fn run_post(
         let held_snapshot_sha256 = match parsed.frontmatter.as_ref() {
             Some(frontmatter)
                 if frontmatter.mode.as_deref() == Some("strict")
-                    && !frontmatter.touches.is_empty() =>
+                    && frontmatter.code_paths().next().is_some() =>
             {
                 let touches = frontmatter
-                    .touches
-                    .iter()
-                    .map(|touch| touch.file.clone())
+                    .code_paths()
+                    .map(str::to_string)
                     .collect::<Vec<_>>();
                 match strict_workflow_snapshot(repo_root, &state.baseline_ref, &touches) {
                     Ok(snapshot) => Some(snapshot),

@@ -34,7 +34,9 @@ are not required for Verified or Strict tasks.
 ## Boundary
 
 - Read the complete `spec.md` before editing.
-- Work only inside frontmatter `touches` and Scope.
+- Work only inside frontmatter `touches` / `creates` and Scope.
+- `creates` authorizes additions relative to the task baseline. It permits
+  regular drafts on retry; it does not authorize replacing a baseline file.
 - Do not add features or unrelated refactors.
 - Do not change the spec, tests, or acceptance criteria to make a failure disappear.
 - Never write `state.json` or `audit.md`; the controller owns lifecycle state.

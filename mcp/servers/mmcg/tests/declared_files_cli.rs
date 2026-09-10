@@ -28,6 +28,7 @@ impl Fixture {
             vec!["config", "user.name", "Test"],
             vec!["config", "user.email", "test@example.com"],
             vec!["config", "commit.gpgsign", "false"],
+            vec!["config", "core.autocrlf", "false"],
         ] {
             git(root, &args);
         }
@@ -67,6 +68,22 @@ impl Fixture {
             "expected_docs": docs, "verify": [{"cmd": VERIFY}],
         });
         self.write(SPEC, format!("---\n{}---\n# Update documentation\n## Goals\nUpdate the service and required documents.\n## Phase 1: update\nDescribe the changed behavior.\n", serde_norway::to_string(&metadata).unwrap()).as_bytes());
+    }
+    fn write_creation_spec(&self, mode: &str, touches: &[&str], creates: &[&str], docs: &[&str]) {
+        let metadata = json!({
+            "mode": mode,
+            "touches": touches.iter().map(|file| json!({"file":file,"symbols":["keep"]})).collect::<Vec<_>>(),
+            "creates": creates, "expected_docs": docs, "verify": [{"cmd":VERIFY}],
+        });
+        let mut body = format!(
+            "---\n{}---\n# Create files\n",
+            serde_norway::to_string(&metadata).unwrap()
+        );
+        for heading in verify_spec::mandatory_sections_for_mode(Some(mode)) {
+            body.push_str(&format!("\n## {heading}\nCreate the declared code and documentation and check their behavior.\n"));
+        }
+        body.push_str("\n## Phase 1: create\nImplement the new files.\n");
+        self.write(SPEC, body.as_bytes());
     }
     fn refresh(&mut self) {
         Indexer::new(self.root())
@@ -125,6 +142,18 @@ impl Fixture {
             success,
         )
     }
+    fn audit_with_report(&self, success: bool) -> Value {
+        json_output(
+            self.command()
+                .arg("audit-spec")
+                .arg(self.spec())
+                .args(["--since", "baseline", "--json", "--executor-report"])
+                .arg(self.spec().with_file_name("executor-report.md"))
+                .output()
+                .unwrap(),
+            success,
+        )
+    }
     fn ci(&self) -> Output {
         self.command()
             .args([
@@ -139,6 +168,9 @@ impl Fixture {
             .unwrap()
     }
     fn controller(&self, pre_only: bool) -> run_task::Outcome {
+        self.controller_with_strict(pre_only, false)
+    }
+    fn controller_with_strict(&self, pre_only: bool, strict: bool) -> run_task::Outcome {
         run_task::run(
             &self.spec(),
             self.root(),
@@ -146,8 +178,27 @@ impl Fixture {
             run_task::RunOpts {
                 pre_only,
                 post_only: !pre_only,
+                strict,
                 ..Default::default()
             },
+        )
+    }
+    fn policy(&self, success: bool) -> Value {
+        json_output(
+            self.command()
+                .args([
+                    "policy",
+                    "check",
+                    "--since",
+                    "baseline",
+                    "--config",
+                    ".mastermind/policy.yml",
+                    "--format",
+                    "sarif",
+                ])
+                .output()
+                .unwrap(),
+            success,
         )
     }
     fn controller_from(&self, cwd: &Path, pre_only: bool) -> Output {
@@ -196,6 +247,310 @@ fn file_error(report: &Value, file: Option<&str>, reason: Option<&str>) {
             }),
         "{report}"
     );
+}
+
+#[test]
+fn creates_public_workflow_retains_baseline_across_drafts_commits_and_recovery() {
+    let mut fixture = Fixture::new();
+    let doc = "docs/new.md";
+    fixture.write_creation_spec("strict", &[], &["new.py", doc], &["./docs\\new.md"]);
+    assert_eq!(fixture.verify(true)["verdict"], "pass");
+    assert_eq!(
+        fixture.controller_with_strict(true, true),
+        run_task::Outcome::PreReady
+    );
+    let baseline = fixture.state().baseline_ref;
+    assert!(!fixture.root().join("new.py").exists());
+    fixture.write("new.py", b"def added():\n    return 2\n");
+    fixture.write(doc, b"# New guide\nAdded behavior.\n");
+    fixture.refresh();
+    fixture.report(&["new.py", doc]);
+    assert_eq!(fixture.verify(true)["verdict"], "pass");
+    assert_eq!(fixture.audit(true)["verdict"], "held");
+    assert_eq!(
+        fixture.controller_with_strict(true, true),
+        run_task::Outcome::PreReady
+    );
+    assert_eq!(fixture.state().baseline_ref, baseline);
+    assert_eq!(fixture.controller(false), run_task::Outcome::PostHeld);
+    let held = fixture.state();
+    assert!(held.held_snapshot_sha256.is_some() && held.history_snapshot_sha256.is_some());
+    git(fixture.root(), &["add", "new.py", doc]);
+    assert_eq!(fixture.audit(true)["verdict"], "held");
+    git(fixture.root(), &["commit", "-qm", "create files"]);
+    assert_eq!(
+        fixture.controller_with_strict(true, true),
+        run_task::Outcome::PreReady
+    );
+    assert_eq!(fixture.state().baseline_ref, baseline);
+    assert_eq!(fixture.controller(false), run_task::Outcome::PostHeld);
+    assert_eq!(
+        fixture.state().held_snapshot_sha256,
+        held.held_snapshot_sha256
+    );
+    let ci = fixture.ci();
+    assert!(ci.status.success(), "{ci:?}");
+    let bundle: Value = serde_json::from_slice(
+        &std::fs::read(
+            fixture
+                .root()
+                .join(".mastermind/bundles/001-declared-files.bundle.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(bundle["schema_version"], 3);
+    assert_eq!(bundle["manifest"]["verdict"], "held");
+    assert_eq!(bundle["manifest"]["declared_files"], json!([doc, "new.py"]));
+    assert_eq!(bundle["manifest"]["discrepancies"], json!([]));
+    std::fs::remove_file(fixture.root().join(doc)).unwrap();
+    fixture.refresh();
+    file_error(&fixture.audit(false), Some(doc), Some("target_missing"));
+    assert_eq!(fixture.controller(false), run_task::Outcome::PostBroken);
+    let failed = fixture.state();
+    assert!(failed.held_snapshot_sha256.is_none() && failed.history_snapshot_sha256.is_none());
+    assert_eq!(failed.baseline_ref, baseline);
+    fixture.write(doc, b"# New guide\nAdded behavior.\n");
+    fixture.refresh();
+    assert_eq!(fixture.controller(false), run_task::Outcome::PostHeld);
+    assert_eq!(fixture.state().baseline_ref, baseline);
+    assert!(!fixture.root().join(".mastermind/should-not-run").exists());
+}
+
+#[test]
+fn creates_postflight_rejects_baseline_files_even_when_untracked() {
+    let mut fixture = Fixture::new();
+    fixture.write_creation_spec("lite", &[], &["service.py"], &[]);
+    assert_eq!(fixture.verify(true)["verdict"], "pass");
+    fixture.write("service.py", b"def keep():\n    return 2\n");
+    fixture.refresh();
+    fixture.report(&["service.py"]);
+    file_error(
+        &fixture.audit(false),
+        Some("service.py"),
+        Some("creation_exists_in_baseline"),
+    );
+    git(fixture.root(), &["rm", "--cached", "service.py"]);
+    fixture.refresh();
+    file_error(
+        &fixture.audit(false),
+        Some("service.py"),
+        Some("creation_exists_in_baseline"),
+    );
+    let ci = fixture.ci();
+    assert!(!ci.status.success(), "{ci:?}");
+    assert!(
+        String::from_utf8_lossy(&ci.stderr).contains("creation_exists_in_baseline"),
+        "{ci:?}"
+    );
+    fixture.write_creation_spec("lite", &[], &["docs"], &[]);
+    std::fs::remove_file(fixture.root().join(DOC)).unwrap();
+    std::fs::remove_dir(fixture.root().join("docs")).unwrap();
+    fixture.write("docs", b"a file replacing a baseline tree");
+    fixture.refresh();
+    fixture.report(&["service.py", "docs", DOC]);
+    file_error(
+        &fixture.audit(false),
+        Some("docs"),
+        Some("creation_exists_in_baseline"),
+    );
+}
+
+#[test]
+fn creates_public_gates_reject_invalid_metadata_and_declaration_conflicts() {
+    let fixture = Fixture::new();
+    for creates in [
+        "new.py",
+        "null",
+        "[null]",
+        "[true]",
+        "[7]",
+        "[{file: new.py}]",
+        "[new.py",
+    ] {
+        fixture.write_creation_spec("lite", &[], &[], &[]);
+        let body = std::fs::read_to_string(fixture.spec())
+            .unwrap()
+            .replace("creates: []", &format!("creates: {creates}"));
+        fixture.write(SPEC, body.as_bytes());
+        fixture.report(&[]);
+        let checked = fixture.verify(false);
+        assert!(
+            checked["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["kind"] == "declared_file_unavailable"
+                    && e["file"].is_null()
+                    && e["reason"] == "frontmatter_invalid"),
+            "{checked}"
+        );
+        file_error(&fixture.audit(false), None, Some("frontmatter_invalid"));
+        assert_eq!(fixture.controller(true), run_task::Outcome::PreFailed);
+        let ci = fixture.ci();
+        assert!(!ci.status.success(), "{ci:?}");
+        assert!(
+            String::from_utf8_lossy(&ci.stderr).contains("frontmatter_invalid"),
+            "{ci:?}"
+        );
+    }
+    for (touches, creates, docs, reason) in [
+        (
+            vec!["./service.py"],
+            vec!["service.py"],
+            vec![],
+            "creation_touch_conflict",
+        ),
+        (
+            vec![],
+            vec!["new", "new/file.py"],
+            vec![],
+            "declaration_ancestor_conflict",
+        ),
+        (
+            vec![],
+            vec!["new"],
+            vec!["new/guide.md"],
+            "declaration_ancestor_conflict",
+        ),
+        (vec![], vec!["../new.py"], vec![], "target_path_invalid"),
+    ] {
+        fixture.write_creation_spec("lite", &touches, &creates, &docs);
+        let checked = fixture.verify(false);
+        assert!(
+            checked["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["kind"] == "declared_file_unavailable" && e["reason"] == reason),
+            "{checked}"
+        );
+        assert_eq!(fixture.audit(false)["verdict"], "broken");
+    }
+}
+
+#[test]
+fn creates_strict_controller_and_policy_bind_created_bytes() {
+    for mixed in [false, true] {
+        let mut fixture = Fixture::new();
+        let touches = if mixed { vec!["service.py"] } else { vec![] };
+        fixture.write_creation_spec("strict", &touches, &["./new.py"], &[]);
+        fixture.write(
+            ".mastermind/policy.yml",
+            b"rules:\n  - id: critical\n    critical: new.py\n    require_workflow: strict\n",
+        );
+        assert_eq!(
+            fixture.controller_with_strict(true, true),
+            run_task::Outcome::PreReady
+        );
+        fixture.write("new.py", b"def added():\n    return 2\n");
+        let mut files = vec!["new.py"];
+        if mixed {
+            fixture.write("service.py", b"def keep():\n    return 2\n");
+            files.push("service.py");
+        }
+        fixture.refresh();
+        fixture.report(&files);
+        assert_eq!(fixture.controller(false), run_task::Outcome::PostHeld);
+        let held = fixture.state().held_snapshot_sha256;
+        assert!(held.is_some());
+        assert_eq!(
+            fixture.policy(true)["runs"][0]["properties"]["passed"],
+            true
+        );
+        fixture.write("new.py", b"def added():\n    return 3\n");
+        fixture.refresh();
+        let failed = fixture.policy(false);
+        assert_eq!(failed["runs"][0]["properties"]["passed"], false);
+        assert!(
+            failed["runs"][0]["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|result| result["ruleId"] == "critical"),
+            "{failed}"
+        );
+        fixture.report(&files);
+        assert_eq!(fixture.controller(false), run_task::Outcome::PostHeld);
+        assert_ne!(fixture.state().held_snapshot_sha256, held);
+        assert_eq!(
+            fixture.policy(true)["runs"][0]["properties"]["passed"],
+            true
+        );
+    }
+}
+
+#[test]
+fn creates_aliases_resolve_root_from_nested_cwd() {
+    let mut fixture = Fixture::new();
+    fixture.write_creation_spec("strict", &[], &["./new\\file.py"], &[]);
+    let nested = fixture.root().join(".mastermind/nested");
+    std::fs::create_dir_all(nested.join("new/file.py")).unwrap();
+    assert_eq!(
+        json_output(fixture.verify_from(&nested), true)["verdict"],
+        "pass"
+    );
+    let pre = fixture.controller_from(&nested, true);
+    assert!(pre.status.success(), "{pre:?}");
+    fixture.write("new/file.py", b"def added():\n    return 1\n");
+    fixture.refresh();
+    fixture.report(&["new/file.py"]);
+    assert_eq!(fixture.controller(false), run_task::Outcome::PostHeld);
+    let held = fixture.state();
+    let post = fixture.controller_from(&nested, false);
+    assert!(post.status.success(), "{post:?}");
+    assert_eq!(
+        fixture.state().history_snapshot_sha256,
+        held.history_snapshot_sha256
+    );
+    assert_eq!(
+        fixture.state().held_snapshot_sha256,
+        held.held_snapshot_sha256
+    );
+}
+
+#[test]
+fn creates_do_not_waive_find_or_verification_contracts() {
+    let mut fixture = Fixture::new();
+    fixture.write_creation_spec("lite", &[], &["new.py"], &[]);
+    let body = std::fs::read_to_string(fixture.spec()).unwrap();
+    fixture.write(
+        SPEC,
+        format!("{body}\n**File:** `new.py`\nFIND:\n```python\nneedle\n```\n").as_bytes(),
+    );
+    let checked = fixture.verify(false);
+    assert!(
+        checked["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["kind"] == "find_block_unavailable" && e["reason"] == "target_missing"),
+        "{checked}"
+    );
+    fixture.write("new.py", b"def added():\n    return 'needle'\n");
+    fixture.refresh();
+    assert_eq!(fixture.verify(true)["verdict"], "pass");
+    fixture.write("new.py", b"def added():\n    return 2\n");
+    fixture.refresh();
+    fixture.report(&["new.py"]);
+    let report_path = fixture.spec().with_file_name("executor-report.md");
+    let mut report: Value = serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
+    report["verifications"] = json!([]);
+    std::fs::write(&report_path, report.to_string()).unwrap();
+    let broken = fixture.audit_with_report(false);
+    assert_eq!(broken["verdict"], "broken");
+    assert!(
+        broken["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["kind"] == "verification_requirement_unmet"
+                && f["cmd"] == VERIFY
+                && f["reason"] == "missing_result"),
+        "{broken}"
+    );
+    fixture.report(&["new.py"]);
+    assert_eq!(fixture.audit_with_report(true)["verdict"], "held");
 }
 
 #[test]

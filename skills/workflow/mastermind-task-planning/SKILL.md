@@ -121,8 +121,12 @@ generic engineering advice.
 
 Before showing the contract to the user:
 
-1. Every scoped path names an existing contained regular file. The current
-   validator has no structured new-file exemption; a prose label cannot supply it.
+1. Existing files belong in `touches`; files to add belong in the top-level
+   `creates` list. Each target must be contained and regular, or safely absent
+   for `creates`. Regular drafts are allowed on repeated preflight. A created
+   path must be absent from the original Git baseline at postflight. List new
+   required docs in both `creates` and `expected_docs`. Do not declare the same
+   normalized path in `touches` and `creates`, or a file and its child path.
 2. Existing symbols and snapshot counts match the current index.
 3. Acceptance Criteria are independently observable.
 4. VERIFY commands are real, terminating, and scoped; the full gate appears

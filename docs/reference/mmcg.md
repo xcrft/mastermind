@@ -1167,10 +1167,12 @@ symbols, baseline declarations and deleted-file checks. Invalid relative scopes
 cannot grant a deletion exception, including aliases of required docs.
 
 Declared files use one shared admission check in preflight, ordinary audit,
-controller postflight and combined CI. Frontmatter `touches` and `expected_docs`
+controller postflight and combined CI. Frontmatter `touches`, `creates` and `expected_docs`
 remain authoritative when nonempty; otherwise the legacy prose-path fallback
-applies. A declaration must name a contained regular file using a valid relative
-path. Directory, symlink/reparse, special-file, absolute, parent and empty paths
+applies only when no structured file scope is present. Invalid or unterminated
+frontmatter is a hard declaration error; its readable body is retained for
+diagnostics and cannot replace the rejected contract. A declaration must name
+a contained regular file using a valid relative path. Directory, symlink/reparse, special-file, absolute, parent and empty paths
 cannot satisfy it. Leading `./` and separator aliases are normalized consistently
 in scope comparisons, bundles and controller snapshots, independently of cwd.
 
@@ -1196,8 +1198,34 @@ fields. Empty, oversized or aggregate targets use `file: null` with an explicit
 reason. A failed controller re-audit clears previous approval snapshots and
 requires planner review; repair and re-audit retain the initial baseline.
 Completed historical tasks keep their existing ordinary-resume behavior; use
-`run-task --post-only` to request a fresh audit. There is currently no structured
-new-file or external-file exemption in `touches`; a prose label does not create one.
+`run-task --post-only` to request a fresh audit. External files are not permitted.
+
+Declare additions in a top-level list such as `creates: [src/new.py, docs/new.md]`.
+Preflight accepts a regular draft or proven absence after no-follow inspection
+of every existing ancestor. Absence receipts recheck the missing component and
+ancestor identities. A read error, dangling link or unavailable parent never
+grants this allowance. Preflight creates no file or directory. Allowing regular
+drafts preserves revised-spec retries and the initial task baseline.
+
+Postflight requires each created file to be regular, present in the added or
+untracked diff, and absent from the immutable baseline tree. An untracked old
+file removed from the Git index is therefore rejected. Baseline queries read
+only names, use literal paths in bounded batches, and share the admission work
+budget, deadline and cancellation. A failed query is not proof of absence.
+
+A new required doc belongs in both `creates` and `expected_docs`; an existing
+doc remains an ordinary presence obligation. `touches` and `creates` cannot
+name the same normalized target. Declared regular files cannot be ancestors
+of other declared files. These contradictions fail before filesystem admission.
+Pre-edit symbol snapshots, removal acknowledgements and literal FIND retain
+their existing requirements; `creates` does not waive them.
+
+Created paths enter audit/report/Bundle scope, history receipts and strict
+controller/policy snapshots. Bundle file lists deduplicate normalized aliases;
+the input spec hash binds creation versus existing-file roles without changing
+the envelope or executor-report schemas. This requires a runtime with `creates`
+support: older binaries ignore the field, and updating source does not update
+an installed runtime or global workflow package.
 
 Literal `FIND:` blocks are preconditions: `verify-spec` and `run-task --pre-only`
 check them against the current working files before execution. A complete read

@@ -54,6 +54,8 @@ If an input is missing, report `could_not_verify`; do not infer it.
    edit. The deterministic preflight checks FIND, but does not prove CHANGE TO
    was applied. Judge the Acceptance Criteria and report missing pre-edit
    evidence honestly; the Git baseline may differ from the approved working file.
+   Every `creates` target must be a regular file added relative to the original
+   baseline. An untracked path alone does not prove creation.
    Required `expected_docs` must still exist as regular files after execution;
    deletion in the diff does not satisfy a documentation update. Acknowledged
    code removals cannot exempt required docs. Distinguish this hard failure from

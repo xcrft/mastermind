@@ -718,9 +718,8 @@ fn collect_workflow_evidence(
             continue;
         }
         let Some(touches) = frontmatter
-            .touches
-            .iter()
-            .map(|touch| normalize_evidence_path(&touch.file))
+            .code_paths()
+            .map(|path| crate::declared_files::normalize(path).ok())
             .collect::<Option<BTreeSet<_>>>()
         else {
             gaps.push(gap(
@@ -964,27 +963,6 @@ fn read_workflow_artifact(
             ));
             None
         }
-    }
-}
-
-fn normalize_evidence_path(path: &str) -> Option<String> {
-    let path = path.trim().replace('\\', "/");
-    if path.is_empty()
-        || path.starts_with('/')
-        || path.starts_with("//")
-        || path.as_bytes().get(1) == Some(&b':')
-        || path
-            .split('/')
-            .any(|part| part == ".." || part.chars().any(char::is_control))
-    {
-        None
-    } else {
-        let normalized = path
-            .split('/')
-            .filter(|part| !part.is_empty() && *part != ".")
-            .collect::<Vec<_>>()
-            .join("/");
-        (!normalized.is_empty()).then_some(normalized)
     }
 }
 

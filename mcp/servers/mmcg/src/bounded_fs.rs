@@ -103,6 +103,24 @@ pub(crate) struct RootCapability {
     identity: StableFileIdentity,
 }
 
+#[derive(Debug)]
+pub(crate) struct AbsentPath {
+    missing_component: usize,
+    parents: Vec<StableFileIdentity>,
+}
+
+impl AbsentPath {
+    pub(crate) fn matches(&self, other: &Self) -> bool {
+        self.missing_component == other.missing_component
+            && self.parents.len() == other.parents.len()
+            && self
+                .parents
+                .iter()
+                .zip(&other.parents)
+                .all(|(a, b)| a.same_object(*b))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BoundedPathKind {
     RegularFile,
@@ -376,6 +394,60 @@ fn open_relative_nofollow(root: &Dir, relative: &Path) -> Result<std::fs::File, 
             }
             _ => BoundedReadError::Io(error),
         })
+}
+
+/// Prove absence at the first missing component. Existing entries (including
+/// dangling links) are never absence; a disappearing opened parent is a change.
+pub(crate) fn inspect_absent_path(
+    root: &RootCapability,
+    path: &Path,
+    control: ReadControl<'_>,
+) -> Result<Option<AbsentPath>, BoundedReadError> {
+    control.check()?;
+    root.verify()?;
+    let relative = root.relative(path)?;
+    let components = relative.components().collect::<Vec<_>>();
+    let mut parent = root.directory.try_clone().map_err(BoundedReadError::Io)?;
+    let mut parents = vec![directory_identity(&parent)?];
+    for (index, component) in components.iter().enumerate() {
+        control.check()?;
+        let Component::Normal(name) = component else {
+            return Err(BoundedReadError::InvalidPath);
+        };
+        match parent.symlink_metadata(name) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(BoundedReadError::NotRegular);
+                }
+                if index + 1 == components.len() {
+                    root.verify()?;
+                    control.check()?;
+                    return Ok(None);
+                }
+                if !metadata.is_dir() {
+                    return Err(BoundedReadError::NotRegular);
+                }
+                parent = parent.open_dir_nofollow(name).map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        BoundedReadError::SnapshotChanged
+                    } else {
+                        BoundedReadError::Io(error)
+                    }
+                })?;
+                parents.push(directory_identity(&parent)?);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                root.verify()?;
+                control.check()?;
+                return Ok(Some(AbsentPath {
+                    missing_component: index,
+                    parents,
+                }));
+            }
+            Err(error) => return Err(BoundedReadError::Io(error)),
+        }
+    }
+    Err(BoundedReadError::InvalidPath)
 }
 
 pub(crate) fn create_regular_file_with_capability(

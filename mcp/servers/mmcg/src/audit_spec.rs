@@ -34,6 +34,7 @@ use crate::spec::{ParsedSpec, SymbolClaim};
 use crate::spec_removals;
 use crate::spec_symbols::{self, Resolved, Scope, Unresolved};
 use crate::store::Store;
+use crate::verification::{pass_contradiction, test_runner, PassContradiction, TestRunner};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -128,8 +129,8 @@ pub enum Finding {
         from_symbol: String,
         to_symbol: String,
     },
-    /// Executor claimed a test command passed, but no test files exist in the
-    /// relevant directory — vacuous pass (zero tests ran).
+    /// A static scan found no conventional test files for a recognized test
+    /// command. This is an advisory warning, not evidence of execution.
     VacuousTestClaim { cmd: String, reason: String },
     /// Executor claimed they added symbol X with a signature that doesn't match
     /// the stored one — wrote a different signature, or copy-pasted the claim
@@ -144,9 +145,8 @@ pub enum Finding {
     /// command passed — the exit code contradicts the claim; the run likely
     /// failed or was skipped.
     ObservedExitCodeNonZero { cmd: String, exit_code: i32 },
-    /// Executor attached `observed: { tests_run: 0 }` with `exit_code: 0` —
-    /// exited cleanly but ran zero tests. Vacuous pass confirmed by the
-    /// executor's own output rather than a static file-existence check.
+    /// Executor claimed a recognized test run passed but reported zero tests.
+    /// A missing exit code does not erase this contradiction in the report.
     ObservedZeroTests { cmd: String },
 }
 
@@ -751,13 +751,7 @@ fn check_declared_verifications(
     let mut outcomes = BTreeMap::new();
     for row in &report.verify {
         let (passed, unsuccessful) = outcomes.entry(row.cmd.trim()).or_insert((0usize, 0usize));
-        if row.claimed.as_deref() == Some("passed")
-            && row
-                .observed
-                .as_ref()
-                .and_then(|observed| observed.exit_code)
-                .is_none_or(|code| code == 0)
-        {
+        if row.claimed.as_deref() == Some("passed") && pass_contradiction(row).is_none() {
             *passed += 1;
         } else {
             *unsuccessful += 1;
@@ -814,26 +808,19 @@ fn check_vacuous_tests(
         if !claimed_passed {
             continue;
         }
+        if let Some(contradiction) = pass_contradiction(v) {
+            findings.push(match contradiction {
+                PassContradiction::NonZeroExit(code) => Finding::ObservedExitCodeNonZero {
+                    cmd: v.cmd.clone(),
+                    exit_code: code,
+                },
+                PassContradiction::ZeroTests => Finding::ObservedZeroTests { cmd: v.cmd.clone() },
+            });
+            continue;
+        }
         if let Some(obs) = &v.observed {
-            if let Some(code) = obs.exit_code {
-                if code != 0 {
-                    findings.push(Finding::ObservedExitCodeNonZero {
-                        cmd: v.cmd.clone(),
-                        exit_code: code,
-                    });
-                    continue;
-                }
-            }
-            if obs.exit_code == Some(0) {
-                if let Some(0) = obs.tests_run {
-                    findings.push(Finding::ObservedZeroTests { cmd: v.cmd.clone() });
-                    continue;
-                }
-            }
-            // A positive observed test count is authoritative: real tests ran,
-            // so the static file-scan below must not override it. Without this,
-            // `cargo test` with only `tests/*.rs` integration tests would
-            // false-positive as vacuous despite the executor reporting N ran.
+            // A positive self-reported count takes precedence over the
+            // advisory file scan; it does not authenticate execution.
             if matches!(obs.tests_run, Some(n) if n > 0) {
                 continue;
             }
@@ -847,76 +834,69 @@ fn check_vacuous_tests(
     }
 }
 
-/// `Some(reason)` if the test run is provably vacuous (no test files in the
-/// relevant scope). `None` when undeterminable — conservative: don't
-/// false-positive.
+/// Advisory absence of conventional test files in the scanned scope. Neither
+/// finding files nor failing to find them establishes how many tests ran.
 fn vacuous_test_reason(cmd: &str, repo_root: &Path) -> Option<String> {
-    let cmd_lower = cmd.to_lowercase();
-
-    // `go test` — exclude `cargo test`, which contains the substring "go test"
-    // ("car|go test"). Without the `cargo` guard it routes into the Go detector,
-    // gets flagged for no `_test.go` files, and shadows the `cargo test` branch
-    // below (unreachable for the literal command).
-    if cmd_lower.contains("go test") && !cmd_lower.contains("cargo") {
-        let pkg_dir = extract_go_package_dir(cmd, repo_root);
-        let dir = repo_root.join(&pkg_dir);
-        if dir.is_dir() && !has_files_matching(&dir, "_test.go") {
-            return Some(format!("no *_test.go files in {pkg_dir}"));
+    match test_runner(cmd)? {
+        TestRunner::Go => {
+            let pkg_dir = extract_go_package_dir(cmd, repo_root);
+            let dir = repo_root.join(&pkg_dir);
+            if dir.is_dir() && !has_files_matching(&dir, "_test.go") {
+                return Some(format!("no *_test.go files in {pkg_dir}"));
+            }
         }
-    } else if cmd_lower.contains("pytest")
-        || cmd_lower.contains("python -m pytest")
-        || cmd_lower.contains("python3 -m pytest")
-    {
-        let scope = extract_pytest_scope(cmd, repo_root);
-        let dir = repo_root.join(&scope);
-        if dir.is_dir() && !has_files_matching_pattern(&dir, "test_", ".py") {
-            return Some(format!("no test_*.py files in {scope}"));
+        TestRunner::Pytest => {
+            let scope = extract_pytest_scope(cmd, repo_root);
+            let dir = repo_root.join(&scope);
+            if dir.is_dir() && !has_files_matching_pattern(&dir, "test_", ".py") {
+                return Some(format!("no test_*.py files in {scope}"));
+            }
         }
-    } else if cmd_lower.contains("cargo test") {
-        // Unit tests live in `src/`, integration tests in `tests/`. Flag vacuous
-        // only when NEITHER carries a test attribute — a crate tested entirely
-        // integration-style (`tests/*.rs`, no `#[test]` in `src/`) is valid and
-        // must not be flagged.
-        //
-        // `--manifest-path` puts the crate somewhere other than the repo root
-        // (workspaces, monorepos). Scanning the root there reads a *sibling*
-        // `tests/` — often CI fixtures in another language — and reports a
-        // fully tested crate as vacuous.
-        let (crate_root, scope) = match extract_cargo_manifest_dir(cmd) {
-            Some(rel) => {
-                let d = repo_root.join(&rel);
-                if !d.is_dir() {
-                    // Manifest points outside the tree we can see: undeterminable.
-                    return None;
+        TestRunner::Cargo => {
+            // Unit tests live in `src/`, integration tests in `tests/`. Flag vacuous
+            // only when NEITHER carries a test attribute — a crate tested entirely
+            // integration-style (`tests/*.rs`, no `#[test]` in `src/`) is valid and
+            // must not be flagged.
+            //
+            // `--manifest-path` puts the crate somewhere other than the repo root
+            // (workspaces, monorepos). Scanning the root there reads a *sibling*
+            // `tests/` — often CI fixtures in another language — and reports a
+            // fully tested crate as vacuous.
+            let (crate_root, scope) = match extract_cargo_manifest_dir(cmd) {
+                Some(rel) => {
+                    let d = repo_root.join(&rel);
+                    if !d.is_dir() {
+                        // Manifest points outside the tree we can see: undeterminable.
+                        return None;
+                    }
+                    (d, format!("{rel}/"))
                 }
-                (d, format!("{rel}/"))
+                None => (repo_root.to_path_buf(), String::new()),
+            };
+            let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+            for sub in ["src", "tests"] {
+                let d = crate_root.join(sub);
+                if d.is_dir() {
+                    dirs.push(d);
+                }
             }
-            None => (repo_root.to_path_buf(), String::new()),
-        };
-        let mut dirs: Vec<std::path::PathBuf> = Vec::new();
-        for sub in ["src", "tests"] {
-            let d = crate_root.join(sub);
-            if d.is_dir() {
-                dirs.push(d);
+            if dirs.is_empty() {
+                dirs.push(crate_root);
             }
-        }
-        if dirs.is_empty() {
-            dirs.push(crate_root);
-        }
-        if !dirs.iter().any(|d| has_test_attr_in_dir(d)) {
-            return Some(format!(
-                "no test attribute (#[test], #[tokio::test], #[rstest], …) in \
+            if !dirs.iter().any(|d| has_test_attr_in_dir(d)) {
+                return Some(format!(
+                    "no test attribute (#[test], #[tokio::test], #[rstest], …) in \
                  {scope}src/ or {scope}tests/"
-            ));
+                ));
+            }
         }
-    } else if (cmd_lower.contains("jest")
-        || cmd_lower.contains("vitest")
-        || cmd_lower.contains("npm test")
-        || cmd_lower.contains("yarn test"))
-        && !has_files_matching_pattern(repo_root, ".test.", "")
-        && !has_files_matching_pattern(repo_root, ".spec.", "")
-    {
-        return Some("no *.test.* or *.spec.* files found".to_string());
+        TestRunner::Javascript => {
+            if !has_files_matching_pattern(repo_root, ".test.", "")
+                && !has_files_matching_pattern(repo_root, ".spec.", "")
+            {
+                return Some("no *.test.* or *.spec.* files found".to_string());
+            }
+        }
     }
 
     None

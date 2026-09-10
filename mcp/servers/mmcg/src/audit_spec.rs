@@ -62,6 +62,11 @@ pub enum Finding {
     /// File was mentioned in the spec but is identical to the baseline —
     /// nothing was written to it, staged or otherwise.
     MissingExpectedFile { file: String },
+    /// A declared current file is missing, unsafe or unavailable after execution.
+    DeclaredFileUnavailable {
+        file: Option<String>,
+        reason: String,
+    },
     /// Pre-edit snapshot count != current `mmcg_callers` count.
     SnapshotCallerDrift {
         symbol: String,
@@ -191,7 +196,8 @@ impl Report {
                 | Finding::SnapshotSignatureDrift { .. }
                 | Finding::PlannedTestNotAdded { .. }
                 | Finding::VacuousTestClaim { .. } => "⚠️ ",
-                Finding::SnapshotSymbolGone { .. }
+                Finding::DeclaredFileUnavailable { .. }
+                | Finding::SnapshotSymbolGone { .. }
                 | Finding::SnapshotUnresolved { .. }
                 | Finding::RemovedSymbolNotAcknowledged { .. }
                 | Finding::RemovalAcknowledgementUnresolved { .. }
@@ -235,6 +241,9 @@ fn render_finding(f: &Finding) -> String {
         }
         Finding::MissingExpectedFile { file } => {
             format!("missing_expected_file: spec named `{file}` but diff shows no change")
+        }
+        Finding::DeclaredFileUnavailable { file, reason } => {
+            format!("declared_file_unavailable: `{}` — required regular file could not be established ({reason})", file.as_deref().unwrap_or("<no valid target>"))
         }
         Finding::SnapshotCallerDrift {
             symbol,
@@ -448,23 +457,8 @@ fn run_internal(
     //    Filter `.mastermind/` from the diff side: local working state (index
     //    DB, specs), universally gitignored in real projects; CI fixtures commit
     //    it for test reasons.
-    let spec_files_owned: Vec<String> = match spec.frontmatter.as_ref() {
-        Some(fm) if fm.has_file_scope() => {
-            let mut out: Vec<String> =
-                Vec::with_capacity(fm.touches.len() + fm.expected_docs.len());
-            for t in &fm.touches {
-                out.push(t.file.clone());
-            }
-            for d in &fm.expected_docs {
-                out.push(d.clone());
-            }
-            out
-        }
-        _ => spec.mentioned_files.clone(),
-    };
-    let spec_files_owned: Vec<_> = spec_files_owned
-        .into_iter()
-        .map(|file| spec_symbols::normalize_file(&file).unwrap_or(file))
+    let spec_files_owned: Vec<_> = crate::declared_files::paths(spec)
+        .filter_map(|file| crate::declared_files::normalize(file).ok())
         .collect();
     let spec_files: HashSet<&str> = spec_files_owned.iter().map(String::as_str).collect();
     let diff_files: HashSet<&str> = symbol_diff
@@ -587,20 +581,8 @@ fn run_internal(
         }
     }
 
-    let verification = verify_postflight.then(|| {
-        let deleted_files = worktree
-            .files
-            .iter()
-            .filter(|file| file.status == "deleted")
-            .map(|file| file.path.as_str())
-            .collect();
-        crate::verify_spec::run_postflight(
-            spec,
-            Some(store),
-            repo_root,
-            removal_plan.as_ref(),
-            &deleted_files,
-        )
+    let mut verification = verify_postflight.then(|| {
+        crate::verify_spec::run_postflight(spec, Some(store), repo_root, removal_plan.as_ref())
     });
     let claim_checks = executor_report.map(|report| {
         check_executor_completion(report, spec, repo_root, deadline, &mut findings);
@@ -639,6 +621,36 @@ fn run_internal(
         {
             return Err(DiffError::GitFailed("index_changed".into()));
         }
+    }
+    let deleted_files: HashSet<_> = worktree
+        .files
+        .iter()
+        .filter(|file| file.status == "deleted")
+        .map(|file| file.path.as_str())
+        .collect();
+    let interrupted = || store.work_interrupted();
+    let file_issues = crate::declared_files::check(
+        spec,
+        repo_root,
+        crate::bounded_fs::ReadControl {
+            deadline: Some(deadline),
+            interrupted: Some(&interrupted),
+        },
+        |file| {
+            deleted_files.contains(file)
+                && removal_plan
+                    .as_ref()
+                    .is_some_and(|plan| plan.accepts_file_removal(file))
+        },
+    );
+    for issue in file_issues {
+        if let Some(verification) = verification.as_mut() {
+            verification.push_error(crate::verify_spec::declared_file_finding(&issue));
+        }
+        findings.push(Finding::DeclaredFileUnavailable {
+            file: issue.file,
+            reason: issue.reason.into(),
+        });
     }
     let verdict = compute_verdict(&findings);
     Ok((
@@ -921,22 +933,9 @@ impl Bundle {
             .collect();
 
         let spec_files: Vec<String> = spec
-            .map(|s| {
-                s.frontmatter
-                    .as_ref()
-                    .filter(|fm| fm.has_file_scope())
-                    .map(|fm| {
-                        fm.touches
-                            .iter()
-                            .map(|t| t.file.clone())
-                            .chain(fm.expected_docs.iter().cloned())
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_else(|| s.mentioned_files.clone())
-            })
-            .unwrap_or_default()
             .into_iter()
-            .map(|file| spec_symbols::normalize_file(&file).unwrap_or(file))
+            .flat_map(crate::declared_files::paths)
+            .filter_map(|file| crate::declared_files::normalize(file).ok())
             .collect();
 
         let mut mmcg_queries: Vec<String> = Vec::new();
@@ -1390,7 +1389,8 @@ fn build_human_summary(
             .iter()
             .filter(|f| matches!(
                 f,
-                Finding::SnapshotSymbolGone { .. }
+                Finding::DeclaredFileUnavailable { .. }
+                    | Finding::SnapshotSymbolGone { .. }
                     | Finding::SnapshotUnresolved { .. }
                     | Finding::RemovedSymbolNotAcknowledged { .. }
                     | Finding::RemovalAcknowledgementUnresolved { .. }
@@ -1410,7 +1410,8 @@ fn build_human_summary(
             .iter()
             .filter(|f| !matches!(
                 f,
-                Finding::SnapshotSymbolGone { .. }
+                Finding::DeclaredFileUnavailable { .. }
+                    | Finding::SnapshotSymbolGone { .. }
                     | Finding::SnapshotUnresolved { .. }
                     | Finding::RemovedSymbolNotAcknowledged { .. }
                     | Finding::RemovalAcknowledgementUnresolved { .. }
@@ -1521,7 +1522,8 @@ fn compute_verdict(findings: &[Finding]) -> Verdict {
     if findings.iter().any(|f| {
         matches!(
             f,
-            Finding::SnapshotSymbolGone { .. }
+            Finding::DeclaredFileUnavailable { .. }
+                | Finding::SnapshotSymbolGone { .. }
                 | Finding::SnapshotUnresolved { .. }
                 | Finding::RemovedSymbolNotAcknowledged { .. }
                 | Finding::RemovalAcknowledgementUnresolved { .. }

@@ -1166,6 +1166,39 @@ File scope treats leading `./` and path separators consistently across current
 symbols, baseline declarations and deleted-file checks. Invalid relative scopes
 cannot grant a deletion exception, including aliases of required docs.
 
+Declared files use one shared admission check in preflight, ordinary audit,
+controller postflight and combined CI. Frontmatter `touches` and `expected_docs`
+remain authoritative when nonempty; otherwise the legacy prose-path fallback
+applies. A declaration must name a contained regular file using a valid relative
+path. Directory, symlink/reparse, special-file, absolute, parent and empty paths
+cannot satisfy it. Leading `./` and separator aliases are normalized consistently
+in scope comparisons, bundles and controller snapshots, independently of cwd.
+
+Admission opens files without following links and rechecks their identity and
+metadata through one root capability. It reads no content, imposes no file-size
+or UTF-8 requirement, and therefore supports binary assets. It caps one check
+at 1,024 declarations and 16,384 work units, with 4,096 path bytes and 64 path
+components. Each declaration costs one work unit; each open/recheck costs one
+plus its path component count. Checks share a deadline and interruption state.
+These receipts establish presence and type, not an atomic snapshot or proof of
+file contents.
+
+A missing preflight file retains `missing_file`; other admission failures are
+hard `declared_file_unavailable` errors. Postflight admission failures always
+produce `declared_file_unavailable` and Broken, including deletion of a required
+document whose name appears in the diff. An acknowledged deleted code touch
+may be absent only after baseline proof; its absence is rechecked. An
+`expected_docs` alias of that touch still requires the file to exist. An unchanged
+existing file retains the separate advisory `missing_expected_file` finding.
+
+Rejected declarations stay in diagnostic findings rather than path-typed bundle
+fields. Empty, oversized or aggregate targets use `file: null` with an explicit
+reason. A failed controller re-audit clears previous approval snapshots and
+requires planner review; repair and re-audit retain the initial baseline.
+Completed historical tasks keep their existing ordinary-resume behavior; use
+`run-task --post-only` to request a fresh audit. There is currently no structured
+new-file or external-file exemption in `touches`; a prose label does not create one.
+
 Literal `FIND:` blocks are preconditions: `verify-spec` and `run-task --pre-only`
 check them against the current working files before execution. A complete read
 that lacks the literal produces `find_block_mismatch`. A missing target marker,

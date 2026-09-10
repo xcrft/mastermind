@@ -109,8 +109,8 @@ pub struct Frontmatter {
     /// are command obligations checked by preflight and canonical postflight.
     #[serde(default)]
     pub verify: Vec<VerifyEntry>,
-    /// Doc files expected to be modified — split from code-touches so the audit
-    /// can flag "you said you'd update the README but didn't".
+    /// Doc files required to exist before and after execution and expected to
+    /// be modified. Code-removal acknowledgements never exempt these paths.
     #[serde(default)]
     pub expected_docs: Vec<String>,
     #[serde(default)]

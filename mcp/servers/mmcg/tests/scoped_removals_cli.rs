@@ -561,6 +561,14 @@ fn ci_accepts_acknowledged_file_deletion_without_weakening_preflight() {
             1,
         );
         std::fs::write(&path, required_doc).unwrap();
+        let audit = fixture.audit(&path, false);
+        assert!(
+            audit["findings"].as_array().unwrap().iter().any(|finding| {
+                finding["kind"] == "declared_file_unavailable"
+                    && finding["reason"] == "target_missing"
+            }),
+            "{audit}"
+        );
         let ci = fixture.command(&["ci", "--since", "baseline"]);
         assert!(!ci.status.success(), "{ci:?}");
 
@@ -569,6 +577,13 @@ fn ci_accepts_acknowledged_file_deletion_without_weakening_preflight() {
             "  - file: service.py\n    symbols: [old_api]\n  - file: absent.py\n",
             "    - {name: old_api, file: service.py}\n",
             "",
+        );
+        let audit = fixture.audit(&path, false);
+        assert!(
+            audit["findings"].as_array().unwrap().iter().any(|finding| {
+                finding["kind"] == "declared_file_unavailable" && finding["file"] == "absent.py"
+            }),
+            "{audit}"
         );
         let ci = fixture.command(&["ci", "--since", "baseline"]);
         assert!(!ci.status.success(), "{ci:?}");

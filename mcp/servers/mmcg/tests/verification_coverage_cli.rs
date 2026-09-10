@@ -117,6 +117,12 @@ impl Fixture {
         .unwrap();
     }
 
+    fn support_file(&self, path: &str, bytes: &[u8]) {
+        let path = self.root().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
     fn command(&self, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_mmcg"))
             .current_dir(self.root())
@@ -831,4 +837,340 @@ fn zero_test_observations_controller_rejects_and_recovers_without_execution() {
     assert_eq!(repeated.next_step.as_deref(), Some("planner_review"));
     assert!(repeated.held_snapshot_sha256.is_none() && repeated.history_snapshot_sha256.is_none());
     assert!(!fixture.root().join(".mastermind/should-not-run").exists());
+}
+
+const SCAN_MANIFEST: &str = ".mastermind/scan/Cargo.toml";
+const SCAN_COMMAND: &str = "cargo test --manifest-path .mastermind/scan/Cargo.toml";
+
+fn scan_fixture() -> Fixture {
+    let mut fixture = Fixture::new(&[]);
+    fixture.support_file(SCAN_MANIFEST, b"[package]\nname = \"scan\"\n");
+    fixture.support_file(".mastermind/scan/src/lib.rs", b"pub fn helper() {}\n");
+    fixture.change();
+    fixture
+}
+
+#[test]
+fn test_scan_audit_handles_contained_and_recursive_scopes() {
+    let fixture = scan_fixture();
+    let empty = fixture.audit(Some(&executor(vec![passed(SCAN_COMMAND)])));
+    assert_eq!(empty.verdict, Verdict::Drift, "{empty:?}");
+    assert!(matches!(
+        empty.findings.as_slice(),
+        [Finding::VacuousTestClaim { .. }]
+    ));
+    fixture.support_file(
+        ".mastermind/scan/tests/check.rs",
+        b"#[test]\nfn check() {}\n",
+    );
+    assert_eq!(
+        fixture
+            .audit(Some(&executor(vec![passed(SCAN_COMMAND)])))
+            .verdict,
+        Verdict::Held
+    );
+
+    let cmd = "go test -run ./decoy ./.mastermind/scan/go/...";
+    fixture.support_file(".mastermind/scan/go/helper.go", b"package scan\n");
+    assert_eq!(
+        fixture.audit(Some(&executor(vec![passed(cmd)]))).verdict,
+        Verdict::Drift
+    );
+    fixture.support_file(".mastermind/scan/go/pkg/scan_test.go", b"package scan\n");
+    assert_eq!(
+        fixture.audit(Some(&executor(vec![passed(cmd)]))).verdict,
+        Verdict::Held
+    );
+    assert_eq!(
+        fixture
+            .audit(Some(&executor(vec![passed(
+                "go test ./.mastermind/scan/go"
+            )])))
+            .verdict,
+        Verdict::Drift
+    );
+
+    for name in ["test_scan.py", "scan_test.py"] {
+        let cmd = format!("python3 -m pytest -k decoy .mastermind/{name}/suite");
+        fixture.support_file(&format!(".mastermind/{name}/suite/helper.py"), b"pass\n");
+        assert_eq!(
+            fixture.audit(Some(&executor(vec![passed(&cmd)]))).verdict,
+            Verdict::Drift
+        );
+        fixture.support_file(
+            &format!(".mastermind/{name}/suite/nested/{name}"),
+            b"def test_scan(): pass\n",
+        );
+        assert_eq!(
+            fixture.audit(Some(&executor(vec![passed(&cmd)]))).verdict,
+            Verdict::Held
+        );
+        let explicit = format!("pytest .mastermind/{name}/suite/helper.py");
+        assert_eq!(
+            fixture
+                .audit(Some(&executor(vec![passed(&explicit)])))
+                .verdict,
+            Verdict::Held
+        );
+    }
+    for cmd in ["jest", "vitest run"] {
+        assert_eq!(
+            fixture.audit(Some(&executor(vec![passed(cmd)]))).verdict,
+            Verdict::Drift
+        );
+    }
+    fixture.support_file(
+        ".mastermind/javascript/nested/scan.spec.ts",
+        b"export {};\n",
+    );
+    for cmd in ["jest", "vitest run"] {
+        assert_eq!(
+            fixture.audit(Some(&executor(vec![passed(cmd)]))).verdict,
+            Verdict::Held
+        );
+    }
+}
+
+#[test]
+fn test_scan_audit_keeps_external_and_unsupported_scopes_unknown() {
+    let fixture = scan_fixture();
+    let outside = tempfile::tempdir_in(fixture.root().parent().unwrap()).unwrap();
+    std::fs::create_dir(outside.path().join("src")).unwrap();
+    std::fs::write(
+        outside.path().join("Cargo.toml"),
+        b"[package]\nname = \"outside\"\n",
+    )
+    .unwrap();
+    let sibling = outside.path().file_name().unwrap().to_str().unwrap();
+    for content in [
+        b"pub fn helper() {}\n".as_slice(),
+        b"#[test]\nfn check() {}\n",
+    ] {
+        std::fs::write(outside.path().join("src/lib.rs"), content).unwrap();
+        for cmd in [
+            format!("cargo test --manifest-path ../{sibling}/Cargo.toml"),
+            format!("pytest ../{sibling}"),
+        ] {
+            let report = fixture.audit(Some(&executor(vec![passed(&cmd)])));
+            assert_eq!(report.verdict, Verdict::Held, "{cmd}: {report:?}");
+            let zero = fixture.audit(Some(&executor(vec![observed(
+                &cmd,
+                json!({"tests_run": 0}),
+            )])));
+            assert!(
+                matches!(
+                    zero.findings.as_slice(),
+                    [Finding::ObservedZeroTests { .. }]
+                ),
+                "command must reach the recognized test path: {cmd}"
+            );
+        }
+    }
+    for cmd in [
+        "cargo test --workspace",
+        "cargo test --doc",
+        "cargo test -p other",
+        "go test ./one ./two",
+        "go test ./.../pkg/...",
+        "go test std",
+        "pytest .mastermind/one .mastermind/two",
+        "pytest tests/test_app.py::test_app",
+        "jest missing-filter",
+        "vitest run missing-filter",
+    ] {
+        let report = fixture.audit(Some(&executor(vec![passed(cmd)])));
+        assert_eq!(report.verdict, Verdict::Held, "{cmd}: {report:?}");
+        assert!(report.findings.is_empty());
+    }
+}
+
+#[test]
+fn test_scan_audit_does_not_treat_incomplete_reads_as_absence() {
+    for case in ["invalid_utf8", "oversized", "deep"] {
+        let fixture = scan_fixture();
+        assert_eq!(
+            fixture
+                .audit(Some(&executor(vec![passed(SCAN_COMMAND)])))
+                .verdict,
+            Verdict::Drift
+        );
+        match case {
+            "invalid_utf8" => fixture.support_file(".mastermind/scan/src/bad.rs", b"\xff"),
+            "oversized" => {
+                let file =
+                    std::fs::File::create(fixture.root().join(".mastermind/scan/src/large.rs"))
+                        .unwrap();
+                file.set_len(1024 * 1024 + 1).unwrap();
+            }
+            "deep" => fixture.support_file(
+                &format!(".mastermind/scan/src/{}test.rs", "d/".repeat(20)),
+                b"#[test]\nfn t() {}\n",
+            ),
+            _ => unreachable!(),
+        }
+        let report = fixture.audit(Some(&executor(vec![passed(SCAN_COMMAND)])));
+        assert_eq!(report.verdict, Verdict::Held, "{case}: {report:?}");
+        assert!(report.findings.is_empty());
+    }
+}
+
+#[test]
+fn test_scan_audit_budget_exhaustion_preserves_hard_observations() {
+    let fixture = scan_fixture();
+    let file = std::fs::File::create(fixture.root().join(".mastermind/scan/src/large.rs")).unwrap();
+    file.set_len(1024 * 1024 + 1).unwrap();
+    drop(file);
+    let mut rows = vec![passed(SCAN_COMMAND); 16];
+    rows.push(observed(SCAN_COMMAND, json!({"tests_run": 0})));
+    rows.push(observed("cargo check", json!({"exit_code": 7})));
+    let report = fixture.audit(Some(&executor(rows)));
+    assert_eq!(report.verdict, Verdict::Broken);
+    assert!(matches!(
+        report.findings.as_slice(),
+        [
+            Finding::ObservedZeroTests { .. },
+            Finding::ObservedExitCodeNonZero { exit_code: 7, .. }
+        ]
+    ));
+}
+
+#[test]
+fn test_scan_cli_ci_bundle_preserve_advisory_severity() {
+    let fixture = scan_fixture();
+    git(fixture.root(), &["add", "service.py"]);
+    git(fixture.root(), &["commit", "-q", "-m", "change"]);
+    for (source, verdict) in [
+        (b"pub fn helper() {}\n".as_slice(), "drift"),
+        (b"\xff", "held"),
+        (b"#[test]\nfn t() {}\n", "held"),
+    ] {
+        fixture.support_file(".mastermind/scan/src/lib.rs", source);
+        fixture.write_report(vec![passed(SCAN_COMMAND)]);
+        let report_path = fixture.spec().with_file_name("executor-report.md");
+        let output = fixture.command(&[
+            "audit-spec",
+            SPEC,
+            "--since",
+            "baseline",
+            "--executor-report",
+            report_path.to_str().unwrap(),
+            "--json",
+        ]);
+        assert!(output.status.success(), "{output:?}");
+        let audit: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(audit["verdict"], verdict);
+        let ci = fixture.command(&[
+            "ci",
+            "--since",
+            "baseline",
+            "--require-executor-report",
+            "--bundle-dir",
+            ".mastermind/output",
+        ]);
+        assert!(ci.status.success(), "{ci:?}");
+        let bundle: Value = serde_json::from_slice(
+            &std::fs::read(
+                fixture
+                    .root()
+                    .join(".mastermind/output/001-verification.bundle.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(bundle["schema_version"], 3);
+        assert_eq!(bundle["manifest"]["verdict"], verdict);
+        assert_eq!(bundle["manifest"]["discrepancies"], audit["findings"]);
+        if verdict == "drift" {
+            assert_eq!(audit["findings"][0]["kind"], "vacuous_test_claim");
+            assert!(bundle["manifest"]["human_summary"]
+                .as_str()
+                .unwrap()
+                .contains("0 errors, 1 warnings"));
+        } else {
+            assert_eq!(audit["findings"], json!([]));
+        }
+    }
+}
+
+#[test]
+fn test_scan_controller_recovers_without_claiming_test_execution() {
+    let marker = "echo proof > .mastermind/should-not-run";
+    let mut fixture = Fixture::new(&[SCAN_COMMAND, marker]);
+    fixture.support_file(SCAN_MANIFEST, b"[package]\nname = \"scan\"\n");
+    fixture.support_file(".mastermind/scan/src/lib.rs", b"pub fn helper() {}\n");
+    assert_eq!(fixture.run_task(true), run_task::Outcome::PreReady);
+    fixture.change();
+    fixture.write_report(vec![passed(SCAN_COMMAND), passed(marker)]);
+    assert_eq!(fixture.run_task(false), run_task::Outcome::PostDrift);
+    let state_path = run_task::state_file_path(fixture.root(), &fixture.spec());
+    let drift = run_task::load_state(&state_path).unwrap().unwrap();
+    assert_eq!(drift.next_step.as_deref(), Some("planner_review"));
+    fixture.support_file(".mastermind/scan/src/lib.rs", b"\xff");
+    assert_eq!(fixture.run_task(false), run_task::Outcome::PostHeld);
+    let held = run_task::load_state(&state_path).unwrap().unwrap();
+    assert_eq!(held.baseline_ref, drift.baseline_ref);
+    assert_eq!(held.iteration, drift.iteration);
+    fixture.write_report(vec![
+        observed(SCAN_COMMAND, json!({"tests_run": 0})),
+        passed(marker),
+    ]);
+    assert_eq!(fixture.run_task(false), run_task::Outcome::PostBroken);
+    assert!(!fixture.root().join(".mastermind/should-not-run").exists());
+}
+
+#[test]
+fn test_scan_cli_resolves_scopes_independently_of_cwd() {
+    let fixture = scan_fixture();
+    fixture.support_file(
+        ".mastermind/nested/.mastermind/scan/src/decoy.rs",
+        b"#[test]\nfn t() {}\n",
+    );
+    fixture.write_report(vec![passed(SCAN_COMMAND)]);
+    let report_path = fixture.spec().with_file_name("executor-report.md");
+    let output = Command::new(env!("CARGO_BIN_EXE_mmcg"))
+        .current_dir(fixture.root().join(".mastermind/nested"))
+        .arg("--index")
+        .arg(fixture.root().join("graph.db"))
+        .arg("audit-spec")
+        .arg(fixture.spec())
+        .arg("--root")
+        .arg(fixture.root())
+        .args(["--since", "baseline", "--executor-report"])
+        .arg(report_path)
+        .arg("--json")
+        .env("MMCG_QUERY_BUDGET_MS", "60000")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["verdict"], "drift");
+    assert_eq!(report["findings"][0]["kind"], "vacuous_test_claim");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_scan_audit_symlinked_scope_is_unknown_unix() {
+    use std::os::unix::fs::symlink;
+    let fixture = scan_fixture();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(
+        outside.path().join("Cargo.toml"),
+        b"[package]\nname = \"outside\"\n",
+    )
+    .unwrap();
+    symlink(outside.path(), fixture.root().join(".mastermind/link")).unwrap();
+    for cmd in [
+        "cargo test --manifest-path .mastermind/link/Cargo.toml",
+        "pytest .mastermind/link",
+    ] {
+        let report = fixture.audit(Some(&executor(vec![passed(cmd)])));
+        assert_eq!(report.verdict, Verdict::Held, "{cmd}: {report:?}");
+    }
+    symlink(
+        outside.path(),
+        fixture.root().join(".mastermind/scan/tests"),
+    )
+    .unwrap();
+    let report = fixture.audit(Some(&executor(vec![passed(SCAN_COMMAND)])));
+    assert_eq!(report.verdict, Verdict::Held, "{report:?}");
 }

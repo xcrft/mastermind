@@ -34,7 +34,8 @@ use crate::spec::{ParsedSpec, SymbolClaim};
 use crate::spec_removals;
 use crate::spec_symbols::{self, Resolved, Scope, Unresolved};
 use crate::store::Store;
-use crate::verification::{pass_contradiction, test_runner, PassContradiction, TestRunner};
+use crate::test_scan::TestScanner;
+use crate::verification::{pass_contradiction, PassContradiction};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -617,7 +618,7 @@ fn run_internal(
             },
         );
         findings.extend(checks.iter().filter_map(|check| check.finding.clone()));
-        check_vacuous_tests(report, repo_root, &mut findings);
+        check_vacuous_tests(report, repo_root, store, deadline, &mut findings);
         checks
     });
     if removal_plan.is_some() || has_claims {
@@ -675,7 +676,7 @@ pub fn run_ci_with_report(
 ///  - Unresolved outcomes for stale, ambiguous or unavailable source evidence
 ///  - Canonical report completion and repository-contained task identity
 ///  - Reported outcomes for every explicitly declared verification command
-///  - Vacuous test detector (2.3): test command claimed passed, no test files
+///  - Bounded advisory scans of conventional test files for claimed passes
 pub fn run_with_report(
     spec: &ParsedSpec,
     store: &Store,
@@ -798,8 +799,18 @@ fn claim_label(index: usize, claim: &Claim) -> String {
 fn check_vacuous_tests(
     er: &crate::executor_report::ExecutorReport,
     repo_root: &Path,
+    store: &Store,
+    deadline: Instant,
     findings: &mut Vec<Finding>,
 ) {
+    let interrupted = || store.work_interrupted();
+    let mut scanner = TestScanner::new(
+        repo_root,
+        crate::bounded_fs::ReadControl {
+            deadline: Some(deadline),
+            interrupted: Some(&interrupted),
+        },
+    );
     for v in &er.verify {
         let claimed_passed = v
             .claimed
@@ -825,188 +836,13 @@ fn check_vacuous_tests(
                 continue;
             }
         }
-        if let Some(reason) = vacuous_test_reason(&v.cmd, repo_root) {
+        if let Some(reason) = scanner.absence_reason(&v.cmd) {
             findings.push(Finding::VacuousTestClaim {
                 cmd: v.cmd.clone(),
                 reason,
             });
         }
     }
-}
-
-/// Advisory absence of conventional test files in the scanned scope. Neither
-/// finding files nor failing to find them establishes how many tests ran.
-fn vacuous_test_reason(cmd: &str, repo_root: &Path) -> Option<String> {
-    match test_runner(cmd)? {
-        TestRunner::Go => {
-            let pkg_dir = extract_go_package_dir(cmd, repo_root);
-            let dir = repo_root.join(&pkg_dir);
-            if dir.is_dir() && !has_files_matching(&dir, "_test.go") {
-                return Some(format!("no *_test.go files in {pkg_dir}"));
-            }
-        }
-        TestRunner::Pytest => {
-            let scope = extract_pytest_scope(cmd, repo_root);
-            let dir = repo_root.join(&scope);
-            if dir.is_dir() && !has_files_matching_pattern(&dir, "test_", ".py") {
-                return Some(format!("no test_*.py files in {scope}"));
-            }
-        }
-        TestRunner::Cargo => {
-            // Unit tests live in `src/`, integration tests in `tests/`. Flag vacuous
-            // only when NEITHER carries a test attribute — a crate tested entirely
-            // integration-style (`tests/*.rs`, no `#[test]` in `src/`) is valid and
-            // must not be flagged.
-            //
-            // `--manifest-path` puts the crate somewhere other than the repo root
-            // (workspaces, monorepos). Scanning the root there reads a *sibling*
-            // `tests/` — often CI fixtures in another language — and reports a
-            // fully tested crate as vacuous.
-            let (crate_root, scope) = match extract_cargo_manifest_dir(cmd) {
-                Some(rel) => {
-                    let d = repo_root.join(&rel);
-                    if !d.is_dir() {
-                        // Manifest points outside the tree we can see: undeterminable.
-                        return None;
-                    }
-                    (d, format!("{rel}/"))
-                }
-                None => (repo_root.to_path_buf(), String::new()),
-            };
-            let mut dirs: Vec<std::path::PathBuf> = Vec::new();
-            for sub in ["src", "tests"] {
-                let d = crate_root.join(sub);
-                if d.is_dir() {
-                    dirs.push(d);
-                }
-            }
-            if dirs.is_empty() {
-                dirs.push(crate_root);
-            }
-            if !dirs.iter().any(|d| has_test_attr_in_dir(d)) {
-                return Some(format!(
-                    "no test attribute (#[test], #[tokio::test], #[rstest], …) in \
-                 {scope}src/ or {scope}tests/"
-                ));
-            }
-        }
-        TestRunner::Javascript => {
-            if !has_files_matching_pattern(repo_root, ".test.", "")
-                && !has_files_matching_pattern(repo_root, ".spec.", "")
-            {
-                return Some("no *.test.* or *.spec.* files found".to_string());
-            }
-        }
-    }
-
-    None
-}
-
-fn extract_go_package_dir(cmd: &str, _root: &Path) -> String {
-    for token in cmd.split_whitespace() {
-        if token.starts_with("./") {
-            let clean = token.trim_end_matches("/...");
-            return clean.trim_start_matches("./").to_string();
-        }
-    }
-    ".".to_string()
-}
-
-/// Crate directory named by `--manifest-path <dir>/Cargo.toml` (and the
-/// `--manifest-path=…` spelling), relative to the repo root and slash-normalised.
-/// `None` when the flag is absent or the manifest sits at the root — both mean
-/// "the crate is the repo root", so the caller keeps its default scan.
-fn extract_cargo_manifest_dir(cmd: &str) -> Option<String> {
-    let tokens: Vec<&str> = cmd.split_whitespace().collect();
-    let mut raw: Option<&str> = None;
-    for (i, t) in tokens.iter().enumerate() {
-        if let Some(v) = t.strip_prefix("--manifest-path=") {
-            raw = Some(v);
-            break;
-        }
-        if *t == "--manifest-path" {
-            raw = tokens.get(i + 1).copied().filter(|n| !n.starts_with('-'));
-            break;
-        }
-    }
-    let path = norm_path(raw?.trim_matches(|c| c == '"' || c == '\''));
-    // Cargo wants the manifest file itself; tolerate a bare directory too.
-    let dir = match path.rsplit_once('/') {
-        Some((parent, last)) if last.eq_ignore_ascii_case("cargo.toml") => parent,
-        None if path.eq_ignore_ascii_case("cargo.toml") => "",
-        _ => path.as_str(),
-    };
-    let dir = dir.trim_end_matches('/');
-    if dir.is_empty() || dir == "." {
-        return None;
-    }
-    Some(dir.to_string())
-}
-
-fn extract_pytest_scope(cmd: &str, _root: &Path) -> String {
-    let tokens: Vec<&str> = cmd.split_whitespace().collect();
-    for (i, t) in tokens.iter().enumerate() {
-        if *t == "pytest" || t.ends_with("pytest") {
-            if let Some(next) = tokens.get(i + 1) {
-                if !next.starts_with('-') {
-                    return next.to_string();
-                }
-            }
-        }
-    }
-    ".".to_string()
-}
-
-fn has_files_matching(dir: &Path, suffix: &str) -> bool {
-    std::fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .any(|e| e.file_name().to_string_lossy().ends_with(suffix))
-        })
-        .unwrap_or(false)
-}
-
-fn has_files_matching_pattern(dir: &Path, contains: &str, ends: &str) -> bool {
-    ignore::WalkBuilder::new(dir)
-        .standard_filters(false)
-        .max_depth(Some(5))
-        .build()
-        .filter_map(|e| e.ok())
-        .any(|e| {
-            if !e.file_type().is_some_and(|kind| kind.is_file()) {
-                return false;
-            }
-            let name = e.file_name().to_string_lossy();
-            name.contains(contains) && (ends.is_empty() || name.ends_with(ends))
-        })
-}
-
-fn has_test_attr_in_dir(dir: &Path) -> bool {
-    ignore::WalkBuilder::new(dir)
-        .standard_filters(false)
-        .max_depth(Some(6))
-        .build()
-        .filter_map(|e| e.ok())
-        .any(|e| {
-            if !e.file_type().is_some_and(|kind| kind.is_file()) {
-                return false;
-            }
-            if e.path().extension().and_then(|s| s.to_str()) != Some("rs") {
-                return false;
-            }
-            std::fs::read_to_string(e.path())
-                .map(|text| file_has_test_attr(&text))
-                .unwrap_or(false)
-        })
-}
-
-/// Recognises common Rust test-attribute spellings: built-in `#[test]`, async
-/// variants like `#[tokio::test]` / `#[async_std::test]` (end in `::test]`), and
-/// `#[rstest]` / `#[rstest(...)]`. Matching only literal `#[test]` used to
-/// false-flag crates testing exclusively via these.
-fn file_has_test_attr(text: &str) -> bool {
-    text.contains("#[test]") || text.contains("::test]") || text.contains("#[rstest")
 }
 
 // ----- evidence bundle ------------------------------------------------------
@@ -2213,138 +2049,6 @@ breaking_changes:
         assert_eq!(norm_path("./src/foo.ts"), norm_path("src/foo.ts"));
         assert_eq!(norm_path(r"src\foo.ts"), norm_path("src/foo.ts"));
         assert_ne!(norm_path("src/foo.ts"), norm_path("src/bar.ts"));
-    }
-
-    #[test]
-    fn file_has_test_attr_recognises_common_spellings() {
-        assert!(file_has_test_attr("#[test]\nfn t() {}"));
-        assert!(file_has_test_attr("#[tokio::test]\nasync fn t() {}"));
-        assert!(file_has_test_attr("#[async_std::test]\nasync fn t() {}"));
-        assert!(file_has_test_attr("#[rstest]\nfn t() {}"));
-        assert!(file_has_test_attr(
-            "#[rstest(input, case(1))]\nfn t(input: u8) {}"
-        ));
-        assert!(!file_has_test_attr("fn helper() {}\n// no tests here"));
-    }
-
-    #[test]
-    fn cargo_test_not_vacuous_with_only_integration_tests() {
-        // Regression: a crate with only integration-style tests (`tests/*.rs`,
-        // no `#[test]` in `src/`) used to be flagged vacuous because the scan
-        // looked only at `src/`.
-        let dir = init_repo("cargo_integration_only");
-        write(
-            &dir,
-            "src/lib.rs",
-            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
-        );
-        write(
-            &dir,
-            "tests/it.rs",
-            "#[test]\nfn adds() { assert_eq!(2, 2); }\n",
-        );
-        assert!(
-            vacuous_test_reason("cargo test", dir.as_path()).is_none(),
-            "integration tests in tests/*.rs must not be flagged vacuous"
-        );
-
-        // A crate with no test attribute anywhere is still flagged.
-        let bare = init_repo("cargo_no_tests");
-        write(&bare, "src/lib.rs", "pub fn add() {}\n");
-        assert!(vacuous_test_reason("cargo test", bare.as_path()).is_some());
-
-        fs::remove_dir_all(&dir).ok();
-        fs::remove_dir_all(&bare).ok();
-    }
-
-    #[test]
-    fn cargo_test_manifest_path_scopes_scan_to_the_crate() {
-        // Regression: `cargo test --manifest-path <sub>/Cargo.toml` used to be
-        // scanned at the repo root, so a monorepo whose root `tests/` holds
-        // non-Rust fixtures reported a fully tested nested crate as vacuous.
-        let dir = init_repo("cargo_manifest_path");
-        write(
-            &dir,
-            "tests/ci_fixture.py",
-            "def test_nothing():\n    pass\n",
-        );
-        write(
-            &dir,
-            "mcp/servers/mmcg/Cargo.toml",
-            "[package]\nname = \"c\"\n",
-        );
-        write(
-            &dir,
-            "mcp/servers/mmcg/src/store.rs",
-            "pub fn budget() {}\n#[test]\nfn work_budget() {}\n",
-        );
-        assert!(
-            vacuous_test_reason(
-                "cargo test --manifest-path mcp/servers/mmcg/Cargo.toml --locked work_budget",
-                dir.as_path()
-            )
-            .is_none(),
-            "tests in the crate named by --manifest-path must not be flagged vacuous"
-        );
-        // Without the flag the crate really is the repo root, and there the
-        // only `tests/` carries no Rust test attribute.
-        assert!(vacuous_test_reason("cargo test", dir.as_path()).is_some());
-        // An unresolvable manifest is undeterminable, not vacuous.
-        assert!(vacuous_test_reason(
-            "cargo test --manifest-path absent/Cargo.toml",
-            dir.as_path()
-        )
-        .is_none());
-
-        // A nested crate genuinely without tests is still flagged — a decoy
-        // `tests/` at the root must not vouch for it.
-        let bare = init_repo("cargo_manifest_path_bare");
-        write(&bare, "tests/it.rs", "#[test]\nfn decoy() {}\n");
-        write(
-            &bare,
-            "crates/thing/Cargo.toml",
-            "[package]\nname = \"t\"\n",
-        );
-        write(&bare, "crates/thing/src/lib.rs", "pub fn add() {}\n");
-        let reason = vacuous_test_reason(
-            "cargo test --manifest-path=crates/thing/Cargo.toml",
-            bare.as_path(),
-        )
-        .expect("untested nested crate must still be flagged");
-        assert!(
-            reason.contains("crates/thing/src/"),
-            "reason should name the scanned crate, got: {reason}"
-        );
-
-        fs::remove_dir_all(&dir).ok();
-        fs::remove_dir_all(&bare).ok();
-    }
-
-    #[test]
-    fn extract_cargo_manifest_dir_handles_flag_spellings() {
-        let d = |cmd: &str| extract_cargo_manifest_dir(cmd);
-        assert_eq!(
-            d("cargo test --manifest-path mcp/servers/mmcg/Cargo.toml --locked"),
-            Some("mcp/servers/mmcg".to_string())
-        );
-        assert_eq!(
-            d("cargo test --manifest-path=./crates/a/Cargo.toml"),
-            Some("crates/a".to_string())
-        );
-        assert_eq!(
-            d(r#"cargo test --manifest-path "crates/a/Cargo.toml""#),
-            Some("crates/a".to_string())
-        );
-        // Bare directory instead of the manifest file.
-        assert_eq!(
-            d("cargo test --manifest-path crates/a/"),
-            Some("crates/a".to_string())
-        );
-        // No relocation: absent flag, root manifest, or a missing value.
-        assert_eq!(d("cargo test --locked --all"), None);
-        assert_eq!(d("cargo test --manifest-path Cargo.toml"), None);
-        assert_eq!(d("cargo test --manifest-path ./Cargo.toml"), None);
-        assert_eq!(d("cargo test --manifest-path --locked"), None);
     }
 
     #[test]

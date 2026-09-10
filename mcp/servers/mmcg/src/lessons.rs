@@ -366,6 +366,7 @@ fn summarize_findings(findings: &[Finding]) -> String {
             Finding::ClaimedSymbolNotAdded { .. } => "claimed symbol not added",
             Finding::ExecutorClaimUnresolved { .. } => "executor claim unresolved",
             Finding::ExecutorReportRejected { .. } => "executor report rejected",
+            Finding::VerificationRequirementUnmet { .. } => "verification requirement unmet",
             Finding::HallucinatedSymbol { .. } => "hallucinated symbol",
             Finding::MissingCallEdge { .. } => "missing call edge",
             Finding::VacuousTestClaim { .. } => "vacuous test claim",

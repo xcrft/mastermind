@@ -15,7 +15,7 @@
 //! - VERIFY commands — `**VERIFY**: `cmd`` lines under phase bodies.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 #[derive(Debug, Serialize, Clone)]
@@ -40,6 +40,23 @@ pub struct ParsedSpec {
     /// gates fall back to the heuristic fields above with an advisory
     /// "consider migrating to frontmatter" warning.
     pub frontmatter: Option<Frontmatter>,
+}
+
+impl ParsedSpec {
+    /// Explicit command obligations, in declaration order with duplicates
+    /// removed. Labels, empty commands and ordinary shell fences are excluded.
+    /// Only outside whitespace is normalized.
+    pub fn declared_verify_commands(&self) -> Vec<&str> {
+        let mut seen = HashSet::new();
+        self.frontmatter
+            .iter()
+            .flat_map(|fm| fm.verify.iter())
+            .filter_map(VerifyEntry::command)
+            .chain(self.verify_commands.iter().map(String::as_str))
+            .map(str::trim)
+            .filter(|cmd| !cmd.is_empty() && seen.insert(*cmd))
+            .collect()
+    }
 }
 
 /// Structured spec metadata from a YAML frontmatter block. All fields optional
@@ -89,7 +106,7 @@ pub struct Frontmatter {
     #[serde(default)]
     pub touches: Vec<TouchEntry>,
     /// Verification steps. Strings are labels (informational); `cmd:` objects
-    /// are real commands fed into verify-spec's PATH check.
+    /// are command obligations checked by preflight and canonical postflight.
     #[serde(default)]
     pub verify: Vec<VerifyEntry>,
     /// Doc files expected to be modified — split from code-touches so the audit
@@ -483,11 +500,20 @@ fn extract_verify_commands(body: &str) -> Vec<String> {
             .or_else(|| trimmed.strip_prefix("VERIFY:"));
         let Some(after) = after else { continue };
         let after = after.trim();
-        // Prefer backticked content, else whole line.
-        let cmd = if let Some(s) = after.strip_prefix('`') {
-            s.find('`').map(|e| &s[..e]).unwrap_or(after)
-        } else {
+        let fence_len = after.bytes().take_while(|byte| *byte == b'`').count();
+        let cmd = if fence_len == 0 {
             after
+        } else {
+            let fence = &after[..fence_len];
+            let content = &after[fence_len..];
+            content
+                .match_indices(fence)
+                .find(|(end, _)| {
+                    (*end == 0 || content.as_bytes()[end - 1] != b'`')
+                        && content.as_bytes().get(end + fence_len) != Some(&b'`')
+                })
+                .map(|(end, _)| &content[..end])
+                .unwrap_or(after)
         };
         let cmd = cmd.trim();
         if !cmd.is_empty() {

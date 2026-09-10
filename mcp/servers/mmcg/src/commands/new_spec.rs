@@ -114,6 +114,7 @@ touches:
 
 verify:
   - cmd: \"<focused test command>\"
+  - cmd: \"<repository-required gate>\"
 
 expected_docs: []
 ---
@@ -729,6 +730,10 @@ mod tests {
         assert!(content.contains("mode: verified"));
         assert!(content.contains("## Acceptance Criteria"));
         assert!(content.contains("## Final Verification"));
+        assert_eq!(
+            mmcg::spec::parse_str("spec.md", &content).declared_verify_commands(),
+            ["<focused test command>", "<repository-required gate>"]
+        );
         assert!(!content.contains("Decision Matrix"));
         assert!(!content.contains("Risk Register"));
     }

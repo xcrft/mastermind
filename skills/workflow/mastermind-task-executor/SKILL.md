@@ -78,8 +78,10 @@ the same failing condition. If it still fails, report `partial` or `failed` with
 the evidence. Do not hide a failure by weakening a test, removing an acceptance
 criterion, or changing the spec.
 
-Run every command in Final Verification after the focused checks pass. Commands
-must terminate; do not launch a server or watcher as verification.
+Run every command in Final Verification and every explicit `verify[].cmd` or
+legacy `VERIFY:` declaration after the focused checks pass. Preserve the full
+command and arguments in the canonical report. Commands must terminate; do not
+launch a server or watcher as verification.
 
 ## Comments
 
@@ -145,9 +147,11 @@ types supported by [[mastermind-structured-report-contract]]. Defect kinds are
 recommended routing labels, not permission to invent an automatic repair.
 
 Complete means every acceptance criterion was demonstrated, every Final
-Verification command passed, all reported steps are `done`, and `defects` is
-empty. Partial/failed reports must name at least one concrete defect. The Rust
-parser rejects contradictory shapes.
+Verification and declared command passed and was reported, all reported steps
+are `done`, and `defects` is empty. Partial/failed reports must name at least one
+concrete defect. The Rust parser rejects contradictory shapes; postflight rejects
+missing or unsuccessful declared-command results. Report evidence only from
+commands you ran; the controller does not execute them for you.
 
 ## Decision boundary
 

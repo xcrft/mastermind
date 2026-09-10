@@ -62,7 +62,9 @@ across languages. Commit voice is fallback-only when repository policy is silent
 6. For an implementation-caused failure, repair and retry at most three times
    for the same condition. Stop immediately for contract drift, unsafe scope
    expansion, missing prerequisites, or security/compatibility contradictions.
-7. Run every terminating command in Final Verification.
+7. Run every terminating command in Final Verification and every explicit
+   `verify[].cmd` or legacy `VERIFY:` declaration. Report each full command and
+   its arguments with the observed result.
 8. Write `<task>/executor-report.md` with the prose evidence and canonical
    schema-v1 tail from `mastermind-structured-report-contract`.
 

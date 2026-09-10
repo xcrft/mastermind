@@ -9,6 +9,12 @@ Use `mastermind new-spec "<description>" --mode verified`; it generates the
 canonical frontmatter and headings. Fill this compact contract:
 
 ````markdown
+---
+verify:
+  - cmd: "<focused test>"
+  - cmd: "<repository-required gate>"
+---
+
 # Task NNN: <title>
 
 ## Goals
@@ -43,6 +49,10 @@ canonical frontmatter and headings. Fill this compact contract:
 
 Use literal `FIND:` / `CHANGE TO:` blocks only when exact replacement is part
 of the contract. Otherwise acceptance criteria define correctness.
+
+Retain the generated scope frontmatter. Mirror every required Final Verification
+command in `verify[].cmd`, including its arguments. Legacy `VERIFY:` command
+lines are also machine-checked; labels and ordinary shell fences are not.
 
 ## Strict additions
 

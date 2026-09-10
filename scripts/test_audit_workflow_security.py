@@ -466,6 +466,29 @@ class InlineVerifierSchemaTests(unittest.TestCase):
         value["manifest"]["snapshot_drift"] = [finding]
         self.assert_rejected(value)
 
+    def test_verification_requirement_finding_validates_command_and_reason(self):
+        value = self.envelope()
+        finding = {"kind": "verification_requirement_unmet", "cmd": "echo checked && echo ready",
+                   "reason": "missing_result"}
+        value["manifest"]["verdict"] = "broken"
+        value["manifest"]["discrepancies"] = [finding]
+        result, _, _ = self.run_verifier(value=self.reseal(value))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for field in ("cmd", "reason"):
+            for invalid in (None, True, 3, "", [], {}):
+                broken = copy.deepcopy(value)
+                broken["manifest"]["discrepancies"][0][field] = invalid
+                self.assert_rejected(broken)
+        for field in finding:
+            broken = copy.deepcopy(value)
+            del broken["manifest"]["discrepancies"][0][field]
+            self.assert_rejected(broken)
+        broken = copy.deepcopy(value)
+        broken["manifest"]["discrepancies"][0]["extra"] = True
+        self.assert_rejected(broken)
+        value["manifest"]["snapshot_drift"] = [finding]
+        self.assert_rejected(value)
+
     def test_every_nested_family_rejects_added_deleted_and_wrong_type(self):
         family_paths = [
             ("manifest",),

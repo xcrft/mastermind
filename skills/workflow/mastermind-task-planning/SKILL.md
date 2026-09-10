@@ -107,6 +107,12 @@ Fill only these sections:
 - **Final Verification** — focused tests plus the repository-required gate.
 - **Notes** — only material assumptions, alternatives, docs, observability, or performance impact.
 
+Declare each required verification command in frontmatter `verify[].cmd`, using
+the same command and arguments as Final Verification. The mechanical gates also
+recognize legacy `VERIFY:`, `**VERIFY**:` and `**VERIFY:**` command lines. Labels
+and ordinary fenced shell blocks do not declare machine-checked obligations.
+Keep the declarations and Final Verification consistent.
+
 For strict work use `--mode strict` and retain the additional risk, evidence,
 rollback, and critic sections. Delete placeholders; never pad a section with
 generic engineering advice.

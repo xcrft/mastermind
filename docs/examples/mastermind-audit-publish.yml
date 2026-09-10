@@ -203,6 +203,7 @@ jobs:
           finding_shapes = {
               "unexpected_file": ({"kind", "file"}, {"file": "path"}),
               "missing_expected_file": ({"kind", "file"}, {"file": "path"}),
+              "declared_file_unavailable": ({"kind", "file", "reason"}, {"file": "nullable", "reason": "text"}),
               "snapshot_caller_drift": ({"kind", "symbol", "spec_says", "index_says"}, {"symbol": "text", "spec_says": "u32", "index_says": "u32"}),
               "snapshot_signature_drift": ({"kind", "symbol", "spec_says", "index_says"}, {"symbol": "text", "spec_says": "text", "index_says": "nullable"}),
               "snapshot_symbol_gone": ({"kind", "symbol"}, {"symbol": "text"}),

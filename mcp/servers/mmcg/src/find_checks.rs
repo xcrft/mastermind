@@ -10,8 +10,6 @@ const MAX_BLOCKS: usize = 1024;
 const MAX_WORK: usize = 16_384;
 const MAX_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_FILE_BYTES: u64 = crate::indexer::MAX_INDEXABLE_FILE_SIZE;
-const MAX_PATH_BYTES: usize = 4096;
-const MAX_PATH_COMPONENTS: usize = 64;
 
 struct Receipt {
     block: usize,
@@ -91,22 +89,7 @@ impl<'a> Checker<'a> {
     }
 
     fn relative(file: &str) -> Result<PathBuf, &'static str> {
-        if file.len() > MAX_PATH_BYTES {
-            return Err("path_limit_exceeded");
-        }
-        let file = crate::spec_symbols::normalize_file(file).map_err(|_| "target_path_invalid")?;
-        if file.chars().any(char::is_control)
-            || (file.as_bytes().get(1) == Some(&b':') && file.as_bytes()[0].is_ascii_alphabetic())
-        {
-            return Err("target_path_invalid");
-        }
-        let relative = crate::audit_bundle::normalize_relative_path(Path::new(&file))
-            .map_err(|_| "target_path_invalid")?;
-        let relative = PathBuf::from(relative);
-        if relative.components().count() > MAX_PATH_COMPONENTS {
-            return Err("path_limit_exceeded");
-        }
-        Ok(relative)
+        crate::declared_files::normalize(file).map(PathBuf::from)
     }
 
     fn read(
@@ -221,6 +204,7 @@ impl<'a> Checker<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::declared_files::{MAX_PATH_BYTES, MAX_PATH_COMPONENTS};
     use std::cell::Cell;
     use std::time::Instant;
 

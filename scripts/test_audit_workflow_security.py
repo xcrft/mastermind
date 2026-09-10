@@ -489,6 +489,34 @@ class InlineVerifierSchemaTests(unittest.TestCase):
         value["manifest"]["snapshot_drift"] = [finding]
         self.assert_rejected(value)
 
+    def test_declared_file_failure_preserves_raw_diagnostic_scope_and_shape(self):
+        for file in (None, "../guide.md", "/guide.md", r"docs\guide.md", "guide\n.md"):
+            value = self.envelope()
+            finding = {"kind": "declared_file_unavailable", "file": file,
+                       "reason": "target_path_invalid"}
+            value["manifest"]["verdict"] = "broken"
+            value["manifest"]["discrepancies"] = [finding]
+            result, _, _ = self.run_verifier(value=self.reseal(value))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for field in ("file", "reason"):
+                invalid_values = (True, 3, "", [], {}) + ((None,) if field == "reason" else ())
+                for invalid in invalid_values:
+                    broken = copy.deepcopy(value)
+                    broken["manifest"]["discrepancies"][0][field] = invalid
+                    self.assert_rejected(broken)
+            for field in finding:
+                broken = copy.deepcopy(value)
+                del broken["manifest"]["discrepancies"][0][field]
+                self.assert_rejected(broken)
+            broken = copy.deepcopy(value)
+            broken["manifest"]["discrepancies"][0]["extra"] = True
+            self.assert_rejected(broken)
+            broken = copy.deepcopy(value)
+            broken["manifest"]["declared_files"] = ["../guide.md"]
+            self.assert_rejected(broken)
+            value["manifest"]["snapshot_drift"] = [finding]
+            self.assert_rejected(value)
+
     def test_every_nested_family_rejects_added_deleted_and_wrong_type(self):
         family_paths = [
             ("manifest",),

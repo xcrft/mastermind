@@ -353,6 +353,7 @@ fn summarize_findings(findings: &[Finding]) -> String {
         let key = match f {
             Finding::UnexpectedFile { .. } => "scope creep",
             Finding::MissingExpectedFile { .. } => "missing expected file",
+            Finding::DeclaredFileUnavailable { .. } => "declared file unavailable",
             Finding::SnapshotCallerDrift { .. } => "caller drift",
             Finding::SnapshotSignatureDrift { .. } => "signature drift",
             Finding::SnapshotSymbolGone { .. } => "snapshot symbol gone",

@@ -428,18 +428,9 @@ fn history_input_snapshot(
     }
     let parsed = spec::parse_str(&spec, &spec_body);
     let mut paths = BTreeSet::new();
-    let declared = match parsed.frontmatter.as_ref() {
-        Some(fm) if fm.has_file_scope() => fm
-            .touches
-            .iter()
-            .map(|touch| touch.file.clone())
-            .chain(fm.expected_docs.iter().cloned())
-            .collect::<Vec<_>>(),
-        _ => parsed.mentioned_files.clone(),
-    };
-    for file in declared {
+    for file in crate::declared_files::paths(&parsed) {
         paths.insert(
-            crate::audit_bundle::normalize_relative_path(Path::new(&file))
+            crate::declared_files::normalize(file)
                 .map_err(|_| format!("invalid history snapshot path `{file}`"))?,
         );
     }
@@ -535,7 +526,7 @@ fn hash_history_file(
     let limit = (*bytes_left).min(crate::audit_bundle::BUNDLE_INPUT_MAX as u64);
     let file = match bounded_fs::read_regular_file_with_capability(
         root,
-        Path::new(path),
+        &root.requested_root().join(path),
         limit,
         limit,
         ReadControl::default(),
@@ -803,7 +794,7 @@ pub(crate) fn strict_workflow_snapshot_for_version(
     }
     let mut paths = BTreeSet::new();
     for file in touch_files {
-        let normalized = crate::audit_bundle::normalize_relative_path(Path::new(file))
+        let normalized = crate::declared_files::normalize(file)
             .map_err(|_| format!("invalid strict-workflow touch path `{file}`"))?;
         if normalized.starts_with(".mastermind/tasks/")
             || normalized.starts_with(".mastermind/releases/")
@@ -883,7 +874,7 @@ fn strict_snapshot_digest(
             .min(STRICT_EVIDENCE_TOTAL_BYTE_LIMIT - total_bytes);
         let file = match bounded_fs::read_regular_file_with_capability(
             root,
-            Path::new(relative),
+            &root.requested_root().join(relative),
             limit,
             limit,
             ReadControl::default(),

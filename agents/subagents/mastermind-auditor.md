@@ -54,6 +54,10 @@ If an input is missing, report `could_not_verify`; do not infer it.
    edit. The deterministic preflight checks FIND, but does not prove CHANGE TO
    was applied. Judge the Acceptance Criteria and report missing pre-edit
    evidence honestly; the Git baseline may differ from the approved working file.
+   Required `expected_docs` must still exist as regular files after execution;
+   deletion in the diff does not satisfy a documentation update. Acknowledged
+   code removals cannot exempt required docs. Distinguish this hard failure from
+   an existing document that was left unchanged.
 5. Re-run cheap, deterministic verification commands. Run each reported
    `VERIFY` command exactly as written, as its own Bash call from the repository
    root: do not prepend `cd` or environment variables, and do not append pipes,

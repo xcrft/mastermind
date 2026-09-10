@@ -18,7 +18,6 @@ use crate::spec_removals;
 use crate::spec_symbols::{self, Resolved, Scope, Unresolved};
 use crate::store::Store;
 use serde::Serialize;
-use std::collections::HashSet;
 use std::path::Path;
 use std::time::Instant;
 
@@ -80,6 +79,11 @@ pub enum Finding {
     },
     /// Spec references a file path that doesn't exist on disk.
     MissingFile { file: String },
+    /// A declared path cannot establish a contained, stable regular file.
+    DeclaredFileUnavailable {
+        file: Option<String>,
+        reason: String,
+    },
     /// A `## ...` section the template marks MANDATORY is missing or empty.
     EmptyMandatorySection { section: String },
     /// Pre-edit snapshot symbol has many callers — proceed with awareness.
@@ -192,6 +196,9 @@ fn render_finding(f: &Finding) -> String {
             format!("missing_symbol: {symbol} (claimed in {section}) — no declaration matches its scope")
         }
         Finding::MissingFile { file } => format!("missing_file: `{file}` not on disk"),
+        Finding::DeclaredFileUnavailable { file, reason } => {
+            format!("declared_file_unavailable: `{}` — regular file could not be established ({reason})", file.as_deref().unwrap_or("<no valid target>"))
+        }
         Finding::EmptyMandatorySection { section } => {
             format!("empty_mandatory_section: `{section}` is missing or empty")
         }
@@ -310,32 +317,18 @@ pub fn strict_check(spec: &ParsedSpec) -> Vec<Finding> {
 /// `repo_root` to resolve file existence. `store` optional — `None` skips the
 /// symbol-existence + blast-radius checks (verify-spec outside an indexed project).
 pub fn run(spec: &ParsedSpec, store: Option<&Store>, repo_root: &Path) -> Report {
-    run_internal(
-        spec,
-        store,
-        repo_root,
-        Phase::Preflight,
-        None,
-        &HashSet::new(),
-    )
+    run_internal(spec, store, repo_root, Phase::Preflight, None)
 }
 
 /// Check completed work without reapplying literal pre-edit FIND conditions.
+/// The audit appends its shared declared-file findings after checking receipts.
 pub(crate) fn run_postflight(
     spec: &ParsedSpec,
     store: Option<&Store>,
     repo_root: &Path,
     removals: Option<&spec_removals::Plan>,
-    deleted_files: &HashSet<&str>,
 ) -> Report {
-    run_internal(
-        spec,
-        store,
-        repo_root,
-        Phase::Postflight,
-        removals,
-        deleted_files,
-    )
+    run_internal(spec, store, repo_root, Phase::Postflight, removals)
 }
 
 enum Phase {
@@ -349,7 +342,6 @@ fn run_internal(
     repo_root: &Path,
     phase: Phase,
     removals: Option<&spec_removals::Plan>,
-    deleted_files: &HashSet<&str>,
 ) -> Report {
     let deadline = Instant::now() + crate::diff::git_timeout();
     let mut errors: Vec<Finding> = Vec::new();
@@ -369,50 +361,6 @@ fn run_internal(
                     });
                 }
             }
-        }
-    }
-
-    // 2. Mentioned files exist on disk.
-    //    Frontmatter-authoritative when present: if it declares `touches[]` or
-    //    `expected_docs[]`, use ONLY that list. Heuristic backticked-path-token
-    //    extraction is too noisy for gates (treats prose like ``do not touch
-    //    `README.md` `` as a claim). Absent (or no file-scope fields) → fall
-    //    back to heuristic mentioned_files for back-compat.
-    let files_to_check: Vec<String> = match spec.frontmatter.as_ref() {
-        Some(fm) if fm.has_file_scope() => {
-            let mut seen: HashSet<String> = HashSet::new();
-            let mut out: Vec<String> = Vec::new();
-            for touch in &fm.touches {
-                if seen.insert(touch.file.clone()) {
-                    out.push(touch.file.clone());
-                }
-            }
-            for doc in &fm.expected_docs {
-                if seen.insert(doc.clone()) {
-                    out.push(doc.clone());
-                }
-            }
-            out
-        }
-        _ => spec.mentioned_files.clone(),
-    };
-    for rel in &files_to_check {
-        let normalized = spec_symbols::normalize_file(rel);
-        let abs = repo_root.join(normalized.as_deref().unwrap_or(rel));
-        let acknowledged_deletion = normalized.is_ok_and(|file| {
-            deleted_files.contains(file.as_str())
-                && removals.is_some_and(|removals| removals.accepts_file_removal(&file))
-                && spec.frontmatter.as_ref().is_some_and(|frontmatter| {
-                    frontmatter.touches.iter().any(|touch| {
-                        spec_symbols::normalize_file(&touch.file)
-                            .is_ok_and(|candidate| candidate == file)
-                    }) && !frontmatter.expected_docs.iter().any(|doc| {
-                        spec_symbols::normalize_file(doc).is_ok_and(|candidate| candidate == file)
-                    })
-                })
-        });
-        if !abs.exists() && !acknowledged_deletion {
-            errors.push(Finding::MissingFile { file: rel.clone() });
         }
     }
 
@@ -443,13 +391,19 @@ fn run_internal(
     // FIND describes pre-edit contents. Successful replacement may remove it.
     if matches!(phase, Phase::Preflight) {
         let interrupted = || store.is_some_and(Store::work_interrupted);
+        let control = crate::bounded_fs::ReadControl {
+            deadline: Some(deadline),
+            interrupted: Some(&interrupted),
+        };
+        errors.extend(
+            crate::declared_files::check(spec, repo_root, control, |_| false)
+                .iter()
+                .map(declared_file_finding),
+        );
         errors.extend(crate::find_checks::check(
             &spec.find_blocks,
             repo_root,
-            crate::bounded_fs::ReadControl {
-                deadline: Some(deadline),
-                interrupted: Some(&interrupted),
-            },
+            control,
         ));
     }
 
@@ -465,6 +419,17 @@ fn run_internal(
         verdict,
         errors,
         warnings,
+    }
+}
+
+pub(crate) fn declared_file_finding(issue: &crate::declared_files::Issue) -> Finding {
+    if let (Some(file), "target_missing") = (&issue.file, issue.reason) {
+        Finding::MissingFile { file: file.clone() }
+    } else {
+        Finding::DeclaredFileUnavailable {
+            file: issue.file.clone(),
+            reason: issue.reason.into(),
+        }
     }
 }
 

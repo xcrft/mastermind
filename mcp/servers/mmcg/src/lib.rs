@@ -13,6 +13,7 @@ pub mod audit_bundle;
 pub mod audit_spec;
 pub mod bounded_fs;
 pub mod context_doctor;
+mod declared_files;
 pub mod diff;
 pub mod doctor;
 pub mod evidence;

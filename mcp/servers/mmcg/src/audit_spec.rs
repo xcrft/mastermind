@@ -722,7 +722,7 @@ fn check_executor_completion(
         Some(_) if metadata.schema_version != 1 => Some("schema_version_unsupported"),
         Some((root, _, checked)) => {
             let limit = crate::audit_bundle::BUNDLE_INPUT_MAX as u64;
-            crate::bounded_fs::read_regular_file(
+            crate::bounded_fs::read_repository_file(
                 &root,
                 Path::new(&checked),
                 limit,

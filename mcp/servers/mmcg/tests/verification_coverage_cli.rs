@@ -1120,31 +1120,54 @@ fn test_scan_controller_recovers_without_claiming_test_execution() {
 
 #[test]
 fn test_scan_cli_resolves_scopes_independently_of_cwd() {
-    let fixture = scan_fixture();
+    fn run(fixture: &Fixture) -> Value {
+        let output = Command::new(env!("CARGO_BIN_EXE_mmcg"))
+            .current_dir(fixture.root().join(".mastermind/nested"))
+            .arg("--index")
+            .arg(fixture.root().join("graph.db"))
+            .arg("audit-spec")
+            .arg(fixture.spec())
+            .arg("--root")
+            .arg(fixture.root())
+            .args(["--since", "baseline", "--executor-report"])
+            .arg(fixture.spec().with_file_name("executor-report.md"))
+            .arg("--json")
+            .env("MMCG_QUERY_BUDGET_MS", "60000")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["verdict"], "drift", "{report}");
+        assert_eq!(report["findings"].as_array().unwrap().len(), 1, "{report}");
+        assert_eq!(report["findings"][0]["kind"], "vacuous_test_claim");
+        report
+    }
+
+    let mut fixture = scan_fixture();
     fixture.support_file(
         ".mastermind/nested/.mastermind/scan/src/decoy.rs",
         b"#[test]\nfn t() {}\n",
     );
     fixture.write_report(vec![passed(SCAN_COMMAND)]);
-    let report_path = fixture.spec().with_file_name("executor-report.md");
-    let output = Command::new(env!("CARGO_BIN_EXE_mmcg"))
-        .current_dir(fixture.root().join(".mastermind/nested"))
-        .arg("--index")
-        .arg(fixture.root().join("graph.db"))
-        .arg("audit-spec")
-        .arg(fixture.spec())
-        .arg("--root")
-        .arg(fixture.root())
-        .args(["--since", "baseline", "--executor-report"])
-        .arg(report_path)
-        .arg("--json")
-        .env("MMCG_QUERY_BUDGET_MS", "60000")
-        .output()
+    run(&fixture);
+
+    fixture.support_file(".mastermind/nested/service.py", b"def decoy():\n    pass\n");
+    fixture.support_file(&format!(".mastermind/nested/{SPEC}"), &[0xff]);
+    fixture.support_file(
+        "service.py",
+        b"def keep():\n    return 2\n\ndef fresh():\n    return 3\n",
+    );
+    Indexer::new(fixture.root())
+        .index_all(&mut fixture.store, false)
         .unwrap();
-    assert!(output.status.success(), "{output:?}");
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["verdict"], "drift");
-    assert_eq!(report["findings"][0]["kind"], "vacuous_test_claim");
+    let mut value = report_value(vec![passed(SCAN_COMMAND)]);
+    value["claims"] = json!([{"kind": "function_added", "symbol": "fresh", "file": "service.py"}]);
+    std::fs::write(
+        fixture.spec().with_file_name("executor-report.md"),
+        value.to_string(),
+    )
+    .unwrap();
+    assert_eq!(run(&fixture)["claim_checks"][0]["status"], "verified");
 }
 
 #[cfg(unix)]

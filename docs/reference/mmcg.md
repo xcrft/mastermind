@@ -1528,6 +1528,9 @@ allows 16,384 work units for enumeration and inspection, 8 MiB of total source
 reads and 1 MiB per file. Rechecks consume the same limits. Descendant traversal
 is capped at depth 12 and explicit starting scopes at 64 path components. The
 existing audit deadline and Store cancellation/budget marker also apply.
+Paths recorded in Git metadata, indexed declarations and canonical task bindings
+resolve against the selected repository root even when the audit starts from a
+nested working directory.
 
 Scopes stay conservative: Cargo checks conventional `src/` and `tests/` under
 one crate directory, falling back to that directory when both are absent.

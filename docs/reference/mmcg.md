@@ -1160,11 +1160,43 @@ TypeScript parser; extractor contract v10 invalidates older indexed output.
 `mmcg ci` uses the same proved removal identity when checking snapshots and
 touches after execution. It also accepts a deleted touched file when all its
 removed declarations are acknowledged. Other missing files, expected docs,
-mandatory sections and FIND checks remain enforced. Standalone
+mandatory sections and scoped snapshot checks remain enforced. Standalone
 `verify-spec` remains a pre-execution gate and requires those targets to exist.
 File scope treats leading `./` and path separators consistently across current
 symbols, baseline declarations and deleted-file checks. Invalid relative scopes
 cannot grant a deletion exception, including aliases of required docs.
+
+Literal `FIND:` blocks are preconditions: `verify-spec` and `run-task --pre-only`
+check them against the current working files before execution. A complete read
+that lacks the literal produces `find_block_mismatch`. A missing target marker,
+invalid path, missing or unreadable file, incomplete read, invalid UTF-8,
+changed file, expired deadline or exhausted budget produces the hard error
+`find_block_unavailable` with a reason. A failed preflight cannot approve the
+task; retry it after repairing the input.
+
+FIND targets must be repository-relative regular files. Leading `./` and path
+separator aliases are supported; absolute, parent, symlink and special-file
+targets are rejected. Reads use one repository root capability, no-follow opens
+and complete UTF-8 contents. Limits per check are 1,024 FIND blocks, 16,384 work
+units, 32 MiB of reads, 5 MiB per file, 4,096 path bytes and 64 path components.
+Each block costs one work unit; each read costs one plus its path component
+count. Repeat reads and final receipt checks share these budgets. Failed reads
+consume their reserved byte allowance. Reads also honor the verifier deadline
+and the supplied store's interruption state.
+
+Before returning, the checker rereads each inspected file and compares its
+identity and content hash, then revalidates the root. A changed or unavailable
+receipt replaces even an earlier mismatch with `find_block_unavailable`.
+This is not an atomic snapshot of all files or protection against changes after
+the check. These read limits apply to FIND checks, not every verifier operation.
+
+Postflight and combined `mmcg ci` do not require the old FIND text to survive a
+replacement or acknowledged deletion. The retained Git baseline may differ
+from the approved pre-edit working file, so it is not used as a substitute FIND
+target. The parser does not model `CHANGE TO` payloads or ordered replacements;
+skipping the old precondition does not prove that an edit was applied. Review
+the resulting diff and acceptance criteria, and retain the final verification
+obligations and ordinary audit gates.
 
 Qualification follows extracted lexical parents. C# namespace segments are
 equivalent whether stored as one qualified namespace or nested namespaces.

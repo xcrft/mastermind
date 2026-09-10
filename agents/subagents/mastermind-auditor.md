@@ -49,8 +49,11 @@ If an input is missing, report `could_not_verify`; do not infer it.
    An unexplained file is scope creep; a reported change absent from this
    combined inventory is a false claim.
 4. For each reported behavior, inspect the actual changed code. File presence
-   alone is not evidence. Literal FIND/CHANGE blocks are checked literally;
-   otherwise judge the Acceptance Criteria.
+   alone is not evidence. Check literal FIND/CHANGE replacements against the
+   resulting diff and file contents; old FIND text need not survive a correct
+   edit. The deterministic preflight checks FIND, but does not prove CHANGE TO
+   was applied. Judge the Acceptance Criteria and report missing pre-edit
+   evidence honestly; the Git baseline may differ from the approved working file.
 5. Re-run cheap, deterministic verification commands. Run each reported
    `VERIFY` command exactly as written, as its own Bash call from the repository
    root: do not prepend `cd` or environment variables, and do not append pipes,

@@ -20,6 +20,7 @@ use crate::store::Store;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::Path;
+use std::time::Instant;
 
 /// `blast_radius` warning threshold. 30 is empirical — touching a function with
 /// >30 callers is rarely "small"; the planner should acknowledge it in Notes.
@@ -114,6 +115,12 @@ pub enum Finding {
         file: String,
         phase: Option<String>,
         find_text_preview: String,
+    },
+    /// The literal precondition could not be checked against a stable, bounded input.
+    FindBlockUnavailable {
+        file: Option<String>,
+        phase: Option<String>,
+        reason: String,
     },
     /// VERIFY command's first token isn't a binary on `$PATH` — `cargo test`
     /// when `cargo` isn't installed, `pnpm` when the project uses `npm`, etc.
@@ -230,6 +237,17 @@ fn render_finding(f: &Finding) -> String {
             let phase_label = phase.as_deref().unwrap_or("(no phase label)");
             format!("find_block_mismatch: {phase_label} → `{file}` doesn't contain the FIND text (preview: `{find_text_preview}`) — spec is stale or the file changed")
         }
+        Finding::FindBlockUnavailable {
+            file,
+            phase,
+            reason,
+        } => {
+            let file = file.as_deref().unwrap_or("<no target file>");
+            let phase = phase.as_deref().unwrap_or("(no phase label)");
+            format!(
+                "find_block_unavailable: {phase} → `{file}` — FIND could not be checked ({reason})"
+            )
+        }
         Finding::VerifyCommandNotFound {
             command,
             executable,
@@ -292,16 +310,48 @@ pub fn strict_check(spec: &ParsedSpec) -> Vec<Finding> {
 /// `repo_root` to resolve file existence. `store` optional — `None` skips the
 /// symbol-existence + blast-radius checks (verify-spec outside an indexed project).
 pub fn run(spec: &ParsedSpec, store: Option<&Store>, repo_root: &Path) -> Report {
-    run_with_removals(spec, store, repo_root, None, &HashSet::new())
+    run_internal(
+        spec,
+        store,
+        repo_root,
+        Phase::Preflight,
+        None,
+        &HashSet::new(),
+    )
 }
 
-pub(crate) fn run_with_removals(
+/// Check completed work without reapplying literal pre-edit FIND conditions.
+pub(crate) fn run_postflight(
     spec: &ParsedSpec,
     store: Option<&Store>,
     repo_root: &Path,
     removals: Option<&spec_removals::Plan>,
     deleted_files: &HashSet<&str>,
 ) -> Report {
+    run_internal(
+        spec,
+        store,
+        repo_root,
+        Phase::Postflight,
+        removals,
+        deleted_files,
+    )
+}
+
+enum Phase {
+    Preflight,
+    Postflight,
+}
+
+fn run_internal(
+    spec: &ParsedSpec,
+    store: Option<&Store>,
+    repo_root: &Path,
+    phase: Phase,
+    removals: Option<&spec_removals::Plan>,
+    deleted_files: &HashSet<&str>,
+) -> Report {
+    let deadline = Instant::now() + crate::diff::git_timeout();
     let mut errors: Vec<Finding> = Vec::new();
     let mut warnings: Vec<Finding> = Vec::new();
 
@@ -382,19 +432,25 @@ pub(crate) fn run_with_removals(
         }
     }
 
-    // 4. FIND blocks — for each block with a target file, the FIND text must be
-    //    a literal substring of the current contents. Stale FIND ⇒ executor
-    //    fails at phase 1, so `error`, not warning.
-    for block in &spec.find_blocks {
-        check_find_block(block, repo_root, &mut errors);
-    }
-
     // 5. VERIFY commands — first token resolvable on `$PATH`. Soft warn: might be
     //    a project-local script (`./scripts/check.sh`) that looks unresolved but
     //    is fine. Covers heuristic phase-block `**VERIFY**: ...` lines AND
     //    frontmatter `verify[]` `cmd:` entries (label-only entries skipped).
     for cmd in spec.declared_verify_commands() {
         check_verify_command(cmd, &mut warnings);
+    }
+
+    // FIND describes pre-edit contents. Successful replacement may remove it.
+    if matches!(phase, Phase::Preflight) {
+        let interrupted = || store.is_some_and(Store::work_interrupted);
+        errors.extend(crate::find_checks::check(
+            &spec.find_blocks,
+            repo_root,
+            crate::bounded_fs::ReadControl {
+                deadline: Some(deadline),
+                interrupted: Some(&interrupted),
+            },
+        ));
     }
 
     let verdict = if !errors.is_empty() {
@@ -565,36 +621,6 @@ fn check_frontmatter_touch(
             }),
             Err(error) => errors.push(unresolved_finding(name, error)),
         }
-    }
-}
-
-/// FIND-block validation: the planner's `FIND:` payload must be a substring of
-/// the target file. Whitespace-sensitive — matching the executor (literal replace).
-fn check_find_block(block: &crate::spec::FindBlock, repo_root: &Path, errors: &mut Vec<Finding>) {
-    let Some(file) = &block.file else {
-        // No `**File:**` marker — can't validate. Silent skip; check #2
-        // (mandatory file mentions) catches the typical case.
-        return;
-    };
-    let abs = repo_root.join(file);
-    let Ok(body) = std::fs::read_to_string(&abs) else {
-        // Missing file already flagged by check #2; don't double-report.
-        return;
-    };
-    if !body.contains(&block.find_text) {
-        let preview: String = block
-            .find_text
-            .lines()
-            .next()
-            .unwrap_or("")
-            .chars()
-            .take(80)
-            .collect();
-        errors.push(Finding::FindBlockMismatch {
-            file: file.clone(),
-            phase: block.phase.clone(),
-            find_text_preview: preview,
-        });
     }
 }
 

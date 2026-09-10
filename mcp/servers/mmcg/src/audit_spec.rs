@@ -594,7 +594,7 @@ fn run_internal(
             .filter(|file| file.status == "deleted")
             .map(|file| file.path.as_str())
             .collect();
-        crate::verify_spec::run_with_removals(
+        crate::verify_spec::run_postflight(
             spec,
             Some(store),
             repo_root,

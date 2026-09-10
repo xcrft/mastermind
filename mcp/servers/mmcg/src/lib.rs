@@ -21,6 +21,7 @@ pub mod executor_report;
 pub mod fact_adapter;
 pub mod fact_signature;
 pub mod facts;
+mod find_checks;
 pub mod fingerprint;
 pub mod hex;
 pub mod indexer;

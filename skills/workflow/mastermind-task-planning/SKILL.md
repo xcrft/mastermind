@@ -138,6 +138,12 @@ mastermind verify-spec <task>/spec.md
 approval. A verified contract should normally fit on one or two screens;
 strict contracts may be longer because their extra evidence is material.
 
+Literal FIND blocks describe the current pre-edit file and require an explicit
+repository-relative File marker. An unavailable read is a preflight failure.
+After applying a replacement, use postflight to check the result; rerunning
+`verify-spec` still tests the old precondition. CHANGE TO coverage requires
+review of the resulting change and final verification evidence.
+
 ## Execution handoff
 
 After the user approves Scope and Acceptance Criteria, enter the approved state:

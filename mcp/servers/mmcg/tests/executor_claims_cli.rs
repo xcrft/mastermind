@@ -150,6 +150,7 @@ fn executor(claims: Vec<Claim>) -> ExecutorReport {
     ExecutorReport {
         claims,
         verify: vec![],
+        canonical: None,
     }
 }
 

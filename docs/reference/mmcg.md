@@ -1458,8 +1458,30 @@ mastermind ci --since origin/main \
 ```
 
 Without `--changed-only`, the command retains its compatibility behavior and
-walks all task specs. Bundle publication always requires a canonical
+walks all task specs. CI bundle publication always requires a canonical
 `executor-report.md`, even if the explicit requirement flag is omitted.
+
+Canonical schema-v1 reports retain their task path, completion status, phases,
+modified-file declarations, defects and verification excerpts. A `partial` or
+`failed` report produces `executor_report_rejected` and a `broken` audit, even
+when there are no claims. Its `spec` must identify the audited task inside the
+repository; absolute and repository-relative paths are supported. Reported
+files and phases do not replace the spec's scope or prove plan coverage.
+
+`run-task` postflight and CI with `--require-executor-report` or `--bundle-dir`
+reject legacy reports. Ordinary `audit-spec` and CI without those flags retain
+legacy compatibility. Canonical parsing rejects explicit nulls, invalid scalar
+types and ambiguous sentinel blocks. Markdown sentinel comments occupy their
+own unindented lines; marker text inside YAML string evidence remains data.
+Empty phase/verification lists remain
+valid under v1; their presence alone does not prove execution.
+
+The JSON audit result includes the complete checked `executor_report` when one
+was supplied. Bundle creation binds all its metadata and verification evidence
+as well as claims; replacing the report with one containing identical claims
+but different completion/task data produces a broken bundle. When the caller
+omits the report during Bundle construction, the checked snapshot is reused.
+Sealing requires its input file and rechecks that file against the snapshot.
 
 ### Executor claim evidence
 

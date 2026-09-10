@@ -1483,13 +1483,38 @@ Labels and ordinary shell fences do not declare machine-checked obligations.
 Command matching trims outside whitespace only. Arguments, case, wrappers and
 internal whitespace remain significant; separate rows cannot satisfy a compound
 command. Missing commands produce `verification_requirement_unmet` with
-`missing_result`. A matching row that does not claim a pass, or reports a nonzero
-exit, produces `not_passed`; mixing it with passing rows produces
+`missing_result`. A matching row that does not claim a pass, reports a nonzero
+exit, or reports zero tests for a recognized test run produces `not_passed`;
+mixing it with passing rows produces
 `conflicting_results`. These findings make the audit and bundle `broken` and
 return the controller to planner review. Repeated successful rows may have
-different excerpts or positive test counts. Existing observed-test checks still
-apply. Optional observations remain optional. Empty results can pass coverage
+different excerpts or positive test counts. Optional observations remain
+optional. Empty results can pass coverage
 when the spec has no command obligations.
+
+For a claimed pass, a nonzero `observed.exit_code` produces
+`observed_exit_code_non_zero` for any command. `observed.tests_run: 0` produces
+`observed_zero_tests` only for recognized test execution, whether the exit code
+is zero or omitted. A positive count cannot override a nonzero exit. Missing
+observations are not converted to successful execution or to a zero count.
+
+Recognition covers a small subset of direct `cargo test`, `go test`, `pytest`,
+`python -m pytest`, `python3 -m pytest`, `jest`, and explicit `vitest run` or
+`vitest --run` invocations, including `.exe` runner names. Plain paths, filters
+and selected runner-specific options are supported; use `vitest run` for bare
+positional filters because `--run` can still select another subcommand.
+Option values retain their
+runner-specific meaning. Compile, collection, help/version and watch modes do
+not establish a finite test run. Unsupported flags, forwarded harness arguments,
+shell quoting/expansion, wrappers and arbitrary npm/yarn scripts remain unknown.
+Zero counts for these commands do not by themselves make an audit broken.
+Command recognition does not inspect implicit configuration or authenticate a
+run. It does not change the exact command matching used for coverage.
+
+`vacuous_test_claim` remains an advisory filesystem warning for recognized test
+commands when no positive count is reported. Finding no conventional test files
+does not prove zero execution, and finding files does not override an explicit
+zero count. Non-test and unknown command forms skip this heuristic.
 
 The executor runs commands and records their results. Coverage checks compare
 self-reported evidence with the spec; they neither run commands nor authenticate

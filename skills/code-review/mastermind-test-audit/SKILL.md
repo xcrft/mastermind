@@ -25,10 +25,13 @@ You are read-only. You report findings and change nothing.
 
 Do not re-derive these — read them and build on them:
 
-- **`vacuous_test_claim`** in `audit.md` means a verification command provably
-  ran zero tests. The controller checks `go test`, `pytest`, `cargo test`, and
-  the jest / vitest / `npm test` family, and it stays silent when the answer is
-  undeterminable rather than guessing.
+- **`vacuous_test_claim`** in `audit.md` is an advisory filesystem warning:
+  the scan found no conventional test files for a recognized test command.
+  It does not establish whether tests ran. **`observed_zero_tests`** means a
+  claimed pass contradicts the executor's own zero count for a recognized
+  test run, even if the exit code is omitted. Neither authenticates execution.
+  Compile/discovery modes, arbitrary scripts, wrappers and unsupported syntax
+  do not imply test execution.
 - **`missing_test`** means a test the spec planned is absent.
 - **`signature_changed`** names symbols whose contract moved.
 

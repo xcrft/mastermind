@@ -41,11 +41,14 @@ report covered code as uncovered.
 
 ## Build on what the controller established
 
-`vacuous_test_claim` already means a command provably ran zero tests, across
-`go test`, `pytest`, `cargo test`, and the jest / vitest / `npm test` family.
-`missing_test` means a planned test is absent. Read them; do not re-derive them,
-do not restate them as your own, and do not contradict them without new
-evidence.
+`vacuous_test_claim` is an advisory warning that a static scan found no
+conventional test files for a recognized test command. It does not prove zero
+execution. `observed_zero_tests` identifies a claimed pass with a self-reported
+zero count for a recognized test run, including when the exit code is missing.
+Compile/discovery modes, scripts, wrappers and unsupported syntax do not imply
+test execution. The report is not authenticated execution evidence.
+`missing_test` means a planned test is absent. Read these findings and build on
+them; do not restate them as your own.
 
 ## Method
 

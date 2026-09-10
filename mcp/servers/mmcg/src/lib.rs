@@ -41,6 +41,7 @@ mod spec_symbols;
 pub mod store;
 pub mod team;
 pub mod temporal;
+mod verification;
 pub mod verify_spec;
 pub mod watcher;
 pub mod workflow_status;

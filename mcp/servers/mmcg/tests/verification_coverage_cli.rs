@@ -48,6 +48,10 @@ struct Fixture {
 
 impl Fixture {
     fn new(commands: &[&str]) -> Self {
+        Self::with_test_files(commands, false)
+    }
+
+    fn with_test_files(commands: &[&str], include_tests: bool) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         for args in [
@@ -60,6 +64,10 @@ impl Fixture {
         }
         std::fs::write(root.join(".gitignore"), "graph.db*\n.mastermind/\n").unwrap();
         std::fs::write(root.join("service.py"), "def keep():\n    return 1\n").unwrap();
+        if include_tests {
+            std::fs::create_dir(root.join("src")).unwrap();
+            std::fs::write(root.join("src/lib.rs"), "#[test]\nfn existing_test() {}\n").unwrap();
+        }
         git(root, &["add", "."]);
         git(root, &["commit", "-q", "-m", "baseline"]);
         git(root, &["tag", "baseline"]);
@@ -496,5 +504,331 @@ fn verification_coverage_controller_rejects_recovers_and_never_executes_commands
     let repeated = run_task::load_state(&state_path).unwrap().unwrap();
     assert_eq!(repeated.next_step.as_deref(), Some("planner_review"));
     assert!(repeated.history_snapshot_sha256.is_none());
+    assert!(!fixture.root().join(".mastermind/should-not-run").exists());
+}
+
+fn observed(cmd: &str, outcome: Value) -> Value {
+    json!({"cmd": cmd, "result": "pass", "observed": outcome})
+}
+
+#[test]
+fn zero_test_observations_reject_recognized_runs_with_or_without_exit_code() {
+    let mut fixture = Fixture::with_test_files(&[], true);
+    fixture.change();
+    for cmd in [
+        "cargo test",
+        " \n cargo test \r\n",
+        "cargo.exe test --manifest-path=Cargo.toml --locked existing_test",
+        "cargo test --package app --lib --features one,two",
+        "go test ./...",
+        "go.exe test -v -count=1 ./...",
+        "go test -count 2 -run TestService",
+        "pytest",
+        "pytest -v --setup-show tests/test_service.py",
+        "python -m pytest -k service",
+        "python3.exe -m pytest -q tests/test_service.py::test_keep",
+        "jest --ci --runInBand",
+        "jest.exe --testNamePattern=keep",
+        "vitest run",
+        "vitest --run",
+        "vitest.exe --run -t keep",
+        "vitest --run -t list",
+    ] {
+        for outcome in [
+            json!({"tests_run": 0}),
+            json!({"tests_run": 0, "exit_code": 0}),
+        ] {
+            let report = fixture.audit(Some(&executor(vec![observed(cmd, outcome)])));
+            assert_eq!(report.verdict, Verdict::Broken, "{cmd}: {report:?}");
+            assert!(
+                matches!(report.findings.as_slice(), [Finding::ObservedZeroTests { cmd: actual }] if actual == cmd)
+            );
+        }
+    }
+}
+
+#[test]
+fn zero_test_observations_allow_compile_discovery_and_unknown_commands() {
+    let mut fixture = Fixture::new(&[]);
+    fixture.change();
+    for cmd in [
+        "cargo check",
+        "cargo build --release",
+        "cargo fmt --check",
+        "cargo clippy --all-targets",
+        "python3 -m py_compile service.py",
+        "ruff check .",
+        "cargo test --no-run",
+        "cargo test --help",
+        "cargo test -- --list",
+        "cargo test -- --bench",
+        "cargo test --config runner=custom",
+        "cargo test --manifest-path",
+        "cargo test --manifest-path=",
+        "cargo test --manifest-path --no-run",
+        "cargo test --unknown-flag",
+        "go test -c",
+        "go test -n ./...",
+        "go test -list .",
+        "go test -count=0",
+        "go test -count -1",
+        "go test -count=invalid",
+        "go test -exec custom",
+        "go test -args -test.list=.",
+        "go test -bench .",
+        "go test -fuzz FuzzService",
+        "pytest --collect-only",
+        "pytest --co",
+        "pytest --fixtures",
+        "pytest --setup-only",
+        "pytest --setup-plan",
+        "pytest --cache-show",
+        "pytest --markers",
+        "pytest --help",
+        "pytest --version",
+        "pytest @args.txt",
+        "pytest -p custom",
+        "pytest -o addopts=--collect-only",
+        "jest -v",
+        "jest --collectTests",
+        "jest --listTests",
+        "jest --showConfig",
+        "jest --clearCache",
+        "jest --watch",
+        "jest --passWithNoTests",
+        "jest --ci=false",
+        "vitest",
+        "vitest watch",
+        "vitest list",
+        "vitest bench",
+        "vitest run --watch",
+        "vitest run --passWithNoTests",
+        "vitest --run=false",
+        "vitest --run list",
+        "vitest --run bench",
+        "vitest --run watch",
+        "vitest --run init browser",
+        "vitest --run related service.ts",
+        "vitest --run service.test.ts",
+        "npm test",
+        "yarn test",
+        "npx jest",
+        "uv run pytest",
+        "env cargo test",
+        "cargo test && echo ready",
+        "cargo test; echo ready",
+        "cargo test\necho ready",
+        "cargo test | tee output",
+        "echo cargo test",
+        "echo \"cargo test\"",
+        "cargo test --manifest-path \"Cargo.toml\"",
+        "cargo test --package $PACKAGE",
+        "cargo test --package *",
+        "./cargo test",
+    ] {
+        for outcome in [
+            json!({"tests_run": 0}),
+            json!({"tests_run": 0, "exit_code": 0}),
+        ] {
+            std::fs::write(fixture.spec(), spec_text(json!([{"cmd": cmd}]), "")).unwrap();
+            let report = fixture.audit(Some(&executor(vec![observed(cmd, outcome)])));
+            assert_eq!(report.verdict, Verdict::Held, "{cmd}: {report:?}");
+            assert!(report.findings.is_empty(), "{cmd}: {report:?}");
+        }
+    }
+}
+
+#[test]
+fn zero_test_observations_preserve_nonzero_exit_precedence_for_all_commands() {
+    let mut fixture = Fixture::new(&[]);
+    fixture.change();
+    for cmd in [
+        "cargo check",
+        "cargo test",
+        "pytest --co",
+        "env custom tests",
+    ] {
+        for count in [0, 3] {
+            let report = fixture.audit(Some(&executor(vec![observed(
+                cmd,
+                json!({"exit_code": 7, "tests_run": count}),
+            )])));
+            assert_eq!(report.verdict, Verdict::Broken);
+            assert!(
+                matches!(report.findings.as_slice(), [Finding::ObservedExitCodeNonZero { cmd: actual, exit_code: 7 }] if actual == cmd)
+            );
+        }
+    }
+}
+
+#[test]
+fn zero_test_observations_preserve_optional_evidence_and_advisory_scan_boundaries() {
+    let mut with_tests = Fixture::with_test_files(&["cargo test"], true);
+    with_tests.change();
+    for row in [
+        passed("cargo test"),
+        observed("cargo test", json!({})),
+        observed("cargo test", json!({"exit_code": 0})),
+    ] {
+        let report = with_tests.audit(Some(&executor(vec![row])));
+        assert_eq!(report.verdict, Verdict::Held, "{report:?}");
+    }
+
+    let mut bare = Fixture::new(&[]);
+    bare.change();
+    let advisory = bare.audit(Some(&executor(vec![passed("cargo test")])));
+    assert_eq!(advisory.verdict, Verdict::Drift);
+    assert!(matches!(
+        advisory.findings.as_slice(),
+        [Finding::VacuousTestClaim { .. }]
+    ));
+    for cmd in ["cargo test", "go test", "pytest", "jest", "vitest run"] {
+        for outcome in [
+            json!({"tests_run": 2}),
+            json!({"tests_run": 2, "exit_code": 0}),
+        ] {
+            let report = bare.audit(Some(&executor(vec![observed(cmd, outcome)])));
+            assert_eq!(report.verdict, Verdict::Held, "{cmd}: {report:?}");
+        }
+    }
+}
+
+#[test]
+fn zero_test_observations_cannot_be_hidden_by_duplicate_passing_rows() {
+    let cmd = "cargo test";
+    let mut fixture = Fixture::with_test_files(&[cmd], true);
+    fixture.change();
+    for outcome in [
+        json!({"tests_run": 0}),
+        json!({"tests_run": 0, "exit_code": 0}),
+    ] {
+        let zero = observed(" \n cargo test \r\n", outcome);
+        let good = observed(" cargo test ", json!({"tests_run": 2}));
+        for rows in [vec![zero.clone(), good.clone()], vec![good, zero.clone()]] {
+            let report = fixture.audit(Some(&executor(rows)));
+            assert_eq!(report.verdict, Verdict::Broken);
+            assert_eq!(unmet(&report), [(cmd, "conflicting_results")]);
+            assert!(report
+                .findings
+                .iter()
+                .any(|f| matches!(f, Finding::ObservedZeroTests { .. })));
+            assert_eq!(report.executor_report.unwrap().verify.len(), 2);
+        }
+        let report = fixture.audit(Some(&executor(vec![zero.clone(), zero])));
+        assert_eq!(unmet(&report), [(cmd, "not_passed")]);
+    }
+}
+
+#[test]
+fn zero_test_observations_keep_legacy_pass_aliases_without_requiring_coverage() {
+    let mut fixture = Fixture::with_test_files(&["echo undeclared"], true);
+    fixture.change();
+    for claim in ["pass", "passed", "PASS", "Passed"] {
+        let value = json!({"claims": [], "verify": [{"cmd": "cargo test", "claimed": claim, "observed": {"tests_run": 0}}]});
+        let legacy = executor_report::parse_str(&value.to_string()).unwrap();
+        let report = fixture.audit(Some(&legacy));
+        assert_eq!(report.verdict, Verdict::Broken);
+        assert!(matches!(
+            report.findings.as_slice(),
+            [Finding::ObservedZeroTests { .. }]
+        ));
+        assert!(unmet(&report).is_empty());
+    }
+}
+
+#[test]
+fn zero_test_observations_cli_ci_and_bundle_reject_and_recover() {
+    let cmd = "cargo test";
+    let mut fixture = Fixture::with_test_files(&[cmd], true);
+    fixture.change();
+    git(fixture.root(), &["add", "service.py"]);
+    git(fixture.root(), &["commit", "-q", "-m", "change"]);
+    for count in [0, 2] {
+        fixture.write_report(vec![observed(cmd, json!({"tests_run": count}))]);
+        let report_path = fixture.spec().with_file_name("executor-report.md");
+        let output = fixture.command(&[
+            "audit-spec",
+            SPEC,
+            "--since",
+            "baseline",
+            "--executor-report",
+            report_path.to_str().unwrap(),
+            "--json",
+        ]);
+        assert_eq!(output.status.success(), count > 0, "{output:?}");
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        if count == 0 {
+            assert_eq!(
+                report["findings"],
+                json!([
+                    {"kind": "verification_requirement_unmet", "cmd": cmd, "reason": "not_passed"},
+                    {"kind": "observed_zero_tests", "cmd": cmd},
+                ])
+            );
+        }
+        let ci = fixture.command(&[
+            "ci",
+            "--since",
+            "baseline",
+            "--require-executor-report",
+            "--bundle-dir",
+            ".mastermind/output",
+        ]);
+        assert_eq!(ci.status.success(), count > 0, "{ci:?}");
+        let envelope: Value = serde_json::from_slice(
+            &std::fs::read(
+                fixture
+                    .root()
+                    .join(".mastermind/output/001-verification.bundle.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(envelope["schema_version"], 3);
+        assert_eq!(
+            envelope["manifest"]["verdict"],
+            if count > 0 { "held" } else { "broken" }
+        );
+        let mut expected = report["findings"].as_array().unwrap().clone();
+        expected.sort_by_key(Value::to_string);
+        assert_eq!(envelope["manifest"]["discrepancies"], json!(expected));
+        if count == 0 {
+            assert!(envelope["manifest"]["human_summary"]
+                .as_str()
+                .unwrap()
+                .contains("2 errors, 0 warnings"));
+            let lessons =
+                std::fs::read_to_string(fixture.root().join(".mastermind/tasks/_lessons.md"))
+                    .unwrap();
+            assert!(lessons.contains("observed zero tests"));
+        }
+    }
+}
+
+#[test]
+fn zero_test_observations_controller_rejects_and_recovers_without_execution() {
+    let cmd = "cargo test";
+    let marker = "echo proof > .mastermind/should-not-run";
+    let mut fixture = Fixture::with_test_files(&[cmd, marker], true);
+    assert_eq!(fixture.run_task(true), run_task::Outcome::PreReady);
+    fixture.change();
+    fixture.write_report(vec![observed(cmd, json!({"tests_run": 0})), passed(marker)]);
+    assert_eq!(fixture.run_task(false), run_task::Outcome::PostBroken);
+    let state_path = run_task::state_file_path(fixture.root(), &fixture.spec());
+    let failed = run_task::load_state(&state_path).unwrap().unwrap();
+    assert_eq!(failed.next_step.as_deref(), Some("planner_review"));
+    assert!(failed.history_snapshot_sha256.is_none());
+    assert!(!run_task::release_file_path(fixture.root(), &fixture.spec()).exists());
+    fixture.write_report(vec![observed(cmd, json!({"tests_run": 2})), passed(marker)]);
+    assert_eq!(fixture.run_task(false), run_task::Outcome::PostHeld);
+    let recovered = run_task::load_state(&state_path).unwrap().unwrap();
+    assert_eq!(recovered.baseline_ref, failed.baseline_ref);
+    assert_eq!(recovered.iteration, failed.iteration);
+    assert!(recovered.history_snapshot_sha256.is_some());
+    fixture.write_report(vec![observed(cmd, json!({"tests_run": 0})), passed(marker)]);
+    assert_eq!(fixture.run_task(false), run_task::Outcome::PostBroken);
+    let repeated = run_task::load_state(&state_path).unwrap().unwrap();
+    assert_eq!(repeated.next_step.as_deref(), Some("planner_review"));
+    assert!(repeated.held_snapshot_sha256.is_none() && repeated.history_snapshot_sha256.is_none());
     assert!(!fixture.root().join(".mastermind/should-not-run").exists());
 }

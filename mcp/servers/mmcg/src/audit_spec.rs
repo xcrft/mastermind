@@ -113,6 +113,8 @@ pub enum Finding {
         reason: String,
         matches: Option<usize>,
     },
+    /// Executor completion, task identity or checked-report binding is invalid.
+    ExecutorReportRejected { reason: String },
     /// The integration claim has no matching target definition in its scope.
     HallucinatedSymbol {
         from_symbol: String,
@@ -158,6 +160,9 @@ pub struct Report {
     /// None means executor claims were not evaluated; Some([]) is an evaluated empty list.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claim_checks: Option<Vec<ClaimCheck>>,
+    /// The complete report whose completion, task identity and claims were checked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executor_report: Option<ExecutorReport>,
 }
 
 impl Report {
@@ -190,6 +195,7 @@ impl Report {
                 | Finding::ClaimedSymbolMissing { .. }
                 | Finding::ClaimedSymbolNotAdded { .. }
                 | Finding::ExecutorClaimUnresolved { .. }
+                | Finding::ExecutorReportRejected { .. }
                 | Finding::HallucinatedSymbol { .. }
                 | Finding::MissingCallEdge { .. }
                 | Finding::ClaimedSignatureMismatch { .. }
@@ -301,6 +307,9 @@ fn render_finding(f: &Finding) -> String {
                 .map(|count| format!(" ({count} matching declarations)"))
                 .unwrap_or_default();
             format!("executor_claim_unresolved: {claim}: {reason}{count}")
+        }
+        Finding::ExecutorReportRejected { reason } => {
+            format!("executor_report_rejected: {reason}")
         }
         Finding::HallucinatedSymbol {
             from_symbol,
@@ -587,6 +596,7 @@ fn run_internal(
         )
     });
     let claim_checks = executor_report.map(|report| {
+        check_executor_completion(report, spec, repo_root, deadline, &mut findings);
         let checks = executor_claims::evaluate(
             report,
             &executor_claims::Context {
@@ -632,6 +642,7 @@ fn run_internal(
             findings,
             symbol_diff: Some(worktree.diff),
             claim_checks,
+            executor_report: executor_report.cloned(),
         },
         verification,
     ))
@@ -656,6 +667,7 @@ pub fn run_ci_with_report(
 /// `executor_report == None` is equivalent to `run()`. When present, adds:
 ///  - Per-claim declaration-addition and compatible-call-candidate evidence
 ///  - Unresolved outcomes for stale, ambiguous or unavailable source evidence
+///  - Canonical report completion and repository-contained task identity
 ///  - Vacuous test detector (2.3): test command claimed passed, no test files
 pub fn run_with_report(
     spec: &ParsedSpec,
@@ -669,6 +681,58 @@ pub fn run_with_report(
 
 fn norm_path(p: &str) -> String {
     p.replace('\\', "/").trim_start_matches("./").to_string()
+}
+
+fn check_executor_completion(
+    report: &ExecutorReport,
+    spec: &ParsedSpec,
+    root: &Path,
+    deadline: Instant,
+    findings: &mut Vec<Finding>,
+) {
+    let Some(metadata) = &report.canonical else {
+        return;
+    };
+    if let Some(reason) = report.completion_rejection() {
+        findings.push(Finding::ExecutorReportRejected {
+            reason: reason.into(),
+        });
+    }
+    let binding = root.canonicalize().ok().and_then(|root| {
+        let normalize = |text: &str| {
+            let path = Path::new(text);
+            let path = path.strip_prefix(".").unwrap_or(path);
+            relative_binding_path(&root, path).ok()
+        };
+        let declared = normalize(&metadata.spec)?;
+        let checked = normalize(&spec.path)?;
+        Some((root, declared, checked))
+    });
+    let reason = match binding {
+        Some((_, declared, checked)) if declared != checked => Some("task_mismatch"),
+        Some(_) if metadata.schema_version != 1 => Some("schema_version_unsupported"),
+        Some((root, _, checked)) => {
+            let limit = crate::audit_bundle::BUNDLE_INPUT_MAX as u64;
+            crate::bounded_fs::read_regular_file(
+                &root,
+                Path::new(&checked),
+                limit,
+                limit,
+                crate::bounded_fs::ReadControl {
+                    deadline: Some(deadline),
+                    interrupted: None,
+                },
+            )
+            .err()
+            .map(|_| "task_source_unavailable")
+        }
+        None => Some("task_path_invalid"),
+    };
+    if let Some(reason) = reason {
+        findings.push(Finding::ExecutorReportRejected {
+            reason: reason.into(),
+        });
+    }
 }
 
 fn claim_label(index: usize, claim: &Claim) -> String {
@@ -961,6 +1025,8 @@ pub struct Bundle {
     /// Legacy alias for `baseline`.
     pub git_ref: String,
     pub executor_report_path: Option<String>,
+    #[serde(skip)]
+    checked_executor_report: Option<ExecutorReport>,
 }
 
 impl Bundle {
@@ -1020,6 +1086,19 @@ impl Bundle {
         let mut failed_claims: Vec<String> = Vec::new();
 
         let mut discrepancies = report.findings.clone();
+        let report_binding_failed = executor_report
+            .is_some_and(|executor| report.executor_report.as_ref() != Some(executor));
+        if report_binding_failed {
+            discrepancies.push(Finding::ExecutorReportRejected {
+                reason: if report.executor_report.is_none() {
+                    "report_not_evaluated"
+                } else {
+                    "report_checks_mismatch"
+                }
+                .into(),
+            });
+        }
+        let executor_report = executor_report.or(report.executor_report.as_ref());
         let claims: Vec<_> = match executor_report {
             Some(executor) => executor.claims.iter().collect(),
             None => report
@@ -1057,11 +1136,12 @@ impl Bundle {
             let label = claim_label(index, claim);
             let checked =
                 checks_match.then(|| &report.claim_checks.as_ref().expect("checked claims")[index]);
-            let verified = checked.is_some_and(|check| {
-                check.status == ClaimStatus::Verified
-                    && check.evidence.is_some()
-                    && check.finding.is_none()
-            });
+            let verified = !report_binding_failed
+                && checked.is_some_and(|check| {
+                    check.status == ClaimStatus::Verified
+                        && check.evidence.is_some()
+                        && check.finding.is_none()
+                });
             if verified {
                 verified_claims.push(label);
             } else {
@@ -1083,13 +1163,15 @@ impl Bundle {
                 }
             }
         }
-        let verdict = if binding_failed || !failed_claims.is_empty() {
+        let verdict = if binding_failed || report_binding_failed || !failed_claims.is_empty() {
             Verdict::Broken
         } else {
             report.verdict
         };
 
-        let commands: Vec<String> = executor_report
+        let commands: Vec<String> = report
+            .executor_report
+            .as_ref()
             .map(|er| er.verify.iter().map(|v| v.cmd.clone()).collect())
             .unwrap_or_default();
 
@@ -1115,6 +1197,7 @@ impl Bundle {
             snapshot_drift,
             git_ref: report.git_ref.clone(),
             executor_report_path: executor_report_path.map(str::to_string),
+            checked_executor_report: report.executor_report.clone(),
         }
     }
 
@@ -1154,12 +1237,19 @@ impl Bundle {
             if let Some(path) = self.executor_report_path.as_deref() {
                 let relative = relative_binding_path(&root, Path::new(path))?;
                 let bytes = read_bound_input(&root.join(&relative))?;
+                let current = crate::executor_report::parse_str(std::str::from_utf8(&bytes)?)?;
+                if self.checked_executor_report.as_ref() != Some(&current) {
+                    return Err("executor report changed or was not evaluated".into());
+                }
                 (
                     Some(relative),
                     true,
                     Some(format!("sha256:{}", sha256_hex(&bytes))),
                 )
             } else {
+                if self.checked_executor_report.is_some() {
+                    return Err("checked executor report requires an input path".into());
+                }
                 (None, false, None)
             };
 
@@ -1449,6 +1539,7 @@ fn build_human_summary(
                     | Finding::ClaimedSymbolMissing { .. }
                     | Finding::ClaimedSymbolNotAdded { .. }
                     | Finding::ExecutorClaimUnresolved { .. }
+                    | Finding::ExecutorReportRejected { .. }
                     | Finding::HallucinatedSymbol { .. }
                     | Finding::MissingCallEdge { .. }
                     | Finding::ClaimedSignatureMismatch { .. }
@@ -1467,6 +1558,7 @@ fn build_human_summary(
                     | Finding::ClaimedSymbolMissing { .. }
                     | Finding::ClaimedSymbolNotAdded { .. }
                     | Finding::ExecutorClaimUnresolved { .. }
+                    | Finding::ExecutorReportRejected { .. }
                     | Finding::HallucinatedSymbol { .. }
                     | Finding::MissingCallEdge { .. }
                     | Finding::ClaimedSignatureMismatch { .. }
@@ -1576,6 +1668,7 @@ fn compute_verdict(findings: &[Finding]) -> Verdict {
                 | Finding::ClaimedSymbolMissing { .. }
                 | Finding::ClaimedSymbolNotAdded { .. }
                 | Finding::ExecutorClaimUnresolved { .. }
+                | Finding::ExecutorReportRejected { .. }
                 | Finding::HallucinatedSymbol { .. }
                 | Finding::MissingCallEdge { .. }
                 | Finding::ClaimedSignatureMismatch { .. }
@@ -1727,6 +1820,7 @@ mod tests {
             findings: Vec::new(),
             symbol_diff: None,
             claim_checks: None,
+            executor_report: None,
         };
 
         let value = serde_json::to_value(Bundle::from_report(&report, None)).unwrap();
@@ -2253,6 +2347,7 @@ breaking_changes:
                 signature: None,
             }],
             verify: vec![],
+            canonical: None,
         };
 
         let checks = executor_claims::evaluate(

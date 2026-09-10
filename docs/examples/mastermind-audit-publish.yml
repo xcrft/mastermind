@@ -213,6 +213,7 @@ jobs:
               "claimed_symbol_missing": ({"kind", "symbol", "file"}, {"symbol": "text", "file": "nullable_path"}),
               "claimed_symbol_not_added": ({"kind", "symbol", "file"}, {"symbol": "text", "file": "nullable_path"}),
               "executor_claim_unresolved": ({"kind", "claim_index", "reason", "matches"}, {"claim_index": "nullable_u64", "reason": "text", "matches": "nullable_u64"}),
+              "executor_report_rejected": ({"kind", "reason"}, {"reason": "text"}),
               "hallucinated_symbol": ({"kind", "from_symbol", "to_symbol"}, {"from_symbol": "text", "to_symbol": "text"}),
               "missing_call_edge": ({"kind", "from_symbol", "to_symbol"}, {"from_symbol": "text", "to_symbol": "text"}),
               "vacuous_test_claim": ({"kind", "cmd", "reason"}, {"cmd": "text", "reason": "text"}),

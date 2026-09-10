@@ -65,8 +65,9 @@ pub fn audit(
     let root = root
         .canonicalize()
         .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
-    let parsed =
-        mmcg::spec::parse_file(spec).map_err(|e| format!("parse {}: {e}", spec.display()))?;
+    let source_path = std::path::absolute(spec)?;
+    let parsed = mmcg::spec::parse_file(&source_path)
+        .map_err(|e| format!("parse {}: {e}", source_path.display()))?;
     let store = open_validated_index(index_path, &root)?.ok_or_else(|| {
         format!(
             "no populated index at `{}`; run `mastermind index .`",

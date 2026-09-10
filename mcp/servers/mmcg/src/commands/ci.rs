@@ -144,7 +144,13 @@ pub fn run(opts: CiOpts, index_path: &Path) -> Result<bool, Box<dyn std::error::
 
         let executor_report = match executor_report_path
             .as_deref()
-            .map(mmcg::executor_report::parse_file)
+            .map(|path| {
+                if opts.require_executor_report || opts.bundle_dir.is_some() {
+                    mmcg::executor_report::parse_canonical_file(path)
+                } else {
+                    mmcg::executor_report::parse_file(path)
+                }
+            })
             .transpose()
         {
             Ok(r) => r,

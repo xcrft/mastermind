@@ -409,6 +409,7 @@ mod tests {
                 relation: Some("calls".into()),
             }],
             verify: vec![],
+            canonical: None,
         }
     }
 
@@ -486,6 +487,7 @@ mod tests {
         let oversized = ExecutorReport {
             claims: vec![report.claims[0].clone(); 257],
             verify: vec![],
+            canonical: None,
         };
         fixture
             .external()

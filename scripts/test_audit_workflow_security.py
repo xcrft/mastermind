@@ -445,6 +445,27 @@ class InlineVerifierSchemaTests(unittest.TestCase):
             value["manifest"]["snapshot_drift"] = [finding]
             self.assert_rejected(value)
 
+    def test_executor_report_rejection_preserves_strict_finding_shape(self):
+        value = self.envelope()
+        finding = {"kind": "executor_report_rejected", "reason": "task_mismatch"}
+        value["manifest"]["verdict"] = "broken"
+        value["manifest"]["discrepancies"] = [finding]
+        result, _, _ = self.run_verifier(value=self.reseal(value))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for invalid in (None, True, 3, "", [], {}):
+            broken = copy.deepcopy(value)
+            broken["manifest"]["discrepancies"][0]["reason"] = invalid
+            self.assert_rejected(broken)
+        for field in finding:
+            broken = copy.deepcopy(value)
+            del broken["manifest"]["discrepancies"][0][field]
+            self.assert_rejected(broken)
+        broken = copy.deepcopy(value)
+        broken["manifest"]["discrepancies"][0]["extra"] = True
+        self.assert_rejected(broken)
+        value["manifest"]["snapshot_drift"] = [finding]
+        self.assert_rejected(value)
+
     def test_every_nested_family_rejects_added_deleted_and_wrong_type(self):
         family_paths = [
             ("manifest",),

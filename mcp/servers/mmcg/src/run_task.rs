@@ -1758,7 +1758,7 @@ fn run_post(
         .parent()
         .unwrap_or(spec_path)
         .join("executor-report.md");
-    let executor_report = match crate::executor_report::parse_str(&inputs.executor_body) {
+    let executor_report = match crate::executor_report::parse_canonical_str(&inputs.executor_body) {
         Ok(report) => report,
         Err(error) => {
             eprintln!(
@@ -1769,8 +1769,8 @@ fn run_post(
             failed.status = "held".into();
             failed.risk = Some("medium".into());
             failed.next_step = Some("planner_review".into());
-            failed.blocking_reason = Some("executor report missing or invalid".into());
-            failed.last_artifact = Some("spec.md".into());
+            failed.blocking_reason = Some(format!("executor report rejected: {error}"));
+            failed.last_artifact = Some("executor-report.md".into());
             let _ = save_state(state_path, &failed);
             return Outcome::PostBroken;
         }

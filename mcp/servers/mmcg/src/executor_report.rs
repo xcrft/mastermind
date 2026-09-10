@@ -15,34 +15,34 @@ const MAX_EXECUTOR_REPORT_BYTES: u64 = 1024 * 1024;
 pub enum Claim {
     FunctionAdded {
         symbol: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         file: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
     },
     Integration {
         from: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         from_file: Option<String>,
         to: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         to_file: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         relation: Option<String>,
     },
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObservedOutcome {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tests_run: Option<u32>,
 }
 
 /// Internal projection consumed by the deterministic audit checks.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VerifyResult {
     pub cmd: String,
@@ -50,11 +50,15 @@ pub struct VerifyResult {
     pub claimed: Option<String>,
     #[serde(default)]
     pub observed: Option<ObservedOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_excerpt: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutorReport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical: Option<CanonicalMetadata>,
     #[serde(default)]
     pub claims: Vec<Claim>,
     #[serde(default)]
@@ -63,41 +67,74 @@ pub struct ExecutorReport {
 
 impl ExecutorReport {
     pub fn is_empty(&self) -> bool {
-        self.claims.is_empty() && self.verify.is_empty()
+        self.canonical.is_none() && self.claims.is_empty() && self.verify.is_empty()
+    }
+
+    pub(crate) fn completion_rejection(&self) -> Option<&'static str> {
+        let metadata = self.canonical.as_ref()?;
+        match metadata.status {
+            ReportStatus::Partial => Some("status_partial"),
+            ReportStatus::Failed => Some("status_failed"),
+            ReportStatus::Complete
+                if !metadata.defects.is_empty()
+                    || metadata
+                        .phases
+                        .iter()
+                        .any(|phase| phase.status != PhaseStatus::Done)
+                    || self
+                        .verify
+                        .iter()
+                        .any(|verification| verification.claimed.as_deref() != Some("passed")) =>
+            {
+                Some("completion_inconsistent")
+            }
+            ReportStatus::Complete => None,
+        }
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalMetadata {
+    pub schema_version: u32,
+    pub spec: String,
+    pub status: ReportStatus,
+    pub phases: Vec<Phase>,
+    pub files_modified: Vec<String>,
+    pub defects: Vec<Defect>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum ReportStatus {
+pub enum ReportStatus {
     Complete,
     Partial,
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum PhaseStatus {
+pub enum PhaseStatus {
     Done,
     Pending,
     StoppedHere,
     Skipped,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Phase {
-    id: String,
-    status: PhaseStatus,
+pub struct Phase {
+    pub id: String,
+    pub status: PhaseStatus,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Defect {
-    kind: String,
-    phase: String,
-    details: String,
-    remediation_hint: String,
+pub struct Defect {
+    pub kind: String,
+    pub phase: String,
+    pub details: String,
+    pub remediation_hint: String,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -177,6 +214,29 @@ impl TryFrom<CanonicalExecutorReport> for ExecutorReport {
                 return Err("executor report verification command must not be empty".into());
             }
         }
+        for claim in &report.claims {
+            let (required, optional) = match claim {
+                Claim::FunctionAdded {
+                    symbol,
+                    file,
+                    signature,
+                } => (vec![symbol], vec![file, signature]),
+                Claim::Integration {
+                    from,
+                    from_file,
+                    to,
+                    to_file,
+                    relation,
+                } => (vec![from, to], vec![from_file, to_file, relation]),
+            };
+            if required
+                .into_iter()
+                .chain(optional.into_iter().filter_map(Option::as_ref))
+                .any(|text| text.trim().is_empty())
+            {
+                return Err("executor report claim fields must not be empty".into());
+            }
+        }
 
         match report.status {
             ReportStatus::Complete => {
@@ -213,20 +273,26 @@ impl TryFrom<CanonicalExecutorReport> for ExecutorReport {
         let verify = report
             .verifications
             .into_iter()
-            .map(|verification| {
-                let _ = verification.output_excerpt;
-                VerifyResult {
-                    cmd: verification.cmd,
-                    claimed: Some(match verification.result {
-                        VerificationStatus::Pass => "passed".into(),
-                        VerificationStatus::Fail => "failed".into(),
-                    }),
-                    observed: verification.observed,
-                }
+            .map(|verification| VerifyResult {
+                cmd: verification.cmd,
+                claimed: Some(match verification.result {
+                    VerificationStatus::Pass => "passed".into(),
+                    VerificationStatus::Fail => "failed".into(),
+                }),
+                observed: verification.observed,
+                output_excerpt: verification.output_excerpt,
             })
             .collect();
 
         Ok(Self {
+            canonical: Some(CanonicalMetadata {
+                schema_version: report.schema_version,
+                spec: report.spec,
+                status: report.status,
+                phases: report.phases,
+                files_modified: report.files_modified,
+                defects: report.defects,
+            }),
             claims: report.claims,
             verify,
         })
@@ -250,68 +316,169 @@ pub fn parse_file(path: &Path) -> Result<ExecutorReport, String> {
 }
 
 pub fn parse_str(text: &str) -> Result<ExecutorReport, String> {
-    if text.contains(REPORT_BEGIN) {
-        let yaml = extract_sentinel_yaml(text, REPORT_BEGIN, REPORT_END)?;
-        let canonical = serde_norway::from_str::<CanonicalExecutorReport>(yaml)
-            .map_err(|e| format!("parse executor report schema v1 YAML: {e}"))?;
-        return canonical.try_into();
+    if text.len() as u64 > MAX_EXECUTOR_REPORT_BYTES {
+        return Err(format!(
+            "executor report exceeds {MAX_EXECUTOR_REPORT_BYTES}-byte limit"
+        ));
     }
-
-    if text.contains(LEGACY_BEGIN) {
-        let yaml = extract_sentinel_yaml(text, LEGACY_BEGIN, LEGACY_END)?;
-        return parse_legacy(yaml);
-    }
-
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Err("executor report is empty".into());
     }
-    let value: serde_norway::Value =
-        serde_norway::from_str(trimmed).map_err(|e| format!("parse executor report YAML: {e}"))?;
-    let canonical = value
-        .as_mapping()
-        .is_some_and(|mapping| mapping.contains_key("schema_version"));
-    if canonical {
-        let report = serde_norway::from_value::<CanonicalExecutorReport>(value)
-            .map_err(|e| format!("parse executor report schema v1 YAML: {e}"))?;
-        report.try_into()
-    } else {
-        parse_legacy(trimmed)
+    let value = serde_norway::from_str::<serde_norway::Value>(trimmed);
+    let value = match value {
+        Ok(value)
+            if value
+                .as_mapping()
+                .is_some_and(|mapping| mapping.contains_key("schema_version")) =>
+        {
+            return parse_canonical_value(value);
+        }
+        Ok(value)
+            if value.as_mapping().is_some_and(|mapping| {
+                mapping
+                    .keys()
+                    .all(|key| matches!(key.as_str(), Some("claims" | "verify")))
+            }) =>
+        {
+            return parse_legacy(trimmed);
+        }
+        other => other,
+    };
+    let has_marker = |marker: &str| {
+        let marker = format!("<!-- {marker} -->");
+        text.lines().any(|line| line.trim_end() == marker)
+    };
+    let canonical_markers = has_marker(REPORT_BEGIN) || has_marker(REPORT_END);
+    let legacy_markers = has_marker(LEGACY_BEGIN) || has_marker(LEGACY_END);
+    if canonical_markers && legacy_markers {
+        return Err("executor report mixes canonical and legacy blocks".into());
     }
+    if canonical_markers {
+        let yaml = extract_sentinel_yaml(text, REPORT_BEGIN, REPORT_END)?;
+        let value = serde_norway::from_str(&yaml)
+            .map_err(|e| format!("parse executor report schema v1 YAML: {e}"))?;
+        return parse_canonical_value(value);
+    }
+
+    if legacy_markers {
+        let yaml = extract_sentinel_yaml(text, LEGACY_BEGIN, LEGACY_END)?;
+        return parse_legacy(&yaml);
+    }
+
+    value.map_err(|e| format!("parse executor report YAML: {e}"))?;
+    parse_legacy(trimmed)
+}
+
+pub fn parse_canonical_file(path: &Path) -> Result<ExecutorReport, String> {
+    require_canonical(parse_file(path)?)
+}
+
+pub fn parse_canonical_str(text: &str) -> Result<ExecutorReport, String> {
+    require_canonical(parse_str(text)?)
+}
+
+fn require_canonical(report: ExecutorReport) -> Result<ExecutorReport, String> {
+    if report.canonical.is_none() {
+        return Err(
+            "canonical executor report schema v1 is required; legacy report supplied".into(),
+        );
+    }
+    Ok(report)
+}
+
+fn parse_canonical_value(value: serde_norway::Value) -> Result<ExecutorReport, String> {
+    let report = serde_json::from_value::<CanonicalExecutorReport>(canonical_json_value(value, 0)?)
+        .map_err(|e| format!("parse executor report schema v1: {e}"))?;
+    report.try_into()
+}
+
+fn canonical_json_value(
+    value: serde_norway::Value,
+    depth: usize,
+) -> Result<serde_json::Value, String> {
+    use serde_norway::Value;
+    if depth > 64 {
+        return Err("executor report nesting limit exceeded".into());
+    }
+    Ok(match value {
+        Value::Null => return Err("canonical executor report does not permit null values".into()),
+        Value::Bool(value) => serde_json::Value::Bool(value),
+        Value::Number(value) => {
+            let value = serde_json::to_value(value).map_err(|e| e.to_string())?;
+            if !value.is_number() {
+                return Err("canonical executor report requires finite numbers".into());
+            }
+            value
+        }
+        Value::String(value) => serde_json::Value::String(value),
+        Value::Sequence(values) => serde_json::Value::Array(
+            values
+                .into_iter()
+                .map(|value| canonical_json_value(value, depth + 1))
+                .collect::<Result<_, _>>()?,
+        ),
+        Value::Mapping(values) => {
+            let mut object = serde_json::Map::new();
+            for (key, value) in values {
+                let Value::String(key) = key else {
+                    return Err("canonical executor report requires string mapping keys".into());
+                };
+                object.insert(key, canonical_json_value(value, depth + 1)?);
+            }
+            serde_json::Value::Object(object)
+        }
+        Value::Tagged(_) => {
+            return Err("canonical executor report does not permit YAML tags".into())
+        }
+    })
 }
 
 fn parse_legacy(yaml: &str) -> Result<ExecutorReport, String> {
-    serde_norway::from_str::<ExecutorReport>(yaml)
-        .map_err(|e| format!("parse legacy executor report YAML: {e}"))
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct LegacyReport {
+        #[serde(default)]
+        claims: Vec<Claim>,
+        #[serde(default)]
+        verify: Vec<VerifyResult>,
+    }
+    let report = serde_norway::from_str::<LegacyReport>(yaml)
+        .map_err(|e| format!("parse legacy executor report YAML: {e}"))?;
+    Ok(ExecutorReport {
+        canonical: None,
+        claims: report.claims,
+        verify: report.verify,
+    })
 }
 
-fn extract_sentinel_yaml<'a>(text: &'a str, begin: &str, end: &str) -> Result<&'a str, String> {
-    let begin_pos = text
-        .find(begin)
-        .ok_or_else(|| format!("executor report missing {begin} sentinel"))?;
-    let after_begin = &text[begin_pos + begin.len()..];
-    let fence_pos = after_begin
-        .find("```yaml")
-        .ok_or_else(|| "executor report sentinel is missing a yaml fence".to_string())?;
-    let yaml_start = begin_pos + begin.len() + fence_pos + "```yaml".len();
-    let yaml = &text[yaml_start..];
-    let yaml = yaml
-        .strip_prefix('\r')
-        .unwrap_or(yaml)
-        .strip_prefix('\n')
-        .unwrap_or(yaml);
-    let fence_end = yaml
-        .find("```")
-        .ok_or_else(|| "executor report yaml fence is not closed".to_string())?;
-    let end_pos = text[yaml_start + fence_end..]
-        .find(end)
-        .ok_or_else(|| format!("executor report missing {end} sentinel"))?;
-    if end_pos < 3 {
-        return Err(format!(
-            "executor report {end} sentinel precedes the yaml fence"
-        ));
+fn extract_sentinel_yaml(text: &str, begin: &str, end: &str) -> Result<String, String> {
+    let lines: Vec<_> = text.lines().collect();
+    let positions = |marker: &str| {
+        let marker = format!("<!-- {marker} -->");
+        lines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, line)| (line.trim_end() == marker).then_some(index))
+            .collect::<Vec<_>>()
+    };
+    let (starts, ends) = (positions(begin), positions(end));
+    if starts.len() != 1 || ends.len() != 1 || starts[0] >= ends[0] {
+        return Err(
+            "executor report requires one ordered sentinel pair enclosing a yaml fence".into(),
+        );
     }
-    Ok(yaml[..fence_end].trim_end())
+    let mut span = &lines[starts[0] + 1..ends[0]];
+    while span.first().is_some_and(|line| line.trim().is_empty()) {
+        span = &span[1..];
+    }
+    while span.last().is_some_and(|line| line.trim().is_empty()) {
+        span = &span[..span.len() - 1];
+    }
+    if span.len() < 2 || span[0].trim() != "```yaml" || span[span.len() - 1].trim() != "```" {
+        return Err("executor report sentinel span must contain one complete yaml fence".into());
+    }
+    Ok(span[1..span.len() - 1].join("\n"))
 }
 
 #[cfg(test)]

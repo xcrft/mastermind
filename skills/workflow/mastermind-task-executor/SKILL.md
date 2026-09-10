@@ -39,7 +39,7 @@ read another artifact only when the spec or caller names it.
 1. Read the complete spec.
 2. Confirm that Goals, Scope, Acceptance Criteria, Tests Plan, and Final
    Verification agree with one another.
-3. Confirm every intended edit is authorized by `touches` or Scope.
+3. Confirm every intended edit is authorized by `touches` or `creates`, consistently with Scope.
 4. When `~/.mastermind/style.md` exists, use relevant non-conflicting rules as
    preferences. Repository code, formatter/linter configuration, and the spec
    take precedence over the user-global profile. Deterministic code-shape
@@ -51,7 +51,7 @@ read another artifact only when the spec or caller names it.
    contract.
 
 Stop before editing when the spec is contradictory, an authorized path is
-missing, the structural evidence is materially stale, or the requested work
+missing without a `creates` declaration, the structural evidence is materially stale, or the requested work
 would cross Scope, security, compatibility, or permission boundaries.
 
 ## Implement and verify

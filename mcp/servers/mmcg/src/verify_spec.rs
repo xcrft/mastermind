@@ -79,7 +79,7 @@ pub enum Finding {
     },
     /// Spec references a file path that doesn't exist on disk.
     MissingFile { file: String },
-    /// A declared path cannot establish a contained, stable regular file.
+    /// A file declaration cannot establish its required preflight state.
     DeclaredFileUnavailable {
         file: Option<String>,
         reason: String,
@@ -197,7 +197,7 @@ fn render_finding(f: &Finding) -> String {
         }
         Finding::MissingFile { file } => format!("missing_file: `{file}` not on disk"),
         Finding::DeclaredFileUnavailable { file, reason } => {
-            format!("declared_file_unavailable: `{}` — regular file could not be established ({reason})", file.as_deref().unwrap_or("<no valid target>"))
+            format!("declared_file_unavailable: `{}` — file declaration could not be satisfied ({reason})", file.as_deref().unwrap_or("<no valid target>"))
         }
         Finding::EmptyMandatorySection { section } => {
             format!("empty_mandatory_section: `{section}` is missing or empty")
@@ -274,7 +274,7 @@ fn render_finding(f: &Finding) -> String {
 }
 
 /// `--strict`-only requirements: a code-touching spec must carry YAML
-/// frontmatter scoping what it changes (`touches`/`expected_docs`), scope each
+/// frontmatter scoping what it changes (`touches`/`creates`/`expected_docs`), scope each
 /// touch to a file, and declare ≥1 runnable verify command. Returns violations
 /// as `StrictViolation` findings for the caller to fold in.
 pub fn strict_check(spec: &ParsedSpec) -> Vec<Finding> {
@@ -286,7 +286,7 @@ pub fn strict_check(spec: &ParsedSpec) -> Vec<Finding> {
         Some(fm) => {
             if !fm.has_file_scope() {
                 out.push(Finding::StrictViolation {
-                    reason: "frontmatter declares no `touches` or `expected_docs` — scope what the spec changes".into(),
+                    reason: "frontmatter declares no `touches`, `creates` or `expected_docs` — scope what the spec changes".into(),
                 });
             }
             for t in &fm.touches {
@@ -396,7 +396,7 @@ fn run_internal(
             interrupted: Some(&interrupted),
         };
         errors.extend(
-            crate::declared_files::check(spec, repo_root, control, |_| false)
+            crate::declared_files::preflight(spec, repo_root, control)
                 .iter()
                 .map(declared_file_finding),
         );

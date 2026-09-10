@@ -50,7 +50,10 @@ verify:
 Use literal `FIND:` / `CHANGE TO:` blocks only when exact replacement is part
 of the contract. Otherwise acceptance criteria define correctness.
 
-Retain the generated scope frontmatter. Mirror every required Final Verification
+Retain the generated scope frontmatter. Use `touches` for existing files and
+`creates: [src/new.py, docs/new.md]` for additions. A new required document also
+belongs in `expected_docs`. Existing drafts allow another preflight, but an old
+baseline file cannot be relabeled as a creation. Mirror every required Final Verification
 command in `verify[].cmd`, including its arguments. Legacy `VERIFY:` command
 lines are also machine-checked; labels and ordinary shell fences are not.
 

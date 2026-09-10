@@ -62,7 +62,7 @@ pub enum Finding {
     /// File was mentioned in the spec but is identical to the baseline —
     /// nothing was written to it, staged or otherwise.
     MissingExpectedFile { file: String },
-    /// A declared current file is missing, unsafe or unavailable after execution.
+    /// A file declaration or its creation baseline cannot be established.
     DeclaredFileUnavailable {
         file: Option<String>,
         reason: String,
@@ -243,7 +243,7 @@ fn render_finding(f: &Finding) -> String {
             format!("missing_expected_file: spec named `{file}` but diff shows no change")
         }
         Finding::DeclaredFileUnavailable { file, reason } => {
-            format!("declared_file_unavailable: `{}` — required regular file could not be established ({reason})", file.as_deref().unwrap_or("<no valid target>"))
+            format!("declared_file_unavailable: `{}` — file declaration could not be satisfied ({reason})", file.as_deref().unwrap_or("<no valid target>"))
         }
         Finding::SnapshotCallerDrift {
             symbol,
@@ -449,7 +449,7 @@ fn run_internal(
     // 1. File scope check — symmetric difference of declared files vs the files
     //    that differ from the baseline on disk.
     //
-    //    Frontmatter authoritative when present: `touches[].file` +
+    //    Frontmatter authoritative when present: `touches[].file` + `creates[]` +
     //    `expected_docs[]` are the declared set. Heuristic mentioned_files
     //    (backticked path tokens) is too noisy — picks up prose like
     //    ``do not touch `README.md` `` and flags files the planner never claimed.
@@ -629,13 +629,15 @@ fn run_internal(
         .map(|file| file.path.as_str())
         .collect();
     let interrupted = || store.work_interrupted();
-    let file_issues = crate::declared_files::check(
+    let file_issues = crate::declared_files::postflight(
         spec,
         repo_root,
         crate::bounded_fs::ReadControl {
             deadline: Some(deadline),
             interrupted: Some(&interrupted),
         },
+        &worktree.baseline_oid,
+        &worktree.files,
         |file| {
             deleted_files.contains(file)
                 && removal_plan
@@ -932,11 +934,13 @@ impl Bundle {
             .cloned()
             .collect();
 
-        let spec_files: Vec<String> = spec
+        let mut spec_files: Vec<String> = spec
             .into_iter()
             .flat_map(crate::declared_files::paths)
             .filter_map(|file| crate::declared_files::normalize(file).ok())
             .collect();
+        let mut seen = HashSet::new();
+        spec_files.retain(|file| seen.insert(file.clone()));
 
         let mut mmcg_queries: Vec<String> = Vec::new();
         let mut verified_claims: Vec<String> = Vec::new();

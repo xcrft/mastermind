@@ -116,6 +116,7 @@ verify:
   - cmd: \"<focused test command>\"
   - cmd: \"<repository-required gate>\"
 
+creates: []
 expected_docs: []
 ---
 
@@ -242,6 +243,7 @@ verify:
   - cmd: \"<typecheck command>\"
   - cmd: \"<test command>\"
 
+creates: []
 expected_docs: []
 ---
 
@@ -428,6 +430,7 @@ verify:
   - cmd: \"<typecheck command>\"
   - cmd: \"<test command>\"
 
+creates: []
 expected_docs: []
 
 breaking_changes:
@@ -721,6 +724,10 @@ mod tests {
                 content.contains("title: \"feat: add new thing\""),
                 "title must be quoted in all modes; got:\n{content}"
             );
+            assert!(content.contains("creates: []"), "{content}");
+            let parsed = mmcg::spec::parse_str("spec.md", &content);
+            assert!(parsed.frontmatter_error.is_none());
+            assert!(parsed.frontmatter.unwrap().creates.is_empty());
         }
     }
 

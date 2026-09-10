@@ -439,7 +439,7 @@ enum Cmd {
         #[arg(long)]
         require_index: bool,
         /// Contract-driven mode: also require YAML frontmatter scoping the change
-        /// (`touches` with files) and at least one `verify[].cmd`. Implies --require-index.
+        /// (`touches`, `creates`, or `expected_docs`) and a `verify[].cmd`. Implies --require-index.
         #[arg(long)]
         strict: bool,
     },
@@ -524,7 +524,7 @@ enum Cmd {
         #[arg(long)]
         allow_no_index: bool,
         /// Contract-driven mode: fold strict spec checks into pre-flight
-        /// (frontmatter scoping, file-scoped touches, a runnable verify command).
+        /// (scoped touches/creates, a runnable verify command).
         #[arg(long)]
         strict: bool,
         /// Maximum number of pre-flight iterations on the same spec before

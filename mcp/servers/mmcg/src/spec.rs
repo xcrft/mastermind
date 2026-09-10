@@ -40,6 +40,9 @@ pub struct ParsedSpec {
     /// gates fall back to the heuristic fields above with an advisory
     /// "consider migrating to frontmatter" warning.
     pub frontmatter: Option<Frontmatter>,
+    /// A present but invalid YAML block cannot fall back to a weaker contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frontmatter_error: Option<String>,
 }
 
 impl ParsedSpec {
@@ -81,6 +84,8 @@ impl ParsedSpec {
 /// expected_docs:
 ///   - README.md
 ///   - docs/billing.md
+/// creates:
+///   - docs/billing.md                  # new relative to the audit baseline
 /// breaking_changes:
 ///   removed_symbols:
 ///     - old_api                       # bare string OR
@@ -105,12 +110,16 @@ pub struct Frontmatter {
     /// snapshots scoped by file + language.
     #[serde(default)]
     pub touches: Vec<TouchEntry>,
+    /// Files to add relative to the task baseline. Preflight allows absent
+    /// targets or regular drafts, so revised contracts can be checked again.
+    #[serde(default)]
+    pub creates: Vec<String>,
     /// Verification steps. Strings are labels (informational); `cmd:` objects
     /// are command obligations checked by preflight and canonical postflight.
     #[serde(default)]
     pub verify: Vec<VerifyEntry>,
-    /// Doc files required to exist before and after execution and expected to
-    /// be modified. Code-removal acknowledgements never exempt these paths.
+    /// Required docs, including new docs explicitly listed in `creates`.
+    /// Code-removal acknowledgements never exempt these paths.
     #[serde(default)]
     pub expected_docs: Vec<String>,
     #[serde(default)]
@@ -118,12 +127,20 @@ pub struct Frontmatter {
 }
 
 impl Frontmatter {
-    /// True when frontmatter declares any file-scope info (touches OR
-    /// expected_docs). When true, verify-spec / audit-spec use the frontmatter
+    /// True when frontmatter declares any file-scope info. When true,
+    /// verify-spec / audit-spec use the frontmatter
     /// list AUTHORITATIVELY for file existence + scope checks instead of merging
     /// the noisy heuristic backticked-path extraction.
     pub fn has_file_scope(&self) -> bool {
-        !self.touches.is_empty() || !self.expected_docs.is_empty()
+        self.code_paths().next().is_some() || !self.expected_docs.is_empty()
+    }
+
+    /// Explicit implementation scope shared by controller and policy evidence.
+    pub(crate) fn code_paths(&self) -> impl Iterator<Item = &str> {
+        self.touches
+            .iter()
+            .map(|touch| touch.file.as_str())
+            .chain(self.creates.iter().map(String::as_str))
     }
 }
 
@@ -259,9 +276,8 @@ pub fn parse_file(path: &Path) -> std::io::Result<ParsedSpec> {
 }
 
 pub fn parse_str(source_path: &str, body: &str) -> ParsedSpec {
-    // Non-fatal: a malformed `---...---` block returns None and gates fall back
-    // to heuristics. Bad YAML must NOT block a spec from reaching verify-spec.
-    let (frontmatter, body_after_fm) = extract_frontmatter(body);
+    // Retain the readable body for diagnostics while gates reject bad metadata.
+    let (frontmatter, frontmatter_error, body_after_fm) = extract_frontmatter(body);
     let (sections, order) = split_sections(body_after_fm);
     let pre_edit_snapshot = sections
         .iter()
@@ -281,19 +297,19 @@ pub fn parse_str(source_path: &str, body: &str) -> ParsedSpec {
         verify_commands,
         find_blocks,
         frontmatter,
+        frontmatter_error,
     }
 }
 
 /// Split a `---\n...\n---\n` block off the top. Returns parsed frontmatter
-/// (None if absent or unparseable) and the body remainder.
+/// (None if absent or unparseable), any contract error and the body remainder.
 ///
 /// Leading `---` MUST be the very first line (no blank lines before it), per
 /// Jekyll / MkDocs / Hugo convention; a trailing `---` closes the block. On
-/// deserialize failure we warn to stderr and return None — body stays usable
-/// via the heuristic path.
-fn extract_frontmatter(body: &str) -> (Option<Frontmatter>, &str) {
+/// deserialize failure the body stays readable, but is not a fallback contract.
+fn extract_frontmatter(body: &str) -> (Option<Frontmatter>, Option<String>, &str) {
     if !body.starts_with("---\n") && !body.starts_with("---\r\n") {
-        return (None, body);
+        return (None, None, body);
     }
     // Skip opening fence.
     let after_open = body
@@ -314,17 +330,29 @@ fn extract_frontmatter(body: &str) -> (Option<Frontmatter>, &str) {
         offset += line.len();
     }
     let Some(yaml_end) = yaml_end else {
-        // No closing fence — treat as no frontmatter.
-        return (None, body);
+        return (None, Some("frontmatter_unterminated".into()), body);
     };
     let yaml_src = &after_open[..yaml_end];
     let rest = &after_open[rest_start..];
+    // Inspect YAML types before typed deserialization can coerce path scalars.
+    // Keep the existing parser for older metadata, including numeric task IDs.
+    let valid_shape = serde_norway::from_str::<serde_norway::Value>(yaml_src)
+        .ok()
+        .is_some_and(|value| {
+            let serde_norway::Value::Mapping(fields) = value else {
+                return false;
+            };
+            fields.get("creates").is_none_or(|creates| {
+                matches!(creates, serde_norway::Value::Sequence(paths)
+                    if paths.iter().all(|path| matches!(path, serde_norway::Value::String(_))))
+            })
+        });
+    if !valid_shape {
+        return (None, Some("frontmatter_invalid".into()), rest);
+    }
     match serde_norway::from_str::<Frontmatter>(yaml_src) {
-        Ok(fm) => (Some(fm), rest),
-        Err(e) => {
-            eprintln!("warning: YAML frontmatter failed to parse, falling back to heuristics: {e}");
-            (None, rest)
-        }
+        Ok(fm) => (Some(fm), None, rest),
+        Err(_) => (None, Some("frontmatter_invalid".into()), rest),
     }
 }
 
@@ -875,17 +903,69 @@ touches:
     }
 
     #[test]
-    fn malformed_frontmatter_falls_back_to_heuristic() {
-        // Missing closing `---` → no frontmatter, body parses as-is.
+    fn malformed_frontmatter_retains_body_and_marks_contract_invalid() {
         let body = "---\nid: 42\ntitle: \"Unterminated\n\n## Goals\n- x\n";
         let s = parse_str("t.md", body);
         assert!(s.frontmatter.is_none());
+        assert_eq!(
+            s.frontmatter_error.as_deref(),
+            Some("frontmatter_unterminated")
+        );
         // No close fence → parser returns the original body, so heuristic
         // parsing still finds Goals.
         assert!(
             s.section_order.iter().any(|n| n.starts_with("Goals")),
-            "heuristic path should still find sections on malformed frontmatter"
+            "diagnostics should retain sections on malformed frontmatter"
         );
+    }
+
+    #[test]
+    fn creates_frontmatter_preserves_scope_and_invalid_metadata() {
+        let parsed = parse_str("spec.md", "---\ncreates: [src/new.py, docs/new.md]\nexpected_docs: [docs/new.md]\n---\n## Goals\nCreate files.\n");
+        assert!(parsed.frontmatter_error.is_none());
+        let fm = parsed.frontmatter.unwrap();
+        assert!(fm.has_file_scope());
+        assert!(fm.touches.is_empty());
+        assert_eq!(
+            fm.code_paths().collect::<Vec<_>>(),
+            ["src/new.py", "docs/new.md"]
+        );
+        assert_eq!(fm.expected_docs, ["docs/new.md"]);
+        let legacy = parse_str("legacy.md", "# Task\n## Goals\nChange files.\n");
+        assert!(legacy.frontmatter_error.is_none());
+        for field in [
+            "",
+            "null",
+            "creates: new.py",
+            "creates: null",
+            "creates: [null]",
+            "creates: [true]",
+            "creates: [7]",
+            "creates: [{file: new.py}]",
+            "creates: [new.py",
+            "creates: [one.py]\ncreates: [two.py]",
+            "verify: [\ncreates: [new.py]",
+        ] {
+            let parsed = parse_str(
+                "spec.md",
+                &format!("---\n{field}\n---\n## Goals\nCreate files.\n"),
+            );
+            assert_eq!(
+                parsed.frontmatter_error.as_deref(),
+                Some("frontmatter_invalid"),
+                "{field}"
+            );
+            assert!(parsed.frontmatter.is_none());
+            assert!(section_body(&parsed, "Goals").is_some());
+        }
+        let numeric_names = parse_str(
+            "spec.md",
+            "---\nid: 42\ncreates: ['7', 'true', 'null']\n---\n## Goals\nCreate files.\n",
+        );
+        assert!(numeric_names.frontmatter_error.is_none());
+        let fm = numeric_names.frontmatter.unwrap();
+        assert_eq!(fm.id.as_deref(), Some("42"));
+        assert_eq!(fm.creates, ["7", "true", "null"]);
     }
 
     #[test]

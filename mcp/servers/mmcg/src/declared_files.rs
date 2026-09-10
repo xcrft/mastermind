@@ -489,7 +489,7 @@ mod tests {
         }
         let unreadable = root.join("private");
         std::fs::write(&unreadable, b"contents").unwrap();
-        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0)).unwrap();
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
         if std::fs::File::open(&unreadable).is_err() {
             assert_eq!(
                 check(

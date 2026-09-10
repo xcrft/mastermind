@@ -502,8 +502,16 @@ fn ci_accepts_acknowledged_file_deletion_without_weakening_preflight() {
         ]);
         let path = fixture.write_spec(
         &format!("  - file: {file}\n    symbols:\n      - name: old_api\n        signature: 'def old_api()'\n"),
-        "    - {name: old_api, file: service.py}\n", "",
+        "    - {name: old_api, file: service.py}\n",
+        &format!("## Phase 1: remove\n**File:** `{file}`\nFIND:\n```python\ndef old_api(): pass\n```\n"),
     );
+        let verify = fixture.command(&[
+            "verify-spec",
+            path.to_str().unwrap(),
+            "--require-index",
+            "--json",
+        ]);
+        assert!(verify.status.success(), "{verify:?}");
         std::fs::remove_file(fixture.root().join("service.py")).unwrap();
         Indexer::new(fixture.root())
             .index_all(&mut fixture.store, false)
@@ -526,6 +534,12 @@ fn ci_accepts_acknowledged_file_deletion_without_weakening_preflight() {
             "--json",
         ]);
         assert!(!verify.status.success(), "{verify:?}");
+        let preflight: Value = serde_json::from_slice(&verify.stdout).unwrap();
+        assert!(preflight["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "find_block_unavailable"));
         let ci = fixture.command(&["ci", "--since", "baseline"]);
         assert!(ci.status.success(), "{ci:?}");
 

@@ -32,8 +32,8 @@ pub struct ParsedSpec {
     pub mentioned_files: Vec<String>,
     /// VERIFY commands extracted from phase blocks.
     pub verify_commands: Vec<String>,
-    /// Per-phase FIND/CHANGE-TO/VERIFY triplets — verify-spec confirms the FIND
-    /// text actually exists in the named file.
+    /// Literal FIND preconditions; verify-spec checks the current named file.
+    /// CHANGE TO payloads and replacement order are not modeled here.
     pub find_blocks: Vec<FindBlock>,
     /// YAML frontmatter (`---`-delimited at file start). When present, takes
     /// precedence over heuristic extraction in verify/audit gates; when absent,
@@ -229,8 +229,8 @@ pub struct BreakingChanges {
 #[derive(Debug, Serialize, Clone)]
 pub struct FindBlock {
     /// File path declared above this FIND (`**File:** \`<path>\``). None when no
-    /// File marker — FIND text still parses, but verify-spec can't validate
-    /// without a target.
+    /// File marker — FIND text still parses, but preflight rejects it as
+    /// unavailable without a target.
     pub file: Option<String>,
     /// Raw FIND payload (between the triple backticks).
     pub find_text: String,

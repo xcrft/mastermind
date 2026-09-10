@@ -1,7 +1,8 @@
 //! Capability-scoped, bounded reads for repository-owned regular files.
 //!
-//! Callers pass an already selected repository root plus a repository-relative
-//! path. Every directory component and the final file are opened without
+//! Repository metadata paths use `read_repository_file`; `read_regular_file`
+//! also accepts paths already prefixed by the selected root. Every directory
+//! component and the final file are opened without
 //! following links. The descriptor identity is checked before and after the
 //! read and then re-opened through the same root capability, closing the usual
 //! check/open and rename/swap races.
@@ -484,6 +485,29 @@ pub(crate) fn read_regular_file(
     read_regular_file_with_capability(&root, path, max_bytes, read_limit, control)
 }
 
+/// Read a path supplied by repository metadata, never relative to process cwd.
+pub(crate) fn read_repository_file(
+    root: &Path,
+    relative: &Path,
+    max_bytes: u64,
+    read_limit: u64,
+    control: ReadControl<'_>,
+) -> Result<BoundedFile, BoundedReadError> {
+    control.check()?;
+    if relative.is_absolute() {
+        return Err(BoundedReadError::InvalidPath);
+    }
+    let relative = relative_path(root, relative)?;
+    let root = RootCapability::open(root)?;
+    read_regular_file_with_capability(
+        &root,
+        &root.requested_root.join(relative),
+        max_bytes,
+        read_limit,
+        control,
+    )
+}
+
 pub(crate) fn read_regular_file_with_capability(
     root: &RootCapability,
     path: &Path,
@@ -699,6 +723,27 @@ pub(crate) fn read_directory_names_with_capability(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repository_file_reads_reject_non_relative_metadata_paths() {
+        let current = std::env::current_dir().unwrap();
+        let root = tempfile::tempdir_in(&current).unwrap();
+        let relative_root = root.path().strip_prefix(&current).unwrap();
+        std::fs::write(root.path().join("file.txt"), b"safe").unwrap();
+        let read =
+            |path: &Path| read_repository_file(relative_root, path, 4, 4, ReadControl::default());
+        assert_eq!(read(Path::new("./file.txt")).unwrap().bytes, b"safe");
+        for path in ["", ".", "../file.txt", "sub/../../file.txt"] {
+            assert!(matches!(
+                read(Path::new(path)),
+                Err(BoundedReadError::InvalidPath)
+            ));
+        }
+        assert!(matches!(
+            read(&root.path().join("file.txt")),
+            Err(BoundedReadError::InvalidPath)
+        ));
+    }
 
     #[test]
     fn bounded_reader_reads_regular_relative_file() {

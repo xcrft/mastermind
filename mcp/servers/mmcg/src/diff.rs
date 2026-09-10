@@ -28,7 +28,7 @@
 //! - Per-file resolution: a symbol moved `a.py`→`b.py` shows as removed-from-a
 //!   + added-to-b, not "moved".
 
-use crate::bounded_fs::{read_regular_file, BoundedReadError, ReadControl, RootCapability};
+use crate::bounded_fs::{read_repository_file, BoundedReadError, ReadControl, RootCapability};
 use crate::indexer::{
     extractor_for_path, parse_baseline_blob, parse_blob, MAX_INDEXABLE_FILE_SIZE,
 };
@@ -830,7 +830,7 @@ pub(crate) fn symbols_changed_in_worktree_with_declarations(
                 interrupted,
             };
             Some(
-                read_regular_file(
+                read_repository_file(
                     repo_root,
                     Path::new(rel),
                     MAX_INDEXABLE_FILE_SIZE,
@@ -1792,7 +1792,7 @@ fn working_tree_snapshot_token_controlled(
         digest.update(file.status.as_bytes());
         digest.update([0]);
         if file.status != "deleted" {
-            let bytes = read_regular_file(
+            let bytes = read_repository_file(
                 repo,
                 Path::new(&file.path),
                 MAX_INDEXABLE_FILE_SIZE,

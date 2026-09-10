@@ -1,7 +1,7 @@
 //! Check each executor claim once and retain its identity and evidence.
 
 use crate::audit_spec::Finding;
-use crate::bounded_fs::{read_regular_file, ReadControl};
+use crate::bounded_fs::{read_repository_file, ReadControl};
 use crate::diff::DeclarationChanges;
 use crate::executor_report::{Claim, ExecutorReport};
 use crate::indexer::{extractor_for_path, parse_baseline_blob, MAX_INDEXABLE_FILE_SIZE};
@@ -192,7 +192,7 @@ fn current_source(
             .map_err(|_| "index_content_unavailable")?
             .filter(|hash| !hash.is_empty())
             .ok_or("index_content_unavailable")?;
-        let read = read_regular_file(
+        let read = read_repository_file(
             context.repo_root,
             Path::new(file),
             MAX_INDEXABLE_FILE_SIZE,

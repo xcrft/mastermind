@@ -47,6 +47,9 @@ execution. `observed_zero_tests` identifies a claimed pass with a self-reported
 zero count for a recognized test run, including when the exit code is missing.
 Compile/discovery modes, scripts, wrappers and unsupported syntax do not imply
 test execution. The report is not authenticated execution evidence.
+The file scan uses repository-contained reads and shared limits. An incomplete
+scan, changed receipt or unsupported scope suppresses the absence warning;
+silence is not proof that tests exist or ran.
 `missing_test` means a planned test is absent. Read these findings and build on
 them; do not restate them as your own.
 

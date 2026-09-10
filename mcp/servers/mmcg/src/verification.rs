@@ -18,6 +18,7 @@ pub(crate) fn pass_contradiction(row: &VerifyResult) -> Option<PassContradiction
     None
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TestRunner {
     Cargo,
     Go,
@@ -25,10 +26,25 @@ pub(crate) enum TestRunner {
     Javascript,
 }
 
+pub(crate) enum TestArgument<'a> {
+    Switch(&'a str),
+    Value(&'a str, &'a str),
+    Filter(&'a str),
+}
+
+pub(crate) struct TestCommand<'a> {
+    pub runner: TestRunner,
+    pub arguments: Vec<TestArgument<'a>>,
+}
+
 /// Recognize a small subset of direct, finite test invocations. Non-test modes
 /// and unknown syntax both return None: neither implies a positive test count.
 /// This describes command intent, not execution or implicit configuration.
 pub(crate) fn test_runner(cmd: &str) -> Option<TestRunner> {
+    test_command(cmd).map(|command| command.runner)
+}
+
+pub(crate) fn test_command(cmd: &str) -> Option<TestCommand<'_>> {
     let cmd = cmd.trim();
     if !cmd
         .bytes()
@@ -126,36 +142,46 @@ pub(crate) fn test_runner(cmd: &str) -> Option<TestRunner> {
     // With --run, a bare positional can select a Vitest subcommand (e.g. list)
     // before it becomes a filter. Explicit `vitest run` has no such ambiguity.
     let allow_filters = !matches!(tokens.as_slice(), ["vitest" | "vitest.exe", "--run", ..]);
-    supported_args(args, switches, values, allow_filters).then_some(runner)
+    Some(TestCommand {
+        runner,
+        arguments: supported_args(args, switches, values, allow_filters)?,
+    })
 }
 
-fn supported_args(args: &[&str], switches: &[&str], values: &[&str], allow_filters: bool) -> bool {
+fn supported_args<'a>(
+    args: &[&'a str],
+    switches: &[&str],
+    values: &[&str],
+    allow_filters: bool,
+) -> Option<Vec<TestArgument<'a>>> {
+    let mut result = Vec::new();
     let mut args = args.iter().copied();
     while let Some(arg) = args.next() {
         if !arg.starts_with('-') {
             if !allow_filters {
-                return false;
+                return None;
             }
+            result.push(TestArgument::Filter(arg));
             continue;
         }
         if switches.contains(&arg) {
+            result.push(TestArgument::Switch(arg));
             continue;
         }
         let (flag, inline) = arg
             .split_once('=')
             .map_or((arg, None), |(flag, value)| (flag, Some(value)));
         if !values.contains(&flag) {
-            return false;
+            return None;
         }
-        let Some(value) = inline.or_else(|| args.next()) else {
-            return false;
-        };
+        let value = inline.or_else(|| args.next())?;
         if value.is_empty() || value.starts_with('-') {
-            return false;
+            return None;
         }
         if flag == "-count" && !value.parse::<u32>().is_ok_and(|n| n > 0) {
-            return false;
+            return None;
         }
+        result.push(TestArgument::Value(flag, value));
     }
-    true
+    Some(result)
 }

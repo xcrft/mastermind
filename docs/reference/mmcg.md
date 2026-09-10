@@ -1516,6 +1516,29 @@ commands when no positive count is reported. Finding no conventional test files
 does not prove zero execution, and finding files does not override an explicit
 zero count. Non-test and unknown command forms skip this heuristic.
 
+Only a completed scan with rechecked directory entries, path kinds and Rust
+source receipts can emit this warning. External paths, parent traversal,
+symlinks, special files, read errors, invalid UTF-8 and incomplete rechecks make
+the advisory result unknown and suppress the absence warning. Unknown is not
+evidence that tests exist or ran. Hard reported-outcome contradictions are
+checked independently, including after the scanner exhausts its budget.
+
+One repository capability and one budget cover the entire report. The scanner
+allows 16,384 work units for enumeration and inspection, 8 MiB of total source
+reads and 1 MiB per file. Rechecks consume the same limits. Descendant traversal
+is capped at depth 12 and explicit starting scopes at 64 path components. The
+existing audit deadline and Store cancellation/budget marker also apply.
+
+Scopes stay conservative: Cargo checks conventional `src/` and `tests/` under
+one crate directory, falling back to that directory when both are absent.
+Package, workspace and doctest selectors remain unknown. Go supports one local
+directory and terminal `/...` recursion; pytest supports one directory or
+explicit Python file, including both `test_*.py` and `*_test.py` discovery names.
+Multiple targets, pytest node selectors and positional JavaScript filters remain
+unknown. Git metadata is excluded. These are conventional-file scans, without
+evaluating package configuration, plugins or the runner's complete discovery
+rules; the rechecks do not create an atomic filesystem snapshot.
+
 The executor runs commands and records their results. Coverage checks compare
 self-reported evidence with the spec; they neither run commands nor authenticate
 execution. Ordinary legacy reports retain their earlier compatibility behavior.

@@ -32,6 +32,9 @@ Do not re-derive these — read them and build on them:
   test run, even if the exit code is omitted. Neither authenticates execution.
   Compile/discovery modes, arbitrary scripts, wrappers and unsupported syntax
   do not imply test execution.
+  The file scan is confined to the repository and bounded across the report.
+  Read errors, links, unsupported scopes, changed receipts or exhausted limits
+  suppress the absence warning; silence does not mean tests exist or ran.
 - **`missing_test`** means a test the spec planned is absent.
 - **`signature_changed`** names symbols whose contract moved.
 

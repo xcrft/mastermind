@@ -115,6 +115,8 @@ pub enum Finding {
     },
     /// Executor completion, task identity or checked-report binding is invalid.
     ExecutorReportRejected { reason: String },
+    /// A declared command has missing, unsuccessful or conflicting report rows.
+    VerificationRequirementUnmet { cmd: String, reason: String },
     /// The integration claim has no matching target definition in its scope.
     HallucinatedSymbol {
         from_symbol: String,
@@ -196,6 +198,7 @@ impl Report {
                 | Finding::ClaimedSymbolNotAdded { .. }
                 | Finding::ExecutorClaimUnresolved { .. }
                 | Finding::ExecutorReportRejected { .. }
+                | Finding::VerificationRequirementUnmet { .. }
                 | Finding::HallucinatedSymbol { .. }
                 | Finding::MissingCallEdge { .. }
                 | Finding::ClaimedSignatureMismatch { .. }
@@ -310,6 +313,9 @@ fn render_finding(f: &Finding) -> String {
         }
         Finding::ExecutorReportRejected { reason } => {
             format!("executor_report_rejected: {reason}")
+        }
+        Finding::VerificationRequirementUnmet { cmd, reason } => {
+            format!("verification_requirement_unmet: `{cmd}`: {reason}")
         }
         Finding::HallucinatedSymbol {
             from_symbol,
@@ -668,6 +674,7 @@ pub fn run_ci_with_report(
 ///  - Per-claim declaration-addition and compatible-call-candidate evidence
 ///  - Unresolved outcomes for stale, ambiguous or unavailable source evidence
 ///  - Canonical report completion and repository-contained task identity
+///  - Reported outcomes for every explicitly declared verification command
 ///  - Vacuous test detector (2.3): test command claimed passed, no test files
 pub fn run_with_report(
     spec: &ParsedSpec,
@@ -693,6 +700,7 @@ fn check_executor_completion(
     let Some(metadata) = &report.canonical else {
         return;
     };
+    check_declared_verifications(report, spec, findings);
     if let Some(reason) = report.completion_rejection() {
         findings.push(Finding::ExecutorReportRejected {
             reason: reason.into(),
@@ -730,6 +738,40 @@ fn check_executor_completion(
     };
     if let Some(reason) = reason {
         findings.push(Finding::ExecutorReportRejected {
+            reason: reason.into(),
+        });
+    }
+}
+
+fn check_declared_verifications(
+    report: &ExecutorReport,
+    spec: &ParsedSpec,
+    findings: &mut Vec<Finding>,
+) {
+    let mut outcomes = BTreeMap::new();
+    for row in &report.verify {
+        let (passed, unsuccessful) = outcomes.entry(row.cmd.trim()).or_insert((0usize, 0usize));
+        if row.claimed.as_deref() == Some("passed")
+            && row
+                .observed
+                .as_ref()
+                .and_then(|observed| observed.exit_code)
+                .is_none_or(|code| code == 0)
+        {
+            *passed += 1;
+        } else {
+            *unsuccessful += 1;
+        }
+    }
+    for cmd in spec.declared_verify_commands() {
+        let reason = match outcomes.get(cmd) {
+            None => "missing_result",
+            Some((_, 0)) => continue,
+            Some((0, _)) => "not_passed",
+            Some(_) => "conflicting_results",
+        };
+        findings.push(Finding::VerificationRequirementUnmet {
+            cmd: cmd.into(),
             reason: reason.into(),
         });
     }
@@ -1540,6 +1582,7 @@ fn build_human_summary(
                     | Finding::ClaimedSymbolNotAdded { .. }
                     | Finding::ExecutorClaimUnresolved { .. }
                     | Finding::ExecutorReportRejected { .. }
+                    | Finding::VerificationRequirementUnmet { .. }
                     | Finding::HallucinatedSymbol { .. }
                     | Finding::MissingCallEdge { .. }
                     | Finding::ClaimedSignatureMismatch { .. }
@@ -1559,6 +1602,7 @@ fn build_human_summary(
                     | Finding::ClaimedSymbolNotAdded { .. }
                     | Finding::ExecutorClaimUnresolved { .. }
                     | Finding::ExecutorReportRejected { .. }
+                    | Finding::VerificationRequirementUnmet { .. }
                     | Finding::HallucinatedSymbol { .. }
                     | Finding::MissingCallEdge { .. }
                     | Finding::ClaimedSignatureMismatch { .. }
@@ -1669,6 +1713,7 @@ fn compute_verdict(findings: &[Finding]) -> Verdict {
                 | Finding::ClaimedSymbolNotAdded { .. }
                 | Finding::ExecutorClaimUnresolved { .. }
                 | Finding::ExecutorReportRejected { .. }
+                | Finding::VerificationRequirementUnmet { .. }
                 | Finding::HallucinatedSymbol { .. }
                 | Finding::MissingCallEdge { .. }
                 | Finding::ClaimedSignatureMismatch { .. }

@@ -278,7 +278,7 @@ pub fn strict_check(spec: &ParsedSpec) -> Vec<Finding> {
                     });
                 }
             }
-            if fm.verify.is_empty() && spec.verify_commands.is_empty() {
+            if spec.declared_verify_commands().is_empty() {
                 out.push(Finding::StrictViolation {
                     reason: "no verify command — declare at least one `verify[].cmd` the executor must run".into(),
                 });
@@ -393,20 +393,8 @@ pub(crate) fn run_with_removals(
     //    a project-local script (`./scripts/check.sh`) that looks unresolved but
     //    is fine. Covers heuristic phase-block `**VERIFY**: ...` lines AND
     //    frontmatter `verify[]` `cmd:` entries (label-only entries skipped).
-    let mut all_commands: Vec<String> = spec.verify_commands.clone();
-    if let Some(fm) = &spec.frontmatter {
-        for entry in &fm.verify {
-            if let Some(cmd) = entry.command() {
-                all_commands.push(cmd.to_string());
-            }
-        }
-    }
-    // De-dup while preserving order.
-    let mut seen_cmds: HashSet<String> = HashSet::new();
-    for cmd in &all_commands {
-        if seen_cmds.insert(cmd.clone()) {
-            check_verify_command(cmd, &mut warnings);
-        }
+    for cmd in spec.declared_verify_commands() {
+        check_verify_command(cmd, &mut warnings);
     }
 
     let verdict = if !errors.is_empty() {

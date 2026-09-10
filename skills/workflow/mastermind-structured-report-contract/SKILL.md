@@ -71,7 +71,8 @@ commands, contradictory complete reports, and reports over 1 MiB fail closed.
 ## Field rules
 
 - `complete`: every reported step is `done`, `defects` is empty, and every
-  verification result is `pass`.
+  verification result is `pass`. Postflight also requires a passing result for
+  every explicit command declared by the spec.
 - `partial` or `failed`: at least one concrete defect is required.
 - `files_modified`: the executor's evidence, not the scope authority. The
   controller calculates the real changed-file set from git and compares it with
@@ -81,7 +82,11 @@ commands, contradictory complete reports, and reports over 1 MiB fail closed.
 - `defects[].kind`: a recommended routing label from `defect-taxonomy.md`, not a
   closed enum and not an instruction for automatic repair.
 - `verifications`: record commands actually run. Do not claim an inferred or
-  intended check.
+  intended check. Match `verify[].cmd` and legacy `VERIFY:` declarations exactly
+  apart from outside whitespace. Missing results or unsuccessful matching rows
+  block completion; another passing row cannot conceal a failed run. Repeated
+  successful runs may have different excerpts or positive test counts. Optional
+  observations remain optional; coverage does not authenticate execution.
 
 ## Independent auditor output
 

@@ -1473,8 +1473,27 @@ reject legacy reports. Ordinary `audit-spec` and CI without those flags retain
 legacy compatibility. Canonical parsing rejects explicit nulls, invalid scalar
 types and ambiguous sentinel blocks. Markdown sentinel comments occupy their
 own unindented lines; marker text inside YAML string evidence remains data.
-Empty phase/verification lists remain
-valid under v1; their presence alone does not prove execution.
+Empty phase/verification lists remain valid under v1. Canonical postflight also
+requires a passing reported result for every nonempty `verify[].cmd` and each
+recognized `VERIFY:`, `**VERIFY**:` or `**VERIFY:**` command line in the spec.
+Labels and ordinary shell fences do not declare machine-checked obligations.
+`verify-spec --strict` requires at least one such command; labels or blank
+`cmd` values cannot satisfy that requirement.
+
+Command matching trims outside whitespace only. Arguments, case, wrappers and
+internal whitespace remain significant; separate rows cannot satisfy a compound
+command. Missing commands produce `verification_requirement_unmet` with
+`missing_result`. A matching row that does not claim a pass, or reports a nonzero
+exit, produces `not_passed`; mixing it with passing rows produces
+`conflicting_results`. These findings make the audit and bundle `broken` and
+return the controller to planner review. Repeated successful rows may have
+different excerpts or positive test counts. Existing observed-test checks still
+apply. Optional observations remain optional. Empty results can pass coverage
+when the spec has no command obligations.
+
+The executor runs commands and records their results. Coverage checks compare
+self-reported evidence with the spec; they neither run commands nor authenticate
+execution. Ordinary legacy reports retain their earlier compatibility behavior.
 
 The JSON audit result includes the complete checked `executor_report` when one
 was supplied. Bundle creation binds all its metadata and verification evidence

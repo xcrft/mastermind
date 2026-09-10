@@ -3222,7 +3222,20 @@ verify:
         .unwrap();
         git(&dir, &["add", "-A"]);
         git(&dir, &["commit", "-q", "-m", "executor"]);
-        write_executor_report(&spec_path, &["src/lib.py"]);
+        let write_report = || {
+            let report = serde_json::json!({
+                "schema_version": 1, "spec": spec_path.display().to_string(),
+                "status": "complete", "phases": [{"id": "1", "status": "done"}],
+                "files_modified": ["src/lib.py"], "claims": [], "defects": [],
+                "verifications": [{"cmd": "python3 -m py_compile src/lib.py", "result": "pass"}]
+            });
+            fs::write(
+                spec_path.parent().unwrap().join("executor-report.md"),
+                report.to_string(),
+            )
+            .unwrap();
+        };
+        write_report();
 
         // Second run auto-resumes into post-flight. Production must refresh the
         // graph itself; callers should not need a manual `mastermind index .`
@@ -3282,7 +3295,7 @@ verify:
             load_state(&state_path).unwrap().unwrap().status,
             "audit_required"
         );
-        write_executor_report(&spec_path, &["src/lib.py"]);
+        write_report();
         assert_eq!(
             run(&spec_path, &dir, &index_path, RunOpts::default()),
             Outcome::PostHeld

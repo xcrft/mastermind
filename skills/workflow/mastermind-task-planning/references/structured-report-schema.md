@@ -68,6 +68,14 @@ verifications:
   empty verification commands are invalid.
 - Unknown top-level or nested fields are invalid.
 
+Postflight compares canonical `verifications` with every explicit nonempty
+`verify[].cmd` and recognized legacy `VERIFY:` declaration. Commands must match
+apart from outside whitespace; labels and ordinary shell fences are excluded.
+Missing, unsuccessful or conflicting matching results make the audit Broken.
+An empty verification list can pass coverage when there are no command
+obligations. Results remain self-reported evidence; the audit does not execute
+commands or authenticate their execution.
+
 The parser projects supported claims and verification observations into the
 deterministic audit. Status, steps, file evidence, and defects are validated for
 consistency even when the mechanical audit independently derives repository

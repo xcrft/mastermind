@@ -691,6 +691,40 @@ fn open_validated_task_index(
     Ok(Some(store))
 }
 
+fn open_current_task_snapshot(index_path: &Path, repo_root: &Path) -> Result<Store, String> {
+    let store = Store::open_read_only(index_path).map_err(|error| {
+        format!(
+            "cannot freeze index `{}` for analysis: {error}",
+            index_path.display()
+        )
+    })?;
+    if !store
+        .schema_current()
+        .map_err(|error| format!("cannot inspect frozen index schema: {error}"))?
+    {
+        return Err("refreshed index schema is not current".into());
+    }
+    if store
+        .symbol_count()
+        .map_err(|error| format!("cannot query frozen index: {error}"))?
+        == 0
+    {
+        return Err("refreshed index became empty before analysis".into());
+    }
+    validate_index_root(&store, repo_root)
+        .map_err(|error| format!("frozen index/root mismatch: {error}"))?;
+    store
+        .ensure_source_snapshot_current()
+        .map_err(|error| format!("index changed while freezing analysis snapshot: {error}"))?;
+    Ok(store)
+}
+
+fn refresh_durable_history_at(index_path: &Path, repo_root: &Path) -> Result<u32, String> {
+    let mut store = open_validated_task_index(index_path, repo_root, false)?
+        .ok_or_else(|| "durable history requires a populated index".to_string())?;
+    refresh_durable_history(&mut store, repo_root)
+}
+
 fn display_relative(repo_root: &Path, path: &Path) -> String {
     let resolved = if path.is_absolute() {
         path.to_path_buf()
@@ -1608,8 +1642,8 @@ fn run_pre(
             return Outcome::PreFailed;
         }
     };
-    if let Some(index) = store.as_mut() {
-        let refresh = match Indexer::new(repo_root).index_all(index, false) {
+    if let Some(mut index) = store.take() {
+        let refresh = match Indexer::new(repo_root).index_all(&mut index, false) {
             Ok(stats) => stats,
             Err(error) => {
                 eprintln!("❌ Refreshing index before pre-flight failed: {error}");
@@ -1623,6 +1657,14 @@ fn run_pre(
             );
             return Outcome::PreFailed;
         }
+        drop(index);
+        store = match open_current_task_snapshot(index_path, repo_root) {
+            Ok(store) => Some(store),
+            Err(error) => {
+                eprintln!("❌ Cannot freeze refreshed pre-flight index: {error}");
+                return Outcome::PreFailed;
+            }
+        };
     }
 
     // 1. verify-spec (store optional — without index, only mandatory-section +
@@ -1668,6 +1710,12 @@ fn run_pre(
     if read_preflight_spec(repo_root, spec_path).ok().as_ref() != Some(&spec_body) {
         eprintln!("error: spec changed during pre-flight; review it and retry --pre-only");
         return Outcome::PreFailed;
+    }
+    if let Some(store) = &store {
+        if let Err(error) = store.ensure_source_snapshot_current() {
+            eprintln!("error: index changed during pre-flight analysis: {error}");
+            return Outcome::PreFailed;
+        }
     }
     let declared_risk = parsed
         .frontmatter
@@ -1825,6 +1873,14 @@ fn run_post(
             );
             return Outcome::PostBroken;
         }
+        drop(store);
+        store = match open_current_task_snapshot(index_path, repo_root) {
+            Ok(store) => store,
+            Err(error) => {
+                eprintln!("error: freezing refreshed post-flight index: {error}");
+                return Outcome::PostBroken;
+            }
+        };
     }
 
     let report_path = spec_path
@@ -1862,6 +1918,10 @@ fn run_post(
             return Outcome::PostBroken;
         }
     };
+    if let Err(error) = store.ensure_source_snapshot_current() {
+        eprintln!("error: index changed during post-flight analysis: {error}");
+        return Outcome::PostBroken;
+    }
     let audit_body = audit.render_text();
     print!("{audit_body}");
     let audit_path = spec_path.parent().unwrap_or(spec_path).join("audit.md");
@@ -1980,7 +2040,7 @@ fn run_post(
             return Outcome::PostBroken;
         }
         if durable_index {
-            if let Err(error) = refresh_durable_history(&mut store, repo_root) {
+            if let Err(error) = refresh_durable_history_at(index_path, repo_root) {
                 eprintln!("error: refreshing durable post-flight history: {error}");
                 return Outcome::PostBroken;
             }
@@ -2019,7 +2079,7 @@ fn run_post(
         }
     } else {
         if durable_index {
-            if let Err(error) = refresh_durable_history(&mut store, repo_root) {
+            if let Err(error) = refresh_durable_history_at(index_path, repo_root) {
                 eprintln!("error: refreshing durable failed-audit history: {error}");
                 return Outcome::PostBroken;
             }
@@ -3260,6 +3320,33 @@ verifications: []\n\
             Outcome::PreFailed
         );
         assert!(!state_file_path(root.path(), &spec).exists());
+    }
+
+    #[test]
+    fn task_analysis_snapshot_rejects_results_after_the_index_advances() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::write(
+            root.path().join("src/lib.py"),
+            "def original_symbol(): pass\n",
+        )
+        .unwrap();
+
+        let index_path = root.path().join("idx.db");
+        let mut writer = Store::open(&index_path).unwrap();
+        let stats = Indexer::new(root.path())
+            .index_all(&mut writer, false)
+            .unwrap();
+        assert_eq!(stats.files_failed, 0);
+        drop(writer);
+
+        let snapshot = open_current_task_snapshot(&index_path, root.path()).unwrap();
+        snapshot.ensure_source_snapshot_current().unwrap();
+
+        let writer = Store::open_existing(&index_path).unwrap();
+        writer.set_meta("snapshot_race", "advanced").unwrap();
+        assert!(snapshot.ensure_source_snapshot_current().is_err());
     }
 
     #[test]

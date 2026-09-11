@@ -6,7 +6,8 @@
 //! repos. Each mine upserts its repo's contribution (idempotent — re-mining the
 //! same repo replaces, never doubles); the rendered profile is the SUM over repos.
 
-use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
+use crate::bounded_fs::{BoundedReadError, ReadControl, StableFileIdentity};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Result as SqlResult};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -53,10 +54,48 @@ impl ProfileStore {
     }
 
     pub fn open(path: &Path) -> SqlResult<Self> {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let conn = Connection::open(path)?;
+        let (root, target) = crate::bounded_fs::prepare_file_target(path)
+            .map_err(|error| sqlite_path_error("prepare style store", error))?;
+        let existing_identity = match crate::bounded_fs::read_regular_file_with_capability(
+            &root,
+            &target,
+            u64::MAX,
+            0,
+            ReadControl::default(),
+        ) {
+            Ok(file) => Some(file.identity),
+            Err(BoundedReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                crate::bounded_fs::inspect_absent_path(&root, &target, ReadControl::default())
+                    .map_err(|error| sqlite_path_error("inspect style store", error))?
+                    .ok_or_else(sqlite_snapshot_changed)?;
+                None
+            }
+            Err(error) => return Err(sqlite_path_error("inspect style store", error)),
+        };
+        let mut created_file = None;
+        let expected_identity = match existing_identity {
+            Some(identity) => identity,
+            None => {
+                let (file, identity) =
+                    crate::bounded_fs::create_regular_file_with_capability(&root, &target, true)
+                        .map_err(|error| sqlite_path_error("create style store", error))?;
+                created_file = Some(file);
+                identity
+            }
+        };
+        let conn = Connection::open_with_flags(
+            &target,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        verify_store_identity(
+            &root,
+            &target,
+            expected_identity,
+            existing_identity.is_some(),
+        )?;
+        drop(created_file);
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS repo (
                  repo_key            TEXT PRIMARY KEY,
@@ -80,6 +119,7 @@ impl ProfileStore {
                  PRIMARY KEY (repo_key, email)
              );",
         )?;
+        verify_store_identity(&root, &target, expected_identity, false)?;
         Ok(Self { conn })
     }
 
@@ -256,6 +296,48 @@ impl ProfileStore {
     }
 }
 
+fn verify_store_identity(
+    root: &crate::bounded_fs::RootCapability,
+    target: &Path,
+    expected: StableFileIdentity,
+    exact: bool,
+) -> SqlResult<()> {
+    root.verify()
+        .map_err(|error| sqlite_path_error("verify style store parent", error))?;
+    let opened = crate::bounded_fs::read_regular_file_with_capability(
+        root,
+        target,
+        u64::MAX,
+        0,
+        ReadControl::default(),
+    )
+    .map_err(|error| sqlite_path_error("verify style store identity", error))?;
+    let matches = if exact {
+        opened.identity == expected
+    } else {
+        opened.identity.same_object(expected)
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(sqlite_snapshot_changed())
+    }
+}
+
+fn sqlite_path_error(context: &str, error: BoundedReadError) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
+        Some(format!("{context}: {error}")),
+    )
+}
+
+fn sqlite_snapshot_changed() -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+        Some("style store changed while opening".into()),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,5 +485,43 @@ mod tests {
         let agg = s.aggregate().unwrap();
         assert_eq!(agg.repos, 1);
         assert_eq!(agg.counts["x"], 10); // only /fresh survived
+    }
+
+    #[test]
+    fn open_creates_missing_private_parent_and_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/.mastermind/style.db");
+        let store = ProfileStore::open(&path).unwrap();
+        assert_eq!(store.aggregate().unwrap().repos, 0);
+        assert!(path.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_rejects_linked_store_and_parent() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let real_parent = dir.path().join("real");
+        std::fs::create_dir(&real_parent).unwrap();
+        let real_store = real_parent.join("style.db");
+        drop(ProfileStore::open(&real_store).unwrap());
+
+        let linked_store = dir.path().join("linked.db");
+        symlink(&real_store, &linked_store).unwrap();
+        assert!(ProfileStore::open(&linked_store).is_err());
+
+        let linked_parent = dir.path().join("linked-parent");
+        symlink(&real_parent, &linked_parent).unwrap();
+        assert!(ProfileStore::open(&linked_parent.join("other.db")).is_err());
+        assert!(!real_parent.join("other.db").exists());
     }
 }

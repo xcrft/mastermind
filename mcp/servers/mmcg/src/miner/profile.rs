@@ -102,7 +102,7 @@ fn mine_to_paths(
 
     // Validate and snapshot the hand-edited output before changing the aggregate.
     // The final conditional rename refuses to erase an edit made during mining.
-    let (profile_root, profile_target) = prepare_profile_target(path)?;
+    let (profile_root, profile_target) = crate::bounded_fs::prepare_file_target(path)?;
     let existing = read_existing_profile(&profile_root, &profile_target, force)?;
 
     // Accumulate into the user-global store, then render from the aggregate.
@@ -1364,38 +1364,6 @@ struct ExistingProfile {
     expectation: AtomicWriteExpectation,
 }
 
-/// Retain one existing ancestor as the authority for parent creation, the
-/// profile snapshot, and the final rename. A linked or non-directory parent is
-/// never accepted as the profile's storage boundary.
-fn prepare_profile_target(path: &Path) -> Result<(RootCapability, PathBuf), BoundedReadError> {
-    let target = std::path::absolute(path).map_err(BoundedReadError::Io)?;
-    if target.file_name().is_none() {
-        return Err(BoundedReadError::InvalidPath);
-    }
-    let parent = target.parent().ok_or(BoundedReadError::InvalidPath)?;
-    let mut anchor = parent;
-    loop {
-        match std::fs::symlink_metadata(anchor) {
-            Ok(metadata) => {
-                if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
-                    return Err(BoundedReadError::NotRegular);
-                }
-                break;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                anchor = anchor.parent().ok_or(BoundedReadError::InvalidPath)?;
-            }
-            Err(error) => return Err(BoundedReadError::Io(error)),
-        }
-    }
-
-    let root = RootCapability::open(anchor)?;
-    if anchor != parent {
-        root.ensure_directory(parent)?;
-    }
-    Ok((root, target))
-}
-
 fn read_existing_profile(
     root: &RootCapability,
     path: &Path,
@@ -2165,7 +2133,7 @@ diff --git a/app/bar.ts b/app/bar.ts
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("style.md");
         std::fs::write(&path, "previous owner's portrait").unwrap();
-        let (root, path) = prepare_profile_target(&path).unwrap();
+        let (root, path) = crate::bounded_fs::prepare_file_target(&path).unwrap();
         assert!(read_existing_profile(&root, &path, false)
             .unwrap()
             .body
@@ -2181,7 +2149,7 @@ diff --git a/app/bar.ts b/app/bar.ts
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("style.md");
         std::fs::write(&path, "observed profile").unwrap();
-        let (root, path) = prepare_profile_target(&path).unwrap();
+        let (root, path) = crate::bounded_fs::prepare_file_target(&path).unwrap();
         let snapshot = read_existing_profile(&root, &path, false).unwrap();
         std::fs::write(&path, "manual edit during mining").unwrap();
 
@@ -2204,7 +2172,7 @@ diff --git a/app/bar.ts b/app/bar.ts
     fn profile_target_creates_missing_parents_under_one_capability() {
         let dir = tempfile::tempdir().unwrap();
         let requested = dir.path().join("nested/profile/style.md");
-        let (root, path) = prepare_profile_target(&requested).unwrap();
+        let (root, path) = crate::bounded_fs::prepare_file_target(&requested).unwrap();
         let snapshot = read_existing_profile(&root, &path, false).unwrap();
         crate::bounded_fs::write_atomic_regular_file_expected_with_capability(
             &root,

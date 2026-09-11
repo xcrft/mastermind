@@ -19,10 +19,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
-use std::fs::File;
-use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::time::{Instant, SystemTime};
+use std::time::Instant;
 
 pub(crate) const MAX_ARTIFACT_BYTES: u64 = 32 * 1024 * 1024;
 pub(crate) const MAX_CODEOWNERS_BYTES: u64 = 3 * 1024 * 1024;
@@ -968,39 +966,16 @@ impl Collector<'_> {
         } else {
             self.root.join(path)
         };
-        let resolved = requested
-            .canonicalize()
-            .map_err(|_| SourceFailure::Unavailable)?;
-        let initial = std::fs::metadata(&resolved).map_err(|_| SourceFailure::Unavailable)?;
-        if !initial.is_file() {
-            return Err(SourceFailure::Unavailable);
-        }
-        if initial.len() > MAX_ARTIFACT_BYTES {
-            return Err(SourceFailure::TooLarge);
-        }
-        let mut file = File::open(&resolved).map_err(|_| SourceFailure::Unavailable)?;
-        let before = file.metadata().map_err(|_| SourceFailure::Unavailable)?;
-        if !before.is_file() {
-            return Err(SourceFailure::Unavailable);
-        }
-        if initial.len() != before.len() || modified(&initial) != modified(&before) {
-            return Err(SourceFailure::Changed);
-        }
-        if before.len() > MAX_ARTIFACT_BYTES {
-            return Err(SourceFailure::TooLarge);
-        }
-        let mut bytes = Vec::with_capacity(usize::try_from(before.len()).unwrap_or(0));
-        file.by_ref()
-            .take(MAX_ARTIFACT_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| SourceFailure::Unavailable)?;
-        if bytes.len() as u64 > MAX_ARTIFACT_BYTES {
-            return Err(SourceFailure::TooLarge);
-        }
-        let after = file.metadata().map_err(|_| SourceFailure::Changed)?;
-        if before.len() != after.len() || modified(&before) != modified(&after) {
-            return Err(SourceFailure::Changed);
-        }
+        let (resolved, source) = crate::bounded_fs::read_selected_regular_file(
+            &requested,
+            MAX_ARTIFACT_BYTES,
+            MAX_ARTIFACT_BYTES,
+            crate::bounded_fs::ReadControl {
+                deadline: self.deadline,
+                interrupted: None,
+            },
+        )
+        .map_err(source_read_error)?;
         if self.deadline_reached() {
             return Err(SourceFailure::Deadline);
         }
@@ -1016,7 +991,7 @@ impl Collector<'_> {
             .unwrap_or_else(|| "evidence artifact".into());
         Ok(SourceInput {
             label: truncate_text(&label, 180),
-            bytes,
+            bytes: source.bytes,
         })
     }
 
@@ -2135,8 +2110,14 @@ impl Collector<'_> {
     }
 }
 
-fn modified(metadata: &std::fs::Metadata) -> Option<SystemTime> {
-    metadata.modified().ok()
+fn source_read_error(error: crate::bounded_fs::BoundedReadError) -> SourceFailure {
+    match error {
+        crate::bounded_fs::BoundedReadError::TooLarge { .. } => SourceFailure::TooLarge,
+        crate::bounded_fs::BoundedReadError::SnapshotChanged => SourceFailure::Changed,
+        crate::bounded_fs::BoundedReadError::Interrupted
+        | crate::bounded_fs::BoundedReadError::DeadlineExceeded => SourceFailure::Deadline,
+        _ => SourceFailure::Unavailable,
+    }
 }
 
 fn strip_utf8_bom(bytes: &[u8]) -> &[u8] {
@@ -3390,6 +3371,27 @@ mod tests {
         assert_eq!(snapshot.diagnostics.items.len(), 2);
         assert_eq!(snapshot.diagnostics.items[0].code, "source_unavailable");
         assert_eq!(snapshot.diagnostics.items[1].code, "invalid_format");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn evidence_source_rejects_a_fifo_without_blocking() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let fifo = root.path().join("report.sarif");
+        let fifo_path = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `fifo_path` is a live, NUL-terminated path buffer.
+        assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+        let mut collector = collector(root.path(), &["src/pay.rs"]);
+
+        collector.load_sarif(&fifo, "sarif:0".into());
+        let snapshot = collector.finish(0);
+
+        assert!(snapshot.partial);
+        assert_eq!(snapshot.sources.items[0].status, "error");
+        assert_eq!(snapshot.diagnostics.items[0].code, "source_unavailable");
     }
 
     #[test]

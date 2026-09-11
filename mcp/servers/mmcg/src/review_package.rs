@@ -613,17 +613,8 @@ fn read_source(root: &Path, request: &SourceRequest) -> Result<SourceIdentity, R
         root.join(&request.path)
     };
     let fallback_label = display_path(&request.path);
-    let resolved = requested
-        .canonicalize()
-        .map_err(|_| ReviewPackageError::EvidenceUnavailable(fallback_label.clone()))?;
-    let parent = resolved
-        .parent()
-        .ok_or_else(|| ReviewPackageError::EvidenceUnavailable(fallback_label.clone()))?;
-    let capability = crate::bounded_fs::RootCapability::open(parent)
-        .map_err(|_| ReviewPackageError::EvidenceUnavailable(fallback_label.clone()))?;
-    let source = crate::bounded_fs::read_regular_file_with_capability(
-        &capability,
-        &resolved,
+    let (resolved, source) = crate::bounded_fs::read_selected_regular_file(
+        &requested,
         request.maximum_bytes,
         request.maximum_bytes,
         crate::bounded_fs::ReadControl::default(),

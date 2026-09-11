@@ -14,9 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
-- Review export reads evidence and attestations through capability-scoped,
-  no-follow file handles, rejecting special files and path swaps instead of
-  following a stale path or blocking on a FIFO.
+- Lens, fact adapters, and review export read selected evidence and attestations
+  through capability-scoped, no-follow file handles, rejecting special files
+  and path swaps instead of following a stale path or blocking on a FIFO.
 - Review export writes and syncs its private staging directory, then rechecks
   external evidence, attestations, the complete document graph, Git/worktree,
   project history, repository identity, and source DB/WAL identity immediately

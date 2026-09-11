@@ -365,14 +365,16 @@ impl RootCapability {
             match directory.open_dir_nofollow(component) {
                 Ok(next) => directory = next,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    directory
-                        .create_dir(component)
-                        .map_err(BoundedReadError::Io)?;
+                    match directory.create_dir(component) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                        Err(error) => return Err(BoundedReadError::Io(error)),
+                    }
                     directory = directory
                         .open_dir_nofollow(component)
-                        .map_err(BoundedReadError::Io)?;
+                        .map_err(classify_nofollow_open_error)?;
                 }
-                Err(error) => return Err(BoundedReadError::Io(error)),
+                Err(error) => return Err(classify_nofollow_open_error(error)),
             }
         }
         self.verify()
@@ -554,10 +556,25 @@ pub(crate) fn open_locked_regular_file_with_capability(
         options.mode(0o600).custom_flags(libc::O_NONBLOCK);
     }
     let open = || {
-        parent
-            .open_with(name, &options)
-            .map(cap_std::fs::File::into_std)
-            .map_err(classify_nofollow_open_error)
+        let mut last_creation_race = None;
+        for _ in 0..128 {
+            match parent.open_with(name, &options) {
+                Ok(file) => return Ok(file.into_std()),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    last_creation_race = Some(error);
+                    std::thread::yield_now();
+                }
+                Err(error) => return Err(classify_nofollow_open_error(error)),
+            }
+        }
+        Err(BoundedReadError::Io(last_creation_race.unwrap_or_else(
+            || {
+                std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "cannot open the stable lock file after concurrent creation",
+                )
+            },
+        )))
     };
     let file = open()?;
     let before = stable_file_identity(&file).map_err(BoundedReadError::Io)?;

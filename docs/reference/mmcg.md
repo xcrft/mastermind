@@ -835,11 +835,18 @@ The export accepts the same `--path`, `--depth`, `--top`,
 `--production-only`, `--sarif`, `--coverage`, `--junit`, `--otel`,
 `--codeowners`, `--git-commits`, `--no-project-knowledge`, and
 `--document-graph` inputs as Lens.
-It rechecks external files after analysis and fails if their exact bytes change.
-The manifest records their SHA-256 digests next to the resolved head OID. This
-is a **digest binding at export time**: it proves exactly which report bytes a
-reviewer saw at that revision, not that Semgrep, CodeQL, a test runner, or an
-OTel collector produced those bytes from that revision.
+It reads external files before and after analysis, then rechecks them and the
+optional attestation after the private package directory is fully written and
+synced. The manifest records their SHA-256 digests next to the resolved head
+OID. This is a **digest binding at export time**: it proves exactly which report
+bytes a reviewer saw at that revision, not that Semgrep, CodeQL, a test runner,
+or an OTel collector produced those bytes from that revision.
+
+The exporter retains the exact read-only SQLite snapshot used by Lens until
+publication. At the same final boundary it revalidates the Git HEAD, bounded
+worktree projection and omissions, project-history inventory, repository root,
+and source database/WAL identity. A race removes the private staging directory
+and publishes no output.
 
 With `--document-graph PATH`, the manifest also binds the packet digest, its
 internal snapshot digest, the stable live observation digest, snapshot Git

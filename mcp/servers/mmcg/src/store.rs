@@ -2088,6 +2088,7 @@ pub struct Store {
     conn: Connection,
     _snapshot_dir: Option<tempfile::TempDir>,
     db_path: PathBuf,
+    source_snapshot_state: Option<IndexFileState>,
     guard_stack: RefCell<Vec<GuardFrame>>,
     ops_counter: Arc<AtomicU64>,
     interrupt_source: Arc<AtomicU8>,
@@ -2374,7 +2375,7 @@ fn index_file_state_with_control(
 fn copy_index_snapshot(
     db_path: &Path,
     budget: SnapshotCopyBudget,
-) -> SqlResult<(tempfile::TempDir, PathBuf)> {
+) -> SqlResult<(tempfile::TempDir, PathBuf, IndexFileState)> {
     if Instant::now() >= budget.deadline {
         return Err(sqlite_snapshot_timeout());
     }
@@ -2456,7 +2457,7 @@ fn copy_index_snapshot(
         wal: optional_source_file_state(&root, &sqlite_sidecar_path(&absolute, "-wal"), control)?,
     };
     if after == before {
-        return Ok((snapshot_dir, snapshot_path));
+        return Ok((snapshot_dir, snapshot_path, before));
     }
     Err(sqlite_snapshot_changed())
 }
@@ -2464,15 +2465,15 @@ fn copy_index_snapshot(
 fn open_private_index_snapshot(
     db_path: &Path,
     budget: SnapshotCopyBudget,
-) -> SqlResult<(Connection, tempfile::TempDir)> {
-    let (snapshot_dir, snapshot_path) = copy_index_snapshot(db_path, budget)?;
+) -> SqlResult<(Connection, tempfile::TempDir, IndexFileState)> {
+    let (snapshot_dir, snapshot_path, source_state) = copy_index_snapshot(db_path, budget)?;
     let connection = Connection::open_with_flags(
         &snapshot_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY
             | OpenFlags::SQLITE_OPEN_NO_MUTEX
             | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE,
     )?;
-    Ok((connection, snapshot_dir))
+    Ok((connection, snapshot_dir, source_state))
 }
 
 #[cfg(test)]
@@ -2658,7 +2659,7 @@ impl Store {
             PRAGMA cache_size = -65536;
             "#,
         )?;
-        let mut store = Self::from_connection(connection, expected, None);
+        let mut store = Self::from_connection(connection, expected, None, None);
         store.managed_root = Some(root.canonical_root().to_path_buf());
         store.serve_root = Some(root.canonical_root().to_path_buf());
         store.init_schema()?;
@@ -2690,7 +2691,7 @@ impl Store {
             PRAGMA cache_size = -65536;
             "#,
         )?;
-        let store = Self::from_connection(conn, db_path, None);
+        let store = Self::from_connection(conn, db_path, None, None);
         store.init_schema()?;
         Ok(store)
     }
@@ -2718,7 +2719,8 @@ impl Store {
         let db_path = std::path::absolute(requested_path)
             .map_err(|error| sqlite_io_error("resolve read-only index", error))?;
         let snapshot_budget = SnapshotCopyBudget::for_request(request_deadline);
-        let (conn, snapshot_dir) = open_private_index_snapshot(&db_path, snapshot_budget)?;
+        let (conn, snapshot_dir, source_snapshot_state) =
+            open_private_index_snapshot(&db_path, snapshot_budget)?;
         conn.execute_batch(
             r#"
             PRAGMA foreign_keys = ON;
@@ -2727,7 +2729,12 @@ impl Store {
             PRAGMA query_only = ON;
             "#,
         )?;
-        Ok(Self::from_connection(conn, db_path, Some(snapshot_dir)))
+        Ok(Self::from_connection(
+            conn,
+            db_path,
+            Some(snapshot_dir),
+            Some(source_snapshot_state),
+        ))
     }
 
     /// Clone the exact connection snapshot into a private writable database.
@@ -2789,7 +2796,7 @@ impl Store {
             PRAGMA cache_size = -65536;
             "#,
         )?;
-        let mut snapshot = Self::from_connection(conn, snapshot_path, Some(snapshot_dir));
+        let mut snapshot = Self::from_connection(conn, snapshot_path, Some(snapshot_dir), None);
         snapshot.interrupt_source = Arc::clone(&self.interrupt_source);
         snapshot.set_default_work_budget(self.default_work_budget());
         if !snapshot.schema_current()? {
@@ -2827,11 +2834,13 @@ impl Store {
         conn: Connection,
         db_path: PathBuf,
         snapshot_dir: Option<tempfile::TempDir>,
+        source_snapshot_state: Option<IndexFileState>,
     ) -> Self {
         Self {
             conn,
             _snapshot_dir: snapshot_dir,
             db_path,
+            source_snapshot_state,
             guard_stack: RefCell::new(Vec::new()),
             ops_counter: Arc::new(AtomicU64::new(0)),
             interrupt_source: Arc::new(AtomicU8::new(INTERRUPT_NONE)),
@@ -4886,6 +4895,16 @@ impl Store {
     /// external watcher advanced the index.
     pub(crate) fn source_index_state(&self) -> SqlResult<IndexFileState> {
         index_file_state(&self.db_path)
+    }
+
+    /// Whether the canonical source database and WAL still match the exact
+    /// state copied into this store's private read-only snapshot.
+    pub(crate) fn source_snapshot_unchanged(&self) -> SqlResult<bool> {
+        let Some(expected) = self.source_snapshot_state.as_ref() else {
+            return Ok(true);
+        };
+        let current = index_file_state(&self.db_path)?;
+        Ok(current.eq(expected))
     }
 
     pub fn begin_read_snapshot(&self) -> SqlResult<()> {

@@ -289,6 +289,35 @@ struct PackageDocument {
     body: Vec<u8>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static REVIEW_FINALIZE_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+struct ReviewFinalizeTestHookGuard;
+
+#[cfg(test)]
+impl Drop for ReviewFinalizeTestHookGuard {
+    fn drop(&mut self) {
+        REVIEW_FINALIZE_TEST_HOOK.with(|hook| hook.borrow_mut().take());
+    }
+}
+
+#[cfg(test)]
+fn install_review_finalize_test_hook(hook: impl FnOnce() + 'static) -> ReviewFinalizeTestHookGuard {
+    REVIEW_FINALIZE_TEST_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    ReviewFinalizeTestHookGuard
+}
+
+#[cfg(test)]
+fn run_review_finalize_test_hook() {
+    if let Some(hook) = REVIEW_FINALIZE_TEST_HOOK.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
+}
+
 pub fn export(options: &ReviewExportOptions) -> Result<ReviewExportResult, ReviewPackageError> {
     let root = options
         .root
@@ -314,7 +343,7 @@ pub fn export(options: &ReviewExportOptions) -> Result<ReviewExportResult, Revie
         })
         .transpose()?;
 
-    let mut snapshot = crate::lens::snapshot_from_paths_with_document_graph(
+    let (mut snapshot, snapshot_validator) = crate::lens::snapshot_from_paths_with_validator(
         &root,
         &options.index_path,
         &options.lens,
@@ -342,13 +371,7 @@ pub fn export(options: &ReviewExportOptions) -> Result<ReviewExportResult, Revie
             )
         })
         .transpose()?;
-    match (&before_attestation, &after_attestation) {
-        (Some(before), Some(after)) if before != after => {
-            return Err(ReviewPackageError::EvidenceChanged(before.label.clone()));
-        }
-        (None, None) | (Some(_), Some(_)) => {}
-        _ => return Err(ReviewPackageError::EvidenceChanged("attestation".into())),
-    }
+    ensure_optional_source_unchanged(&before_attestation, &after_attestation, "attestation")?;
 
     let head_oid = snapshot.impact.baseline.head_oid.clone();
     let attestation = validate_attestation(after_attestation.as_ref(), &after_sources, &head_oid)?;
@@ -489,12 +512,36 @@ pub fn export(options: &ReviewExportOptions) -> Result<ReviewExportResult, Revie
         &serde_json::to_value(&manifest)
             .map_err(|error| ReviewPackageError::Serialization(error.to_string()))?,
     )?;
-    ensure_document_graph_unchanged(
-        &root,
-        options.document_graph.as_deref(),
-        snapshot.document_graph.as_ref(),
-    )?;
-    write_package(&output_dir, documents, &manifest_body)?;
+    write_package(&output_dir, documents, &manifest_body, || {
+        #[cfg(test)]
+        run_review_finalize_test_hook();
+        let final_sources = read_sources(&root, &requests)?;
+        ensure_sources_unchanged(&after_sources, &final_sources)?;
+        let final_attestation = options
+            .evidence_attestation
+            .as_ref()
+            .map(|path| {
+                read_source(
+                    &root,
+                    &SourceRequest {
+                        id: "attestation".into(),
+                        kind: "attestation",
+                        path: path.clone(),
+                        maximum_bytes: MAX_ATTESTATION_BYTES,
+                        retain_body: true,
+                    },
+                )
+            })
+            .transpose()?;
+        ensure_optional_source_unchanged(&after_attestation, &final_attestation, "attestation")?;
+        ensure_document_graph_unchanged(
+            &root,
+            options.document_graph.as_deref(),
+            snapshot.document_graph.as_ref(),
+        )?;
+        snapshot_validator.validate(&snapshot)?;
+        Ok(())
+    })?;
 
     Ok(ReviewExportResult {
         output_dir,
@@ -645,6 +692,20 @@ fn ensure_sources_unchanged(
         }
     }
     Ok(())
+}
+
+fn ensure_optional_source_unchanged(
+    before: &Option<SourceIdentity>,
+    after: &Option<SourceIdentity>,
+    label: &str,
+) -> Result<(), ReviewPackageError> {
+    match (before, after) {
+        (Some(before), Some(after)) if before != after => {
+            Err(ReviewPackageError::EvidenceChanged(before.label.clone()))
+        }
+        (None, None) | (Some(_), Some(_)) => Ok(()),
+        _ => Err(ReviewPackageError::EvidenceChanged(label.into())),
+    }
 }
 
 fn validate_attestation(
@@ -1182,6 +1243,7 @@ fn write_package(
     target: &Path,
     documents: Vec<PackageDocument>,
     manifest: &[u8],
+    validate_before_publish: impl FnOnce() -> Result<(), ReviewPackageError>,
 ) -> Result<(), ReviewPackageError> {
     let parent = target
         .parent()
@@ -1203,6 +1265,7 @@ fn write_package(
             .and_then(|directory| directory.sync_all())
             .map_err(|error| ReviewPackageError::Io(error.to_string()))?;
     }
+    validate_before_publish()?;
     match rename_package_noclobber(temporary.path(), target) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -1554,6 +1617,75 @@ mod tests {
             export(&options),
             Err(ReviewPackageError::OutputExists)
         ));
+    }
+
+    #[test]
+    fn export_rejects_worktree_drift_during_package_assembly() {
+        let (repository, _state, index_path) = fixture();
+        let output = repository.path().join("raced-review");
+        let options = export_options(repository.path(), index_path, output.clone());
+        let changed = repository.path().join("src/lib.rs");
+        let _hook = install_review_finalize_test_hook(move || {
+            std::fs::write(
+                changed,
+                "pub fn charge() -> i32 { 3 }\npub fn checkout() -> i32 { charge() }\n",
+            )
+            .unwrap();
+        });
+
+        assert!(matches!(
+            export(&options),
+            Err(ReviewPackageError::Lens(LensError::ImpactUnavailable(
+                crate::queries::ChangeImpactError::SnapshotChanged
+            )))
+        ));
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn export_rechecks_evidence_after_package_assembly() {
+        let (repository, state, index_path) = fixture();
+        let sarif = state.path().join("late-change.sarif");
+        std::fs::write(
+            &sarif,
+            r#"{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Semgrep"}},"results":[]}] }"#,
+        )
+        .unwrap();
+        let output = repository.path().join("evidence-raced-review");
+        let mut options = export_options(repository.path(), index_path, output.clone());
+        options.evidence.sarif.push(sarif.clone());
+        let _hook = install_review_finalize_test_hook(move || {
+            std::fs::write(
+                sarif,
+                r#"{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Changed"}},"results":[]}]}"#,
+            )
+            .unwrap();
+        });
+
+        assert!(matches!(
+            export(&options),
+            Err(ReviewPackageError::EvidenceChanged(ref label)) if label == "late-change.sarif"
+        ));
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn export_rejects_source_index_drift_before_publication() {
+        let (repository, _state, index_path) = fixture();
+        let output = repository.path().join("index-raced-review");
+        let options = export_options(repository.path(), index_path.clone(), output.clone());
+        let _hook = install_review_finalize_test_hook(move || {
+            let store = Store::open(index_path).unwrap();
+            store.set_meta("late_export_race", "changed").unwrap();
+        });
+
+        assert!(matches!(
+            export(&options),
+            Err(ReviewPackageError::Lens(LensError::ImpactUnavailable(
+                crate::queries::ChangeImpactError::SnapshotChanged
+            )))
+        ));
+        assert!(!output.exists());
     }
 
     #[test]

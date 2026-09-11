@@ -256,6 +256,8 @@ pub struct DocumentGraphCheck {
     pub root: String,
     pub packet: DocumentGraphPacket,
     pub snapshot_revision: DocumentRevision,
+    /// Digest of the stable live endpoint/corpus file observation used by this check.
+    pub observation_sha256: String,
     pub changed_files: Vec<DocumentGraphChange>,
     pub corpus: DocumentCorpusCheck,
     pub edges: Vec<DocumentEdgeCheck>,
@@ -284,6 +286,28 @@ fn canonical_digest(value: &Value) -> Result<String, DocumentGraphError> {
     serde_json::to_vec(value)
         .map(|bytes| digest_bytes(&bytes))
         .map_err(|_| DocumentGraphError::new("invalid_schema"))
+}
+
+fn observation_digest(
+    current: &BTreeMap<String, CurrentFile>,
+) -> Result<String, DocumentGraphError> {
+    let files = current
+        .iter()
+        .map(|(path, item)| match &item.record {
+            Some(record) => json!({
+                "path": path,
+                "status": "available",
+                "sha256": record.sha256,
+                "bytes": record.bytes,
+                "lines": record.lines,
+            }),
+            None => json!({
+                "path": path,
+                "status": item.reason.unwrap_or("unavailable"),
+            }),
+        })
+        .collect::<Vec<_>>();
+    canonical_digest(&json!({ "files": files }))
 }
 
 fn lowercase_sha256(value: &str) -> bool {
@@ -1088,6 +1112,7 @@ pub(crate) fn check(
         })
         .collect::<Vec<_>>();
 
+    let observation_sha256 = observation_digest(&current)?;
     let corpus = match (snapshot.corpus(), inventory) {
         (None, None) => DocumentCorpusCheck {
             status: "not_tracked",
@@ -1171,6 +1196,7 @@ pub(crate) fn check(
             snapshot_schema_version: snapshot.version(),
         },
         snapshot_revision: snapshot.revision().clone(),
+        observation_sha256,
         changed_files,
         corpus,
         edges,
@@ -1205,6 +1231,20 @@ pub fn check_for_store(
         ReadControl {
             deadline: store.request_deadline(),
             interrupted: Some(&interrupted),
+        },
+    )
+}
+
+pub(crate) fn check_bounded(
+    root: &Path,
+    graph_path: &Path,
+) -> Result<DocumentGraphCheck, DocumentGraphError> {
+    check(
+        root,
+        graph_path,
+        ReadControl {
+            deadline: Some(Instant::now() + CORPUS_TIMEOUT),
+            interrupted: None,
         },
     )
 }
@@ -1356,6 +1396,7 @@ mod tests {
         assert_eq!(response.edges[0].freshness, "current");
         assert_eq!(response.packet.path, GRAPH_PATH);
         assert_eq!(response.packet.snapshot_schema_version, 1);
+        assert!(lowercase_sha256(&response.observation_sha256));
         assert_ne!(
             response.packet.artifact_sha256, response.packet.snapshot_sha256,
             "the packet digest covers the trailing newline as well as the snapshot"
@@ -1422,6 +1463,25 @@ mod tests {
         );
         assert_eq!(response.edges[0].freshness, "needs_review");
         assert_eq!(response.edges[0].verification, "unverified");
+    }
+
+    #[test]
+    fn observation_digest_binds_changed_bytes_even_when_status_is_unchanged() {
+        let (root, graph) = fixture(false);
+        let endpoint = root.path().join("src/handler.rs");
+        std::fs::write(&endpoint, "fn changed_a() {}\n").unwrap();
+        let first = check(root.path(), &graph, ReadControl::default()).unwrap();
+        std::fs::write(&endpoint, "fn changed_b() {}\n").unwrap();
+        let second = check(root.path(), &graph, ReadControl::default()).unwrap();
+
+        assert_eq!(first.status, "needs_review");
+        assert_eq!(second.status, "needs_review");
+        assert_eq!(first.changed_files[0].reasons, vec!["content_changed"]);
+        assert_eq!(
+            first.changed_files[0].reasons,
+            second.changed_files[0].reasons
+        );
+        assert_ne!(first.observation_sha256, second.observation_sha256);
     }
 
     #[test]

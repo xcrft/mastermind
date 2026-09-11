@@ -63,6 +63,8 @@ pub struct LensSnapshot {
     pub temporal: LensTemporalSnapshot,
     pub semantic: crate::scip_overlay::SemanticOverlaySnapshot,
     pub evidence: crate::evidence::EvidenceSnapshot,
+    /// Optional live check of one explicitly selected portable document graph.
+    pub document_graph: Option<crate::document_graph::DocumentGraphCheck>,
     /// Audit facts for the selected map scope.
     pub audit: LensAudit,
 }
@@ -72,7 +74,10 @@ impl Serialize for LensSnapshot {
     where
         S: Serializer,
     {
-        let mut state = serializer.serialize_struct("LensSnapshot", 9)?;
+        let mut state = serializer.serialize_struct(
+            "LensSnapshot",
+            if self.document_graph.is_some() { 10 } else { 9 },
+        )?;
         state.serialize_field("schema_version", &self.schema_version)?;
         state.serialize_field("repository", &self.repository)?;
         state.serialize_field("options", &self.options)?;
@@ -81,6 +86,9 @@ impl Serialize for LensSnapshot {
         state.serialize_field("temporal", &self.temporal)?;
         state.serialize_field("semantic", &self.semantic)?;
         state.serialize_field("evidence", &self.evidence)?;
+        if let Some(document_graph) = &self.document_graph {
+            state.serialize_field("document_graph", document_graph)?;
+        }
         state.serialize_field("audit", &self.audit)?;
         state.end()
     }
@@ -307,6 +315,7 @@ pub enum LensError {
     AnalysisTimeout,
     MapUnavailable(String),
     ImpactUnavailable(ChangeImpactError),
+    DocumentGraph(crate::document_graph::DocumentGraphError),
     Serialization,
     Bind(String),
     Serve(String),
@@ -323,6 +332,7 @@ impl LensError {
             Self::AnalysisTimeout => "analysis_timeout",
             Self::MapUnavailable(_) => "map_unavailable",
             Self::ImpactUnavailable(error) => error.code(),
+            Self::DocumentGraph(error) => error.code(),
             Self::Serialization => "serialization_failed",
             Self::Bind(_) => "server_bind_failed",
             Self::Serve(_) => "server_io_failed",
@@ -370,6 +380,19 @@ impl LensError {
                     "git analysis exceeded its output limit; narrow the change".into()
                 }
             },
+            Self::DocumentGraph(error)
+                if matches!(error.code(), "deadline_exceeded" | "interrupted") =>
+            {
+                "checking the selected document graph exceeded Lens's bounded work window; retry or narrow its tracked corpus".into()
+            }
+            Self::DocumentGraph(error) => format!(
+                "the selected document graph could not be checked ({}{}); fix the explicit --document-graph input before relying on this snapshot",
+                error.code(),
+                error
+                    .path()
+                    .map(|path| format!(": {path}"))
+                    .unwrap_or_default(),
+            ),
             Self::Serialization => "Lens could not serialize its bounded result".into(),
             Self::Bind(_) => "Lens could not bind its loopback server".into(),
             Self::Serve(_) => "Lens encountered a local server error".into(),
@@ -382,6 +405,7 @@ impl fmt::Display for LensError {
         match self {
             Self::MapUnavailable(message) => write!(formatter, "{}: {message}", self.code()),
             Self::ImpactUnavailable(error) => write!(formatter, "{}: {error}", self.code()),
+            Self::DocumentGraph(error) => write!(formatter, "document graph check failed: {error}"),
             Self::Bind(message) | Self::Serve(message) => {
                 write!(formatter, "{}: {message}", self.code())
             }
@@ -441,19 +465,21 @@ pub fn build_snapshot_with_evidence_extensions(
         options,
         evidence,
         extensions,
+        None,
         request_deadline(),
     )
 }
 
 /// Build one fail-closed Lens snapshot from an existing index without serving
-/// HTTP. Review-package export uses this entry point so CLI, MCP, and Lens keep
-/// the same freshness, WAL, and bounded-analysis semantics.
-pub(crate) fn snapshot_from_paths_with_evidence_extensions(
+/// HTTP. Review-package export uses this entry point so CLI and Lens keep the
+/// same freshness, WAL, bounded-analysis, and optional document-graph semantics.
+pub(crate) fn snapshot_from_paths_with_document_graph(
     root: &Path,
     index_path: &Path,
     options: &LensOptions,
     evidence: &crate::evidence::EvidenceOptions,
     extensions: &crate::evidence::EvidenceExtensionOptions,
+    document_graph: Option<&Path>,
 ) -> Result<LensSnapshot, LensError> {
     snapshot_from_paths_until(
         root,
@@ -461,6 +487,7 @@ pub(crate) fn snapshot_from_paths_with_evidence_extensions(
         options,
         evidence,
         extensions,
+        document_graph,
         request_deadline(),
     )
 }
@@ -471,6 +498,7 @@ fn snapshot_from_paths_until(
     options: &LensOptions,
     evidence: &crate::evidence::EvidenceOptions,
     extensions: &crate::evidence::EvidenceExtensionOptions,
+    document_graph: Option<&Path>,
     deadline: Option<Instant>,
 ) -> Result<LensSnapshot, LensError> {
     let root = root
@@ -485,7 +513,15 @@ fn snapshot_from_paths_until(
     let before = index_source_state(&index_path)?;
     let store =
         Store::open_read_only_with_deadline(&index_path, deadline).map_err(read_only_open_error)?;
-    let snapshot = build_snapshot_until(&store, &root, options, evidence, extensions, deadline)?;
+    let snapshot = build_snapshot_until(
+        &store,
+        &root,
+        options,
+        evidence,
+        extensions,
+        document_graph,
+        deadline,
+    )?;
     if index_source_state(&index_path)? != before {
         return Err(LensError::ImpactUnavailable(
             ChangeImpactError::SnapshotChanged,
@@ -1101,6 +1137,7 @@ fn build_snapshot_until(
     options: &LensOptions,
     evidence_options: &crate::evidence::EvidenceOptions,
     evidence_extensions: &crate::evidence::EvidenceExtensionOptions,
+    document_graph_path: Option<&Path>,
     deadline: Option<Instant>,
 ) -> Result<LensSnapshot, LensError> {
     let root = root
@@ -1402,6 +1439,21 @@ fn build_snapshot_until(
         narrative,
     };
 
+    let document_graph = document_graph_path
+        .map(|path| {
+            let interrupted = || store.work_interrupted();
+            crate::document_graph::check(
+                &root,
+                path,
+                crate::bounded_fs::ReadControl {
+                    deadline,
+                    interrupted: Some(&interrupted),
+                },
+            )
+            .map_err(LensError::DocumentGraph)
+        })
+        .transpose()?;
+
     if store
         .data_version()
         .map_err(|_| LensError::ImpactUnavailable(ChangeImpactError::SnapshotChanged))?
@@ -1425,6 +1477,7 @@ fn build_snapshot_until(
         temporal,
         semantic,
         evidence,
+        document_graph,
         audit,
     })
 }
@@ -1469,6 +1522,20 @@ pub fn run_with_evidence_extensions(
     extensions: crate::evidence::EvidenceExtensionOptions,
     port: u16,
 ) -> Result<(), LensError> {
+    run_with_evidence_extensions_and_document_graph(
+        root, index_path, options, evidence, extensions, None, port,
+    )
+}
+
+pub fn run_with_evidence_extensions_and_document_graph(
+    root: PathBuf,
+    index_path: PathBuf,
+    options: LensOptions,
+    evidence: crate::evidence::EvidenceOptions,
+    extensions: crate::evidence::EvidenceExtensionOptions,
+    document_graph: Option<PathBuf>,
+    port: u16,
+) -> Result<(), LensError> {
     let root = root
         .canonicalize()
         .map_err(|_| LensError::RootUnavailable)?;
@@ -1494,6 +1561,7 @@ pub fn run_with_evidence_extensions(
         options,
         evidence,
         extensions,
+        document_graph,
         authority,
     };
     serve(listener, &state, None)
@@ -1505,6 +1573,7 @@ struct ServerState {
     options: LensOptions,
     evidence: crate::evidence::EvidenceOptions,
     extensions: crate::evidence::EvidenceExtensionOptions,
+    document_graph: Option<PathBuf>,
     authority: String,
 }
 
@@ -1827,6 +1896,7 @@ fn api_response(state: &ServerState) -> HttpResponse {
         &state.options,
         &state.evidence,
         &state.extensions,
+        state.document_graph.as_deref(),
         deadline,
     );
     match result {
@@ -1852,10 +1922,16 @@ struct ErrorBody<'a> {
 fn error_response(error: &LensError) -> HttpResponse {
     let status = match error {
         LensError::IndexUnavailable | LensError::RootUnavailable => 409,
+        LensError::DocumentGraph(error)
+            if matches!(error.code(), "deadline_exceeded" | "interrupted") =>
+        {
+            503
+        }
         LensError::IndexStale
         | LensError::SnapshotTooLarge
         | LensError::MapUnavailable(_)
-        | LensError::ImpactUnavailable(_) => 422,
+        | LensError::ImpactUnavailable(_)
+        | LensError::DocumentGraph(_) => 422,
         LensError::SnapshotTimeout | LensError::AnalysisTimeout => 503,
         LensError::Serialization | LensError::Bind(_) | LensError::Serve(_) => 500,
     };
@@ -2045,6 +2121,7 @@ mod tests {
         assert_eq!(json["impact"]["schema_version"], 1);
         assert_eq!(json["temporal"]["status"], "available");
         assert_eq!(json["temporal"]["data"]["schema_version"], 1);
+        assert!(json.get("document_graph").is_none());
         assert_eq!(
             json["temporal"]["data"]["provenance"]["baseline_graph"],
             "git_blob_rewind_private_sqlite_snapshot"
@@ -2056,6 +2133,54 @@ mod tests {
             "src/lib.rs"
         );
         assert_eq!(json["impact"], raw_impact);
+    }
+
+    #[test]
+    fn snapshot_live_checks_only_an_explicit_document_graph() {
+        let (repo, _index_dir, index_path) = fixture();
+        let graph = crate::document_graph::test_support::write_snapshot(repo.path(), true);
+        let mut store = Store::open(&index_path).unwrap();
+        Indexer::new(repo.path())
+            .index_all(&mut store, false)
+            .unwrap();
+        drop(store);
+
+        let snapshot = snapshot_from_paths_with_document_graph(
+            repo.path(),
+            &index_path,
+            &options(),
+            &crate::evidence::EvidenceOptions::default(),
+            &crate::evidence::EvidenceExtensionOptions::default(),
+            Some(&graph),
+        )
+        .unwrap();
+        let json = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(json["document_graph"]["status"], "current");
+        assert_eq!(
+            json["document_graph"]["edges"][0]["verification"],
+            "unverified"
+        );
+
+        fs::write(
+            repo.path().join("docs/adr/0001.md"),
+            "# Changed decision\nReview handler.\n",
+        )
+        .unwrap();
+        let changed = snapshot_from_paths_with_document_graph(
+            repo.path(),
+            &index_path,
+            &options(),
+            &crate::evidence::EvidenceOptions::default(),
+            &crate::evidence::EvidenceExtensionOptions::default(),
+            Some(&graph),
+        )
+        .unwrap();
+        let changed = serde_json::to_value(changed).unwrap();
+        assert_eq!(changed["document_graph"]["status"], "needs_review");
+        assert_eq!(
+            changed["document_graph"]["changed_files"][0]["path"],
+            "docs/adr/0001.md"
+        );
     }
 
     #[test]
@@ -2892,6 +3017,7 @@ mod tests {
             options: options(),
             evidence: crate::evidence::EvidenceOptions::default(),
             extensions: crate::evidence::EvidenceExtensionOptions::default(),
+            document_graph: None,
             authority: authority.clone(),
         };
         let server = std::thread::spawn(move || serve(listener, &state, Some(1)).unwrap());
@@ -2932,6 +3058,7 @@ mod tests {
             options: options(),
             evidence: crate::evidence::EvidenceOptions::default(),
             extensions: crate::evidence::EvidenceExtensionOptions::default(),
+            document_graph: None,
             authority: "127.0.0.1:43123".into(),
         };
 
@@ -2975,6 +3102,7 @@ mod tests {
             options: options(),
             evidence: crate::evidence::EvidenceOptions::default(),
             extensions: crate::evidence::EvidenceExtensionOptions::default(),
+            document_graph: None,
             authority: "127.0.0.1:43123".into(),
         };
 
@@ -3003,6 +3131,7 @@ mod tests {
             options: options(),
             evidence: crate::evidence::EvidenceOptions::default(),
             extensions: crate::evidence::EvidenceExtensionOptions::default(),
+            document_graph: None,
             authority: "127.0.0.1:43123".into(),
         };
 
@@ -3035,6 +3164,7 @@ mod tests {
             options: options(),
             evidence: crate::evidence::EvidenceOptions::default(),
             extensions: crate::evidence::EvidenceExtensionOptions::default(),
+            document_graph: None,
             authority: "127.0.0.1:43123".into(),
         };
 
@@ -3060,6 +3190,26 @@ mod tests {
         for leaked in ["SELECT", "secret", "no such", "hidden"] {
             assert!(!body.contains(leaked), "leaked {leaked}: {body}");
         }
+    }
+
+    #[test]
+    fn document_graph_deadlines_are_retryable_but_invalid_inputs_are_not() {
+        let timeout = error_response(&LensError::DocumentGraph(
+            crate::document_graph::DocumentGraphError::new("deadline_exceeded"),
+        ));
+        let timeout_body = String::from_utf8(timeout.body).unwrap();
+        assert_eq!(timeout.status, 503);
+        assert!(
+            timeout_body.contains("bounded work window"),
+            "{timeout_body}"
+        );
+
+        let invalid = error_response(&LensError::DocumentGraph(
+            crate::document_graph::DocumentGraphError::new("invalid_schema"),
+        ));
+        let invalid_body = String::from_utf8(invalid.body).unwrap();
+        assert_eq!(invalid.status, 422);
+        assert!(invalid_body.contains("invalid_schema"), "{invalid_body}");
     }
 
     #[cfg(unix)]

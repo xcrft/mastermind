@@ -146,6 +146,7 @@ that may need review.
 
 ```bash
 mastermind ui --since main \
+  --document-graph .mastermind/research/session-evidence-v2.json \
   --sarif semgrep.sarif --sarif codeql.sarif \
   --coverage lcov.info --coverage cobertura.xml \
   --junit junit.xml --otel traces.json
@@ -153,7 +154,9 @@ mastermind ui --since main \
 
 Lens correlates exact returned trace files with SARIF, LCOV/Cobertura, JUnit,
 OpenTelemetry, CODEOWNERS, Git churn, specs, ADRs, audits, lessons, and imported
-facts. Each overlay retains its source and completeness state.
+facts. An explicitly selected document graph adds a live freshness check and an
+review queue for unverified relations; it never turns a declared link into proof.
+Each evidence source retains its identity and completeness state.
 
 ### Turn architecture into an executable rule
 
@@ -195,7 +198,10 @@ mastermind-review/
 
 The exporter refuses to overwrite an existing directory. External evidence can
 be bound to the head revision, and signed fact manifests can carry Ed25519
-provenance into the package.
+provenance into the package. Add `--document-graph PATH` to bind the selected
+packet and its live observation digest. A changed graph marks the package
+partial, and the exporter rejects an output directory inside its tracked
+Markdown corpus.
 
 ### Give coding agents bounded context
 

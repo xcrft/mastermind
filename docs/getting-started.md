@@ -90,6 +90,11 @@ mastermind ui --since main
 - `temporal` compares architecture at the baseline and indexed worktree.
 - `ui` serves the same bounded snapshot in local read-only Mastermind Lens.
 
+If a research packet includes an explicit document evidence graph, add
+`--document-graph .mastermind/research/<packet>.json` to `ui`. Lens checks its
+named files and optional Markdown corpus live, displays changed documents for
+review, and keeps every declared relation `unverified`.
+
 For a first review, run `impact`, then open `ui`. Use `map` when you need the
 architecture around the change and `temporal` when you need base-versus-head
 drift.
@@ -164,7 +169,9 @@ mastermind review export --since main --out mastermind-review
 
 The new directory contains standalone HTML, SARIF, a Markdown summary, a
 revision/evidence manifest, and a pinned GitHub Actions workflow. The exporter
-does not overwrite an existing path.
+does not overwrite an existing path. The same optional `--document-graph PATH`
+binds the packet and live file observation into all review surfaces. Put the
+output outside every corpus directory tracked by that packet.
 
 ## Optional: enable the task workflow
 

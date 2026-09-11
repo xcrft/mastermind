@@ -2,7 +2,7 @@
 name: mastermind-project-history
 description: Retrieve and reason from durable project decisions, failed approaches, audits, reports, and lessons without treating provenance, search rank, or user approval as technical proof. Use when asking why a design exists, whether an approach was tried, what supersedes an older decision, what prior evidence should constrain a new plan, or how to record and check explicit document-to-code evidence links.
 metadata:
-  version: 0.3.0
+  version: 0.4.0
   authors: [mastermind]
   tags: [workflow, history, decisions, provenance, evidence]
 ---
@@ -83,6 +83,14 @@ history`. MCP exposes the same optional argument on `mmcg_history`. Read history
 `freshness` and `document_graph.status` independently: re-indexing repairs only
 the derived history index and cannot make a changed graph current. The native
 check is live and read-only; it does not persist graph nodes or execute Git.
+
+Pass the same explicit path to `mastermind ui` when a reviewer needs the graph
+beside change, topology, and imported evidence. Lens keeps declared relations in
+a separate review queue. Pass it to `mastermind review export` to bind the
+packet and stable live observation into the offline manifest, HTML, and summary.
+`needs_review` makes the package partial. Keep `--out` outside tracked corpus
+directories; the exporter rejects output that would immediately invalidate the
+selected graph.
 
 Read the separate `corpus.status` before reusing a conclusion. `changed` makes
 the overall check `needs_review`, even when every edge remains `current`.

@@ -186,10 +186,13 @@ itself does not complete a task. Completed tasks describe the version they
 reviewed; later unrelated work does not reopen them.
 
 For a saved document evidence graph, pass `--document-graph <path>` to
-`mastermind history` (or the same argument to `mmcg_history`). The response keeps
-history-index freshness and graph content freshness separate. Re-indexing does
-not clear changed endpoints or a changed Markdown corpus, and a current graph
-does not verify a declared relation.
+`mastermind history` (or the same argument to `mmcg_history`), `mastermind ui`,
+or `mastermind review export`. History keeps index freshness and graph content
+freshness separate. Lens adds an explicit review queue, and review export binds
+the packet plus a stable live-observation digest into the offline package. A
+changed graph makes that package partial. Re-indexing does not clear changed
+endpoints or a changed Markdown corpus, and a current graph does not verify a
+declared relation.
 
 ## Deterministic workflow audit
 

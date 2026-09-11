@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `mastermind ui` and `mastermind review export` accept an explicit portable
+  document graph. Lens exposes live endpoint and Markdown-corpus drift in a
+  bounded review queue, while offline packages bind the packet, live observation,
+  snapshot revision, partial state, and unverified relation boundary.
+
+### Fixed
+- Review export rechecks the complete document graph before atomic publication
+  and rejects output inside a tracked corpus, preventing packages that are stale
+  as soon as their Markdown summary appears.
+
 ## [2.1.0] - 2026-08-25
 
 ### Added

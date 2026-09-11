@@ -1453,6 +1453,21 @@ def validate_review_package_contract() -> list[Issue]:
             issues.append(Issue(path, "error", f"{label} schema required fields drifted"))
         if schema.get("properties", {}).get("schema_version", {}).get("const") != 1:
             issues.append(Issue(path, "error", f"{label} schema must pin version 1"))
+        if path == manifest_path:
+            properties = schema.get("properties", {})
+            graph = schema.get("$defs", {}).get("document_graph", {})
+            analysis = properties.get("analysis", {}).get("properties", {})
+            states = analysis.get("states", {}).get("items", {}).get("properties", {})
+            if properties.get("document_graph", {}).get("$ref") != "#/$defs/document_graph":
+                issues.append(Issue(path, "error", "review manifest must define optional document_graph binding"))
+            if graph.get("additionalProperties") is not False or graph.get("properties", {}).get("relation_verification", {}).get("const") != "unverified":
+                issues.append(Issue(path, "error", "document graph binding must stay strict and semantically unverified"))
+            if set(analysis.get("document_graph_status", {}).get("enum", [])) != {"current", "needs_review"}:
+                issues.append(Issue(path, "error", "review analysis must expose document graph freshness"))
+            if "needs_review" not in states.get("state", {}).get("enum", []):
+                issues.append(Issue(path, "error", "review partial-state schema must admit document graph review"))
+            if len(schema.get("allOf", [])) < 3 or "$.document_graph" not in json.dumps(schema.get("allOf", [])):
+                issues.append(Issue(path, "error", "review manifest must bind graph status to its partial-state projection"))
 
     rust_path = REPO_ROOT / "mcp/servers/mmcg/src/review_package.rs"
     try:
@@ -1470,6 +1485,8 @@ def validate_review_package_contract() -> list[Issue]:
             "mastermind-review.yml",
             "digest-bound-at-export",
             "producer-attested",
+            "head_matches_snapshot",
+            "observation_sha256",
             "from_json_strict",
         ):
             if token not in rust:

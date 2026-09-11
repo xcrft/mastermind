@@ -2300,6 +2300,76 @@ body:has(.workspace[data-trace-mode="mobile"].has-selection) .inspector {
   font-family: var(--mono);
 }
 
+.document-evidence {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+
+.document-evidence__heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 28px;
+}
+
+.document-evidence__heading h3 {
+  margin: 4px 0 0;
+  color: var(--ink);
+  font-size: 16px;
+  letter-spacing: -0.025em;
+}
+
+.document-evidence__heading > p {
+  max-width: 64ch;
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 11px;
+  text-align: right;
+}
+
+.document-evidence__queue {
+  display: grid;
+  margin-top: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 28px;
+}
+
+.document-evidence__item {
+  display: grid;
+  min-width: 0;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--line);
+  grid-template-columns: minmax(130px, 0.38fr) minmax(0, 1fr);
+  gap: 14px;
+}
+
+.document-evidence__kind {
+  color: var(--violet);
+  font-size: 11px;
+  font-weight: 670;
+}
+
+.document-evidence__item.is-review .document-evidence__kind {
+  color: var(--coral-dark);
+}
+
+.document-evidence__detail {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--ink-soft);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.document-evidence__more {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 12px 0 0;
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
 .temporal-deck {
   padding: 22px 4px 8px;
 }
@@ -2747,6 +2817,7 @@ body:has(.workspace[data-trace-mode="mobile"].has-selection) .inspector {
   }
 
   .evidence-deck__heading,
+  .document-evidence__heading,
   .temporal-deck__heading,
   .method-ledger > header {
     align-items: flex-start;
@@ -2755,12 +2826,17 @@ body:has(.workspace[data-trace-mode="mobile"].has-selection) .inspector {
   }
 
   .evidence-deck__heading > p,
+  .document-evidence__heading > p,
   .temporal-deck__heading > p,
   .method-ledger > header > p {
     text-align: left;
   }
 
   .evidence-source-list {
+    grid-template-columns: 1fr;
+  }
+
+  .document-evidence__queue {
     grid-template-columns: 1fr;
   }
 

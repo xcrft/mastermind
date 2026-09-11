@@ -14,9 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
-- Opt-in deep style synthesis now resolves `claude` outside the repository,
-  bounds its prompt and captured output, times out a stuck process, sanitizes
-  diagnostics, and rejects responses that could corrupt managed profile blocks.
+- Claude subprocesses launched by `init`, `run-task --exec`, and deep style
+  synthesis now resolve through absolute `PATH` entries and reject executables
+  inside the repository, closing repository-local command substitution.
+- Opt-in deep style synthesis now bounds its prompt and captured output, times
+  out a stuck process, sanitizes diagnostics, and rejects responses that could
+  corrupt managed profile blocks.
 - Style mining now bounds and times out every Git history query. Provenance uses
   compact Git aggregates, freshness counts without materializing commit lines,
   and oversized patch samples shrink while recording the actual sample size.

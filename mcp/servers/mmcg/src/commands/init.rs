@@ -546,7 +546,9 @@ fn draft_prompt(context: Option<&Path>, claude_md: Option<&Path>) -> String {
 
 fn run_claude_draft(root: &Path, prompt: &str) -> Result<(), String> {
     println!("\nDrafting scaffold files via `claude -p` (pass --no-claude to skip)...\n");
-    let status = std::process::Command::new("claude")
+    let claude = mmcg::setup::resolve_native_cli("claude", root)
+        .map_err(|error| format!("resolve claude: {error}"))?;
+    let status = std::process::Command::new(claude)
         .arg("-p")
         .arg(prompt)
         .arg("--permission-mode")

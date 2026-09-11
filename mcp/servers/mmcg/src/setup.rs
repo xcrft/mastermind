@@ -741,7 +741,7 @@ fn run_native(request: &Request, entry: &Value) -> Outcome {
             )
         }
     };
-    let program = match resolve_native(name, &request.root) {
+    let program = match resolve_native_cli(name, &request.root) {
         Ok(program) => program,
         Err(class) => return finish_error(request, "native", operation(request), entry, &class),
     };
@@ -1410,7 +1410,9 @@ fn error_hint(class: &str) -> Option<String> {
     }
 }
 
-pub(crate) fn resolve_native(name: &str, root: &Path) -> Result<PathBuf, String> {
+/// Resolve a native CLI through absolute `PATH` entries and reject any binary
+/// whose canonical location is inside the repository it will operate on.
+pub fn resolve_native_cli(name: &str, root: &Path) -> Result<PathBuf, String> {
     let root = root
         .canonicalize()
         .map_err(|_| "root_resolution_failed".to_string())?;
@@ -1745,8 +1747,9 @@ fn render_line_diff(before: &str, after: &str) -> String {
 
 #[cfg(test)]
 mod path_entry_tests {
-    use super::describe_unsafe_path_entries;
+    use super::{describe_unsafe_path_entries, resolve_native_from_directories};
     use std::ffi::OsString;
+    use std::path::PathBuf;
 
     // `split_paths` and `is_absolute` are both platform-defined, so the fixtures
     // have to be too: `;` and a drive letter on Windows, `:` and a leading slash
@@ -1773,6 +1776,33 @@ mod path_entry_tests {
 
     fn describe(entries: &[&str]) -> Option<String> {
         describe_unsafe_path_entries(&OsString::from(entries.join(SEP)))
+    }
+
+    #[test]
+    fn native_resolution_rejects_repository_and_relative_candidates() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().join("repo");
+        let inside = root.join("bin");
+        let outside = sandbox.path().join("outside-bin");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(inside.join("claude"), b"fixture").unwrap();
+        std::fs::write(outside.join("claude"), b"fixture").unwrap();
+        let root = root.canonicalize().unwrap();
+
+        assert_eq!(
+            resolve_native_from_directories("claude", &root, [inside]).unwrap_err(),
+            "repository_native_rejected"
+        );
+        assert_eq!(
+            resolve_native_from_directories("claude", &root, [PathBuf::from("relative")])
+                .unwrap_err(),
+            "unsafe_path_entry"
+        );
+        assert_eq!(
+            resolve_native_from_directories("claude", &root, [outside.clone()]).unwrap(),
+            outside.join("claude").canonicalize().unwrap()
+        );
     }
 
     #[test]

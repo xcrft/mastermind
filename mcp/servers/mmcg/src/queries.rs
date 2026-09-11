@@ -1611,10 +1611,12 @@ pub(crate) fn validate_change_impact_snapshot(
         &repository_root,
         &impact.baseline.baseline_oid,
         &impact.baseline.head_oid,
-        &expected_files,
-        impact.worktree_files_truncated,
-        impact.skipped_non_utf8_paths,
-        &impact.snapshot_token,
+        crate::diff::WorkingTreeSnapshotExpectation {
+            files: &expected_files,
+            files_truncated: impact.worktree_files_truncated,
+            skipped_non_utf8_paths: impact.skipped_non_utf8_paths,
+            token: &impact.snapshot_token,
+        },
         deadline,
         Some(&interrupted),
     )?;
@@ -2322,10 +2324,12 @@ pub fn change_impact(
         &repository_root,
         &working.baseline_oid,
         &working.head_oid,
-        &working.files,
-        working.files_truncated,
-        working.skipped_non_utf8_paths,
-        &working.snapshot_token,
+        crate::diff::WorkingTreeSnapshotExpectation {
+            files: &working.files,
+            files_truncated: working.files_truncated,
+            skipped_non_utf8_paths: working.skipped_non_utf8_paths,
+            token: &working.snapshot_token,
+        },
         store.request_deadline(),
         Some(&interrupted),
     )?;

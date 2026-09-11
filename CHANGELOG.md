@@ -14,9 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
-- Review export rechecks the complete document graph before atomic publication
-  and rejects output inside a tracked corpus, preventing packages that are stale
-  as soon as their Markdown summary appears.
+- Review export writes and syncs its private staging directory, then rechecks
+  external evidence, attestations, the complete document graph, Git/worktree,
+  project history, repository identity, and source DB/WAL identity immediately
+  before atomic publication. It also rejects output inside a tracked corpus,
+  preventing packages that are stale as soon as their Markdown summary appears.
 - Lens now rechecks the Git HEAD, bounded working-tree projection, project-history
   inventory, repository identity, and SQLite state after evidence, audit, and
   document-graph work, preventing one response from mixing repository snapshots.

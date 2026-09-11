@@ -1737,13 +1737,22 @@ pub(crate) fn validate_working_tree_snapshot_controlled(
         repo,
         baseline_oid,
         expected_head_oid,
-        expected_files,
-        false,
-        0,
-        expected_token,
+        WorkingTreeSnapshotExpectation {
+            files: expected_files,
+            files_truncated: false,
+            skipped_non_utf8_paths: 0,
+            token: expected_token,
+        },
         deadline,
         interrupted,
     )
+}
+
+pub(crate) struct WorkingTreeSnapshotExpectation<'a> {
+    pub files: &'a [WorkingTreeChangedFile],
+    pub files_truncated: bool,
+    pub skipped_non_utf8_paths: u32,
+    pub token: &'a str,
 }
 
 /// Recheck the exact bounded changed-file projection used to build a partial
@@ -1753,10 +1762,7 @@ pub(crate) fn validate_working_tree_projection_controlled(
     repo: &Path,
     baseline_oid: &str,
     expected_head_oid: &str,
-    expected_files: &[WorkingTreeChangedFile],
-    expected_files_truncated: bool,
-    expected_skipped_non_utf8_paths: u32,
-    expected_token: &str,
+    expected: WorkingTreeSnapshotExpectation<'_>,
     deadline: Option<Instant>,
     interrupted: Option<&dyn Fn() -> bool>,
 ) -> Result<(), WorkingTreeDiffError> {
@@ -1765,9 +1771,9 @@ pub(crate) fn validate_working_tree_projection_controlled(
     }
     let (files, _, files_truncated, skipped_non_utf8_paths) =
         collect_worktree_paths_controlled(repo, baseline_oid, deadline, interrupted)?;
-    if files_truncated != expected_files_truncated
-        || skipped_non_utf8_paths != expected_skipped_non_utf8_paths
-        || files != expected_files
+    if files_truncated != expected.files_truncated
+        || skipped_non_utf8_paths != expected.skipped_non_utf8_paths
+        || files != expected.files
     {
         return Err(WorkingTreeDiffError::SnapshotChanged);
     }
@@ -1778,7 +1784,7 @@ pub(crate) fn validate_working_tree_projection_controlled(
         deadline,
         interrupted,
     )?;
-    if token != expected_token {
+    if token != expected.token {
         return Err(WorkingTreeDiffError::SnapshotChanged);
     }
     Ok(())

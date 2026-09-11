@@ -17,7 +17,9 @@ use std::fmt;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Component, Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime};
+#[cfg(test)]
+use std::time::SystemTime;
+use std::time::{Duration, Instant};
 
 const INDEX_HTML: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -424,6 +426,52 @@ impl Drop for WorkBudgetScope<'_> {
     }
 }
 
+pub(crate) struct LensSnapshotValidator {
+    store: Store,
+    root: PathBuf,
+    root_capability: crate::bounded_fs::RootCapability,
+}
+
+impl LensSnapshotValidator {
+    pub(crate) fn validate(&self, snapshot: &LensSnapshot) -> Result<(), LensError> {
+        let deadline = request_deadline();
+        let exhausted = self.store.push_work_budget(remaining_work_budget(deadline));
+        let _budget_scope = WorkBudgetScope(&self.store);
+        if exhausted {
+            return Err(LensError::AnalysisTimeout);
+        }
+        if !self
+            .store
+            .source_snapshot_unchanged()
+            .map_err(|_| LensError::ImpactUnavailable(ChangeImpactError::SnapshotChanged))?
+        {
+            return Err(LensError::ImpactUnavailable(
+                ChangeImpactError::SnapshotChanged,
+            ));
+        }
+        queries::validate_change_impact_snapshot(
+            &self.store,
+            &self.root,
+            &snapshot.impact,
+            deadline,
+        )
+        .map_err(LensError::ImpactUnavailable)?;
+        self.root_capability
+            .verify()
+            .map_err(|_| LensError::ImpactUnavailable(ChangeImpactError::SnapshotChanged))?;
+        if !self
+            .store
+            .source_snapshot_unchanged()
+            .map_err(|_| LensError::ImpactUnavailable(ChangeImpactError::SnapshotChanged))?
+        {
+            return Err(LensError::ImpactUnavailable(
+                ChangeImpactError::SnapshotChanged,
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     static LENS_FINAL_SNAPSHOT_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
@@ -502,8 +550,9 @@ pub fn build_snapshot_with_evidence_extensions(
 }
 
 /// Build one fail-closed Lens snapshot from an existing index without serving
-/// HTTP. Review-package export uses this entry point so CLI and Lens keep the
-/// same freshness, WAL, bounded-analysis, and optional document-graph semantics.
+/// HTTP. The validator-retaining companion below is used at publication
+/// boundaries; both keep the same freshness, WAL, bounded-analysis, and
+/// optional document-graph semantics as live Lens.
 pub(crate) fn snapshot_from_paths_with_document_graph(
     root: &Path,
     index_path: &Path,
@@ -523,6 +572,28 @@ pub(crate) fn snapshot_from_paths_with_document_graph(
     )
 }
 
+/// Build a review snapshot while retaining the exact read-only SQLite
+/// connection and filesystem capabilities needed to validate it again at the
+/// publication boundary.
+pub(crate) fn snapshot_from_paths_with_validator(
+    root: &Path,
+    index_path: &Path,
+    options: &LensOptions,
+    evidence: &crate::evidence::EvidenceOptions,
+    extensions: &crate::evidence::EvidenceExtensionOptions,
+    document_graph: Option<&Path>,
+) -> Result<(LensSnapshot, LensSnapshotValidator), LensError> {
+    snapshot_from_paths_until_with_validator(
+        root,
+        index_path,
+        options,
+        evidence,
+        extensions,
+        document_graph,
+        request_deadline(),
+    )
+}
+
 fn snapshot_from_paths_until(
     root: &Path,
     index_path: &Path,
@@ -532,18 +603,48 @@ fn snapshot_from_paths_until(
     document_graph: Option<&Path>,
     deadline: Option<Instant>,
 ) -> Result<LensSnapshot, LensError> {
+    snapshot_from_paths_until_with_validator(
+        root,
+        index_path,
+        options,
+        evidence,
+        extensions,
+        document_graph,
+        deadline,
+    )
+    .map(|(snapshot, _validator)| snapshot)
+}
+
+fn snapshot_from_paths_until_with_validator(
+    root: &Path,
+    index_path: &Path,
+    options: &LensOptions,
+    evidence: &crate::evidence::EvidenceOptions,
+    extensions: &crate::evidence::EvidenceExtensionOptions,
+    document_graph: Option<&Path>,
+    deadline: Option<Instant>,
+) -> Result<(LensSnapshot, LensSnapshotValidator), LensError> {
     let root = root
         .canonicalize()
         .map_err(|_| LensError::RootUnavailable)?;
+    let root_capability =
+        crate::bounded_fs::RootCapability::open(&root).map_err(|_| LensError::RootUnavailable)?;
     let index_path = index_path
         .canonicalize()
         .map_err(|_| LensError::IndexUnavailable)?;
     if !index_path.is_file() {
         return Err(LensError::IndexUnavailable);
     }
-    let before = index_source_state(&index_path)?;
     let store =
         Store::open_read_only_with_deadline(&index_path, deadline).map_err(read_only_open_error)?;
+    if !store
+        .source_snapshot_unchanged()
+        .map_err(|_| LensError::IndexUnavailable)?
+    {
+        return Err(LensError::ImpactUnavailable(
+            ChangeImpactError::SnapshotChanged,
+        ));
+    }
     let snapshot = build_snapshot_until(
         &store,
         &root,
@@ -553,12 +654,25 @@ fn snapshot_from_paths_until(
         document_graph,
         deadline,
     )?;
-    if index_source_state(&index_path)? != before {
+    if !store
+        .source_snapshot_unchanged()
+        .map_err(|_| LensError::ImpactUnavailable(ChangeImpactError::SnapshotChanged))?
+    {
         return Err(LensError::ImpactUnavailable(
             ChangeImpactError::SnapshotChanged,
         ));
     }
-    Ok(snapshot)
+    root_capability
+        .verify()
+        .map_err(|_| LensError::ImpactUnavailable(ChangeImpactError::SnapshotChanged))?;
+    Ok((
+        snapshot,
+        LensSnapshotValidator {
+            store,
+            root,
+            root_capability,
+        },
+    ))
 }
 
 /// Render a single-file, offline Lens application. The snapshot, stylesheet,
@@ -1652,51 +1766,6 @@ struct ServerState {
     extensions: crate::evidence::EvidenceExtensionOptions,
     document_graph: Option<PathBuf>,
     authority: String,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct IndexSourceState {
-    database: FileState,
-    wal: Option<FileState>,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct FileState {
-    len: u64,
-    modified: Option<SystemTime>,
-}
-
-fn sidecar_path(index_path: &Path, suffix: &str) -> PathBuf {
-    let mut value = index_path.as_os_str().to_os_string();
-    value.push(suffix);
-    PathBuf::from(value)
-}
-
-fn file_state(path: &Path) -> Result<FileState, LensError> {
-    let metadata = std::fs::metadata(path).map_err(|_| LensError::IndexUnavailable)?;
-    Ok(FileState {
-        len: metadata.len(),
-        modified: metadata.modified().ok(),
-    })
-}
-
-fn index_source_state(index_path: &Path) -> Result<IndexSourceState, LensError> {
-    let index_path = index_path
-        .canonicalize()
-        .map_err(|_| LensError::IndexUnavailable)?;
-    let wal_path = sidecar_path(&index_path, "-wal");
-    let wal = match std::fs::metadata(&wal_path) {
-        Ok(metadata) => Some(FileState {
-            len: metadata.len(),
-            modified: metadata.modified().ok(),
-        }),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => return Err(LensError::IndexUnavailable),
-    };
-    Ok(IndexSourceState {
-        database: file_state(&index_path)?,
-        wal,
-    })
 }
 
 fn read_only_open_error(error: rusqlite::Error) -> LensError {
@@ -3343,25 +3412,5 @@ mod tests {
         let invalid_body = String::from_utf8(invalid.body).unwrap();
         assert_eq!(invalid.status, 422);
         assert!(invalid_body.contains("invalid_schema"), "{invalid_body}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn index_state_follows_a_symlink_to_the_target_wal() {
-        use std::os::unix::fs::symlink;
-
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("real.db");
-        let alias = directory.path().join("alias.db");
-        let writer = Store::open(&path).unwrap();
-        writer
-            .insert_symbol("wal_only", "function", "src/lib.rs", 1, 2, None, None)
-            .unwrap();
-        symlink(&path, &alias).unwrap();
-
-        let state = index_source_state(&alias).unwrap();
-        assert!(state.wal.as_ref().is_some_and(|wal| wal.len > 0));
-        assert_eq!(state, index_source_state(&path).unwrap());
-        drop(writer);
     }
 }

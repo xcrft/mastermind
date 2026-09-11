@@ -312,7 +312,7 @@ fn find_preflight_controller_revokes_approval_and_recovers() {
     let mut approved = run_task::load_state(&state_path).unwrap().unwrap();
     approved.held_snapshot_sha256 = Some("old-held".into());
     approved.history_snapshot_sha256 = Some("old-history".into());
-    run_task::save_state(&state_path, &approved).unwrap();
+    run_task::save_state_in_repository(fixture.root(), &state_path, &approved).unwrap();
     fixture.write(INPUT, &[0xff]);
     assert_eq!(fixture.controller(true), run_task::Outcome::PreFailed);
     let failed = run_task::load_state(&state_path).unwrap().unwrap();

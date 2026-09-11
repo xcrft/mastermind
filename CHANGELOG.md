@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Lifecycle state updates now use a private, durable temporary file and
+  capability-scoped atomic replacement. Interrupted writes cannot leave
+  truncated JSON, and symlink or non-file state targets are rejected.
 - Status, next-action, and resume now read task lifecycle state through bounded,
   no-follow repository capabilities. Malformed, oversized, unknown, or
   special-file state is held instead of becoming a fresh ready task; an

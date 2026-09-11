@@ -647,13 +647,48 @@ pub fn load_state(path: &Path) -> std::io::Result<Option<RunState>> {
     Ok(Some(state))
 }
 
+/// Persist state for callers that selected an explicit state path. Controller
+/// flows should use `save_state_in_repository` so every path component remains
+/// bound to the selected repository capability.
 pub fn save_state(path: &Path, state: &RunState) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let body = serde_json::to_string_pretty(state)
+    let parent = path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    save_state_in_repository(parent, path, state)
+}
+
+pub fn save_state_in_repository(
+    repo_root: &Path,
+    path: &Path,
+    state: &RunState,
+) -> std::io::Result<()> {
+    let body = serde_json::to_vec_pretty(state)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(path, body)
+    if body.len() as u64 > RUN_STATE_BYTE_LIMIT {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "serialized state has {} bytes, limit is {RUN_STATE_BYTE_LIMIT}",
+                body.len()
+            ),
+        ));
+    }
+    let root = RootCapability::open(repo_root).map_err(std::io::Error::other)?;
+    let relative = root
+        .repository_relative(path)
+        .map_err(std::io::Error::other)?;
+    if let Some(parent) = relative
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        root.ensure_directory(parent)
+            .map_err(std::io::Error::other)?;
+    }
+    let target = root.requested_root().join(relative);
+    bounded_fs::write_atomic_regular_file_with_capability(&root, &target, &body, true)
+        .map_err(std::io::Error::other)
 }
 
 pub fn delete_state(path: &Path) -> std::io::Result<()> {
@@ -1330,7 +1365,7 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts)
                     stale.blocking_reason = Some(reason.clone());
                     stale.held_snapshot_sha256 = None;
                     stale.history_snapshot_sha256 = None;
-                    if let Err(error) = save_state(&state_path, &stale) {
+                    if let Err(error) = save_state_in_repository(repo_root, &state_path, &stale) {
                         eprintln!("error: persisting required re-audit: {error}");
                     }
                     eprintln!("error: history review cannot close this task: {reason}. Re-run run-task to audit the current work.");
@@ -1369,7 +1404,8 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts)
                     completed.status = "learned".into();
                     completed.next_step = Some("close".into());
                     completed.last_artifact = Some("history-review.md".into());
-                    if let Err(error) = save_state(&state_path, &completed) {
+                    if let Err(error) = save_state_in_repository(repo_root, &state_path, &completed)
+                    {
                         eprintln!(
                             "error: persisting reviewed state `{}`: {error}",
                             state_path.display()
@@ -1382,7 +1418,9 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts)
                         let mut pending = state.clone();
                         pending.status = "history_review_required".into();
                         pending.next_step = Some("review_history".into());
-                        if let Err(error) = save_state(&state_path, &pending) {
+                        if let Err(error) =
+                            save_state_in_repository(repo_root, &state_path, &pending)
+                        {
                             eprintln!("error: persisting required semantic review: {error}");
                             return Outcome::PostBroken;
                         }
@@ -1434,7 +1472,7 @@ fn run_pre(
         if !budget_exhausted || opts.force_iteration {
             pending.iteration = iteration;
         }
-        if let Err(error) = save_state(state_path, &pending) {
+        if let Err(error) = save_state_in_repository(repo_root, state_path, &pending) {
             eprintln!("error: invalidating previous pre-flight approval: {error}");
             return Outcome::PreFailed;
         }
@@ -1615,7 +1653,7 @@ fn run_pre(
         allow_no_index: opts.allow_no_index,
         strict: opts.strict,
     };
-    if let Err(e) = save_state(state_path, &state) {
+    if let Err(e) = save_state_in_repository(repo_root, state_path, &state) {
         eprintln!("error: writing state `{}`: {e}", state_path.display());
         return Outcome::PreFailed;
     }
@@ -1668,7 +1706,7 @@ fn run_post(
     auditing.next_step = Some("run_audit".into());
     auditing.held_snapshot_sha256 = None;
     auditing.history_snapshot_sha256 = None;
-    if let Err(error) = save_state(state_path, &auditing) {
+    if let Err(error) = save_state_in_repository(repo_root, state_path, &auditing) {
         eprintln!("error: persisting audit-required state: {error}");
         return Outcome::PostBroken;
     }
@@ -1681,7 +1719,7 @@ fn run_post(
             auditing.next_step = Some("planner_review".into());
             auditing.blocking_reason = Some(format!("audit inputs unavailable: {error}"));
             auditing.last_artifact = Some("spec.md".into());
-            let _ = save_state(state_path, &auditing);
+            let _ = save_state_in_repository(repo_root, state_path, &auditing);
             return Outcome::PostBroken;
         }
     };
@@ -1700,7 +1738,7 @@ fn run_post(
             state,
             "spec changed since approval; review the revised contract and rerun pre-flight",
         );
-        if let Err(error) = save_state(state_path, &blocked) {
+        if let Err(error) = save_state_in_repository(repo_root, state_path, &blocked) {
             eprintln!("error: persisting required pre-flight: {error}");
         }
         eprintln!(
@@ -1762,7 +1800,7 @@ fn run_post(
             failed.next_step = Some("planner_review".into());
             failed.blocking_reason = Some(format!("executor report rejected: {error}"));
             failed.last_artifact = Some("executor-report.md".into());
-            let _ = save_state(state_path, &failed);
+            let _ = save_state_in_repository(repo_root, state_path, &failed);
             return Outcome::PostBroken;
         }
     };
@@ -1794,7 +1832,7 @@ fn run_post(
         failed.next_step = Some("planner_review".into());
         failed.blocking_reason = Some("failed to persist audit.md".into());
         failed.last_artifact = Some("executor-report.md".into());
-        let _ = save_state(state_path, &failed);
+        let _ = save_state_in_repository(repo_root, state_path, &failed);
         return Outcome::PostBroken;
     }
 
@@ -1931,7 +1969,7 @@ fn run_post(
         complete.held_snapshot_sha256 = held_snapshot_sha256;
         complete.held_snapshot_version = STRICT_SNAPSHOT_VERSION;
         complete.history_snapshot_sha256 = Some(history_snapshot);
-        if let Err(error) = save_state(state_path, &complete) {
+        if let Err(error) = save_state_in_repository(repo_root, state_path, &complete) {
             eprintln!(
                 "error: persisting post-flight state `{}`: {error}",
                 state_path.display()
@@ -1960,7 +1998,7 @@ fn run_post(
         failed.next_step = Some("planner_review".into());
         failed.blocking_reason = Some(format!("post-flight verdict: {verdict_label}"));
         failed.last_artifact = Some("audit.md".into());
-        if let Err(error) = save_state(state_path, &failed) {
+        if let Err(error) = save_state_in_repository(repo_root, state_path, &failed) {
             eprintln!(
                 "warning: persisting failed state `{}`: {error}",
                 state_path.display()
@@ -3659,7 +3697,7 @@ verify:
         let mut approved = load_state(&state_path).unwrap().unwrap();
         approved.held_snapshot_sha256 = Some("old-held".into());
         approved.history_snapshot_sha256 = Some("old-history".into());
-        save_state(&state_path, &approved).unwrap();
+        save_state_in_repository(root.path(), &state_path, &approved).unwrap();
         fs::write(&spec, body).unwrap();
         // This body passes non-strict pre-flight, but retries retain --strict.
         assert_eq!(

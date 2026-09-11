@@ -645,7 +645,8 @@ fn declared_docs_controller_rejects_deletion_clears_approval_and_recovers() {
     let mut held = fixture.state();
     assert!(held.history_snapshot_sha256.is_some());
     held.held_snapshot_sha256 = Some("old-held".into());
-    run_task::save_state(
+    run_task::save_state_in_repository(
+        fixture.root(),
         &run_task::state_file_path(fixture.root(), &fixture.spec()),
         &held,
     )

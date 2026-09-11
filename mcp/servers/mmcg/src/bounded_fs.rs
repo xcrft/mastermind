@@ -15,6 +15,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
 const READ_CHUNK_BYTES: usize = 64 * 1024;
+static NEXT_ATOMIC_FILE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct ReadControl<'a> {
@@ -501,6 +502,102 @@ pub(crate) fn create_regular_file_with_capability(
     let identity = stable_file_identity(&file).map_err(BoundedReadError::Io)?;
     root.verify()?;
     Ok((file, identity))
+}
+
+/// Atomically replace one repository-owned regular file through a retained
+/// parent-directory capability. The temporary file is durable before rename,
+/// the parent directory is synced on Unix, and existing links or non-files are
+/// never accepted as the controller-owned target.
+pub(crate) fn write_atomic_regular_file_with_capability(
+    root: &RootCapability,
+    path: &Path,
+    bytes: &[u8],
+    private: bool,
+) -> Result<(), BoundedReadError> {
+    #[cfg(not(unix))]
+    let _ = private;
+
+    root.verify()?;
+    let relative = root.relative(path)?;
+    let name = relative
+        .file_name()
+        .ok_or(BoundedReadError::InvalidPath)?
+        .to_os_string();
+    let parent_relative = relative.parent().unwrap_or_else(|| Path::new(""));
+    let parent = open_relative_directory_nofollow(&root.directory, parent_relative)?;
+    let parent_identity = directory_identity(&parent)?;
+    match parent.symlink_metadata(&name) {
+        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => return Err(BoundedReadError::NotRegular),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(BoundedReadError::Io(error)),
+    }
+
+    let mut temporary = None;
+    for _ in 0..128 {
+        let nonce = NEXT_ATOMIC_FILE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let candidate = std::ffi::OsString::from(format!(
+            ".mastermind-atomic-{}-{nonce}.tmp",
+            std::process::id()
+        ));
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            options.mode(if private { 0o600 } else { 0o644 });
+        }
+        match parent.open_with(&candidate, &options) {
+            Ok(file) => {
+                temporary = Some((candidate, file.into_std()));
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(BoundedReadError::Io(error)),
+        }
+    }
+    let (temporary_name, mut file) = temporary.ok_or_else(|| {
+        BoundedReadError::Io(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "cannot allocate an atomic temporary file",
+        ))
+    })?;
+
+    let result = (|| {
+        file.write_all(bytes).map_err(BoundedReadError::Io)?;
+        file.sync_all().map_err(BoundedReadError::Io)?;
+        drop(file);
+
+        let verify_parent = || -> Result<(), BoundedReadError> {
+            root.verify()?;
+            let current = open_relative_directory_nofollow(&root.directory, parent_relative)?;
+            if !directory_identity(&current)?.same_object(parent_identity) {
+                return Err(BoundedReadError::SnapshotChanged);
+            }
+            Ok(())
+        };
+        verify_parent()?;
+        parent
+            .rename(&temporary_name, &parent, &name)
+            .map_err(BoundedReadError::Io)?;
+        #[cfg(unix)]
+        parent
+            .try_clone()
+            .map_err(BoundedReadError::Io)?
+            .into_std_file()
+            .sync_all()
+            .map_err(BoundedReadError::Io)?;
+        verify_parent()
+    })();
+
+    if result.is_err() {
+        let _ = parent.remove_file(&temporary_name);
+    }
+    result
 }
 
 fn open_relative_directory_nofollow(root: &Dir, relative: &Path) -> Result<Dir, BoundedReadError> {
@@ -994,6 +1091,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read.bytes, b"fn main() {}\n");
+    }
+
+    #[test]
+    fn atomic_writer_replaces_regular_file_without_leaving_staging() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("state.json");
+        std::fs::write(&path, b"old").unwrap();
+        let capability = RootCapability::open(root.path()).unwrap();
+
+        write_atomic_regular_file_with_capability(&capability, &path, b"new", true).unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert_eq!(
+            std::fs::read_dir(root.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_writer_rejects_symlink_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.json");
+        std::fs::write(&victim, b"safe").unwrap();
+        let path = root.path().join("state.json");
+        symlink(&victim, &path).unwrap();
+        let capability = RootCapability::open(root.path()).unwrap();
+
+        assert!(matches!(
+            write_atomic_regular_file_with_capability(&capability, &path, b"changed", true),
+            Err(BoundedReadError::NotRegular)
+        ));
+        assert_eq!(std::fs::read(victim).unwrap(), b"safe");
     }
 
     #[cfg(unix)]

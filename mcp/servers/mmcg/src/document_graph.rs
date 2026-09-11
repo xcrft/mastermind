@@ -921,12 +921,18 @@ fn corpus_inventory(
 fn capture(
     root: &RootCapability,
     endpoint_paths: &BTreeSet<String>,
+    saved_corpus_paths: &BTreeSet<String>,
     directories: &[String],
     request_control: ReadControl<'_>,
 ) -> Result<(BTreeMap<String, CurrentFile>, Option<CorpusInventory>), DocumentGraphError> {
     if directories.is_empty() {
-        let first = capture_files(root, endpoint_paths, request_control)?;
-        let second = capture_files(root, endpoint_paths, request_control)?;
+        let paths = endpoint_paths
+            .iter()
+            .cloned()
+            .chain(saved_corpus_paths.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        let first = capture_files(root, &paths, request_control)?;
+        let second = capture_files(root, &paths, request_control)?;
         if first != second {
             return Err(DocumentGraphError::new("snapshot_changed"));
         }
@@ -948,6 +954,7 @@ fn capture(
         let paths = endpoint_paths
             .iter()
             .cloned()
+            .chain(saved_corpus_paths.iter().cloned())
             .chain(before.files.keys().cloned())
             .collect::<BTreeSet<_>>();
         let files = capture_files(root, &paths, control)?;
@@ -1009,7 +1016,23 @@ pub(crate) fn check(
         .corpus()
         .map(|corpus| corpus.directories.as_slice())
         .unwrap_or_default();
-    let (current, inventory) = capture(&capability, &endpoint_paths, directories, control)?;
+    let saved_corpus_paths = snapshot
+        .corpus()
+        .map(|corpus| {
+            corpus
+                .files
+                .iter()
+                .map(|record| record.path.clone())
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let (current, inventory) = capture(
+        &capability,
+        &endpoint_paths,
+        &saved_corpus_paths,
+        directories,
+        control,
+    )?;
     let graph_after = read_regular_file_expected(
         &capability,
         &rooted_graph,
@@ -1352,6 +1375,37 @@ mod tests {
         assert_eq!(response.corpus.changed_files[0].reasons, vec!["added"]);
         assert_eq!(response.edges[0].freshness, "current");
         assert_eq!(response.edges[0].verification, "unverified");
+    }
+
+    #[test]
+    fn v2_removed_uncited_corpus_file_is_reported_as_missing() {
+        let (root, graph) = fixture(true);
+        let path = "docs/adr/0002.md";
+        let bytes = b"# Uncited decision\n";
+        std::fs::write(root.path().join(path), bytes).unwrap();
+        let mut value = test_support::read_value(root.path());
+        let record = FileRecord {
+            path: path.into(),
+            sha256: digest_bytes(bytes),
+            bytes: bytes.len() as u64,
+            lines: 1,
+        };
+        let files = value["corpus"]["files"].as_array_mut().unwrap();
+        files.push(serde_json::to_value(record).unwrap());
+        files.sort_by(|left, right| left["path"].as_str().cmp(&right["path"].as_str()));
+        test_support::repair_digest(&mut value);
+        test_support::write_value(root.path(), &value);
+        std::fs::remove_file(root.path().join(path)).unwrap();
+
+        let response = check(root.path(), &graph, ReadControl::default()).unwrap();
+
+        assert_eq!(response.status, "needs_review");
+        assert!(response.changed_files.is_empty());
+        assert_eq!(response.corpus.status, "changed");
+        assert_eq!(response.corpus.changed_files.len(), 1);
+        assert_eq!(response.corpus.changed_files[0].path, path);
+        assert_eq!(response.corpus.changed_files[0].reasons, vec!["missing"]);
+        assert_eq!(response.edges[0].freshness, "current");
     }
 
     #[test]

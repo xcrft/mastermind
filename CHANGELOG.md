@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Style diagnostics now distinguish a wholly absent profile, an existing
+  profile that this repository has not enriched, an inconsistent leftover
+  database, and a stored mine point outside current Git history. Each state now
+  yields the appropriate optional, failure, or refresh decision.
 - Style-store reset, retention, legacy-alias cleanup, and contribution upsert
   now commit as one SQLite transaction. A failed mine preserves the complete
   previous aggregate, and retention no longer treats permission or I/O errors

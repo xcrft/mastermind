@@ -217,6 +217,12 @@ fn check_style_profile(root: &Path) -> Check {
             message: "none — `mastermind miner profile` to seed (optional)".into(),
             hint: None,
         },
+        Staleness::Unmined => Check {
+            name: "style profile",
+            status: Status::Ok,
+            message: "available globally; current repository has not contributed (optional)".into(),
+            hint: None,
+        },
         Staleness::Legacy => Check {
             name: "style profile",
             status: Status::Warn,
@@ -231,6 +237,14 @@ fn check_style_profile(root: &Path) -> Check {
                 "restore regular ~/.mastermind/style.md and style.db files, then refresh the profile"
                     .into(),
             ),
+        },
+        Staleness::Unverifiable { mined_through } => Check {
+            name: "style profile",
+            status: Status::Warn,
+            message: format!(
+                "stored mine point is outside the current history (mined through {mined_through})"
+            ),
+            hint: Some(STYLE_REFRESH_HINT.into()),
         },
         Staleness::Fresh { mined_through } => Check {
             name: "style profile",

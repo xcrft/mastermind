@@ -3235,7 +3235,7 @@ mod tests {
         let authority = format!("127.0.0.1:{}", address.port());
         let state = ServerState {
             root: repo.path().to_path_buf(),
-            index_path,
+            index_path: index_path.clone(),
             options: options(),
             evidence: crate::evidence::EvidenceOptions::default(),
             extensions: crate::evidence::EvidenceExtensionOptions::default(),

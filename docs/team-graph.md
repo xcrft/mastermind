@@ -67,6 +67,11 @@ Mastermind's private read-only snapshot path and rechecks all pins. Revision,
 identity, source freshness, DB/WAL drift, duplicate canonical roots, or
 duplicate canonical indexes fail closed.
 
+Database and WAL digests stream through a retained capability for their shared
+parent directory. Each opened file is bounded and checked by identity before
+and after the read; symlinks, path substitution, and special files such as
+FIFOs are rejected without blocking.
+
 The result namespaces every node (`repo:checkout` and
 `repo:checkout/component:src/api`). Internal component edges remain
 Tree-sitter-derived with `confidence=medium`; cross-repository edges exist only

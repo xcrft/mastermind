@@ -10,10 +10,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
-use std::fs::File;
-#[cfg(unix)]
-use std::fs::OpenOptions;
-use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -452,148 +448,62 @@ fn read_regular_until(
     label: &str,
     deadline: Option<Instant>,
 ) -> Result<Vec<u8>, FactError> {
-    let initial = std::fs::symlink_metadata(path)
-        .map_err(|error| FactError::Io(format!("read {label} metadata: {error}")))?;
-    if !initial.file_type().is_file() {
-        return Err(invalid(format!(
-            "{label} must be a regular non-symlink file"
-        )));
-    }
-    if initial.len() > maximum {
-        return Err(invalid(format!("{label} exceeds the {maximum}-byte limit")));
-    }
-    let file = File::open(path).map_err(|error| FactError::Io(format!("open {label}: {error}")))?;
-    let before = file
-        .metadata()
-        .map_err(|error| FactError::Io(format!("read {label} metadata: {error}")))?;
-    if !before.is_file() || before.len() != initial.len() || modified(&before) != modified(&initial)
-    {
-        return Err(invalid(format!("{label} changed before it could be read")));
-    }
-    read_opened_regular_until(file, before, maximum, label, deadline)
-}
-
-fn read_opened_regular_until(
-    mut file: File,
-    before: std::fs::Metadata,
-    maximum: u64,
-    label: &str,
-    deadline: Option<Instant>,
-) -> Result<Vec<u8>, FactError> {
-    if !before.is_file() {
-        return Err(invalid(format!(
-            "{label} must be a regular non-symlink file"
-        )));
-    }
-    if before.len() > maximum {
-        return Err(invalid(format!("{label} exceeds the {maximum}-byte limit")));
-    }
-    let mut bytes = Vec::with_capacity(usize::try_from(before.len()).unwrap_or(0));
-    let mut remaining = maximum.saturating_add(1);
-    let mut buffer = [0_u8; 64 * 1024];
-    while remaining > 0 {
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            return Err(FactError::Io(format!(
-                "verification deadline exceeded while reading {label}"
-            )));
-        }
-        let chunk = buffer.len().min(remaining as usize);
-        let count = file
-            .read(&mut buffer[..chunk])
-            .map_err(|error| FactError::Io(format!("read {label}: {error}")))?;
-        if count == 0 {
-            break;
-        }
-        bytes.extend_from_slice(&buffer[..count]);
-        remaining = remaining.saturating_sub(count as u64);
-    }
-    if bytes.len() as u64 > maximum {
-        return Err(invalid(format!("{label} exceeds the {maximum}-byte limit")));
-    }
-    let after = file
-        .metadata()
-        .map_err(|error| FactError::Io(format!("re-read {label} metadata: {error}")))?;
-    let identity_changed = {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            before.dev() != after.dev() || before.ino() != after.ino()
-        }
-        #[cfg(not(unix))]
-        {
-            false
-        }
-    };
-    if identity_changed || before.len() != after.len() || modified(&before) != modified(&after) {
-        return Err(invalid(format!("{label} changed while it was being read")));
-    }
-    Ok(bytes)
-}
-
-fn modified(metadata: &std::fs::Metadata) -> Option<SystemTime> {
-    metadata.modified().ok()
-}
-
-#[cfg(not(unix))]
-fn resolve_contained_regular(
-    root: &Path,
-    relative: &str,
-    label: &str,
-) -> Result<PathBuf, FactError> {
-    let mut candidate = root.to_path_buf();
-    let components = Path::new(relative).components().collect::<Vec<_>>();
-    for (index, component) in components.iter().enumerate() {
-        let Component::Normal(part) = component else {
-            return Err(invalid(format!("{label} has an unsafe path component")));
-        };
-        candidate.push(part);
-        let metadata = std::fs::symlink_metadata(&candidate)
-            .map_err(|error| FactError::Io(format!("read {label} path metadata: {error}")))?;
-        if metadata.file_type().is_symlink() {
-            return Err(invalid(format!("{label} must not traverse a symlink")));
-        }
-        if index + 1 < components.len() && !metadata.is_dir() {
-            return Err(invalid(format!("{label} has a non-directory parent")));
-        }
-    }
-    let canonical = candidate
-        .canonicalize()
+    let absolute = std::path::absolute(path)
         .map_err(|error| FactError::Io(format!("resolve {label}: {error}")))?;
-    if !canonical.starts_with(root) {
-        return Err(invalid(format!("{label} escapes the indexed repository")));
+    let name = absolute
+        .file_name()
+        .ok_or_else(|| invalid(format!("{label} must be a regular non-symlink file")))?;
+    let parent = absolute
+        .parent()
+        .ok_or_else(|| invalid(format!("{label} has no parent directory")))?
+        .canonicalize()
+        .map_err(|error| FactError::Io(format!("resolve {label} parent: {error}")))?;
+    let root = crate::bounded_fs::RootCapability::open(&parent)
+        .map_err(|error| bounded_read_error(maximum, label, error))?;
+    let selected = parent.join(name);
+    let source = crate::bounded_fs::read_regular_file_with_capability(
+        &root,
+        &selected,
+        maximum,
+        maximum,
+        crate::bounded_fs::ReadControl {
+            deadline,
+            interrupted: None,
+        },
+    )
+    .map_err(|error| bounded_read_error(maximum, label, error))?;
+    Ok(source.bytes)
+}
+
+fn bounded_read_error(
+    maximum: u64,
+    label: &str,
+    error: crate::bounded_fs::BoundedReadError,
+) -> FactError {
+    match error {
+        crate::bounded_fs::BoundedReadError::TooLarge { .. } => {
+            invalid(format!("{label} exceeds the {maximum}-byte limit"))
+        }
+        crate::bounded_fs::BoundedReadError::SnapshotChanged => {
+            invalid(format!("{label} changed while it was being read"))
+        }
+        crate::bounded_fs::BoundedReadError::InvalidPath
+        | crate::bounded_fs::BoundedReadError::OutsideRoot
+        | crate::bounded_fs::BoundedReadError::NotRegular => {
+            invalid(format!("{label} must be a regular non-symlink file"))
+        }
+        crate::bounded_fs::BoundedReadError::DeadlineExceeded => FactError::Io(format!(
+            "verification deadline exceeded while reading {label}"
+        )),
+        crate::bounded_fs::BoundedReadError::Interrupted => {
+            FactError::Io(format!("verification cancelled while reading {label}"))
+        }
+        crate::bounded_fs::BoundedReadError::Io(error) => {
+            FactError::Io(format!("read {label}: {error}"))
+        }
     }
-    Ok(canonical)
 }
 
-#[cfg(unix)]
-fn path_component_cstring(component: &std::ffi::OsStr) -> Result<std::ffi::CString, FactError> {
-    use std::os::unix::ffi::OsStrExt;
-    std::ffi::CString::new(component.as_bytes())
-        .map_err(|_| invalid("fact path contains an unsafe component"))
-}
-
-#[cfg(unix)]
-fn open_contained_at(
-    parent: &File,
-    component: &std::ffi::OsStr,
-    directory: bool,
-) -> Result<File, FactError> {
-    use std::os::fd::{AsRawFd, FromRawFd};
-    let component = path_component_cstring(component)?;
-    let flags = libc::O_RDONLY
-        | libc::O_NOFOLLOW
-        | libc::O_CLOEXEC
-        | if directory { libc::O_DIRECTORY } else { 0 };
-    let descriptor = unsafe { libc::openat(parent.as_raw_fd(), component.as_ptr(), flags) };
-    if descriptor < 0 {
-        return Err(invalid(
-            "fact inputs must use regular non-symlink repository paths",
-        ));
-    }
-    Ok(unsafe { File::from_raw_fd(descriptor) })
-}
-
-#[cfg(unix)]
 fn read_contained_regular(
     root: &Path,
     relative: &str,
@@ -601,43 +511,18 @@ fn read_contained_regular(
     label: &str,
     deadline: Option<Instant>,
 ) -> Result<Vec<u8>, FactError> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut options = OpenOptions::new();
-    options.read(true);
-    options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    let mut directory = options
-        .open(root)
-        .map_err(|error| FactError::Io(format!("open indexed repository: {error}")))?;
-    let parts = Path::new(relative)
-        .components()
-        .map(|component| match component {
-            Component::Normal(part) => Ok(part.to_os_string()),
-            _ => Err(invalid("fact path contains an unsafe component")),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let (leaf, parents) = parts
-        .split_last()
-        .ok_or_else(|| invalid("fact path is empty"))?;
-    for parent in parents {
-        directory = open_contained_at(&directory, parent, true)?;
-    }
-    let file = open_contained_at(&directory, leaf, false)?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| FactError::Io(format!("read {label} metadata: {error}")))?;
-    read_opened_regular_until(file, metadata, maximum, label, deadline)
-}
-
-#[cfg(not(unix))]
-fn read_contained_regular(
-    root: &Path,
-    relative: &str,
-    maximum: u64,
-    label: &str,
-    deadline: Option<Instant>,
-) -> Result<Vec<u8>, FactError> {
-    let resolved = resolve_contained_regular(root, relative, label)?;
-    read_regular_until(&resolved, maximum, label, deadline)
+    let source = crate::bounded_fs::read_repository_file(
+        root,
+        Path::new(relative),
+        maximum,
+        maximum,
+        crate::bounded_fs::ReadControl {
+            deadline,
+            interrupted: None,
+        },
+    )
+    .map_err(|error| bounded_read_error(maximum, label, error))?;
+    Ok(source.bytes)
 }
 
 fn canonical_remote(value: &str) -> Option<String> {
@@ -1839,6 +1724,31 @@ mod tests {
         let path = fixture.root.path().join(name);
         fs::write(&path, serde_json::to_vec_pretty(value).unwrap()).unwrap();
         path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fact_readers_reject_a_fifo_without_blocking() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("facts.json");
+        let raw = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `raw` is a live, NUL-terminated path buffer.
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+
+        let manifest_error = read_regular(&path, MAX_MANIFEST_BYTES, "fact manifest").unwrap_err();
+        assert!(matches!(manifest_error, FactError::InvalidManifest(_)));
+        let repository_error = read_contained_regular(
+            root.path(),
+            "facts.json",
+            MAX_ARTIFACT_BYTES,
+            "fact input",
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(repository_error, FactError::InvalidManifest(_)));
     }
 
     #[test]

@@ -228,6 +228,11 @@ sources at 10,000 files and 512 MiB total, provenance at 64 artifacts, 32 MiB
 each and 256 MiB total, and facts at 100,000. Query responses expose their own
 smaller limits and explicit partial/truncation states.
 
+The manifest and every repository input are read through bounded, no-follow
+file handles. Mastermind verifies the opened file identity before and after the
+read and rejects special files or path substitution, including FIFO swaps,
+instead of waiting for external input.
+
 A successful import atomically replaces only the dataset identified by
 `producer.name` plus `dataset`. An empty `facts` array therefore clears that
 dataset while preserving its validated provenance record. If validation fails,

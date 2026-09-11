@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Declarative fact manifests, referenced sources, and provenance artifacts now
+  use bounded, capability-scoped, no-follow reads on every platform. File
+  identity is checked before and after each read, and special-file swaps are
+  rejected without blocking on FIFOs.
 - SCIP import now makes one bounded, no-follow private snapshot of the selected
   artifact. Its digest and all three streaming decode passes use those same
   bytes, and the source identity and digest are rechecked before replacing the

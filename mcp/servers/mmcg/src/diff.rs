@@ -1064,7 +1064,7 @@ fn bounded_reader<R: Read + Send + 'static>(
     receiver
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn run_bounded_git(
     repo: &Path,
     args: &[&str],

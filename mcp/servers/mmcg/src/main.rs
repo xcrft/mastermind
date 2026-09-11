@@ -2409,7 +2409,7 @@ mod tests {
         assert_eq!(
             error
                 .downcast_ref::<mmcg::queries::ChangeImpactError>()
-                .map(mmcg::queries::ChangeImpactError::code),
+                .map(|error| error.code()),
             Some("index_stale")
         );
         assert!(!index.exists());

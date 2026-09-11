@@ -259,6 +259,8 @@ mmcg miner profile . --author "Ada Lovelace"  # literal substring of author name
 mmcg miner profile . --deep                    # explicit claude -p compatibility path
 # --force intentionally replaces the whole profile, including preserved prose;
 # it is not refresh.
+# Existing profiles are capped at 1 MiB and must be regular, no-follow files.
+# Publication is atomic; a manual edit made during mining aborts the replacement.
 # Subdirectories and linked worktrees share one repository contribution.
 # Independent clones remain separate; repeated samples do not prove quality.
 

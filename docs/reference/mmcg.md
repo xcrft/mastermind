@@ -851,10 +851,12 @@ regular file. A path swap, symlink change, or special file fails closed.
 The exporter retains the exact read-only SQLite snapshot used by Lens until
 publication. At the same final boundary it revalidates the Git HEAD, bounded
 worktree projection and omissions, project-history inventory, repository root,
-and source database/WAL identity. A race removes the private staging directory
-and publishes no output. When staging is inside the repository, the worktree
-check excludes only that exact newly created private directory; sibling and
-pre-existing changes remain part of validation.
+and source database/WAL identity. It then checks the retained staging directory
+contains only the declared package files and rereads every payload and manifest
+byte through no-follow handles before the atomic rename. A race removes the
+private staging directory and publishes no output. When staging is inside the
+repository, the worktree check excludes only that exact newly created private
+directory; sibling and pre-existing changes remain part of validation.
 
 With `--document-graph PATH`, the manifest also binds the packet digest, its
 internal snapshot digest, the stable live observation digest, snapshot Git

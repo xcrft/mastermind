@@ -7,6 +7,7 @@
 //! or concurrent audit invocations idempotent.
 
 use sha2::{Digest, Sha256};
+#[cfg(test)]
 use std::fs;
 use std::path::Path;
 

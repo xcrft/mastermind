@@ -4,16 +4,33 @@ fn open_validated_index(
     index_path: &Path,
     root: &Path,
 ) -> Result<Option<mmcg::store::Store>, Box<dyn std::error::Error>> {
-    if !index_path.is_file() {
-        return Ok(None);
+    match std::fs::symlink_metadata(index_path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(format!(
+                "index path `{}` is not a regular file",
+                index_path.display()
+            )
+            .into());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!("cannot inspect index `{}`: {error}", index_path.display()).into());
+        }
     }
-    let store = mmcg::store::Store::open(index_path)?;
-    if store.symbol_count()? == 0 {
-        return Ok(None);
+    let store = mmcg::store::Store::open_read_only(index_path)?;
+    if !store.schema_current()? {
+        return Err(format!(
+            "index schema at `{}` is missing or outdated; rebuild with `mastermind index .`",
+            index_path.display()
+        )
+        .into());
     }
     mmcg::indexer::validate_index_root(&store, root)
         .map_err(|error| format!("index/root mismatch: {error}"))?;
-    Ok(Some(store))
+    let populated = store.symbol_count()? > 0;
+    store.ensure_source_snapshot_current()?;
+    Ok(populated.then_some(store))
 }
 
 pub fn verify(
@@ -31,6 +48,9 @@ pub fn verify(
         mmcg::spec::parse_file(spec).map_err(|e| format!("parse {}: {e}", spec.display()))?;
     let store = open_validated_index(index_path, &root)?;
     let mut report = mmcg::verify_spec::run(&parsed, store.as_ref(), &root);
+    if let Some(store) = &store {
+        store.ensure_source_snapshot_current()?;
+    }
     if (strict || require_index) && store.is_none() {
         report.push_error(mmcg::verify_spec::Finding::StrictViolation {
             reason: "no index — run `mastermind index .` (required by --strict / --require-index)"
@@ -82,6 +102,7 @@ pub fn audit(
 
     let report =
         mmcg::audit_spec::run_with_report(&parsed, &store, &root, since, executor_report.as_ref())?;
+    store.ensure_source_snapshot_current()?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -119,4 +140,54 @@ pub fn audit(
         std::process::exit(1);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_index_is_optional_without_creating_its_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let index_path = root.join("missing/index.db");
+
+        assert!(open_validated_index(&index_path, &root).unwrap().is_none());
+        assert!(!index_path.exists());
+        assert!(!root.join("missing").exists());
+    }
+
+    #[test]
+    fn empty_foreign_index_does_not_bypass_repository_binding() {
+        let requested = tempfile::tempdir().unwrap();
+        let indexed = tempfile::tempdir().unwrap();
+        let requested_root = requested.path().canonicalize().unwrap();
+        let indexed_root = indexed.path().canonicalize().unwrap();
+        let index_path = indexed_root.join("empty.db");
+        let store = mmcg::store::Store::open(&index_path).unwrap();
+        store
+            .set_meta("index_root", &indexed_root.to_string_lossy())
+            .unwrap();
+        drop(store);
+
+        let error = match open_validated_index(&index_path, &requested_root) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("foreign index must fail root validation"),
+        };
+        assert!(error.contains("index/root mismatch"), "{error}");
+    }
+
+    #[test]
+    fn empty_index_for_the_requested_repository_remains_optional() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let index_path = root.join("empty.db");
+        let store = mmcg::store::Store::open(&index_path).unwrap();
+        store
+            .set_meta("index_root", &root.to_string_lossy())
+            .unwrap();
+        drop(store);
+
+        assert!(open_validated_index(&index_path, &root).unwrap().is_none());
+    }
 }

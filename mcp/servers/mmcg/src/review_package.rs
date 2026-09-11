@@ -62,6 +62,7 @@ pub enum ReviewPackageError {
     EvidenceChanged(String),
     EvidenceBinding(String),
     InvalidAttestation(String),
+    PackageChanged(String),
     Serialization(String),
     Io(String),
 }
@@ -98,6 +99,12 @@ impl fmt::Display for ReviewPackageError {
             }
             Self::InvalidAttestation(message) => {
                 write!(formatter, "invalid review evidence attestation: {message}")
+            }
+            Self::PackageChanged(message) => {
+                write!(
+                    formatter,
+                    "review package changed before publication: {message}"
+                )
             }
             Self::Serialization(message) => {
                 write!(formatter, "review package serialization failed: {message}")
@@ -1241,7 +1248,7 @@ fn write_package(
         .prefix(".mastermind-review-")
         .tempdir_in(parent)
         .map_err(|error| ReviewPackageError::Io(error.to_string()))?;
-    for document in documents {
+    for document in &documents {
         write_new_file(&temporary.path().join(document.path), &document.body)?;
     }
     write_new_file(&temporary.path().join("manifest.json"), manifest)?;
@@ -1254,7 +1261,11 @@ fn write_package(
             .and_then(|directory| directory.sync_all())
             .map_err(|error| ReviewPackageError::Io(error.to_string()))?;
     }
+    let staging = crate::bounded_fs::RootCapability::open(temporary.path())
+        .map_err(|error| ReviewPackageError::PackageChanged(error.to_string()))?;
     validate_before_publish(temporary.path())?;
+    ensure_staged_package_unchanged(&staging, &documents, manifest)?;
+    drop(staging);
     match rename_package_noclobber(temporary.path(), target) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -1266,6 +1277,52 @@ fn write_package(
     File::open(parent)
         .and_then(|directory| directory.sync_all())
         .map_err(|error| ReviewPackageError::Io(error.to_string()))?;
+    Ok(())
+}
+
+fn ensure_staged_package_unchanged(
+    staging: &crate::bounded_fs::RootCapability,
+    documents: &[PackageDocument],
+    manifest: &[u8],
+) -> Result<(), ReviewPackageError> {
+    let mut expected_names = documents
+        .iter()
+        .map(|document| std::ffi::OsString::from(document.path))
+        .collect::<Vec<_>>();
+    expected_names.push(std::ffi::OsString::from("manifest.json"));
+    expected_names.sort();
+    let names = crate::bounded_fs::read_directory_names_with_capability(
+        staging,
+        staging.requested_root(),
+        expected_names.len().saturating_add(1),
+        crate::bounded_fs::ReadControl::default(),
+    )
+    .map_err(|error| ReviewPackageError::PackageChanged(error.to_string()))?;
+    if names != expected_names {
+        return Err(ReviewPackageError::PackageChanged(
+            "staging directory contents differ from the manifest".into(),
+        ));
+    }
+
+    for (path, expected) in documents
+        .iter()
+        .map(|document| (document.path, document.body.as_slice()))
+        .chain(std::iter::once(("manifest.json", manifest)))
+    {
+        let maximum_bytes = u64::try_from(expected.len())
+            .map_err(|_| ReviewPackageError::PackageChanged(path.into()))?;
+        let observed = crate::bounded_fs::read_regular_file_with_capability(
+            staging,
+            Path::new(path),
+            maximum_bytes,
+            maximum_bytes,
+            crate::bounded_fs::ReadControl::default(),
+        )
+        .map_err(|error| ReviewPackageError::PackageChanged(format!("{path}: {error}")))?;
+        if observed.declared_len != maximum_bytes || observed.bytes != expected {
+            return Err(ReviewPackageError::PackageChanged(path.into()));
+        }
+    }
     Ok(())
 }
 
@@ -2153,5 +2210,40 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read(target.join("owner")).unwrap(), b"existing");
         assert!(source.path().join("payload").is_file());
+    }
+
+    #[test]
+    fn package_tampering_before_publication_fails_closed() {
+        for mutation in ["payload", "extra-entry"] {
+            let parent = tempfile::tempdir().unwrap();
+            let target = parent.path().join("review");
+            let documents = vec![PackageDocument {
+                path: "index.html",
+                media_type: "text/html",
+                body: b"expected".to_vec(),
+            }];
+
+            let error = write_package(&target, documents, b"{}\n", |staging| {
+                let path = match mutation {
+                    "payload" => staging.join("index.html"),
+                    "extra-entry" => staging.join("unexpected"),
+                    _ => unreachable!(),
+                };
+                std::fs::write(path, b"tampered")
+                    .map_err(|error| ReviewPackageError::Io(error.to_string()))?;
+                Ok(())
+            })
+            .unwrap_err();
+
+            assert!(
+                matches!(&error, ReviewPackageError::PackageChanged(_)),
+                "{mutation}: {error}"
+            );
+            assert!(!target.exists(), "{mutation}");
+            assert!(
+                std::fs::read_dir(parent.path()).unwrap().next().is_none(),
+                "{mutation}"
+            );
+        }
     }
 }

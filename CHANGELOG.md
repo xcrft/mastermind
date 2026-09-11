@@ -20,9 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Review export writes and syncs its private staging directory, then rechecks
   external evidence, attestations, the complete document graph, Git/worktree,
   project history, repository identity, and source DB/WAL identity immediately
-  before atomic publication. The worktree recheck excludes only that newly
-  created staging directory. Export also rejects output inside a tracked corpus,
-  preventing packages that are stale as soon as their Markdown summary appears.
+  before atomic publication. It then reopens the retained staging directory,
+  rejects added entries, and verifies every payload and manifest byte before the
+  rename. The worktree recheck excludes only that newly created staging
+  directory. Export also rejects output inside a tracked corpus, preventing
+  packages that are stale as soon as their Markdown summary appears.
 - Lens now rechecks the Git HEAD, bounded working-tree projection, project-history
   inventory, repository identity, and SQLite state after evidence, audit, and
   document-graph work, preventing one response from mixing repository snapshots.

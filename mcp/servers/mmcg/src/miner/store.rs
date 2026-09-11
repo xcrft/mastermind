@@ -8,6 +8,7 @@
 
 use crate::bounded_fs::{BoundedReadError, ReadControl, StableFileIdentity};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Result as SqlResult};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -43,6 +44,26 @@ pub struct Aggregate {
     pub added_lines_sampled: i64,
     pub identities: Vec<String>,
     pub counts: Counts,
+}
+
+impl Aggregate {
+    /// Stable digest of every store value that determines the generated profile.
+    /// Identity rows are deliberately excluded because they are private ownership
+    /// evidence and never affect the rendered Markdown.
+    pub fn profile_revision(&self) -> String {
+        let mut digest = Sha256::new();
+        digest.update(b"mastermind-style-aggregate-v1\0");
+        digest.update((self.repos as u64).to_le_bytes());
+        digest.update(self.commits_total.to_le_bytes());
+        digest.update(self.commits_sampled.to_le_bytes());
+        digest.update(self.added_lines_sampled.to_le_bytes());
+        for (key, value) in &self.counts {
+            digest.update((key.len() as u64).to_le_bytes());
+            digest.update(key.as_bytes());
+            digest.update(value.to_le_bytes());
+        }
+        crate::hex::encode(&digest.finalize())
+    }
 }
 
 pub struct ProfileStore {
@@ -469,6 +490,36 @@ mod tests {
                 vec!["a@x".to_string(), "b@x".to_string()]
             )
         );
+    }
+
+    #[test]
+    fn profile_revision_is_deterministic_and_tracks_rendered_inputs() {
+        let baseline = Aggregate {
+            repos: 1,
+            commits_total: 10,
+            commits_sampled: 8,
+            added_lines_sampled: 120,
+            identities: vec!["private@example.test".into()],
+            counts: counts(&[("indent.space", 20), ("indent.tab", 1)]),
+        };
+        let same_rendered_inputs = Aggregate {
+            repos: baseline.repos,
+            commits_total: baseline.commits_total,
+            commits_sampled: baseline.commits_sampled,
+            added_lines_sampled: baseline.added_lines_sampled,
+            identities: vec!["another-private@example.test".into()],
+            counts: baseline.counts.clone(),
+        };
+        assert_eq!(
+            baseline.profile_revision(),
+            same_rendered_inputs.profile_revision()
+        );
+
+        let changed = Aggregate {
+            counts: counts(&[("indent.space", 21), ("indent.tab", 1)]),
+            ..same_rendered_inputs
+        };
+        assert_ne!(baseline.profile_revision(), changed.profile_revision());
     }
 
     #[test]

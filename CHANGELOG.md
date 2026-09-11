@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Generated style profiles now carry a deterministic revision of the aggregate
+  that produced them. Diagnostics fail when `style.db` commits but `style.md`
+  publication does not, instead of reporting a stale profile as fresh.
 - Style diagnostics now distinguish a wholly absent profile, an existing
   profile that this repository has not enriched, an inconsistent leftover
   database, and a stored mine point outside current Git history. Each state now

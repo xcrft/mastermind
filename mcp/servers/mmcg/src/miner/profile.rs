@@ -31,7 +31,8 @@ const RETENTION_DAYS: i64 = 365;
 const COMMIT_SAMPLE_CAP: usize = 400;
 
 const MIN_SAMPLES: usize = 20;
-const PROFILE_SCHEMA_MARKER: &str = "<!-- mastermind-style:schema:2 -->";
+const PROFILE_SCHEMA_MARKER: &str = "<!-- mastermind-style:schema:3 -->";
+const PROFILE_REVISION_PREFIX: &str = "<!-- mastermind-style:store-revision:";
 const MAX_STYLE_PROFILE_SIZE: u64 = crate::indexer::MAX_HISTORY_ARTIFACT_SIZE;
 const PROFILE_LOCK_FILE: &str = ".style-profile.lock";
 const PROFILE_WRITE_ATTEMPTS: usize = 3;
@@ -428,11 +429,15 @@ fn staleness_at(root: &Path, profile_path: &Path, db_path: &Path) -> Staleness {
             };
         }
     };
-    if profile
-        .as_deref()
-        .is_some_and(|profile| !profile.contains(PROFILE_SCHEMA_MARKER))
-    {
-        return Staleness::Legacy;
+    if let Some(profile) = profile.as_deref() {
+        if !profile.lines().any(|line| line == PROFILE_SCHEMA_MARKER) {
+            return Staleness::Legacy;
+        }
+        if !has_current_profile_header(profile) {
+            return Staleness::Invalid {
+                reason: "style profile header is malformed".into(),
+            };
+        }
     }
     let db = match store::ProfileStore::open_optional_read_only(db_path) {
         Ok(db) => db,
@@ -450,8 +455,56 @@ fn staleness_at(root: &Path, profile_path: &Path, db_path: &Path) -> Staleness {
         (Some(_), None) => Staleness::Invalid {
             reason: "style.db is missing for the generated style.md".into(),
         },
-        (Some(_), Some(db)) => staleness_for_repo(root, &db),
+        (Some(profile), Some(db)) => {
+            let profile_revision = match profile_revision(&profile) {
+                Ok(revision) => revision,
+                Err(reason) => return Staleness::Invalid { reason },
+            };
+            let aggregate = match db.aggregate() {
+                Ok(aggregate) => aggregate,
+                Err(error) => {
+                    return Staleness::Invalid {
+                        reason: format!("style store aggregate query failed: {error}"),
+                    };
+                }
+            };
+            if profile_revision != aggregate.profile_revision() {
+                return Staleness::Invalid {
+                    reason: "style.md was generated from a different style.db revision".into(),
+                };
+            }
+            staleness_for_repo(root, &db)
+        }
     }
+}
+
+fn profile_revision(profile: &str) -> Result<&str, String> {
+    if !has_current_profile_header(profile) {
+        return Err("style profile header is malformed".into());
+    }
+    let line = profile
+        .lines()
+        .nth(3)
+        .ok_or_else(|| "style profile store revision is missing".to_string())?;
+    let revision = line
+        .strip_prefix(PROFILE_REVISION_PREFIX)
+        .and_then(|line| line.strip_suffix(" -->"))
+        .ok_or_else(|| "style profile store revision is malformed".to_string())?;
+    if revision.len() != 64
+        || !revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("style profile store revision is malformed".into());
+    }
+    Ok(revision)
+}
+
+fn has_current_profile_header(profile: &str) -> bool {
+    let mut lines = profile.lines();
+    lines.next() == Some("# Author style")
+        && lines.next() == Some("")
+        && lines.next() == Some(PROFILE_SCHEMA_MARKER)
 }
 
 fn read_profile_for_staleness(path: &Path) -> Result<Option<String>, Box<dyn std::error::Error>> {
@@ -1566,6 +1619,10 @@ fn render_profile(
     let mut out = String::new();
     out.push_str("# Author style\n\n");
     out.push_str(PROFILE_SCHEMA_MARKER);
+    out.push('\n');
+    out.push_str(PROFILE_REVISION_PREFIX);
+    out.push_str(&agg.profile_revision());
+    out.push_str(" -->");
     out.push_str("\n\n");
 
     out.push_str(MANUAL_START);
@@ -2194,6 +2251,10 @@ diff --git a/app/bar.ts b/app/bar.ts
         assert_eq!(a, b);
         assert!(a.contains("# Author style"));
         assert!(a.contains(PROFILE_SCHEMA_MARKER));
+        assert!(a.contains(&format!(
+            "{PROFILE_REVISION_PREFIX}{} -->",
+            agg.profile_revision()
+        )));
         assert!(a.contains("## Observed code-shape conventions"));
         assert!(a.contains("2-space"));
         assert!(a.contains("_Not: tabs._"));
@@ -2302,14 +2363,20 @@ diff --git a/app/bar.ts b/app/bar.ts
         fixture_repository(&repo, "Alice");
         let db_path = dir.path().join("style.db");
         let profile = dir.path().join("style.md");
-        std::fs::write(&profile, PROFILE_SCHEMA_MARKER).unwrap();
-        drop(store::ProfileStore::open(&db_path).unwrap());
+        let mut db = store::ProfileStore::open(&db_path).unwrap();
+        let aggregate = db.aggregate().unwrap();
+        std::fs::write(
+            &profile,
+            render_profile("Alice", &aggregate, &[], None, None),
+        )
+        .unwrap();
+        drop(db);
         assert!(matches!(
             staleness_at(&repo, &profile, &db_path),
             Staleness::Unmined
         ));
 
-        let mut db = store::ProfileStore::open(&db_path).unwrap();
+        db = store::ProfileStore::open(&db_path).unwrap();
         db.upsert_repo(
             &repository_key(&repo).unwrap(),
             &store::RepoProvenance {
@@ -2324,6 +2391,19 @@ diff --git a/app/bar.ts b/app/bar.ts
             &["author@example.test".into()],
             &Counts::new(),
             &[],
+        )
+        .unwrap();
+        drop(db);
+        assert!(matches!(
+            staleness_at(&repo, &profile, &db_path),
+            Staleness::Invalid { .. }
+        ));
+
+        db = store::ProfileStore::open(&db_path).unwrap();
+        let aggregate = db.aggregate().unwrap();
+        std::fs::write(
+            &profile,
+            render_profile("Alice", &aggregate, &[], None, None),
         )
         .unwrap();
         drop(db);

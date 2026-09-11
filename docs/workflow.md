@@ -189,6 +189,9 @@ The candidate store is capped at 1 MiB, matching history indexing, and updated
 under a stable, repository-scoped lock. Symlinks, special files, invalid UTF-8,
 path swaps and oversized stores fail without replacing existing reviewed
 knowledge.
+`mastermind context doctor` applies the same file limit and reports unsafe or
+unreadable context, task-state, review, and lesson inputs instead of treating
+them as absent knowledge.
 
 After a held audit, review `history-review.md` and mark Context and Lesson as
 `updated` or `not applicable` with a concrete reason. This prevents a successful

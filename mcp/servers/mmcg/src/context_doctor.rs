@@ -9,6 +9,10 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 const MAX_LESSONS_SIZE: u64 = crate::indexer::MAX_HISTORY_ARTIFACT_SIZE;
+const MAX_CONTEXT_SIZE: u64 = crate::indexer::MAX_HISTORY_ARTIFACT_SIZE;
+const MAX_TASK_STATE_SIZE: u64 = crate::indexer::MAX_HISTORY_ARTIFACT_SIZE;
+const MAX_HISTORY_REVIEW_SIZE: u64 = crate::indexer::MAX_HISTORY_ARTIFACT_SIZE;
+const MAX_HISTORY_TASKS: usize = 4_096;
 const REQUIRED_CONTEXT_SECTIONS: &[&str] = &["identity", "active goals", "decision log"];
 const REQUIRED_DECISION_FIELDS: &[&str] = &[
     "Decision",
@@ -135,37 +139,116 @@ impl Report {
 }
 
 pub fn run(root: &Path) -> Report {
+    let repository = crate::bounded_fs::RootCapability::open(root)
+        .map_err(|error| format!("cannot retain repository snapshot: {error}"));
     let context_path = root.join("CONTEXT.md");
-    let body = std::fs::read_to_string(&context_path).ok();
-    let review_tasks = history_review_task_dirs(&root.join(".mastermind/tasks"));
+    let context = match &repository {
+        Ok(repository) => read_optional_text(repository, &context_path, MAX_CONTEXT_SIZE),
+        Err(error) => Err(error.clone()),
+    };
+    let body = context
+        .as_ref()
+        .ok()
+        .and_then(|snapshot| snapshot.as_ref())
+        .map(|snapshot| snapshot.body.as_str());
+    let review_tasks = match &repository {
+        Ok(repository) => history_review_task_dirs(repository, &root.join(".mastermind/tasks")),
+        Err(error) => Err(error.clone()),
+    };
+    let history_review = match (&repository, &review_tasks) {
+        (Ok(repository), Ok(tasks)) => check_history_review_with_capability(repository, tasks),
+        (Err(error), _) => Check {
+            name: "history review",
+            status: Status::Fail,
+            message: error.clone(),
+            hint: Some("restore a regular repository root before trusting the result".into()),
+        },
+        (_, Err(error)) => Check {
+            name: "history review",
+            status: Status::Fail,
+            message: error.clone(),
+            hint: Some(
+                "restore a bounded regular task inventory before trusting the result".into(),
+            ),
+        },
+    };
     let checks = vec![
-        check_exists(&context_path),
-        check_placeholders(body.as_deref()),
-        check_minimum_content(body.as_deref()),
-        check_core_sections(body.as_deref()),
-        check_decision_schema(body.as_deref()),
-        check_history_review(&review_tasks),
-        check_lessons_file(root, &review_tasks),
+        check_context_file(&context),
+        check_placeholders(body),
+        check_minimum_content(body),
+        check_core_sections(body),
+        check_decision_schema(body),
+        history_review,
+        match &repository {
+            Ok(repository) => check_lessons_file_with_capability(
+                repository,
+                review_tasks.as_deref().unwrap_or_default(),
+            ),
+            Err(error) => Check {
+                name: "lessons quality",
+                status: Status::Fail,
+                message: error.clone(),
+                hint: Some("restore a regular repository root before trusting the result".into()),
+            },
+        },
     ];
     Report::from_checks(root, checks)
 }
 
-fn check_exists(path: &Path) -> Check {
-    if path.is_file() {
-        let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
-        Check {
+struct TextSnapshot {
+    body: String,
+    bytes: u64,
+}
+
+fn read_optional_text(
+    root: &crate::bounded_fs::RootCapability,
+    path: &Path,
+    maximum_bytes: u64,
+) -> Result<Option<TextSnapshot>, String> {
+    match crate::bounded_fs::read_regular_file_with_capability(
+        root,
+        path,
+        maximum_bytes,
+        maximum_bytes,
+        crate::bounded_fs::ReadControl::default(),
+    ) {
+        Ok(file) => {
+            let body = String::from_utf8(file.bytes)
+                .map_err(|_| format!("{} is not valid UTF-8", path.display()))?;
+            Ok(Some(TextSnapshot {
+                body,
+                bytes: file.declared_len,
+            }))
+        }
+        Err(crate::bounded_fs::BoundedReadError::Io(error))
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(format!("cannot read {} safely: {error}", path.display())),
+    }
+}
+
+fn check_context_file(context: &Result<Option<TextSnapshot>, String>) -> Check {
+    match context {
+        Ok(Some(snapshot)) => Check {
             name: "context.md exists",
             status: Status::Ok,
-            message: format!("CONTEXT.md found ({})", format_bytes(size)),
+            message: format!("CONTEXT.md found ({})", format_bytes(snapshot.bytes)),
             hint: None,
-        }
-    } else {
-        Check {
+        },
+        Ok(None) => Check {
             name: "context.md exists",
             status: Status::Fail,
             message: "CONTEXT.md not found at project root".into(),
             hint: Some("run `mastermind init` to scaffold a lean CONTEXT.md".into()),
-        }
+        },
+        Err(error) => Check {
+            name: "context.md exists",
+            status: Status::Fail,
+            message: error.clone(),
+            hint: Some("replace it with a regular UTF-8 file within the size limit".into()),
+        },
     }
 }
 
@@ -370,7 +453,10 @@ fn check_decision_schema(body: Option<&str>) -> Check {
     }
 }
 
-fn check_history_review(tasks: &[PathBuf]) -> Check {
+fn check_history_review_with_capability(
+    root: &crate::bounded_fs::RootCapability,
+    tasks: &[PathBuf],
+) -> Check {
     if tasks.is_empty() {
         return Check {
             name: "history review",
@@ -386,11 +472,18 @@ fn check_history_review(tasks: &[PathBuf]) -> Check {
             .and_then(|name| name.to_str())
             .unwrap_or("unknown");
         let review_path = task.join("history-review.md");
-        if !review_path.is_file() {
-            unresolved.push(format!("{task_name}: missing"));
-            continue;
-        }
-        let state = match read_task_state(task) {
+        let review = match read_optional_text(root, &review_path, MAX_HISTORY_REVIEW_SIZE) {
+            Ok(Some(review)) => review,
+            Ok(None) => {
+                unresolved.push(format!("{task_name}: missing"));
+                continue;
+            }
+            Err(_) => {
+                unresolved.push(format!("{task_name}: unreadable history review"));
+                continue;
+            }
+        };
+        let state = match read_task_state_with_capability(root, task) {
             Ok(state) => state,
             Err(_) => {
                 unresolved.push(format!("{task_name}: unreadable task state"));
@@ -400,7 +493,7 @@ fn check_history_review(tasks: &[PathBuf]) -> Check {
         let snapshot = state
             .as_ref()
             .and_then(|state| state.history_snapshot_sha256.as_deref());
-        if !crate::run_task::history_review_complete_for_snapshot(&review_path, snapshot) {
+        if !crate::run_task::history_review_body_complete(&review.body, snapshot) {
             unresolved.push(format!(
                 "{task_name}: incomplete, ambiguous, or mismatched review"
             ));
@@ -426,46 +519,81 @@ fn check_history_review(tasks: &[PathBuf]) -> Check {
     }
 }
 
-fn check_lessons_file(root: &Path, tasks: &[PathBuf]) -> Check {
-    let lessons_path = root.join(".mastermind/tasks/_lessons.md");
-    if !lessons_path.is_file() {
-        let expected = tasks.iter().any(|task| {
-            std::fs::read_to_string(task.join("history-review.md"))
+fn check_lessons_file_with_capability(
+    root: &crate::bounded_fs::RootCapability,
+    tasks: &[PathBuf],
+) -> Check {
+    let lessons_path = root.requested_root().join(".mastermind/tasks/_lessons.md");
+    let lessons = match crate::bounded_fs::read_regular_file_with_capability(
+        root,
+        &lessons_path,
+        MAX_LESSONS_SIZE,
+        MAX_LESSONS_SIZE,
+        crate::bounded_fs::ReadControl::default(),
+    ) {
+        Ok(file) => file,
+        Err(crate::bounded_fs::BoundedReadError::Io(error))
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            let expected = tasks.iter().any(|task| {
+                read_optional_text(
+                    root,
+                    &task.join("history-review.md"),
+                    MAX_HISTORY_REVIEW_SIZE,
+                )
                 .ok()
-                .and_then(|body| field_value(&body, "Lesson").map(str::to_owned))
+                .flatten()
+                .and_then(|snapshot| field_value(&snapshot.body, "Lesson").map(str::to_owned))
                 .is_some_and(|value| normalized(&value) == "updated")
-        });
-        return if expected {
-            Check {
+            });
+            return if expected {
+                Check {
+                    name: "lessons quality",
+                    status: Status::Warn,
+                    message: "history review says lesson updated, but _lessons.md is missing"
+                        .into(),
+                    hint: Some("record the reviewed lesson with provenance and evidence".into()),
+                }
+            } else {
+                Check {
+                    name: "lessons quality",
+                    status: Status::Ok,
+                    message: "no project lessons recorded".into(),
+                    hint: None,
+                }
+            };
+        }
+        Err(crate::bounded_fs::BoundedReadError::TooLarge { size, .. }) => {
+            return Check {
                 name: "lessons quality",
                 status: Status::Warn,
-                message: "history review says lesson updated, but _lessons.md is missing".into(),
-                hint: Some("record the reviewed lesson with provenance and evidence".into()),
-            }
-        } else {
-            Check {
+                message: format!(
+                    "_lessons.md is {} and will be skipped by history indexing",
+                    format_bytes(size)
+                ),
+                hint: Some("archive resolved entries before the file reaches 1 MB".into()),
+            };
+        }
+        Err(error) => {
+            return Check {
                 name: "lessons quality",
-                status: Status::Ok,
-                message: "no project lessons recorded".into(),
-                hint: None,
-            }
-        };
-    }
-    let size = std::fs::metadata(&lessons_path)
-        .map(|metadata| metadata.len())
-        .unwrap_or(0);
-    if size > MAX_LESSONS_SIZE {
-        return Check {
-            name: "lessons quality",
-            status: Status::Warn,
-            message: format!(
-                "_lessons.md is {} and will be skipped by history indexing",
-                format_bytes(size)
-            ),
-            hint: Some("archive resolved entries before the file reaches 1 MB".into()),
-        };
-    }
-    let body = std::fs::read_to_string(&lessons_path).unwrap_or_default();
+                status: Status::Fail,
+                message: format!("cannot read _lessons.md safely: {error}"),
+                hint: Some("replace it with a regular UTF-8 repository file".into()),
+            };
+        }
+    };
+    let body = match String::from_utf8(lessons.bytes) {
+        Ok(body) => body,
+        Err(_) => {
+            return Check {
+                name: "lessons quality",
+                status: Status::Fail,
+                message: "_lessons.md is not valid UTF-8".into(),
+                hint: Some("replace it with a regular UTF-8 repository file".into()),
+            };
+        }
+    };
     let entries = level_two_blocks(&body);
     if entries.is_empty() {
         return Check {
@@ -532,17 +660,70 @@ fn check_lessons_file(root: &Path, tasks: &[PathBuf]) -> Check {
     }
 }
 
-fn history_review_task_dirs(tasks_dir: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(tasks_dir) else {
-        return Vec::new();
+#[cfg(test)]
+fn check_lessons_file(root: &Path, tasks: &[PathBuf]) -> Check {
+    match crate::bounded_fs::RootCapability::open(root) {
+        Ok(root) => check_lessons_file_with_capability(&root, tasks),
+        Err(error) => Check {
+            name: "lessons quality",
+            status: Status::Fail,
+            message: format!("cannot retain repository snapshot: {error}"),
+            hint: None,
+        },
+    }
+}
+
+fn history_review_task_dirs(
+    root: &crate::bounded_fs::RootCapability,
+    tasks_dir: &Path,
+) -> Result<Vec<PathBuf>, String> {
+    let names = match crate::bounded_fs::read_directory_names_with_capability(
+        root,
+        tasks_dir,
+        MAX_HISTORY_TASKS,
+        crate::bounded_fs::ReadControl::default(),
+    ) {
+        Ok(names) => names,
+        Err(crate::bounded_fs::BoundedReadError::Io(error))
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            return Ok(Vec::new());
+        }
+        Err(error) => {
+            return Err(format!("cannot enumerate task inventory safely: {error}"));
+        }
     };
     let mut tasks = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
+    for name in names {
+        let Some(name_text) = name.to_str() else {
+            return Err("task inventory contains a non-UTF-8 entry".into());
+        };
+        if name_text.starts_with('_') || name_text.starts_with('.') || name_text.ends_with(".md") {
             continue;
         }
-        let Ok(Some(state)) = read_task_state(&path) else {
+        let path = tasks_dir.join(name);
+        match crate::bounded_fs::inspect_path_kind_with_capability(
+            root,
+            &path,
+            crate::bounded_fs::ReadControl::default(),
+        ) {
+            Ok(crate::bounded_fs::BoundedPathKind::Directory) => {}
+            Ok(_) => {
+                return Err(format!(
+                    "task inventory entry is not a regular no-follow directory: {}",
+                    path.display()
+                ));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "cannot inspect task inventory entry {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+        let state = read_task_state_with_capability(root, &path)
+            .map_err(|error| format!("cannot read task state at {}: {error}", path.display()))?;
+        let Some(state) = state else {
             continue;
         };
         if matches!(state.status.as_str(), "learned" | "history_review_required") {
@@ -550,16 +731,38 @@ fn history_review_task_dirs(tasks_dir: &Path) -> Vec<PathBuf> {
         }
     }
     tasks.sort();
-    tasks
+    Ok(tasks)
 }
 
-fn read_task_state(task: &Path) -> std::io::Result<Option<crate::workflow_status::TaskState>> {
-    match std::fs::read_to_string(task.join("state.json")) {
-        Ok(body) => serde_json::from_str(&body)
-            .map(Some)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
+fn read_task_state_with_capability(
+    root: &crate::bounded_fs::RootCapability,
+    task: &Path,
+) -> std::io::Result<Option<crate::workflow_status::TaskState>> {
+    let state_path = task.join("state.json");
+    match crate::bounded_fs::read_regular_file_with_capability(
+        root,
+        &state_path,
+        MAX_TASK_STATE_SIZE,
+        MAX_TASK_STATE_SIZE,
+        crate::bounded_fs::ReadControl::default(),
+    ) {
+        Ok(file) => {
+            let body = String::from_utf8(file.bytes).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "task state is not valid UTF-8",
+                )
+            })?;
+            serde_json::from_str(&body)
+                .map(Some)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        }
+        Err(crate::bounded_fs::BoundedReadError::Io(error))
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(std::io::Error::other(error)),
     }
 }
 
@@ -830,7 +1033,82 @@ mod tests {
             r#"{"status":"held","blocking_reason":"not learned yet"}"#,
         )
         .unwrap();
-        assert_eq!(history_review_task_dirs(&tasks), vec![learned, awaiting]);
+        let root = crate::bounded_fs::RootCapability::open(dir.path()).unwrap();
+        assert_eq!(
+            history_review_task_dirs(&root, &tasks).unwrap(),
+            vec![learned, awaiting]
+        );
+    }
+
+    #[test]
+    fn malformed_task_state_cannot_be_reported_as_an_empty_history_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("CONTEXT.md"), context()).unwrap();
+        let task = dir.path().join(".mastermind/tasks/001-broken");
+        std::fs::create_dir_all(&task).unwrap();
+        std::fs::write(task.join("state.json"), "{broken state").unwrap();
+
+        let report = run(dir.path());
+        let check = report
+            .checks
+            .iter()
+            .find(|check| check.name == "history review")
+            .unwrap();
+        assert_eq!(check.status, Status::Fail);
+        assert!(check.message.contains("cannot read task state"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_rejects_special_context_and_lesson_files_without_blocking() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let context_case = tempfile::tempdir().unwrap();
+        let context_path = context_case.path().join("CONTEXT.md");
+        let context_name = CString::new(context_path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(context_name.as_ptr(), 0o600) }, 0);
+        let report = run(context_case.path());
+        assert!(report.checks.iter().any(|check| {
+            check.name == "context.md exists"
+                && check.status == Status::Fail
+                && check.message.contains("not a regular")
+        }));
+
+        let lessons_case = tempfile::tempdir().unwrap();
+        std::fs::write(lessons_case.path().join("CONTEXT.md"), context()).unwrap();
+        let tasks = lessons_case.path().join(".mastermind/tasks");
+        std::fs::create_dir_all(&tasks).unwrap();
+        let lessons_path = tasks.join("_lessons.md");
+        let lessons_name = CString::new(lessons_path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(lessons_name.as_ptr(), 0o600) }, 0);
+        let report = run(lessons_case.path());
+        assert!(report.checks.iter().any(|check| {
+            check.name == "lessons quality"
+                && check.status == Status::Fail
+                && check.message.contains("not a regular")
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_task_inventory_is_visible_in_the_diagnosis() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("CONTEXT.md"), context()).unwrap();
+        std::fs::create_dir_all(dir.path().join(".mastermind")).unwrap();
+        symlink(outside.path(), dir.path().join(".mastermind/tasks")).unwrap();
+
+        let report = run(dir.path());
+        let check = report
+            .checks
+            .iter()
+            .find(|check| check.name == "history review")
+            .unwrap();
+        assert_eq!(check.status, Status::Fail);
+        assert!(check.message.contains("cannot enumerate task inventory"));
     }
 
     #[test]
@@ -843,8 +1121,9 @@ mod tests {
             "- **Context:** pending\n- **Lesson:** pending\n- **Reason:** semantic review required\n",
         )
         .unwrap();
+        let root = crate::bounded_fs::RootCapability::open(dir.path()).unwrap();
         assert_eq!(
-            check_history_review(std::slice::from_ref(&task)).status,
+            check_history_review_with_capability(&root, std::slice::from_ref(&task)).status,
             Status::Warn
         );
         std::fs::write(
@@ -852,7 +1131,10 @@ mod tests {
             "- **Context:** not applicable\n- **Lesson:** updated\n- **Reason:** Captured a reusable boundary rule.\n",
         )
         .unwrap();
-        assert_eq!(check_history_review(&[task]).status, Status::Ok);
+        assert_eq!(
+            check_history_review_with_capability(&root, &[task]).status,
+            Status::Ok
+        );
     }
 
     #[test]
@@ -916,8 +1198,9 @@ mod tests {
             format!("{complete}- **Reason:** semantic review required\n"),
         ] {
             std::fs::write(dir.path().join("history-review.md"), &body).unwrap();
+            let root = crate::bounded_fs::RootCapability::open(dir.path()).unwrap();
             assert_eq!(
-                check_history_review(&[dir.path().to_path_buf()]).status,
+                check_history_review_with_capability(&root, &[dir.path().to_path_buf()]).status,
                 Status::Warn,
                 "{body}"
             );

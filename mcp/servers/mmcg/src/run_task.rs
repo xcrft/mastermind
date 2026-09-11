@@ -341,7 +341,11 @@ pub fn history_review_complete_for_snapshot(review_path: &Path, snapshot: Option
     let Ok(body) = read_history_review(review_path) else {
         return false;
     };
-    let Some(fields) = history_review_fields(&body) else {
+    history_review_body_complete(&body, snapshot)
+}
+
+pub(crate) fn history_review_body_complete(body: &str, snapshot: Option<&str>) -> bool {
+    let Some(fields) = history_review_fields(body) else {
         return false;
     };
     let field = |name: &str| fields.get(name).copied();

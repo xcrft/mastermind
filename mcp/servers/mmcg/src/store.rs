@@ -2604,9 +2604,10 @@ impl Store {
         let expected_identity = match existing_identity {
             Some(identity) => identity,
             None => {
-                let (file, identity) =
-                    crate::bounded_fs::create_regular_file_with_capability(&state, &expected)
-                        .map_err(|error| sqlite_bounded_error("create managed index", error))?;
+                let (file, identity) = crate::bounded_fs::create_regular_file_with_capability(
+                    &state, &expected, false,
+                )
+                .map_err(|error| sqlite_bounded_error("create managed index", error))?;
                 created_file = Some(file);
                 identity
             }

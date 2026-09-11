@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- The user-global style store now creates its parent through a retained
+  capability, opens a private pre-created database with SQLite no-follow flags,
+  and verifies the database and parent identities around schema setup. Linked
+  databases or storage directories are rejected instead of followed.
 - Style mining now snapshots `style.md` through a bounded, no-follow capability
   before changing the aggregate store and publishes it with a conditional
   durable rename. Invalid, oversized, linked, or special profiles fail closed,

@@ -381,6 +381,40 @@ impl RootCapability {
     }
 }
 
+/// Create missing parent directories beneath the closest existing directory,
+/// then retain the final parent as the authority for one selected file.
+pub(crate) fn prepare_file_target(
+    path: &Path,
+) -> Result<(RootCapability, PathBuf), BoundedReadError> {
+    let target = std::path::absolute(path).map_err(BoundedReadError::Io)?;
+    if target.file_name().is_none() {
+        return Err(BoundedReadError::InvalidPath);
+    }
+    let parent = target.parent().ok_or(BoundedReadError::InvalidPath)?;
+    let mut anchor = parent;
+    loop {
+        match std::fs::symlink_metadata(anchor) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+                    return Err(BoundedReadError::NotRegular);
+                }
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                anchor = anchor.parent().ok_or(BoundedReadError::InvalidPath)?;
+            }
+            Err(error) => return Err(BoundedReadError::Io(error)),
+        }
+    }
+
+    let root = RootCapability::open(anchor)?;
+    if anchor == parent {
+        return Ok((root, target));
+    }
+    root.ensure_directory(parent)?;
+    Ok((RootCapability::open(parent)?, target))
+}
+
 fn classify_nofollow_open_error(error: std::io::Error) -> BoundedReadError {
     let known_non_regular = matches!(
         error.kind(),
@@ -484,7 +518,10 @@ pub(crate) fn inspect_absent_path(
 pub(crate) fn create_regular_file_with_capability(
     root: &RootCapability,
     path: &Path,
+    private: bool,
 ) -> Result<(std::fs::File, StableFileIdentity), BoundedReadError> {
+    #[cfg(not(unix))]
+    let _ = private;
     root.verify()?;
     let relative = root.relative(path)?;
     let components = relative
@@ -509,6 +546,11 @@ pub(crate) fn create_regular_file_with_capability(
         .write(true)
         .create_new(true)
         .follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        options.mode(if private { 0o600 } else { 0o644 });
+    }
     let file = parent
         .open_with(name, &options)
         .map(cap_std::fs::File::into_std)

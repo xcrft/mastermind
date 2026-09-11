@@ -6,10 +6,11 @@
 
 use mmcg::indexer::Indexer;
 use mmcg::store::Store;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::templates;
 
@@ -339,12 +340,6 @@ impl StackManifest {
         self.contents.is_some() || self.error.is_some()
     }
 
-    fn contains(&self, needle: &str) -> bool {
-        self.contents
-            .as_deref()
-            .is_some_and(|contents| contents.contains(needle))
-    }
-
     fn warning(&self) -> Option<String> {
         self.error.as_ref().map(|error| {
             format!(
@@ -363,7 +358,7 @@ fn read_stack_manifest(root: &Path, name: &'static str) -> StackManifest {
     ) {
         Ok(Some(contents)) => StackManifest {
             name,
-            contents: Some(contents.to_ascii_lowercase()),
+            contents: Some(contents),
             error: None,
         },
         Ok(None) => StackManifest {
@@ -377,6 +372,172 @@ fn read_stack_manifest(root: &Path, name: &'static str) -> StackManifest {
             error: Some(error.to_string()),
         },
     }
+}
+
+fn dependency_name(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace(['_', '.'], "-")
+}
+
+fn node_dependencies(contents: &str) -> Result<BTreeSet<String>, String> {
+    let package: serde_json::Value =
+        serde_json::from_str(contents).map_err(|error| error.to_string())?;
+    let package = package
+        .as_object()
+        .ok_or_else(|| "top-level value is not an object".to_string())?;
+    let mut dependencies = BTreeSet::new();
+    for section in [
+        "dependencies",
+        "devDependencies",
+        "peerDependencies",
+        "optionalDependencies",
+    ] {
+        let Some(value) = package.get(section) else {
+            continue;
+        };
+        let entries = value
+            .as_object()
+            .ok_or_else(|| format!("`{section}` is not an object"))?;
+        dependencies.extend(entries.keys().map(|name| name.to_ascii_lowercase()));
+    }
+    Ok(dependencies)
+}
+
+fn cargo_dependency_table(value: Option<&toml::Value>, dependencies: &mut BTreeSet<String>) {
+    let Some(table) = value.and_then(toml::Value::as_table) else {
+        return;
+    };
+    for (alias, specification) in table {
+        dependencies.insert(dependency_name(alias));
+        if let Some(package) = specification
+            .as_table()
+            .and_then(|value| value.get("package"))
+            .and_then(toml::Value::as_str)
+        {
+            dependencies.insert(dependency_name(package));
+        }
+    }
+}
+
+fn cargo_dependencies(contents: &str) -> Result<BTreeSet<String>, String> {
+    let manifest: toml::Value = toml::from_str(contents).map_err(|error| error.to_string())?;
+    let root = manifest
+        .as_table()
+        .ok_or_else(|| "top-level value is not a table".to_string())?;
+    let mut dependencies = BTreeSet::new();
+    for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        cargo_dependency_table(root.get(section), &mut dependencies);
+    }
+    if let Some(workspace) = root.get("workspace").and_then(toml::Value::as_table) {
+        cargo_dependency_table(workspace.get("dependencies"), &mut dependencies);
+    }
+    if let Some(targets) = root.get("target").and_then(toml::Value::as_table) {
+        for target in targets.values().filter_map(toml::Value::as_table) {
+            for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+                cargo_dependency_table(target.get(section), &mut dependencies);
+            }
+        }
+    }
+    Ok(dependencies)
+}
+
+fn python_requirement_name(requirement: &str) -> Option<String> {
+    let requirement = requirement.trim_start();
+    if requirement.is_empty()
+        || requirement.starts_with('#')
+        || requirement.starts_with('-')
+        || !requirement
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+    {
+        return None;
+    }
+    let name = requirement
+        .chars()
+        .take_while(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+        .collect::<String>();
+    (!name.is_empty()).then(|| dependency_name(&name))
+}
+
+fn add_python_requirement_array(value: Option<&toml::Value>, dependencies: &mut BTreeSet<String>) {
+    let Some(requirements) = value.and_then(toml::Value::as_array) else {
+        return;
+    };
+    dependencies.extend(
+        requirements
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .filter_map(python_requirement_name),
+    );
+}
+
+fn add_python_dependency_table(value: Option<&toml::Value>, dependencies: &mut BTreeSet<String>) {
+    let Some(table) = value.and_then(toml::Value::as_table) else {
+        return;
+    };
+    dependencies.extend(table.keys().map(|name| dependency_name(name)));
+}
+
+fn pyproject_dependencies(contents: &str) -> Result<BTreeSet<String>, String> {
+    let manifest: toml::Value = toml::from_str(contents).map_err(|error| error.to_string())?;
+    let root = manifest
+        .as_table()
+        .ok_or_else(|| "top-level value is not a table".to_string())?;
+    let mut dependencies = BTreeSet::new();
+    if let Some(project) = root.get("project").and_then(toml::Value::as_table) {
+        add_python_requirement_array(project.get("dependencies"), &mut dependencies);
+        if let Some(optional) = project
+            .get("optional-dependencies")
+            .and_then(toml::Value::as_table)
+        {
+            for group in optional.values() {
+                add_python_requirement_array(Some(group), &mut dependencies);
+            }
+        }
+    }
+    if let Some(groups) = root
+        .get("dependency-groups")
+        .and_then(toml::Value::as_table)
+    {
+        for group in groups.values() {
+            add_python_requirement_array(Some(group), &mut dependencies);
+        }
+    }
+    if let Some(tool) = root.get("tool").and_then(toml::Value::as_table) {
+        if let Some(poetry) = tool.get("poetry").and_then(toml::Value::as_table) {
+            add_python_dependency_table(poetry.get("dependencies"), &mut dependencies);
+            add_python_dependency_table(poetry.get("dev-dependencies"), &mut dependencies);
+            if let Some(groups) = poetry.get("group").and_then(toml::Value::as_table) {
+                for group in groups.values().filter_map(toml::Value::as_table) {
+                    add_python_dependency_table(group.get("dependencies"), &mut dependencies);
+                }
+            }
+        }
+        if let Some(uv) = tool.get("uv").and_then(toml::Value::as_table) {
+            add_python_requirement_array(uv.get("dev-dependencies"), &mut dependencies);
+        }
+    }
+    Ok(dependencies)
+}
+
+fn pipfile_dependencies(contents: &str) -> Result<BTreeSet<String>, String> {
+    let manifest: toml::Value = toml::from_str(contents).map_err(|error| error.to_string())?;
+    let root = manifest
+        .as_table()
+        .ok_or_else(|| "top-level value is not a table".to_string())?;
+    let mut dependencies = BTreeSet::new();
+    for section in ["packages", "dev-packages"] {
+        add_python_dependency_table(root.get(section), &mut dependencies);
+    }
+    Ok(dependencies)
+}
+
+fn add_manifest_parse_warning(warnings: &mut Vec<String>, name: &str, error: String) {
+    warnings.push(format!(
+        "stack detection could not parse `{name}` dependencies: {error}"
+    ));
 }
 
 /// Auto-detect the stack as runtime + framework by sniffing the repo's
@@ -406,37 +567,51 @@ fn detect_stack(root: &Path) -> Stack {
         &pom,
         &gradle,
     ];
-    let warnings = manifests
+    let mut warnings = manifests
         .iter()
         .filter_map(|manifest| manifest.warning())
         .collect::<Vec<_>>();
 
-    if cargo.contents.is_some() {
-        if cargo.contains("tauri") {
+    if let Some(contents) = cargo.contents.as_deref() {
+        let dependencies = match cargo_dependencies(contents) {
+            Ok(dependencies) => dependencies,
+            Err(error) => {
+                add_manifest_parse_warning(&mut warnings, cargo.name, error);
+                BTreeSet::new()
+            }
+        };
+        if dependencies.contains("tauri") {
             return Stack::new("rust (tauri desktop)", warnings);
         }
         return Stack::new("rust", warnings);
     }
 
-    if let Some(pkg) = package.contents.as_deref() {
-        if pkg.contains("\"react-native\"") || pkg.contains("\"expo\"") {
+    if let Some(contents) = package.contents.as_deref() {
+        let dependencies = match node_dependencies(contents) {
+            Ok(dependencies) => dependencies,
+            Err(error) => {
+                add_manifest_parse_warning(&mut warnings, package.name, error);
+                BTreeSet::new()
+            }
+        };
+        if dependencies.contains("react-native") || dependencies.contains("expo") {
             return Stack::new("react native", warnings);
         }
-        if pkg.contains("\"electron\"") {
+        if dependencies.contains("electron") {
             return Stack::new("node (electron desktop)", warnings);
         }
         // Frameworks, most-specific first (Next wraps React, Nuxt wraps Vue).
-        let frontend = if pkg.contains("\"next\"") {
+        let frontend = if dependencies.contains("next") {
             Some("next.js")
-        } else if pkg.contains("\"nuxt\"") {
+        } else if dependencies.contains("nuxt") {
             Some("nuxt")
-        } else if pkg.contains("\"@angular/core\"") {
+        } else if dependencies.contains("@angular/core") {
             Some("angular")
-        } else if pkg.contains("\"svelte\"") {
+        } else if dependencies.contains("svelte") {
             Some("svelte")
-        } else if pkg.contains("\"vue\"") {
+        } else if dependencies.contains("vue") {
             Some("vue")
-        } else if pkg.contains("\"react\"") {
+        } else if dependencies.contains("react") {
             Some("react")
         } else {
             None
@@ -445,9 +620,17 @@ fn detect_stack(root: &Path) -> Stack {
             return Stack::new(format!("node ({fw})"), warnings);
         }
         let api = [
-            "express", "fastify", "@nestjs", "koa", "graphql", "apollo", "hapi",
+            "express",
+            "fastify",
+            "@nestjs/core",
+            "koa",
+            "graphql",
+            "apollo-server",
+            "@apollo/server",
+            "hapi",
+            "@hapi/hapi",
         ];
-        if api.iter().any(|f| pkg.contains(f)) {
+        if api.iter().any(|name| dependencies.contains(*name)) {
             return Stack::new("node (api)", warnings);
         }
         return Stack::new("node", warnings);
@@ -455,13 +638,29 @@ fn detect_stack(root: &Path) -> Stack {
 
     let python = [&pyproject, &requirements, &pipfile, &setup_py];
     if python.iter().any(|manifest| manifest.contents.is_some()) {
-        if python.iter().any(|manifest| manifest.contains("fastapi")) {
+        let mut dependencies = BTreeSet::new();
+        if let Some(contents) = pyproject.contents.as_deref() {
+            match pyproject_dependencies(contents) {
+                Ok(found) => dependencies.extend(found),
+                Err(error) => add_manifest_parse_warning(&mut warnings, pyproject.name, error),
+            }
+        }
+        if let Some(contents) = requirements.contents.as_deref() {
+            dependencies.extend(contents.lines().filter_map(python_requirement_name));
+        }
+        if let Some(contents) = pipfile.contents.as_deref() {
+            match pipfile_dependencies(contents) {
+                Ok(found) => dependencies.extend(found),
+                Err(error) => add_manifest_parse_warning(&mut warnings, pipfile.name, error),
+            }
+        }
+        if dependencies.contains("fastapi") {
             return Stack::new("python (fastapi)", warnings);
         }
-        if python.iter().any(|manifest| manifest.contains("django")) {
+        if dependencies.contains("django") {
             return Stack::new("python (django)", warnings);
         }
-        if python.iter().any(|manifest| manifest.contains("flask")) {
+        if dependencies.contains("flask") {
             return Stack::new("python (flask)", warnings);
         }
         return Stack::new("python", warnings);
@@ -481,47 +680,48 @@ fn detect_stack(root: &Path) -> Stack {
     Stack::new("generic", warnings)
 }
 
-/// Distinct language ecosystems whose manifest lives in a *subdirectory*, via
-/// `git ls-files` (tracked files only). Python's two manifest kinds fold to one.
-/// Empty when `root` isn't a git repo. ≥2 with a bare root ⇒ polyglot monorepo.
-fn monorepo_ecosystems(root: &Path) -> Vec<&'static str> {
-    let out = match Command::new("git")
+fn has_tracked_manifest(root: &Path, pathspec: &str) -> bool {
+    Command::new("git")
         .arg("-C")
         .arg(root)
         .args([
+            "-c",
+            "core.fsmonitor=false",
             "ls-files",
-            "*/package.json",
-            "*/Cargo.toml",
-            "*/pyproject.toml",
-            "*/requirements.txt",
-            "*/go.mod",
-            "*/composer.json",
-            "*/pom.xml",
-            "*/build.gradle",
+            "--error-unmatch",
+            "--",
+            pathspec,
         ])
-        .output()
-    {
-        Ok(o) if o.status.success() => o.stdout,
-        _ => return Vec::new(),
-    };
-    let listing = String::from_utf8_lossy(&out).to_ascii_lowercase();
-    let mut ecos = std::collections::BTreeSet::new();
-    for line in listing.lines() {
-        if line.ends_with("/package.json") {
-            ecos.insert("javascript");
-        } else if line.ends_with("/cargo.toml") {
-            ecos.insert("rust");
-        } else if line.ends_with("/pyproject.toml") || line.ends_with("/requirements.txt") {
-            ecos.insert("python");
-        } else if line.ends_with("/go.mod") {
-            ecos.insert("go");
-        } else if line.ends_with("/composer.json") {
-            ecos.insert("php");
-        } else if line.ends_with("/pom.xml") || line.ends_with("/build.gradle") {
-            ecos.insert("java");
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Distinct language ecosystems whose manifest lives in a *subdirectory*, via
+/// `git ls-files` (tracked files only). Existence probes discard stdout, so a
+/// repository with many packages cannot make `init` retain an unbounded path
+/// listing. Empty when `root` isn't a Git repository.
+fn monorepo_ecosystems(root: &Path) -> Vec<&'static str> {
+    let manifest_groups: &[(&str, &[&str])] = &[
+        ("javascript", &["*/package.json"]),
+        ("rust", &["*/Cargo.toml"]),
+        ("python", &["*/pyproject.toml", "*/requirements.txt"]),
+        ("go", &["*/go.mod"]),
+        ("php", &["*/composer.json"]),
+        ("java", &["*/pom.xml", "*/build.gradle"]),
+    ];
+    let mut ecosystems = BTreeSet::new();
+    for (ecosystem, pathspecs) in manifest_groups {
+        if pathspecs
+            .iter()
+            .any(|pathspec| has_tracked_manifest(root, pathspec))
+        {
+            ecosystems.insert(*ecosystem);
         }
     }
-    ecos.into_iter().collect()
+    ecosystems.into_iter().collect()
 }
 
 fn collect_flat_specs(tasks_dir: &Path) -> Vec<String> {
@@ -648,6 +848,19 @@ mod tests {
     }
 
     #[test]
+    fn detect_stack_uses_cargo_dependency_keys_instead_of_free_text() {
+        let d = tempfile::tempdir().unwrap();
+        fs::write(
+            d.path().join("Cargo.toml"),
+            "[package]\nname = \"tauri-migration-notes\"\ndescription = \"remove tauri\"\n\
+             [dependencies]\nserde = \"1\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(detect_stack(d.path()).label, "rust");
+    }
+
+    #[test]
     fn detect_stack_react_native_wins_over_frameworks() {
         let d = tempfile::tempdir().unwrap();
         // RN repo that also carries react + express — RN must win.
@@ -686,6 +899,24 @@ mod tests {
     }
 
     #[test]
+    fn detect_stack_uses_node_dependency_sections_instead_of_free_text() {
+        let d = tempfile::tempdir().unwrap();
+        fs::write(
+            d.path().join("package.json"),
+            r#"{"description":"react and express migration","keywords":["next"],"dependencies":{"lodash":"4"}}"#,
+        )
+        .unwrap();
+        assert_eq!(detect_stack(d.path()).label, "node");
+
+        let malformed = tempfile::tempdir().unwrap();
+        fs::write(malformed.path().join("package.json"), "{ not json").unwrap();
+        let stack = detect_stack(malformed.path());
+        assert_eq!(stack.label, "node");
+        assert_eq!(stack.warnings.len(), 1);
+        assert!(stack.warnings[0].contains("could not parse `package.json`"));
+    }
+
+    #[test]
     fn detect_stack_python_frameworks() {
         for (req, want) in [
             ("fastapi==0.110\nuvicorn", "python (fastapi)"),
@@ -698,6 +929,22 @@ mod tests {
             let s = detect_stack(d.path());
             assert_eq!(s.label, want);
         }
+
+        let d = tempfile::tempdir().unwrap();
+        fs::write(
+            d.path().join("requirements.txt"),
+            "django-filter==24.3\nflask-login==0.6\n",
+        )
+        .unwrap();
+        assert_eq!(detect_stack(d.path()).label, "python");
+
+        let d = tempfile::tempdir().unwrap();
+        fs::write(
+            d.path().join("pyproject.toml"),
+            "[project]\nname = \"api\"\ndependencies = [\"FastAPI[standard]>=0.110\"]\n",
+        )
+        .unwrap();
+        assert_eq!(detect_stack(d.path()).label, "python (fastapi)");
     }
 
     #[test]

@@ -1267,7 +1267,7 @@ fn run_cli_inner(
                     )
                     .into());
                 }
-                let store = Store::open_read_only(&selected_index)?;
+                let store = commands::query::open_query_store(&selected_index)?;
                 let summary = mmcg::fact_adapter::adapt(
                     &store,
                     &mmcg::fact_adapter::AdaptOptions {
@@ -1354,7 +1354,7 @@ fn run_cli_inner(
                 .canonicalize()
                 .map_err(|_| mmcg::queries::ChangeImpactError::RootMismatch)?;
             let index_path = index_path_for_root(index_override.as_deref(), &root);
-            let store = Store::open(&index_path)
+            let store = commands::query::open_query_store(&index_path)
                 .map_err(|_| mmcg::queries::ChangeImpactError::IndexStale)?;
             let top =
                 usize::try_from(top).map_err(|_| mmcg::queries::ChangeImpactError::InvalidRef)?;
@@ -1374,6 +1374,9 @@ fn run_cli_inner(
                 return Err("impact request exceeded its work budget".into());
             }
             let response = response?;
+            store
+                .ensure_source_snapshot_current()
+                .map_err(|_| mmcg::queries::ChangeImpactError::SnapshotChanged)?;
             print!(
                 "{}",
                 commands::query::render_change_impact(&response, format)?
@@ -1492,7 +1495,7 @@ fn run_cli_inner(
                 .canonicalize()
                 .map_err(|_| mmcg::policy::PolicyError::new_for_cli("policy_root_unavailable"))?;
             let index_path = index_path_for_root(index_override.as_deref(), &root);
-            let store = Store::open_read_only(&index_path)
+            let store = commands::query::open_query_store(&index_path)
                 .map_err(|_| mmcg::policy::PolicyError::new_for_cli("policy_index_unavailable"))?;
             let report = mmcg::policy::check(
                 &store,
@@ -2334,6 +2337,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let index = root.join("impact-errors.db");
+        drop(Store::open(&index).unwrap());
         for (error, code) in [
             (mmcg::queries::ChangeImpactError::InvalidRef, "invalid_ref"),
             (
@@ -2377,6 +2381,39 @@ mod tests {
             assert!(!transcript.contains(injected_detail));
         }
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn impact_cli_does_not_create_a_missing_index() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        std::fs::create_dir(&root).unwrap();
+        let index = root.join("missing/index.db");
+        let cli = Cli::try_parse_from([
+            "mastermind",
+            "--index",
+            index.to_str().unwrap(),
+            "impact",
+            "--since",
+            "main",
+            "--root",
+            root.to_str().unwrap(),
+        ])
+        .unwrap();
+        let engine = |_: &Store, _: &std::path::Path, _: &str, _: u32, _: usize| {
+            panic!("impact engine must not run without an index")
+        };
+
+        let error = run_cli_with_impact_engine(cli, &engine).unwrap_err();
+
+        assert_eq!(
+            error
+                .downcast_ref::<mmcg::queries::ChangeImpactError>()
+                .map(mmcg::queries::ChangeImpactError::code),
+            Some("index_stale")
+        );
+        assert!(!index.exists());
+        assert!(!root.join("missing").exists());
     }
 
     #[test]

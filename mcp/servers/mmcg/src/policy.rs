@@ -675,7 +675,14 @@ pub fn check_with_impact_engine(
             "policy config changed during evaluation",
         ));
     }
-    Ok(evaluate(&loaded.config, input, loaded.identity))
+    let report = evaluate(&loaded.config, input, loaded.identity);
+    store.ensure_source_snapshot_current().map_err(|_| {
+        PolicyError::new(
+            "policy_snapshot_changed",
+            "codegraph index changed during policy evaluation",
+        )
+    })?;
+    Ok(report)
 }
 
 fn load_config(store: &Store, root: &Path, requested: &Path) -> Result<LoadedConfig, PolicyError> {

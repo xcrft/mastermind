@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -592,30 +592,156 @@ fn source_for_store(source: &SemanticSourceInput) -> SemanticSource {
     }
 }
 
-fn artifact_metadata(path: &Path) -> Result<std::fs::Metadata, ScipOverlayError> {
-    let metadata = path.metadata().map_err(|error| {
-        ScipOverlayError::Io(format!("read {} metadata: {error}", path.display()))
-    })?;
-    if !metadata.is_file() {
-        return Err(ScipOverlayError::InvalidIndex(format!(
-            "artifact is not a regular file: {}",
-            path.display()
-        )));
-    }
-    if metadata.len() > MAX_SCIP_BYTES {
-        return Err(ScipOverlayError::InvalidIndex(format!(
-            "artifact exceeds the {} MiB safety limit",
-            MAX_SCIP_BYTES / 1024 / 1024
-        )));
-    }
-    Ok(metadata)
+struct DigestWriter<W> {
+    inner: W,
+    hasher: Sha256,
 }
 
-fn hash_artifact(path: &Path) -> Result<String, ScipOverlayError> {
-    artifact_metadata(path)?;
-    let file = File::open(path)
-        .map_err(|error| ScipOverlayError::Io(format!("open {}: {error}", path.display())))?;
-    let mut reader = BufReader::new(file);
+impl<W> DigestWriter<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            hasher: Sha256::new(),
+        }
+    }
+}
+
+impl<W: Write> DigestWriter<W> {
+    fn finish(mut self) -> std::io::Result<String> {
+        self.inner.flush()?;
+        Ok(crate::hex::encode(&self.hasher.finalize()))
+    }
+}
+
+impl<W: Write> Write for DigestWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(bytes)?;
+        self.hasher.update(&bytes[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+struct ScipArtifactSnapshot {
+    path: PathBuf,
+    source_root: crate::bounded_fs::RootCapability,
+    source_identity: crate::bounded_fs::StableFileIdentity,
+    file: File,
+    sha256: String,
+}
+
+impl ScipArtifactSnapshot {
+    fn capture(
+        requested: &Path,
+        control: crate::bounded_fs::ReadControl<'_>,
+    ) -> Result<Self, ScipOverlayError> {
+        let path = requested.canonicalize().map_err(|error| {
+            ScipOverlayError::Io(format!("resolve {}: {error}", requested.display()))
+        })?;
+        let parent = path.parent().ok_or_else(|| {
+            ScipOverlayError::InvalidIndex("artifact path has no parent directory".into())
+        })?;
+        let source_root = crate::bounded_fs::RootCapability::open(parent)
+            .map_err(|error| artifact_read_error(&path, error))?;
+        let mut file = tempfile::tempfile().map_err(|error| {
+            ScipOverlayError::Io(format!("create private SCIP snapshot: {error}"))
+        })?;
+        let mut writer = DigestWriter::new(&mut file);
+        let source = crate::bounded_fs::copy_regular_file_with_capability(
+            &source_root,
+            &path,
+            MAX_SCIP_BYTES,
+            control,
+            None,
+            &mut writer,
+        )
+        .map_err(|error| artifact_read_error(&path, error))?;
+        let sha256 = writer.finish().map_err(|error| {
+            ScipOverlayError::Io(format!("write private SCIP snapshot: {error}"))
+        })?;
+        Ok(Self {
+            path,
+            source_root,
+            source_identity: source.identity,
+            file,
+            sha256,
+        })
+    }
+
+    fn verify_snapshot(&mut self) -> Result<(), ScipOverlayError> {
+        if hash_open_artifact(&mut self.file, &self.path)? != self.sha256 {
+            return Err(ScipOverlayError::InvalidIndex(
+                "private SCIP snapshot changed while it was being imported".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify_source(
+        &self,
+        control: crate::bounded_fs::ReadControl<'_>,
+    ) -> Result<(), ScipOverlayError> {
+        let mut digest = DigestWriter::new(std::io::sink());
+        crate::bounded_fs::copy_regular_file_with_capability(
+            &self.source_root,
+            &self.path,
+            MAX_SCIP_BYTES,
+            control,
+            Some(self.source_identity),
+            &mut digest,
+        )
+        .map_err(|error| artifact_read_error(&self.path, error))?;
+        if digest.finish().map_err(|error| {
+            ScipOverlayError::Io(format!("verify SCIP artifact digest: {error}"))
+        })? != self.sha256
+        {
+            return Err(ScipOverlayError::InvalidIndex(
+                "SCIP artifact changed while it was being imported".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn artifact_read_error(
+    path: &Path,
+    error: crate::bounded_fs::BoundedReadError,
+) -> ScipOverlayError {
+    match error {
+        crate::bounded_fs::BoundedReadError::TooLarge { .. } => {
+            ScipOverlayError::InvalidIndex(format!(
+                "artifact exceeds the {} MiB safety limit",
+                MAX_SCIP_BYTES / 1024 / 1024
+            ))
+        }
+        crate::bounded_fs::BoundedReadError::NotRegular
+        | crate::bounded_fs::BoundedReadError::InvalidPath
+        | crate::bounded_fs::BoundedReadError::OutsideRoot => {
+            ScipOverlayError::InvalidIndex(format!(
+                "artifact is not a regular no-follow file: {}",
+                path.display()
+            ))
+        }
+        crate::bounded_fs::BoundedReadError::SnapshotChanged => ScipOverlayError::InvalidIndex(
+            "SCIP artifact changed while it was being imported".into(),
+        ),
+        crate::bounded_fs::BoundedReadError::Interrupted
+        | crate::bounded_fs::BoundedReadError::DeadlineExceeded => {
+            ScipOverlayError::Io("SCIP artifact read exceeded the request work budget".into())
+        }
+        crate::bounded_fs::BoundedReadError::Io(error) => {
+            ScipOverlayError::Io(format!("read {}: {error}", path.display()))
+        }
+    }
+}
+
+fn hash_open_artifact(file: &mut File, path: &Path) -> Result<String, ScipOverlayError> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| ScipOverlayError::Io(format!("seek {}: {error}", path.display())))?;
+    let mut reader = BufReader::new(&mut *file);
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     let mut total = 0_u64;
@@ -649,13 +775,13 @@ enum ScipRecord {
 /// the full `Index` plus every document body in memory would multiply the
 /// artifact's peak footprint before any useful evidence reached SQLite.
 fn stream_scip(
+    file: &mut File,
     path: &Path,
     mut visit: impl FnMut(ScipRecord) -> Result<(), ScipOverlayError>,
 ) -> Result<(), ScipOverlayError> {
-    artifact_metadata(path)?;
-    let file = File::open(path)
-        .map_err(|error| ScipOverlayError::Io(format!("open {}: {error}", path.display())))?;
-    let mut reader = BufReader::new(file.take(MAX_SCIP_BYTES.saturating_add(1)));
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| ScipOverlayError::Io(format!("seek {}: {error}", path.display())))?;
+    let mut reader = BufReader::new((&mut *file).take(MAX_SCIP_BYTES.saturating_add(1)));
     let mut input = CodedInputStream::from_buf_read(&mut reader);
     let mut metadata_seen = false;
     loop {
@@ -1000,10 +1126,14 @@ fn build_batch(store: &Store, scip_path: &Path) -> Result<SemanticImportBatch, S
         .map_err(|error| ScipOverlayError::Store(format!("resolve index root: {error}")))?;
     crate::indexer::validate_index_root(store, &root).map_err(ScipOverlayError::Store)?;
 
-    let artifact = scip_path.canonicalize().map_err(|error| {
-        ScipOverlayError::Io(format!("resolve {}: {error}", scip_path.display()))
-    })?;
-    let artifact_sha256 = hash_artifact(&artifact)?;
+    let interrupted = || store.work_interrupted();
+    let read_control = crate::bounded_fs::ReadControl {
+        deadline: store.request_deadline(),
+        interrupted: Some(&interrupted),
+    };
+    let mut artifact = ScipArtifactSnapshot::capture(scip_path, read_control)?;
+    let artifact_path = artifact.path.clone();
+    let artifact_sha256 = artifact.sha256.clone();
 
     let mut scip_metadata = None::<Metadata>;
     let mut documents = Vec::new();
@@ -1020,7 +1150,7 @@ fn build_batch(store: &Store, scip_path: &Path) -> Result<SemanticImportBatch, S
     // Pass one validates source identity and retains only compact definition
     // and relationship records. Each potentially large Document is released
     // before the next top-level protobuf field is decoded.
-    stream_scip(&artifact, |record| {
+    stream_scip(&mut artifact.file, &artifact_path, |record| {
         match record {
             ScipRecord::Metadata(value) => scip_metadata = Some(value),
             ScipRecord::ExternalSymbol(info) => {
@@ -1197,7 +1327,7 @@ fn build_batch(store: &Store, scip_path: &Path) -> Result<SemanticImportBatch, S
     let mut second_pass_occurrences = 0_usize;
     // Pass two resolves references now that every global definition and symbol
     // relationship is known. It still holds only one Document at a time.
-    stream_scip(&artifact, |record| {
+    stream_scip(&mut artifact.file, &artifact_path, |record| {
         let ScipRecord::Document(document) = record else {
             return Ok(());
         };
@@ -1275,7 +1405,7 @@ fn build_batch(store: &Store, scip_path: &Path) -> Result<SemanticImportBatch, S
 
     // External symbol information can also carry relationships. A third
     // streaming pass avoids retaining those relationship vectors in memory.
-    stream_scip(&artifact, |record| {
+    stream_scip(&mut artifact.file, &artifact_path, |record| {
         let ScipRecord::ExternalSymbol(info) = record else {
             return Ok(());
         };
@@ -1290,17 +1420,14 @@ fn build_batch(store: &Store, scip_path: &Path) -> Result<SemanticImportBatch, S
         )
     })?;
 
-    if hash_artifact(&artifact)? != artifact_sha256 {
-        return Err(ScipOverlayError::InvalidIndex(
-            "SCIP artifact changed while it was being imported".into(),
-        ));
-    }
+    artifact.verify_snapshot()?;
+    artifact.verify_source(read_control)?;
 
     let source = SemanticSourceInput {
         tool_name,
         tool_version,
         project_root: ".".into(),
-        artifact_path: artifact_label(&artifact, &root),
+        artifact_path: artifact_label(&artifact_path, &root),
         artifact_sha256,
         imported_at: SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1683,6 +1810,48 @@ mod tests {
         let scip_path = temp.path().join("index.scip");
         scip::write_message_to_file(&scip_path, index).unwrap();
         (temp, store, scip_path)
+    }
+
+    #[test]
+    fn artifact_snapshot_keeps_one_version_and_rejects_source_changes() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("index.scip");
+        std::fs::write(&path, b"original").unwrap();
+        let mut snapshot =
+            ScipArtifactSnapshot::capture(&path, crate::bounded_fs::ReadControl::default())
+                .unwrap();
+        std::fs::write(&path, b"replaced").unwrap();
+
+        snapshot.file.seek(SeekFrom::Start(0)).unwrap();
+        let mut captured = Vec::new();
+        snapshot.file.read_to_end(&mut captured).unwrap();
+
+        assert_eq!(captured, b"original");
+        assert!(matches!(
+            snapshot.verify_source(crate::bounded_fs::ReadControl::default()),
+            Err(ScipOverlayError::InvalidIndex(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_snapshot_rejects_a_fifo_without_blocking() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("index.scip");
+        let raw = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `raw` is a live, NUL-terminated path buffer.
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+
+        let error =
+            match ScipArtifactSnapshot::capture(&path, crate::bounded_fs::ReadControl::default()) {
+                Ok(_) => panic!("a FIFO must not be accepted as a SCIP artifact"),
+                Err(error) => error,
+            };
+
+        assert!(matches!(error, ScipOverlayError::InvalidIndex(_)));
     }
 
     #[test]

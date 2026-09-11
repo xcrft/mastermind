@@ -14,9 +14,8 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::time::SystemTime;
 
 pub const REVIEW_PACKAGE_SCHEMA: u32 = 1;
 pub const EVIDENCE_ATTESTATION_SCHEMA: u32 = 1;
@@ -132,7 +131,7 @@ struct SourceIdentity {
     repository_relative: bool,
     sha256: String,
     bytes: u64,
-    modified: Option<SystemTime>,
+    identity: Option<crate::bounded_fs::StableFileIdentity>,
     body: Vec<u8>,
 }
 
@@ -617,37 +616,19 @@ fn read_source(root: &Path, request: &SourceRequest) -> Result<SourceIdentity, R
     let resolved = requested
         .canonicalize()
         .map_err(|_| ReviewPackageError::EvidenceUnavailable(fallback_label.clone()))?;
-    let initial = std::fs::metadata(&resolved)
+    let parent = resolved
+        .parent()
+        .ok_or_else(|| ReviewPackageError::EvidenceUnavailable(fallback_label.clone()))?;
+    let capability = crate::bounded_fs::RootCapability::open(parent)
         .map_err(|_| ReviewPackageError::EvidenceUnavailable(fallback_label.clone()))?;
-    if !initial.is_file() {
-        return Err(ReviewPackageError::EvidenceUnavailable(fallback_label));
-    }
-    if initial.len() > request.maximum_bytes {
-        return Err(ReviewPackageError::EvidenceTooLarge(fallback_label));
-    }
-    let mut file = File::open(&resolved)
-        .map_err(|_| ReviewPackageError::EvidenceUnavailable(fallback_label.clone()))?;
-    let before = file
-        .metadata()
-        .map_err(|_| ReviewPackageError::EvidenceUnavailable(fallback_label.clone()))?;
-    if !before.is_file() || before.len() != initial.len() || modified(&before) != modified(&initial)
-    {
-        return Err(ReviewPackageError::EvidenceChanged(fallback_label));
-    }
-    let mut body = Vec::with_capacity(usize::try_from(before.len()).unwrap_or(0));
-    Read::by_ref(&mut file)
-        .take(request.maximum_bytes + 1)
-        .read_to_end(&mut body)
-        .map_err(|_| ReviewPackageError::EvidenceUnavailable(fallback_label.clone()))?;
-    if body.len() as u64 > request.maximum_bytes {
-        return Err(ReviewPackageError::EvidenceTooLarge(fallback_label));
-    }
-    let after = file
-        .metadata()
-        .map_err(|_| ReviewPackageError::EvidenceChanged(fallback_label.clone()))?;
-    if after.len() != before.len() || modified(&after) != modified(&before) {
-        return Err(ReviewPackageError::EvidenceChanged(fallback_label));
-    }
+    let source = crate::bounded_fs::read_regular_file_with_capability(
+        &capability,
+        &resolved,
+        request.maximum_bytes,
+        request.maximum_bytes,
+        crate::bounded_fs::ReadControl::default(),
+    )
+    .map_err(|error| evidence_read_error(error, &fallback_label))?;
     let (label, repository_relative) = match resolved.strip_prefix(root) {
         Ok(relative) => (display_path(relative), true),
         Err(_) => (
@@ -658,8 +639,8 @@ fn read_source(root: &Path, request: &SourceRequest) -> Result<SourceIdentity, R
             false,
         ),
     };
-    let sha256 = sha256_hex(&body);
-    let bytes = body.len() as u64;
+    let sha256 = sha256_hex(&source.bytes);
+    let bytes = source.declared_len;
     Ok(SourceIdentity {
         id: request.id.clone(),
         kind: request.kind.into(),
@@ -668,13 +649,28 @@ fn read_source(root: &Path, request: &SourceRequest) -> Result<SourceIdentity, R
         repository_relative,
         sha256,
         bytes,
-        modified: modified(&after),
+        identity: Some(source.identity),
         body: if request.retain_body {
-            body
+            source.bytes
         } else {
             Vec::new()
         },
     })
+}
+
+fn evidence_read_error(
+    error: crate::bounded_fs::BoundedReadError,
+    label: &str,
+) -> ReviewPackageError {
+    match error {
+        crate::bounded_fs::BoundedReadError::TooLarge { .. } => {
+            ReviewPackageError::EvidenceTooLarge(label.into())
+        }
+        crate::bounded_fs::BoundedReadError::SnapshotChanged => {
+            ReviewPackageError::EvidenceChanged(label.into())
+        }
+        _ => ReviewPackageError::EvidenceUnavailable(label.into()),
+    }
 }
 
 fn ensure_sources_unchanged(
@@ -1372,10 +1368,6 @@ fn pretty_json(value: &Value) -> Result<Vec<u8>, ReviewPackageError> {
     Ok(body)
 }
 
-fn modified(metadata: &std::fs::Metadata) -> Option<SystemTime> {
-    metadata.modified().ok()
-}
-
 fn sha256_hex(bytes: &[u8]) -> String {
     crate::hex::encode(&Sha256::digest(bytes))
 }
@@ -1544,6 +1536,33 @@ mod tests {
             .index_all(&mut store, false)
             .unwrap();
         graph
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn evidence_reader_rejects_a_fifo_without_blocking() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let fifo = root.path().join("report.sarif");
+        let fifo_path = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `fifo_path` is a live, NUL-terminated path buffer.
+        assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+
+        let error = read_source(
+            root.path(),
+            &SourceRequest {
+                id: "sarif:0".into(),
+                kind: "sarif",
+                path: fifo,
+                maximum_bytes: crate::evidence::MAX_ARTIFACT_BYTES,
+                retain_body: false,
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, ReviewPackageError::EvidenceUnavailable(_)));
     }
 
     #[test]
@@ -1988,7 +2007,7 @@ mod tests {
             repository_relative: true,
             sha256: sha256_hex(&body),
             bytes: body.len() as u64,
-            modified: None,
+            identity: None,
             body,
         };
         let parsed: EvidenceAttestation =
@@ -2073,7 +2092,7 @@ mod tests {
             repository_relative: true,
             sha256: sha256_hex(&body),
             bytes: body.len() as u64,
-            modified: None,
+            identity: None,
             body,
         };
         assert!(matches!(

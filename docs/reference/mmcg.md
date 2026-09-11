@@ -841,6 +841,8 @@ synced. The manifest records their SHA-256 digests next to the resolved head
 OID. This is a **digest binding at export time**: it proves exactly which report
 bytes a reviewer saw at that revision, not that Semgrep, CodeQL, a test runner,
 or an OTel collector produced those bytes from that revision.
+Each read uses a capability-scoped, no-follow handle and accepts only a bounded
+regular file. A path swap, symlink change, or special file fails closed.
 
 The exporter retains the exact read-only SQLite snapshot used by Lens until
 publication. At the same final boundary it revalidates the Git HEAD, bounded

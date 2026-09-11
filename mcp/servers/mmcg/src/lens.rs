@@ -553,6 +553,7 @@ pub fn build_snapshot_with_evidence_extensions(
 /// HTTP. The validator-retaining companion below is used at publication
 /// boundaries; both keep the same freshness, WAL, bounded-analysis, and
 /// optional document-graph semantics as live Lens.
+#[cfg(test)]
 pub(crate) fn snapshot_from_paths_with_document_graph(
     root: &Path,
     index_path: &Path,

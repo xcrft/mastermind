@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Atomic artifact writes now retain a directory capability through durable
+  rename and reject symlinked parents, links, and special-file targets.
 - `impact`, architecture policy checks, and fact adapters now use a current
   immutable index snapshot and reject results assembled across index updates.
 - CLI graph queries plus `verify-spec` and `audit-spec` now require a current

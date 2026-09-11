@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::OpenOptions;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 #[cfg(unix)]
@@ -277,47 +277,31 @@ pub fn read_signature(path: &Path) -> Result<DetachedSignature, BundleError> {
 }
 
 pub fn write_atomic(path: &Path, bytes: &[u8], private: bool) -> Result<(), BundleError> {
-    #[cfg(not(unix))]
-    let _ = private;
     if bytes.len() > BUNDLE_INPUT_MAX {
         return Err(BundleError::SizeLimit);
     }
-    let parent = path
+    let absolute = std::path::absolute(path).map_err(|error| BundleError::Io(error.to_string()))?;
+    let parent = absolute
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let name = path
+    absolute
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| BundleError::Invalid("invalid output filename".into()))?;
-    let mut created = None;
-    for nonce in 0..128_u32 {
-        let candidate = parent.join(format!(".{name}.{}.{}.tmp", std::process::id(), nonce));
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(if private { 0o600 } else { 0o644 });
-        }
-        match options.open(&candidate) {
-            Ok(mut file) => {
-                file.write_all(bytes)
-                    .and_then(|_| file.sync_all())
-                    .map_err(|e| BundleError::Io(e.to_string()))?;
-                created = Some(candidate);
-                break;
+    crate::bounded_fs::write_atomic_regular_file(parent, &absolute, bytes, private).map_err(
+        |error| match error {
+            crate::bounded_fs::BoundedReadError::InvalidPath
+            | crate::bounded_fs::BoundedReadError::OutsideRoot
+            | crate::bounded_fs::BoundedReadError::NotRegular => {
+                BundleError::Invalid(format!("unsafe output path: {error}"))
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(BundleError::Io(e.to_string())),
-        }
-    }
-    let temp = created.ok_or_else(|| BundleError::Io("cannot allocate temp file".into()))?;
-    if let Err(error) = std::fs::rename(&temp, path) {
-        let _ = std::fs::remove_file(&temp);
-        return Err(BundleError::Io(error.to_string()));
-    }
-    Ok(())
+            crate::bounded_fs::BoundedReadError::SnapshotChanged => {
+                BundleError::Invalid("output path changed during write".into())
+            }
+            error => BundleError::Io(error.to_string()),
+        },
+    )
 }
 
 pub fn verify_envelope(envelope: &Envelope, policy: &VerifyPolicy) -> VerificationReport {
@@ -2049,6 +2033,72 @@ mod tests {
         );
         assert_eq!(report.content_integrity, "fail");
         assert_eq!(report.reasons, vec!["snapshot_changed"]);
+    }
+
+    #[test]
+    fn atomic_output_replaces_only_a_regular_file_without_staging_debris() {
+        let directory = tempdir().unwrap();
+        let output = directory.path().join("bundle.json");
+        std::fs::write(&output, b"old").unwrap();
+
+        write_atomic(&output, b"new", false).unwrap();
+
+        assert_eq!(std::fs::read(&output).unwrap(), b"new");
+        assert_eq!(
+            std::fs::read_dir(directory.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_output_rejects_symlinked_targets_and_parents() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempdir().unwrap();
+        let victim = directory.path().join("victim.json");
+        std::fs::write(&victim, b"unchanged").unwrap();
+        let linked_target = directory.path().join("linked-target.json");
+        symlink(&victim, &linked_target).unwrap();
+
+        assert!(write_atomic(&linked_target, b"replacement", false).is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"unchanged");
+
+        let real_parent = directory.path().join("real-parent");
+        let linked_parent = directory.path().join("linked-parent");
+        std::fs::create_dir(&real_parent).unwrap();
+        symlink(&real_parent, &linked_parent).unwrap();
+        assert!(write_atomic(&linked_parent.join("output.json"), b"escape", false).is_err());
+        assert!(!real_parent.join("output.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_output_rejects_special_files_and_keeps_private_mode() {
+        use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+
+        let directory = tempdir().unwrap();
+        let fifo = directory.path().join("output.pipe");
+        assert!(Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::fs::symlink_metadata(&fifo)
+            .unwrap()
+            .file_type()
+            .is_fifo());
+        assert!(write_atomic(&fifo, b"blocked", false).is_err());
+
+        let private = directory.path().join("private.json");
+        write_atomic(&private, b"secret", true).unwrap();
+        assert_eq!(
+            std::fs::metadata(private).unwrap().permissions().mode() & 0o077,
+            0
+        );
     }
 
     #[test]

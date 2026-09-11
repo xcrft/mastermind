@@ -8,7 +8,7 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-const MAX_LESSONS_SIZE: u64 = 1024 * 1024;
+const MAX_LESSONS_SIZE: u64 = crate::indexer::MAX_HISTORY_ARTIFACT_SIZE;
 const REQUIRED_CONTEXT_SECTIONS: &[&str] = &["identity", "active goals", "decision log"];
 const REQUIRED_DECISION_FIELDS: &[&str] = &[
     "Decision",

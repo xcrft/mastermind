@@ -104,6 +104,10 @@ impl StableFileIdentity {
         self.attributes
     }
 
+    pub(crate) fn length(self) -> u64 {
+        self.length
+    }
+
     pub(crate) fn same_object(self, other: Self) -> bool {
         self.volume == other.volume && self.index == other.index
     }
@@ -164,14 +168,20 @@ fn stable_file_identity(file: &std::fs::File) -> std::io::Result<StableFileIdent
 #[cfg(windows)]
 fn stable_file_identity(file: &std::fs::File) -> std::io::Result<StableFileIdentity> {
     use std::os::windows::io::AsRawHandle;
+    stable_windows_handle_identity(file.as_raw_handle())
+}
+
+#[cfg(windows)]
+pub(crate) fn stable_windows_handle_identity(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+) -> std::io::Result<StableFileIdentity> {
     use windows_sys::Win32::Storage::FileSystem::{
         GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
     };
 
     let mut information = BY_HANDLE_FILE_INFORMATION::default();
-    let success = unsafe {
-        GetFileInformationByHandle(file.as_raw_handle(), std::ptr::addr_of_mut!(information))
-    };
+    let success =
+        unsafe { GetFileInformationByHandle(handle, std::ptr::addr_of_mut!(information)) };
     if success == 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -190,6 +200,57 @@ fn stable_file_identity(_file: &std::fs::File) -> std::io::Result<StableFileIden
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "stable file identity is unavailable on this platform",
+    ))
+}
+
+#[cfg(unix)]
+fn stable_metadata_identity(
+    metadata: &cap_std::fs::Metadata,
+) -> std::io::Result<StableFileIdentity> {
+    use cap_std::fs::MetadataExt;
+    Ok(StableFileIdentity {
+        volume: metadata.dev(),
+        index: metadata.ino(),
+        length: metadata.len(),
+        modified_seconds: metadata.mtime(),
+        modified_fraction: metadata.mtime_nsec(),
+        attributes: metadata.mode() as u64,
+    })
+}
+
+#[cfg(windows)]
+fn stable_metadata_identity(
+    metadata: &cap_std::fs::Metadata,
+) -> std::io::Result<StableFileIdentity> {
+    use cap_std::fs::MetadataExt;
+    let modified = metadata.last_write_time();
+    Ok(StableFileIdentity {
+        volume: metadata.volume_serial_number().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "volume identity is unavailable",
+            )
+        })? as u64,
+        index: metadata.file_index().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "file identity is unavailable",
+            )
+        })?,
+        length: metadata.file_size(),
+        modified_seconds: (modified >> 32) as i64,
+        modified_fraction: (modified & u64::from(u32::MAX)) as i64,
+        attributes: metadata.file_attributes() as u64,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn stable_metadata_identity(
+    _metadata: &cap_std::fs::Metadata,
+) -> std::io::Result<StableFileIdentity> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "stable metadata identity is unavailable on this platform",
     ))
 }
 
@@ -882,6 +943,43 @@ pub(crate) fn inspect_path_kind_with_capability(
     }
 }
 
+/// Inspect one direct child without opening it. SQLite uses process-scoped
+/// POSIX locks, so opening and closing a second descriptor for an active
+/// database can silently release the connection's locks.
+pub(crate) fn inspect_direct_regular_file_identity_with_capability(
+    root: &RootCapability,
+    path: &Path,
+    control: ReadControl<'_>,
+) -> Result<Option<StableFileIdentity>, BoundedReadError> {
+    control.check()?;
+    root.verify()?;
+    let relative = root.relative(path)?;
+    let mut components = relative.components();
+    let name = match (components.next(), components.next()) {
+        (Some(Component::Normal(name)), None) => name,
+        _ => return Err(BoundedReadError::InvalidPath),
+    };
+    let inspect = || match root.directory.symlink_metadata(name) {
+        Ok(metadata) if metadata.file_type().is_file() => stable_metadata_identity(&metadata)
+            .map(Some)
+            .map_err(BoundedReadError::Io),
+        Ok(_) => Err(BoundedReadError::NotRegular),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(BoundedReadError::Io(error)),
+    };
+    let before = inspect()?;
+    control.check()?;
+    root.verify()?;
+    let after = inspect()?;
+    control.check()?;
+    root.verify()?;
+    if before == after {
+        Ok(before)
+    } else {
+        Err(BoundedReadError::SnapshotChanged)
+    }
+}
+
 pub(crate) fn inspect_path_receipt_with_capability(
     root: &RootCapability,
     path: &Path,
@@ -983,6 +1081,29 @@ pub(crate) fn read_repository_file(
         read_limit,
         control,
     )
+}
+
+/// Read one optional repository-relative UTF-8 file through the bounded,
+/// no-follow path. Missing files return `None`; unsafe paths, oversized files,
+/// invalid UTF-8, and unstable snapshots return an error.
+pub fn read_optional_repository_text(
+    root: &Path,
+    relative: &Path,
+    max_bytes: u64,
+) -> std::io::Result<Option<String>> {
+    match read_repository_file(root, relative, max_bytes, max_bytes, ReadControl::default()) {
+        Ok(file) => String::from_utf8(file.bytes).map(Some).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("repository file is not valid UTF-8: {}", relative.display()),
+            )
+        }),
+        Err(BoundedReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(None)
+        }
+        Err(BoundedReadError::Io(error)) => Err(error),
+        Err(error) => Err(std::io::Error::other(error)),
+    }
 }
 
 pub(crate) fn read_regular_file_with_capability(

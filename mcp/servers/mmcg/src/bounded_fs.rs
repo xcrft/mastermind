@@ -595,6 +595,25 @@ pub(crate) fn read_regular_file(
     read_regular_file_with_capability(&root, path, max_bytes, read_limit, control)
 }
 
+/// Resolve one explicitly selected file, then read it through a retained parent
+/// capability. Final symlinks are resolved once for user convenience; the
+/// resulting regular file and every parent are opened without following later
+/// path substitutions.
+pub(crate) fn read_selected_regular_file(
+    path: &Path,
+    max_bytes: u64,
+    read_limit: u64,
+    control: ReadControl<'_>,
+) -> Result<(PathBuf, BoundedFile), BoundedReadError> {
+    control.check()?;
+    let resolved = path.canonicalize().map_err(BoundedReadError::Io)?;
+    control.check()?;
+    let parent = resolved.parent().ok_or(BoundedReadError::InvalidPath)?;
+    let root = RootCapability::open(parent)?;
+    let file = read_regular_file_with_capability(&root, &resolved, max_bytes, read_limit, control)?;
+    Ok((resolved, file))
+}
+
 /// Read a path supplied by repository metadata, never relative to process cwd.
 pub(crate) fn read_repository_file(
     root: &Path,

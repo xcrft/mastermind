@@ -759,6 +759,10 @@ owners per rule, contributor details at five recent names per file, and
 diagnostics at 100. Churn totals stay complete when contributor names are
 truncated. Git output is capped at 8 MiB.
 
+Explicit evidence paths are resolved once and then read through a retained
+parent capability with no-follow handles. Only bounded regular files are
+accepted; path substitutions and special files fail closed.
+
 When the changed-file inventory is already truncated, evidence selects symbol,
 impact, and candidate-test paths first, then admits at most 200 file-only paths.
 The response remains partial and reports `relevant_file_limit`; the cap cannot

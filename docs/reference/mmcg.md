@@ -933,7 +933,9 @@ for ingestion limits and PR annotation behavior.
 `mastermind-policy.yml` over one normalized evidence input. Git/SQLite,
 CODEOWNERS, and strict workflow artifacts are collected first; the policy
 evaluator itself is deterministic and has no Rego, OPA daemon, network access,
-or embedded general-purpose runtime.
+or embedded general-purpose runtime. The config is read as a bounded regular
+file through a retained repository capability and is revalidated by path,
+digest, and file identity after evidence collection.
 
 ```yaml
 version: 1

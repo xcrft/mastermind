@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Architecture-policy config reads are now capability-scoped, no-follow,
+  request-bounded snapshots. Policy evaluation rejects special files, path
+  swaps, and same-byte file replacement instead of issuing a result against an
+  ambiguous config identity.
 - Lens, temporal ownership drift, fact adapters, and review export read selected
   evidence and attestations through capability-scoped, no-follow file handles,
   rejecting special files and path swaps instead of following a stale path or

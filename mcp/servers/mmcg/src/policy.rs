@@ -609,7 +609,7 @@ pub struct PolicyDiagnostic {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PolicyConfigIdentity {
     pub path: String,
     pub sha256: String,
@@ -640,6 +640,13 @@ pub struct PolicyReport {
 struct LoadedConfig {
     config: PolicyConfig,
     identity: PolicyConfigIdentity,
+    file_identity: crate::bounded_fs::StableFileIdentity,
+}
+
+impl LoadedConfig {
+    fn same_snapshot(&self, other: &Self) -> bool {
+        self.identity == other.identity && self.file_identity == other.file_identity
+    }
 }
 
 pub fn check(
@@ -659,10 +666,10 @@ pub fn check_with_impact_engine(
     let root = root.canonicalize().map_err(|_| {
         PolicyError::new("policy_root_unavailable", "project root cannot be resolved")
     })?;
-    let loaded = load_config(&root, &options.config_path)?;
+    let loaded = load_config(store, &root, &options.config_path)?;
     let input = evidence::collect(store, &root, &loaded.config, options, impact_engine)?;
-    let reloaded = load_config(&root, &options.config_path)?;
-    if loaded.identity.sha256 != reloaded.identity.sha256 {
+    let reloaded = load_config(store, &root, &options.config_path)?;
+    if !loaded.same_snapshot(&reloaded) {
         return Err(PolicyError::new(
             "policy_snapshot_changed",
             "policy config changed during evaluation",
@@ -671,49 +678,77 @@ pub fn check_with_impact_engine(
     Ok(evaluate(&loaded.config, input, loaded.identity))
 }
 
-fn load_config(root: &Path, requested: &Path) -> Result<LoadedConfig, PolicyError> {
-    let path = if requested.is_absolute() {
+fn load_config(store: &Store, root: &Path, requested: &Path) -> Result<LoadedConfig, PolicyError> {
+    let requested_path = if requested.is_absolute() {
         requested.to_path_buf()
     } else {
         root.join(requested)
     };
-    let path = path.canonicalize().map_err(|_| {
+    let root_capability = crate::bounded_fs::RootCapability::open(root).map_err(|_| {
         PolicyError::new(
-            "policy_config_unavailable",
-            format!("cannot read `{}`", display_path(root, &path)),
+            "policy_snapshot_changed",
+            "project root changed before the policy config could be read",
         )
     })?;
-    if !path.starts_with(root) {
+    let path = requested_path.canonicalize().map_err(|_| {
+        PolicyError::new(
+            "policy_config_unavailable",
+            format!("cannot read `{}`", display_path(root, &requested_path)),
+        )
+    })?;
+    if !path.starts_with(root_capability.canonical_root()) {
         return Err(PolicyError::new(
             "invalid_policy_config",
             "policy config must resolve inside the repository",
         ));
     }
-    let metadata = std::fs::metadata(&path).map_err(|_| {
-        PolicyError::new(
+    let interrupted = || store.work_interrupted();
+    let source = crate::bounded_fs::read_regular_file_with_capability(
+        &root_capability,
+        &path,
+        CONFIG_BYTE_LIMIT,
+        CONFIG_BYTE_LIMIT,
+        crate::bounded_fs::ReadControl {
+            deadline: store.request_deadline(),
+            interrupted: Some(&interrupted),
+        },
+    )
+    .map_err(|error| match error {
+        crate::bounded_fs::BoundedReadError::NotRegular
+        | crate::bounded_fs::BoundedReadError::TooLarge { .. }
+        | crate::bounded_fs::BoundedReadError::InvalidPath
+        | crate::bounded_fs::BoundedReadError::OutsideRoot => PolicyError::new(
+            "invalid_policy_config",
+            "policy config must be a non-empty regular file no larger than 1 MiB",
+        ),
+        crate::bounded_fs::BoundedReadError::SnapshotChanged => PolicyError::new(
+            "policy_snapshot_changed",
+            "policy config changed while it was being read",
+        ),
+        crate::bounded_fs::BoundedReadError::Interrupted
+        | crate::bounded_fs::BoundedReadError::DeadlineExceeded => PolicyError::new(
+            "policy_config_unavailable",
+            "policy config read exceeded the request work budget",
+        ),
+        crate::bounded_fs::BoundedReadError::Io(_) => PolicyError::new(
             "policy_config_unavailable",
             format!("cannot read `{}`", display_path(root, &path)),
-        )
+        ),
     })?;
-    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > CONFIG_BYTE_LIMIT {
+    if source.declared_len == 0 {
         return Err(PolicyError::new(
             "invalid_policy_config",
             "policy config must be a non-empty regular file no larger than 1 MiB",
         ));
     }
-    let source = std::fs::read(&path).map_err(|_| {
-        PolicyError::new(
-            "policy_config_unavailable",
-            format!("cannot read `{}`", display_path(root, &path)),
-        )
-    })?;
-    let config = parse_config(&source)?;
+    let config = parse_config(&source.bytes)?;
     Ok(LoadedConfig {
         identity: PolicyConfigIdentity {
             path: display_path(root, &path),
-            sha256: crate::hex::encode(&Sha256::digest(&source)),
+            sha256: crate::hex::encode(&Sha256::digest(&source.bytes)),
             version: config.version,
         },
+        file_identity: source.identity,
         config,
     })
 }
@@ -1233,6 +1268,47 @@ rules:
             parse_config(too_many.as_bytes()).unwrap_err().code(),
             "invalid_policy_config"
         );
+    }
+
+    #[test]
+    fn policy_config_snapshot_detects_same_byte_file_replacement() {
+        let repository = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let config = repository.path().join(DEFAULT_CONFIG_PATH);
+        std::fs::write(&config, ALL_RULES).unwrap();
+        let store = Store::open(state.path().join("mmcg.db")).unwrap();
+        let before = load_config(&store, repository.path(), &config).unwrap();
+        let replacement = repository.path().join("replacement.yml");
+        std::fs::write(&replacement, ALL_RULES).unwrap();
+        std::fs::remove_file(&config).unwrap();
+        std::fs::rename(replacement, &config).unwrap();
+
+        let after = load_config(&store, repository.path(), &config).unwrap();
+
+        assert_eq!(before.identity.sha256, after.identity.sha256);
+        assert!(!before.same_snapshot(&after));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn policy_config_reader_rejects_a_fifo_without_blocking() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let repository = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let config = repository.path().join(DEFAULT_CONFIG_PATH);
+        let config_path = CString::new(config.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `config_path` is a live, NUL-terminated path buffer.
+        assert_eq!(unsafe { libc::mkfifo(config_path.as_ptr(), 0o600) }, 0);
+        let store = Store::open(state.path().join("mmcg.db")).unwrap();
+
+        let error = match load_config(&store, repository.path(), &config) {
+            Ok(_) => panic!("a FIFO must not be accepted as policy YAML"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "invalid_policy_config");
     }
 
     #[test]

@@ -344,6 +344,9 @@ enum Cmd {
         kind: Option<String>,
         #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=50))]
         top: u32,
+        /// Live-check one root-bound portable document graph and return it beside FTS history.
+        #[arg(long, value_name = "PATH")]
+        document_graph: Option<PathBuf>,
     },
     /// Build a grounded evidence packet for "why" questions without inventing
     /// rationale that is absent from durable project history.
@@ -982,6 +985,9 @@ enum QueryCmd {
         kind: Option<String>,
         #[arg(long, default_value_t = 10)]
         top: u32,
+        /// Live-check one root-bound portable document graph and return it beside FTS history.
+        #[arg(long, value_name = "PATH")]
+        document_graph: Option<PathBuf>,
     },
     /// List files whose top-level imports reference the given name or path.
     ImportedBy {
@@ -1647,8 +1653,19 @@ fn run_cli_inner(
             let ws = mmcg::workflow_status::WorkflowStatus::scan_with_index(&root, &index_path);
             print!("{}", ws.render_text());
         }
-        Cmd::History { query, kind, top } => {
-            commands::query::dispatch_history(&query, kind.as_deref(), top, &index_path)?;
+        Cmd::History {
+            query,
+            kind,
+            top,
+            document_graph,
+        } => {
+            commands::query::dispatch_history(
+                &query,
+                kind.as_deref(),
+                top,
+                document_graph.as_deref(),
+                &index_path,
+            )?;
         }
         Cmd::Why { query, top } => {
             commands::query::dispatch_why(&query, top, &index_path)?;
@@ -2391,8 +2408,42 @@ mod tests {
             Cmd::History {
                 query,
                 kind: Some(kind),
-                top: 5
+                top: 5,
+                document_graph: None,
             } if query == "webhook dedupe" && kind == "audit"
+        ));
+
+        let history_with_graph = Cli::try_parse_from([
+            "mastermind",
+            "history",
+            "storage boundary",
+            "--document-graph",
+            ".mastermind/research/graph.json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            history_with_graph.cmd,
+            Cmd::History {
+                document_graph: Some(path),
+                ..
+            } if path == PathBuf::from(".mastermind/research/graph.json")
+        ));
+
+        let query_history_with_graph = Cli::try_parse_from([
+            "mastermind",
+            "query",
+            "history",
+            "storage boundary",
+            "--document-graph",
+            ".mastermind/research/graph.json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            query_history_with_graph.cmd,
+            Cmd::Query(QueryCmd::History {
+                document_graph: Some(path),
+                ..
+            }) if path == PathBuf::from(".mastermind/research/graph.json")
         ));
 
         let why = Cli::try_parse_from(["mastermind", "why", "idempotency"]).unwrap();

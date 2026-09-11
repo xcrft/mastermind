@@ -86,6 +86,18 @@ pub(crate) struct StableFileIdentity {
     attributes: u64,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct BoundedPathReceipt {
+    pub kind: BoundedPathKind,
+    pub identity: StableFileIdentity,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BoundedDirectoryReceipt {
+    pub names: Vec<std::ffi::OsString>,
+    pub identity: StableFileIdentity,
+}
+
 impl StableFileIdentity {
     pub(crate) fn attributes(self) -> u64 {
         self.attributes
@@ -289,6 +301,10 @@ impl RootCapability {
 
     pub(crate) fn requested_root(&self) -> &Path {
         &self.requested_root
+    }
+
+    pub(crate) fn repository_relative(&self, path: &Path) -> Result<PathBuf, BoundedReadError> {
+        self.relative(path)
     }
 
     fn relative(&self, path: &Path) -> Result<PathBuf, BoundedReadError> {
@@ -511,24 +527,46 @@ pub(crate) fn inspect_path_kind_with_capability(
     path: &Path,
     control: ReadControl<'_>,
 ) -> Result<BoundedPathKind, BoundedReadError> {
+    match inspect_path_receipt_with_capability(root, path, control) {
+        Ok(receipt) => Ok(receipt.kind),
+        Err(BoundedReadError::NotRegular) => Ok(BoundedPathKind::Other),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn inspect_path_receipt_with_capability(
+    root: &RootCapability,
+    path: &Path,
+    control: ReadControl<'_>,
+) -> Result<BoundedPathReceipt, BoundedReadError> {
     control.check()?;
     root.verify()?;
     let relative = root.relative(path)?;
-    if open_relative_directory_nofollow(&root.directory, &relative).is_ok() {
+    if let Ok(directory) = open_relative_directory_nofollow(&root.directory, &relative) {
+        let identity = directory_identity(&directory)?;
         root.verify()?;
-        return Ok(BoundedPathKind::Directory);
+        return Ok(BoundedPathReceipt {
+            kind: BoundedPathKind::Directory,
+            identity,
+        });
     }
     let file = match open_relative_nofollow(&root.directory, &relative) {
         Ok(file) => file,
-        Err(BoundedReadError::NotRegular) => return Ok(BoundedPathKind::Other),
+        Err(BoundedReadError::NotRegular) => {
+            return Err(BoundedReadError::NotRegular);
+        }
         Err(error) => return Err(error),
     };
     let metadata = file.metadata().map_err(BoundedReadError::Io)?;
+    let identity = stable_file_identity(&file).map_err(BoundedReadError::Io)?;
     root.verify()?;
-    Ok(if metadata.file_type().is_file() {
-        BoundedPathKind::RegularFile
-    } else {
-        BoundedPathKind::Other
+    Ok(BoundedPathReceipt {
+        kind: if metadata.file_type().is_file() {
+            BoundedPathKind::RegularFile
+        } else {
+            BoundedPathKind::Other
+        },
+        identity,
     })
 }
 
@@ -742,6 +780,16 @@ pub(crate) fn read_directory_names_with_capability(
     remaining_entries: usize,
     control: ReadControl<'_>,
 ) -> Result<Vec<std::ffi::OsString>, BoundedReadError> {
+    read_directory_receipt_with_capability(root, path, remaining_entries, control)
+        .map(|receipt| receipt.names)
+}
+
+pub(crate) fn read_directory_receipt_with_capability(
+    root: &RootCapability,
+    path: &Path,
+    remaining_entries: usize,
+    control: ReadControl<'_>,
+) -> Result<BoundedDirectoryReceipt, BoundedReadError> {
     control.check()?;
     root.verify()?;
     let relative = if path == root.requested_root || path == root.canonical_root {
@@ -789,7 +837,10 @@ pub(crate) fn read_directory_names_with_capability(
     if before != after || after != current_identity {
         return Err(BoundedReadError::SnapshotChanged);
     }
-    Ok(names)
+    Ok(BoundedDirectoryReceipt {
+        names,
+        identity: after,
+    })
 }
 
 #[cfg(test)]

@@ -3,6 +3,7 @@ use mmcg::{
     queries,
     store::{query_budget_ms_from_env, Store, WorkBudget, DEFAULT_CLI_BUDGET_MS},
 };
+use serde::Serialize;
 use serde_json::Value;
 use std::path::Path;
 
@@ -175,12 +176,45 @@ pub fn dispatch_history(
     query: &str,
     kind: Option<&str>,
     top: u32,
+    document_graph: Option<&Path>,
     index_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let store = Store::open(index_path)?;
-    let response = queries::history(&store, query, kind, top.clamp(1, 50))?;
+    let _budget_scope = document_graph.map(|_| {
+        let budget_ms = query_budget_ms_from_env(DEFAULT_CLI_BUDGET_MS);
+        store.push_work_budget(WorkBudget::from_millis(budget_ms));
+        WorkBudgetScope(&store)
+    });
+    let response = history_response(&store, query, kind, top, document_graph)?;
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum HistoryResponse {
+    History(queries::HistorySearchResponse),
+    WithDocumentGraph(Box<queries::HistoryDocumentGraphResponse>),
+}
+
+fn history_response(
+    store: &Store,
+    query: &str,
+    kind: Option<&str>,
+    top: u32,
+    document_graph: Option<&Path>,
+) -> Result<HistoryResponse, Box<dyn std::error::Error>> {
+    match document_graph {
+        Some(path) => Ok(HistoryResponse::WithDocumentGraph(Box::new(
+            queries::history_with_document_graph(store, query, kind, top.clamp(1, 50), path)?,
+        ))),
+        None => Ok(HistoryResponse::History(queries::history(
+            store,
+            query,
+            kind,
+            top.clamp(1, 50),
+        )?)),
+    }
 }
 
 pub fn dispatch_why(
@@ -698,11 +732,17 @@ fn execute(store: &Store, q: QueryCmd) -> Result<Value, Box<dyn std::error::Erro
         QueryCmd::Tasks { query, top } => {
             serde_json::to_value(queries::tasks(store, &query, top)?)?
         }
-        QueryCmd::History { query, kind, top } => serde_json::to_value(queries::history(
+        QueryCmd::History {
+            query,
+            kind,
+            top,
+            document_graph,
+        } => serde_json::to_value(history_response(
             store,
             &query,
             kind.as_deref(),
-            top.clamp(1, 50),
+            top,
+            document_graph.as_deref(),
         )?)?,
         QueryCmd::SymbolsChangedSince { git_ref, root } => {
             let root = root

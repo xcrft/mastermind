@@ -19,7 +19,7 @@
 
 use super::store::{self, Counts};
 use crate::bounded_fs::{AtomicWriteExpectation, BoundedReadError, ReadControl, RootCapability};
-use crate::diff::repository_git_command;
+use crate::diff::{run_bounded_git_with_limit, WorkingTreeDiffError};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -29,6 +29,8 @@ const RETENTION_DAYS: i64 = 365;
 
 /// Commits scanned for diffs. Provenance still counts the full history.
 const COMMIT_SAMPLE_CAP: usize = 400;
+const GIT_METADATA_OUTPUT_LIMIT: usize = 1024 * 1024;
+const GIT_SAMPLE_OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
 
 const MIN_SAMPLES: usize = 20;
 const PROFILE_SCHEMA_MARKER: &str = "<!-- mastermind-style:schema:3 -->";
@@ -95,9 +97,11 @@ fn mine_to_paths(
         return Ok(SeedOutcome::NoCommits { author });
     }
 
-    let raw = git_log_patch(repo_root, &author, COMMIT_SAMPLE_CAP)?;
+    let requested_sample = prov.commits_total.min(COMMIT_SAMPLE_CAP);
+    let (raw, sampled_commits) = git_log_patch(repo_root, &author, requested_sample)?;
     let lines = parse_added_lines(&raw);
-    let commit_msgs = collect_commits(repo_root, &author, COMMIT_SAMPLE_CAP)?;
+    let commit_msgs = collect_commits(repo_root, &author, sampled_commits)?;
+    prov.commits_sampled = sampled_commits;
     prov.added_lines_sampled = lines.len();
 
     let mut counts = Counts::new();
@@ -220,19 +224,13 @@ fn mine_to_paths(
 /// Subdirectories and linked worktrees share one contribution. Independent
 /// clones have different common directories and remain separate repositories.
 fn repository_key(root: &Path) -> Result<String, Box<dyn std::error::Error>> {
-    let out = repository_git_command()
-        .arg("-C")
-        .arg(root)
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .output()?;
-    if !out.status.success() {
-        return Err(format!(
-            "git repository identity failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )
-        .into());
-    }
-    let output = String::from_utf8(out.stdout)?;
+    let output = run_profile_git(
+        root,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        GIT_METADATA_OUTPUT_LIMIT,
+        "git repository identity",
+    )?;
+    let output = String::from_utf8(output)?;
     let path = output.strip_suffix('\n').unwrap_or(&output);
     let path = path.strip_suffix('\r').unwrap_or(path);
     Ok(Path::new(path)
@@ -600,36 +598,51 @@ fn staleness_for_repo(root: &Path, db: &store::ProfileStore) -> Staleness {
     }
 }
 
+fn run_profile_git(
+    root: &Path,
+    args: &[&str],
+    output_limit: usize,
+    context: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let output = run_bounded_git_with_limit(root, args, None, output_limit)
+        .map_err(|error| format!("{context} failed: {error}"))?;
+    if !output.success {
+        return Err(format!("{context} exited unsuccessfully").into());
+    }
+    Ok(output.stdout)
+}
+
 /// Count the author's commits in a `<rev>..HEAD` range. `None` if the range is
 /// invalid (e.g. the SHA isn't in this repo's history).
 fn count_commits_range(root: &Path, author: &str, range: &str) -> Option<usize> {
-    let out = repository_git_command()
-        .arg("-C")
-        .arg(root)
-        .args([
-            "log",
+    let author = format!("--author={author}");
+    let out = run_profile_git(
+        root,
+        &[
+            "rev-list",
+            "--count",
             "--no-merges",
             "--fixed-strings",
-            &format!("--author={author}"),
+            &author,
             range,
-            "--oneline",
-        ])
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).lines().count())
+        ],
+        GIT_METADATA_OUTPUT_LIMIT,
+        "git history count",
+    )
+    .ok()?;
+    String::from_utf8(out).ok()?.trim().parse().ok()
 }
 
 fn git_config(root: &Path, key: &str) -> Option<String> {
-    let out = repository_git_command()
-        .arg("-C")
-        .arg(root)
-        .args(["config", key])
-        .output()
-        .ok()?;
-    let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (out.status.success() && !v.is_empty()).then_some(v)
+    let out = run_profile_git(
+        root,
+        &["config", "--get", key],
+        GIT_METADATA_OUTPUT_LIMIT,
+        "git config",
+    )
+    .ok()?;
+    let value = String::from_utf8(out).ok()?.trim().to_string();
+    (!value.is_empty()).then_some(value)
 }
 
 /// Default author filter: `user.name` (matches every email the person commits
@@ -644,53 +657,100 @@ fn resolve_git_author(root: &Path) -> Result<String, Box<dyn std::error::Error>>
         })
 }
 
-/// Count the author's commits, the date span, and the distinct identities
+/// Count the author's commits, record the latest mine point, and collect the distinct identities
 /// (emails) the filter matched — over the *full* history.
 fn collect_provenance(root: &Path, author: &str) -> Result<Provenance, Box<dyn std::error::Error>> {
-    let out = repository_git_command()
-        .arg("-C")
-        .arg(root)
-        .args([
-            "log",
+    let author = format!("--author={author}");
+    let total = run_profile_git(
+        root,
+        &[
+            "rev-list",
+            "--count",
             "--no-merges",
             "--fixed-strings",
-            &format!("--author={author}"),
-            // author date (ISO) · email · full SHA, US-separated
+            &author,
+            "HEAD",
+        ],
+        GIT_METADATA_OUTPUT_LIMIT,
+        "git provenance count",
+    )?;
+    let total = String::from_utf8(total)?.trim().parse::<usize>()?;
+    if total == 0 {
+        return Ok(Provenance {
+            identities: Vec::new(),
+            commits_total: 0,
+            commits_sampled: 0,
+            added_lines_sampled: 0,
+            latest_date: None,
+            latest_sha: None,
+        });
+    }
+
+    let latest = run_profile_git(
+        root,
+        &[
+            "log",
+            "-1",
+            "--no-merges",
+            "--fixed-strings",
+            &author,
             "--pretty=format:%aI%x1f%ae%x1f%H",
-        ])
-        .output()?;
-    if !out.status.success() {
-        return Err(format!(
-            "git log failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )
-        .into());
+        ],
+        GIT_METADATA_OUTPUT_LIMIT,
+        "git latest provenance",
+    )?;
+    let latest = String::from_utf8(latest)?;
+    let mut parts = latest.trim().splitn(3, '\u{1f}');
+    let date = parts.next().unwrap_or("").trim();
+    let latest_email = parts.next().unwrap_or("").trim();
+    let sha = parts.next().unwrap_or("").trim();
+    if date.is_empty() || sha.is_empty() {
+        return Err("git latest provenance returned malformed output".into());
     }
-    // git log is newest-first: first line = latest, last line = earliest.
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let mut dates: Vec<String> = Vec::new();
-    let mut shas: Vec<String> = Vec::new();
-    let mut identities: Vec<String> = Vec::new();
-    for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
-        let mut parts = line.splitn(3, '\u{1f}');
-        let date = parts.next().unwrap_or("").trim();
-        let email = parts.next().unwrap_or("").trim();
-        let sha = parts.next().unwrap_or("").trim();
-        dates.push(date_only(date).to_string());
-        shas.push(sha.to_string());
-        if !email.is_empty() && !identities.iter().any(|e| e == email) {
-            identities.push(email.to_string());
-        }
+
+    let shortlog = run_profile_git(
+        root,
+        &[
+            "shortlog",
+            "-sne",
+            "--no-merges",
+            "--fixed-strings",
+            &author,
+            "HEAD",
+        ],
+        GIT_METADATA_OUTPUT_LIMIT,
+        "git provenance identities",
+    )?;
+    let mut identities = parse_shortlog_identities(&String::from_utf8(shortlog)?)?;
+    if !latest_email.is_empty() && !identities.iter().any(|email| email == latest_email) {
+        identities.push(latest_email.to_string());
+        identities.sort();
     }
-    let total = dates.len();
     Ok(Provenance {
         identities,
         commits_total: total,
         commits_sampled: total.min(COMMIT_SAMPLE_CAP),
         added_lines_sampled: 0, // filled by the caller once diffs are parsed
-        latest_date: dates.first().cloned(),
-        latest_sha: shas.first().filter(|s| !s.is_empty()).cloned(),
+        latest_date: Some(date_only(date).to_string()),
+        latest_sha: Some(sha.to_string()),
     })
+}
+
+fn parse_shortlog_identities(raw: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let mut identities = Vec::new();
+    for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+        let email = line
+            .rsplit_once('<')
+            .and_then(|(_, email)| email.strip_suffix('>'))
+            .map(str::trim)
+            .filter(|email| !email.is_empty())
+            .ok_or("git shortlog returned malformed identity output")?;
+        if !identities.iter().any(|stored| stored == email) {
+            identities.push(email.to_string());
+        }
+    }
+    identities.sort();
+    Ok(identities)
 }
 
 /// `git log -p` for the author's most recent `cap` commits, zero context so the
@@ -699,31 +759,42 @@ fn git_log_patch(
     root: &Path,
     author: &str,
     cap: usize,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let out = repository_git_command()
-        .arg("-C")
-        .arg(root)
-        .args([
-            "log",
-            "--no-merges",
-            "--fixed-strings",
-            &format!("--author={author}"),
-            "-p",
-            "--unified=0",
-            "-M", // follow renames; don't count moved code as authored
-            &format!("-n{cap}"),
-            "--no-color",
-            "--pretty=format:", // suppress commit headers — we only want diffs
-        ])
-        .output()?;
-    if !out.status.success() {
-        return Err(format!(
-            "git log -p failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )
-        .into());
+) -> Result<(String, usize), Box<dyn std::error::Error>> {
+    if cap == 0 {
+        return Ok((String::new(), 0));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    let author = format!("--author={author}");
+    let mut sampled = cap;
+    loop {
+        let count = format!("-n{sampled}");
+        let out = run_bounded_git_with_limit(
+            root,
+            &[
+                "log",
+                "--no-merges",
+                "--fixed-strings",
+                &author,
+                "-p",
+                "--unified=0",
+                "-M", // follow renames; don't count moved code as authored
+                &count,
+                "--no-color",
+                "--pretty=format:", // suppress commit headers — we only want diffs
+            ],
+            None,
+            GIT_SAMPLE_OUTPUT_LIMIT,
+        );
+        match out {
+            Ok(out) if out.success => {
+                return Ok((String::from_utf8_lossy(&out.stdout).into_owned(), sampled));
+            }
+            Ok(_) => return Err("git log -p exited unsuccessfully".into()),
+            Err(WorkingTreeDiffError::GitOutputLimit) if sampled > 1 => {
+                sampled = sampled.div_ceil(2);
+            }
+            Err(error) => return Err(format!("git log -p failed: {error}").into()),
+        }
+    }
 }
 
 fn date_only(iso: &str) -> &str {
@@ -742,27 +813,23 @@ fn collect_commits(
     author: &str,
     cap: usize,
 ) -> Result<Vec<Commit>, Box<dyn std::error::Error>> {
-    let out = repository_git_command()
-        .arg("-C")
-        .arg(root)
-        .args([
+    let author = format!("--author={author}");
+    let count = format!("-n{cap}");
+    let out = run_profile_git(
+        root,
+        &[
             "log",
             "--no-merges",
             "--fixed-strings",
-            &format!("--author={author}"),
-            &format!("-n{cap}"),
+            &author,
+            &count,
             // RS (1e) between commits, US (1f) between subject and body.
             "--pretty=format:%x1e%s%x1f%b",
-        ])
-        .output()?;
-    if !out.status.success() {
-        return Err(format!(
-            "git log (commits) failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )
-        .into());
-    }
-    Ok(parse_commits(&String::from_utf8_lossy(&out.stdout)))
+        ],
+        GIT_SAMPLE_OUTPUT_LIMIT,
+        "git commit sample",
+    )?;
+    Ok(parse_commits(&String::from_utf8_lossy(&out)))
 }
 
 fn parse_commits(raw: &str) -> Vec<Commit> {
@@ -1781,7 +1848,8 @@ mod tests {
         let provenance = collect_provenance(&root, "A. User").unwrap();
         assert_eq!(provenance.commits_total, 1);
         assert_eq!(provenance.identities, vec!["author@example.test"]);
-        let patch = git_log_patch(&root, "A. User", COMMIT_SAMPLE_CAP).unwrap();
+        let (patch, sampled) = git_log_patch(&root, "A. User", 1).unwrap();
+        assert_eq!(sampled, 1);
         assert!(patch.contains("let sample_0"));
         assert!(!patch.contains("OTHER_AUTHOR_SENTINEL"));
         let commits = collect_commits(&root, "A. User", COMMIT_SAMPLE_CAP).unwrap();
@@ -1906,6 +1974,7 @@ mod tests {
             );
             assert!(git_log_patch(&second, "Second Alias", 400)
                 .unwrap()
+                .0
                 .contains("SECOND_REPOSITORY_SENTINEL"));
             assert_eq!(
                 collect_commits(&second, "Second Alias", 400).unwrap().len(),
@@ -2625,6 +2694,16 @@ diff --git a/app/bar.ts b/app/bar.ts
         assert_eq!(c[0].body, "body line");
         assert_eq!(c[1].subject, "fix: b");
         assert!(c[1].body.is_empty());
+    }
+
+    #[test]
+    fn shortlog_identity_parser_deduplicates_and_rejects_partial_evidence() {
+        let identities = parse_shortlog_identities(
+            "  3\tAlias <z@example.test>\n  1\tOther <a@example.test>\n  2\tAlias <z@example.test>\n",
+        )
+        .unwrap();
+        assert_eq!(identities, vec!["a@example.test", "z@example.test"]);
+        assert!(parse_shortlog_identities("1\tmissing-email").is_err());
     }
 
     // Golden corpus: a fixed multi-language fixture must yield a stable, specific

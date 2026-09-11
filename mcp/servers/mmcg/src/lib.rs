@@ -42,6 +42,7 @@ pub mod spec;
 mod spec_removals;
 mod spec_symbols;
 pub mod store;
+pub mod task_scaffold;
 pub mod team;
 pub mod temporal;
 mod test_scan;

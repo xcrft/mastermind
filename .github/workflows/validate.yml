@@ -43,7 +43,7 @@ jobs:
         run: python -m evals.benchmark_corpus --source-repo .
 
       - name: Test document evidence snapshots
-        run: python scripts/test_document_graph.py
+        run: python scripts/test_document_graph.py -v
 
       - name: Run audit workflow security fixtures
         run: python scripts/test_audit_workflow_security.py

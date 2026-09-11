@@ -424,6 +424,37 @@ impl Drop for WorkBudgetScope<'_> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static LENS_FINAL_SNAPSHOT_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+struct LensFinalSnapshotTestHookGuard;
+
+#[cfg(test)]
+impl Drop for LensFinalSnapshotTestHookGuard {
+    fn drop(&mut self) {
+        LENS_FINAL_SNAPSHOT_TEST_HOOK.with(|hook| hook.borrow_mut().take());
+    }
+}
+
+#[cfg(test)]
+fn install_lens_final_snapshot_test_hook(
+    hook: impl FnOnce() + 'static,
+) -> LensFinalSnapshotTestHookGuard {
+    LENS_FINAL_SNAPSHOT_TEST_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    LensFinalSnapshotTestHookGuard
+}
+
+#[cfg(test)]
+fn run_lens_final_snapshot_test_hook() {
+    if let Some(hook) = LENS_FINAL_SNAPSHOT_TEST_HOOK.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
+}
+
 pub fn build_snapshot(
     store: &Store,
     root: &Path,
@@ -635,6 +666,39 @@ fn remaining_work_budget(deadline: Option<Instant>) -> WorkBudget {
         },
         None => WorkBudget::UNLIMITED,
     }
+}
+
+fn validate_document_graph_snapshot(
+    store: &Store,
+    root: &Path,
+    path: &Path,
+    expected: &crate::document_graph::DocumentGraphCheck,
+    deadline: Option<Instant>,
+) -> Result<(), LensError> {
+    let interrupted = || store.work_interrupted();
+    let observed = crate::document_graph::check(
+        root,
+        path,
+        crate::bounded_fs::ReadControl {
+            deadline,
+            interrupted: Some(&interrupted),
+        },
+    )
+    .map_err(|error| {
+        if matches!(error.code(), "deadline_exceeded" | "interrupted") {
+            LensError::DocumentGraph(error)
+        } else {
+            LensError::ImpactUnavailable(ChangeImpactError::SnapshotChanged)
+        }
+    })?;
+    let expected = serde_json::to_vec(expected).map_err(|_| LensError::Serialization)?;
+    let observed = serde_json::to_vec(&observed).map_err(|_| LensError::Serialization)?;
+    if observed != expected {
+        return Err(LensError::ImpactUnavailable(
+            ChangeImpactError::SnapshotChanged,
+        ));
+    }
+    Ok(())
 }
 
 /// Fail-closed freshness proof shared by read-only architecture consumers.
@@ -1143,6 +1207,8 @@ fn build_snapshot_until(
     let root = root
         .canonicalize()
         .map_err(|_| LensError::RootUnavailable)?;
+    let root_capability =
+        crate::bounded_fs::RootCapability::open(&root).map_err(|_| LensError::RootUnavailable)?;
     let exhausted = store.push_work_budget(remaining_work_budget(deadline));
     let _budget_scope = WorkBudgetScope(store);
     if exhausted {
@@ -1453,6 +1519,17 @@ fn build_snapshot_until(
             .map_err(LensError::DocumentGraph)
         })
         .transpose()?;
+
+    #[cfg(test)]
+    run_lens_final_snapshot_test_hook();
+    if let (Some(path), Some(expected)) = (document_graph_path, document_graph.as_ref()) {
+        validate_document_graph_snapshot(store, &root, path, expected, deadline)?;
+    }
+    queries::validate_change_impact_snapshot(store, &root, &impact, deadline)
+        .map_err(LensError::ImpactUnavailable)?;
+    root_capability
+        .verify()
+        .map_err(|_| LensError::ImpactUnavailable(ChangeImpactError::SnapshotChanged))?;
 
     if store
         .data_version()
@@ -2136,6 +2213,27 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_rejects_a_worktree_change_after_late_analysis() {
+        let (repo, _index_dir, index_path) = fixture();
+        let store = Store::open_read_only(&index_path).unwrap();
+        let changed = repo.path().join("src/lib.rs");
+        let _hook = install_lens_final_snapshot_test_hook(move || {
+            fs::write(
+                changed,
+                "pub fn seed() -> i32 { 3 }\npub fn caller() -> i32 { seed() }\n",
+            )
+            .unwrap();
+        });
+
+        let error = build_snapshot(&store, repo.path(), &options()).unwrap_err();
+
+        assert!(matches!(
+            error,
+            LensError::ImpactUnavailable(ChangeImpactError::SnapshotChanged)
+        ));
+    }
+
+    #[test]
     fn snapshot_live_checks_only_an_explicit_document_graph() {
         let (repo, _index_dir, index_path) = fixture();
         let graph = crate::document_graph::test_support::write_snapshot(repo.path(), true);
@@ -2181,6 +2279,41 @@ mod tests {
             changed["document_graph"]["changed_files"][0]["path"],
             "docs/adr/0001.md"
         );
+    }
+
+    #[test]
+    fn snapshot_rejects_late_drift_in_an_ignored_document_graph_endpoint() {
+        let (repo, _index_dir, index_path) = fixture();
+        fs::write(
+            repo.path().join(".git/info/exclude"),
+            ".mastermind/research/\ndocs/adr/\nsrc/handler.rs\n",
+        )
+        .unwrap();
+        let graph = crate::document_graph::test_support::write_snapshot(repo.path(), true);
+        let mut store = Store::open(&index_path).unwrap();
+        Indexer::new(repo.path())
+            .index_all(&mut store, false)
+            .unwrap();
+        drop(store);
+        let endpoint = repo.path().join("src/handler.rs");
+        let _hook = install_lens_final_snapshot_test_hook(move || {
+            fs::write(endpoint, "fn changed() {\n}\n").unwrap();
+        });
+
+        let error = snapshot_from_paths_with_document_graph(
+            repo.path(),
+            &index_path,
+            &options(),
+            &crate::evidence::EvidenceOptions::default(),
+            &crate::evidence::EvidenceExtensionOptions::default(),
+            Some(&graph),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            LensError::ImpactUnavailable(ChangeImpactError::SnapshotChanged)
+        ));
     }
 
     #[test]

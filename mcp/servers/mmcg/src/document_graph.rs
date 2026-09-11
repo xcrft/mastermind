@@ -1469,9 +1469,9 @@ mod tests {
     fn observation_digest_binds_changed_bytes_even_when_status_is_unchanged() {
         let (root, graph) = fixture(false);
         let endpoint = root.path().join("src/handler.rs");
-        std::fs::write(&endpoint, "fn changed_a() {}\n").unwrap();
+        std::fs::write(&endpoint, "fn changed_a() {\n}\n").unwrap();
         let first = check(root.path(), &graph, ReadControl::default()).unwrap();
-        std::fs::write(&endpoint, "fn changed_b() {}\n").unwrap();
+        std::fs::write(&endpoint, "fn changed_b() {\n}\n").unwrap();
         let second = check(root.path(), &graph, ReadControl::default()).unwrap();
 
         assert_eq!(first.status, "needs_review");

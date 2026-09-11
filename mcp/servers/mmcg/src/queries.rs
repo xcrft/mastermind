@@ -759,6 +759,10 @@ pub struct ChangeImpactResponse {
     pub(crate) snapshot_token: String,
     #[serde(skip)]
     pub(crate) checked_snapshot: Option<CheckedSnapshotToken>,
+    #[serde(skip)]
+    pub(crate) worktree_files_truncated: bool,
+    #[serde(skip)]
+    pub(crate) skipped_non_utf8_paths: u32,
     pub baseline: ImpactBaseline,
     pub scope: ImpactScope,
     pub changes: ImpactChanges,
@@ -1575,6 +1579,51 @@ fn validate_checked_snapshot(
     Ok(())
 }
 
+/// Revalidate every mutable source behind a previously built impact response.
+/// The changed-file projection may be intentionally partial, so its original
+/// cap and non-UTF-8 omission state are part of the comparison.
+pub(crate) fn validate_change_impact_snapshot(
+    store: &Store,
+    requested_root: &Path,
+    impact: &ChangeImpactResponse,
+    deadline: Option<std::time::Instant>,
+) -> Result<(), ChangeImpactError> {
+    let repository_root =
+        owning_repository(requested_root).ok_or(ChangeImpactError::RootMismatch)?;
+    let root_capability = crate::bounded_fs::RootCapability::open(&repository_root)
+        .map_err(|_| ChangeImpactError::SnapshotChanged)?;
+    let checked = impact
+        .checked_snapshot
+        .as_ref()
+        .ok_or(ChangeImpactError::SnapshotChanged)?;
+    let expected_files = impact
+        .changes
+        .files
+        .items
+        .iter()
+        .map(|file| crate::diff::WorkingTreeChangedFile {
+            path: file.path.clone(),
+            status: file.status.clone(),
+        })
+        .collect::<Vec<_>>();
+    let interrupted = || store.work_interrupted();
+    crate::diff::validate_working_tree_projection_controlled(
+        &repository_root,
+        &impact.baseline.baseline_oid,
+        &impact.baseline.head_oid,
+        &expected_files,
+        impact.worktree_files_truncated,
+        impact.skipped_non_utf8_paths,
+        &impact.snapshot_token,
+        deadline,
+        Some(&interrupted),
+    )?;
+    validate_checked_snapshot(store, &repository_root, checked, &impact.snapshot_token)?;
+    root_capability
+        .verify()
+        .map_err(|_| ChangeImpactError::SnapshotChanged)
+}
+
 impl From<crate::diff::WorkingTreeDiffError> for ChangeImpactError {
     fn from(error: crate::diff::WorkingTreeDiffError) -> Self {
         match error {
@@ -2269,11 +2318,13 @@ pub fn change_impact(
     }
     #[cfg(test)]
     run_impact_test_hook(ImpactTestStage::BeforeGitSnapshotRecheck);
-    crate::diff::validate_working_tree_snapshot_controlled(
+    crate::diff::validate_working_tree_projection_controlled(
         &repository_root,
         &working.baseline_oid,
         &working.head_oid,
         &working.files,
+        working.files_truncated,
+        working.skipped_non_utf8_paths,
         &working.snapshot_token,
         store.request_deadline(),
         Some(&interrupted),
@@ -2288,6 +2339,12 @@ pub fn change_impact(
         .verify()
         .map_err(|_| ChangeImpactError::SnapshotChanged)?;
 
+    if working.skipped_non_utf8_paths > 0 {
+        precision_notes.push(format!(
+            "non_utf8_changed_paths_skipped:{}",
+            working.skipped_non_utf8_paths
+        ));
+    }
     precision_notes.sort();
     precision_notes.dedup();
     let files = working
@@ -2299,11 +2356,19 @@ pub fn change_impact(
         })
         .collect::<Vec<_>>();
     let disciplines = classify_disciplines(&files);
+    let files_partial = working.files_truncated || working.skipped_non_utf8_paths > 0;
     let files_collection = Collection {
         total: working.files_total,
         returned: files.len() as u32,
-        truncated: working.files_truncated,
-        truncation_reason: working.files_truncated.then(|| "file_limit".to_string()),
+        truncated: files_partial,
+        truncation_reason: files_partial.then(|| {
+            if working.files_truncated {
+                "file_limit"
+            } else {
+                "non_utf8_path"
+            }
+            .to_string()
+        }),
         items: files,
     };
     let impact_collection = if graph_overflow {
@@ -2325,6 +2390,8 @@ pub fn change_impact(
     };
     Ok(ChangeImpactResponse {
         schema_version: 1,
+        worktree_files_truncated: working.files_truncated,
+        skipped_non_utf8_paths: working.skipped_non_utf8_paths,
         snapshot_token: working.snapshot_token,
         checked_snapshot: Some(checked_snapshot),
         baseline: ImpactBaseline {
@@ -2825,30 +2892,9 @@ pub fn brief(
         };
     }
 
-    let expected_files = impact
-        .changes
-        .files
-        .items
-        .iter()
-        .map(|file| crate::diff::WorkingTreeChangedFile {
-            path: file.path.clone(),
-            status: file.status.clone(),
-        })
-        .collect::<Vec<_>>();
     #[cfg(test)]
     run_brief_test_hook();
-    let interrupted = || store.work_interrupted();
-    crate::diff::validate_working_tree_snapshot_controlled(
-        &repository_root,
-        &impact.baseline.baseline_oid,
-        &impact.baseline.head_oid,
-        &expected_files,
-        &impact.snapshot_token,
-        store.request_deadline(),
-        Some(&interrupted),
-    )
-    .map_err(ChangeImpactError::from)?;
-    validate_checked_snapshot(store, &repository_root, &checked, &impact.snapshot_token)?;
+    validate_change_impact_snapshot(store, &repository_root, &impact, store.request_deadline())?;
     root_capability
         .verify()
         .map_err(|_| BriefError::SnapshotChanged)?;
@@ -7247,6 +7293,36 @@ fn checks_value() { assert_eq!(value(), 1); }
             change_impact(&store, &root, "HEAD", 3, 100).unwrap_err(),
             ChangeImpactError::SnapshotChanged
         );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn change_impact_marks_non_utf8_changed_paths_as_partial() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = impact_repo(
+            "non_utf8_changed_path",
+            &[("src/app.py", "def value():\n    return 1\n")],
+        );
+        write_impact_file(&root, "src/app.py", "def value():\n    return 2\n");
+        let store = index_impact(&root, "non_utf8_changed_path");
+        let invalid_name = OsString::from_vec(b"untracked-\xff.bin".to_vec());
+        std::fs::write(root.join(invalid_name), b"unrepresented").unwrap();
+
+        let response = change_impact(&store, &root, "HEAD", 3, 100).unwrap();
+
+        assert_eq!(response.changes.files.total, Some(2));
+        assert_eq!(response.changes.files.returned, 1);
+        assert!(response.changes.files.truncated);
+        assert_eq!(
+            response.changes.files.truncation_reason.as_deref(),
+            Some("non_utf8_path")
+        );
+        assert!(response
+            .precision_notes
+            .contains(&"non_utf8_changed_paths_skipped:1".to_string()));
         std::fs::remove_dir_all(root).ok();
     }
 

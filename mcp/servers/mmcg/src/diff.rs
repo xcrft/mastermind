@@ -1064,7 +1064,7 @@ fn bounded_reader<R: Read + Send + 'static>(
     receiver
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn run_bounded_git(
     repo: &Path,
     args: &[&str],
@@ -1455,31 +1455,12 @@ fn is_mastermind_runtime_artifact(path: &[u8]) -> bool {
     )
 }
 
-#[allow(dead_code)]
-fn baseline_blobs(
-    repo: &Path,
-    baseline_oid: &str,
-    files: &[WorkingTreeChangedFile],
-) -> Result<BTreeMap<String, Option<Vec<u8>>>, WorkingTreeDiffError> {
-    let paths = files
-        .iter()
-        .filter(|file| extractor_for_path(Path::new(&file.path)).is_some())
-        .map(|file| file.path.clone())
-        .collect::<Vec<_>>();
-    let mut blobs = files
-        .iter()
-        .map(|file| (file.path.clone(), None))
-        .collect::<BTreeMap<_, _>>();
-    blobs.extend(baseline_blobs_for_paths(repo, baseline_oid, &paths)?);
-    Ok(blobs)
-}
-
 /// Fetch a bounded set of blobs from one resolved baseline commit. Requests
 /// are split across bounded `git cat-file --batch` processes so the aggregate
 /// size of a large diff cannot trip the per-process output limit. Missing
 /// paths are returned as `None`, which is how temporal rewind represents files
 /// added after the baseline.
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn baseline_blobs_for_paths(
     repo: &Path,
     baseline_oid: &str,
@@ -1829,15 +1810,6 @@ pub(crate) fn validate_working_tree_projection_controlled(
         return Err(WorkingTreeDiffError::SnapshotChanged);
     }
     Ok(())
-}
-
-#[allow(dead_code)]
-pub(crate) fn working_tree_snapshot_token(
-    repo: &Path,
-    head_oid: &str,
-    files: &[WorkingTreeChangedFile],
-) -> Result<String, WorkingTreeDiffError> {
-    working_tree_snapshot_token_controlled(repo, head_oid, files, None, None)
 }
 
 fn working_tree_snapshot_token_controlled(

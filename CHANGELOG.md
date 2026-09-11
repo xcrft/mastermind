@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Style mining now snapshots `style.md` through a bounded, no-follow capability
+  before changing the aggregate store and publishes it with a conditional
+  durable rename. Invalid, oversized, linked, or special profiles fail closed,
+  and a concurrent manual edit is preserved instead of silently overwritten.
 - `context doctor` now bounds and revalidates `CONTEXT.md`, lesson, task-state,
   and task-inventory reads. Invalid UTF-8, special files, links, oversized
   inputs, and inventory failures are reported fail-closed instead of hanging or

@@ -18,6 +18,7 @@
 //!   alone. Re-mining is user-invoked — there is no silent online update.
 
 use super::store::{self, Counts};
+use crate::bounded_fs::{AtomicWriteExpectation, BoundedReadError, ReadControl, RootCapability};
 use crate::diff::repository_git_command;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -31,6 +32,7 @@ const COMMIT_SAMPLE_CAP: usize = 400;
 
 const MIN_SAMPLES: usize = 20;
 const PROFILE_SCHEMA_MARKER: &str = "<!-- mastermind-style:schema:2 -->";
+const MAX_STYLE_PROFILE_SIZE: u64 = crate::indexer::MAX_HISTORY_ARTIFACT_SIZE;
 
 /// `doctor` nudges to re-mine once the author has this many new commits since.
 const STALE_COMMITS: usize = 25;
@@ -98,6 +100,11 @@ fn mine_to_paths(
     let mut counts = Counts::new();
     accumulate(&lines, &commit_msgs, &mut counts);
 
+    // Validate and snapshot the hand-edited output before changing the aggregate.
+    // The final conditional rename refuses to erase an edit made during mining.
+    let (profile_root, profile_target) = prepare_profile_target(path)?;
+    let existing = read_existing_profile(&profile_root, &profile_target, force)?;
+
     // Accumulate into the user-global store, then render from the aggregate.
     let mut db = store::ProfileStore::open(db_path)?;
     if !force {
@@ -144,11 +151,10 @@ fn mine_to_paths(
 
     // `--force` is a full owner/profile replacement, so carrying manual or
     // interpreted prose from the previous owner would be cross-person leakage.
-    let existing = read_existing_profile(path, force);
-    let manual = existing.as_deref().and_then(extract_manual);
+    let manual = existing.body.as_deref().and_then(extract_manual);
     let synthesized = generated_interpreted.is_some();
     let interpreted =
-        generated_interpreted.or_else(|| existing.as_deref().and_then(extract_interpreted));
+        generated_interpreted.or_else(|| existing.body.as_deref().and_then(extract_interpreted));
     let markdown = render_profile(
         &author,
         &agg,
@@ -156,10 +162,20 @@ fn mine_to_paths(
         interpreted.as_deref(),
         manual.as_deref(),
     );
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    if markdown.len() as u64 > MAX_STYLE_PROFILE_SIZE {
+        return Err(format!(
+            "rendered style profile has {} bytes, limit is {MAX_STYLE_PROFILE_SIZE}",
+            markdown.len()
+        )
+        .into());
     }
-    std::fs::write(path, &markdown)?;
+    crate::bounded_fs::write_atomic_regular_file_expected_with_capability(
+        &profile_root,
+        &profile_target,
+        markdown.as_bytes(),
+        true,
+        existing.expectation,
+    )?;
 
     Ok(SeedOutcome::Enriched {
         repo_commits: prov.commits_total as i64,
@@ -1343,10 +1359,83 @@ fn extract_manual(text: &str) -> Option<String> {
     Some(text[start..end].trim_matches('\n').to_string())
 }
 
-fn read_existing_profile(path: &Path, replace: bool) -> Option<String> {
-    (!replace)
-        .then(|| std::fs::read_to_string(path).ok())
-        .flatten()
+struct ExistingProfile {
+    body: Option<String>,
+    expectation: AtomicWriteExpectation,
+}
+
+/// Retain one existing ancestor as the authority for parent creation, the
+/// profile snapshot, and the final rename. A linked or non-directory parent is
+/// never accepted as the profile's storage boundary.
+fn prepare_profile_target(path: &Path) -> Result<(RootCapability, PathBuf), BoundedReadError> {
+    let target = std::path::absolute(path).map_err(BoundedReadError::Io)?;
+    if target.file_name().is_none() {
+        return Err(BoundedReadError::InvalidPath);
+    }
+    let parent = target.parent().ok_or(BoundedReadError::InvalidPath)?;
+    let mut anchor = parent;
+    loop {
+        match std::fs::symlink_metadata(anchor) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+                    return Err(BoundedReadError::NotRegular);
+                }
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                anchor = anchor.parent().ok_or(BoundedReadError::InvalidPath)?;
+            }
+            Err(error) => return Err(BoundedReadError::Io(error)),
+        }
+    }
+
+    let root = RootCapability::open(anchor)?;
+    if anchor != parent {
+        root.ensure_directory(parent)?;
+    }
+    Ok((root, target))
+}
+
+fn read_existing_profile(
+    root: &RootCapability,
+    path: &Path,
+    replace: bool,
+) -> Result<ExistingProfile, Box<dyn std::error::Error>> {
+    match crate::bounded_fs::read_regular_file_with_capability(
+        root,
+        path,
+        MAX_STYLE_PROFILE_SIZE,
+        if replace { 0 } else { MAX_STYLE_PROFILE_SIZE },
+        ReadControl::default(),
+    ) {
+        Ok(file) => {
+            let identity = file.identity;
+            let body = if replace {
+                None
+            } else {
+                Some(String::from_utf8(file.bytes).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "style profile is not valid UTF-8",
+                    )
+                })?)
+            };
+            Ok(ExistingProfile {
+                body,
+                expectation: AtomicWriteExpectation::File(identity),
+            })
+        }
+        Err(BoundedReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            let missing =
+                crate::bounded_fs::inspect_absent_path(root, path, ReadControl::default())?
+                    .ok_or(BoundedReadError::SnapshotChanged)?;
+            Ok(ExistingProfile {
+                body: None,
+                expectation: AtomicWriteExpectation::Missing(missing),
+            })
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Preserve the qualitative portrait across deterministic re-mines. Both the
@@ -2076,8 +2165,79 @@ diff --git a/app/bar.ts b/app/bar.ts
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("style.md");
         std::fs::write(&path, "previous owner's portrait").unwrap();
-        assert!(read_existing_profile(&path, false).is_some());
-        assert!(read_existing_profile(&path, true).is_none());
+        let (root, path) = prepare_profile_target(&path).unwrap();
+        assert!(read_existing_profile(&root, &path, false)
+            .unwrap()
+            .body
+            .is_some());
+        assert!(read_existing_profile(&root, &path, true)
+            .unwrap()
+            .body
+            .is_none());
+    }
+
+    #[test]
+    fn profile_snapshot_preserves_a_concurrent_manual_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("style.md");
+        std::fs::write(&path, "observed profile").unwrap();
+        let (root, path) = prepare_profile_target(&path).unwrap();
+        let snapshot = read_existing_profile(&root, &path, false).unwrap();
+        std::fs::write(&path, "manual edit during mining").unwrap();
+
+        let error = crate::bounded_fs::write_atomic_regular_file_expected_with_capability(
+            &root,
+            &path,
+            b"stale generated profile",
+            true,
+            snapshot.expectation,
+        )
+        .expect_err("a concurrent edit must win");
+        assert!(matches!(error, BoundedReadError::SnapshotChanged));
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "manual edit during mining"
+        );
+    }
+
+    #[test]
+    fn profile_target_creates_missing_parents_under_one_capability() {
+        let dir = tempfile::tempdir().unwrap();
+        let requested = dir.path().join("nested/profile/style.md");
+        let (root, path) = prepare_profile_target(&requested).unwrap();
+        let snapshot = read_existing_profile(&root, &path, false).unwrap();
+        crate::bounded_fs::write_atomic_regular_file_expected_with_capability(
+            &root,
+            &path,
+            b"profile",
+            true,
+            snapshot.expectation,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"profile");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mine_rejects_a_linked_profile_before_creating_the_store() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        fixture_repository(&repo, "Alice");
+        let victim = dir.path().join("victim.md");
+        std::fs::write(&victim, "manual profile").unwrap();
+        let profile = dir.path().join("style.md");
+        symlink(&victim, &profile).unwrap();
+        let db = dir.path().join("style.db");
+
+        let error = match mine_to_paths(&repo, None, false, false, &db, &profile) {
+            Err(error) => error,
+            Ok(_) => panic!("linked profile must be rejected"),
+        };
+        assert!(error.to_string().contains("regular no-follow"));
+        assert!(!db.exists());
+        assert_eq!(std::fs::read_to_string(victim).unwrap(), "manual profile");
     }
 
     #[test]

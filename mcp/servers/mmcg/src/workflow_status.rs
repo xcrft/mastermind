@@ -4709,6 +4709,20 @@ fn detect_phase(
 mod tests {
     use super::*;
     use std::fs;
+    use std::process::Command;
+
+    fn init_git_repository(root: &Path) {
+        let output = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     fn source_fixture() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
@@ -6031,6 +6045,7 @@ mod tests {
                 .as_nanos()
         ));
         fs::create_dir_all(&root).unwrap();
+        init_git_repository(&root);
         let db = root.join("mmcg.db");
         let source = root.join("src/lib.rs");
         fs::create_dir_all(source.parent().unwrap()).unwrap();
@@ -6074,6 +6089,7 @@ mod tests {
         ));
         let source = root.join("src/lib.rs");
         fs::create_dir_all(source.parent().unwrap()).unwrap();
+        init_git_repository(&root);
         fs::write(&source, b"fn current() {}\n").unwrap();
         let mtime = source
             .metadata()
@@ -6116,6 +6132,7 @@ mod tests {
                 .as_nanos()
         ));
         fs::create_dir_all(root.join(".mastermind")).unwrap();
+        init_git_repository(&root);
         fs::write(root.join("lib.rs"), "pub fn current() {}\n").unwrap();
         let db = root.join(".mastermind/mmcg.db");
         let mut store = crate::store::Store::open(&db).unwrap();

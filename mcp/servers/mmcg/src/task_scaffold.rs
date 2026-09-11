@@ -1,14 +1,23 @@
 //! Race-safe allocation of canonical `.mastermind/tasks/<id>-<slug>/spec.md` files.
 
 use crate::bounded_fs::{
-    create_regular_file_with_capability, inspect_absent_path,
+    create_regular_file_with_capability, inspect_absent_path, inspect_path_kind_with_capability,
     open_locked_regular_file_with_capability, read_directory_names_with_capability,
-    read_regular_file_with_capability, BoundedReadError, ReadControl, RootCapability,
+    read_regular_file_with_capability, write_atomic_regular_file_expected_with_capability,
+    AtomicWriteExpectation, BoundedPathKind, BoundedReadError, ReadControl, RootCapability,
 };
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const TASK_ENTRY_LIMIT: usize = 100_000;
+const SCAFFOLD_FILE_LIMIT: u64 = 4 * 1024 * 1024;
+const BACKUP_ATTEMPTS: u32 = 10_000;
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct ScaffoldFileOutcome {
+    pub written: bool,
+    pub backup: Option<PathBuf>,
+}
 
 fn into_io_error(error: BoundedReadError) -> std::io::Error {
     match error {
@@ -51,6 +60,159 @@ fn next_task_number(names: &[std::ffi::OsString]) -> std::io::Result<u32> {
     })
 }
 
+fn create_file_no_clobber(root: &RootCapability, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let (mut file, _) =
+        create_regular_file_with_capability(root, path, false).map_err(into_io_error)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+
+    let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    let observed =
+        read_regular_file_with_capability(root, path, size, size, ReadControl::default())
+            .map_err(into_io_error)?;
+    if observed.bytes == bytes {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(
+            "created file changed while it was being published",
+        ))
+    }
+}
+
+fn create_backup(root: &RootCapability, path: &Path, bytes: &[u8]) -> std::io::Result<PathBuf> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("scaffold");
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "scaffold path has no parent",
+        )
+    })?;
+    for suffix in 0..BACKUP_ATTEMPTS {
+        let name = if suffix == 0 {
+            format!("{file_name}.mastermind-backup")
+        } else {
+            format!("{file_name}.mastermind-backup.{suffix}")
+        };
+        let candidate = parent.join(name);
+        match create_file_no_clobber(root, &candidate, bytes) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!("cannot allocate a backup for {}", path.display()),
+    ))
+}
+
+/// Create a repository directory without following any path component.
+pub fn ensure_repository_directory(repo_root: &Path, path: &Path) -> std::io::Result<bool> {
+    let root = RootCapability::open(repo_root).map_err(into_io_error)?;
+    let missing = inspect_absent_path(&root, path, ReadControl::default())
+        .map_err(into_io_error)?
+        .is_some();
+    root.ensure_directory(path).map_err(into_io_error)?;
+    Ok(missing)
+}
+
+/// Write a generated project file under the shared scaffold lock. Existing
+/// files are preserved unless `force` is set; forced replacements first copy
+/// the exact observed version into a no-clobber backup and then conditionally
+/// replace only that version.
+pub fn write_project_file(
+    repo_root: &Path,
+    path: &Path,
+    contents: &str,
+    force: bool,
+) -> std::io::Result<ScaffoldFileOutcome> {
+    let root = RootCapability::open(repo_root).map_err(into_io_error)?;
+    let mastermind_dir = root.requested_root().join(".mastermind");
+    root.ensure_directory(&mastermind_dir)
+        .map_err(into_io_error)?;
+    let lock_path = mastermind_dir.join(".scaffold.lock");
+    let lock =
+        open_locked_regular_file_with_capability(&root, &lock_path).map_err(into_io_error)?;
+    let result = (|| {
+        if contents.len() as u64 > SCAFFOLD_FILE_LIMIT {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "generated scaffold has {} bytes, limit is {SCAFFOLD_FILE_LIMIT}",
+                    contents.len()
+                ),
+            ));
+        }
+        let relative = root.repository_relative(path).map_err(into_io_error)?;
+        if let Some(parent) = relative
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            root.ensure_directory(&root.requested_root().join(parent))
+                .map_err(into_io_error)?;
+        }
+        let existing = match inspect_path_kind_with_capability(&root, path, ReadControl::default())
+        {
+            Ok(BoundedPathKind::RegularFile) if !force => {
+                return Ok(ScaffoldFileOutcome {
+                    written: false,
+                    backup: None,
+                })
+            }
+            Ok(BoundedPathKind::RegularFile) => Some(
+                read_regular_file_with_capability(
+                    &root,
+                    path,
+                    SCAFFOLD_FILE_LIMIT,
+                    SCAFFOLD_FILE_LIMIT,
+                    ReadControl::default(),
+                )
+                .map_err(into_io_error)?,
+            ),
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("scaffold target is not a regular file: {}", path.display()),
+                ))
+            }
+            Err(BoundedReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                None
+            }
+            Err(error) => return Err(into_io_error(error)),
+        };
+        let Some(existing) = existing else {
+            create_file_no_clobber(&root, path, contents.as_bytes())?;
+            return Ok(ScaffoldFileOutcome {
+                written: true,
+                backup: None,
+            });
+        };
+        let backup = create_backup(&root, path, &existing.bytes)?;
+        write_atomic_regular_file_expected_with_capability(
+            &root,
+            path,
+            contents.as_bytes(),
+            false,
+            AtomicWriteExpectation::File(existing.identity),
+        )
+        .map_err(into_io_error)?;
+        Ok(ScaffoldFileOutcome {
+            written: true,
+            backup: Some(backup),
+        })
+    })();
+    let unlock = lock.unlock();
+    match (result, unlock) {
+        (Err(error), _) => Err(error),
+        (Ok(outcome), Ok(())) => Ok(outcome),
+        (Ok(_), Err(error)) => Err(error),
+    }
+}
+
 /// Allocate one task number while holding the repository's scaffold lock, then
 /// publish its spec through a no-follow `create_new` handle. Concurrent
 /// `new-spec` processes cannot reuse an id or overwrite an existing spec.
@@ -91,25 +253,7 @@ pub fn create_numbered_spec(
 
         let spec_path = task_dir.join("spec.md");
         let body = render(number);
-        let (mut file, _) =
-            create_regular_file_with_capability(&root, &spec_path, false).map_err(into_io_error)?;
-        file.write_all(body.as_bytes())?;
-        file.sync_all()?;
-        drop(file);
-
-        let observed = read_regular_file_with_capability(
-            &root,
-            &spec_path,
-            u64::try_from(body.len()).unwrap_or(u64::MAX),
-            u64::try_from(body.len()).unwrap_or(u64::MAX),
-            ReadControl::default(),
-        )
-        .map_err(into_io_error)?;
-        if observed.bytes != body.as_bytes() {
-            return Err(std::io::Error::other(
-                "task spec changed while it was being created",
-            ));
-        }
+        create_file_no_clobber(&root, &spec_path, body.as_bytes())?;
         Ok(spec_path)
     })();
     let unlock = lock.unlock();
@@ -187,6 +331,60 @@ mod tests {
         assert_eq!(numbers.last().map(String::as_str), Some("008"));
     }
 
+    #[test]
+    fn forced_project_writes_preserve_each_observed_version() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("CONTEXT.md");
+        std::fs::write(&path, "first\n").unwrap();
+
+        let first = write_project_file(root.path(), &path, "second\n", true).unwrap();
+        let second = write_project_file(root.path(), &path, "third\n", true).unwrap();
+
+        assert!(first.written);
+        assert!(second.written);
+        assert_ne!(first.backup, second.backup);
+        assert_eq!(
+            std::fs::read_to_string(first.backup.unwrap()).unwrap(),
+            "first\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(second.backup.unwrap()).unwrap(),
+            "second\n"
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "third\n");
+    }
+
+    #[test]
+    fn non_forced_project_writes_never_replace_existing_content() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("CLAUDE.md");
+        std::fs::write(&path, "owned\n").unwrap();
+
+        let outcome = write_project_file(root.path(), &path, "generated\n", false).unwrap();
+
+        assert!(!outcome.written);
+        assert!(outcome.backup.is_none());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "owned\n");
+    }
+
+    #[test]
+    fn non_forced_project_writes_skip_oversized_existing_files_without_reading() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("CONTEXT.md");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(SCAFFOLD_FILE_LIMIT + 1).unwrap();
+        drop(file);
+
+        let outcome = write_project_file(root.path(), &path, "generated\n", false).unwrap();
+
+        assert!(!outcome.written);
+        assert!(outcome.backup.is_none());
+        assert_eq!(
+            std::fs::metadata(path).unwrap().len(),
+            SCAFFOLD_FILE_LIMIT + 1
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn symlinked_mastermind_directory_cannot_redirect_a_spec() {
@@ -198,5 +396,26 @@ mod tests {
 
         assert!(create_numbered_spec(root.path(), "escaped", |_| "outside\n".into()).is_err());
         assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_writes_do_not_follow_a_symlinked_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.md");
+        std::fs::write(&victim, "outside\n").unwrap();
+        symlink(&victim, root.path().join("CONTEXT.md")).unwrap();
+
+        assert!(write_project_file(
+            root.path(),
+            &root.path().join("CONTEXT.md"),
+            "replacement\n",
+            true,
+        )
+        .is_err());
+        assert_eq!(std::fs::read_to_string(victim).unwrap(), "outside\n");
     }
 }

@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- `init` now serializes scaffold writes, rejects linked parents and targets,
+  preserves forced `CONTEXT.md` and `CLAUDE.md` versions in no-clobber backups.
 - `enrich` now opens only an existing writable codegraph, closing the
   check/open race that could recreate a disappeared index before import.
 - `doctor` now bounds and no-follow reads project `.gitignore` and `CLAUDE.md`

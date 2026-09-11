@@ -54,7 +54,8 @@ const CAT_FILE_RESPONSE_OVERHEAD: usize = 128;
 const BASELINE_BLOB_BATCH_OUTPUT_LIMIT: usize =
     MAX_INDEXABLE_FILE_SIZE as usize + CAT_FILE_RESPONSE_OVERHEAD;
 const BASELINE_BLOB_TOTAL_LIMIT: usize = 64 * 1024 * 1024;
-const GIT_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_GIT_TIMEOUT_MS: u64 = 30_000;
+const MAX_GIT_TIMEOUT_MS: u64 = 300_000;
 /// Must stay a real `sleep`. `park_timeout` returns instantly when the thread
 /// holds an unpark token, and the sibling drain threads talk over `mpsc`, which
 /// parks and unparks this very thread — a stray token turns the wait into a
@@ -335,7 +336,16 @@ pub(crate) fn git_timeout() -> Duration {
     if let Some(timeout) = TEST_GIT_TIMEOUT.with(|value| *value.borrow()) {
         return timeout;
     }
-    GIT_TIMEOUT
+    configured_git_timeout(std::env::var("MMCG_GIT_TIMEOUT_MS").ok().as_deref())
+}
+
+fn configured_git_timeout(value: Option<&str>) -> Duration {
+    let millis = value
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|millis| *millis > 0)
+        .unwrap_or(DEFAULT_GIT_TIMEOUT_MS)
+        .min(MAX_GIT_TIMEOUT_MS);
+    Duration::from_millis(millis)
 }
 
 /// Repository commands select their checkout with `current_dir`; ambient Git
@@ -1928,6 +1938,30 @@ mod tests {
     use std::env;
     use std::fs;
     use std::process::Command;
+
+    #[test]
+    fn git_timeout_configuration_is_bounded() {
+        assert_eq!(
+            configured_git_timeout(None),
+            Duration::from_millis(DEFAULT_GIT_TIMEOUT_MS)
+        );
+        assert_eq!(
+            configured_git_timeout(Some("1250")),
+            Duration::from_millis(1250)
+        );
+        assert_eq!(
+            configured_git_timeout(Some("0")),
+            Duration::from_millis(DEFAULT_GIT_TIMEOUT_MS)
+        );
+        assert_eq!(
+            configured_git_timeout(Some("invalid")),
+            Duration::from_millis(DEFAULT_GIT_TIMEOUT_MS)
+        );
+        assert_eq!(
+            configured_git_timeout(Some("999999")),
+            Duration::from_millis(MAX_GIT_TIMEOUT_MS)
+        );
+    }
 
     #[cfg(unix)]
     struct GitInvocationGuard;

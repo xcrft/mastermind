@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- `MMCG_GIT_TIMEOUT_MS` once again controls the shared bounded Git runner as
+  documented. The default is 30 seconds, values are capped at five minutes,
+  and a shorter request deadline still takes precedence.
 - Claude subprocesses launched by `init`, `run-task --exec`, and deep style
   synthesis now resolve through absolute `PATH` entries and reject executables
   inside the repository, closing repository-local command substitution.

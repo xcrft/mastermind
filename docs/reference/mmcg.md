@@ -1423,7 +1423,7 @@ mmcg serve
 |---|---|---|---|
 | `MMCG_INDEX_PATH` | no | `.mastermind/mmcg.db` (relative to cwd) | Where the SQLite index lives. |
 | `MMCG_QUERY_BUDGET_MS` | no | `10000` for `mmcg serve`; `60000` for `mmcg query`/`mmcg map`/`mmcg impact` | Wall-clock work budget for a single MCP tool call or CLI graph query. `0` = unlimited. See [Work budgets, timeouts, and cancellation](#work-budgets-timeouts-and-cancellation). |
-| `MMCG_GIT_TIMEOUT_MS` | no | `30000` | Deadline for the `git` subprocesses behind `mmcg_symbols_changed_since` / `mmcg query symbols-changed-since`. A stuck `git` is killed and the call fails with a timeout error. |
+| `MMCG_GIT_TIMEOUT_MS` | no | `30000` | Deadline for bounded Git subprocesses used by history, diff, verification, and audit paths; capped at `300000`. A shorter request deadline still wins. A stuck process is killed and the operation fails with a timeout error. |
 | `MMCG_REQUEST_SOFT_TIMEOUT_MS` | no | `30000` | `mmcg serve` only. Wall-clock ceiling after which the watchdog cancels the in-flight request. `0` = no soft ceiling. See [Work budgets, timeouts, and cancellation](#work-budgets-timeouts-and-cancellation). |
 | `MMCG_REQUEST_HARD_TIMEOUT_MS` | no | `300000` | `mmcg serve` only. Wall-clock ceiling after which the watchdog exits the process rather than let it keep burning CPU. `0` = no hard ceiling. |
 | `MMCG_WATCHDOG` | no | unset | Set to `0` to disable the serve watchdog entirely — both ceilings and the reparent check. |
@@ -1474,9 +1474,9 @@ ceiling for code that cannot cooperate.
   still serial, so an unrelated request (even `ping`) sent while a query is
   running still waits — bounded by the work budget, not eliminated by
   cancellation.
-- **Git subprocesses** (`run_git`, `git_show_blob` behind
-  `mmcg_symbols_changed_since`) are killed if they exceed
-  `MMCG_GIT_TIMEOUT_MS` (default 30,000 ms). The per-file diff loop is
+- **Git subprocesses** used by history, diff, verification, and audit paths are
+  killed if they exceed `MMCG_GIT_TIMEOUT_MS` (default 30,000 ms, maximum
+  300,000 ms). A shorter request deadline still wins. The per-file diff loop is
   additionally capped at 10,000 files; beyond that, `truncated: true` marks
   the response as a prefix, not the full diff.
 - **Git refs** are non-empty and at most 1,024 bytes, cannot begin with `-` or

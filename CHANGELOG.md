@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Executor reports are now parsed from one bounded, no-follow file snapshot.
+  The parser rejects special files and path retargeting instead of following a
+  replacement or blocking on a FIFO before postflight and CI decisions.
 - Declarative fact manifests, referenced sources, and provenance artifacts now
   use bounded, capability-scoped, no-follow reads on every platform. File
   identity is checked before and after each read, and special-file swaps are

@@ -69,6 +69,8 @@ before commit.
 Post-flight fails closed when the executor report is absent or malformed, or
 the spec differs from the approved pre-flight bytes. Review a changed contract,
 then explicitly repeat `run-task <task>/spec.md --pre-only` before another audit.
+The report is read as one bounded regular-file snapshot; path retargeting and
+special files are rejected before its claims or completion status are used.
 Both `--pre-only` and `--reset` retain the task's original Git baseline, prior
 strict/index options, and iteration count. Already committed implementation
 therefore remains in the audit diff. Failed retries revoke approval and keep

@@ -185,6 +185,9 @@ the actual lesson and changes its status. Repeated failures refresh the same
 candidate instead of creating duplicates.
 The refresh changes event counts, observations and the latest event evidence;
 it preserves reviewed provenance, evidence, lesson text and review notes.
+The candidate store is capped at 8 MiB and updated under a stable,
+repository-scoped lock. Symlinks, special files, invalid UTF-8, path swaps and
+oversized stores fail without replacing existing reviewed knowledge.
 
 After a held audit, review `history-review.md` and mark Context and Lesson as
 `updated` or `not applicable` with a concrete reason. This prevents a successful

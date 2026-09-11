@@ -23,6 +23,7 @@ Required fields: Status, Task, Kind, Provenance, Evidence, Supersedes,\n\
 Occurrences, Last seen, and Reusable lesson.\n\n";
 
 const SEPARATE_LOCK_SURVIVING_RENAME: &str = "_lessons.md.lock";
+const MAX_LESSONS_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Record a deduplicated lesson candidate for a `Drift`/`Broken` audit.
 /// A held contract is not evidence that a reusable lesson exists.
@@ -52,7 +53,16 @@ pub fn append_audit_candidate(
     } else {
         repo_root.join(&audit)
     };
-    let evidence = if audit_resolved.is_file() {
+    let audit_persisted = crate::bounded_fs::RootCapability::open(repo_root)
+        .and_then(|root| {
+            crate::bounded_fs::inspect_path_kind_with_capability(
+                &root,
+                &audit_resolved,
+                crate::bounded_fs::ReadControl::default(),
+            )
+        })
+        .is_ok_and(|kind| kind == crate::bounded_fs::BoundedPathKind::RegularFile);
+    let evidence = if audit_persisted {
         format!("`{}`; `{}`", spec, relative_display(repo_root, &audit))
     } else {
         format!("`{spec}`; standalone audit output observed in this invocation but not persisted")
@@ -101,35 +111,71 @@ struct Candidate {
 fn append_candidate(repo_root: &Path, candidate: Candidate) -> std::io::Result<bool> {
     let lessons_path = repo_root.join(".mastermind/tasks/_lessons.md");
     let lock_path = lessons_path.with_file_name(SEPARATE_LOCK_SURVIVING_RENAME);
-    for path in [&lessons_path, &lock_path] {
-        if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "refusing to write lessons through a symlink",
-            ));
-        }
-    }
-    if let Some(parent) = lessons_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)?;
-    lock.lock()?;
+    let root = crate::bounded_fs::RootCapability::open(repo_root).map_err(std::io::Error::other)?;
+    root.ensure_directory(Path::new(".mastermind/tasks"))
+        .map_err(std::io::Error::other)?;
+    let lock = crate::bounded_fs::open_locked_regular_file_with_capability(&root, &lock_path)
+        .map_err(std::io::Error::other)?;
 
     let result = (|| {
-        let body = match fs::read_to_string(&lessons_path) {
-            Ok(body) => body,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(error) => return Err(error),
+        let (body, expectation) = match crate::bounded_fs::read_regular_file_with_capability(
+            &root,
+            &lessons_path,
+            MAX_LESSONS_BYTES,
+            MAX_LESSONS_BYTES,
+            crate::bounded_fs::ReadControl::default(),
+        ) {
+            Ok(file) => {
+                let identity = file.identity;
+                let body = String::from_utf8(file.bytes).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "project lessons are not valid UTF-8",
+                    )
+                })?;
+                (
+                    body,
+                    crate::bounded_fs::AtomicWriteExpectation::File(identity),
+                )
+            }
+            Err(crate::bounded_fs::BoundedReadError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                let missing = crate::bounded_fs::inspect_absent_path(
+                    &root,
+                    &lessons_path,
+                    crate::bounded_fs::ReadControl::default(),
+                )
+                .map_err(std::io::Error::other)?
+                .ok_or_else(|| {
+                    std::io::Error::other(
+                        "project lessons appeared while acquiring the update snapshot",
+                    )
+                })?;
+                (
+                    String::new(),
+                    crate::bounded_fs::AtomicWriteExpectation::Missing(missing),
+                )
+            }
+            Err(error) => return Err(std::io::Error::other(error)),
         };
         let Some(merged) = merge_candidate(&body, &candidate) else {
             return Ok(false);
         };
-        crate::audit_bundle::write_atomic(&lessons_path, merged.as_bytes(), false)
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        if merged.len() as u64 > MAX_LESSONS_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("project lessons exceed the {MAX_LESSONS_BYTES}-byte limit"),
+            ));
+        }
+        crate::bounded_fs::write_atomic_regular_file_expected_with_capability(
+            &root,
+            &lessons_path,
+            merged.as_bytes(),
+            false,
+            expectation,
+        )
+        .map_err(std::io::Error::other)?;
         Ok(true)
     })();
     lock.unlock()?;
@@ -785,6 +831,56 @@ mod tests {
     fn task_id_is_markdown_safe() {
         let path = PathBuf::from(".mastermind/tasks/042-name`\n- injected/spec.md");
         assert_eq!(derive_task_id(&path), "042-name-injected");
+    }
+
+    #[test]
+    fn lesson_writer_rejects_oversized_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks = dir.path().join(".mastermind/tasks");
+        fs::create_dir_all(&tasks).unwrap();
+        let lessons = fs::File::create(tasks.join("_lessons.md")).unwrap();
+        lessons.set_len(MAX_LESSONS_BYTES + 1).unwrap();
+
+        let spec = PathBuf::from(".mastermind/tasks/007-retry/spec.md");
+        let error = append_iteration_budget_candidate(dir.path(), &spec, 4).unwrap_err();
+        assert!(error.to_string().contains("limit is 8388608"));
+        assert_eq!(
+            fs::metadata(tasks.join("_lessons.md")).unwrap().len(),
+            MAX_LESSONS_BYTES + 1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lesson_writer_rejects_fifo_without_blocking() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let tasks = dir.path().join(".mastermind/tasks");
+        fs::create_dir_all(&tasks).unwrap();
+        let lessons = tasks.join("_lessons.md");
+        let lessons_path = CString::new(lessons.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(lessons_path.as_ptr(), 0o600) }, 0);
+
+        let spec = PathBuf::from(".mastermind/tasks/007-retry/spec.md");
+        assert!(append_iteration_budget_candidate(dir.path(), &spec, 4).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lesson_writer_rejects_symlinked_task_directory() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".mastermind")).unwrap();
+        symlink(outside.path(), dir.path().join(".mastermind").join("tasks")).unwrap();
+
+        let spec = PathBuf::from(".mastermind/tasks/007-retry/spec.md");
+        assert!(append_iteration_budget_candidate(dir.path(), &spec, 4).is_err());
+        assert!(!outside.path().join("_lessons.md").exists());
+        assert!(!outside.path().join(SEPARATE_LOCK_SURVIVING_RENAME).exists());
     }
 
     #[cfg(unix)]

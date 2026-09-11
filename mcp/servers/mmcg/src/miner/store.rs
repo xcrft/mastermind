@@ -128,17 +128,43 @@ impl ProfileStore {
     /// Open an existing profile store for diagnostics without creating its
     /// parent, database, schema, or SQLite sidecars.
     pub fn open_read_only(path: &Path) -> SqlResult<Self> {
-        let (root, target) = crate::bounded_fs::open_file_target(path)
-            .map_err(|error| sqlite_path_error("open style store parent", error))?;
-        let expected = crate::bounded_fs::read_regular_file_with_capability(
+        Self::open_optional_read_only(path)?.ok_or_else(|| {
+            sqlite_path_error(
+                "open style store",
+                BoundedReadError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "style store does not exist",
+                )),
+            )
+        })
+    }
+
+    pub(crate) fn open_optional_read_only(path: &Path) -> SqlResult<Option<Self>> {
+        let (root, target) = match crate::bounded_fs::open_file_target(path) {
+            Ok(target) => target,
+            Err(BoundedReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(error) => return Err(sqlite_path_error("open style store parent", error)),
+        };
+        let expected = match crate::bounded_fs::read_regular_file_with_capability(
             &root,
             &target,
             MAX_STYLE_STORE_SIZE,
             0,
             ReadControl::default(),
-        )
-        .map_err(|error| sqlite_path_error("inspect style store", error))?
-        .identity;
+        ) {
+            Ok(file) => file.identity,
+            Err(BoundedReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                match crate::bounded_fs::inspect_absent_path(&root, &target, ReadControl::default())
+                    .map_err(|error| sqlite_path_error("inspect style store", error))?
+                {
+                    Some(_) => return Ok(None),
+                    None => return Err(sqlite_snapshot_changed()),
+                }
+            }
+            Err(error) => return Err(sqlite_path_error("inspect style store", error)),
+        };
         let conn = Connection::open_with_flags(
             &target,
             OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -148,7 +174,7 @@ impl ProfileStore {
         verify_store_identity(&root, &target, expected, true)?;
         conn.execute_batch("PRAGMA query_only = ON;")?;
         verify_store_identity(&root, &target, expected, true)?;
-        Ok(Self { conn })
+        Ok(Some(Self { conn }))
     }
 
     /// Replace `repo_key`'s contribution and remove its legacy checkout aliases
@@ -161,7 +187,7 @@ impl ProfileStore {
         counts: &Counts,
         aliases: &[String],
     ) -> SqlResult<()> {
-        self.apply_mine(false, &[], repo_key, prov, identities, counts, aliases)
+        self.apply_mine(false, aliases, repo_key, prov, identities, counts)
     }
 
     /// Apply the complete mutation for one mine in a single transaction. A
@@ -169,18 +195,17 @@ impl ProfileStore {
     pub fn apply_mine(
         &mut self,
         replace_all: bool,
-        pruned: &[String],
+        removed: &[String],
         repo_key: &str,
         prov: &RepoProvenance,
         identities: &[String],
         counts: &Counts,
-        aliases: &[String],
     ) -> SqlResult<()> {
         let tx = self.conn.transaction()?;
         if replace_all {
             tx.execute_batch("DELETE FROM counter; DELETE FROM identity; DELETE FROM repo;")?;
         }
-        for key in pruned.iter().chain(aliases) {
+        for key in removed {
             delete_repo(&tx, key)?;
         }
         delete_repo(&tx, repo_key)?;
@@ -528,7 +553,6 @@ mod tests {
                 &prov(Some("new"), 2),
                 &[],
                 &counts(&[("x", 99)]),
-                &[],
             )
             .is_err());
         let aggregate = store.aggregate().unwrap();

@@ -126,9 +126,11 @@ fn mine_to_paths(
         } else {
             legacy_repository_keys(&db, &repo_key)?
         };
+        let mut removed = pruned.clone();
+        removed.extend(aliases);
         db.apply_mine(
             force,
-            &pruned,
+            &removed,
             &repo_key,
             &store::RepoProvenance {
                 author: author.clone(),
@@ -141,7 +143,6 @@ fn mine_to_paths(
             },
             &prov.identities,
             &counts,
-            &aliases,
         )?;
         for key in &pruned {
             eprintln!("retention: dropped {key} (gone or stale > {RETENTION_DAYS}d)");
@@ -379,10 +380,14 @@ fn profile_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
 pub enum Staleness {
     /// No profile has been generated for this user.
     Absent,
+    /// A global profile exists, but this repository has not contributed to it.
+    Unmined,
     /// A profile from before the privacy/persistence contract is still present.
     Legacy,
     /// Profile or store state exists but cannot be trusted or queried safely.
     Invalid { reason: String },
+    /// The stored mine point cannot be compared with the current Git history.
+    Unverifiable { mined_through: String },
     /// Present and recent enough.
     Fresh { mined_through: String },
     /// Author has accrued enough new commits since the mine to warrant a re-mine.
@@ -416,18 +421,20 @@ pub fn staleness(root: &Path) -> Staleness {
 
 fn staleness_at(root: &Path, profile_path: &Path, db_path: &Path) -> Staleness {
     let profile = match read_profile_for_staleness(profile_path) {
-        Ok(Some(profile)) => profile,
-        Ok(None) => return Staleness::Absent,
+        Ok(profile) => profile,
         Err(error) => {
             return Staleness::Invalid {
                 reason: format!("style profile cannot be read safely: {error}"),
             };
         }
     };
-    if !profile.contains(PROFILE_SCHEMA_MARKER) {
+    if profile
+        .as_deref()
+        .is_some_and(|profile| !profile.contains(PROFILE_SCHEMA_MARKER))
+    {
         return Staleness::Legacy;
     }
-    let db = match store::ProfileStore::open_read_only(db_path) {
+    let db = match store::ProfileStore::open_optional_read_only(db_path) {
         Ok(db) => db,
         Err(error) => {
             return Staleness::Invalid {
@@ -435,7 +442,16 @@ fn staleness_at(root: &Path, profile_path: &Path, db_path: &Path) -> Staleness {
             };
         }
     };
-    staleness_for_repo(root, &db)
+    match (profile, db) {
+        (None, None) => Staleness::Absent,
+        (None, Some(_)) => Staleness::Invalid {
+            reason: "style.md is missing while style.db still exists".into(),
+        },
+        (Some(_), None) => Staleness::Invalid {
+            reason: "style.db is missing for the generated style.md".into(),
+        },
+        (Some(_), Some(db)) => staleness_for_repo(root, &db),
+    }
 }
 
 fn read_profile_for_staleness(path: &Path) -> Result<Option<String>, Box<dyn std::error::Error>> {
@@ -475,7 +491,7 @@ fn read_profile_for_staleness(path: &Path) -> Result<Option<String>, Box<dyn std
 fn staleness_for_repo(root: &Path, db: &store::ProfileStore) -> Staleness {
     let key = match repository_key(root) {
         Ok(key) => key,
-        Err(_) => return Staleness::Absent,
+        Err(_) => return Staleness::Unmined,
     };
     let meta = match db.repo_meta(&key) {
         Ok(meta) => meta,
@@ -515,11 +531,11 @@ fn staleness_for_repo(root: &Path, db: &store::ProfileStore) -> Staleness {
     };
     let (author, sha, date) = match meta {
         Some(m) => m,
-        _ => return Staleness::Absent, // this repo never contributed
+        _ => return Staleness::Unmined,
     };
     let mined_through = date.unwrap_or_else(|| "unknown".to_string());
     let Some(sha) = sha else {
-        return Staleness::Fresh { mined_through };
+        return Staleness::Unverifiable { mined_through };
     };
     match count_commits_range(root, &author, &format!("{sha}..HEAD")) {
         Some(n) if n >= STALE_COMMITS => Staleness::Stale {
@@ -527,7 +543,7 @@ fn staleness_for_repo(root: &Path, db: &store::ProfileStore) -> Staleness {
             new_commits: n,
         },
         Some(_) => Staleness::Fresh { mined_through },
-        None => Staleness::Absent, // SHA not in this repo's history (rebased/moved)
+        None => Staleness::Unverifiable { mined_through },
     }
 }
 
@@ -2263,13 +2279,57 @@ diff --git a/app/bar.ts b/app/bar.ts
     }
 
     #[test]
-    fn staleness_does_not_treat_a_missing_profile_as_fresh() {
+    fn staleness_distinguishes_an_empty_install_from_a_leftover_store() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("style.db");
+        let profile = dir.path().join("style.md");
+        assert!(matches!(
+            staleness_at(dir.path(), &profile, &db),
+            Staleness::Absent
+        ));
+
         drop(store::ProfileStore::open(&db).unwrap());
         assert!(matches!(
-            staleness_at(dir.path(), &dir.path().join("style.md"), &db),
-            Staleness::Absent
+            staleness_at(dir.path(), &profile, &db),
+            Staleness::Invalid { .. }
+        ));
+    }
+
+    #[test]
+    fn staleness_distinguishes_unmined_and_unverifiable_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        fixture_repository(&repo, "Alice");
+        let db_path = dir.path().join("style.db");
+        let profile = dir.path().join("style.md");
+        std::fs::write(&profile, PROFILE_SCHEMA_MARKER).unwrap();
+        drop(store::ProfileStore::open(&db_path).unwrap());
+        assert!(matches!(
+            staleness_at(&repo, &profile, &db_path),
+            Staleness::Unmined
+        ));
+
+        let mut db = store::ProfileStore::open(&db_path).unwrap();
+        db.upsert_repo(
+            &repository_key(&repo).unwrap(),
+            &store::RepoProvenance {
+                author: "Alice".into(),
+                commits_total: 1,
+                commits_sampled: 1,
+                added_lines_sampled: 10,
+                latest_sha: None,
+                latest_date: Some("2026-01-01".into()),
+                mined_at_epoch: now_epoch(),
+            },
+            &["author@example.test".into()],
+            &Counts::new(),
+            &[],
+        )
+        .unwrap();
+        drop(db);
+        assert!(matches!(
+            staleness_at(&repo, &profile, &db_path),
+            Staleness::Unverifiable { .. }
         ));
     }
 

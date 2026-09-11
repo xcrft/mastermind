@@ -5030,6 +5030,12 @@ impl Store {
         Ok(current.eq(expected))
     }
 
+    pub(crate) fn source_snapshot_database_len(&self) -> Option<u64> {
+        self.source_snapshot_state
+            .as_ref()
+            .map(|state| state.database.len)
+    }
+
     pub fn begin_read_snapshot(&self) -> SqlResult<()> {
         self.conn
             .execute_batch("BEGIN DEFERRED; SELECT 1 FROM meta LIMIT 1")

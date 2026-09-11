@@ -25,6 +25,8 @@ const MAX_WORKFLOW_SERVERS_PER_COMPONENT: usize = 64;
 const MAX_WORKFLOW_WRITERS: usize = 512;
 const MAX_WORKFLOW_DIAGNOSTICS: usize = 4_096;
 const MAX_WORKFLOW_CONTEXT_ESTIMATES: usize = 16_384;
+const MAX_STATUS_TASKS: usize = 4_096;
+const MAX_TASK_STATE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 pub struct WorkflowAuditLimits {
@@ -3550,6 +3552,7 @@ pub struct WorkflowStatus {
     pub index: IndexInfo,
     pub install: InstallInfo,
     pub tasks: Vec<TaskInfo>,
+    pub task_scan_error: Option<String>,
 }
 
 pub struct NextAction {
@@ -3564,11 +3567,13 @@ impl WorkflowStatus {
     }
 
     pub fn scan_with_index(root: &Path, index_path: &Path) -> Self {
+        let task_scan = scan_tasks(root);
         Self {
             root: root.to_path_buf(),
             index: scan_index(root, index_path),
             install: scan_install(root),
-            tasks: scan_tasks(root),
+            tasks: task_scan.tasks,
+            task_scan_error: task_scan.error,
         }
     }
 
@@ -3584,6 +3589,17 @@ impl WorkflowStatus {
                     self.root.display(),
                     self.root.display(),
                     self.index.index_path.display()
+                )),
+            });
+        }
+        if let Some(error) = &self.task_scan_error {
+            return Some(NextAction {
+                description: format!("Task workflow state cannot be trusted: {error}"),
+                command: None,
+                claude_prompt: Some(format!(
+                    "Repair the Mastermind task inventory under {}/.mastermind/tasks before continuing. \
+                     The status reader rejected the current filesystem snapshot: {error}",
+                    self.root.display()
                 )),
             });
         }
@@ -3768,7 +3784,9 @@ impl WorkflowStatus {
         );
         out.push('\n');
 
-        if self.tasks.is_empty() {
+        if let Some(error) = &self.task_scan_error {
+            out.push_str(&format!("Tasks\n  ⛔ inventory unavailable — {error}\n\n"));
+        } else if self.tasks.is_empty() {
             out.push_str(
                 "Tasks\n  (none — Direct mode needs no task; use `mastermind new-spec 'description'` for Verified/Strict work)\n\n",
             );
@@ -3865,6 +3883,13 @@ impl WorkflowStatus {
                 self.root.display()
             );
         }
+        if let Some(error) = &self.task_scan_error {
+            return format!(
+                "Cannot resume safely: task workflow state cannot be trusted — {error}\n\n\
+                 Repair the task inventory under {}/.mastermind/tasks and run `mastermind status` again.\n",
+                self.root.display()
+            );
+        }
         let task = match task_name {
             Some(name) => self.tasks.iter().find(|t| t.folder == name),
             None => self
@@ -3917,14 +3942,31 @@ impl WorkflowStatus {
 
         out.push('\n');
 
-        let spec_text = std::fs::read_to_string(&task.spec_path).unwrap_or_default();
-        let goal_snippet = extract_section(&spec_text, "Goal");
-        if !goal_snippet.is_empty() {
-            out.push_str("Goal\n");
-            for line in goal_snippet.lines().take(8) {
-                out.push_str(&format!("  {line}\n"));
+        match crate::bounded_fs::read_regular_file(
+            &self.root,
+            &task.spec_path,
+            crate::audit_bundle::BUNDLE_INPUT_MAX as u64,
+            crate::audit_bundle::BUNDLE_INPUT_MAX as u64,
+            crate::bounded_fs::ReadControl::default(),
+        ) {
+            Ok(file) => match String::from_utf8(file.bytes) {
+                Ok(spec_text) => {
+                    let goal_snippet = extract_section(&spec_text, "Goal");
+                    if !goal_snippet.is_empty() {
+                        out.push_str("Goal\n");
+                        for line in goal_snippet.lines().take(8) {
+                            out.push_str(&format!("  {line}\n"));
+                        }
+                        out.push('\n');
+                    }
+                }
+                Err(_) => out.push_str("Goal\n  unavailable: spec is not valid UTF-8\n\n"),
+            },
+            Err(error) => {
+                out.push_str(&format!(
+                    "Goal\n  unavailable: spec read failed: {error}\n\n"
+                ));
             }
-            out.push('\n');
         }
 
         let task_dir = task.spec_path.parent().unwrap_or(task.spec_path.as_path());
@@ -4343,32 +4385,115 @@ fn count_workflow_skill_dirs(dir: &Path) -> usize {
         .unwrap_or(0)
 }
 
-fn scan_tasks(root: &Path) -> Vec<TaskInfo> {
-    let tasks_dir = root.join(".mastermind").join("tasks");
-    if !tasks_dir.is_dir() {
-        return vec![];
+#[derive(Default)]
+struct TaskScan {
+    tasks: Vec<TaskInfo>,
+    error: Option<String>,
+}
+
+impl TaskScan {
+    fn failed(error: impl Into<String>) -> Self {
+        Self {
+            tasks: Vec::new(),
+            error: Some(error.into()),
+        }
     }
+}
 
-    let inflight_spec = read_inflight_spec(root);
-
-    let mut entries: Vec<_> = std::fs::read_dir(&tasks_dir)
-        .map(|rd| rd.filter_map(|e| e.ok()).collect())
-        .unwrap_or_default();
-    entries.sort_by_key(|e| e.file_name());
+fn scan_tasks(root: &Path) -> TaskScan {
+    let tasks_dir = root.join(".mastermind").join("tasks");
+    let root_capability = match crate::bounded_fs::RootCapability::open(root) {
+        Ok(root) => root,
+        Err(error) => {
+            return TaskScan::failed(format!(
+                "cannot retain repository root {}: {error}",
+                root.display()
+            ));
+        }
+    };
+    let entries = match crate::bounded_fs::read_directory_names_with_capability(
+        &root_capability,
+        &tasks_dir,
+        MAX_STATUS_TASKS,
+        crate::bounded_fs::ReadControl::default(),
+    ) {
+        Ok(entries) => entries,
+        Err(error) if bounded_read_missing(&error) => return TaskScan::default(),
+        Err(error) => {
+            return TaskScan::failed(format!(
+                "cannot read task inventory {}: {error}",
+                tasks_dir.display()
+            ));
+        }
+    };
+    let inflight_spec = read_inflight_spec(&root_capability, root);
 
     let mut tasks = Vec::new();
-    for entry in entries {
-        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            continue;
+    for file_name in &entries {
+        let task_dir = tasks_dir.join(file_name);
+        match crate::bounded_fs::inspect_path_kind_with_capability(
+            &root_capability,
+            &task_dir,
+            crate::bounded_fs::ReadControl::default(),
+        ) {
+            Ok(crate::bounded_fs::BoundedPathKind::Directory) => {}
+            Ok(_) => continue,
+            Err(error) => {
+                return TaskScan::failed(format!(
+                    "cannot inspect task directory {}: {error}",
+                    task_dir.display()
+                ));
+            }
         }
-        let folder = entry.file_name().to_string_lossy().to_string();
-        let spec_path = entry.path().join("spec.md");
-        if !spec_path.is_file() {
-            continue;
+
+        let folder = file_name.to_string_lossy().to_string();
+        let spec_path = task_dir.join("spec.md");
+        match crate::bounded_fs::read_regular_file_with_capability(
+            &root_capability,
+            &spec_path,
+            crate::audit_bundle::BUNDLE_INPUT_MAX as u64,
+            0,
+            crate::bounded_fs::ReadControl::default(),
+        ) {
+            Ok(_) => {}
+            Err(error) if bounded_read_missing(&error) => continue,
+            Err(error) => {
+                tasks.push(held_task(
+                    folder,
+                    spec_path,
+                    format!("cannot read task spec safely: {error}"),
+                ));
+                continue;
+            }
         }
-        let task_dir = entry.path();
-        let state = read_task_state(&task_dir);
-        let phase = detect_phase(&spec_path, &inflight_spec, state.as_ref());
+
+        let mut state = match read_task_state(&root_capability, &task_dir) {
+            Ok(state) => state,
+            Err(error) => Some(invalid_task_state(error)),
+        };
+        if state.is_none() {
+            if let Err(error) = &inflight_spec {
+                state = Some(invalid_task_state(error.clone()));
+            }
+        }
+
+        let executor_report_is_regular =
+            match optional_regular_file(&root_capability, &task_dir.join("executor-report.md")) {
+                Ok(present) => present,
+                Err(error) => {
+                    state = Some(invalid_task_state(error));
+                    false
+                }
+            };
+        let phase = detect_phase(
+            &spec_path,
+            inflight_spec
+                .as_ref()
+                .ok()
+                .and_then(|inflight| inflight.as_ref()),
+            state.as_ref(),
+            executor_report_is_regular,
+        );
         tasks.push(TaskInfo {
             folder,
             spec_path,
@@ -4376,37 +4501,159 @@ fn scan_tasks(root: &Path) -> Vec<TaskInfo> {
             state,
         });
     }
-    tasks
-}
 
-fn read_inflight_spec(root: &Path) -> Option<PathBuf> {
-    let state_file = root.join(".mastermind").join("run-state").join("spec.json");
-    if !state_file.is_file() {
-        return None;
+    match crate::bounded_fs::read_directory_names_with_capability(
+        &root_capability,
+        &tasks_dir,
+        MAX_STATUS_TASKS,
+        crate::bounded_fs::ReadControl::default(),
+    ) {
+        Ok(current) if current == entries => TaskScan { tasks, error: None },
+        Ok(_) => TaskScan::failed("task inventory changed during status scan"),
+        Err(error) => TaskScan::failed(format!(
+            "cannot revalidate task inventory {}: {error}",
+            tasks_dir.display()
+        )),
     }
-    let body = std::fs::read_to_string(&state_file).ok()?;
-    let state: crate::run_task::RunState = serde_json::from_str(&body).ok()?;
-    Some(PathBuf::from(state.spec_path))
 }
 
-fn read_task_state(task_dir: &Path) -> Option<TaskState> {
+fn bounded_read_missing(error: &crate::bounded_fs::BoundedReadError) -> bool {
+    matches!(
+        error,
+        crate::bounded_fs::BoundedReadError::Io(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+    )
+}
+
+fn optional_regular_file(
+    root: &crate::bounded_fs::RootCapability,
+    path: &Path,
+) -> Result<bool, String> {
+    match crate::bounded_fs::inspect_path_kind_with_capability(
+        root,
+        path,
+        crate::bounded_fs::ReadControl::default(),
+    ) {
+        Ok(crate::bounded_fs::BoundedPathKind::RegularFile) => Ok(true),
+        Ok(_) => Err(format!(
+            "workflow artifact is not a regular no-follow file: {}",
+            path.display()
+        )),
+        Err(error) if bounded_read_missing(&error) => Ok(false),
+        Err(error) => Err(format!(
+            "cannot inspect workflow artifact {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn invalid_task_state(reason: String) -> TaskState {
+    TaskState {
+        status: "broken".into(),
+        history_snapshot_sha256: None,
+        risk: None,
+        next_step: None,
+        blocking_reason: Some(reason),
+        last_artifact: Some("state.json".into()),
+    }
+}
+
+fn held_task(folder: String, spec_path: PathBuf, reason: String) -> TaskInfo {
+    TaskInfo {
+        folder,
+        spec_path,
+        phase: TaskPhase::Held,
+        state: Some(invalid_task_state(reason)),
+    }
+}
+
+fn read_inflight_spec(
+    root: &crate::bounded_fs::RootCapability,
+    repository: &Path,
+) -> Result<Option<PathBuf>, String> {
+    let state_file = repository
+        .join(".mastermind")
+        .join("run-state")
+        .join("spec.json");
+    let file = match crate::bounded_fs::read_regular_file_with_capability(
+        root,
+        &state_file,
+        MAX_TASK_STATE_BYTES,
+        MAX_TASK_STATE_BYTES,
+        crate::bounded_fs::ReadControl::default(),
+    ) {
+        Ok(file) => file,
+        Err(error) if bounded_read_missing(&error) => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "cannot read legacy workflow state {}: {error}",
+                state_file.display()
+            ));
+        }
+    };
+    let state: crate::run_task::RunState =
+        serde_json::from_slice(&file.bytes).map_err(|error| {
+            format!(
+                "cannot parse legacy workflow state {}: {error}",
+                state_file.display()
+            )
+        })?;
+    Ok(Some(PathBuf::from(state.spec_path)))
+}
+
+fn read_task_state(
+    root: &crate::bounded_fs::RootCapability,
+    task_dir: &Path,
+) -> Result<Option<TaskState>, String> {
     let path = task_dir.join("state.json");
-    if !path.is_file() {
-        return None;
+    let file = match crate::bounded_fs::read_regular_file_with_capability(
+        root,
+        &path,
+        MAX_TASK_STATE_BYTES,
+        MAX_TASK_STATE_BYTES,
+        crate::bounded_fs::ReadControl::default(),
+    ) {
+        Ok(file) => file,
+        Err(error) if bounded_read_missing(&error) => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "cannot read task state {}: {error}",
+                path.display()
+            ));
+        }
+    };
+    let state: TaskState = serde_json::from_slice(&file.bytes)
+        .map_err(|error| format!("cannot parse task state {}: {error}", path.display()))?;
+    if !matches!(
+        state.status.as_str(),
+        "history_review_required"
+            | "learned"
+            | "audit_required"
+            | "approved"
+            | "executing"
+            | "held"
+            | "drift"
+            | "broken"
+    ) {
+        return Err(format!(
+            "task state {} has unsupported status {:?}",
+            path.display(),
+            state.status
+        ));
     }
-    let body = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&body).ok()
+    Ok(Some(state))
 }
 
 fn detect_phase(
     spec_path: &Path,
-    inflight_spec: &Option<PathBuf>,
+    inflight_spec: Option<&PathBuf>,
     state: Option<&TaskState>,
+    executor_report_is_regular: bool,
 ) -> TaskPhase {
     let task_dir = spec_path.parent().unwrap_or(spec_path);
 
     if let Some(s) = state {
-        if s.status == "approved" && task_dir.join("executor-report.md").is_file() {
+        if s.status == "approved" && executor_report_is_regular {
             return TaskPhase::AwaitingAudit;
         }
         return match s.status.as_str() {
@@ -4423,11 +4670,11 @@ fn detect_phase(
             "audit_required" => TaskPhase::AwaitingAudit,
             "approved" | "executing" => TaskPhase::AwaitingExecutor,
             "held" | "drift" | "broken" => TaskPhase::Held,
-            _ => TaskPhase::Ready,
+            _ => TaskPhase::Held,
         };
     }
 
-    let is_inflight = inflight_spec.as_deref().is_some_and(|inflight| {
+    let is_inflight = inflight_spec.is_some_and(|inflight| {
         let a = spec_path.canonicalize().ok();
         let b = inflight.canonicalize().ok();
         match (a, b) {
@@ -4437,7 +4684,7 @@ fn detect_phase(
     });
 
     if is_inflight {
-        if task_dir.join("executor-report.md").is_file() {
+        if executor_report_is_regular {
             return TaskPhase::AwaitingAudit;
         }
         return TaskPhase::AwaitingExecutor;
@@ -5383,7 +5630,7 @@ mod tests {
         };
 
         assert_eq!(
-            detect_phase(&spec_path, &None, Some(&state)),
+            detect_phase(&spec_path, None, Some(&state), true),
             TaskPhase::AwaitingAudit
         );
         fs::remove_dir_all(root).ok();
@@ -5418,7 +5665,7 @@ mod tests {
         };
 
         assert_eq!(
-            detect_phase(&spec_path, &None, Some(&state)),
+            detect_phase(&spec_path, None, Some(&state), false),
             TaskPhase::AwaitingHistoryReview
         );
 
@@ -5428,22 +5675,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            detect_phase(&spec_path, &None, Some(&state)),
+            detect_phase(&spec_path, None, Some(&state), false),
             TaskPhase::Complete
         );
         state.history_snapshot_sha256 = Some("current".into());
         assert_eq!(
-            detect_phase(&spec_path, &None, Some(&state)),
+            detect_phase(&spec_path, None, Some(&state), false),
             TaskPhase::AwaitingHistoryReview
         );
         fs::write(task_dir.join("history-review.md"), "- **Audit snapshot:** foreign\n- **Context:** updated\n- **Lesson:** not applicable\n- **Reason:** reviewed\n").unwrap();
         assert_eq!(
-            detect_phase(&spec_path, &None, Some(&state)),
+            detect_phase(&spec_path, None, Some(&state), false),
             TaskPhase::AwaitingHistoryReview
         );
         fs::remove_file(task_dir.join("history-review.md")).unwrap();
         assert_eq!(
-            detect_phase(&spec_path, &None, Some(&state)),
+            detect_phase(&spec_path, None, Some(&state), false),
             TaskPhase::AwaitingHistoryReview
         );
         fs::remove_dir_all(root).ok();
@@ -5463,12 +5710,126 @@ mod tests {
         .unwrap();
         for verdict in ["✅ Held", "⚠️ Drift", "❌ Broken"] {
             fs::write(task.join("audit.md"), verdict).unwrap();
-            assert_eq!(detect_phase(&spec, &None, None), TaskPhase::Ready);
+            assert_eq!(detect_phase(&spec, None, None, false), TaskPhase::Ready);
             assert_eq!(
-                detect_phase(&spec, &Some(spec.clone()), None),
+                detect_phase(&spec, Some(&spec), None, false),
                 TaskPhase::AwaitingExecutor
             );
         }
+    }
+
+    #[test]
+    fn malformed_or_unknown_task_state_is_held() {
+        for (state, expected) in [
+            ("{broken", "cannot parse task state"),
+            (r#"{"status":"future_state"}"#, "unsupported status"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let task = root.path().join(".mastermind/tasks/001-ambiguous");
+            fs::create_dir_all(&task).unwrap();
+            fs::write(task.join("spec.md"), "# Ambiguous\n").unwrap();
+            fs::write(task.join("state.json"), state).unwrap();
+
+            let status = WorkflowStatus::scan(root.path());
+            assert!(status.task_scan_error.is_none());
+            assert_eq!(status.tasks.len(), 1);
+            assert_eq!(status.tasks[0].phase, TaskPhase::Held);
+            assert!(status.tasks[0]
+                .state
+                .as_ref()
+                .and_then(|state| state.blocking_reason.as_deref())
+                .is_some_and(|reason| reason.contains(expected)));
+            assert!(status.next_action().unwrap().command.is_none());
+        }
+    }
+
+    #[test]
+    fn oversized_task_state_is_held() {
+        let root = tempfile::tempdir().unwrap();
+        let task = root.path().join(".mastermind/tasks/001-oversized");
+        fs::create_dir_all(&task).unwrap();
+        fs::write(task.join("spec.md"), "# Oversized\n").unwrap();
+        let state = File::create(task.join("state.json")).unwrap();
+        state.set_len(MAX_TASK_STATE_BYTES + 1).unwrap();
+
+        let status = WorkflowStatus::scan(root.path());
+        assert_eq!(status.tasks.len(), 1);
+        assert_eq!(status.tasks[0].phase, TaskPhase::Held);
+        assert!(status.tasks[0]
+            .state
+            .as_ref()
+            .and_then(|state| state.blocking_reason.as_deref())
+            .is_some_and(|reason| reason.contains("limit is 1048576")));
+    }
+
+    #[test]
+    fn corrupt_legacy_inflight_state_holds_unstarted_tasks() {
+        let root = tempfile::tempdir().unwrap();
+        let task = root.path().join(".mastermind/tasks/001-unstarted");
+        fs::create_dir_all(&task).unwrap();
+        fs::write(task.join("spec.md"), "# Unstarted\n").unwrap();
+        let run_state = root.path().join(".mastermind/run-state");
+        fs::create_dir_all(&run_state).unwrap();
+        fs::write(run_state.join("spec.json"), "{broken").unwrap();
+
+        let status = WorkflowStatus::scan(root.path());
+        assert_eq!(status.tasks.len(), 1);
+        assert_eq!(status.tasks[0].phase, TaskPhase::Held);
+        assert!(status.tasks[0]
+            .state
+            .as_ref()
+            .and_then(|state| state.blocking_reason.as_deref())
+            .is_some_and(|reason| reason.contains("legacy workflow state")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn task_state_fifo_is_rejected_without_becoming_ready() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let task = root.path().join(".mastermind/tasks/001-fifo");
+        fs::create_dir_all(&task).unwrap();
+        fs::write(task.join("spec.md"), "# FIFO\n").unwrap();
+        let state = task.join("state.json");
+        let state_path = CString::new(state.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(state_path.as_ptr(), 0o600) }, 0);
+
+        let status = WorkflowStatus::scan(root.path());
+        assert_eq!(status.tasks.len(), 1);
+        assert_eq!(status.tasks[0].phase, TaskPhase::Held);
+        assert!(status.tasks[0]
+            .state
+            .as_ref()
+            .and_then(|state| state.blocking_reason.as_deref())
+            .is_some_and(|reason| reason.contains("not a regular")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn task_inventory_symlink_blocks_status_actions() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let task = outside.path().join("001-outside");
+        fs::create_dir_all(&task).unwrap();
+        fs::write(task.join("spec.md"), "# Outside\n").unwrap();
+        fs::create_dir_all(root.path().join(".mastermind")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path(),
+            root.path().join(".mastermind").join("tasks"),
+        )
+        .unwrap();
+
+        let status = WorkflowStatus::scan(root.path());
+        assert!(status.tasks.is_empty());
+        assert!(status.task_scan_error.is_some());
+        assert!(status
+            .render_next_text()
+            .contains("Task workflow state cannot be trusted"));
+        assert!(status
+            .render_resume_text(None)
+            .contains("Cannot resume safely"));
     }
 
     #[test]
@@ -5497,6 +5858,7 @@ mod tests {
                 agents_count: 0,
                 skills_count: 0,
             },
+            task_scan_error: None,
             tasks: vec![
                 TaskInfo {
                     folder: "001-history".into(),

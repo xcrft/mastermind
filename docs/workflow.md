@@ -119,6 +119,9 @@ Status, next-action, and resume read task inventories and lifecycle state
 through bounded, no-follow repository capabilities. An unreadable, malformed,
 oversized, unknown, or special-file state is shown as held, and an ambiguous or
 changing inventory blocks resume instead of being treated as a new ready task.
+Controller updates replace `state.json` atomically through the retained task
+directory after syncing the private temporary file. A process interruption
+therefore leaves either the previous complete state or the next complete state.
 
 ## What the gates prove
 

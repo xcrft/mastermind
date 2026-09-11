@@ -277,7 +277,7 @@ struct CorpusInventory {
 }
 
 fn digest_bytes(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    crate::hex::encode(&Sha256::digest(bytes))
 }
 
 fn canonical_digest(value: &Value) -> Result<String, DocumentGraphError> {
@@ -658,9 +658,9 @@ fn map_read_error(error: BoundedReadError, path: &str) -> DocumentGraphError {
         BoundedReadError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => {
             DocumentGraphError::at("missing", path)
         }
-        BoundedReadError::Io(error) => {
+        BoundedReadError::Io(_error) => {
             #[cfg(unix)]
-            if error.raw_os_error() == Some(libc::ELOOP) {
+            if _error.raw_os_error() == Some(libc::ELOOP) {
                 return DocumentGraphError::at("unsafe_path", path);
             }
             DocumentGraphError::at("unreadable", path)

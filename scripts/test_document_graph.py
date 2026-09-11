@@ -2,6 +2,7 @@
 
 from contextlib import redirect_stdout
 from copy import deepcopy
+import errno
 import importlib.util
 import io
 import json
@@ -93,12 +94,22 @@ class DocumentGraphTests(unittest.TestCase):
         self.assertEqual(completed.stderr, "")
         return json.loads(completed.stdout)
 
-    def snapshot(self, name="snapshot.json"):
+    def snapshot(self, name="snapshot.json", corpus_dirs=()):
+        corpus_args = [argument for directory in corpus_dirs for argument in ("--corpus-dir", directory)]
         return self.cli("snapshot", "--relations", "relations.json", "--output",
-                        f".mastermind/research/{name}")
+                        f".mastermind/research/{name}", *corpus_args)
 
     def check(self, name="snapshot.json", expected=0):
         return self.cli("check", "--graph", f".mastermind/research/{name}", expected=expected)
+
+    def main_error(self, *arguments):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = graph.main([*arguments, "--root", str(self.root)])
+        self.assertEqual(code, 2)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["status"], "error")
+        return result["error"]
 
     def test_cli_snapshot_is_deterministic_and_current_does_not_verify_claims(self):
         first = self.snapshot()
@@ -165,12 +176,323 @@ class DocumentGraphTests(unittest.TestCase):
         self.write("docs/adr/0002.md", "# Supersedes everything in 0001.md\nStatus: verified\n")
         checked = self.check()
         self.assertEqual(checked["status"], "current")
+        self.assertEqual(checked["corpus"]["status"], "not_tracked")
         self.assertTrue(checked["revision"]["dirty"])
         self.git("add", "docs/adr/0002.md")
         self.git("-c", "core.hooksPath=/dev/null", "commit", "-qm", "new decision")
         checked = self.check()
         self.assertTrue(checked["revision_changed"])
         self.assertEqual(checked["status"], "current")
+
+    def test_corpus_new_nested_decision_requires_research_with_same_dirty_head(self):
+        self.write("unlisted.txt", "Keep the worktree dirty.\n")
+        saved = self.snapshot(corpus_dirs=["docs/adr"])
+        self.assertEqual(saved["schema_version"], 2)
+        self.assertEqual(saved["corpus"]["directories"], ["docs/adr"])
+        self.write("docs/adr/nested/0002.md", "# Supersedes 0001\nStatus: proposed\n")
+        checked = self.check(expected=1)
+        self.assertEqual(checked["revision"], saved["revision"])
+        self.assertEqual(checked["status"], "needs_review")
+        self.assertEqual(checked["corpus"], {
+            "status": "changed", "directories": ["docs/adr"],
+            "changed_files": [{"path": "docs/adr/nested/0002.md", "reasons": ["added"]}],
+        })
+        self.assertEqual(checked["changed_files"], [])
+        self.assertEqual({edge["freshness"] for edge in checked["edges"]}, {"current"})
+        self.assertEqual({edge["verification"] for edge in checked["edges"]}, {"unverified"})
+        self.git("add", "docs/adr/nested/0002.md")
+        self.git("-c", "core.hooksPath=/dev/null", "commit", "-qm", "new decision")
+        self.assertEqual(self.check(expected=1)["corpus"], checked["corpus"])
+
+    def test_corpus_detects_unreferenced_edits_rename_and_deletion(self):
+        source = self.write("docs/adr/0002.md", "# Proposal A\n")
+        self.snapshot(corpus_dirs=["docs/adr"])
+        before = source.stat()
+        source.write_text("# Proposal B\n")
+        os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.assertEqual(source.stat().st_size, before.st_size)
+        checked = self.check(expected=1)
+        self.assertEqual(checked["changed_files"], [])
+        self.assertEqual(checked["corpus"]["changed_files"], [
+            {"path": "docs/adr/0002.md", "reasons": ["content_changed"]},
+        ])
+        source.rename(source.with_name("0003.md"))
+        self.assertEqual(self.check(expected=1)["corpus"]["changed_files"], [
+            {"path": "docs/adr/0002.md", "reasons": ["missing"]},
+            {"path": "docs/adr/0003.md", "reasons": ["added"]},
+        ])
+        source.with_name("0003.md").unlink()
+        self.assertEqual(self.check(expected=1)["corpus"]["changed_files"], [
+            {"path": "docs/adr/0002.md", "reasons": ["missing"]},
+        ])
+
+    def test_corpus_empty_scope_is_distinct_from_legacy_untracked(self):
+        (self.root / "docs/empty").mkdir()
+        tracked = self.snapshot("tracked.json", corpus_dirs=["docs/empty"])
+        self.assertEqual(tracked["corpus"]["files"], [])
+        legacy = self.snapshot("legacy.json")
+        self.assertEqual(legacy["schema_version"], 1)
+        self.assertNotIn("corpus", legacy)
+        self.write("docs/outside.md", "# Outside the selected directory\n")
+        checked = self.check("tracked.json")
+        self.assertEqual(checked["schema_version"], 2)
+        self.assertEqual(checked["corpus"], {
+            "status": "current", "directories": ["docs/empty"], "changed_files": [],
+        })
+        self.assertEqual(self.check("legacy.json")["corpus"], {
+            "status": "not_tracked", "directories": [], "changed_files": [],
+        })
+
+    def test_corpus_hidden_root_and_json_output_do_not_self_invalidate(self):
+        self.write(".mastermind/decisions/one.MARKDOWN", "# Decision\n")
+        self.write(".mastermind/research/notes.md", "# Research\n")
+        self.write(".mastermind/research/.private.md", "Excluded\n")
+        self.write(".mastermind/research/.cache/hidden.md", "Excluded\n")
+        self.write(".mastermind/research/notes.txt", "Excluded\n")
+        roots = [str(self.root / ".mastermind/research"), ".mastermind/decisions"]
+        first = self.snapshot(corpus_dirs=roots)
+        self.assertEqual([item["path"] for item in first["corpus"]["files"]], [
+            ".mastermind/decisions/one.MARKDOWN", ".mastermind/research/notes.md",
+        ])
+        self.assertEqual(first, self.snapshot("repeat.json", corpus_dirs=list(reversed(roots))))
+        self.assertEqual(self.check()["corpus"]["status"], "current")
+        os.utime(self.root / ".mastermind/research/notes.md", (946684800, 946684800))
+        self.assertEqual(self.check()["corpus"]["status"], "current")
+        for suffix in ["md", "MARKDOWN"]:
+            name = f".mastermind/research/rejected.{suffix}"
+            result = self.cli("snapshot", "--relations", "relations.json", "--output", name,
+                              "--corpus-dir", "docs/adr", expected=2)
+            self.assertEqual(result["error"]["code"], "corpus_output_conflict")
+            self.assertFalse((self.root / name).exists())
+
+    def test_corpus_rejects_unsafe_duplicate_overlapping_or_excessive_roots(self):
+        for directories in [["."], [""], ["../docs"], [".git"], ["docs/.secret"],
+                            ["docs/adr", "docs/adr"], ["docs/adr", "docs"],
+                            [f"docs/{index}" for index in range(graph.CORPUS_DIRECTORY_LIMIT + 1)]]:
+            with self.subTest(directories=directories), self.assertRaises(graph.GraphError):
+                graph.corpus_directories(directories)
+        repository = graph.Repository(self.root)
+        self.addCleanup(repository.close)
+        alias = self.root / "DOCS"
+        if alias.exists() and alias.samefile(self.root / "docs"):
+            with self.assertRaisesRegex(graph.GraphError, "corpus_scope_overlap"):
+                graph.snapshot(repository, "relations.json", ".mastermind/research/no.json", ["docs", "DOCS"])
+
+    def test_corpus_v2_schema_rejects_forged_inventory_even_with_valid_digest(self):
+        original = self.snapshot(corpus_dirs=["docs"])
+        bad_corpora = [None, {}, {**original["corpus"], "status": "current"},
+                       {**original["corpus"], "directories": []},
+                       {**original["corpus"], "directories": "docs"},
+                       {**original["corpus"], "directories": ["src", "docs"]},
+                       {**original["corpus"], "directories": ["docs", "docs/adr"]},
+                       {**original["corpus"], "files": list(reversed(original["corpus"]["files"]))},
+                       {**original["corpus"], "files": []}]
+        for key, value in [("path", "outside.md"), ("path", "docs/file.txt"),
+                           ("path", "docs/" + "nested/" * (graph.CORPUS_DEPTH_LIMIT + 1) + "file.md"),
+                           ("bytes", True), ("lines", -1), ("sha256", "approved"),
+                           ("sha256", "0" * 64), ("verified", True)]:
+            corpus = deepcopy(original["corpus"])
+            corpus["files"][0][key] = value
+            bad_corpora.append(corpus)
+        corpus = deepcopy(original["corpus"])
+        corpus["files"].append(deepcopy(corpus["files"][0]))
+        bad_corpora.append(corpus)
+        for corpus in bad_corpora:
+            value = {**deepcopy(original), "corpus": corpus}
+            value["sha256"] = graph.digest({key: item for key, item in value.items() if key != "sha256"})
+            with self.subTest(corpus=corpus), self.assertRaises(graph.GraphError):
+                graph.validate_snapshot(value)
+        for version in [True, 0, 1, 3]:
+            value = {**original, "schema_version": version}
+            with self.subTest(version=version), self.assertRaises(graph.GraphError):
+                graph.validate_snapshot(value)
+        value = {key: item for key, item in original.items() if key != "corpus"}
+        with self.assertRaisesRegex(graph.GraphError, "invalid_schema"):
+            graph.validate_snapshot(value)
+
+    def test_corpus_missing_root_and_nonregular_entries_are_errors(self):
+        (self.root / "docs/watched").mkdir()
+        self.snapshot(corpus_dirs=["docs/watched"])
+        (self.root / "docs/watched").rmdir()
+        self.assertEqual(self.check(expected=2)["error"], {"code": "missing", "path": "docs/watched"})
+        (self.root / "docs/watched").symlink_to(self.root / "docs/adr", target_is_directory=True)
+        self.assertEqual(self.check(expected=2)["error"]["code"], "unsafe_path")
+        (self.root / "docs/watched").unlink()
+        (self.root / "docs/watched").mkdir()
+        entry = self.root / "docs/watched/entry.md"
+        entry.symlink_to(self.root / "missing.md")
+        self.assertEqual(self.check(expected=2)["error"], {"code": "unsafe_path", "path": "docs/watched/entry.md"})
+        entry.unlink()
+        os.mkfifo(entry)
+        self.assertEqual(self.check(expected=2)["error"]["code"], "not_regular")
+        entry.unlink()
+        entry.write_bytes(b"\xff\x00")
+        self.assertEqual(self.check(expected=2)["error"]["code"], "unsupported_text")
+
+    def test_corpus_read_and_enumeration_errors_never_return_partial_current(self):
+        self.write("docs/adr/unreferenced.md", "# Evidence\n")
+        self.snapshot(corpus_dirs=["docs/adr"])
+        original_read = graph.Repository.read
+
+        def unreadable(instance, path, limit):
+            if path == "docs/adr/unreferenced.md":
+                raise graph.GraphError("unreadable", path)
+            return original_read(instance, path, limit)
+
+        with patch.object(graph.Repository, "read", new=unreadable):
+            self.assertEqual(self.main_error("check", "--graph", ".mastermind/research/snapshot.json")["code"], "unreadable")
+        original_stat = graph.os.stat
+
+        def unreadable_entry(path, *arguments, **keywords):
+            if path == "unreferenced.md" and "dir_fd" in keywords:
+                raise PermissionError(errno.EACCES, "denied")
+            return original_stat(path, *arguments, **keywords)
+
+        with patch.object(graph.os, "stat", new=unreadable_entry):
+            self.assertEqual(self.main_error("check", "--graph", ".mastermind/research/snapshot.json"),
+                             {"code": "unreadable", "path": "docs/adr/unreferenced.md"})
+
+    def test_corpus_file_depth_entry_and_time_limits_fail_closed(self):
+        repository = graph.Repository(self.root)
+        self.addCleanup(repository.close)
+        self.write("docs/adr/nested/extra.md", "# Extra\n")
+        self.write("docs/adr/ignored.txt", "Ignored\n")
+        self.write("docs/adr/.hidden", "Ignored\n")
+        for name, limit, code in [("CORPUS_FILE_LIMIT", 1, "corpus_file_limit"),
+                                  ("CORPUS_DEPTH_LIMIT", 0, "corpus_depth_limit"),
+                                  ("CORPUS_ENTRY_LIMIT", 9, "corpus_entry_limit"),
+                                  ("CORPUS_TIMEOUT", 0, "corpus_timeout")]:
+            with self.subTest(name=name), patch.object(graph, name, limit):
+                with self.assertRaisesRegex(graph.GraphError, code):
+                    graph.snapshot(repository, "relations.json", ".mastermind/research/no.json", ["docs/adr"])
+            self.assertFalse((self.root / ".mastermind/research/no.json").exists())
+        # Even excluded entries consume the shared budget, before content reads.
+        with patch.object(graph, "CORPUS_ENTRY_LIMIT", 2), patch.object(repository, "read") as read:
+            with self.assertRaisesRegex(graph.GraphError, "corpus_entry_limit"):
+                graph.capture_files(repository, [], ["docs/adr"])
+            read.assert_not_called()
+
+    def test_corpus_mid_enumeration_failure_is_not_an_empty_or_partial_inventory(self):
+        self.snapshot(corpus_dirs=["docs/adr"])
+        original_scandir = graph.os.scandir
+
+        class InterruptedScan:
+            def __init__(self, descriptor):
+                self.entries = original_scandir(descriptor)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_arguments):
+                self.entries.close()
+
+            def __iter__(self):
+                yield next(self.entries)
+                raise PermissionError(errno.EACCES, "incomplete listing")
+
+        with patch.object(graph.os, "scandir", new=InterruptedScan), \
+                patch.object(graph.os, "supports_fd", os.supports_fd | {InterruptedScan}):
+            self.assertEqual(self.main_error("check", "--graph", ".mastermind/research/snapshot.json"),
+                             {"code": "unreadable", "path": "docs/adr"})
+
+    def test_corpus_deadline_is_rechecked_after_content_read(self):
+        repository = graph.Repository(self.root)
+        self.addCleanup(repository.close)
+        original_read = repository.read
+        now = 0
+
+        def slow_read(path, limit):
+            nonlocal now
+            result = original_read(path, limit)
+            now = graph.CORPUS_TIMEOUT + 1
+            return result
+
+        with patch.object(graph.time, "monotonic", side_effect=lambda: now), \
+                patch.object(repository, "read", side_effect=slow_read):
+            with self.assertRaisesRegex(graph.GraphError, "corpus_timeout"):
+                graph.capture_files(repository, [], ["docs/adr"])
+
+    def test_corpus_byte_limit_counts_the_union_once_and_validates_saved_totals(self):
+        self.write("docs/adr/unreferenced.md", "# New\n")
+        _edges, paths = graph.validate_manifest(self.manifest)
+        all_paths = set(paths) | {"docs/adr/unreferenced.md"}
+        total = sum((self.root / path).stat().st_size for path in all_paths)
+        repository = graph.Repository(self.root)
+        self.addCleanup(repository.close)
+        with patch.object(graph, "TOTAL_BYTE_LIMIT", total):
+            saved = graph.snapshot(repository, "relations.json", ".mastermind/research/ok.json", ["docs/adr"])
+            graph.validate_snapshot(saved)
+        with patch.object(graph, "TOTAL_BYTE_LIMIT", total - 1):
+            with self.assertRaisesRegex(graph.GraphError, "total_byte_limit"):
+                graph.capture_files(repository, paths, ["docs/adr"])
+            with self.assertRaisesRegex(graph.GraphError, "total_byte_limit"):
+                graph.validate_snapshot(saved)
+        self.write("docs/adr/unreferenced.md", "x" * (graph.FILE_BYTE_LIMIT + 1))
+        self.assertEqual(self.check("ok.json", expected=2)["error"]["code"], "file_byte_limit")
+
+    def test_corpus_shared_endpoint_and_late_added_file_cannot_mix_versions(self):
+        self.write("unlisted.txt", "Already dirty\n")
+        repository = graph.Repository(self.root)
+        self.addCleanup(repository.close)
+        original_read = repository.read
+        for late_addition in [False, True]:
+            reads = 0
+
+            def race(path, limit):
+                nonlocal reads
+                result = original_read(path, limit)
+                if path == "docs/adr/0001.md":
+                    reads += 1
+                    if reads == 2:
+                        if late_addition:
+                            self.write("docs/adr/late.md", "# Newly discovered decision\n")
+                        else:
+                            self.write(path, "# Decision\nUse another.\nProof.\n")
+                return result
+
+            with self.subTest(late_addition=late_addition), patch.object(repository, "read", side_effect=race):
+                with self.assertRaisesRegex(graph.GraphError, "corpus_changed_during_operation"):
+                    graph.snapshot(repository, "relations.json", ".mastermind/research/no.json", ["docs/adr"])
+            self.assertEqual(reads, 2)
+            self.assertFalse((self.root / ".mastermind/research/no.json").exists())
+
+    def test_corpus_replacing_an_empty_directory_during_capture_is_an_error(self):
+        (self.root / "docs/empty").mkdir()
+        repository = graph.Repository(self.root)
+        self.addCleanup(repository.close)
+        original_read = repository.read
+        moved = False
+
+        def replace_directory(path, limit):
+            nonlocal moved
+            result = original_read(path, limit)
+            if path == "docs/adr/0001.md" and not moved:
+                moved = True
+                (self.root / "docs/empty").rename(self.root / "docs/old-empty")
+                (self.root / "docs/empty").mkdir()
+            return result
+
+        with patch.object(repository, "read", side_effect=replace_directory):
+            with self.assertRaisesRegex(graph.GraphError, "corpus_changed_during_operation"):
+                graph.capture_files(repository, ["docs/adr/0001.md"], ["docs/empty"])
+
+    def test_corpus_interruption_returns_json_and_rolls_back_published_output(self):
+        with patch.object(graph.Repository, "corpus_inventory", side_effect=KeyboardInterrupt):
+            self.assertEqual(self.main_error("snapshot", "--relations", "relations.json", "--output",
+                                             ".mastermind/research/no.json", "--corpus-dir", "docs/adr"),
+                             {"code": "interrupted"})
+        original_fsync = graph.os.fsync
+
+        def interrupt_after_publication(descriptor):
+            if (self.root / ".mastermind/research/no.json").exists():
+                raise KeyboardInterrupt
+            return original_fsync(descriptor)
+
+        with patch.object(graph.os, "fsync", new=interrupt_after_publication):
+            self.assertEqual(self.main_error("snapshot", "--relations", "relations.json", "--output",
+                                             ".mastermind/research/no.json", "--corpus-dir", "docs/adr"),
+                             {"code": "interrupted"})
+        self.assertEqual(list((self.root / ".mastermind/research").iterdir()), [])
 
     def test_strict_manifest_rejects_unsafe_paths_duplicates_and_false_types(self):
         for path in ["../outside.md", "/tmp/outside.md", "docs/../outside.md", "docs//file.md",

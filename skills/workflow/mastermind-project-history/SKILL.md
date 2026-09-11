@@ -68,17 +68,30 @@ See [the commands and contract](references/document-evidence-graph.md).
 
 Before reusing a snapshot, run `check`. A changed or missing endpoint makes
 every incident edge `needs_review`; read the changed source before repeating
-the conclusion. Unaffected edges can remain `current`.
+the conclusion. Unaffected edges can remain `current`. When the research depends
+on a collection of decisions, declare its directories with repeatable
+`snapshot --corpus-dir docs/adr` options. This also captures non-hidden Markdown
+documents recursively within those directories, including uncited documents.
+Choose a small relevant scope; do not assume the entire repository was searched.
+
+Read the separate `corpus.status` before reusing a conclusion. `changed` makes
+the overall check `needs_review`, even when every edge remains `current`.
+Inspect the added, missing, or changed documents and search history again for
+superseding records and contradictions. `not_tracked` means no corpus inventory
+was saved, including in legacy snapshots. `current` covers only the chosen
+directories and cannot prove completeness outside them.
 
 `current` means the named files still match the snapshot. Every edge remains
 `unverified`, including `verified_by`: a hash or relation name cannot establish
 that code obeys a decision or that a test passed. Review semantic claims and
 runtime evidence separately. A `mentions` edge is only a mention.
 
-The graph covers only named files. A newly added superseding ADR is not detected
-by endpoint hashes: search history again before making corpus-wide or current
-policy claims. `revision_changed` is separate from file freshness; even an
-unchanged revision does not prove a clean worktree or complete evidence.
+Without corpus tracking, the graph covers only named files. A newly added
+superseding ADR is not detected by endpoint hashes: search history again before
+making corpus-wide or current policy claims. `revision_changed` is separate
+from endpoint and corpus freshness; even an unchanged revision does not prove
+a clean worktree or complete evidence. A corpus read, traversal, or limit error
+is incomplete evidence; resolve it before reusing the snapshot.
 
 ## Output contract
 

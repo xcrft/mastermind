@@ -27,6 +27,12 @@ RELATION_LIMIT = 256
 FILE_LIMIT = 128
 FILE_BYTE_LIMIT = 1024 * 1024
 TOTAL_BYTE_LIMIT = 16 * 1024 * 1024
+CORPUS_DIRECTORY_LIMIT = 8
+CORPUS_FILE_LIMIT = 256
+CORPUS_ENTRY_LIMIT = 8192
+CORPUS_DEPTH_LIMIT = 16
+CORPUS_PATH_COMPONENT_LIMIT = 32
+CORPUS_TIMEOUT = 10
 GIT_OUTPUT_LIMIT = 1024 * 1024
 GIT_TIMEOUT = 5
 RELATIONS = {
@@ -94,6 +100,50 @@ def relative_path(value):
         if not allowed:
             raise GraphError("unsafe_path", value)
     return value
+
+
+def relative_directory(value):
+    if not isinstance(value, str):
+        raise GraphError("unsafe_path")
+    # Reuse the evidence-path policy while admitting roots such as
+    # .mastermind/decisions, which need a descendant for endpoint validation.
+    relative_path(value + "/_corpus.md")
+    if len(PurePosixPath(value).parts) >= CORPUS_PATH_COMPONENT_LIMIT:
+        raise GraphError("corpus_depth_limit", value)
+    return value
+
+
+def corpus_directories(values):
+    if not isinstance(values, (list, tuple)):
+        raise GraphError("invalid_schema")
+    if len(values) > CORPUS_DIRECTORY_LIMIT:
+        raise GraphError("corpus_directory_limit")
+    directories = sorted(relative_directory(value) for value in values)
+    for index, directory in enumerate(directories):
+        if any(directory == other or directory.startswith(other + "/")
+               for other in directories[:index]):
+            raise GraphError("corpus_scope_overlap", directory)
+    return directories
+
+
+def in_corpus(path, directories):
+    return any(path.startswith(directory + "/") for directory in directories)
+
+
+class CorpusControl:
+    def __init__(self):
+        self.deadline = time.monotonic() + CORPUS_TIMEOUT
+        self.entries = 0
+
+    def check(self):
+        if time.monotonic() >= self.deadline:
+            raise GraphError("corpus_timeout")
+
+    def visit(self):
+        self.check()
+        self.entries += 1
+        if self.entries > CORPUS_ENTRY_LIMIT:
+            raise GraphError("corpus_entry_limit")
 
 
 def endpoint(value, markdown=False):
@@ -199,13 +249,14 @@ class Repository:
         if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != self.root_identity:
             raise GraphError("root_changed_during_operation")
 
-    def local_argument(self, argument):
+    def local_argument(self, argument, directory=False):
+        validate = relative_directory if directory else relative_path
         candidate = Path(argument)
         if not candidate.is_absolute():
-            return relative_path(candidate.as_posix())
+            return validate(candidate.as_posix())
         for base in (self.root, self.requested_root):
             try:
-                return relative_path(candidate.relative_to(base).as_posix())
+                return validate(candidate.relative_to(base).as_posix())
             except ValueError:
                 continue
         raise GraphError("path_outside_root")
@@ -239,6 +290,67 @@ class Repository:
                     raise GraphError("parent_changed_during_operation", path)
         except GraphError as error:
             raise GraphError("parent_changed_during_operation", path) from error
+
+    def corpus_inventory(self, directories, control):
+        if os.scandir not in os.supports_fd:
+            raise GraphError("unsupported_platform")
+        files, directory_ids, seen_directories = {}, {}, set()
+
+        @contextmanager
+        def directory_handle(path):
+            probe = path + "/_corpus.md"
+            try:
+                with self.parent(probe) as (descriptor, _name):
+                    yield descriptor
+                    self.assert_parent_binding(probe, descriptor)
+            except GraphError as error:
+                if error.path == probe:
+                    raise GraphError(error.code, path) from error
+                raise
+
+        def scan(path, depth):
+            control.visit()
+            if depth > CORPUS_DEPTH_LIMIT:
+                raise GraphError("corpus_depth_limit", path)
+            relative_directory(path)
+            with directory_handle(path) as descriptor:
+                current = os.fstat(descriptor)
+                identity = (current.st_dev, current.st_ino)
+                if identity in seen_directories:
+                    raise GraphError("corpus_scope_overlap", path)
+                seen_directories.add(identity)
+                directory_ids[path] = identity
+                with os.scandir(descriptor) as entries:
+                    for entry in entries:
+                        control.visit()
+                        if entry.name.startswith("."):
+                            continue
+                        child = path + "/" + entry.name
+                        try:
+                            current = os.stat(entry.name, dir_fd=descriptor, follow_symlinks=False)
+                        except OSError as error:
+                            raise path_error(error, child) from error
+                        if stat.S_ISLNK(current.st_mode):
+                            raise GraphError("unsafe_path", child)
+                        if stat.S_ISDIR(current.st_mode):
+                            scan(child, depth + 1)
+                        elif not stat.S_ISREG(current.st_mode):
+                            raise GraphError("not_regular", child)
+                        elif PurePosixPath(child).suffix.lower() in MARKDOWN:
+                            relative_path(child)
+                            if len(PurePosixPath(child).parts) > CORPUS_PATH_COMPONENT_LIMIT:
+                                raise GraphError("corpus_depth_limit", child)
+                            if len(files) >= CORPUS_FILE_LIMIT:
+                                raise GraphError("corpus_file_limit")
+                            if child in files:
+                                raise GraphError("corpus_changed_during_operation", child)
+                            files[child] = stat_identity(current)
+                control.check()
+
+        for directory in directories:
+            scan(directory, 0)
+        self.assert_root_binding()
+        return files, directory_ids
 
     def read(self, path, limit):
         with self.parent(path) as (directory, name):
@@ -307,7 +419,7 @@ class Repository:
                     raise GraphError("output_exists", path) from error
                 os.fsync(directory)
                 self.assert_parent_binding(path, directory)
-            except (GraphError, OSError):
+            except (GraphError, OSError, KeyboardInterrupt):
                 if published:
                     try:
                         owned = os.stat(name, dir_fd=directory, follow_symlinks=False)
@@ -385,13 +497,17 @@ class Repository:
         return {"head": head, "dirty": dirty}
 
 
-def inspect_files(repository, paths, checking=False):
+def inspect_files(repository, paths, checking=False, control=None):
     records = {}
     states = {}
     total = 0
     for path in paths:
+        if control is not None:
+            control.check()
         try:
             data, identity = repository.read(path, FILE_BYTE_LIMIT)
+            if control is not None:
+                control.check()
             total += len(data)
             if total > TOTAL_BYTE_LIMIT:
                 raise GraphError("total_byte_limit")
@@ -422,6 +538,65 @@ def stable_files(repository, paths, checking=False):
     return records
 
 
+def capture_files(repository, paths, directories, checking=False):
+    if not directories:
+        return stable_files(repository, paths, checking), None
+    control = CorpusControl()
+    previous = None
+    for _pass in range(2):
+        inventory, directory_ids = repository.corpus_inventory(directories, control)
+        all_paths = sorted(set(paths) | inventory.keys())
+        records, states = inspect_files(repository, all_paths, checking, control)
+        confirmed, confirmed_dirs = repository.corpus_inventory(directories, control)
+        if inventory != confirmed or directory_ids != confirmed_dirs:
+            raise GraphError("corpus_changed_during_operation")
+        for path, identity in confirmed.items():
+            if "reason" in records[path]:
+                raise GraphError(records[path]["reason"], path)
+            if states[path][0] != identity:
+                raise GraphError("corpus_changed_during_operation", path)
+        receipt = (states, confirmed, confirmed_dirs)
+        if previous is not None and receipt != previous:
+            raise GraphError("files_changed_during_snapshot")
+        previous = receipt
+    return ({path: records[path] for path in paths},
+            {"directories": directories, "files": [records[path] for path in sorted(inventory)]})
+
+
+def validate_corpus(value, endpoints):
+    exact_fields(value, {"directories", "files"})
+    if not isinstance(value["directories"], list):
+        raise GraphError("invalid_schema")
+    directories = corpus_directories(value["directories"])
+    if not directories or directories != value["directories"]:
+        raise GraphError("invalid_corpus_directories")
+    if not isinstance(value["files"], list) or len(value["files"]) > CORPUS_FILE_LIMIT:
+        raise GraphError("invalid_corpus_inventory")
+    files = {}
+    for item in value["files"]:
+        exact_fields(item, {"path", "sha256", "bytes", "lines"})
+        path = relative_path(item["path"])
+        if (not in_corpus(path, directories) or PurePosixPath(path).suffix.lower() not in MARKDOWN
+                or len(PurePosixPath(path).parts) > CORPUS_PATH_COMPONENT_LIMIT or path in files):
+            raise GraphError("invalid_corpus_inventory")
+        directory = next(root for root in directories if path.startswith(root + "/"))
+        if len(PurePosixPath(path).relative_to(directory).parts) - 1 > CORPUS_DEPTH_LIMIT:
+            raise GraphError("invalid_corpus_inventory")
+        integer(item["bytes"], 0, FILE_BYTE_LIMIT)
+        integer(item["lines"], 0, item["bytes"])
+        if not isinstance(item["sha256"], str) or not HEX.fullmatch(item["sha256"]):
+            raise GraphError("invalid_file_digest")
+        files[path] = item
+    if list(files) != sorted(files):
+        raise GraphError("invalid_corpus_inventory")
+    for path, item in endpoints.items():
+        if in_corpus(path, directories) and PurePosixPath(path).suffix.lower() in MARKDOWN:
+            if files.get(path) != item:
+                raise GraphError("inconsistent_corpus_endpoint", path)
+    if sum(item["bytes"] for item in (endpoints | files).values()) > TOTAL_BYTE_LIMIT:
+        raise GraphError("total_byte_limit")
+
+
 def validate_lines(edges, files):
     for edge in edges:
         for side in ("from", "to"):
@@ -431,8 +606,10 @@ def validate_lines(edges, files):
 
 
 def validate_snapshot(value):
-    exact_fields(value, {"schema_version", "kind", "root", "revision", "files", "edges", "sha256"})
-    integer(value["schema_version"], 1, 1)
+    version = value.get("schema_version") if isinstance(value, dict) else None
+    integer(version, 1, 2)
+    fields = {"schema_version", "kind", "root", "revision", "files", "edges", "sha256"}
+    exact_fields(value, fields | {"corpus"} if version == 2 else fields)
     if value["kind"] != SNAPSHOT_KIND or not isinstance(value["root"], str) or not Path(value["root"]).is_absolute():
         raise GraphError("invalid_schema")
     exact_fields(value["revision"], {"head", "dirty"})
@@ -469,24 +646,34 @@ def validate_snapshot(value):
         raise GraphError("total_byte_limit")
     if list(files) != paths:
         raise GraphError("invalid_file_inventory")
+    if version == 2:
+        validate_corpus(value["corpus"], files)
     validate_lines(edges, files)
     if not isinstance(value["sha256"], str) or value["sha256"] != digest({key: item for key, item in value.items() if key != "sha256"}):
         raise GraphError("snapshot_digest_mismatch")
     return edges, paths, files
 
 
-def snapshot(repository, relations_path, output_path):
+def snapshot(repository, relations_path, output_path, corpus_dirs=()):
+    directories = corpus_directories(corpus_dirs)
+    # A Markdown snapshot could add itself to the corpus through case aliases
+    # on case-insensitive filesystems; tracked snapshots remain data artifacts.
+    if directories and PurePosixPath(output_path).suffix.lower() in MARKDOWN:
+        raise GraphError("corpus_output_conflict", output_path)
     before = repository.revision()
     raw, identity = repository.read(relations_path, MANIFEST_LIMIT)
     edges, paths = validate_manifest(decode_json(raw))
-    files = stable_files(repository, paths)
+    files, corpus = capture_files(repository, paths, directories)
     validate_lines(edges, files)
     if repository.read(relations_path, MANIFEST_LIMIT) != (raw, identity):
         raise GraphError("input_changed_during_snapshot")
     if repository.revision() != before:
         raise GraphError("repository_changed_during_snapshot")
-    result = {"schema_version": 1, "kind": SNAPSHOT_KIND, "root": str(repository.root),
+    result = {"schema_version": 2 if corpus is not None else 1,
+              "kind": SNAPSHOT_KIND, "root": str(repository.root),
               "revision": before, "files": [files[path] for path in paths], "edges": edges}
+    if corpus is not None:
+        result["corpus"] = corpus
     result["sha256"] = digest(result)
     encoded = canonical(result) + b"\n"
     if len(encoded) > GRAPH_LIMIT:
@@ -502,7 +689,25 @@ def check(repository, graph_path):
     edges, paths, expected = validate_snapshot(saved)
     if saved["root"] != str(repository.root):
         raise GraphError("root_binding_mismatch")
-    current = stable_files(repository, paths, checking=True)
+    directories = saved["corpus"]["directories"] if saved["schema_version"] == 2 else []
+    current, corpus = capture_files(repository, paths, directories, checking=True)
+    corpus_result = {"status": "not_tracked", "directories": [], "changed_files": []}
+    if corpus is not None:
+        old_files = {item["path"]: item for item in saved["corpus"]["files"]}
+        new_files = {item["path"]: item for item in corpus["files"]}
+        changes = []
+        for path in sorted(old_files.keys() | new_files.keys()):
+            if path not in old_files:
+                reason = "added"
+            elif path not in new_files:
+                reason = "missing"
+            elif old_files[path] != new_files[path]:
+                reason = "content_changed"
+            else:
+                continue
+            changes.append({"path": path, "reasons": [reason]})
+        corpus_result = {"status": "changed" if changes else "current",
+                         "directories": directories, "changed_files": changes}
     changed = {}
     for path in paths:
         item = current[path]
@@ -521,8 +726,9 @@ def check(repository, graph_path):
     if repository.revision() != before:
         raise GraphError("repository_changed_during_check")
     return {
-        "schema_version": 1, "kind": CHECK_KIND,
-        "status": "needs_review" if changed else "current",
+        "schema_version": 2, "kind": CHECK_KIND,
+        "status": "needs_review" if changed or corpus_result["status"] == "changed" else "current",
+        "corpus": corpus_result,
         "root": str(repository.root), "snapshot_sha256": saved["sha256"],
         "revision": before, "snapshot_revision": saved["revision"],
         "revision_changed": before["head"] != saved["revision"]["head"],
@@ -546,6 +752,8 @@ def main(argv=None):
         make.add_argument("--root", required=True)
         make.add_argument("--relations", required=True)
         make.add_argument("--output", required=True)
+        make.add_argument("--corpus-dir", action="append", default=[],
+                          help="Track Markdown documents below this directory; repeat for multiple roots.")
         inspect = commands.add_parser("check")
         inspect.add_argument("--root", required=True)
         inspect.add_argument("--graph", required=True)
@@ -553,7 +761,9 @@ def main(argv=None):
         repository = Repository(arguments.root)
         if arguments.command == "snapshot":
             result = snapshot(repository, repository.local_argument(arguments.relations),
-                              repository.local_argument(arguments.output))
+                              repository.local_argument(arguments.output),
+                              [repository.local_argument(path, directory=True)
+                               for path in arguments.corpus_dir])
         else:
             result = check(repository, repository.local_argument(arguments.graph))
         print(canonical(result).decode("utf-8"))
@@ -563,6 +773,9 @@ def main(argv=None):
         if error.path is not None:
             detail["path"] = error.path
         print(json.dumps({"schema_version": 1, "status": "error", "error": detail}))
+        return 2
+    except KeyboardInterrupt:
+        print(json.dumps({"schema_version": 1, "status": "error", "error": {"code": "interrupted"}}))
         return 2
     except (OSError, ValueError, RecursionError):
         print(json.dumps({"schema_version": 1, "status": "error", "error": {"code": "operation_failed"}}))

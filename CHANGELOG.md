@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Audit-bundle construction now reads the bound spec and executor report
+  through one retained repository capability, rejecting path swaps, symlinks,
+  and special files before their digests enter the manifest.
 - Executor reports are now parsed from one bounded, no-follow file snapshot.
   The parser rejects special files and path retargeting instead of following a
   replacement or blocking on a FIFO before postflight and CI decisions.

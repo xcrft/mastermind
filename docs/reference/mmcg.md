@@ -1600,6 +1600,9 @@ provenance and does not silently upgrade these default graph queries.
 
 `mastermind ci` indexes the repository, verifies selected specs, parses their
 executor reports, audits the real diff, and optionally emits sealed bundles.
+Bundle construction reads the bound spec and executor report through one
+retained repository capability and rejects path substitution, symlinks, and
+special files before recording their digests.
 For pull requests, scope the gate to changed task folders and require evidence:
 
 ```bash

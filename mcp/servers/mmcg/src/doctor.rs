@@ -87,7 +87,7 @@ impl DoctorIndex {
             Ok(true) => Self::Ready {
                 size: store
                     .source_snapshot_database_len()
-                    .unwrap_or_else(|| metadata.len()),
+                    .unwrap_or(metadata.len()),
                 store: Box::new(store),
             },
             Ok(false) => Self::Invalid("schema is missing or outdated".into()),

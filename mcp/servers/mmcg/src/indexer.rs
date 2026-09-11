@@ -1557,12 +1557,6 @@ fn source_walk_builder(root: &Path) -> WalkBuilder {
     builder
 }
 
-/// All non-ignored files below `root`, in deterministic path order. Language
-/// filtering and content admission happen separately so stats stay truthful.
-pub(crate) fn source_candidates(root: &Path) -> Vec<PathBuf> {
-    source_candidates_controlled(root, None, ReadControl::default()).unwrap_or_default()
-}
-
 pub(crate) fn source_candidates_bounded(
     root: &RootCapability,
     limit: usize,
@@ -1873,10 +1867,6 @@ fn parse_one_with_concepts_controlled(
         .to_string_lossy()
         .replace('\\', "/");
     parse_blob_with_concepts(&rel, &source.bytes, source.modified_millis, extractor)
-}
-
-pub(crate) fn source_admission_mtime(root: &Path, path: &Path) -> Result<i64, IndexError> {
-    source_admission_controlled(root, path, ReadControl::default()).map(|file| file.modified_millis)
 }
 
 pub(crate) fn source_admission_controlled(
@@ -3443,7 +3433,7 @@ def candidate(value: ImportantType) -> ResultType"#
         fs::write(&nested_ignored, "pub fn ignored() {}\n").unwrap();
         fs::write(&nested_kept, "pub fn kept() {}\n").unwrap();
 
-        let candidates = source_candidates(&dir);
+        let candidates = source_candidates_controlled(&dir, None, ReadControl::default()).unwrap();
         assert!(!candidates.contains(&generated));
         assert!(candidates.contains(&kept));
         assert!(!candidates.contains(&nested_ignored));

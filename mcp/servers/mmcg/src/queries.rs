@@ -3488,7 +3488,7 @@ pub fn status(store: &Store) -> rusqlite::Result<StatusResponse> {
     let db_path = store.db_path();
     let stale_files = store
         .meta_value("index_root")?
-        .map(|root| stale_count(std::path::Path::new(&root), db_path))
+        .map(|root| stale_count(store, std::path::Path::new(&root)))
         .unwrap_or(1);
     Ok(StatusResponse {
         db_path: db_path.to_string_lossy().to_string(),
@@ -3502,19 +3502,32 @@ pub fn status(store: &Store) -> rusqlite::Result<StatusResponse> {
 /// Best-effort count of source files that differ from their stored index mtime
 /// (capped). Returns 1 when freshness cannot be read so `status` does not claim
 /// that a damaged index is current.
-/// Both paths may be relative, so canonicalize before comparing filesystem
-/// state. The repository root comes from the index binding rather than the DB
-/// location because `--index` may place SQLite anywhere.
-fn stale_count(index_root: &std::path::Path, db_path: &std::path::Path) -> usize {
-    let Ok(db_abs) = db_path.canonicalize() else {
-        return 1;
-    };
+/// The repository root comes from the index binding rather than the DB location
+/// because `--index` may place SQLite anywhere. Reuse the caller's exact Store
+/// snapshot so status cannot silently mix rows from two index revisions.
+fn stale_count(store: &Store, index_root: &std::path::Path) -> usize {
     let Ok(root) = index_root.canonicalize() else {
         return 1;
     };
-    crate::workflow_status::stale_paths(&root, &db_abs, 100)
-        .map(|paths| paths.len())
-        .unwrap_or(1)
+    let hard_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = store
+        .request_deadline()
+        .map_or(hard_deadline, |deadline| deadline.min(hard_deadline));
+    let interrupted = || store.work_interrupted();
+    match crate::workflow_status::stale_paths_controlled(
+        store,
+        &root,
+        100,
+        crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
+        crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
+        crate::bounded_fs::ReadControl {
+            deadline: Some(deadline),
+            interrupted: Some(&interrupted),
+        },
+    ) {
+        Ok(paths) if store.source_snapshot_unchanged().unwrap_or(false) => paths.len(),
+        _ => 1,
+    }
 }
 
 #[derive(Debug, Serialize)]

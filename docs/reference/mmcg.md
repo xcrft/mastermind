@@ -260,7 +260,8 @@ mmcg miner profile . --deep                    # explicit claude -p compatibilit
 # --force intentionally replaces the whole profile, including preserved prose;
 # it is not refresh.
 # Existing profiles are capped at 1 MiB and must be regular, no-follow files.
-# Publication is atomic; a manual edit made during mining aborts the replacement.
+# Publication is serialized and atomic; concurrent mines cannot lose a contribution.
+# A manual edit is rebased with bounded retries and is never silently overwritten.
 # Subdirectories and linked worktrees share one repository contribution.
 # Independent clones remain separate; repeated samples do not prove quality.
 

@@ -478,6 +478,9 @@ pub fn adapt(store: &Store, options: &AdaptOptions<'_>) -> Result<AdaptSummary, 
         .map_err(|error| AdapterError::Io(error.to_string()))?;
     bytes.push(b'\n');
     facts::validate_generated_manifest(store, &bytes).map_err(contract_error)?;
+    store
+        .ensure_source_snapshot_current()
+        .map_err(|_| contract_error("index changed while the fact manifest was being assembled"))?;
     crate::audit_bundle::write_atomic(&output, &bytes, false)
         .map_err(|error| AdapterError::Io(error.to_string()))?;
     Ok(AdaptSummary {

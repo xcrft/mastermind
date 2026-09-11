@@ -18,7 +18,7 @@ impl Drop for WorkBudgetScope<'_> {
     }
 }
 
-fn open_query_store(index_path: &Path) -> Result<Store, Box<dyn std::error::Error>> {
+pub(crate) fn open_query_store(index_path: &Path) -> Result<Store, Box<dyn std::error::Error>> {
     let store = Store::open_read_only(index_path)?;
     if !store.schema_current()? {
         return Err(format!(

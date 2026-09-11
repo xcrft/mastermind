@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Status, next-action, and resume now read task lifecycle state through bounded,
+  no-follow repository capabilities. Malformed, oversized, unknown, or
+  special-file state is held instead of becoming a fresh ready task; an
+  ambiguous or changing task inventory blocks workflow actions.
 - Spec parsing now uses a single bounded, no-follow file snapshot capped at the
   audit-bundle 16 MiB limit. Verify, CI, and workflow gates reject path swaps
   and special files instead of reading an unbounded or blocking input.

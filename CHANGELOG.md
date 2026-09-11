@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- `context doctor` now bounds and revalidates `CONTEXT.md`, lesson, task-state,
+  and task-inventory reads. Invalid UTF-8, special files, links, oversized
+  inputs, and inventory failures are reported fail-closed instead of hanging or
+  producing an empty-success diagnosis.
 - Lesson-candidate updates now retain the repository and lock-file identities
   across the complete read-modify-write section. The 1 MiB bounded reader and
   atomic writer reject symlinks, special files, path swaps, and oversized or

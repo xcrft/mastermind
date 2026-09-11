@@ -286,8 +286,13 @@ fn ensure_history_review(
                 Err(BoundedReadError::Io(error))
                     if error.kind() == std::io::ErrorKind::NotFound =>
                 {
-                    crate::audit_bundle::write_atomic(&archive, &previous.bytes, false)
-                        .map_err(std::io::Error::other)?;
+                    bounded_fs::write_atomic_regular_file(
+                        repo_root,
+                        &archive,
+                        &previous.bytes,
+                        false,
+                    )
+                    .map_err(std::io::Error::other)?;
                 }
                 _ => {
                     return Err(std::io::Error::other(
@@ -317,7 +322,7 @@ Complete this after semantic review. Replace each `pending` with `updated` or\n\
 - **Evidence:** `{spec}`; `{audit}`; `{release}`\n",
         spec_basename(spec_path),
     );
-    crate::audit_bundle::write_atomic(&path, body.as_bytes(), false)
+    bounded_fs::write_atomic_regular_file(repo_root, &path, body.as_bytes(), false)
         .map_err(std::io::Error::other)?;
     Ok(true)
 }
@@ -675,19 +680,7 @@ pub fn save_state_in_repository(
             ),
         ));
     }
-    let root = RootCapability::open(repo_root).map_err(std::io::Error::other)?;
-    let relative = root
-        .repository_relative(path)
-        .map_err(std::io::Error::other)?;
-    if let Some(parent) = relative
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-    {
-        root.ensure_directory(parent)
-            .map_err(std::io::Error::other)?;
-    }
-    let target = root.requested_root().join(relative);
-    bounded_fs::write_atomic_regular_file_with_capability(&root, &target, &body, true)
+    bounded_fs::write_atomic_regular_file(repo_root, path, &body, true)
         .map_err(std::io::Error::other)
 }
 
@@ -1821,7 +1814,9 @@ fn run_post(
     let audit_body = audit.render_text();
     print!("{audit_body}");
     let audit_path = spec_path.parent().unwrap_or(spec_path).join("audit.md");
-    if let Err(error) = std::fs::write(&audit_path, &audit_body) {
+    if let Err(error) =
+        bounded_fs::write_atomic_regular_file(repo_root, &audit_path, audit_body.as_bytes(), false)
+    {
         eprintln!(
             "error: failed to persist `{}`: {error}",
             audit_path.display()
@@ -1900,16 +1895,9 @@ fn run_post(
         let body = render_release_notes(&notes);
         println!("\n--- Release notes draft ---\n{body}");
         let release_path = release_file_path(repo_root, spec_path);
-        if let Some(parent) = release_path.parent() {
-            if let Err(error) = std::fs::create_dir_all(parent) {
-                eprintln!(
-                    "error: failed to create release-note directory `{}`: {error}",
-                    parent.display()
-                );
-                return Outcome::PostBroken;
-            }
-        }
-        if let Err(error) = std::fs::write(&release_path, &body) {
+        if let Err(error) =
+            bounded_fs::write_atomic_regular_file(repo_root, &release_path, body.as_bytes(), false)
+        {
             eprintln!(
                 "error: failed to write release notes `{}`: {error}",
                 release_path.display()

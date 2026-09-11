@@ -508,6 +508,24 @@ pub(crate) fn create_regular_file_with_capability(
 /// parent-directory capability. The temporary file is durable before rename,
 /// the parent directory is synced on Unix, and existing links or non-files are
 /// never accepted as the controller-owned target.
+pub(crate) fn write_atomic_regular_file(
+    root: &Path,
+    path: &Path,
+    bytes: &[u8],
+    private: bool,
+) -> Result<(), BoundedReadError> {
+    let root = RootCapability::open(root)?;
+    let relative = root.repository_relative(path)?;
+    if let Some(parent) = relative
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        root.ensure_directory(parent)?;
+    }
+    let target = root.requested_root().join(relative);
+    write_atomic_regular_file_with_capability(&root, &target, bytes, private)
+}
+
 pub(crate) fn write_atomic_regular_file_with_capability(
     root: &RootCapability,
     path: &Path,
@@ -1110,6 +1128,26 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn atomic_writer_creates_anchored_parent_and_rejects_outside_path() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(".mastermind/releases/task.md");
+        write_atomic_regular_file(root.path(), &path, b"release", false).unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"release");
+
+        let outside = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            write_atomic_regular_file(
+                root.path(),
+                &outside.path().join("escaped.md"),
+                b"outside",
+                false,
+            ),
+            Err(BoundedReadError::OutsideRoot)
+        ));
+        assert!(!outside.path().join("escaped.md").exists());
     }
 
     #[cfg(unix)]

@@ -122,6 +122,8 @@ changing inventory blocks resume instead of being treated as a new ready task.
 Controller updates replace `state.json` atomically through the retained task
 directory after syncing the private temporary file. A process interruption
 therefore leaves either the previous complete state or the next complete state.
+The same repository-bound replacement protects controller-written `audit.md`,
+release-note drafts, `history-review.md`, and review archives.
 
 ## What the gates prove
 

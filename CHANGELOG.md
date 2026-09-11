@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Post-flight audit reports, release-note drafts, history reviews, and review
+  archives now use the same capability-scoped atomic writer as lifecycle state,
+  preventing partial artifacts and path-component substitutions.
 - Lifecycle state updates now use a private, durable temporary file and
   capability-scoped atomic replacement. Interrupted writes cannot leave
   truncated JSON, and symlink or non-file state targets are rejected.

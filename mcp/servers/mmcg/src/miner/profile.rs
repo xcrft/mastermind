@@ -116,12 +116,19 @@ fn mine_to_paths(
         if !force {
             ensure_owner_compatible(&db, &author, &prov.identities)?;
         }
-        if force {
-            db.reset()?;
-        }
-        let pruned = prune_stale(&mut db)?;
-        let aliases = legacy_repository_keys(&db, &repo_key)?;
-        db.upsert_repo(
+        let pruned = if force {
+            Vec::new()
+        } else {
+            stale_repository_keys(&db)?
+        };
+        let aliases = if force {
+            Vec::new()
+        } else {
+            legacy_repository_keys(&db, &repo_key)?
+        };
+        db.apply_mine(
+            force,
+            &pruned,
             &repo_key,
             &store::RepoProvenance {
                 author: author.clone(),
@@ -136,6 +143,9 @@ fn mine_to_paths(
             &counts,
             &aliases,
         )?;
+        for key in &pruned {
+            eprintln!("retention: dropped {key} (gone or stale > {RETENTION_DAYS}d)");
+        }
 
         let agg = db.aggregate()?;
         let rules = derive_rules(&agg.counts);
@@ -254,23 +264,24 @@ fn now_epoch() -> i64 {
         .unwrap_or(0)
 }
 
-/// Retention sweep: drop repos whose path is gone from disk or that haven't been
-/// re-mined in `RETENTION_DAYS`. Returns the dropped keys (logged by the caller).
-fn prune_stale(db: &mut store::ProfileStore) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+/// Select repos whose canonical Git directory is confirmed gone or which have
+/// not been mined in `RETENTION_DAYS`. Filesystem errors abort without pruning.
+fn stale_repository_keys(
+    db: &store::ProfileStore,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let cutoff = now_epoch() - RETENTION_DAYS * 86_400;
-    let drop: Vec<String> = db
-        .list_repos()?
-        .into_iter()
-        .filter(|(key, mined_at)| !Path::new(key).exists() || *mined_at < cutoff)
-        .map(|(key, _)| key)
-        .collect();
-    if !drop.is_empty() {
-        for key in &drop {
-            eprintln!("retention: dropped {key} (gone or stale > {RETENTION_DAYS}d)");
+    let mut stale = Vec::new();
+    for (key, mined_at) in db.list_repos()? {
+        let gone = match std::fs::symlink_metadata(&key) {
+            Ok(metadata) => metadata.file_type().is_symlink() || !metadata.is_dir(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => return Err(error.into()),
+        };
+        if gone || mined_at < cutoff {
+            stale.push(key);
         }
-        db.prune_repos(&drop)?;
     }
-    Ok(drop)
+    Ok(stale)
 }
 
 /// `style.db` is one person's cross-repository profile. A matching author label
@@ -1782,8 +1793,8 @@ mod tests {
             ));
         }
         fixture_git(&root, &["worktree", "remove", worktree.to_str().unwrap()]);
-        let mut db = store::ProfileStore::open(&db_path).unwrap();
-        assert!(prune_stale(&mut db).unwrap().is_empty());
+        let db = store::ProfileStore::open(&db_path).unwrap();
+        assert!(stale_repository_keys(&db).unwrap().is_empty());
         assert_eq!(
             db.list_repos().unwrap()[0].0,
             repository_key(&root).unwrap()

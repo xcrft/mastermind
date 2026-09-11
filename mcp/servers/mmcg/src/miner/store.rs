@@ -161,17 +161,29 @@ impl ProfileStore {
         counts: &Counts,
         aliases: &[String],
     ) -> SqlResult<()> {
+        self.apply_mine(false, &[], repo_key, prov, identities, counts, aliases)
+    }
+
+    /// Apply the complete mutation for one mine in a single transaction. A
+    /// failed replacement cannot leave a reset or retention sweep committed.
+    pub fn apply_mine(
+        &mut self,
+        replace_all: bool,
+        pruned: &[String],
+        repo_key: &str,
+        prov: &RepoProvenance,
+        identities: &[String],
+        counts: &Counts,
+        aliases: &[String],
+    ) -> SqlResult<()> {
         let tx = self.conn.transaction()?;
-        for alias in aliases {
-            tx.execute("DELETE FROM counter WHERE repo_key = ?1", params![alias])?;
-            tx.execute("DELETE FROM identity WHERE repo_key = ?1", params![alias])?;
-            tx.execute("DELETE FROM repo WHERE repo_key = ?1", params![alias])?;
+        if replace_all {
+            tx.execute_batch("DELETE FROM counter; DELETE FROM identity; DELETE FROM repo;")?;
         }
-        tx.execute("DELETE FROM counter WHERE repo_key = ?1", params![repo_key])?;
-        tx.execute(
-            "DELETE FROM identity WHERE repo_key = ?1",
-            params![repo_key],
-        )?;
+        for key in pruned.iter().chain(aliases) {
+            delete_repo(&tx, key)?;
+        }
+        delete_repo(&tx, repo_key)?;
         tx.execute(
             "INSERT OR REPLACE INTO repo (repo_key, author, commits_total, commits_sampled, \
              added_lines_sampled, latest_sha, latest_date, mined_at_epoch) \
@@ -324,6 +336,16 @@ impl ProfileStore {
     }
 }
 
+fn delete_repo(transaction: &rusqlite::Transaction<'_>, repo_key: &str) -> SqlResult<()> {
+    transaction.execute("DELETE FROM counter WHERE repo_key = ?1", params![repo_key])?;
+    transaction.execute(
+        "DELETE FROM identity WHERE repo_key = ?1",
+        params![repo_key],
+    )?;
+    transaction.execute("DELETE FROM repo WHERE repo_key = ?1", params![repo_key])?;
+    Ok(())
+}
+
 fn verify_store_identity(
     root: &crate::bounded_fs::RootCapability,
     target: &Path,
@@ -472,6 +494,49 @@ mod tests {
         assert_eq!(aggregate.identities, vec!["author@example.test"]);
         assert_eq!(
             s.repo_latest_sha("/checkout").unwrap().as_deref(),
+            Some("old")
+        );
+    }
+
+    #[test]
+    fn failed_force_replacement_rolls_back_reset_and_pruning() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ProfileStore::open(&dir.path().join("style.db")).unwrap();
+        store
+            .upsert_repo(
+                "/old",
+                &prov(Some("old"), 1),
+                &["old@example.test".into()],
+                &counts(&[("x", 10)]),
+                &[],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER reject_replacement BEFORE INSERT ON repo
+                 WHEN NEW.repo_key = '/new'
+                 BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END;",
+            )
+            .unwrap();
+
+        assert!(store
+            .apply_mine(
+                true,
+                &["/old".into()],
+                "/new",
+                &prov(Some("new"), 2),
+                &[],
+                &counts(&[("x", 99)]),
+                &[],
+            )
+            .is_err());
+        let aggregate = store.aggregate().unwrap();
+        assert_eq!(aggregate.repos, 1);
+        assert_eq!(aggregate.counts["x"], 10);
+        assert_eq!(aggregate.identities, vec!["old@example.test"]);
+        assert_eq!(
+            store.repo_latest_sha("/old").unwrap().as_deref(),
             Some("old")
         );
     }

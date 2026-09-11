@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Style-store reset, retention, legacy-alias cleanup, and contribution upsert
+  now commit as one SQLite transaction. A failed mine preserves the complete
+  previous aggregate, and retention no longer treats permission or I/O errors
+  as proof that a repository disappeared.
 - Concurrent style mines now serialize the database and profile update through
   one stable user-global lock. Profile publication rebases a concurrent manual
   edit with bounded retries, so successful miners cannot leave `style.md`

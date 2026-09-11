@@ -1074,6 +1074,8 @@ impl Bundle {
         let root = root
             .canonicalize()
             .map_err(|e| format!("canonicalize audit root {}: {e}", root.display()))?;
+        let input_root = crate::bounded_fs::RootCapability::open(&root)
+            .map_err(|error| format!("open audit input snapshot: {error}"))?;
         let baseline_oid = resolve_commit(&root, &self.baseline)?;
         let head_oid = resolve_commit(&root, "HEAD")?;
         if baseline_oid == head_oid {
@@ -1093,11 +1095,11 @@ impl Bundle {
         .is_empty();
 
         let spec_path = relative_binding_path(&root, Path::new(&self.spec))?;
-        let spec_bytes = read_bound_input(&root.join(&spec_path))?;
+        let spec_bytes = read_bound_input(&input_root, &spec_path)?;
         let (executor_report_path, executor_report_present, executor_report_sha256) =
             if let Some(path) = self.executor_report_path.as_deref() {
                 let relative = relative_binding_path(&root, Path::new(path))?;
-                let bytes = read_bound_input(&root.join(&relative))?;
+                let bytes = read_bound_input(&input_root, &relative)?;
                 let current = crate::executor_report::parse_str(std::str::from_utf8(&bytes)?)?;
                 if self.checked_executor_report.as_ref() != Some(&current) {
                     return Err("executor report changed or was not evaluated".into());
@@ -1288,15 +1290,39 @@ fn normalize_windows_audit_input(
     Ok(path.canonicalize()?)
 }
 
-fn read_bound_input(path: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let metadata = std::fs::symlink_metadata(path)?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err("audit input is not a regular non-symlink file".into());
-    }
-    if metadata.len() > crate::audit_bundle::BUNDLE_INPUT_MAX as u64 {
-        return Err("audit input exceeds 16 MiB".into());
-    }
-    Ok(std::fs::read(path)?)
+fn read_bound_input(
+    root: &crate::bounded_fs::RootCapability,
+    relative: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let limit = crate::audit_bundle::BUNDLE_INPUT_MAX as u64;
+    let source = crate::bounded_fs::read_regular_file_with_capability(
+        root,
+        &root.canonical_root().join(relative),
+        limit,
+        limit,
+        crate::bounded_fs::ReadControl::default(),
+    )
+    .map_err(|error| match error {
+        crate::bounded_fs::BoundedReadError::TooLarge { .. } => {
+            "audit input exceeds 16 MiB".to_string()
+        }
+        crate::bounded_fs::BoundedReadError::SnapshotChanged => {
+            "audit input changed while it was being read".to_string()
+        }
+        crate::bounded_fs::BoundedReadError::InvalidPath
+        | crate::bounded_fs::BoundedReadError::OutsideRoot
+        | crate::bounded_fs::BoundedReadError::NotRegular => {
+            "audit input is not a regular non-symlink file".to_string()
+        }
+        crate::bounded_fs::BoundedReadError::Interrupted
+        | crate::bounded_fs::BoundedReadError::DeadlineExceeded => {
+            "audit input read was interrupted".to_string()
+        }
+        crate::bounded_fs::BoundedReadError::Io(error) => {
+            format!("read audit input {relative}: {error}")
+        }
+    })?;
+    Ok(source.bytes)
 }
 
 fn parse_name_status(
@@ -1676,6 +1702,25 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(p, body).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_bundle_input_rejects_a_fifo_without_blocking() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("spec.md");
+        let raw = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `raw` is a live, NUL-terminated path buffer.
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+        let capability = crate::bounded_fs::RootCapability::open(root.path()).unwrap();
+
+        assert!(read_bound_input(&capability, "spec.md")
+            .unwrap_err()
+            .to_string()
+            .contains("regular non-symlink"));
     }
 
     #[test]

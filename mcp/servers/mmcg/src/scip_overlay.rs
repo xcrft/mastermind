@@ -448,81 +448,53 @@ fn enclosing_range(occurrence: &Occurrence) -> Result<Option<SourceRange>, ScipO
     }
 }
 
-fn hash_file(path: &Path) -> Result<(String, u64), ScipOverlayError> {
-    let metadata = path.metadata().map_err(|error| {
-        ScipOverlayError::Io(format!("read {} metadata: {error}", path.display()))
-    })?;
-    if !metadata.is_file() {
-        return Err(ScipOverlayError::InvalidIndex(format!(
-            "document is not a regular file: {}",
-            path.display()
-        )));
-    }
-    if metadata.len() > MAX_DOCUMENT_BYTES {
-        return Err(ScipOverlayError::InvalidIndex(format!(
-            "document {} exceeds the {} MiB safety limit",
-            path.display(),
-            MAX_DOCUMENT_BYTES / 1024 / 1024
-        )));
-    }
-    let file = File::open(path)
-        .map_err(|error| ScipOverlayError::Io(format!("open {}: {error}", path.display())))?;
-    let mut reader = BufReader::new(file);
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    let mut total = 0_u64;
-    loop {
-        let read = reader
-            .read(&mut buffer)
-            .map_err(|error| ScipOverlayError::Io(format!("read {}: {error}", path.display())))?;
-        if read == 0 {
-            break;
-        }
-        total = total.saturating_add(read as u64);
-        if total > MAX_DOCUMENT_BYTES {
-            return Err(ScipOverlayError::InvalidIndex(format!(
-                "document {} grew beyond the {} MiB safety limit while being read",
-                path.display(),
-                MAX_DOCUMENT_BYTES / 1024 / 1024
-            )));
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok((crate::hex::encode(&hasher.finalize()), total))
+struct HashedFile {
+    sha256: String,
+    bytes: u64,
+    identity: crate::bounded_fs::StableFileIdentity,
 }
 
-fn embedded_text_matches_file(
+fn hash_file(
+    root: &crate::bounded_fs::RootCapability,
+    path: &Path,
+    control: crate::bounded_fs::ReadControl<'_>,
+) -> Result<HashedFile, ScipOverlayError> {
+    let mut digest = DigestWriter::new(std::io::sink());
+    let source = crate::bounded_fs::copy_regular_file_with_capability(
+        root,
+        path,
+        MAX_DOCUMENT_BYTES,
+        control,
+        None,
+        &mut digest,
+    )
+    .map_err(|error| document_read_error(&path.to_string_lossy(), error))?;
+    let sha256 = digest
+        .finish()
+        .map_err(|error| ScipOverlayError::Io(format!("hash {}: {error}", path.display())))?;
+    Ok(HashedFile {
+        sha256,
+        bytes: source.declared_len,
+        identity: source.identity,
+    })
+}
+
+fn embedded_text_matches_bytes(
+    bytes: &[u8],
     path: &Path,
     embedded: &str,
     encoding: TextEncoding,
 ) -> Result<bool, ScipOverlayError> {
-    let metadata = path.metadata().map_err(|error| {
-        ScipOverlayError::Io(format!("read {} metadata: {error}", path.display()))
-    })?;
-    if metadata.len() > MAX_DOCUMENT_BYTES {
-        return Err(ScipOverlayError::InvalidIndex(format!(
-            "document {} exceeds the {} MiB safety limit",
-            path.display(),
-            MAX_DOCUMENT_BYTES / 1024 / 1024
-        )));
-    }
-    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
-    File::open(path)
-        .and_then(|file| {
-            file.take(MAX_DOCUMENT_BYTES.saturating_add(1))
-                .read_to_end(&mut bytes)
-        })
-        .map_err(|error| ScipOverlayError::Io(format!("read {}: {error}", path.display())))?;
     if bytes.len() as u64 > MAX_DOCUMENT_BYTES {
         return Err(ScipOverlayError::InvalidIndex(format!(
-            "document {} grew beyond the {} MiB safety limit while being read",
+            "document {} exceeds the {} MiB safety limit",
             path.display(),
             MAX_DOCUMENT_BYTES / 1024 / 1024
         )));
     }
     let decoded = match encoding {
         TextEncoding::UTF16 => {
-            let (little_endian, body) = match bytes.as_slice() {
+            let (little_endian, body) = match bytes {
                 [0xff, 0xfe, rest @ ..] => (true, rest),
                 [0xfe, 0xff, rest @ ..] => (false, rest),
                 _ => {
@@ -558,7 +530,7 @@ fn embedded_text_matches_file(
             })?
         }
         TextEncoding::UTF8 | TextEncoding::UnspecifiedTextEncoding => {
-            let decoded = std::str::from_utf8(&bytes).map_err(|_| {
+            let decoded = std::str::from_utf8(bytes).map_err(|_| {
                 ScipOverlayError::InvalidIndex(format!(
                     "SCIP document {} is not valid UTF-8",
                     path.display()
@@ -623,6 +595,100 @@ impl<W: Write> Write for DigestWriter<W> {
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
     }
+}
+
+struct DocumentSourceReceipt {
+    resolved_relative: Option<PathBuf>,
+    identity: crate::bounded_fs::StableFileIdentity,
+    bytes: u64,
+}
+
+fn document_read_error(
+    relative: &str,
+    error: crate::bounded_fs::BoundedReadError,
+) -> ScipOverlayError {
+    match error {
+        crate::bounded_fs::BoundedReadError::TooLarge { .. } => {
+            ScipOverlayError::InvalidIndex(format!(
+                "document {relative:?} exceeds the {} MiB safety limit",
+                MAX_DOCUMENT_BYTES / 1024 / 1024
+            ))
+        }
+        crate::bounded_fs::BoundedReadError::SnapshotChanged => ScipOverlayError::InvalidIndex(
+            format!("repository file changed while SCIP evidence was being verified: {relative:?}"),
+        ),
+        crate::bounded_fs::BoundedReadError::Interrupted
+        | crate::bounded_fs::BoundedReadError::DeadlineExceeded => ScipOverlayError::Io(format!(
+            "repository document read exceeded the request work budget: {relative:?}"
+        )),
+        crate::bounded_fs::BoundedReadError::InvalidPath
+        | crate::bounded_fs::BoundedReadError::OutsideRoot
+        | crate::bounded_fs::BoundedReadError::NotRegular => ScipOverlayError::InvalidIndex(
+            format!("document is not a regular no-follow repository file: {relative:?}"),
+        ),
+        crate::bounded_fs::BoundedReadError::Io(error) => {
+            ScipOverlayError::Io(format!("read repository document {relative:?}: {error}"))
+        }
+    }
+}
+
+fn verify_document_sources(
+    root: &crate::bounded_fs::RootCapability,
+    sources: &[DocumentSourceReceipt],
+    documents: &[SemanticDocumentInput],
+    control: crate::bounded_fs::ReadControl<'_>,
+) -> Result<(), ScipOverlayError> {
+    if sources.len() != documents.len() {
+        return Err(ScipOverlayError::InvalidIndex(
+            "SCIP document verification receipts are incomplete".into(),
+        ));
+    }
+    for (source, document) in sources.iter().zip(documents) {
+        control
+            .check()
+            .map_err(|error| document_read_error(&document.path, error))?;
+        let requested = root.canonical_root().join(&document.path);
+        let resolved = requested.canonicalize().map_err(|_| {
+            ScipOverlayError::InvalidIndex(format!(
+                "repository file changed while SCIP evidence was being verified: {:?}",
+                document.path
+            ))
+        })?;
+        let expected = source
+            .resolved_relative
+            .as_ref()
+            .map(|path| root.canonical_root().join(path))
+            .unwrap_or(requested);
+        if resolved != expected {
+            return Err(ScipOverlayError::InvalidIndex(format!(
+                "repository file changed while SCIP evidence was being verified: {:?}",
+                document.path
+            )));
+        }
+        let mut digest = DigestWriter::new(std::io::sink());
+        let observed = crate::bounded_fs::copy_regular_file_with_capability(
+            root,
+            &expected,
+            MAX_DOCUMENT_BYTES,
+            control,
+            Some(source.identity),
+            &mut digest,
+        )
+        .map_err(|error| document_read_error(&document.path, error))?;
+        let sha256 = digest.finish().map_err(|error| {
+            ScipOverlayError::Io(format!(
+                "verify repository document {:?}: {error}",
+                document.path
+            ))
+        })?;
+        if observed.declared_len != source.bytes || sha256 != document.content_sha256 {
+            return Err(ScipOverlayError::InvalidIndex(format!(
+                "repository file changed while SCIP evidence was being verified: {:?}",
+                document.path
+            )));
+        }
+    }
+    Ok(())
 }
 
 struct ScipArtifactSnapshot {
@@ -1125,6 +1191,9 @@ fn build_batch(store: &Store, scip_path: &Path) -> Result<SemanticImportBatch, S
         .canonicalize()
         .map_err(|error| ScipOverlayError::Store(format!("resolve index root: {error}")))?;
     crate::indexer::validate_index_root(store, &root).map_err(ScipOverlayError::Store)?;
+    let repository_root = crate::bounded_fs::RootCapability::open(&root).map_err(|error| {
+        ScipOverlayError::Store(format!("open indexed repository snapshot: {error}"))
+    })?;
 
     let interrupted = || store.work_interrupted();
     let read_control = crate::bounded_fs::ReadControl {
@@ -1137,6 +1206,7 @@ fn build_batch(store: &Store, scip_path: &Path) -> Result<SemanticImportBatch, S
 
     let mut scip_metadata = None::<Metadata>;
     let mut documents = Vec::new();
+    let mut document_sources = Vec::new();
     let mut document_paths = HashSet::new();
     let mut total_source_bytes = 0_u64;
     let mut text_verified_documents = 0_usize;
@@ -1182,27 +1252,41 @@ fn build_batch(store: &Store, scip_path: &Path) -> Result<SemanticImportBatch, S
                     )));
                 }
                 validate_bounded(&document.language, 256, "document language")?;
-                let resolved = root.join(&relative).canonicalize().map_err(|error| {
+                let requested_path = root.join(&relative);
+                let resolved = requested_path.canonicalize().map_err(|error| {
                     ScipOverlayError::InvalidIndex(format!(
                         "document {relative:?} is unavailable under the indexed repository: {error}"
                     ))
                 })?;
-                if !resolved.starts_with(&root) {
+                if !resolved.starts_with(repository_root.canonical_root()) {
                     return Err(ScipOverlayError::InvalidIndex(format!(
                         "document escapes the indexed repository through a symlink: {relative:?}"
                     )));
                 }
-                let (content_sha256, bytes) = hash_file(&resolved)?;
-                total_source_bytes = total_source_bytes.saturating_add(bytes);
-                if total_source_bytes > MAX_SOURCE_BYTES {
-                    return Err(ScipOverlayError::InvalidIndex(format!(
-                        "documents exceed the {} GiB source verification limit",
-                        MAX_SOURCE_BYTES / 1024 / 1024 / 1024
-                    )));
-                }
-                let source_text_verified = if document.text.is_empty() {
-                    false
+                let direct_path = repository_root.canonical_root().join(&relative);
+                let resolved_relative = (resolved != direct_path)
+                    .then(|| {
+                        resolved
+                            .strip_prefix(repository_root.canonical_root())
+                            .map(Path::to_path_buf)
+                    })
+                    .transpose()
+                    .map_err(|_| {
+                        ScipOverlayError::InvalidIndex(format!(
+                            "document escapes the indexed repository through a symlink: {relative:?}"
+                        ))
+                    })?;
+                let (source, source_text_verified) = if document.text.is_empty() {
+                    (hash_file(&repository_root, &resolved, read_control)?, false)
                 } else {
+                    let file = crate::bounded_fs::read_regular_file_with_capability(
+                        &repository_root,
+                        &resolved,
+                        MAX_DOCUMENT_BYTES,
+                        MAX_DOCUMENT_BYTES,
+                        read_control,
+                    )
+                    .map_err(|error| document_read_error(&relative, error))?;
                     let encoding = scip_metadata
                         .as_ref()
                         .expect("stream_scip guarantees metadata before documents")
@@ -1213,19 +1297,40 @@ fn build_batch(store: &Store, scip_path: &Path) -> Result<SemanticImportBatch, S
                                 "SCIP metadata uses an unknown document text encoding".into(),
                             )
                         })?;
-                    if !embedded_text_matches_file(&resolved, &document.text, encoding)? {
+                    if !embedded_text_matches_bytes(
+                        &file.bytes,
+                        &resolved,
+                        &document.text,
+                        encoding,
+                    )? {
                         return Err(ScipOverlayError::InvalidIndex(format!(
                             "embedded SCIP text does not match the current repository file {relative:?}"
                         )));
                     }
-                    if hash_file(&resolved)?.0 != content_sha256 {
-                        return Err(ScipOverlayError::InvalidIndex(format!(
-                            "repository file changed while SCIP evidence was being verified: {relative:?}"
-                        )));
-                    }
                     text_verified_documents += 1;
-                    true
+                    (
+                        HashedFile {
+                            sha256: crate::hex::encode(&Sha256::digest(&file.bytes)),
+                            bytes: file.declared_len,
+                            identity: file.identity,
+                        },
+                        true,
+                    )
                 };
+                let content_sha256 = source.sha256;
+                let bytes = source.bytes;
+                total_source_bytes = total_source_bytes.saturating_add(bytes);
+                if total_source_bytes > MAX_SOURCE_BYTES {
+                    return Err(ScipOverlayError::InvalidIndex(format!(
+                        "documents exceed the {} GiB source verification limit",
+                        MAX_SOURCE_BYTES / 1024 / 1024 / 1024
+                    )));
+                }
+                document_sources.push(DocumentSourceReceipt {
+                    resolved_relative,
+                    identity: source.identity,
+                    bytes,
+                });
                 let position_encoding = document
                     .position_encoding
                     .enum_value()
@@ -1422,6 +1527,12 @@ fn build_batch(store: &Store, scip_path: &Path) -> Result<SemanticImportBatch, S
 
     artifact.verify_snapshot()?;
     artifact.verify_source(read_control)?;
+    verify_document_sources(
+        &repository_root,
+        &document_sources,
+        &documents,
+        read_control,
+    )?;
 
     let source = SemanticSourceInput {
         tool_name,
@@ -1605,6 +1716,14 @@ fn stale_semantic_paths(
     root: &Path,
     paths: impl IntoIterator<Item = String>,
 ) -> Result<BTreeSet<String>, ScipOverlayError> {
+    let root_capability = crate::bounded_fs::RootCapability::open(root).map_err(|error| {
+        ScipOverlayError::Store(format!("open indexed repository snapshot: {error}"))
+    })?;
+    let interrupted = || store.work_interrupted();
+    let control = crate::bounded_fs::ReadControl {
+        deadline: store.request_deadline(),
+        interrupted: Some(&interrupted),
+    };
     let paths = paths.into_iter().collect::<BTreeSet<_>>();
     let path_vec = paths.iter().cloned().collect::<Vec<_>>();
     let hashes = store
@@ -1613,11 +1732,13 @@ fn stale_semantic_paths(
     let mut stale = paths;
     for (path, expected) in hashes {
         stale.remove(&path);
-        let actual = root.join(&path).canonicalize().ok().and_then(|resolved| {
-            resolved
-                .starts_with(root)
-                .then(|| hash_file(&resolved).ok().map(|value| value.0))
-                .flatten()
+        let requested = root_capability.canonical_root().join(&path);
+        let actual = requested.canonicalize().ok().and_then(|resolved| {
+            if !resolved.starts_with(root_capability.canonical_root()) {
+                return None;
+            }
+            let sha256 = hash_file(&root_capability, &resolved, control).ok()?.sha256;
+            (requested.canonicalize().ok()? == resolved).then_some(sha256)
         });
         if actual.as_deref() != Some(expected.as_str()) {
             stale.insert(path);
@@ -1851,6 +1972,65 @@ mod tests {
                 Err(error) => error,
             };
 
+        assert!(matches!(&error, ScipOverlayError::InvalidIndex(_)));
+    }
+
+    #[test]
+    fn document_source_receipt_rejects_same_byte_replacement() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("source.cpp");
+        let replacement = temp.path().join("replacement.cpp");
+        std::fs::write(&path, b"int value = 1;\n").unwrap();
+        std::fs::write(&replacement, b"int value = 1;\n").unwrap();
+        let root = crate::bounded_fs::RootCapability::open(temp.path()).unwrap();
+        let source = hash_file(&root, &path, crate::bounded_fs::ReadControl::default()).unwrap();
+        let receipt = DocumentSourceReceipt {
+            resolved_relative: None,
+            identity: source.identity,
+            bytes: source.bytes,
+        };
+        let document = SemanticDocumentInput {
+            path: "source.cpp".into(),
+            language: "cpp".into(),
+            position_encoding: "UTF8".into(),
+            content_sha256: source.sha256,
+            source_text_verified: false,
+        };
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+
+        let error = verify_document_sources(
+            &root,
+            &[receipt],
+            &[document],
+            crate::bounded_fs::ReadControl::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(&error, ScipOverlayError::InvalidIndex(_)));
+        assert!(error
+            .to_string()
+            .contains("changed while SCIP evidence was being verified"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn document_hash_rejects_a_fifo_without_blocking() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("source.cpp");
+        let raw = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `raw` is a live, NUL-terminated path buffer.
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+        let root = crate::bounded_fs::RootCapability::open(temp.path()).unwrap();
+
+        let error = match hash_file(&root, &path, crate::bounded_fs::ReadControl::default()) {
+            Ok(_) => panic!("a FIFO must not be accepted as a repository document"),
+            Err(error) => error,
+        };
+
         assert!(matches!(error, ScipOverlayError::InvalidIndex(_)));
     }
 
@@ -2022,8 +2202,9 @@ mod tests {
         for unit in source.encode_utf16() {
             bytes.extend_from_slice(&unit.to_le_bytes());
         }
-        std::fs::write(&path, bytes).unwrap();
-        assert!(embedded_text_matches_file(&path, source, TextEncoding::UTF16).unwrap());
-        assert!(!embedded_text_matches_file(&path, "different", TextEncoding::UTF16).unwrap());
+        assert!(embedded_text_matches_bytes(&bytes, &path, source, TextEncoding::UTF16).unwrap());
+        assert!(
+            !embedded_text_matches_bytes(&bytes, &path, "different", TextEncoding::UTF16).unwrap()
+        );
     }
 }

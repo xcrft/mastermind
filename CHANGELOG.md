@@ -17,7 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SCIP import now makes one bounded, no-follow private snapshot of the selected
   artifact. Its digest and all three streaming decode passes use those same
   bytes, and the source identity and digest are rechecked before replacing the
-  semantic overlay.
+  semantic overlay. Repository documents are read through one retained root
+  capability, embedded text and document digests use the same bytes, and every
+  source path, identity, size, and digest is revalidated at the commit boundary.
+  Semantic staleness checks now use the same bounded, no-follow reads.
 - Architecture-policy config reads are now capability-scoped, no-follow,
   request-bounded snapshots. Policy evaluation rejects special files, path
   swaps, and same-byte file replacement instead of issuing a result against an

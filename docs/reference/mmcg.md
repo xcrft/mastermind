@@ -490,8 +490,12 @@ copies the selected regular file once through a no-follow parent capability,
 then streams every top-level protobuf pass from that same private snapshot
 instead of retaining the full SCIP index and all embedded source text in memory.
 The snapshot and original artifact identity and digest are rechecked before the
-overlay is replaced. Source files are hashed at import. The reported
-`project_root` must resolve to the indexed repository; a
+overlay is replaced. Source files are read through one retained repository-root
+capability and hashed at import. When a document embeds source text, its digest
+and text comparison use the same bounded read; textless documents are hashed as
+bounded streams. Before replacement, the importer revalidates every source
+path, file identity, size, and digest. The reported `project_root` must resolve
+to the indexed repository; a
 portable or moved artifact is accepted only when every `Document.text` exactly
 matches its current file. Successful sources expose `repository_verified`.
 When some text is omitted, repository identity is still verified but the result

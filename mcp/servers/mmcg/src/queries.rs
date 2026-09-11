@@ -1588,6 +1588,16 @@ pub(crate) fn validate_change_impact_snapshot(
     impact: &ChangeImpactResponse,
     deadline: Option<std::time::Instant>,
 ) -> Result<(), ChangeImpactError> {
+    validate_change_impact_snapshot_ignoring_path(store, requested_root, impact, None, deadline)
+}
+
+pub(crate) fn validate_change_impact_snapshot_ignoring_path(
+    store: &Store,
+    requested_root: &Path,
+    impact: &ChangeImpactResponse,
+    ignored_path: Option<&Path>,
+    deadline: Option<std::time::Instant>,
+) -> Result<(), ChangeImpactError> {
     let repository_root =
         owning_repository(requested_root).ok_or(ChangeImpactError::RootMismatch)?;
     let root_capability = crate::bounded_fs::RootCapability::open(&repository_root)
@@ -1606,6 +1616,22 @@ pub(crate) fn validate_change_impact_snapshot(
             status: file.status.clone(),
         })
         .collect::<Vec<_>>();
+    let ignored_path_prefix = ignored_path
+        .and_then(|path| path.strip_prefix(&repository_root).ok())
+        .map(|relative| {
+            if relative.as_os_str().is_empty()
+                || relative
+                    .components()
+                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
+            {
+                return Err(ChangeImpactError::SnapshotChanged);
+            }
+            relative
+                .to_str()
+                .map(|value| value.replace('\\', "/"))
+                .ok_or(ChangeImpactError::SnapshotChanged)
+        })
+        .transpose()?;
     let interrupted = || store.work_interrupted();
     crate::diff::validate_working_tree_projection_controlled(
         &repository_root,
@@ -1616,6 +1642,7 @@ pub(crate) fn validate_change_impact_snapshot(
             files_truncated: impact.worktree_files_truncated,
             skipped_non_utf8_paths: impact.skipped_non_utf8_paths,
             token: &impact.snapshot_token,
+            ignored_path_prefix: ignored_path_prefix.as_deref(),
         },
         deadline,
         Some(&interrupted),
@@ -2329,6 +2356,7 @@ pub fn change_impact(
             files_truncated: working.files_truncated,
             skipped_non_utf8_paths: working.skipped_non_utf8_paths,
             token: &working.snapshot_token,
+            ignored_path_prefix: None,
         },
         store.request_deadline(),
         Some(&interrupted),

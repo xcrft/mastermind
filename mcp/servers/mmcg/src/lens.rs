@@ -433,7 +433,11 @@ pub(crate) struct LensSnapshotValidator {
 }
 
 impl LensSnapshotValidator {
-    pub(crate) fn validate(&self, snapshot: &LensSnapshot) -> Result<(), LensError> {
+    pub(crate) fn validate_before_publication(
+        &self,
+        snapshot: &LensSnapshot,
+        staging_dir: &Path,
+    ) -> Result<(), LensError> {
         let deadline = request_deadline();
         let exhausted = self.store.push_work_budget(remaining_work_budget(deadline));
         let _budget_scope = WorkBudgetScope(&self.store);
@@ -449,10 +453,11 @@ impl LensSnapshotValidator {
                 ChangeImpactError::SnapshotChanged,
             ));
         }
-        queries::validate_change_impact_snapshot(
+        queries::validate_change_impact_snapshot_ignoring_path(
             &self.store,
             &self.root,
             &snapshot.impact,
+            Some(staging_dir),
             deadline,
         )
         .map_err(LensError::ImpactUnavailable)?;

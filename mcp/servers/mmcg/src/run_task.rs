@@ -2027,7 +2027,9 @@ fn run_executor(spec_path: &Path, repo_root: &Path) -> Result<(), String> {
          via your MCP configuration so verify/audit gates have the live index.",
         spec_path.display(),
     );
-    let status = Command::new("claude")
+    let claude = crate::setup::resolve_native_cli("claude", repo_root)
+        .map_err(|error| format!("resolve claude: {error}"))?;
+    let status = Command::new(claude)
         .arg("-p")
         .arg(&prompt)
         .stdin(std::process::Stdio::null())

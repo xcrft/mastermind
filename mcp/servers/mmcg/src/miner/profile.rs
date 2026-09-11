@@ -1551,7 +1551,7 @@ fn run_claude_capture(root: &Path, prompt: &str) -> Result<String, String> {
             prompt.len()
         ));
     }
-    let claude = crate::setup::resolve_native("claude", root)
+    let claude = crate::setup::resolve_native_cli("claude", root)
         .map_err(|error| format!("resolve claude: {error}"))?;
     let mut child = Command::new(claude)
         .arg("-p")

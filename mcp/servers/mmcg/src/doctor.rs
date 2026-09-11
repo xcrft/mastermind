@@ -9,7 +9,7 @@
 //! | # | Name                  | Catches                                                |
 //! |---|-----------------------|--------------------------------------------------------|
 //! | 1 | `mmcg binary`          | sanity — we're running, report our version             |
-//! | 2 | `index database`       | selected index exists                                  |
+//! | 2 | `index database`       | selected index is a valid current-schema database       |
 //! | 3 | `index repository`     | selected index belongs to the requested repository     |
 //! | 4 | `symbols indexed`      | non-empty index (catches "I ran init but not index")   |
 //! | 5 | `index freshness`      | no source file newer than the index                    |
@@ -25,6 +25,8 @@
 
 use serde::Serialize;
 use std::path::Path;
+
+const DOCTOR_FRESHNESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Per-check verdict. Order matters — Display picks the marker by severity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -58,6 +60,40 @@ pub struct Summary {
     pub ok: u32,
     pub warn: u32,
     pub fail: u32,
+}
+
+enum DoctorIndex {
+    Missing,
+    Invalid(String),
+    Ready {
+        store: Box<crate::store::Store>,
+        size: u64,
+    },
+}
+
+impl DoctorIndex {
+    fn inspect(index_path: &Path) -> Self {
+        let metadata = match std::fs::symlink_metadata(index_path) {
+            Ok(metadata) if metadata.file_type().is_file() => metadata,
+            Ok(_) => return Self::Invalid("selected path is not a regular file".into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Self::Missing,
+            Err(error) => return Self::Invalid(format!("can't inspect db: {error}")),
+        };
+        let store = match crate::store::Store::open_read_only(index_path) {
+            Ok(store) => store,
+            Err(error) => return Self::Invalid(format!("can't open db read-only: {error}")),
+        };
+        match store.schema_current() {
+            Ok(true) => Self::Ready {
+                size: store
+                    .source_snapshot_database_len()
+                    .unwrap_or_else(|| metadata.len()),
+                store: Box::new(store),
+            },
+            Ok(false) => Self::Invalid("schema is missing or outdated".into()),
+            Err(error) => Self::Invalid(format!("can't inspect schema: {error}")),
+        }
+    }
 }
 
 impl Report {
@@ -186,17 +222,18 @@ pub fn run(root: &Path, mmcg_binary: &Path) -> Report {
 /// Run every check against `root` using the selected index database.
 pub fn run_with_index(root: &Path, mmcg_binary: &Path, index_path: &Path) -> Report {
     let workflow_audit = crate::workflow_status::audit_workflow_for_doctor(root);
+    let index = DoctorIndex::inspect(index_path);
     let checks = vec![
         check_binary(),
         check_path_entries(),
-        check_index_db(index_path),
-        check_index_root(root, index_path),
-        check_symbols_indexed(index_path),
-        check_index_freshness(root, index_path),
+        check_index_db(index_path, &index),
+        check_index_root(root, index_path, &index),
+        check_symbols_indexed(&index),
+        check_index_freshness(root, &index),
         check_gitignore(root),
         check_claude_md(root),
         check_mcp_config(root),
-        check_mcp_handshake(index_path, mmcg_binary),
+        check_mcp_handshake(index_path, mmcg_binary, &index),
         check_workflow_mcp_contract(workflow_audit.as_ref()),
         check_workflow_runtime_contract(workflow_audit.as_ref()),
         check_style_profile(root),
@@ -304,48 +341,74 @@ fn check_path_entries() -> Check {
     }
 }
 
-fn check_index_db(index_path: &Path) -> Check {
-    if index_path.is_file() {
-        let size = std::fs::metadata(index_path).map(|m| m.len()).unwrap_or(0);
-        Check {
+fn check_index_db(index_path: &Path, index: &DoctorIndex) -> Check {
+    match index {
+        DoctorIndex::Ready { size, .. } => Check {
             name: "index database",
             status: Status::Ok,
-            message: format!("{} ({})", index_path.display(), format_bytes(size)),
+            message: format!("{} ({})", index_path.display(), format_bytes(*size)),
             hint: None,
-        }
-    } else {
-        Check {
+        },
+        DoctorIndex::Missing => Check {
             name: "index database",
             status: Status::Fail,
             message: format!("{} not found", index_path.display()),
             hint: Some("run `mastermind init` then `mastermind index .`".into()),
-        }
+        },
+        DoctorIndex::Invalid(error) => Check {
+            name: "index database",
+            status: Status::Fail,
+            message: format!("{} is unusable: {error}", index_path.display()),
+            hint: Some("rebuild with `mastermind index .` or pass the correct `--index`".into()),
+        },
     }
 }
 
-fn check_index_root(root: &Path, index_path: &Path) -> Check {
-    if !index_path.is_file() {
-        return Check {
-            name: "index repository",
-            status: Status::Warn,
-            message: "skipped — no index database".into(),
-            hint: None,
-        };
-    }
-    match crate::store::Store::open(index_path)
-        .map_err(|error| format!("can't open db: {error}"))
-        .and_then(|store| crate::indexer::validate_index_root(&store, root))
-    {
-        Ok(()) => Check {
-            name: "index repository",
-            status: Status::Ok,
-            message: format!("{} belongs to {}", index_path.display(), root.display()),
-            hint: None,
+fn check_index_root(root: &Path, index_path: &Path, index: &DoctorIndex) -> Check {
+    let store = match index {
+        DoctorIndex::Ready { store, .. } => store,
+        DoctorIndex::Missing => {
+            return Check {
+                name: "index repository",
+                status: Status::Warn,
+                message: "skipped — no index database".into(),
+                hint: None,
+            };
+        }
+        DoctorIndex::Invalid(_) => {
+            return Check {
+                name: "index repository",
+                status: Status::Warn,
+                message: "skipped — index database is unusable".into(),
+                hint: None,
+            };
+        }
+    };
+    match crate::indexer::validate_index_root(store, root) {
+        Ok(()) => match store.source_snapshot_unchanged() {
+            Ok(true) => Check {
+                name: "index repository",
+                status: Status::Ok,
+                message: format!("{} belongs to {}", index_path.display(), root.display()),
+                hint: None,
+            },
+            Ok(false) => Check {
+                name: "index repository",
+                status: Status::Warn,
+                message: "index changed while doctor was inspecting it".into(),
+                hint: Some("rerun `mastermind doctor` for a stable snapshot".into()),
+            },
+            Err(error) => Check {
+                name: "index repository",
+                status: Status::Fail,
+                message: format!("can't verify index snapshot: {error}"),
+                hint: Some("inspect the index path, then rerun `mastermind doctor`".into()),
+            },
         },
         Err(error) => Check {
             name: "index repository",
             status: Status::Fail,
-            message: error,
+            message: error.to_string(),
             hint: Some(
                 "pass the correct `--index` or rebuild the index for this repository".into(),
             ),
@@ -353,28 +416,59 @@ fn check_index_root(root: &Path, index_path: &Path) -> Check {
     }
 }
 
-fn check_symbols_indexed(index_path: &Path) -> Check {
-    if !index_path.is_file() {
-        return Check {
-            name: "symbols indexed",
-            status: Status::Warn,
-            message: "skipped — no index database".into(),
-            hint: None,
-        };
-    }
-    let store = match crate::store::Store::open(index_path) {
-        Ok(s) => s,
-        Err(e) => {
+fn check_symbols_indexed(index: &DoctorIndex) -> Check {
+    let store = match index {
+        DoctorIndex::Ready { store, .. } => store,
+        DoctorIndex::Missing => {
             return Check {
                 name: "symbols indexed",
-                status: Status::Fail,
-                message: format!("can't open db: {e}"),
-                hint: Some("delete `.mastermind/mmcg.db` and re-run `mastermind index .`".into()),
+                status: Status::Warn,
+                message: "skipped — no index database".into(),
+                hint: None,
+            };
+        }
+        DoctorIndex::Invalid(_) => {
+            return Check {
+                name: "symbols indexed",
+                status: Status::Warn,
+                message: "skipped — index database is unusable".into(),
+                hint: None,
             };
         }
     };
-    let file_count = store.file_count().unwrap_or(0);
-    let symbol_count = store.symbol_count().unwrap_or(0);
+    let (file_count, symbol_count) = match store
+        .file_count()
+        .and_then(|files| store.symbol_count().map(|symbols| (files, symbols)))
+    {
+        Ok(counts) => counts,
+        Err(error) => {
+            return Check {
+                name: "symbols indexed",
+                status: Status::Fail,
+                message: format!("can't query index counts: {error}"),
+                hint: Some("rebuild the index with `mastermind index .`".into()),
+            };
+        }
+    };
+    match store.source_snapshot_unchanged() {
+        Ok(true) => {}
+        Ok(false) => {
+            return Check {
+                name: "symbols indexed",
+                status: Status::Warn,
+                message: "index changed while doctor was inspecting it".into(),
+                hint: Some("rerun `mastermind doctor` for a stable snapshot".into()),
+            };
+        }
+        Err(error) => {
+            return Check {
+                name: "symbols indexed",
+                status: Status::Fail,
+                message: format!("can't verify index snapshot: {error}"),
+                hint: Some("inspect the index path, then rerun `mastermind doctor`".into()),
+            };
+        }
+    }
     if file_count == 0 || symbol_count == 0 {
         Check {
             name: "symbols indexed",
@@ -394,32 +488,86 @@ fn check_symbols_indexed(index_path: &Path) -> Check {
 
 /// Compare each indexable path with its stored source mtime.
 /// Stops at 10 hits to keep the doctor fast on large repos.
-fn check_index_freshness(root: &Path, index_path: &Path) -> Check {
-    if !index_path.is_file() {
-        return Check {
-            name: "index freshness",
-            status: Status::Warn,
-            message: "skipped — no index database".into(),
-            hint: None,
-        };
-    }
-    if crate::workflow_status::db_extractor_contract_current(index_path) != Some(true) {
-        return Check {
-            name: "index freshness",
-            status: Status::Warn,
-            message: "extractor contract changed since this index was built".into(),
-            hint: Some("run `mastermind index .` to rebuild structural data".into()),
-        };
+fn check_index_freshness(root: &Path, index: &DoctorIndex) -> Check {
+    let store = match index {
+        DoctorIndex::Ready { store, .. } => store,
+        DoctorIndex::Missing => {
+            return Check {
+                name: "index freshness",
+                status: Status::Warn,
+                message: "skipped — no index database".into(),
+                hint: None,
+            };
+        }
+        DoctorIndex::Invalid(_) => {
+            return Check {
+                name: "index freshness",
+                status: Status::Warn,
+                message: "skipped — index database is unusable".into(),
+                hint: None,
+            };
+        }
+    };
+    match store.extractor_contract_current() {
+        Ok(true) => {}
+        Ok(false) => {
+            return Check {
+                name: "index freshness",
+                status: Status::Warn,
+                message: "extractor contract changed since this index was built".into(),
+                hint: Some("run `mastermind index .` to rebuild structural data".into()),
+            };
+        }
+        Err(error) => {
+            return Check {
+                name: "index freshness",
+                status: Status::Fail,
+                message: format!("can't read extractor contract: {error}"),
+                hint: Some("rebuild the index with `mastermind index .`".into()),
+            };
+        }
     }
     let limit = 10usize;
-    let Some(stale) = crate::workflow_status::stale_paths(root, index_path, limit) else {
-        return Check {
-            name: "index freshness",
-            status: Status::Warn,
-            message: "cannot inspect index freshness".into(),
-            hint: Some("run `mastermind index .` to rebuild the index".into()),
-        };
+    let stale = match crate::workflow_status::stale_paths_controlled(
+        store,
+        root,
+        limit,
+        crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
+        crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
+        crate::bounded_fs::ReadControl {
+            deadline: Some(std::time::Instant::now() + DOCTOR_FRESHNESS_TIMEOUT),
+            interrupted: None,
+        },
+    ) {
+        Ok(stale) => stale,
+        Err(error) => {
+            return Check {
+                name: "index freshness",
+                status: Status::Warn,
+                message: format!("cannot inspect index freshness safely: {error}"),
+                hint: Some("inspect the repository limits, then rerun `mastermind doctor`".into()),
+            };
+        }
     };
+    match store.source_snapshot_unchanged() {
+        Ok(true) => {}
+        Ok(false) => {
+            return Check {
+                name: "index freshness",
+                status: Status::Warn,
+                message: "index changed while doctor was inspecting it".into(),
+                hint: Some("rerun `mastermind doctor` for a stable snapshot".into()),
+            };
+        }
+        Err(error) => {
+            return Check {
+                name: "index freshness",
+                status: Status::Fail,
+                message: format!("can't verify index snapshot: {error}"),
+                hint: Some("inspect the index path, then rerun `mastermind doctor`".into()),
+            };
+        }
+    }
     if stale.is_empty() {
         Check {
             name: "index freshness",
@@ -748,14 +896,25 @@ fn parse_codex_mmcg(bytes: &[u8]) -> Result<Option<serde_json::Value>, String> {
 /// Spawn `mmcg --index <db> serve`, write `initialize` + `tools/list`, read
 /// the responses, count tools. 3-second budget. Fails if the binary is missing
 /// OR the handshake fails.
-fn check_mcp_handshake(index_path: &Path, binary: &Path) -> Check {
-    if !index_path.is_file() {
-        return Check {
-            name: "MCP handshake",
-            status: Status::Warn,
-            message: "skipped — no index database to serve".into(),
-            hint: None,
-        };
+fn check_mcp_handshake(index_path: &Path, binary: &Path, index: &DoctorIndex) -> Check {
+    match index {
+        DoctorIndex::Ready { .. } => {}
+        DoctorIndex::Missing => {
+            return Check {
+                name: "MCP handshake",
+                status: Status::Warn,
+                message: "skipped — no index database to serve".into(),
+                hint: None,
+            };
+        }
+        DoctorIndex::Invalid(_) => {
+            return Check {
+                name: "MCP handshake",
+                status: Status::Warn,
+                message: "skipped — index database is unusable".into(),
+                hint: None,
+            };
+        }
     }
 
     let mut child = match std::process::Command::new(binary)
@@ -1095,19 +1254,24 @@ mod tests {
     #[test]
     fn check_index_db_fails_when_missing() {
         let root = tmp();
-        let c = check_index_db(&root.join("custom.db"));
+        let path = root.join("custom.db");
+        let index = DoctorIndex::inspect(&path);
+        let c = check_index_db(&path, &index);
         assert_eq!(c.status, Status::Fail);
         assert!(c.hint.as_deref().unwrap().contains("mastermind init"));
         fs::remove_dir_all(&root).ok();
     }
 
     #[test]
-    fn check_index_db_ok_when_present() {
+    fn check_index_db_rejects_junk_file() {
         let root = tmp();
         fs::create_dir_all(root.join(".mastermind")).unwrap();
-        fs::write(root.join(".mastermind/mmcg.db"), b"junk").unwrap();
-        let c = check_index_db(&root.join(".mastermind/mmcg.db"));
-        assert_eq!(c.status, Status::Ok);
+        let path = root.join(".mastermind/mmcg.db");
+        fs::write(&path, b"junk").unwrap();
+        let index = DoctorIndex::inspect(&path);
+        let c = check_index_db(&path, &index);
+        assert_eq!(c.status, Status::Fail);
+        assert!(c.message.contains("unusable"));
         fs::remove_dir_all(&root).ok();
     }
 
@@ -1122,12 +1286,54 @@ mod tests {
             .unwrap();
         drop(store);
 
-        let check = check_index_root(&requested, &db);
+        let index = DoctorIndex::inspect(&db);
+        let check = check_index_root(&requested, &db, &index);
         assert_eq!(check.status, Status::Fail);
         assert!(check.message.contains("index belongs to"));
         assert!(check.message.contains(&requested.display().to_string()));
         fs::remove_dir_all(requested).ok();
         fs::remove_dir_all(indexed).ok();
+    }
+
+    #[test]
+    fn index_checks_leave_the_source_database_unchanged() {
+        let root = tmp().canonicalize().unwrap();
+        let db = root.join("doctor.db");
+        {
+            let store = crate::store::Store::open(&db).unwrap();
+            store
+                .set_meta("index_root", &root.to_string_lossy())
+                .unwrap();
+        }
+        {
+            let connection = rusqlite::Connection::open(&db).unwrap();
+            let mode: String = connection
+                .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(mode, "delete");
+        }
+        let sidecar_path = |suffix: &str| {
+            let mut value = db.as_os_str().to_os_string();
+            value.push(suffix);
+            PathBuf::from(value)
+        };
+        for suffix in ["-wal", "-shm", "-journal"] {
+            fs::remove_file(sidecar_path(suffix)).ok();
+        }
+        let before = fs::read(&db).unwrap();
+
+        let index = DoctorIndex::inspect(&db);
+        assert_eq!(check_index_db(&db, &index).status, Status::Ok);
+        assert_eq!(check_index_root(&root, &db, &index).status, Status::Ok);
+        assert_eq!(check_symbols_indexed(&index).status, Status::Fail);
+        assert_eq!(check_index_freshness(&root, &index).status, Status::Warn);
+        drop(index);
+
+        assert_eq!(fs::read(&db).unwrap(), before);
+        for suffix in ["-wal", "-shm", "-journal"] {
+            assert!(!sidecar_path(suffix).exists());
+        }
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- `mastermind doctor` now shares one stable read-only snapshot across database
+  diagnostics and starts its handshake only for a validated index. Repository,
+  symbol, and freshness checks no longer migrate malformed databases or create
+  SQLite state beside them.
 - Writable graph-store opens now create and inspect paths through retained
   directory capabilities, reject links and special files for the database and
   its SQLite sidecars, use SQLite no-follow, and verify database identity before

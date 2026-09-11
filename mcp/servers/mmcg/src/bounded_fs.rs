@@ -134,6 +134,12 @@ impl AbsentPath {
     }
 }
 
+pub(crate) enum AtomicWriteExpectation {
+    Any,
+    Missing(AbsentPath),
+    File(StableFileIdentity),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BoundedPathKind {
     RegularFile,
@@ -504,6 +510,82 @@ pub(crate) fn create_regular_file_with_capability(
     Ok((file, identity))
 }
 
+/// Open and exclusively lock a stable repository-owned lock file. Existing
+/// links, special files, and parent substitutions are rejected before the
+/// caller enters its read-modify-write critical section.
+pub(crate) fn open_locked_regular_file_with_capability(
+    root: &RootCapability,
+    path: &Path,
+) -> Result<std::fs::File, BoundedReadError> {
+    root.verify()?;
+    let relative = root.relative(path)?;
+    let components = relative
+        .components()
+        .map(|component| match component {
+            Component::Normal(value) => Ok(value.to_os_string()),
+            _ => Err(BoundedReadError::InvalidPath),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let (name, parents) = components
+        .split_last()
+        .ok_or(BoundedReadError::InvalidPath)?;
+    let mut parent = root.directory.try_clone().map_err(BoundedReadError::Io)?;
+    for component in parents {
+        parent = parent
+            .open_dir_nofollow(component)
+            .map_err(BoundedReadError::Io)?;
+    }
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NONBLOCK);
+    }
+    let open = || {
+        parent
+            .open_with(name, &options)
+            .map(cap_std::fs::File::into_std)
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::InvalidInput | std::io::ErrorKind::NotADirectory => {
+                    BoundedReadError::NotRegular
+                }
+                _ => BoundedReadError::Io(error),
+            })
+    };
+    let file = open()?;
+    let before = stable_file_identity(&file).map_err(BoundedReadError::Io)?;
+    if !file
+        .metadata()
+        .map_err(BoundedReadError::Io)?
+        .file_type()
+        .is_file()
+    {
+        return Err(BoundedReadError::NotRegular);
+    }
+    file.lock().map_err(BoundedReadError::Io)?;
+    let verification = (|| {
+        let current = open()?;
+        let after = stable_file_identity(&file).map_err(BoundedReadError::Io)?;
+        let current_identity = stable_file_identity(&current).map_err(BoundedReadError::Io)?;
+        root.verify()?;
+        if before != after || after != current_identity {
+            return Err(BoundedReadError::SnapshotChanged);
+        }
+        Ok(())
+    })();
+    if let Err(error) = verification {
+        let _ = file.unlock();
+        return Err(error);
+    }
+    Ok(file)
+}
+
 /// Atomically replace one repository-owned regular file through a retained
 /// parent-directory capability. The temporary file is durable before rename,
 /// the parent directory is synced on Unix, and existing links or non-files are
@@ -532,6 +614,22 @@ pub(crate) fn write_atomic_regular_file_with_capability(
     bytes: &[u8],
     private: bool,
 ) -> Result<(), BoundedReadError> {
+    write_atomic_regular_file_expected_with_capability(
+        root,
+        path,
+        bytes,
+        private,
+        AtomicWriteExpectation::Any,
+    )
+}
+
+pub(crate) fn write_atomic_regular_file_expected_with_capability(
+    root: &RootCapability,
+    path: &Path,
+    bytes: &[u8],
+    private: bool,
+    expectation: AtomicWriteExpectation,
+) -> Result<(), BoundedReadError> {
     #[cfg(not(unix))]
     let _ = private;
 
@@ -544,12 +642,7 @@ pub(crate) fn write_atomic_regular_file_with_capability(
     let parent_relative = relative.parent().unwrap_or_else(|| Path::new(""));
     let parent = open_relative_directory_nofollow(&root.directory, parent_relative)?;
     let parent_identity = directory_identity(&parent)?;
-    match parent.symlink_metadata(&name) {
-        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {}
-        Ok(_) => return Err(BoundedReadError::NotRegular),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(BoundedReadError::Io(error)),
-    }
+    verify_atomic_write_target(root, path, &expectation)?;
 
     let mut temporary = None;
     for _ in 0..128 {
@@ -599,16 +692,11 @@ pub(crate) fn write_atomic_regular_file_with_capability(
             Ok(())
         };
         verify_parent()?;
+        verify_atomic_write_target(root, path, &expectation)?;
         parent
             .rename(&temporary_name, &parent, &name)
             .map_err(BoundedReadError::Io)?;
-        #[cfg(unix)]
-        parent
-            .try_clone()
-            .map_err(BoundedReadError::Io)?
-            .into_std_file()
-            .sync_all()
-            .map_err(BoundedReadError::Io)?;
+        sync_directory(&parent)?;
         verify_parent()
     })();
 
@@ -616,6 +704,69 @@ pub(crate) fn write_atomic_regular_file_with_capability(
         let _ = parent.remove_file(&temporary_name);
     }
     result
+}
+
+#[cfg(unix)]
+fn sync_directory(directory: &Dir) -> Result<(), BoundedReadError> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    // SAFETY: `directory` owns a live directory descriptor and the path is a
+    // static NUL-terminated string. `openat` returns a new owned descriptor.
+    let descriptor = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            c".".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if descriptor < 0 {
+        return Err(BoundedReadError::Io(std::io::Error::last_os_error()));
+    }
+    // SAFETY: `descriptor` was created successfully above and ownership is
+    // transferred exactly once to `File`.
+    let directory = unsafe { std::fs::File::from_raw_fd(descriptor) };
+    directory.sync_all().map_err(BoundedReadError::Io)
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_directory: &Dir) -> Result<(), BoundedReadError> {
+    Ok(())
+}
+
+fn verify_atomic_write_target(
+    root: &RootCapability,
+    path: &Path,
+    expectation: &AtomicWriteExpectation,
+) -> Result<(), BoundedReadError> {
+    match expectation {
+        AtomicWriteExpectation::Any => {
+            match inspect_path_kind_with_capability(root, path, ReadControl::default()) {
+                Ok(BoundedPathKind::RegularFile) => Ok(()),
+                Ok(_) => Err(BoundedReadError::NotRegular),
+                Err(BoundedReadError::Io(error))
+                    if error.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            }
+        }
+        AtomicWriteExpectation::Missing(expected) => {
+            match inspect_absent_path(root, path, ReadControl::default())? {
+                Some(current) if expected.matches(&current) => Ok(()),
+                _ => Err(BoundedReadError::SnapshotChanged),
+            }
+        }
+        AtomicWriteExpectation::File(expected) => read_regular_file_expected(
+            root,
+            path,
+            u64::MAX,
+            0,
+            ReadControl::default(),
+            Some(*expected),
+        )
+        .map(|_| ()),
+    }
 }
 
 fn open_relative_directory_nofollow(root: &Dir, relative: &Path) -> Result<Dir, BoundedReadError> {
@@ -1148,6 +1299,52 @@ mod tests {
             Err(BoundedReadError::OutsideRoot)
         ));
         assert!(!outside.path().join("escaped.md").exists());
+    }
+
+    #[test]
+    fn conditional_atomic_writer_preserves_concurrent_change() {
+        let root = tempfile::tempdir().unwrap();
+        let capability = RootCapability::open(root.path()).unwrap();
+        let path = root.path().join("lessons.md");
+        std::fs::write(&path, b"observed").unwrap();
+        let observed = read_regular_file_with_capability(
+            &capability,
+            &path,
+            1024,
+            1024,
+            ReadControl::default(),
+        )
+        .unwrap();
+        std::fs::write(&path, b"reviewed concurrently").unwrap();
+
+        assert!(matches!(
+            write_atomic_regular_file_expected_with_capability(
+                &capability,
+                &path,
+                b"stale merge",
+                false,
+                AtomicWriteExpectation::File(observed.identity),
+            ),
+            Err(BoundedReadError::SnapshotChanged)
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), b"reviewed concurrently");
+
+        std::fs::remove_file(&path).unwrap();
+        let missing = inspect_absent_path(&capability, &path, ReadControl::default())
+            .unwrap()
+            .unwrap();
+        std::fs::write(&path, b"created concurrently").unwrap();
+        assert!(matches!(
+            write_atomic_regular_file_expected_with_capability(
+                &capability,
+                &path,
+                b"stale creation",
+                false,
+                AtomicWriteExpectation::Missing(missing),
+            ),
+            Err(BoundedReadError::SnapshotChanged)
+        ));
+        assert_eq!(std::fs::read(path).unwrap(), b"created concurrently");
     }
 
     #[cfg(unix)]

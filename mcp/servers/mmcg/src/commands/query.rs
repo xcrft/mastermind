@@ -18,10 +18,23 @@ impl Drop for WorkBudgetScope<'_> {
     }
 }
 
+fn open_query_store(index_path: &Path) -> Result<Store, Box<dyn std::error::Error>> {
+    let store = Store::open_read_only(index_path)?;
+    if !store.schema_current()? {
+        return Err(format!(
+            "index schema at `{}` is missing or outdated; rebuild with `mastermind index .`",
+            index_path.display()
+        )
+        .into());
+    }
+    Ok(store)
+}
+
 pub fn dispatch(q: QueryCmd, index_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let store = Store::open(index_path)?;
+    let store = open_query_store(index_path)?;
     let is_explain = matches!(q, QueryCmd::Explain { .. });
     let result = execute(&store, q)?;
+    store.ensure_source_snapshot_current()?;
     println!("{}", serde_json::to_string_pretty(&result)?);
     if is_explain {
         if let Some(matched) = result.get("matched").and_then(|v| v.as_array()) {
@@ -51,11 +64,12 @@ pub fn dispatch_map(
     production_only: bool,
     index_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let store = Store::open(index_path)?;
+    let store = open_query_store(index_path)?;
     let budget_ms = query_budget_ms_from_env(DEFAULT_CLI_BUDGET_MS);
     store.push_work_budget(WorkBudget::from_millis(budget_ms));
     let _budget_scope = WorkBudgetScope(&store);
     let map = queries::project_map_with_options(&store, path, depth, top, production_only)?;
+    store.ensure_source_snapshot_current()?;
     match format {
         crate::MapFormat::Json => println!("{}", serde_json::to_string_pretty(&map)?),
         crate::MapFormat::Text => print!("{}", render_map_text(&map)),
@@ -74,11 +88,12 @@ pub fn dispatch_temporal(
     root: &Path,
     index_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let store = Store::open_read_only(index_path)?;
+    let store = open_query_store(index_path)?;
     let budget_ms = query_budget_ms_from_env(DEFAULT_CLI_BUDGET_MS);
     store.push_work_budget(WorkBudget::from_millis(budget_ms));
     let _budget_scope = WorkBudgetScope(&store);
     let response = mmcg::temporal::analyze(&store, root, options)?;
+    store.ensure_source_snapshot_current()?;
     match format {
         crate::TemporalFormat::Json => {
             println!("{}", serde_json::to_string_pretty(&response)?)
@@ -179,13 +194,14 @@ pub fn dispatch_history(
     document_graph: Option<&Path>,
     index_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let store = Store::open(index_path)?;
+    let store = open_query_store(index_path)?;
     let _budget_scope = document_graph.map(|_| {
         let budget_ms = query_budget_ms_from_env(DEFAULT_CLI_BUDGET_MS);
         store.push_work_budget(WorkBudget::from_millis(budget_ms));
         WorkBudgetScope(&store)
     });
     let response = history_response(&store, query, kind, top, document_graph)?;
+    store.ensure_source_snapshot_current()?;
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
 }
@@ -222,9 +238,10 @@ pub fn dispatch_why(
     top: u32,
     index_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let store = Store::open(index_path)?;
+    let store = open_query_store(index_path)?;
     let retrieval_query = natural_language_history_query(query);
     let response = queries::history(&store, &retrieval_query, None, top.clamp(1, 50))?;
+    store.ensure_source_snapshot_current()?;
     println!("mastermind why — {}\n", safe_line_text(query));
     println!("{}", history_snapshot_notice(&response));
     println!("Observed (indexed matches)");
@@ -776,6 +793,16 @@ fn execute(store: &Store, q: QueryCmd) -> Result<Value, Box<dyn std::error::Erro
 #[cfg(test)]
 mod map_tests {
     use super::*;
+
+    #[test]
+    fn query_open_never_creates_a_missing_index() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("missing/index.db");
+
+        assert!(open_query_store(&path).is_err());
+        assert!(!path.exists());
+        assert!(!directory.path().join("missing").exists());
+    }
 
     #[test]
     fn callees_cli_execution_uses_the_requested_definition() {

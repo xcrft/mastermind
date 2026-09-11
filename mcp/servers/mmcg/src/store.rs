@@ -5030,6 +5030,16 @@ impl Store {
         Ok(current.eq(expected))
     }
 
+    /// Reject a result assembled after the source database or active WAL moved
+    /// beyond the revision copied into this read-only Store.
+    pub fn ensure_source_snapshot_current(&self) -> SqlResult<()> {
+        if self.source_snapshot_unchanged()? {
+            Ok(())
+        } else {
+            Err(sqlite_snapshot_changed())
+        }
+    }
+
     pub(crate) fn source_snapshot_database_len(&self) -> Option<u64> {
         self.source_snapshot_state
             .as_ref()
@@ -7433,6 +7443,24 @@ mod tests {
 
         assert_eq!(directory_bytes(directory.path()), before);
         drop(writer);
+    }
+
+    #[test]
+    fn read_only_snapshot_rejects_results_after_the_source_wal_advances() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("active.db");
+        let writer = Store::open(&path).unwrap();
+        writer
+            .insert_symbol("initial", "function", "src/lib.rs", 1, 2, None, None)
+            .unwrap();
+        let read_only = Store::open_read_only(&path).unwrap();
+        read_only.ensure_source_snapshot_current().unwrap();
+
+        writer
+            .insert_symbol("newer", "function", "src/lib.rs", 3, 4, None, None)
+            .unwrap();
+
+        assert!(read_only.ensure_source_snapshot_current().is_err());
     }
 
     #[cfg(unix)]

@@ -2730,10 +2730,10 @@ impl Store {
         Self::open_writable(db_path.as_ref(), true)
     }
 
-    /// Open an existing index for a workflow that is explicitly going to
-    /// refresh it. Unlike [`Store::open`], this never creates the database or
+    /// Open an existing index for an operation that is explicitly going to
+    /// mutate it. Unlike [`Store::open`], this never creates the database or
     /// its parent directories if the selected index disappears.
-    pub(crate) fn open_existing(db_path: impl AsRef<Path>) -> SqlResult<Self> {
+    pub fn open_existing(db_path: impl AsRef<Path>) -> SqlResult<Self> {
         Self::open_writable(db_path.as_ref(), false)
     }
 

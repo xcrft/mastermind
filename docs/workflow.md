@@ -60,6 +60,10 @@ Post-flight compares the approved spec, executor claims, current index, and Git
 diff. Uncommitted and untracked files count because this gate normally runs
 before commit.
 
+Workflow specs are parsed from one bounded regular-file snapshot with a 16 MiB
+limit. A changed path, symlink substitution, or special file fails before
+verify, CI, or post-flight uses the contract.
+
 | Verdict | Meaning | Next action |
 |---|---|---|
 | `held` | Mechanical contract is satisfied | Perform semantic review and delivery gates |

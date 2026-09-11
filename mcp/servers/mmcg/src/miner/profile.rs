@@ -33,6 +33,8 @@ const COMMIT_SAMPLE_CAP: usize = 400;
 const MIN_SAMPLES: usize = 20;
 const PROFILE_SCHEMA_MARKER: &str = "<!-- mastermind-style:schema:2 -->";
 const MAX_STYLE_PROFILE_SIZE: u64 = crate::indexer::MAX_HISTORY_ARTIFACT_SIZE;
+const PROFILE_LOCK_FILE: &str = ".style-profile.lock";
+const PROFILE_WRITE_ATTEMPTS: usize = 3;
 
 /// `doctor` nudges to re-mine once the author has this many new commits since.
 const STALE_COMMITS: usize = 25;
@@ -100,93 +102,107 @@ fn mine_to_paths(
     let mut counts = Counts::new();
     accumulate(&lines, &commit_msgs, &mut counts);
 
-    // Validate and snapshot the hand-edited output before changing the aggregate.
-    // The final conditional rename refuses to erase an edit made during mining.
     let (profile_root, profile_target) = crate::bounded_fs::prepare_file_target(path)?;
-    let existing = read_existing_profile(&profile_root, &profile_target, force)?;
+    let lock_path = profile_root.canonical_root().join(PROFILE_LOCK_FILE);
+    let lock =
+        crate::bounded_fs::open_locked_regular_file_with_capability(&profile_root, &lock_path)?;
 
-    // Accumulate into the user-global store, then render from the aggregate.
-    let mut db = store::ProfileStore::open(db_path)?;
-    if !force {
-        ensure_owner_compatible(&db, &author, &prov.identities)?;
-    }
-    if force {
-        db.reset()?;
-    }
-    let pruned = prune_stale(&mut db)?;
-    let aliases = legacy_repository_keys(&db, &repo_key)?;
-    db.upsert_repo(
-        &repo_key,
-        &store::RepoProvenance {
-            author: author.clone(),
-            commits_total: prov.commits_total as i64,
-            commits_sampled: prov.commits_sampled as i64,
-            added_lines_sampled: prov.added_lines_sampled as i64,
-            latest_sha: prov.latest_sha.clone(),
-            latest_date: prov.latest_date.clone(),
-            mined_at_epoch: now_epoch(),
-        },
-        &prov.identities,
-        &counts,
-        &aliases,
-    )?;
+    let result: Result<SeedOutcome, Box<dyn std::error::Error>> = (|| {
+        // Snapshot after acquiring the global style lock so two miners cannot
+        // derive and publish from the same stale profile/store pair.
+        let mut existing = read_existing_profile(&profile_root, &profile_target, force)?;
 
-    let agg = db.aggregate()?;
-    let rules = derive_rules(&agg.counts);
+        let mut db = store::ProfileStore::open(db_path)?;
+        if !force {
+            ensure_owner_compatible(&db, &author, &prov.identities)?;
+        }
+        if force {
+            db.reset()?;
+        }
+        let pruned = prune_stale(&mut db)?;
+        let aliases = legacy_repository_keys(&db, &repo_key)?;
+        db.upsert_repo(
+            &repo_key,
+            &store::RepoProvenance {
+                author: author.clone(),
+                commits_total: prov.commits_total as i64,
+                commits_sampled: prov.commits_sampled as i64,
+                added_lines_sampled: prov.added_lines_sampled as i64,
+                latest_sha: prov.latest_sha.clone(),
+                latest_date: prov.latest_date.clone(),
+                mined_at_epoch: now_epoch(),
+            },
+            &prov.identities,
+            &counts,
+            &aliases,
+        )?;
 
-    // Stage 2 (opt-in): an LLM writes the "design patterns" section regex can't,
-    // from this repo's samples + the measured rules. Best-effort.
-    let generated_interpreted = if deep {
-        eprintln!("Deep mode sends sampled added lines and commit messages to `claude -p`.");
-        match synthesize(repo_root, &rules, &commit_msgs, &lines) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                eprintln!("deep synthesis skipped — {e}");
-                None
+        let agg = db.aggregate()?;
+        let rules = derive_rules(&agg.counts);
+
+        // Stage 2 (opt-in): an LLM writes the "design patterns" section regex can't,
+        // from this repo's samples + the measured rules. Best-effort.
+        let generated_interpreted = if deep {
+            eprintln!("Deep mode sends sampled added lines and commit messages to `claude -p`.");
+            match synthesize(repo_root, &rules, &commit_msgs, &lines) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    eprintln!("deep synthesis skipped — {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let synthesized = generated_interpreted.is_some();
+
+        for attempt in 0..PROFILE_WRITE_ATTEMPTS {
+            // `--force` is a full owner/profile replacement, so carrying manual or
+            // interpreted prose from the previous owner would be cross-person leakage.
+            let manual = existing.body.as_deref().and_then(extract_manual);
+            let preserved_interpreted = existing.body.as_deref().and_then(extract_interpreted);
+            let interpreted = generated_interpreted
+                .as_deref()
+                .or(preserved_interpreted.as_deref());
+            let markdown = render_profile(&author, &agg, &rules, interpreted, manual.as_deref());
+            if markdown.len() as u64 > MAX_STYLE_PROFILE_SIZE {
+                return Err(format!(
+                    "rendered style profile has {} bytes, limit is {MAX_STYLE_PROFILE_SIZE}",
+                    markdown.len()
+                )
+                .into());
+            }
+            match crate::bounded_fs::write_atomic_regular_file_expected_with_capability(
+                &profile_root,
+                &profile_target,
+                markdown.as_bytes(),
+                true,
+                existing.expectation,
+            ) {
+                Ok(()) => {
+                    return Ok(SeedOutcome::Enriched {
+                        repo_commits: prov.commits_total as i64,
+                        author,
+                        repos: agg.repos,
+                        rules: rules.len(),
+                        commits: agg.commits_total,
+                        pruned: pruned.len(),
+                        synthesized,
+                        empty: rules.is_empty(),
+                    });
+                }
+                Err(BoundedReadError::SnapshotChanged)
+                    if !force && attempt + 1 < PROFILE_WRITE_ATTEMPTS =>
+                {
+                    existing = read_existing_profile(&profile_root, &profile_target, false)?;
+                }
+                Err(error) => return Err(error.into()),
             }
         }
-    } else {
-        None
-    };
-
-    // `--force` is a full owner/profile replacement, so carrying manual or
-    // interpreted prose from the previous owner would be cross-person leakage.
-    let manual = existing.body.as_deref().and_then(extract_manual);
-    let synthesized = generated_interpreted.is_some();
-    let interpreted =
-        generated_interpreted.or_else(|| existing.body.as_deref().and_then(extract_interpreted));
-    let markdown = render_profile(
-        &author,
-        &agg,
-        &rules,
-        interpreted.as_deref(),
-        manual.as_deref(),
-    );
-    if markdown.len() as u64 > MAX_STYLE_PROFILE_SIZE {
-        return Err(format!(
-            "rendered style profile has {} bytes, limit is {MAX_STYLE_PROFILE_SIZE}",
-            markdown.len()
-        )
-        .into());
-    }
-    crate::bounded_fs::write_atomic_regular_file_expected_with_capability(
-        &profile_root,
-        &profile_target,
-        markdown.as_bytes(),
-        true,
-        existing.expectation,
-    )?;
-
-    Ok(SeedOutcome::Enriched {
-        repo_commits: prov.commits_total as i64,
-        author,
-        repos: agg.repos,
-        rules: rules.len(),
-        commits: agg.commits_total,
-        pruned: pruned.len(),
-        synthesized,
-        empty: rules.is_empty(),
-    })
+        Err(BoundedReadError::SnapshotChanged.into())
+    })();
+    lock.unlock()?;
+    result
 }
 
 /// Subdirectories and linked worktrees share one contribution. Independent
@@ -2341,6 +2357,44 @@ diff --git a/app/bar.ts b/app/bar.ts
         assert!(error.to_string().contains("regular no-follow"));
         assert!(!db.exists());
         assert_eq!(std::fs::read_to_string(victim).unwrap(), "manual profile");
+    }
+
+    #[test]
+    fn concurrent_mines_serialize_database_and_profile_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        fixture_repository(&first, "Alice");
+        fixture_repository(&second, "Alice");
+        let db = dir.path().join("style.db");
+        let profile = dir.path().join("style.md");
+        let ready = std::sync::Barrier::new(2);
+
+        std::thread::scope(|scope| {
+            let first_mine = scope.spawn(|| {
+                ready.wait();
+                mine_to_paths(&first, None, false, false, &db, &profile)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            });
+            let second_mine = scope.spawn(|| {
+                ready.wait();
+                mine_to_paths(&second, None, false, false, &db, &profile)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            });
+            first_mine.join().unwrap().unwrap();
+            second_mine.join().unwrap().unwrap();
+        });
+
+        let aggregate = store::ProfileStore::open_read_only(&db)
+            .unwrap()
+            .aggregate()
+            .unwrap();
+        assert_eq!(aggregate.repos, 2);
+        assert_eq!(aggregate.commits_total, 2);
+        let profile = std::fs::read_to_string(profile).unwrap();
+        assert!(profile.contains("2 repo(s), 2 commit(s)"));
     }
 
     #[test]

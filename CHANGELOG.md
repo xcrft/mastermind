@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Concurrent style mines now serialize the database and profile update through
+  one stable user-global lock. Profile publication rebases a concurrent manual
+  edit with bounded retries, so successful miners cannot leave `style.md`
+  missing another process's committed contribution.
 - Style freshness checks are now read-only and fail closed. A missing
   `style.md` cannot be reported fresh from a leftover database, and malformed,
   oversized, linked, missing-store, or invalid-schema state is reported as an

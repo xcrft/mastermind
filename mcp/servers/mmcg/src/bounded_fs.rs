@@ -412,9 +412,9 @@ fn open_relative_nofollow(root: &Dir, relative: &Path) -> Result<std::fs::File, 
         .open_with(name, &options)
         .map(cap_std::fs::File::into_std)
         .map_err(|error| match error.kind() {
-            std::io::ErrorKind::InvalidInput | std::io::ErrorKind::NotADirectory => {
-                BoundedReadError::NotRegular
-            }
+            std::io::ErrorKind::InvalidInput
+            | std::io::ErrorKind::NotADirectory
+            | std::io::ErrorKind::FilesystemLoop => BoundedReadError::NotRegular,
             _ => BoundedReadError::Io(error),
         })
 }

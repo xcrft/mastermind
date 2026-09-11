@@ -16,7 +16,6 @@ use crate::store::Store;
 use aho_corasick::AhoCorasick;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -1370,38 +1369,25 @@ fn ownership_delta(
 }
 
 fn read_stable_codeowners(path: &Path, store: &Store) -> Result<Vec<u8>, &'static str> {
-    const MAX_BYTES: u64 = 3 * 1024 * 1024;
-    let mut file = std::fs::File::open(path).map_err(|_| "codeowners_unavailable")?;
-    let before = file.metadata().map_err(|_| "codeowners_unavailable")?;
-    if !before.is_file() {
-        return Err("codeowners_unavailable");
-    }
-    if before.len() >= MAX_BYTES {
-        return Err("codeowners_too_large");
-    }
-    let mut bytes = Vec::with_capacity(usize::try_from(before.len()).unwrap_or(0));
-    let mut input = file.by_ref().take(MAX_BYTES + 1);
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        if store.work_interrupted() {
-            return Err("work_interrupted");
-        }
-        let count = input
-            .read(&mut buffer)
-            .map_err(|_| "codeowners_unavailable")?;
-        if count == 0 {
-            break;
-        }
-        bytes.extend_from_slice(&buffer[..count]);
-    }
-    if bytes.len() as u64 >= MAX_BYTES {
-        return Err("codeowners_too_large");
-    }
-    let after = file.metadata().map_err(|_| "codeowners_changed")?;
-    if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
-        return Err("codeowners_changed");
-    }
-    Ok(bytes)
+    let interrupted = || store.work_interrupted();
+    let maximum_bytes = crate::evidence::MAX_CODEOWNERS_BYTES - 1;
+    crate::bounded_fs::read_selected_regular_file(
+        path,
+        maximum_bytes,
+        maximum_bytes,
+        crate::bounded_fs::ReadControl {
+            deadline: store.request_deadline(),
+            interrupted: Some(&interrupted),
+        },
+    )
+    .map(|(_, source)| source.bytes)
+    .map_err(|error| match error {
+        crate::bounded_fs::BoundedReadError::TooLarge { .. } => "codeowners_too_large",
+        crate::bounded_fs::BoundedReadError::SnapshotChanged => "codeowners_changed",
+        crate::bounded_fs::BoundedReadError::Interrupted
+        | crate::bounded_fs::BoundedReadError::DeadlineExceeded => "work_interrupted",
+        _ => "codeowners_unavailable",
+    })
 }
 
 fn history_review_candidates(
@@ -1966,6 +1952,25 @@ mod tests {
             .iter()
             .any(|diagnostic| diagnostic.code == "codeowner_diagnostic_limit"));
         assert!(response.diagnostics.len() <= DIAGNOSTIC_LIMIT);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temporal_codeowners_reader_rejects_a_fifo_without_blocking() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let fifo = root.path().join("CODEOWNERS");
+        let fifo_path = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `fifo_path` is a live, NUL-terminated path buffer.
+        assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+        let store = Store::open(root.path().join("mmcg.db")).unwrap();
+
+        assert_eq!(
+            read_stable_codeowners(&fifo, &store),
+            Err("codeowners_unavailable")
+        );
     }
 
     #[cfg(unix)]

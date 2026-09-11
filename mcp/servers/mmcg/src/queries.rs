@@ -7328,7 +7328,9 @@ fn checks_value() { assert_eq!(value(), 1); }
         std::fs::remove_dir_all(root).ok();
     }
 
-    #[cfg(unix)]
+    // APFS rejects invalid UTF-8 names before Git can observe them. The raw
+    // path accounting itself has a platform-independent unit test in `diff`.
+    #[cfg(target_os = "linux")]
     #[test]
     fn change_impact_marks_non_utf8_changed_paths_as_partial() {
         use std::ffi::OsString;

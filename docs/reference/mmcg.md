@@ -619,7 +619,9 @@ the returned deterministic window when the underlying map is partial. Ownership
 checks at most 500 relevant paths; history scans at most 5,000 derived artifacts
 and 32 MiB and returns at most 500 candidates. Diagnostics are capped at 100
 with an explicit `diagnostics_truncated` flag. Git, CODEOWNERS, history, rewind,
-and SQLite phases cooperatively observe the request budget/cancel signal.
+and SQLite phases cooperatively observe the request budget/cancel signal. The
+head CODEOWNERS file is a bounded regular-file read through a retained,
+no-follow parent capability, so special files and path swaps fail closed.
 Temporal topology is Tree-sitter syntactic evidence in v1; SCIP, runtime,
 coverage, and test overlays keep their separate provenance in Lens.
 

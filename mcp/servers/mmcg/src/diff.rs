@@ -2127,6 +2127,22 @@ mod tests {
     }
 
     #[test]
+    fn changed_path_projection_counts_non_utf8_entries_as_omitted() {
+        let changed = BTreeMap::from([
+            (b"src/app.py".to_vec(), "modified"),
+            (b"untracked-\xff.bin".to_vec(), "untracked"),
+        ]);
+
+        let (files, total, truncated, skipped_non_utf8_paths) = finalize_changed_paths(changed);
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "src/app.py");
+        assert_eq!(total, Some(2));
+        assert!(!truncated);
+        assert_eq!(skipped_non_utf8_paths, 1);
+    }
+
+    #[test]
     fn worktree_paths_stay_repository_relative_from_a_subdirectory() {
         // `git diff` reports repository-relative paths whatever the cwd is;
         // `ls-files` reports cwd-relative ones unless asked otherwise. Mixing

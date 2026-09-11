@@ -15,9 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Lesson-candidate updates now retain the repository and lock-file identities
-  across the complete read-modify-write section. The 8 MiB bounded reader and
+  across the complete read-modify-write section. The 1 MiB bounded reader and
   atomic writer reject symlinks, special files, path swaps, and oversized or
-  invalid UTF-8 lesson stores without losing reviewed guidance.
+  invalid UTF-8 lesson stores without losing reviewed guidance. The shared cap
+  prevents candidates from growing past the history indexer's admission limit.
 - Post-flight audit reports, release-note drafts, history reviews, and review
   archives now use the same capability-scoped atomic writer as lifecycle state,
   preventing partial artifacts and path-component substitutions.

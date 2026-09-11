@@ -24,7 +24,7 @@ Required fields: Status, Task, Kind, Provenance, Evidence, Supersedes,\n\
 Occurrences, Last seen, and Reusable lesson.\n\n";
 
 const SEPARATE_LOCK_SURVIVING_RENAME: &str = "_lessons.md.lock";
-const MAX_LESSONS_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_LESSONS_BYTES: u64 = crate::indexer::MAX_HISTORY_ARTIFACT_SIZE;
 
 /// Record a deduplicated lesson candidate for a `Drift`/`Broken` audit.
 /// A held contract is not evidence that a reusable lesson exists.
@@ -844,11 +844,28 @@ mod tests {
 
         let spec = PathBuf::from(".mastermind/tasks/007-retry/spec.md");
         let error = append_iteration_budget_candidate(dir.path(), &spec, 4).unwrap_err();
-        assert!(error.to_string().contains("limit is 8388608"));
+        assert!(error
+            .to_string()
+            .contains(&format!("limit is {MAX_LESSONS_BYTES}")));
         assert_eq!(
             fs::metadata(tasks.join("_lessons.md")).unwrap().len(),
             MAX_LESSONS_BYTES + 1
         );
+    }
+
+    #[test]
+    fn lesson_writer_does_not_cross_the_history_index_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks = dir.path().join(".mastermind/tasks");
+        fs::create_dir_all(&tasks).unwrap();
+        let lessons = tasks.join("_lessons.md");
+        let original = " ".repeat(MAX_LESSONS_BYTES as usize - 1);
+        fs::write(&lessons, &original).unwrap();
+
+        let spec = PathBuf::from(".mastermind/tasks/007-retry/spec.md");
+        let error = append_iteration_budget_candidate(dir.path(), &spec, 4).unwrap_err();
+        assert!(error.to_string().contains("project lessons exceed"));
+        assert_eq!(fs::read_to_string(lessons).unwrap(), original);
     }
 
     #[cfg(unix)]

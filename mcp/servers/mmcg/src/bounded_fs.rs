@@ -381,16 +381,38 @@ impl RootCapability {
     }
 }
 
+fn absolute_file_target(path: &Path) -> Result<PathBuf, BoundedReadError> {
+    let target = std::path::absolute(path).map_err(BoundedReadError::Io)?;
+    if target.file_name().is_none() {
+        return Err(BoundedReadError::InvalidPath);
+    }
+    Ok(target)
+}
+
+/// Retain an existing final parent without creating any filesystem state.
+pub(crate) fn open_file_target(path: &Path) -> Result<(RootCapability, PathBuf), BoundedReadError> {
+    let target = absolute_file_target(path)?;
+    let parent = target.parent().ok_or(BoundedReadError::InvalidPath)?;
+    let name = target
+        .file_name()
+        .ok_or(BoundedReadError::InvalidPath)?
+        .to_os_string();
+    let root = RootCapability::open(parent)?;
+    let target = root.canonical_root().join(name);
+    Ok((root, target))
+}
+
 /// Create missing parent directories beneath the closest existing directory,
 /// then retain the final parent as the authority for one selected file.
 pub(crate) fn prepare_file_target(
     path: &Path,
 ) -> Result<(RootCapability, PathBuf), BoundedReadError> {
-    let target = std::path::absolute(path).map_err(BoundedReadError::Io)?;
-    if target.file_name().is_none() {
-        return Err(BoundedReadError::InvalidPath);
-    }
+    let target = absolute_file_target(path)?;
     let parent = target.parent().ok_or(BoundedReadError::InvalidPath)?;
+    let name = target
+        .file_name()
+        .ok_or(BoundedReadError::InvalidPath)?
+        .to_os_string();
     let mut anchor = parent;
     loop {
         match std::fs::symlink_metadata(anchor) {
@@ -409,10 +431,13 @@ pub(crate) fn prepare_file_target(
 
     let root = RootCapability::open(anchor)?;
     if anchor == parent {
+        let target = root.canonical_root().join(name);
         return Ok((root, target));
     }
     root.ensure_directory(parent)?;
-    Ok((RootCapability::open(parent)?, target))
+    let root = RootCapability::open(parent)?;
+    let target = root.canonical_root().join(name);
+    Ok((root, target))
 }
 
 fn classify_nofollow_open_error(error: std::io::Error) -> BoundedReadError {

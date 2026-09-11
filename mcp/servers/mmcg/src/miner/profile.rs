@@ -350,10 +350,12 @@ fn profile_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
 
 /// Freshness of the on-disk profile relative to the author's commits in `root`.
 pub enum Staleness {
-    /// No profile yet, or its provenance marker is unreadable.
+    /// No profile has been generated for this user.
     Absent,
     /// A profile from before the privacy/persistence contract is still present.
     Legacy,
+    /// Profile or store state exists but cannot be trusted or queried safely.
+    Invalid { reason: String },
     /// Present and recent enough.
     Fresh { mined_through: String },
     /// Author has accrued enough new commits since the mine to warrant a re-mine.
@@ -366,22 +368,81 @@ pub enum Staleness {
 /// Per-repo freshness from the store: count the author's commits in `root` since
 /// the SHA it was last mined at. `doctor` uses this to nudge a re-mine — read-only.
 pub fn staleness(root: &Path) -> Staleness {
-    if profile_path()
-        .ok()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .is_some_and(|text| !text.contains(PROFILE_SCHEMA_MARKER))
-    {
+    let profile = match profile_path() {
+        Ok(path) => path,
+        Err(error) => {
+            return Staleness::Invalid {
+                reason: error.to_string(),
+            };
+        }
+    };
+    let db = match store::ProfileStore::db_path() {
+        Some(path) => path,
+        None => {
+            return Staleness::Invalid {
+                reason: "could not resolve style store path".into(),
+            };
+        }
+    };
+    staleness_at(root, &profile, &db)
+}
+
+fn staleness_at(root: &Path, profile_path: &Path, db_path: &Path) -> Staleness {
+    let profile = match read_profile_for_staleness(profile_path) {
+        Ok(Some(profile)) => profile,
+        Ok(None) => return Staleness::Absent,
+        Err(error) => {
+            return Staleness::Invalid {
+                reason: format!("style profile cannot be read safely: {error}"),
+            };
+        }
+    };
+    if !profile.contains(PROFILE_SCHEMA_MARKER) {
         return Staleness::Legacy;
     }
-    let db = match store::ProfileStore::db_path() {
-        Some(p) if p.exists() => p,
-        _ => return Staleness::Absent,
-    };
-    let db = match store::ProfileStore::open(&db) {
-        Ok(d) => d,
-        Err(_) => return Staleness::Absent,
+    let db = match store::ProfileStore::open_read_only(db_path) {
+        Ok(db) => db,
+        Err(error) => {
+            return Staleness::Invalid {
+                reason: format!("style store cannot be read safely: {error}"),
+            };
+        }
     };
     staleness_for_repo(root, &db)
+}
+
+fn read_profile_for_staleness(path: &Path) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let (root, target) = match crate::bounded_fs::open_file_target(path) {
+        Ok(target) => target,
+        Err(BoundedReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    match crate::bounded_fs::read_regular_file_with_capability(
+        &root,
+        &target,
+        MAX_STYLE_PROFILE_SIZE,
+        MAX_STYLE_PROFILE_SIZE,
+        ReadControl::default(),
+    ) {
+        Ok(file) => String::from_utf8(file.bytes)
+            .map(Some)
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "style profile is not valid UTF-8",
+                )
+            })
+            .map_err(Into::into),
+        Err(BoundedReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            match crate::bounded_fs::inspect_absent_path(&root, &target, ReadControl::default())? {
+                Some(_) => Ok(None),
+                None => Err(BoundedReadError::SnapshotChanged.into()),
+            }
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn staleness_for_repo(root: &Path, db: &store::ProfileStore) -> Staleness {
@@ -389,12 +450,42 @@ fn staleness_for_repo(root: &Path, db: &store::ProfileStore) -> Staleness {
         Ok(key) => key,
         Err(_) => return Staleness::Absent,
     };
-    let meta = db.repo_meta(&key).ok().flatten().or_else(|| {
-        legacy_repository_keys(db, &key)
-            .ok()?
-            .into_iter()
-            .find_map(|alias| db.repo_meta(&alias).ok().flatten())
-    });
+    let meta = match db.repo_meta(&key) {
+        Ok(meta) => meta,
+        Err(error) => {
+            return Staleness::Invalid {
+                reason: format!("style store provenance query failed: {error}"),
+            };
+        }
+    };
+    let meta = if meta.is_some() {
+        meta
+    } else {
+        let aliases = match legacy_repository_keys(db, &key) {
+            Ok(aliases) => aliases,
+            Err(error) => {
+                return Staleness::Invalid {
+                    reason: format!("style store repository query failed: {error}"),
+                };
+            }
+        };
+        let mut legacy = None;
+        for alias in aliases {
+            match db.repo_meta(&alias) {
+                Ok(Some(meta)) => {
+                    legacy = Some(meta);
+                    break;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return Staleness::Invalid {
+                        reason: format!("style store provenance query failed: {error}"),
+                    };
+                }
+            }
+        }
+        legacy
+    };
     let (author, sha, date) = match meta {
         Some(m) => m,
         _ => return Staleness::Absent, // this repo never contributed
@@ -2142,6 +2233,50 @@ diff --git a/app/bar.ts b/app/bar.ts
             .unwrap()
             .body
             .is_none());
+    }
+
+    #[test]
+    fn staleness_does_not_treat_a_missing_profile_as_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("style.db");
+        drop(store::ProfileStore::open(&db).unwrap());
+        assert!(matches!(
+            staleness_at(dir.path(), &dir.path().join("style.md"), &db),
+            Staleness::Absent
+        ));
+    }
+
+    #[test]
+    fn staleness_reports_inconsistent_or_invalid_profile_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("style.md");
+        std::fs::write(&profile, PROFILE_SCHEMA_MARKER).unwrap();
+        assert!(matches!(
+            staleness_at(dir.path(), &profile, &dir.path().join("missing.db")),
+            Staleness::Invalid { .. }
+        ));
+
+        std::fs::write(&profile, [0xff]).unwrap();
+        assert!(matches!(
+            staleness_at(dir.path(), &profile, &dir.path().join("missing.db")),
+            Staleness::Invalid { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staleness_rejects_a_linked_profile() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.md");
+        std::fs::write(&target, PROFILE_SCHEMA_MARKER).unwrap();
+        let profile = dir.path().join("style.md");
+        symlink(&target, &profile).unwrap();
+        assert!(matches!(
+            staleness_at(dir.path(), &profile, &dir.path().join("missing.db")),
+            Staleness::Invalid { .. }
+        ));
     }
 
     #[test]

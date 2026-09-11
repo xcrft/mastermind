@@ -223,6 +223,15 @@ fn check_style_profile(root: &Path) -> Check {
             message: "legacy format — refresh removes identity metadata and preserves the new profile contract".into(),
             hint: Some(STYLE_REFRESH_HINT.into()),
         },
+        Staleness::Invalid { reason } => Check {
+            name: "style profile",
+            status: Status::Fail,
+            message: format!("unusable — {reason}"),
+            hint: Some(
+                "restore regular ~/.mastermind/style.md and style.db files, then refresh the profile"
+                    .into(),
+            ),
+        },
         Staleness::Fresh { mined_through } => Check {
             name: "style profile",
             status: Status::Ok,

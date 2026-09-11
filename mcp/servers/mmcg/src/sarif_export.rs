@@ -475,6 +475,8 @@ mod tests {
         };
         let response = ChangeImpactResponse {
             schema_version: 1,
+            worktree_files_truncated: false,
+            skipped_non_utf8_paths: 0,
             snapshot_token: "snapshot".into(),
             checked_snapshot: None,
             baseline: ImpactBaseline {

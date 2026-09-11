@@ -2,7 +2,7 @@
 name: mastermind-change-impact
 description: Produce an evidence-backed change-impact brief with `mastermind impact` or `mmcg_change_impact`. Use before editing, during implementation planning, or in PR review to trace changed symbols, callers, component/API crossings, collision risk, and likely affected consumers since a git ref.
 metadata:
-  version: 0.1.0
+  version: 0.1.1
   authors: [mastermind]
   tags: [workflow, mmcg, impact]
 ---
@@ -28,7 +28,9 @@ caller list.
 
    Use `mmcg_change_impact` through MCP when appropriate.
 4. Verify full baseline/head object IDs and whether worktree/untracked files are
-   included. Check every limit and precision note before ranking risk.
+   included. Check every collection's `truncated` and `truncation_reason` fields
+   plus every precision note before ranking risk. Treat `file_limit` and
+   `non_utf8_changed_paths_skipped:N` as omitted changed-file evidence.
 5. Report changed symbols, direct then transitive consumers, component/API
    crossings, and public-surface implications. Attach each conclusion to the
    response's changed-symbol seeds and repository-relative evidence.

@@ -1471,6 +1471,11 @@ mod tests {
 
     fn indexed_document_graph(repository: &Path, index_path: &Path) -> PathBuf {
         let graph = crate::document_graph::test_support::write_snapshot(repository, true);
+        let head = git(repository, &["rev-parse", "HEAD"]);
+        let mut value = crate::document_graph::test_support::read_value(repository);
+        value["revision"]["head"] = Value::String(head);
+        crate::document_graph::test_support::repair_digest(&mut value);
+        crate::document_graph::test_support::write_value(repository, &value);
         let mut store = Store::open(index_path).unwrap();
         Indexer::new(repository)
             .index_all(&mut store, false)

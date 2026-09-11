@@ -643,7 +643,12 @@ fields keep the distinction explicit: `returned` is the displayed item count,
 `observed` is the impact engine's lower bound, and `projection_truncated` with
 `projection_reason: lens_payload_limit` identifies the transport projection.
 Impact analysis, SARIF, summaries, and manifests continue to use the full
-bounded collection in memory.
+bounded collection in memory. A changed path that cannot be represented as
+UTF-8 is omitted, makes the source collection partial with
+`truncation_reason: non_utf8_path`, and adds a counted
+`non_utf8_changed_paths_skipped:N` precision note. When the file cap also
+applies, `file_limit` remains the collection reason and the precision note
+preserves the separate omission count.
 
 The server binds only to `127.0.0.1`; port `0` is the default and lets the OS
 choose a free port. It accepts same-origin `GET`/`HEAD` requests, serves embedded
@@ -653,7 +658,9 @@ directly as immutable; an active WAL is copied with the database into a bounded
 private temporary snapshot (2 GiB and at most 60 seconds, or the shorter request
 deadline), so Lens never creates or changes source sidecars.
 Refreshes fail closed when the repository, index, WAL, baseline, or work
-snapshot changes, or when indexed source files disappeared. There are no
+snapshot changes, or when indexed source files disappeared. The final check
+runs after evidence, audit, and the optional document graph, and binds the exact
+bounded working-tree projection plus its omission state. There are no
 source-content or mutation routes.
 
 `--since` is required. `--path`, `--depth 1..5`, `--top 1..100`, and
@@ -1099,7 +1106,7 @@ or given WAL/SHM sidecars by the server. Incompatible custom schemas return
 | `mmcg_team_map` | `manifest` | Bounded `mastermind-team/v1` graph over pinned local read-only indexes. The locked manifest must be repository-relative, inside the MCP server root, and exactly authorized by `MMCG_TEAM_MANIFEST` plus `MMCG_TEAM_MANIFEST_SHA256`. Nodes are repository-namespaced; internal imports retain Tree-sitter provenance and cross-repository edges are explicit manifest claims. |
 | `mmcg_map` | optional `path` (default `.`), `depth` (1–6, default 2), `top` (1–100, default 20), `production_only` (default `false`) | Schema-v1 architecture briefing with lexical file/directory scope: `%` and `_` are literal bytes, selected-directory components are relative to that directory, root components remain repository-relative, and selected files retain their paths. `production_only` excludes conventional test/fixture/example/generated/vendor path segments and test filenames (`test_*`, `*_test.*`, `*.test.*`, `*.spec.*`, `*Test.*`, `*Tests.*`) before bounded queries run. Hotspots prefer unambiguous definitions before pooled same-name collisions. JSON, text, Mermaid, and CLI SARIF are projections of the same result; Mermaid includes component counts/languages, boundaries, hotspots, and cycle rings, while SARIF exports returned cycles as architecture findings. Caps are 50,000 aggregation paths, 20 languages, 20 components, 20 boundaries/component and 400 globally, 50 entry points, 100 hotspots, 50,000 scoped cycle edges, 50 cycles, and 500 cycle memberships. `path_work_limit` marks path-derived partial aggregates; `top_probe` marks a hotspot or per-component boundary cap+1 probe; `global_probe_limit` marks components whose certainty was prevented by the 401st global boundary row; cycle `work_limit` returns no cycles because SCC analysis was skipped before truncated edges could be analyzed. |
 | `mmcg_temporal` | `since`, optional `root`, `path` (default `.`), `depth` (1–5, default 2), `top` (1–100, default 20), `production_only`, `codeowners` | Schema-v1 base-vs-indexed-worktree architecture delta. It rewinds changed Git blobs only in a private SQLite snapshot and reports components, public boundaries/API, cycles, centrality/hotspot drift, base/head CODEOWNERS changes, exact history review candidates, provenance, limits, and partial diagnostics. A truncated 10,000-file change set fails closed. |
-| `mmcg_change_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Stable schema-v1 analysis of the resolved baseline against staged, unstaged, and untracked content. Reports added/removed/signature/body-changed symbols, batched dependency candidates through calls and references, component crossings, ranked test candidates, a `disciplines` block routing the change to an evidence set, exact collection metadata, caps, and precision notes. Root, SHA-256 index freshness, Git snapshot, and SQLite snapshot checks fail closed with stable codes. |
+| `mmcg_change_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Stable schema-v1 analysis of the resolved baseline against staged, unstaged, and untracked content. Reports added/removed/signature/body-changed symbols, batched dependency candidates through calls and references, component crossings, ranked test candidates, a `disciplines` block routing the change to an evidence set, exact collection metadata, caps, and precision notes. Stable file-limit projections remain partial; non-UTF-8 paths are omitted, counted, and mark the file collection partial. Root, SHA-256 index freshness, Git snapshot, and SQLite snapshot checks fail closed with stable codes. |
 | `mmcg_brief` | `role` (`planner`, `executor`, or `auditor`), `since`, optional `root`, `budget_tokens` (256–8,000; default 2,000) | One deterministic schema-v1 role packet over the checked worktree, structural graph, and project-history inventory. Role changes prefix admission order, not fields. The accepted budget covers the serialized MCP result after JSON escaping, `content.text`, and `structuredContent` duplication. Repository paths and symbol names are capped, control/bidi-escaped untrusted data; source bodies, signatures, literals/defaults, history titles, and excerpts are excluded. |
 | `mmcg_test_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Exact test-focused projection of `mmcg_change_impact`. Changed tests and depth-1 graph tests are direct, deeper graph tests are transitive, and same-component candidates without graph evidence in this response are heuristic. Explicit supported test attributes identify candidates independently of filename, including inline Rust `test`, `tokio::test`, and `async_std::test`. Name heuristics still require test-like paths; fixtures and lifecycle hooks remain excluded. Fallback evidence is `same_component_test_filename` for test-like paths or `same_component_test_attribute` otherwise. Focused candidates never replace the repository's full required gate. |
 | `mmcg_tasks` | `query`, optional `top` (default 10) | Full-text search past task specs (`.mastermind/tasks/<NNN>-<name>/spec.md`). FTS5 MATCH syntax (bare words AND-joined, `"phrases"`, `OR`/`NOT`). Returns paths, titles, and snippet excerpts with `«match»` highlights ranked by BM25. Use as planner pre-flight: "have we touched this area before?" surfaces past designs and prior verdicts. Top-level files prefixed with `_` (e.g. `_lessons.md`) and bare `.md` files at the top of `tasks/` (legacy 0.6.x layout) are intentionally excluded. |
@@ -1343,7 +1350,8 @@ upstream/source limits, rejected unsafe content, and budget admission for every
 collection. A null collection `total` and `source_limit_exact: false` preserve
 an upstream lower bound instead of inventing an exact count. Planner priority is
 changes → callers → history → tests; executor is changes → tests → callers →
-history; auditor is tests → callers → changes → history.
+history; auditor is tests → callers → changes → history. Stable file-limit and
+non-UTF-8-path omissions remain explicit upstream limits in the packet.
 
 The estimate is `ceil(serialized MCP tool-result bytes / 4)`. It includes the
 escaped JSON text and structured-content copy but excludes only outer JSON-RPC

@@ -1720,9 +1720,10 @@ fn baseline_blob_oids(
     Ok(object_ids)
 }
 
-/// Recheck the inexpensive filesystem/Git token used by temporal analysis
-/// without parsing every changed source file a third time. Cooperative
-/// controls let MCP cancellation stop the extra Git work promptly.
+/// Recheck a complete filesystem/Git snapshot without parsing every changed
+/// source file a third time. Callers that deliberately retain a partial
+/// changed-file projection must use `validate_working_tree_projection_controlled`
+/// and preserve its original truncation metadata.
 pub(crate) fn validate_working_tree_snapshot_controlled(
     repo: &Path,
     baseline_oid: &str,
@@ -1732,12 +1733,42 @@ pub(crate) fn validate_working_tree_snapshot_controlled(
     deadline: Option<Instant>,
     interrupted: Option<&dyn Fn() -> bool>,
 ) -> Result<(), WorkingTreeDiffError> {
+    validate_working_tree_projection_controlled(
+        repo,
+        baseline_oid,
+        expected_head_oid,
+        expected_files,
+        false,
+        0,
+        expected_token,
+        deadline,
+        interrupted,
+    )
+}
+
+/// Recheck the exact bounded changed-file projection used to build a partial
+/// response. Changes beyond a stable file-limit prefix and non-UTF-8 paths are
+/// outside that response's claim, but their truncation state must stay stable.
+pub(crate) fn validate_working_tree_projection_controlled(
+    repo: &Path,
+    baseline_oid: &str,
+    expected_head_oid: &str,
+    expected_files: &[WorkingTreeChangedFile],
+    expected_files_truncated: bool,
+    expected_skipped_non_utf8_paths: u32,
+    expected_token: &str,
+    deadline: Option<Instant>,
+    interrupted: Option<&dyn Fn() -> bool>,
+) -> Result<(), WorkingTreeDiffError> {
     if resolve_head_controlled(repo, deadline, interrupted)? != expected_head_oid {
         return Err(WorkingTreeDiffError::SnapshotChanged);
     }
-    let (files, _, truncated, _) =
+    let (files, _, files_truncated, skipped_non_utf8_paths) =
         collect_worktree_paths_controlled(repo, baseline_oid, deadline, interrupted)?;
-    if truncated || files != expected_files {
+    if files_truncated != expected_files_truncated
+        || skipped_non_utf8_paths != expected_skipped_non_utf8_paths
+        || files != expected_files
+    {
         return Err(WorkingTreeDiffError::SnapshotChanged);
     }
     let token = working_tree_snapshot_token_controlled(

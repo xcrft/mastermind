@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Review export rechecks the complete document graph before atomic publication
   and rejects output inside a tracked corpus, preventing packages that are stale
   as soon as their Markdown summary appears.
+- Lens now rechecks the Git HEAD, bounded working-tree projection, project-history
+  inventory, repository identity, and SQLite state after evidence, audit, and
+  document-graph work, preventing one response from mixing repository snapshots.
+- Change impact now returns stable file-limit projections as explicitly partial
+  instead of misreporting `snapshot_changed`, and non-UTF-8 changed paths are
+  counted and surfaced as omitted evidence rather than hidden from completeness.
 
 ## [2.1.0] - 2026-08-25
 

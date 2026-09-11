@@ -486,9 +486,12 @@ validates canonical repository-relative document paths, rejects paths and
 symlinks that escape the indexed root, and bounds the artifact at 512 MiB,
 documents at 500,000, occurrences at 10 million, definitions at 2 million,
 symbol-information records at 2 million, and semantic edges at 5 million. It
-streams top-level protobuf fields in bounded passes instead of retaining the
-full SCIP index and all embedded source text in memory. Source files are hashed at
-import. The reported `project_root` must resolve to the indexed repository; a
+copies the selected regular file once through a no-follow parent capability,
+then streams every top-level protobuf pass from that same private snapshot
+instead of retaining the full SCIP index and all embedded source text in memory.
+The snapshot and original artifact identity and digest are rechecked before the
+overlay is replaced. Source files are hashed at import. The reported
+`project_root` must resolve to the indexed repository; a
 portable or moved artifact is accepted only when every `Document.text` exactly
 matches its current file. Successful sources expose `repository_verified`.
 When some text is omitted, repository identity is still verified but the result

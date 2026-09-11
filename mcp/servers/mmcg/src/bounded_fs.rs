@@ -218,32 +218,6 @@ fn stable_metadata_identity(
     })
 }
 
-#[cfg(windows)]
-fn stable_metadata_identity(
-    metadata: &cap_std::fs::Metadata,
-) -> std::io::Result<StableFileIdentity> {
-    use cap_std::fs::MetadataExt;
-    let modified = metadata.last_write_time();
-    Ok(StableFileIdentity {
-        volume: metadata.volume_serial_number().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "volume identity is unavailable",
-            )
-        })? as u64,
-        index: metadata.file_index().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "file identity is unavailable",
-            )
-        })?,
-        length: metadata.file_size(),
-        modified_seconds: (modified >> 32) as i64,
-        modified_fraction: (modified & u64::from(u32::MAX)) as i64,
-        attributes: metadata.file_attributes() as u64,
-    })
-}
-
 #[cfg(not(any(unix, windows)))]
 fn stable_metadata_identity(
     _metadata: &cap_std::fs::Metadata,
@@ -943,9 +917,11 @@ pub(crate) fn inspect_path_kind_with_capability(
     }
 }
 
-/// Inspect one direct child without opening it. SQLite uses process-scoped
-/// POSIX locks, so opening and closing a second descriptor for an active
-/// database can silently release the connection's locks.
+/// Inspect one direct child without opening it on Unix. SQLite uses
+/// process-scoped POSIX locks there, so opening and closing a second descriptor
+/// for an active database can silently release the connection's locks. Windows
+/// locks are handle-scoped, so use a no-follow handle to retain its stronger
+/// stable file identity.
 pub(crate) fn inspect_direct_regular_file_identity_with_capability(
     root: &RootCapability,
     path: &Path,
@@ -959,6 +935,7 @@ pub(crate) fn inspect_direct_regular_file_identity_with_capability(
         (Some(Component::Normal(name)), None) => name,
         _ => return Err(BoundedReadError::InvalidPath),
     };
+    #[cfg(not(windows))]
     let inspect = || match root.directory.symlink_metadata(name) {
         Ok(metadata) if metadata.file_type().is_file() => stable_metadata_identity(&metadata)
             .map(Some)
@@ -966,6 +943,25 @@ pub(crate) fn inspect_direct_regular_file_identity_with_capability(
         Ok(_) => Err(BoundedReadError::NotRegular),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(BoundedReadError::Io(error)),
+    };
+    #[cfg(windows)]
+    let inspect = || {
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        match root.directory.open_with(name, &options) {
+            Ok(file) => {
+                let file = file.into_std();
+                let metadata = file.metadata().map_err(BoundedReadError::Io)?;
+                if !metadata.file_type().is_file() {
+                    return Err(BoundedReadError::NotRegular);
+                }
+                stable_file_identity(&file)
+                    .map(Some)
+                    .map_err(BoundedReadError::Io)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(classify_nofollow_open_error(error)),
+        }
     };
     let before = inspect()?;
     control.check()?;

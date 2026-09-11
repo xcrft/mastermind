@@ -2508,10 +2508,17 @@ fn copy_index_snapshot(
     let file_name = absolute
         .file_name()
         .ok_or_else(|| rusqlite::Error::InvalidPath(absolute.clone()))?;
-    let snapshot_path = snapshot_dir.path().join(file_name);
+    // Resolve only directory aliases. The final database component remains
+    // protected by SQLite's NOFOLLOW open and the before/after identity checks.
+    let sqlite_source_path = root.canonical_root().join(file_name);
+    let snapshot_path = snapshot_dir
+        .path()
+        .canonicalize()
+        .map_err(|error| sqlite_io_error("resolve private index snapshot", error))?
+        .join(file_name);
     let (source_path, source_flags) = if before.wal.is_none() {
         (
-            immutable_sqlite_uri(&absolute)?,
+            immutable_sqlite_uri(&sqlite_source_path)?,
             OpenFlags::SQLITE_OPEN_READ_ONLY
                 | OpenFlags::SQLITE_OPEN_URI
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX
@@ -2520,7 +2527,7 @@ fn copy_index_snapshot(
         )
     } else {
         (
-            absolute.clone(),
+            sqlite_source_path,
             OpenFlags::SQLITE_OPEN_READ_ONLY
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX
                 | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE
@@ -2962,12 +2969,14 @@ impl Store {
     /// Open an existing index for query-only surfaces such as Lens.
     ///
     /// Unlike [`Store::open`], this never creates parent directories, creates
-    /// a database, creates WAL/SHM sidecars, changes journal settings, or runs
-    /// schema initialization. A missing or outdated index remains an explicit
+    /// a database or WAL, changes journal settings, or runs schema
+    /// initialization. A missing or outdated index remains an explicit
     /// operator error instead of a read-only command mutating repository state
     /// while diagnosing it. The database and active WAL are copied through
-    /// no-follow handles into one bounded private snapshot, so source sidecars
-    /// remain untouched and special files cannot block SQLite startup.
+    /// no-follow SQLite handles into one bounded private snapshot. Durable
+    /// database and WAL bytes remain unchanged; SQLite may update reader marks
+    /// in an existing shared-memory sidecar while taking the snapshot. Special
+    /// files cannot block SQLite startup.
     /// Long-running callers must reject a result if the source database or WAL
     /// changes during the query, as Lens does around each refresh.
     pub fn open_read_only(db_path: impl AsRef<Path>) -> SqlResult<Self> {
@@ -7256,6 +7265,19 @@ mod tests {
             .collect()
     }
 
+    fn durable_index_bytes(
+        snapshot: &BTreeMap<std::ffi::OsString, Vec<u8>>,
+        database_path: &Path,
+    ) -> BTreeMap<std::ffi::OsString, Vec<u8>> {
+        let shm_path = sqlite_sidecar_path(database_path, "-shm");
+        let shm_name = shm_path.file_name().expect("database has a file name");
+        snapshot
+            .iter()
+            .filter(|(name, _)| name.as_os_str() != shm_name)
+            .map(|(name, bytes)| (name.clone(), bytes.clone()))
+            .collect()
+    }
+
     #[test]
     fn largest_files_rank_by_size_and_honor_production() {
         let path = tmp_db("largest_files");
@@ -7628,7 +7650,7 @@ mod tests {
     }
 
     #[test]
-    fn read_only_open_sees_an_active_wal_without_touching_its_files() {
+    fn read_only_open_sees_an_active_wal_without_mutating_durable_files() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("active.db");
         let writer = Store::open(&path).unwrap();
@@ -7645,7 +7667,15 @@ mod tests {
             .any(|symbol| symbol.name == "in_wal"));
         drop(read_only);
 
-        assert_eq!(directory_bytes(directory.path()), before);
+        let after = directory_bytes(directory.path());
+        assert_eq!(
+            after.keys().collect::<Vec<_>>(),
+            before.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            durable_index_bytes(&after, &path),
+            durable_index_bytes(&before, &path)
+        );
         drop(writer);
     }
 

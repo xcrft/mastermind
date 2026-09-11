@@ -2248,6 +2248,19 @@ mod tests {
         files
     }
 
+    fn durable_index_snapshot(path: &Path, database_path: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut shm_name = database_path
+            .file_name()
+            .expect("database has a file name")
+            .to_string_lossy()
+            .into_owned();
+        shm_name.push_str("-shm");
+        directory_snapshot(path)
+            .into_iter()
+            .filter(|(name, _)| name != &shm_name)
+            .collect()
+    }
+
     fn directory_names(path: &Path) -> Vec<String> {
         let mut names = fs::read_dir(path)
             .unwrap()
@@ -3201,7 +3214,7 @@ mod tests {
     }
 
     #[test]
-    fn loopback_api_serves_shared_snapshot_without_touching_the_index() {
+    fn loopback_api_serves_shared_snapshot_without_mutating_durable_index_files() {
         let (repo, index_dir, index_path) = fixture();
         let writer = Store::open(&index_path).unwrap();
         writer
@@ -3215,7 +3228,8 @@ mod tests {
                 None,
             )
             .unwrap();
-        let index_before = directory_snapshot(index_dir.path());
+        let index_names_before = directory_names(index_dir.path());
+        let index_before = durable_index_snapshot(index_dir.path(), &index_path);
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
         let authority = format!("127.0.0.1:{}", address.port());
@@ -3252,7 +3266,11 @@ mod tests {
         assert_eq!(json["map"]["schema_version"], 1);
         assert_eq!(json["temporal"]["status"], "available");
         assert_eq!(json["impact"]["changes"]["files"]["returned"], 1);
-        assert_eq!(directory_snapshot(index_dir.path()), index_before);
+        assert_eq!(directory_names(index_dir.path()), index_names_before);
+        assert_eq!(
+            durable_index_snapshot(index_dir.path(), &index_path),
+            index_before
+        );
         drop(writer);
     }
 

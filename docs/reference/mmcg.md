@@ -602,11 +602,12 @@ Git commit without checking out the old tree. Mastermind clones the exact
 current SQLite connection snapshot into a private temporary writable database,
 batch-loads the changed blobs at the baseline, rewinds only supported changed
 source paths, and runs the same bounded `project_map` engine on both sides.
-The repository index, source files, Git index, and source WAL/SHM files remain
-unchanged. Data-version plus source database/WAL metadata are rechecked so a
-concurrent watcher cannot mix two SQLite revisions into one result. A fully
-deleted selected scope is reconstructed from the baseline instead of failing
-as an empty head map.
+The repository database and WAL bytes, source files, and Git index remain
+unchanged. SQLite may update reader-coordination marks in an existing SHM file
+while taking a consistent active-WAL snapshot. Data-version plus source
+database/WAL metadata are rechecked so a concurrent watcher cannot mix two
+SQLite revisions into one result. A fully deleted selected scope is
+reconstructed from the baseline instead of failing as an empty head map.
 
 Schema v1 reports:
 
@@ -673,7 +674,9 @@ offline assets under a restrictive content-security policy, and opens the
 existing SQLite index in query-only mode. A checkpointed index is opened
 directly as immutable; an active WAL is copied with the database into a bounded
 private temporary snapshot (2 GiB and at most 60 seconds, or the shorter request
-deadline), so Lens never creates or changes source sidecars.
+deadline) through SQLite's online backup API. Database and WAL bytes remain
+unchanged; SQLite may create or update the SHM reader-coordination file required
+for a consistent active-WAL read.
 Refreshes fail closed when the repository, index, WAL, baseline, or work
 snapshot changes, or when indexed source files disappeared. The final check
 runs after evidence, audit, and the optional document graph, and binds the exact
@@ -1113,7 +1116,8 @@ candidates and 512 MiB of declared source bytes; exceeding either cap returns
 `refresh_limit_exceeded` without a partial refresh. A custom external `--index`
 is opened read-only by `serve`: it remains query-compatible when fresh, requires
 an explicit `mmcg index` when stale, and is never created, migrated, truncated,
-or given WAL/SHM sidecars by the server. Incompatible custom schemas return
+or given a WAL by the server. Reading an existing active WAL may create or
+update its SHM coordination file. Incompatible custom schemas return
 `schema_incompatible`. Other failed or unavailable refreshes return
 `index_stale`.
 

@@ -1866,13 +1866,14 @@ fn schema_tasks() -> Value {
 fn schema_history() -> Value {
     json!({
         "name": "mmcg_history",
-        "description": "Search durable project history across active and archived CONTEXT files, canonical task specs, executor reports, audits, release notes, lessons, and Markdown architecture decisions in conventional ADR directories. Candidate lessons are unresolved audit signals, not active guidance. Returns observed FTS matches plus skipped/truncated signals; ranking and co-occurrence do not establish causality or correctness. The returned Markdown paths remain the source of truth, and callers should re-index after Markdown changes.",
+        "description": "Search durable project history across active and archived CONTEXT files, canonical task specs, executor reports, audits, release notes, lessons, and Markdown architecture decisions in conventional ADR directories. Candidate lessons are unresolved audit signals, not active guidance. Returns observed FTS matches plus skipped/truncated signals; ranking and co-occurrence do not establish causality or correctness. The returned Markdown paths remain the source of truth, and callers should re-index after Markdown changes. Optionally live-check one portable document graph; its content freshness is independent of the FTS index and every declared relation remains unverified.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "query": { "type": "string", "description": "FTS5 MATCH query (e.g. 'rate limit', 'auth OR session', '\"token bucket\"')" },
                 "kind": { "type": "string", "enum": ["context", "lesson", "task_spec", "executor_report", "audit", "release_notes", "architecture_decision"], "description": "Optional exact artifact-kind filter" },
-                "top": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10, "description": "How many observed matches to return" }
+                "top": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10, "description": "How many observed matches to return" },
+                "document_graph": { "type": "string", "minLength": 1, "description": "Repository-relative or root-contained absolute path to a root-bound graph packet below .mastermind/research. The packet is read live without persistence; freshness never verifies a relation." }
             },
             "required": ["query"]
         }
@@ -2376,6 +2377,15 @@ fn handle_tasks(store: &mut Store, args: &Value) -> Result<Value, HandlerError> 
 fn handle_history(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let query = str_arg(args, "query")?;
     let kind = opt_str_arg(args, "kind");
+    let document_graph = match args.get("document_graph") {
+        None => None,
+        Some(Value::String(path)) if !path.is_empty() => Some(PathBuf::from(path)),
+        Some(_) => {
+            return Err(HandlerError::InvalidArguments(
+                "Invalid argument: document_graph".into(),
+            ))
+        }
+    };
     let top = args
         .get("top")
         .and_then(|value| value.as_u64())
@@ -2383,10 +2393,40 @@ fn handle_history(store: &mut Store, args: &Value) -> Result<Value, HandlerError
         .unwrap_or(10)
         .clamp(1, 50);
     ensure_schema_compatible(store)?;
-    let response = queries::history(store, query, kind, top)
-        .map_err(|error| HandlerError::internal("history_query", error))?;
-    serde_json::to_value(response)
-        .map_err(|error| HandlerError::internal("serialize_response", error))
+    let response = match document_graph {
+        Some(path) => serde_json::to_value(
+            queries::history_with_document_graph(store, query, kind, top, &path).map_err(
+                |error| match error {
+                    queries::HistoryDocumentGraphError::Query(error) => {
+                        HandlerError::internal("history_query", error)
+                    }
+                    queries::HistoryDocumentGraphError::DocumentGraph(error) => {
+                        match error.code() {
+                            "snapshot_changed" => HandlerError::SnapshotChanged,
+                            "interrupted" | "deadline_exceeded" => HandlerError::WorkLimitExceeded,
+                            code => HandlerError::StructuredInvalid { code },
+                        }
+                    }
+                    queries::HistoryDocumentGraphError::SnapshotChanged => {
+                        HandlerError::SnapshotChanged
+                    }
+                    queries::HistoryDocumentGraphError::WorkLimitExceeded => {
+                        HandlerError::WorkLimitExceeded
+                    }
+                    queries::HistoryDocumentGraphError::HistorySnapshotUnavailable => {
+                        HandlerError::StructuredInvalid {
+                            code: "history_snapshot_unavailable",
+                        }
+                    }
+                },
+            )?,
+        ),
+        None => serde_json::to_value(
+            queries::history(store, query, kind, top)
+                .map_err(|error| HandlerError::internal("history_query", error))?,
+        ),
+    };
+    response.map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
 fn handle_centrality(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
@@ -3905,7 +3945,85 @@ mod tests {
         assert_eq!(result["skipped_artifacts"], 0);
         assert_eq!(result["truncated"], false);
         assert_eq!(result["freshness"], "stale");
+        assert!(result.get("document_graph").is_none());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn history_tool_live_checks_document_graph_without_upgrading_relations() {
+        let (root, mut store) = fresh_test_store();
+        let graph = crate::document_graph::test_support::write_snapshot(root.path(), false);
+        store
+            .replace_project_history(&[crate::store::ProjectHistoryEntry {
+                path: "CONTEXT.md".into(),
+                kind: "context".into(),
+                title: "Storage boundary".into(),
+                body: "The handler owns durable storage.".into(),
+            }])
+            .unwrap();
+
+        let envelope = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({
+                "name": "mmcg_history",
+                "arguments": {
+                    "query": "storage",
+                    "document_graph": graph.to_string_lossy()
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(envelope["isError"], false);
+        let result = unwrap_content(&envelope);
+        assert_eq!(result["count"], 1);
+        assert_eq!(result["freshness"], "stale");
+        assert_eq!(result["document_graph"]["status"], "current");
+        assert_eq!(
+            result["document_graph"]["edges"][0]["verification"],
+            "unverified"
+        );
+        assert_eq!(result["document_graph"]["corpus"]["status"], "not_tracked");
+    }
+
+    #[test]
+    fn history_tool_rejects_invalid_document_graph_arguments_and_paths() {
+        let (_root, mut store) = fresh_test_store();
+        let invalid_type = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({
+                "name": "mmcg_history",
+                "arguments": { "query": "storage", "document_graph": true }
+            }),
+        )
+        .unwrap();
+        assert_eq!(invalid_type["isError"], true);
+        assert_eq!(
+            unwrap_content(&invalid_type)["error"],
+            "Invalid argument: document_graph"
+        );
+
+        let invalid_path = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({
+                "name": "mmcg_history",
+                "arguments": {
+                    "query": "storage",
+                    "document_graph": "graph.json"
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(invalid_path["isError"], true);
+        assert_eq!(unwrap_content(&invalid_path)["code"], "unsafe_graph_path");
+
+        let schema = schema_history();
+        assert_eq!(
+            schema["inputSchema"]["properties"]["document_graph"]["minLength"],
+            1
+        );
     }
 
     #[test]

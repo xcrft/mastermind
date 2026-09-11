@@ -185,6 +185,12 @@ allowed lesson statuses and non-placeholder evidence. An `audit.md` file by
 itself does not complete a task. Completed tasks describe the version they
 reviewed; later unrelated work does not reopen them.
 
+For a saved document evidence graph, pass `--document-graph <path>` to
+`mastermind history` (or the same argument to `mmcg_history`). The response keeps
+history-index freshness and graph content freshness separate. Re-indexing does
+not clear changed endpoints or a changed Markdown corpus, and a current graph
+does not verify a declared relation.
+
 ## Deterministic workflow audit
 
 ```bash

@@ -34,7 +34,10 @@ load-bearing.
 
 ## Workflow
 
-1. Query `mmcg_history` with the narrowest useful terms and optional `kind`.
+1. Query `mmcg_history` with the narrowest useful terms and optional `kind`. If
+   the caller supplies a saved document graph, pass its path as
+   `document_graph` so the history retrieval and live graph check share one
+   response without importing the graph into SQLite.
 2. Read the returned Markdown around each relevant match. Search rank is not
    confidence, and co-occurrence is not causality.
 3. Resolve explicit status and supersession links. An accepted or active record
@@ -73,6 +76,13 @@ on a collection of decisions, declare its directories with repeatable
 `snapshot --corpus-dir docs/adr` options. This also captures non-hidden Markdown
 documents recursively within those directories, including uncited documents.
 Choose a small relevant scope; do not assume the entire repository was searched.
+
+The native CLI can perform the same content check beside retrieval with
+`mastermind history <query> --document-graph <path>` or `mastermind query
+history`. MCP exposes the same optional argument on `mmcg_history`. Read history
+`freshness` and `document_graph.status` independently: re-indexing repairs only
+the derived history index and cannot make a changed graph current. The native
+check is live and read-only; it does not persist graph nodes or execute Git.
 
 Read the separate `corpus.status` before reusing a conclusion. `changed` makes
 the overall check `needs_review`, even when every edge remains `current`.

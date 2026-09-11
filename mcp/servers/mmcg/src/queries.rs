@@ -544,6 +544,121 @@ pub struct HistorySearchResponse {
     pub freshness: &'static str,
 }
 
+#[derive(Debug, Serialize)]
+pub struct HistoryDocumentGraphResponse {
+    #[serde(flatten)]
+    pub history: HistorySearchResponse,
+    pub document_graph: crate::document_graph::DocumentGraphCheck,
+}
+
+#[derive(Debug)]
+pub enum HistoryDocumentGraphError {
+    Query(rusqlite::Error),
+    DocumentGraph(crate::document_graph::DocumentGraphError),
+    SnapshotChanged,
+    WorkLimitExceeded,
+    HistorySnapshotUnavailable,
+}
+
+impl HistoryDocumentGraphError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Query(_) => "history_query_failed",
+            Self::DocumentGraph(error) => error.code(),
+            Self::SnapshotChanged => "snapshot_changed",
+            Self::WorkLimitExceeded => "work_limit_exceeded",
+            Self::HistorySnapshotUnavailable => "history_snapshot_unavailable",
+        }
+    }
+}
+
+impl std::fmt::Display for HistoryDocumentGraphError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.code())
+    }
+}
+
+impl std::error::Error for HistoryDocumentGraphError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Query(error) => Some(error),
+            Self::DocumentGraph(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+fn history_composition_error(error: ChangeImpactError) -> HistoryDocumentGraphError {
+    match error {
+        ChangeImpactError::SnapshotChanged => HistoryDocumentGraphError::SnapshotChanged,
+        ChangeImpactError::GitTimeout | ChangeImpactError::GitOutputLimit => {
+            HistoryDocumentGraphError::WorkLimitExceeded
+        }
+        ChangeImpactError::InvalidRef
+        | ChangeImpactError::RootMismatch
+        | ChangeImpactError::IndexStale => HistoryDocumentGraphError::HistorySnapshotUnavailable,
+    }
+}
+
+fn history_with_document_graph_using(
+    store: &Store,
+    query: &str,
+    kind: Option<&str>,
+    top: u32,
+    graph_path: &Path,
+    checker: impl FnOnce(
+        &Store,
+        &Path,
+    ) -> Result<
+        crate::document_graph::DocumentGraphCheck,
+        crate::document_graph::DocumentGraphError,
+    >,
+) -> Result<HistoryDocumentGraphResponse, HistoryDocumentGraphError> {
+    let root = store
+        .meta_value("index_root")
+        .map_err(HistoryDocumentGraphError::Query)?
+        .ok_or_else(|| {
+            HistoryDocumentGraphError::DocumentGraph(
+                crate::document_graph::DocumentGraphError::new("index_root_unavailable"),
+            )
+        })?;
+    let checked =
+        checked_snapshot_token(store, Path::new(&root), "").map_err(history_composition_error)?;
+    let history =
+        history(store, query, kind, top.clamp(1, 50)).map_err(HistoryDocumentGraphError::Query)?;
+    if history.freshness != history_status(checked.history_freshness) {
+        if store.work_interrupted() {
+            return Err(HistoryDocumentGraphError::WorkLimitExceeded);
+        }
+        return Err(HistoryDocumentGraphError::SnapshotChanged);
+    }
+    let document_graph =
+        checker(store, graph_path).map_err(HistoryDocumentGraphError::DocumentGraph)?;
+    validate_checked_snapshot(store, Path::new(&root), &checked, "")
+        .map_err(history_composition_error)?;
+    Ok(HistoryDocumentGraphResponse {
+        history,
+        document_graph,
+    })
+}
+
+pub fn history_with_document_graph(
+    store: &Store,
+    query: &str,
+    kind: Option<&str>,
+    top: u32,
+    graph_path: &Path,
+) -> Result<HistoryDocumentGraphResponse, HistoryDocumentGraphError> {
+    history_with_document_graph_using(
+        store,
+        query,
+        kind,
+        top,
+        graph_path,
+        crate::document_graph::check_for_store,
+    )
+}
+
 pub fn history(
     store: &Store,
     query: &str,
@@ -4190,6 +4305,31 @@ mod tests {
         p.push(format!("mmcg-queries-{}-{}.db", std::process::id(), name));
         let _ = std::fs::remove_file(&p);
         p
+    }
+
+    #[test]
+    fn combined_history_and_graph_reject_mid_composition_history_drift() {
+        let root = tempfile::tempdir().unwrap();
+        let graph = crate::document_graph::test_support::write_snapshot(root.path(), false);
+        let mut store = Store::open(root.path().join("mmcg.db")).unwrap();
+        crate::indexer::Indexer::new(root.path())
+            .index_all(&mut store, true)
+            .unwrap();
+
+        let error = history_with_document_graph_using(
+            &store,
+            "decision",
+            None,
+            10,
+            &graph,
+            |store, path| {
+                let checked = crate::document_graph::check_for_store(store, path)?;
+                std::fs::write(root.path().join("docs/adr/0002.md"), "# New decision\n").unwrap();
+                Ok(checked)
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, HistoryDocumentGraphError::SnapshotChanged));
     }
 
     #[test]

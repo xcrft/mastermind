@@ -2890,6 +2890,12 @@ impl Store {
             .canonicalize()
             .map_err(|error| sqlite_io_error("resolve temporal index snapshot", error))?
             .join("mmcg.db");
+        let snapshot_root = crate::bounded_fs::RootCapability::open(
+            snapshot_path
+                .parent()
+                .ok_or_else(|| rusqlite::Error::InvalidPath(snapshot_path.clone()))?,
+        )
+        .map_err(|error| sqlite_bounded_error("open temporal snapshot directory", error))?;
         let query_only = self
             .conn
             .query_row("PRAGMA query_only", [], |row| row.get::<_, i64>(0))?
@@ -2909,7 +2915,37 @@ impl Store {
         vacuum?;
         restore?;
 
-        let conn = Connection::open(&snapshot_path)?;
+        let expected_identity = crate::bounded_fs::read_regular_file_with_capability(
+            &snapshot_root,
+            &snapshot_path,
+            u64::MAX,
+            0,
+            crate::bounded_fs::ReadControl::default(),
+        )
+        .map_err(|error| sqlite_bounded_error("inspect temporal index snapshot", error))?
+        .identity;
+        validate_writable_sidecars(&snapshot_root, &snapshot_path)?;
+        let conn = Connection::open_with_flags(
+            &snapshot_path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        snapshot_root
+            .verify()
+            .map_err(|error| sqlite_bounded_error("verify temporal snapshot directory", error))?;
+        let opened_identity = crate::bounded_fs::read_regular_file_with_capability(
+            &snapshot_root,
+            &snapshot_path,
+            u64::MAX,
+            0,
+            crate::bounded_fs::ReadControl::default(),
+        )
+        .map_err(|error| sqlite_bounded_error("verify temporal index snapshot", error))?
+        .identity;
+        if !opened_identity.same_object(expected_identity) {
+            return Err(sqlite_snapshot_changed());
+        }
         conn.execute_batch(
             r#"
             PRAGMA foreign_keys = ON;
@@ -2919,6 +2955,7 @@ impl Store {
             PRAGMA cache_size = -65536;
             "#,
         )?;
+        validate_writable_sidecars(&snapshot_root, &snapshot_path)?;
         let mut snapshot = Self::from_connection(conn, snapshot_path, Some(snapshot_dir), None);
         snapshot.interrupt_source = Arc::clone(&self.interrupt_source);
         snapshot.set_default_work_budget(self.default_work_budget());

@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Writable temporal clones now reopen the `VACUUM INTO` database with
+  `NOFOLLOW`, retained directory authority, and file-identity verification.
 - Atomic artifact writes now retain a directory capability through durable
   rename and reject symlinked parents, links, and special-file targets.
 - `impact`, architecture policy checks, and fact adapters now use a current

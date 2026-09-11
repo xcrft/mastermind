@@ -226,8 +226,12 @@ fn mine_to_paths(
         }
         Err(BoundedReadError::SnapshotChanged.into())
     })();
-    lock.unlock()?;
-    result
+    let unlock = lock.unlock();
+    match (result, unlock) {
+        (Err(error), _) => Err(error),
+        (Ok(outcome), Ok(())) => Ok(outcome),
+        (Ok(_), Err(error)) => Err(error.into()),
+    }
 }
 
 /// Subdirectories and linked worktrees share one contribution. Independent

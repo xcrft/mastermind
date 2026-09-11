@@ -719,7 +719,7 @@ fn validate_attestation(
             "unsupported schema_version".into(),
         ));
     }
-    if !full_oid(&attestation.head_oid) || attestation.head_oid != head_oid {
+    if !crate::diff::is_full_git_oid(&attestation.head_oid) || attestation.head_oid != head_oid {
         return Err(ReviewPackageError::InvalidAttestation(
             "head_oid does not match the review snapshot".into(),
         ));
@@ -1424,13 +1424,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 fn sha256_digest(value: &str) -> bool {
     value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-}
-
-fn full_oid(value: &str) -> bool {
-    matches!(value.len(), 40 | 64)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())

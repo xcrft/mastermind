@@ -112,11 +112,14 @@ struct Candidate {
 fn append_candidate(repo_root: &Path, candidate: Candidate) -> std::io::Result<bool> {
     let lessons_path = repo_root.join(".mastermind/tasks/_lessons.md");
     let lock_path = lessons_path.with_file_name(SEPARATE_LOCK_SURVIVING_RENAME);
-    let root = crate::bounded_fs::RootCapability::open(repo_root).map_err(std::io::Error::other)?;
+    let root = crate::bounded_fs::RootCapability::open(repo_root)
+        .map_err(|error| std::io::Error::other(format!("cannot open lessons root: {error}")))?;
     root.ensure_directory(Path::new(".mastermind/tasks"))
-        .map_err(std::io::Error::other)?;
+        .map_err(|error| {
+            std::io::Error::other(format!("cannot prepare lessons directory: {error}"))
+        })?;
     let lock = crate::bounded_fs::open_locked_regular_file_with_capability(&root, &lock_path)
-        .map_err(std::io::Error::other)?;
+        .map_err(|error| std::io::Error::other(format!("cannot lock project lessons: {error}")))?;
 
     let result = (|| {
         let (body, expectation) = match crate::bounded_fs::read_regular_file_with_capability(
@@ -147,7 +150,11 @@ fn append_candidate(repo_root: &Path, candidate: Candidate) -> std::io::Result<b
                     &lessons_path,
                     crate::bounded_fs::ReadControl::default(),
                 )
-                .map_err(std::io::Error::other)?
+                .map_err(|error| {
+                    std::io::Error::other(format!(
+                        "cannot inspect missing project lessons: {error}"
+                    ))
+                })?
                 .ok_or_else(|| {
                     std::io::Error::other(
                         "project lessons appeared while acquiring the update snapshot",
@@ -158,7 +165,11 @@ fn append_candidate(repo_root: &Path, candidate: Candidate) -> std::io::Result<b
                     crate::bounded_fs::AtomicWriteExpectation::Missing(missing),
                 )
             }
-            Err(error) => return Err(std::io::Error::other(error)),
+            Err(error) => {
+                return Err(std::io::Error::other(format!(
+                    "cannot read project lessons: {error}"
+                )));
+            }
         };
         let Some(merged) = merge_candidate(&body, &candidate) else {
             return Ok(false);
@@ -176,11 +187,17 @@ fn append_candidate(repo_root: &Path, candidate: Candidate) -> std::io::Result<b
             false,
             expectation,
         )
-        .map_err(std::io::Error::other)?;
+        .map_err(|error| {
+            std::io::Error::other(format!("cannot publish project lessons: {error}"))
+        })?;
         Ok(true)
     })();
-    lock.unlock()?;
-    result
+    let unlock = lock.unlock();
+    match (result, unlock) {
+        (Err(error), _) => Err(error),
+        (Ok(outcome), Ok(())) => Ok(outcome),
+        (Ok(_), Err(error)) => Err(error),
+    }
 }
 
 /// Fold `candidate` into `body`, returning the new file contents or `None` when

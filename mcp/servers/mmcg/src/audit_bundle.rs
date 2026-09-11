@@ -397,11 +397,13 @@ pub fn verify_envelope(envelope: &Envelope, policy: &VerifyPolicy) -> Verificati
             report.reasons.push("repository_mismatch".into());
             policy_ok = false;
         }
-        if !full_oid(baseline) || envelope.manifest.repository.baseline_oid != baseline {
+        if !crate::diff::is_full_git_oid(baseline)
+            || envelope.manifest.repository.baseline_oid != baseline
+        {
             report.reasons.push("baseline_mismatch".into());
             policy_ok = false;
         }
-        if !full_oid(head) || envelope.manifest.repository.head_oid != head {
+        if !crate::diff::is_full_git_oid(head) || envelope.manifest.repository.head_oid != head {
             report.reasons.push("head_mismatch".into());
             policy_ok = false;
         }
@@ -1323,13 +1325,6 @@ fn valid_repository_identity(value: &str) -> bool {
         if !owner.is_empty() && !repo.is_empty()
             && owner.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
             && repo.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
-}
-
-fn full_oid(value: &str) -> bool {
-    value.len() == 40
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
 #[cfg(test)]

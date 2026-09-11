@@ -106,10 +106,11 @@ must pass. A present signature is never ignored.
 The repository-root `action.yml` defines a Docker Action with these inputs:
 
 - `root`: repository-relative root contained below `GITHUB_WORKSPACE`;
-- `since` and `expected-baseline`: the same full lowercase baseline OID;
+- `since` and `expected-baseline`: the same full lowercase SHA-1 or SHA-256
+  baseline OID;
 - `bundle-dir`: a new, non-symlink repository-relative output directory;
 - `expected-repository`: exact GitHub `owner/repo`;
-- `expected-head`: full lowercase head OID;
+- `expected-head`: full lowercase SHA-1 or SHA-256 head OID;
 - `require-clean-worktree`: must remain `true` for publication.
 
 The Action outputs the verified bundle directory and aggregate result JSON

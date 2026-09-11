@@ -578,6 +578,29 @@ class InlineVerifierSchemaTests(unittest.TestCase):
         self.assertFalse(verified)
 
 
+class EntrypointOidGrammarTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        text = (ROOT / "scripts/audit-action-entrypoint.sh").read_text(encoding="utf-8")
+        cls.function = text[text.index("full_oid()") : text.index("relative_path()")]
+
+    def check(self, value):
+        return subprocess.run(
+            ["sh", "-c", self.function + '\nfull_oid "$1"', "test", value],
+            env={**os.environ, "LC_ALL": "C"},
+            check=False,
+        ).returncode == 0
+
+    def test_full_sha1_and_sha256_object_ids_pass(self):
+        self.assertTrue(self.check("a" * 40))
+        self.assertTrue(self.check("b" * 64))
+
+    def test_other_lengths_and_non_lowercase_hex_fail(self):
+        for value in ("a" * 39, "a" * 41, "a" * 63, "a" * 65, "A" * 40, "g" * 64):
+            with self.subTest(value=value):
+                self.assertFalse(self.check(value))
+
+
 class EntrypointPathGrammarTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

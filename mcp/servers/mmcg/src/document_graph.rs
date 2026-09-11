@@ -317,13 +317,6 @@ fn lowercase_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn full_revision(value: &str) -> bool {
-    matches!(value.len(), 40 | 64)
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
 fn path_parts(value: &str) -> Result<Vec<&str>, DocumentGraphError> {
     if value.is_empty()
         || value == "."
@@ -475,7 +468,7 @@ fn validate_snapshot(snapshot: &Snapshot, canonical_root: &str) -> Result<(), Do
     }
     if snapshot.version() == 0
         || snapshot.version() > 2
-        || !full_revision(&snapshot.revision().head)
+        || !crate::diff::is_full_git_oid(&snapshot.revision().head)
     {
         return Err(DocumentGraphError::new("invalid_revision"));
     }

@@ -1941,6 +1941,10 @@ mod tests {
             json!(SUPPORTED_CAPABILITIES)
         );
         assert_eq!(
+            schema["$defs"]["repository"]["properties"]["revision"]["pattern"],
+            r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        );
+        assert_eq!(
             schema["required"],
             json!([
                 "api_version",

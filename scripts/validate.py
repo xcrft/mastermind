@@ -1584,6 +1584,16 @@ def validate_fact_ingestion_sdk_contract() -> list[Issue]:
     if capabilities != ["annotations", "relationships"]:
         issues.append(Issue(schema_path, "error", "fact capability allowlist drifted"))
     definitions = schema.get("$defs", {})
+    revision_pattern = (
+        definitions.get("repository", {})
+        .get("properties", {})
+        .get("revision", {})
+        .get("pattern")
+    )
+    if revision_pattern != r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$":
+        issues.append(
+            Issue(schema_path, "error", "fact revisions must accept full SHA-1 and SHA-256 Git OIDs")
+        )
     for name in (
         "repository",
         "producer",
@@ -2278,6 +2288,14 @@ def validate_audit_action_security() -> list[Issue]:
             issues.append(Issue(entrypoint_path, "error", "Action entrypoint must be executable in the Git tree"))
         if "set -eu" not in entrypoint:
             issues.append(Issue(entrypoint_path, "error", "Action entrypoint must use set -eu"))
+        if 'case "${#1}" in 40|64)' not in entrypoint:
+            issues.append(
+                Issue(
+                    entrypoint_path,
+                    "error",
+                    "Action entrypoint must accept full SHA-1 and SHA-256 Git OIDs",
+                )
+            )
         if re.search(r"(^|\s)(eval|source|\.)\s", entrypoint, re.MULTILINE):
             issues.append(Issue(entrypoint_path, "error", "Action entrypoint must not eval or source repository data"))
         if "--expected-baseline" not in entrypoint or "--expected-head" not in entrypoint or "--expected-repository" not in entrypoint:

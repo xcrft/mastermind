@@ -524,6 +524,24 @@ impl std::fmt::Display for WorkingTreeDiffError {
 
 impl std::error::Error for WorkingTreeDiffError {}
 
+/// Git repositories currently use full SHA-1 or SHA-256 object IDs. Keep one
+/// lowercase validator for persisted revision bindings across the product.
+pub(crate) fn is_full_git_oid(value: &str) -> bool {
+    matches!(value.len(), 40 | 64)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn normalized_git_oid(bytes: Vec<u8>) -> Result<String, WorkingTreeDiffError> {
+    let oid = String::from_utf8(bytes).map_err(|_| WorkingTreeDiffError::InvalidRef)?;
+    let oid = oid.trim().to_ascii_lowercase();
+    if !is_full_git_oid(&oid) {
+        return Err(WorkingTreeDiffError::InvalidRef);
+    }
+    Ok(oid)
+}
+
 #[derive(Debug)]
 pub enum DiffError {
     GitNotFound,
@@ -1361,12 +1379,7 @@ fn resolve_commit_controlled(
     if !output.success {
         return Err(WorkingTreeDiffError::InvalidRef);
     }
-    let oid = String::from_utf8(output.stdout).map_err(|_| WorkingTreeDiffError::InvalidRef)?;
-    let oid = oid.trim();
-    if oid.len() != 40 || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(WorkingTreeDiffError::InvalidRef);
-    }
-    Ok(oid.to_ascii_lowercase())
+    normalized_git_oid(output.stdout)
 }
 
 pub(crate) fn validate_commit_ref_controlled(
@@ -1398,8 +1411,7 @@ fn resolve_head_controlled(
     if !output.success {
         return Err(WorkingTreeDiffError::InvalidRef);
     }
-    let oid = String::from_utf8(output.stdout).map_err(|_| WorkingTreeDiffError::InvalidRef)?;
-    Ok(oid.trim().to_ascii_lowercase())
+    normalized_git_oid(output.stdout)
 }
 
 fn git_diff_name_only_controlled(
@@ -2076,6 +2088,15 @@ mod tests {
             configured_git_timeout(Some("999999")),
             Duration::from_millis(MAX_GIT_TIMEOUT_MS)
         );
+    }
+
+    #[test]
+    fn full_git_oid_accepts_sha1_and_sha256_only() {
+        assert!(is_full_git_oid(&"0".repeat(40)));
+        assert!(is_full_git_oid(&"a".repeat(64)));
+        assert!(!is_full_git_oid(&"A".repeat(40)));
+        assert!(!is_full_git_oid(&"0".repeat(39)));
+        assert!(!is_full_git_oid(&"g".repeat(64)));
     }
 
     #[cfg(unix)]
@@ -3155,6 +3176,37 @@ def body_only(): return 2
             resolve_commit(&dir, blob.trim()),
             Err(WorkingTreeDiffError::InvalidRef)
         );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn commit_resolver_accepts_sha256_repository_oids() {
+        let dir = env::temp_dir().join(format!(
+            "mmcg-diff-{}-sha256-object-format",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        run(
+            &dir,
+            &[
+                "init",
+                "-q",
+                "--object-format=sha256",
+                "--initial-branch=main",
+            ],
+        );
+        run(&dir, &["config", "user.email", "t@t"]);
+        run(&dir, &["config", "user.name", "t"]);
+        run(&dir, &["config", "commit.gpgsign", "false"]);
+        write(&dir, "x.py", "def x():\n    pass\n");
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+
+        let resolved = resolve_commit(&dir, "HEAD").unwrap();
+        assert_eq!(resolved.len(), 64);
+        assert!(is_full_git_oid(&resolved));
+        assert_eq!(resolve_head(&dir).unwrap(), resolved);
         fs::remove_dir_all(&dir).ok();
     }
 

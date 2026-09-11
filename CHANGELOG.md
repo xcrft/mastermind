@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repository-routing variables before selecting task contracts. CI enumerates
   task folders with a bounded no-follow walk, recognizes changes anywhere below
   a task folder, and parses specs and reports through repository-scoped reads.
+- Git revision bindings now consistently accept full SHA-1 and SHA-256 object
+  IDs. Workflow and audit HEAD capture uses the shared bounded, sanitized Git
+  runner instead of an unbounded best-effort subprocess.
+- Stable workflow lock files now use an explicit open-or-create protocol with a
+  bounded macOS creation-race retry, and verify the retained parent directory
+  before entering a read-modify-write critical section.
 - `init` now serializes scaffold writes, rejects linked parents and targets,
   preserves forced `CONTEXT.md` and `CLAUDE.md` versions in no-clobber backups.
 - `enrich` now opens only an existing writable codegraph, closing the

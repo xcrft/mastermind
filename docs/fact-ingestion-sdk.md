@@ -19,7 +19,7 @@ Its API identifier is `mastermind-facts/v1`, with two capabilities:
 | Property | v1 behavior |
 |---|---|
 | Producer output | Inert JSON matching the public schema |
-| Repository binding | Exact repository identity and 40-character Git revision |
+| Repository binding | Exact repository identity and full SHA-1 or SHA-256 Git revision |
 | File binding | Canonical path, byte size, and SHA-256 digest |
 | Provenance | Bounded local artifacts, optionally signed with Ed25519 |
 | Database writes | Performed only by Mastermind after full validation |
@@ -212,7 +212,7 @@ Before any database write, Mastermind verifies all of the following:
 
 - the exact API version, declared capability allowlist, required fields, and
   absence of duplicate or unknown JSON fields;
-- the indexed repository identity and current 40-character Git HEAD;
+- the indexed repository identity and current full SHA-1 or SHA-256 Git HEAD;
 - canonical repository-relative paths with no traversal, absolute roots,
   backslashes, control bytes, or symlinks;
 - regular-file sizes and lowercase SHA-256 digests for every referenced source

@@ -408,12 +408,7 @@ fn history_input_snapshot(
     spec_path: &Path,
     state: &RunState,
 ) -> Result<HistoryInputs, String> {
-    if !matches!(state.baseline_ref.len(), 40 | 64)
-        || !state
-            .baseline_ref
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
+    if !crate::diff::is_full_git_oid(&state.baseline_ref) {
         return Err("history review requires an exact baseline object ID".into());
     }
     let root = RootCapability::open(repo_root).map_err(|error| error.to_string())?;
@@ -883,8 +878,7 @@ fn preflight_baseline(repo_root: &Path, previous: Option<&RunState>) -> Result<S
         return git_head(repo_root);
     };
     let baseline = &previous.baseline_ref;
-    if !matches!(baseline.len(), 40 | 64) || !baseline.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
+    if !crate::diff::is_full_git_oid(baseline) {
         return Err("saved baseline must be an exact Git object ID".into());
     }
     let output = crate::diff::run_bounded_git_with_limit(
@@ -924,9 +918,7 @@ pub(crate) fn strict_workflow_snapshot_for_version(
     if !matches!(version, 1 | STRICT_SNAPSHOT_VERSION) {
         return Err(format!("unsupported strict-workflow snapshot version {version}; re-audit with a supported runtime"));
     }
-    if !matches!(baseline_ref.len(), 40 | 64)
-        || !baseline_ref.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
+    if !crate::diff::is_full_git_oid(baseline_ref) {
         return Err("strict-workflow baseline must be an exact Git object ID".into());
     }
     let mut paths = BTreeSet::new();
@@ -1150,18 +1142,8 @@ fn timestamp_now() -> u64 {
 }
 
 fn git_head(repo_root: &Path) -> Result<String, String> {
-    let out = crate::diff::repository_git_command()
-        .args(["rev-parse", "HEAD"])
-        .current_dir(repo_root)
-        .output()
-        .map_err(|e| format!("git rev-parse HEAD: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "git rev-parse HEAD: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    crate::diff::current_head_oid(repo_root)
+        .map_err(|error| format!("git rev-parse HEAD: {}", error.code()))
 }
 
 fn git_diff_stat(repo_root: &Path, baseline_ref: &str) -> Result<String, String> {

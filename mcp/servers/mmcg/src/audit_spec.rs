@@ -1225,7 +1225,7 @@ fn resolve_commit(root: &Path, reference: &str) -> Result<String, Box<dyn std::e
         128,
     )?;
     let oid = std::str::from_utf8(&bytes)?.trim().to_ascii_lowercase();
-    if oid.len() != 40 || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if !crate::diff::is_full_git_oid(&oid) {
         return Err("git did not return a full object ID".into());
     }
     Ok(oid)
@@ -1372,22 +1372,9 @@ fn parse_name_status(
 }
 
 fn resolve_head_sha(root: Option<&Path>) -> String {
-    let mut cmd = std::process::Command::new("git");
-    cmd.args(["rev-parse", "--short", "HEAD"]);
-    if let Some(r) = root {
-        cmd.current_dir(r);
-    }
-    cmd.output()
+    crate::diff::current_head_oid(root.unwrap_or_else(|| Path::new(".")))
         .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                String::from_utf8(o.stdout)
-                    .ok()
-                    .map(|s| s.trim().to_string())
-            } else {
-                None
-            }
-        })
+        .map(|oid| oid[..oid.len().min(12)].to_string())
         .unwrap_or_else(|| "unknown".to_string())
 }
 

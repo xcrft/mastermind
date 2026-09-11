@@ -7,7 +7,7 @@ fail() {
 }
 
 full_oid() {
-  test "${#1}" -eq 40 || return 1
+  case "${#1}" in 40|64) ;; *) return 1 ;; esac
   case "$1" in *[!0-9a-f]*) return 1 ;; esac
 }
 

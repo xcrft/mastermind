@@ -1485,8 +1485,9 @@ ceiling for code that cannot cooperate.
   the response as a prefix, not the full diff.
 - **Git refs** are non-empty and at most 1,024 bytes, cannot begin with `-` or
   contain NUL, and must resolve through `rev-parse --verify --end-of-options`
-  to one 40-hex commit OID. Later Git commands use that OID and an explicit
-  `--` path separator, never the raw caller-supplied ref.
+  to one full lowercase SHA-1 or SHA-256 commit OID (40 or 64 hex characters).
+  Later Git commands use that OID and an explicit `--` path separator, never
+  the raw caller-supplied ref.
 - **Serve watchdog.** `mmcg serve` runs a polling thread that measures each
   in-flight request on the wall clock, independent of where the time is being
   spent. It escalates: at `MMCG_REQUEST_SOFT_TIMEOUT_MS` (default 30,000 ms) it

@@ -645,26 +645,45 @@ pub(crate) fn open_locked_regular_file_with_capability(
             .open_dir_nofollow(component)
             .map_err(BoundedReadError::Io)?;
     }
-    let mut options = OpenOptions::new();
-    options
+    let parent_relative = relative.parent().unwrap_or_else(|| Path::new(""));
+    let parent_identity = directory_identity(&parent).map_err(BoundedReadError::Io)?;
+
+    let mut existing_options = OpenOptions::new();
+    existing_options
         .read(true)
         .write(true)
-        .create(true)
-        .truncate(false)
+        .follow(FollowSymlinks::No);
+    let mut create_options = OpenOptions::new();
+    create_options
+        .read(true)
+        .write(true)
+        .create_new(true)
         .follow(FollowSymlinks::No);
     #[cfg(unix)]
     {
         use cap_std::fs::OpenOptionsExt;
-        options.mode(0o600).custom_flags(libc::O_NONBLOCK);
+        existing_options.custom_flags(libc::O_NONBLOCK);
+        create_options.mode(0o600).custom_flags(libc::O_NONBLOCK);
     }
-    let open = || {
-        let mut last_creation_race = None;
+    let open = |directory: &Dir| {
+        let mut last_creation_race: Option<std::io::Error> = None;
         for _ in 0..128 {
-            match parent.open_with(name, &options) {
+            match directory.open_with(name, &existing_options) {
                 Ok(file) => return Ok(file.into_std()),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    last_creation_race = Some(error);
-                    std::thread::yield_now();
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    match directory.open_with(name, &create_options) {
+                        Ok(file) => return Ok(file.into_std()),
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::NotFound
+                            ) =>
+                        {
+                            last_creation_race = Some(error);
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
+                        Err(error) => return Err(classify_nofollow_open_error(error)),
+                    }
                 }
                 Err(error) => return Err(classify_nofollow_open_error(error)),
             }
@@ -672,13 +691,13 @@ pub(crate) fn open_locked_regular_file_with_capability(
         Err(BoundedReadError::Io(last_creation_race.unwrap_or_else(
             || {
                 std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists,
+                    std::io::ErrorKind::NotFound,
                     "cannot open the stable lock file after concurrent creation",
                 )
             },
         )))
     };
-    let file = open()?;
+    let file = open(&parent)?;
     let before = stable_file_identity(&file).map_err(BoundedReadError::Io)?;
     if !file
         .metadata()
@@ -690,7 +709,21 @@ pub(crate) fn open_locked_regular_file_with_capability(
     }
     file.lock().map_err(BoundedReadError::Io)?;
     let verification = (|| {
-        let current = open()?;
+        root.verify()?;
+        let current_parent = open_relative_directory_nofollow(&root.directory, parent_relative)
+            .map_err(|_| BoundedReadError::SnapshotChanged)?;
+        if !directory_identity(&current_parent)
+            .map_err(BoundedReadError::Io)?
+            .same_object(parent_identity)
+        {
+            return Err(BoundedReadError::SnapshotChanged);
+        }
+        let current = open(&current_parent).map_err(|error| match error {
+            BoundedReadError::Io(inner) if inner.kind() == std::io::ErrorKind::NotFound => {
+                BoundedReadError::SnapshotChanged
+            }
+            other => other,
+        })?;
         let after = stable_file_identity(&file).map_err(BoundedReadError::Io)?;
         let current_identity = stable_file_identity(&current).map_err(BoundedReadError::Io)?;
         root.verify()?;

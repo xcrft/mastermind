@@ -393,7 +393,7 @@ impl Checker<'_> {
         paths: &[&str],
         baseline: &str,
     ) -> Result<BTreeSet<String>, &'static str> {
-        if !matches!(baseline.len(), 40 | 64) || !baseline.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if !crate::diff::is_full_git_oid(baseline) {
             return Err("creation_baseline_unavailable");
         }
         let mut found = BTreeSet::new();

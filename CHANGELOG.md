@@ -16,11 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Writable opens and private snapshots no longer disturb SQLite's process-wide
   POSIX locks; snapshots now use SQLite's consistent online backup protocol,
-  resolve aliased parent directories for no-follow opens, and distinguish
-  transient shared-memory coordination from durable database or WAL changes.
+  existing writable indexes and snapshots resolve aliased parent directories
+  for no-follow opens, and validation distinguishes transient shared-memory
+  coordination from durable database or WAL changes.
 - Stack detection now parses dependency sections instead of matching arbitrary
   manifest prose, bounds and validates manifest reads, reports skipped evidence,
-  and probes tracked monorepo manifests without retaining Git path listings.
+  and probes tracked monorepo manifests through bounded, sanitized Git commands
+  without retaining path listings.
+- `mastermind ci --changed-only` now resolves the baseline and HEAD once, bounds
+  Git runtime and output, disables external diff drivers, and ignores ambient
+  repository-routing variables before selecting task contracts. CI enumerates
+  task folders with a bounded no-follow walk, recognizes changes anywhere below
+  a task folder, and parses specs and reports through repository-scoped reads.
 - `init` now serializes scaffold writes, rejects linked parents and targets,
   preserves forced `CONTEXT.md` and `CLAUDE.md` versions in no-clobber backups.
 - `enrich` now opens only an existing writable codegraph, closing the

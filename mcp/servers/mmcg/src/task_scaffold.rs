@@ -120,6 +120,102 @@ pub fn ensure_repository_directory(repo_root: &Path, path: &Path) -> std::io::Re
     Ok(missing)
 }
 
+/// Enumerate canonical task contracts without following repository links or
+/// retaining an unbounded directory listing. `None` means the task directory
+/// is absent; an existing linked or non-directory path is an error.
+pub fn discover_canonical_task_specs(repo_root: &Path) -> std::io::Result<Option<Vec<PathBuf>>> {
+    let root = RootCapability::open(repo_root).map_err(into_io_error)?;
+    let tasks_dir = root.requested_root().join(".mastermind/tasks");
+    match inspect_path_kind_with_capability(&root, &tasks_dir, ReadControl::default()) {
+        Ok(BoundedPathKind::Directory) => {}
+        Ok(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                ".mastermind/tasks must be a real directory",
+            ));
+        }
+        Err(BoundedReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(error) => return Err(into_io_error(error)),
+    }
+    let names = read_directory_names_with_capability(
+        &root,
+        &tasks_dir,
+        TASK_ENTRY_LIMIT,
+        ReadControl::default(),
+    )
+    .map_err(into_io_error)?;
+    let mut specs = Vec::new();
+    for name in names {
+        let task_dir = tasks_dir.join(name);
+        match inspect_path_kind_with_capability(&root, &task_dir, ReadControl::default()) {
+            Ok(BoundedPathKind::Directory) => {}
+            Ok(BoundedPathKind::RegularFile) => continue,
+            Ok(BoundedPathKind::Other) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "task entry must be a real directory or regular file: {}",
+                        task_dir.display()
+                    ),
+                ));
+            }
+            Err(BoundedReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                continue;
+            }
+            Err(error) => return Err(into_io_error(error)),
+        }
+        let spec = task_dir.join("spec.md");
+        match inspect_path_kind_with_capability(&root, &spec, ReadControl::default()) {
+            Ok(BoundedPathKind::RegularFile) => specs.push(spec),
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("task spec must be a real regular file: {}", spec.display()),
+                ));
+            }
+            Err(BoundedReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(into_io_error(error)),
+        }
+    }
+    specs.sort();
+    Ok(Some(specs))
+}
+
+/// Return legacy flat task specs for migration diagnostics through the same
+/// bounded, no-follow task-directory capability.
+#[doc(hidden)]
+pub fn discover_legacy_flat_specs(repo_root: &Path) -> std::io::Result<Vec<String>> {
+    let root = RootCapability::open(repo_root).map_err(into_io_error)?;
+    let tasks_dir = root.requested_root().join(".mastermind/tasks");
+    let names = read_directory_names_with_capability(
+        &root,
+        &tasks_dir,
+        TASK_ENTRY_LIMIT,
+        ReadControl::default(),
+    )
+    .map_err(into_io_error)?;
+    let mut specs = Vec::new();
+    for name in names {
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.ends_with(".md") || name.starts_with('_') || name.starts_with('.') {
+            continue;
+        }
+        let path = tasks_dir.join(name);
+        match inspect_path_kind_with_capability(&root, &path, ReadControl::default()) {
+            Ok(BoundedPathKind::RegularFile) => specs.push(name.to_string()),
+            Ok(_) => {}
+            Err(BoundedReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(into_io_error(error)),
+        }
+    }
+    specs.sort();
+    Ok(specs)
+}
+
 /// Write a generated project file under the shared scaffold lock. Existing
 /// files are preserved unless `force` is set; forced replacements first copy
 /// the exact observed version into a no-clobber backup and then conditionally
@@ -271,6 +367,27 @@ mod tests {
     use std::sync::{Arc, Barrier};
 
     #[test]
+    fn task_discovery_returns_only_real_canonical_and_legacy_specs() {
+        let root = tempfile::tempdir().unwrap();
+        let tasks = root.path().join(".mastermind/tasks");
+        std::fs::create_dir_all(tasks.join("002-real")).unwrap();
+        std::fs::create_dir_all(tasks.join("001-no-spec")).unwrap();
+        std::fs::write(tasks.join("002-real/spec.md"), "# Real\n").unwrap();
+        std::fs::write(tasks.join("003-legacy.md"), "# Legacy\n").unwrap();
+        std::fs::write(tasks.join("_ignored.md"), "# Ignored\n").unwrap();
+        std::fs::write(tasks.join("004-not-a-directory"), "file\n").unwrap();
+
+        assert_eq!(
+            discover_canonical_task_specs(root.path()).unwrap(),
+            Some(vec![tasks.join("002-real/spec.md")])
+        );
+        assert_eq!(
+            discover_legacy_flat_specs(root.path()).unwrap(),
+            vec!["003-legacy.md"]
+        );
+    }
+
+    #[test]
     fn repeated_allocations_get_distinct_numbers_and_preserve_specs() {
         let root = tempfile::tempdir().unwrap();
         let first = create_numbered_spec(root.path(), "first", |number| {
@@ -396,6 +513,20 @@ mod tests {
 
         assert!(create_numbered_spec(root.path(), "escaped", |_| "outside\n".into()).is_err());
         assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn task_discovery_rejects_a_symlinked_tasks_directory() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join(".mastermind")).unwrap();
+        symlink(outside.path(), root.path().join(".mastermind/tasks")).unwrap();
+
+        assert!(discover_canonical_task_specs(root.path()).is_err());
+        assert!(discover_legacy_flat_specs(root.path()).is_err());
     }
 
     #[cfg(unix)]

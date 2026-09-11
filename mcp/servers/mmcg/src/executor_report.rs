@@ -298,14 +298,8 @@ impl TryFrom<CanonicalExecutorReport> for ExecutorReport {
     }
 }
 
-pub fn parse_file(path: &Path) -> Result<ExecutorReport, String> {
-    let (resolved, source) = crate::bounded_fs::read_selected_regular_file(
-        path,
-        MAX_EXECUTOR_REPORT_BYTES,
-        MAX_EXECUTOR_REPORT_BYTES,
-        crate::bounded_fs::ReadControl::default(),
-    )
-    .map_err(|error| match error {
+fn report_read_error(path: &Path, error: crate::bounded_fs::BoundedReadError) -> String {
+    match error {
         crate::bounded_fs::BoundedReadError::TooLarge { .. } => {
             format!("executor report exceeds {MAX_EXECUTOR_REPORT_BYTES}-byte limit")
         }
@@ -324,7 +318,23 @@ pub fn parse_file(path: &Path) -> Result<ExecutorReport, String> {
         crate::bounded_fs::BoundedReadError::Io(error) => {
             format!("read {}: {error}", path.display())
         }
-    })?;
+    }
+}
+
+fn parse_file_bytes(path: &Path, bytes: Vec<u8>) -> Result<ExecutorReport, String> {
+    let text = String::from_utf8(bytes)
+        .map_err(|_| format!("executor report {} is not UTF-8", path.display()))?;
+    parse_str(&text)
+}
+
+pub fn parse_file(path: &Path) -> Result<ExecutorReport, String> {
+    let (resolved, source) = crate::bounded_fs::read_selected_regular_file(
+        path,
+        MAX_EXECUTOR_REPORT_BYTES,
+        MAX_EXECUTOR_REPORT_BYTES,
+        crate::bounded_fs::ReadControl::default(),
+    )
+    .map_err(|error| report_read_error(path, error))?;
     if path
         .canonicalize()
         .map_err(|error| format!("re-resolve executor report {}: {error}", path.display()))?
@@ -332,9 +342,28 @@ pub fn parse_file(path: &Path) -> Result<ExecutorReport, String> {
     {
         return Err("executor report path changed while it was being read".into());
     }
-    let text = String::from_utf8(source.bytes)
-        .map_err(|_| format!("executor report {} is not UTF-8", path.display()))?;
-    parse_str(&text)
+    parse_file_bytes(path, source.bytes)
+}
+
+/// Parse a repository-owned executor report without following links outside
+/// the selected repository.
+#[doc(hidden)]
+pub fn parse_repository_file(repo_root: &Path, path: &Path) -> Result<ExecutorReport, String> {
+    let relative = if path.is_absolute() {
+        path.strip_prefix(repo_root)
+            .map_err(|_| "executor report must be inside the repository".to_string())?
+    } else {
+        path
+    };
+    let source = crate::bounded_fs::read_repository_file(
+        repo_root,
+        relative,
+        MAX_EXECUTOR_REPORT_BYTES,
+        MAX_EXECUTOR_REPORT_BYTES,
+        crate::bounded_fs::ReadControl::default(),
+    )
+    .map_err(|error| report_read_error(path, error))?;
+    parse_file_bytes(path, source.bytes)
 }
 
 pub fn parse_str(text: &str) -> Result<ExecutorReport, String> {
@@ -394,6 +423,14 @@ pub fn parse_str(text: &str) -> Result<ExecutorReport, String> {
 
 pub fn parse_canonical_file(path: &Path) -> Result<ExecutorReport, String> {
     require_canonical(parse_file(path)?)
+}
+
+#[doc(hidden)]
+pub fn parse_canonical_repository_file(
+    repo_root: &Path,
+    path: &Path,
+) -> Result<ExecutorReport, String> {
+    require_canonical(parse_repository_file(repo_root, path)?)
 }
 
 pub fn parse_canonical_str(text: &str) -> Result<ExecutorReport, String> {
@@ -625,5 +662,23 @@ mod tests {
         assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
 
         assert!(parse_file(&path).unwrap_err().contains("regular file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_parser_rejects_a_linked_report() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_report = outside.path().join("executor-report.md");
+        std::fs::write(&outside_report, canonical_yaml("")).unwrap();
+        let task = root.path().join(".mastermind/tasks/001-linked");
+        std::fs::create_dir_all(&task).unwrap();
+        let linked_report = task.join("executor-report.md");
+        symlink(&outside_report, &linked_report).unwrap();
+
+        let error = parse_repository_file(root.path(), &linked_report).unwrap_err();
+        assert!(error.contains("regular file"));
     }
 }

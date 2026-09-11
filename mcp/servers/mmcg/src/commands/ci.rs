@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::process::Command;
 
 pub struct CiOpts {
@@ -11,38 +12,21 @@ pub struct CiOpts {
 }
 
 fn changed_task_folders(root: &Path, since: &str) -> Result<BTreeSet<PathBuf>, String> {
-    if since.starts_with('-') {
-        return Err("since ref must not start with '-'".into());
-    }
-    let range = format!("{since}..HEAD");
-    let output = Command::new("git")
-        .args([
-            "diff",
-            "--name-only",
-            "-z",
-            &range,
-            "--",
-            ".mastermind/tasks",
-        ])
-        .current_dir(root)
-        .output()
+    let changed = mmcg::diff::changed_paths_under(root, since, ".mastermind/tasks")
         .map_err(|error| format!("git diff changed tasks: {error}"))?;
-    if !output.status.success() {
-        return Err("git diff changed tasks failed".into());
-    }
     let mut folders = BTreeSet::new();
-    for raw in output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|raw| !raw.is_empty())
-    {
-        let relative = std::str::from_utf8(raw)
-            .map_err(|_| "changed task path is not valid UTF-8".to_string())?;
-        let path = Path::new(relative);
-        if let Some(parent) = path.parent() {
-            if parent.parent() == Some(Path::new(".mastermind/tasks")) {
-                folders.insert(parent.to_path_buf());
-            }
+    let tasks_prefix = Path::new(".mastermind/tasks");
+    for relative in changed {
+        let path = Path::new(&relative);
+        let Ok(within_tasks) = path.strip_prefix(tasks_prefix) else {
+            continue;
+        };
+        let mut components = within_tasks.components();
+        let Some(std::path::Component::Normal(task_name)) = components.next() else {
+            continue;
+        };
+        if components.next().is_some() {
+            folders.insert(tasks_prefix.join(task_name));
         }
     }
     Ok(folders)
@@ -65,25 +49,10 @@ pub fn run(opts: CiOpts, index_path: &Path) -> Result<bool, Box<dyn std::error::
         stats.symbols_total, stats.edges_total, stats.files_indexed, stats.files_unchanged,
     );
 
-    let tasks_dir = root.join(".mastermind").join("tasks");
-    if !tasks_dir.is_dir() {
+    let Some(mut spec_paths) = mmcg::task_scaffold::discover_canonical_task_specs(&root)? else {
         eprintln!("  no .mastermind/tasks/ — nothing to verify");
         return Ok(true);
-    }
-
-    let mut spec_paths: Vec<PathBuf> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&tasks_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let spec = path.join("spec.md");
-                if spec.is_file() {
-                    spec_paths.push(spec);
-                }
-            }
-        }
-    }
-    spec_paths.sort();
+    };
 
     if opts.changed_only {
         let changed = changed_task_folders(&root, &opts.since)?;
@@ -118,7 +87,7 @@ pub fn run(opts: CiOpts, index_path: &Path) -> Result<bool, Box<dyn std::error::
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| spec_path.display().to_string());
 
-        let parsed = match mmcg::spec::parse_file(spec_path) {
+        let parsed = match mmcg::spec::parse_repository_file(&root, spec_path) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("  [FAIL] {spec_name} — parse error: {e}");
@@ -146,9 +115,9 @@ pub fn run(opts: CiOpts, index_path: &Path) -> Result<bool, Box<dyn std::error::
             .as_deref()
             .map(|path| {
                 if opts.require_executor_report || opts.bundle_dir.is_some() {
-                    mmcg::executor_report::parse_canonical_file(path)
+                    mmcg::executor_report::parse_canonical_repository_file(&root, path)
                 } else {
-                    mmcg::executor_report::parse_file(path)
+                    mmcg::executor_report::parse_repository_file(&root, path)
                 }
             })
             .transpose()
@@ -298,14 +267,16 @@ mod tests {
         git(&root, &["commit", "-q", "-m", "baseline"]);
         let baseline = git(&root, &["rev-parse", "HEAD"]);
 
+        fs::create_dir_all(root.join(".mastermind/tasks/002-changed/evidence")).unwrap();
         fs::write(
-            root.join(".mastermind/tasks/002-changed/executor-report.md"),
-            "report\n",
+            root.join(".mastermind/tasks/002-changed/evidence/result.json"),
+            "{}\n",
         )
         .unwrap();
         fs::write(root.join("README.md"), "after\n").unwrap();
         git(&root, &["add", "-A"]);
         git(&root, &["commit", "-q", "-m", "change one task"]);
+        git(&root, &["config", "diff.external", "/definitely/missing"]);
 
         let changed = changed_task_folders(&root, &baseline).unwrap();
         assert_eq!(

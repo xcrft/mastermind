@@ -1623,6 +1623,11 @@ mastermind ci --since origin/main \
 Without `--changed-only`, the command retains its compatibility behavior and
 walks all task specs. CI bundle publication always requires a canonical
 `executor-report.md`, even if the explicit requirement flag is omitted.
+Changed-task discovery resolves the requested baseline and HEAD to commit IDs,
+uses a literal task-directory pathspec, and shares the configured bounded Git
+deadline while ignoring ambient repository-routing and external-diff settings.
+Task discovery has a fixed entry limit, does not follow linked directories or
+contracts, and maps changes anywhere below a task folder back to its spec.
 
 Canonical schema-v1 reports retain their task path, completion status, phases,
 modified-file declarations, defects and verification excerpts. A `partial` or
@@ -1634,8 +1639,9 @@ files and phases do not replace the spec's scope or prove plan coverage.
 `run-task` postflight and CI with `--require-executor-report` or `--bundle-dir`
 reject legacy reports. Ordinary `audit-spec` and CI without those flags retain
 legacy compatibility. Canonical parsing rejects explicit nulls, invalid scalar
-types and ambiguous sentinel blocks. Report files are read through a bounded,
-no-follow snapshot and rejected if their selected path changes during the read.
+types and ambiguous sentinel blocks. Repository-owned specs and reports are
+read through bounded, no-follow snapshots. Explicitly selected report files
+also reject a path that changes during the read.
 Markdown sentinel comments occupy their own unindented lines; marker text
 inside YAML string evidence remains data.
 Empty phase/verification lists remain valid under v1. Canonical postflight also

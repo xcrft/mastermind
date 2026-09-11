@@ -271,15 +271,8 @@ pub struct SymbolClaim {
     pub raw: String,
 }
 
-/// Parse a spec file from disk.
-pub fn parse_file(path: &Path) -> std::io::Result<ParsedSpec> {
-    let (resolved, source) = crate::bounded_fs::read_selected_regular_file(
-        path,
-        MAX_SPEC_BYTES,
-        MAX_SPEC_BYTES,
-        crate::bounded_fs::ReadControl::default(),
-    )
-    .map_err(|error| match error {
+fn spec_read_error(error: crate::bounded_fs::BoundedReadError) -> std::io::Error {
+    match error {
         crate::bounded_fs::BoundedReadError::TooLarge { .. } => std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("spec exceeds the {MAX_SPEC_BYTES}-byte limit"),
@@ -298,15 +291,55 @@ pub fn parse_file(path: &Path) -> std::io::Result<ParsedSpec> {
             std::io::Error::other("spec read was interrupted")
         }
         crate::bounded_fs::BoundedReadError::Io(error) => error,
-    })?;
+    }
+}
+
+fn parse_file_bytes(path: &Path, bytes: Vec<u8>) -> std::io::Result<ParsedSpec> {
+    let body = String::from_utf8(bytes)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "spec is not UTF-8"))?;
+    Ok(parse_str(&path.display().to_string(), &body))
+}
+
+/// Parse one explicitly selected spec file from disk.
+pub fn parse_file(path: &Path) -> std::io::Result<ParsedSpec> {
+    let (resolved, source) = crate::bounded_fs::read_selected_regular_file(
+        path,
+        MAX_SPEC_BYTES,
+        MAX_SPEC_BYTES,
+        crate::bounded_fs::ReadControl::default(),
+    )
+    .map_err(spec_read_error)?;
     if path.canonicalize()? != resolved {
         return Err(std::io::Error::other(
             "spec path changed while it was being read",
         ));
     }
-    let body = String::from_utf8(source.bytes)
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "spec is not UTF-8"))?;
-    Ok(parse_str(&path.display().to_string(), &body))
+    parse_file_bytes(path, source.bytes)
+}
+
+/// Parse a repository-owned spec without allowing any path component to leave
+/// the selected repository through a link.
+#[doc(hidden)]
+pub fn parse_repository_file(repo_root: &Path, path: &Path) -> std::io::Result<ParsedSpec> {
+    let relative = if path.is_absolute() {
+        path.strip_prefix(repo_root).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "spec must be inside the repository",
+            )
+        })?
+    } else {
+        path
+    };
+    let source = crate::bounded_fs::read_repository_file(
+        repo_root,
+        relative,
+        MAX_SPEC_BYTES,
+        MAX_SPEC_BYTES,
+        crate::bounded_fs::ReadControl::default(),
+    )
+    .map_err(spec_read_error)?;
+    parse_file_bytes(path, source.bytes)
 }
 
 pub fn parse_str(source_path: &str, body: &str) -> ParsedSpec {
@@ -713,6 +746,25 @@ mod tests {
         assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
 
         let error = parse_file(&path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("regular file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_parser_rejects_a_linked_spec() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_spec = outside.path().join("spec.md");
+        std::fs::write(&outside_spec, "# Outside\n").unwrap();
+        let task = root.path().join(".mastermind/tasks/001-linked");
+        std::fs::create_dir_all(&task).unwrap();
+        let linked_spec = task.join("spec.md");
+        symlink(&outside_spec, &linked_spec).unwrap();
+
+        let error = parse_repository_file(root.path(), &linked_spec).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("regular file"));
     }

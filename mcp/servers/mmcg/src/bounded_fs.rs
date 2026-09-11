@@ -379,6 +379,20 @@ impl RootCapability {
     }
 }
 
+fn classify_nofollow_open_error(error: std::io::Error) -> BoundedReadError {
+    let known_non_regular = matches!(
+        error.kind(),
+        std::io::ErrorKind::InvalidInput | std::io::ErrorKind::NotADirectory
+    );
+    #[cfg(unix)]
+    let known_non_regular = known_non_regular || error.raw_os_error() == Some(libc::ELOOP);
+    if known_non_regular {
+        BoundedReadError::NotRegular
+    } else {
+        BoundedReadError::Io(error)
+    }
+}
+
 fn open_relative_nofollow(root: &Dir, relative: &Path) -> Result<std::fs::File, BoundedReadError> {
     let components = relative
         .components()
@@ -395,10 +409,7 @@ fn open_relative_nofollow(root: &Dir, relative: &Path) -> Result<std::fs::File, 
     for component in parents {
         parent = parent
             .open_dir_nofollow(component)
-            .map_err(|error| match error.kind() {
-                std::io::ErrorKind::NotADirectory => BoundedReadError::NotRegular,
-                _ => BoundedReadError::Io(error),
-            })?;
+            .map_err(classify_nofollow_open_error)?;
     }
 
     let mut options = OpenOptions::new();
@@ -411,12 +422,7 @@ fn open_relative_nofollow(root: &Dir, relative: &Path) -> Result<std::fs::File, 
     parent
         .open_with(name, &options)
         .map(cap_std::fs::File::into_std)
-        .map_err(|error| match error.kind() {
-            std::io::ErrorKind::InvalidInput
-            | std::io::ErrorKind::NotADirectory
-            | std::io::ErrorKind::FilesystemLoop => BoundedReadError::NotRegular,
-            _ => BoundedReadError::Io(error),
-        })
+        .map_err(classify_nofollow_open_error)
 }
 
 /// Prove absence at the first missing component. Existing entries (including
@@ -551,12 +557,7 @@ pub(crate) fn open_locked_regular_file_with_capability(
         parent
             .open_with(name, &options)
             .map(cap_std::fs::File::into_std)
-            .map_err(|error| match error.kind() {
-                std::io::ErrorKind::InvalidInput | std::io::ErrorKind::NotADirectory => {
-                    BoundedReadError::NotRegular
-                }
-                _ => BoundedReadError::Io(error),
-            })
+            .map_err(classify_nofollow_open_error)
     };
     let file = open()?;
     let before = stable_file_identity(&file).map_err(BoundedReadError::Io)?;
@@ -780,10 +781,7 @@ fn open_relative_directory_nofollow(root: &Dir, relative: &Path) -> Result<Dir, 
         };
         directory = directory
             .open_dir_nofollow(component)
-            .map_err(|error| match error.kind() {
-                std::io::ErrorKind::NotADirectory => BoundedReadError::NotRegular,
-                _ => BoundedReadError::Io(error),
-            })?;
+            .map_err(classify_nofollow_open_error)?;
     }
     Ok(directory)
 }

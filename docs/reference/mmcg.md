@@ -188,6 +188,7 @@ mmcg policy check --since main --format sarif > mastermind-policy.sarif
 # Serve the local, read-only diff-first Lens UI on an ephemeral loopback port.
 mmcg ui --since main
 mmcg ui --since origin/main --path src --depth 2 --top 50 --production-only
+mmcg ui --since main --document-graph .mastermind/research/session-evidence-v2.json
 mmcg ui --since main --sarif semgrep.sarif --sarif codeql.sarif \
   --coverage lcov.info --coverage cobertura.xml \
   --junit junit.xml --otel traces.json
@@ -722,6 +723,11 @@ evidence:
   `project_history_stale` diagnostic; incomplete admission suppresses them with
   `project_history_incomplete`. Healthy code and other evidence overlays remain
   available. This is enabled by default; `--no-project-knowledge` disables it;
+- one explicit portable document graph with `--document-graph PATH`. Lens reads
+  only a root-contained packet under `.mastermind/research`, rechecks its named
+  endpoints and optional Markdown corpus, and displays a separate relation
+  review queue. `needs_review` is a partial evidence state. `current` describes
+  matching bytes only; every relation remains `unverified`;
 - CODEOWNERS from `.github/CODEOWNERS`, repository-root `CODEOWNERS`, or
   `docs/CODEOWNERS` in that order, with `--codeowners PATH` as an override;
 - bounded Git churn and contributor names from the last 200 commits by default,
@@ -781,11 +787,12 @@ decision directories admitted by the indexer. Lens writes none of this evidence
 to source files or SQLite.
 
 The portable [project-history skill](../../skills/workflow/mastermind-project-history/SKILL.md)
-also ships an explicit document evidence snapshot/check helper. It records
-declared document/code relations and invalidates incident edges when a named
-file changes. This is a local research artifact, separate from Lens topology and
-the code-file endpoints required by `mastermind-facts/v1`. Relation labels and
-unchanged hashes do not establish semantic correctness.
+ships the producer and standalone checker for this packet. The Lens projection
+keeps it separate from inferred history candidates, Lens topology, and the
+code-file endpoints required by `mastermind-facts/v1`. A different packet Git
+revision is shown separately from live content freshness: matching named bytes
+do not cover unrelated changes. Relation labels and unchanged hashes do not
+establish semantic correctness.
 
 ### PR evidence package (`mmcg review export`)
 
@@ -819,12 +826,24 @@ artifact.
 
 The export accepts the same `--path`, `--depth`, `--top`,
 `--production-only`, `--sarif`, `--coverage`, `--junit`, `--otel`,
-`--codeowners`, `--git-commits`, and `--no-project-knowledge` inputs as Lens.
+`--codeowners`, `--git-commits`, `--no-project-knowledge`, and
+`--document-graph` inputs as Lens.
 It rechecks external files after analysis and fails if their exact bytes change.
 The manifest records their SHA-256 digests next to the resolved head OID. This
 is a **digest binding at export time**: it proves exactly which report bytes a
 reviewer saw at that revision, not that Semgrep, CodeQL, a test runner, or an
 OTel collector produced those bytes from that revision.
+
+With `--document-graph PATH`, the manifest also binds the packet digest, its
+internal snapshot digest, the stable live observation digest, snapshot Git
+metadata, whether that snapshot head matches the review head, content-change
+counts, corpus status, and relation count. The embedded Lens and Markdown
+summary carry the same check. `needs_review` makes `analysis.partial` true, while
+`current` still leaves every relation semantically `unverified`. Export rechecks
+the complete graph observation immediately before atomic publication and fails
+if the packet or observed bytes changed. It also rejects `--out` beneath a
+tracked corpus directory because publishing `summary.md` there would make the
+new package stale at creation time.
 
 Loaded `mastermind-facts/v1` datasets need no second sidecar attestation: their
 ingestion contract already verified exact repository identity, Git head, source

@@ -84,12 +84,19 @@ mastermind history "session expiry" \
 
 mastermind query history "session expiry" \
   --document-graph .mastermind/research/session-evidence-v2.json
+
+mastermind ui --since main \
+  --document-graph .mastermind/research/session-evidence-v2.json
+
+mastermind review export --since main --out mastermind-review \
+  --document-graph .mastermind/research/session-evidence-v2.json
 ```
 
-The MCP equivalent is `mmcg_history` with the optional `document_graph` string
-argument. Without that argument, all three entry points retain the existing
-history-only response. With it, the normal history fields stay at the top level
-and a separate `document_graph` object contains the live check.
+The MCP equivalent for retrieval is `mmcg_history` with the optional
+`document_graph` string argument. Without an explicit graph, history, Lens, and
+review export retain their existing response/package shapes. With it, history
+keeps its normal fields at the top level, Lens adds a separate review queue, and
+review export carries the same check into its manifest, HTML, and summary.
 
 Choose existing directories relevant to the question. Each `--corpus-dir`
 recursively tracks non-hidden `.md` and `.markdown` files (case insensitive),
@@ -147,9 +154,12 @@ path when relevant.
 The native history projection validates the same strict v1/v2 packet and live
 file/corpus bytes, but has its own response contract: `schema_version: 1`, kind
 `mastermind_native_document_evidence_check`, `status`, `root`, `packet`,
-`snapshot_revision`, `changed_files`, `corpus`, `edges`, and `limits`. `packet`
-keeps the raw artifact digest and byte length separate from the snapshot's
-internal digest and schema version. The native reader accepts only a
+`snapshot_revision`, `observation_sha256`, `changed_files`, `corpus`, `edges`,
+and `limits`. The observation digest binds the sorted live status, digest, byte,
+and line record for every named endpoint and corpus file; it changes even when
+an already-stale file changes again without changing its `needs_review` reason.
+`packet` keeps the raw artifact digest and byte length separate from the
+snapshot's internal digest and schema version. The native reader accepts only a
 repository-relative or root-contained absolute packet path under
 `.mastermind/research`, follows no links, writes nothing to SQLite, and does not
 run Git. It therefore does not return a current revision or `revision_changed`;
@@ -165,6 +175,14 @@ only after reviewing the changed sources. A native `current` edge still has
 inventory and SQLite data version after graph capture; concurrent history drift
 returns `snapshot_changed` instead of pairing an old `fresh` result with the
 new graph check.
+
+Lens uses the same native projection only when `--document-graph` is explicit.
+It displays endpoint/corpus drift before the unverified relations and reports a
+packet revision that differs from the review head without treating live byte
+freshness as revision-wide coverage. Review export records both packet and live
+observation digests, rechecks the exact projection before atomic publication,
+and marks `needs_review` as a partial analysis state. It rejects output beneath
+a tracked corpus root so its own Markdown summary cannot invalidate the packet.
 
 ## Scope and limits
 

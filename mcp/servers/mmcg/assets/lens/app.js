@@ -477,6 +477,7 @@
     const impact = record(raw.impact);
     const evidence = record(raw.evidence);
     const semantic = record(raw.semantic);
+    const documentGraph = isRecord(raw.document_graph) ? record(raw.document_graph) : null;
     const temporalEnvelope = record(raw.temporal);
     const temporal = record(temporalEnvelope.data);
     const changes = record(impact.changes);
@@ -652,6 +653,23 @@
       nodes
     );
     const precisionNotes = collectPrecisionNotes(map, impact, evidence, semantic);
+    if (documentGraph) {
+      precisionNotes.push({
+        code: "declared_relations_unverified",
+        message: "The selected packet declares document relations. Content freshness does not verify their meaning or activate a decision.",
+        source: "Document graph",
+      });
+      const graphRevision = record(documentGraph.snapshot_revision);
+      const graphHead = text(graphRevision.head, "");
+      const reviewHead = text(record(impact.baseline).head_oid, "");
+      if (graphHead && reviewHead && graphHead !== reviewHead) {
+        precisionNotes.push({
+          code: "document_graph_revision_differs",
+          message: "The packet was captured at a different Git revision. Its named bytes were checked live, but unrelated changes remain outside its declared scope.",
+          source: "Document graph",
+        });
+      }
+    }
     array(temporal.diagnostics).forEach(function (value) {
       const item = record(value);
       precisionNotes.push({
@@ -672,6 +690,9 @@
     appendTemporalTruncations(truncations, temporal);
     const limits = collectLimits(raw, map, impact, evidence);
     flattenPrimitiveEntries("Temporal", temporal.limits, 0, limits);
+    if (documentGraph) {
+      flattenPrimitiveEntries("Document graph", documentGraph.limits, 0, limits);
+    }
 
     return {
       raw: raw,
@@ -690,6 +711,7 @@
       mapComponents: mapComponents,
       evidence: evidence,
       semantic: semantic,
+      documentGraph: documentGraph,
       temporalEnvelope: temporalEnvelope,
       temporal: temporal,
       evidenceSources: evidenceSources,
@@ -968,6 +990,9 @@
     elements.overlayButtons = Array.from(document.querySelectorAll("[data-overlay]"));
     elements.evidenceSummary = byId("evidence-summary");
     elements.evidenceSourceList = byId("evidence-source-list");
+    elements.documentGraphPanel = byId("document-graph-panel");
+    elements.documentGraphSummary = byId("document-graph-summary");
+    elements.documentGraphList = byId("document-graph-list");
     elements.temporalSummary = byId("temporal-summary");
     elements.temporalEvents = byId("temporal-events");
     elements.temporalMetric = {
@@ -1206,6 +1231,7 @@
     renderNotices();
     renderCompleteness();
     renderEvidenceSources();
+    renderDocumentGraph();
     renderComponents();
     renderTemporal();
     renderMethodLedger();
@@ -2209,6 +2235,29 @@
           text(diagnostic.message, "The base/head architecture comparison was not returned; the ordinary diff trace remains available.")
         );
       }
+      if (state.model.documentGraph && text(state.model.documentGraph.status, "needs_review") === "needs_review") {
+        const endpointChanges = array(state.model.documentGraph.changed_files).length;
+        const corpusChanges = array(record(state.model.documentGraph.corpus).changed_files).length;
+        appendNotice(
+          "warning",
+          "Document evidence · needs review",
+          endpointChanges + " endpoint change" + (endpointChanges === 1 ? "" : "s") + " · "
+            + corpusChanges + " corpus change" + (corpusChanges === 1 ? "" : "s")
+            + ". Re-read affected documents before accepting any declared relation."
+        );
+      }
+      if (state.model.documentGraph) {
+        const graphHead = text(record(state.model.documentGraph.snapshot_revision).head, "");
+        const reviewHead = text(state.model.baseline.head_oid, "");
+        if (graphHead && reviewHead && graphHead !== reviewHead) {
+          appendNotice(
+            "warning",
+            "Document evidence · different snapshot revision",
+            "Named bytes were checked live. The packet does not cover unrelated changes between "
+              + shortOid(graphHead) + " and " + shortOid(reviewHead) + "."
+          );
+        }
+      }
     }
     elements.noticeStack.hidden = elements.noticeStack.childElementCount === 0;
   }
@@ -2240,8 +2289,13 @@
       return;
     }
     const temporalUnavailable = text(state.model.temporalEnvelope.status, "unavailable") !== "available";
+    const documentReview = state.model.documentGraph
+      && text(state.model.documentGraph.status, "needs_review") === "needs_review";
     const partial = snapshotIsPartial();
-    if (partial) {
+    if (documentReview) {
+      elements.completeness.textContent = "Document evidence needs review";
+      elements.completeness.classList.add("is-partial");
+    } else if (partial) {
       elements.completeness.textContent = "Partial evidence";
       elements.completeness.classList.add("is-partial");
     } else if (temporalUnavailable) {
@@ -2261,7 +2315,9 @@
       || state.model.schemaVersion !== EXPECTED_SCHEMA
       || record(state.model.evidence).partial === true
       || record(state.model.semantic).partial === true
-      || record(state.model.temporal).partial === true;
+      || record(state.model.temporal).partial === true
+      || Boolean(state.model.documentGraph
+        && text(state.model.documentGraph.status, "needs_review") === "needs_review");
   }
 
   function completeZeroChange() {
@@ -2399,7 +2455,8 @@
     const factArtifacts = state.model.factArtifacts.items.map(record);
     const semantic = record(state.model.semantic);
     const semanticSource = isRecord(semantic.source) ? record(semantic.source) : null;
-    const sourceCount = sources.length + (semanticSource ? 1 : 0);
+    const documentGraph = state.model.documentGraph;
+    const sourceCount = sources.length + (semanticSource ? 1 : 0) + (documentGraph ? 1 : 0);
     const matchedPaths = new Set();
     state.model.evidenceFiles.items.map(record).forEach(function (file) {
       const path = text(file.path, "");
@@ -2428,12 +2485,38 @@
       }
     });
     const matchedFiles = matchedPaths.size;
+    const documentReview = documentGraph && text(documentGraph.status, "needs_review") === "needs_review";
     elements.evidenceSummary.textContent = sourceCount === 0
       ? "No external evidence sources loaded; the static graph remains available."
-      : sourceCount + " source" + (sourceCount === 1 ? "" : "s") + " · " + matchedFiles + " matched trace file" + (matchedFiles === 1 ? "" : "s") + ((record(state.model.evidence).partial === true || semantic.partial === true) ? " · partial" : "");
+      : sourceCount + " source" + (sourceCount === 1 ? "" : "s") + " · " + matchedFiles + " matched trace file" + (matchedFiles === 1 ? "" : "s") + ((record(state.model.evidence).partial === true || semantic.partial === true || documentReview) ? " · partial" : "");
     if (sourceCount === 0) {
       elements.evidenceSourceList.appendChild(createElement("p", "evidence-source-list__empty", "Use mastermind enrich --scip index.scip, enrich --facts facts.json, or external evidence flags to add corroborating facts."));
       return;
+    }
+    if (documentGraph) {
+      const graphStatus = text(documentGraph.status, "needs_review");
+      const packet = record(documentGraph.packet);
+      const card = createElement("article", "evidence-source evidence-source--" + (graphStatus === "current" ? "loaded" : "partial"));
+      card.appendChild(createElement("span", "evidence-source__kind", "document graph · " + graphStatus.replace("_", " ")));
+      card.appendChild(createElement("span", "evidence-source__label", text(packet.path, "Selected packet")));
+      const relations = array(documentGraph.edges).length;
+      card.appendChild(createElement("span", "evidence-source__facts", relations + " declared relation" + (relations === 1 ? "" : "s") + " · all unverified"));
+      const graphHead = text(record(documentGraph.snapshot_revision).head, "");
+      const reviewHead = text(state.model.baseline.head_oid, "");
+      if (graphHead && reviewHead) {
+        card.appendChild(createElement(
+          "span",
+          "evidence-source__facts",
+          "snapshot " + shortOid(graphHead) + " · review head " + (graphHead === reviewHead ? "matches" : "differs")
+        ));
+      }
+      const digest = text(packet.artifact_sha256, "");
+      if (digest) {
+        const identity = createElement("span", "evidence-source__facts", "packet sha256 " + digest.slice(0, 12) + "… · live " + text(documentGraph.observation_sha256, "unknown").slice(0, 12) + "…");
+        identity.setAttribute("title", "packet " + digest + " · observation " + text(documentGraph.observation_sha256, "unknown"));
+        card.appendChild(identity);
+      }
+      elements.evidenceSourceList.appendChild(card);
     }
     if (semanticSource) {
       const status = semantic.partial === true ? "partial" : "loaded";
@@ -2489,6 +2572,69 @@
       }
       elements.evidenceSourceList.appendChild(card);
     });
+  }
+
+  function renderDocumentGraph() {
+    const graph = state.model.documentGraph;
+    elements.documentGraphPanel.hidden = !graph;
+    elements.documentGraphList.replaceChildren();
+    if (!graph) {
+      elements.documentGraphSummary.textContent = "No portable document graph was selected.";
+      return;
+    }
+
+    const status = text(graph.status, "needs_review");
+    const revision = record(graph.snapshot_revision);
+    const edges = array(graph.edges).map(record);
+    const endpointChanges = array(graph.changed_files).map(record);
+    const corpusChanges = array(record(graph.corpus).changed_files).map(record);
+    elements.documentGraphSummary.textContent = edges.length + " declared relation" + (edges.length === 1 ? "" : "s")
+      + " · snapshot " + shortOid(revision.head)
+      + " · content " + status.replace("_", " ")
+      + " · semantics unverified.";
+
+    const rows = [];
+    endpointChanges.forEach(function (change) {
+      rows.push({
+        review: true,
+        label: "Endpoint needs review",
+        detail: text(change.path, "unknown path") + " · " + array(change.reasons).map(function (reason) { return text(reason, "changed").replace(/_/g, " "); }).join(", "),
+      });
+    });
+    corpusChanges.forEach(function (change) {
+      rows.push({
+        review: true,
+        label: "Corpus changed",
+        detail: text(change.path, "unknown path") + " · " + array(change.reasons).map(function (reason) { return text(reason, "changed").replace(/_/g, " "); }).join(", "),
+      });
+    });
+    edges.sort(function (left, right) {
+      return Number(text(right.freshness, "needs_review") === "needs_review")
+        - Number(text(left.freshness, "needs_review") === "needs_review");
+    }).forEach(function (edge) {
+      const from = record(edge.from);
+      const to = record(edge.to);
+      rows.push({
+        review: text(edge.freshness, "needs_review") === "needs_review",
+        label: text(edge.relation, "relation") + " · " + text(edge.verification, "unverified"),
+        detail: text(from.path, "unknown path") + formatLine(from.line) + " → "
+          + text(to.path, "unknown path") + formatLine(to.line)
+          + " · content " + text(edge.freshness, "needs_review").replace("_", " "),
+      });
+    });
+    rows.slice(0, 16).forEach(function (row) {
+      const item = createElement("article", "document-evidence__item " + (row.review ? "is-review" : "is-current"));
+      item.appendChild(createElement("span", "document-evidence__kind", row.label));
+      item.appendChild(createElement("span", "document-evidence__detail", row.detail));
+      elements.documentGraphList.appendChild(item);
+    });
+    if (rows.length > 16) {
+      elements.documentGraphList.appendChild(createElement(
+        "p",
+        "document-evidence__more",
+        "+" + (rows.length - 16) + " more bounded records remain in the snapshot."
+      ));
+    }
   }
 
   function componentMeta(row) {
@@ -4323,13 +4469,15 @@
   function snapshotAnnouncement() {
     const model = state.model;
     const semanticSourceCount = isRecord(record(model.semantic).source) ? 1 : 0;
-    const evidenceSourceCount = returnedCount(model.evidenceSources) + semanticSourceCount;
+    const evidenceSourceCount = returnedCount(model.evidenceSources) + semanticSourceCount + (model.documentGraph ? 1 : 0);
     return "Lens snapshot loaded. "
       + totalOrReturned(model.changedSymbols) + " changed symbols, "
       + totalOrReturned(model.impactedSymbols) + " impacted symbols, and "
       + totalOrReturned(model.tests) + " candidate tests. "
       + evidenceSourceCount + " evidence sources were evaluated. "
-      + (model.truncations.length > 0 ? "The result is partial." : "No truncation was reported.");
+      + (model.documentGraph && text(model.documentGraph.status, "needs_review") === "needs_review"
+        ? "Document evidence needs review."
+        : (model.truncations.length > 0 ? "The result is partial." : "No truncation was reported."));
   }
 
   function announceVisibleClaims() {

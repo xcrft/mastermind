@@ -71,6 +71,7 @@
         "temporal_status": { "enum": ["available", "unavailable"] },
         "semantic_available": { "type": "boolean" },
         "evidence_partial": { "type": "boolean" },
+        "document_graph_status": { "enum": ["current", "needs_review"] },
         "states": {
           "type": "array",
           "items": {
@@ -79,7 +80,7 @@
             "required": ["path", "state"],
             "properties": {
               "path": { "type": "string", "pattern": "^\\$(?:$|\\.|\\[)" },
-              "state": { "enum": ["partial", "truncated", "unavailable"] },
+              "state": { "enum": ["partial", "truncated", "unavailable", "needs_review"] },
               "reason": { "type": "string", "minLength": 1 }
             }
           }
@@ -110,6 +111,7 @@
         "attestation": { "$ref": "#/$defs/attestation" }
       }
     },
+    "document_graph": { "$ref": "#/$defs/document_graph" },
     "artifacts": {
       "type": "array",
       "minItems": 4,
@@ -124,6 +126,69 @@
     },
     "content_sha256": { "$ref": "#/$defs/sha256" }
   },
+  "allOf": [
+    {
+      "if": {
+        "required": ["document_graph"],
+        "properties": {
+          "document_graph": {
+            "required": ["status"],
+            "properties": { "status": { "const": "current" } }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "analysis": {
+            "required": ["document_graph_status"],
+            "properties": { "document_graph_status": { "const": "current" } }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["document_graph"],
+        "properties": {
+          "document_graph": {
+            "required": ["status"],
+            "properties": { "status": { "const": "needs_review" } }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "analysis": {
+            "required": ["document_graph_status"],
+            "properties": {
+              "partial": { "const": true },
+              "document_graph_status": { "const": "needs_review" },
+              "states": {
+                "contains": {
+                  "type": "object",
+                  "required": ["path", "state"],
+                  "properties": {
+                    "path": { "const": "$.document_graph" },
+                    "state": { "const": "needs_review" }
+                  }
+                },
+                "minContains": 1,
+                "maxContains": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "not": { "required": ["document_graph"] } },
+      "then": {
+        "properties": {
+          "analysis": { "not": { "required": ["document_graph_status"] } }
+        }
+      }
+    }
+  ],
   "$defs": {
     "sha256": {
       "type": "string",
@@ -132,6 +197,45 @@
     "git_oid": {
       "type": "string",
       "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "document_graph": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "packet_path",
+        "packet_sha256",
+        "snapshot_sha256",
+        "observation_sha256",
+        "snapshot_head",
+        "snapshot_dirty",
+        "head_matches_snapshot",
+        "endpoint_changes",
+        "corpus_status",
+        "corpus_changes",
+        "relations",
+        "relation_verification"
+      ],
+      "properties": {
+        "status": { "enum": ["current", "needs_review"] },
+        "packet_path": {
+          "type": "string",
+          "minLength": 22,
+          "maxLength": 4096,
+          "pattern": "^\\.mastermind/research/"
+        },
+        "packet_sha256": { "$ref": "#/$defs/sha256" },
+        "snapshot_sha256": { "$ref": "#/$defs/sha256" },
+        "observation_sha256": { "$ref": "#/$defs/sha256" },
+        "snapshot_head": { "$ref": "#/$defs/git_oid" },
+        "snapshot_dirty": { "type": "boolean" },
+        "head_matches_snapshot": { "type": "boolean" },
+        "endpoint_changes": { "type": "integer", "minimum": 0, "maximum": 128 },
+        "corpus_status": { "enum": ["not_tracked", "current", "changed"] },
+        "corpus_changes": { "type": "integer", "minimum": 0, "maximum": 512 },
+        "relations": { "type": "integer", "minimum": 1, "maximum": 256 },
+        "relation_verification": { "const": "unverified" }
+      }
     },
     "evidence_source": {
       "type": "object",

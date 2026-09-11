@@ -36,6 +36,7 @@ pub struct ReviewExportOptions {
     pub evidence: EvidenceOptions,
     pub extensions: EvidenceExtensionOptions,
     pub evidence_attestation: Option<PathBuf>,
+    pub document_graph: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
@@ -53,6 +54,8 @@ pub enum ReviewPackageError {
     OutputExists,
     OutputParentUnavailable,
     UnsafeOutput,
+    OutputInsideDocumentCorpus(String),
+    DocumentGraphChanged(String),
     EvidenceUnavailable(String),
     EvidenceTooLarge(String),
     EvidenceChanged(String),
@@ -73,6 +76,13 @@ impl fmt::Display for ReviewPackageError {
                 formatter.write_str("review output parent must be an existing real directory")
             }
             Self::UnsafeOutput => formatter.write_str("review output path is unsafe"),
+            Self::OutputInsideDocumentCorpus(path) => write!(
+                formatter,
+                "review output would change the selected document corpus: {path}"
+            ),
+            Self::DocumentGraphChanged(message) => {
+                write!(formatter, "document graph changed during export: {message}")
+            }
             Self::EvidenceUnavailable(label) => {
                 write!(formatter, "review evidence is unavailable: {label}")
             }
@@ -151,6 +161,8 @@ struct ReviewManifest {
     scope: ScopeBinding,
     analysis: AnalysisBinding,
     evidence_binding: EvidenceBinding,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    document_graph: Option<DocumentGraphBinding>,
     artifacts: Vec<ArtifactBinding>,
     content_sha256: String,
 }
@@ -187,7 +199,26 @@ struct AnalysisBinding {
     temporal_status: &'static str,
     semantic_available: bool,
     evidence_partial: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    document_graph_status: Option<&'static str>,
     states: Vec<AnalysisState>,
+}
+
+#[derive(Debug, Serialize)]
+struct DocumentGraphBinding {
+    status: &'static str,
+    packet_path: String,
+    packet_sha256: String,
+    snapshot_sha256: String,
+    observation_sha256: String,
+    snapshot_head: String,
+    snapshot_dirty: bool,
+    head_matches_snapshot: bool,
+    endpoint_changes: u32,
+    corpus_status: &'static str,
+    corpus_changes: u32,
+    relations: u32,
+    relation_verification: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -283,13 +314,15 @@ pub fn export(options: &ReviewExportOptions) -> Result<ReviewExportResult, Revie
         })
         .transpose()?;
 
-    let mut snapshot = crate::lens::snapshot_from_paths_with_evidence_extensions(
+    let mut snapshot = crate::lens::snapshot_from_paths_with_document_graph(
         &root,
         &options.index_path,
         &options.lens,
         &options.evidence,
         &options.extensions,
+        options.document_graph.as_deref(),
     )?;
+    ensure_output_outside_document_corpus(&root, &output_dir, snapshot.document_graph.as_ref())?;
 
     let after_sources = read_sources(&root, &requests)?;
     ensure_sources_unchanged(&before_sources, &after_sources)?;
@@ -370,6 +403,10 @@ pub fn export(options: &ReviewExportOptions) -> Result<ReviewExportResult, Revie
     let snapshot_value = serde_json::to_value(&snapshot)
         .map_err(|error| ReviewPackageError::Serialization(error.to_string()))?;
     let analysis = analysis_binding(&snapshot, &snapshot_value);
+    let document_graph = snapshot
+        .document_graph
+        .as_ref()
+        .map(|graph| document_graph_binding(graph, &head_oid));
     let evidence_binding = evidence_binding(
         &snapshot,
         &after_sources,
@@ -444,12 +481,18 @@ pub fn export(options: &ReviewExportOptions) -> Result<ReviewExportResult, Revie
         },
         analysis,
         evidence_binding,
+        document_graph,
         artifacts,
         content_sha256,
     };
     let manifest_body = pretty_json(
         &serde_json::to_value(&manifest)
             .map_err(|error| ReviewPackageError::Serialization(error.to_string()))?,
+    )?;
+    ensure_document_graph_unchanged(
+        &root,
+        options.document_graph.as_deref(),
+        snapshot.document_graph.as_ref(),
     )?;
     write_package(&output_dir, documents, &manifest_body)?;
 
@@ -844,6 +887,77 @@ fn evidence_binding(
     })
 }
 
+fn document_graph_binding(
+    graph: &crate::document_graph::DocumentGraphCheck,
+    review_head: &str,
+) -> DocumentGraphBinding {
+    DocumentGraphBinding {
+        status: graph.status,
+        packet_path: graph.packet.path.clone(),
+        packet_sha256: graph.packet.artifact_sha256.clone(),
+        snapshot_sha256: graph.packet.snapshot_sha256.clone(),
+        observation_sha256: graph.observation_sha256.clone(),
+        snapshot_head: graph.snapshot_revision.head.clone(),
+        snapshot_dirty: graph.snapshot_revision.dirty,
+        head_matches_snapshot: graph.snapshot_revision.head == review_head,
+        endpoint_changes: graph.changed_files.len() as u32,
+        corpus_status: graph.corpus.status,
+        corpus_changes: graph.corpus.changed_files.len() as u32,
+        relations: graph.edges.len() as u32,
+        relation_verification: "unverified",
+    }
+}
+
+fn ensure_output_outside_document_corpus(
+    root: &Path,
+    output: &Path,
+    graph: Option<&crate::document_graph::DocumentGraphCheck>,
+) -> Result<(), ReviewPackageError> {
+    let Some(graph) = graph else {
+        return Ok(());
+    };
+    for directory in &graph.corpus.directories {
+        let corpus_root = root.join(directory).canonicalize().map_err(|_| {
+            ReviewPackageError::DocumentGraphChanged(format!(
+                "tracked corpus is unavailable: {directory}"
+            ))
+        })?;
+        if output.starts_with(corpus_root) {
+            return Err(ReviewPackageError::OutputInsideDocumentCorpus(
+                directory.clone(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_document_graph_unchanged(
+    root: &Path,
+    path: Option<&Path>,
+    expected: Option<&crate::document_graph::DocumentGraphCheck>,
+) -> Result<(), ReviewPackageError> {
+    match (path, expected) {
+        (None, None) => Ok(()),
+        (Some(path), Some(expected)) => {
+            let observed = crate::document_graph::check_bounded(root, path)
+                .map_err(|error| ReviewPackageError::DocumentGraphChanged(error.to_string()))?;
+            let expected = serde_json::to_vec(expected)
+                .map_err(|error| ReviewPackageError::Serialization(error.to_string()))?;
+            let observed = serde_json::to_vec(&observed)
+                .map_err(|error| ReviewPackageError::Serialization(error.to_string()))?;
+            if observed != expected {
+                return Err(ReviewPackageError::DocumentGraphChanged(
+                    path.to_string_lossy().into_owned(),
+                ));
+            }
+            Ok(())
+        }
+        _ => Err(ReviewPackageError::DocumentGraphChanged(
+            "inconsistent graph selection".into(),
+        )),
+    }
+}
+
 fn analysis_binding(snapshot: &LensSnapshot, value: &Value) -> AnalysisBinding {
     let mut states = BTreeSet::new();
     collect_analysis_states(value, "$", &mut states);
@@ -858,12 +972,29 @@ fn analysis_binding(snapshot: &LensSnapshot, value: &Value) -> AnalysisBinding {
                 .map(|diagnostic| diagnostic.code.into()),
         });
     }
+    let document_graph_status = snapshot.document_graph.as_ref().map(|graph| graph.status);
+    if let Some(graph) = snapshot
+        .document_graph
+        .as_ref()
+        .filter(|graph| graph.status == "needs_review")
+    {
+        states.insert(AnalysisState {
+            path: "$.document_graph".into(),
+            state: "needs_review",
+            reason: Some(format!(
+                "{} endpoint changes, {} corpus changes",
+                graph.changed_files.len(),
+                graph.corpus.changed_files.len(),
+            )),
+        });
+    }
     let states = states.into_iter().collect::<Vec<_>>();
     AnalysisBinding {
         partial: !states.is_empty(),
         temporal_status: snapshot.temporal.status,
         semantic_available: snapshot.semantic.available,
         evidence_partial: snapshot.evidence.partial,
+        document_graph_status,
         states,
     }
 }
@@ -970,6 +1101,25 @@ fn summary_markdown(
             summary.cycles_changed,
             summary.ownership_changes,
             summary.history_review_candidates,
+        ));
+    }
+    if let Some(graph) = &snapshot.document_graph {
+        output.push_str(&format!(
+            "\n## Declared document evidence\n\n- Packet: `{}`\n- Content status: `{}`\n- Endpoint changes: {}\n- Corpus status: `{}` · {} changes\n- Declared relations: {} · all `unverified`\n- Snapshot revision: `{}` · review head {}\n- Packet SHA-256: `{}`\n- Live observation SHA-256: `{}`\n\nContent freshness shows which declarations need rereading. It does not verify the meaning of a declared relation.\n",
+            markdown_text(&graph.packet.path),
+            graph.status,
+            graph.changed_files.len(),
+            graph.corpus.status,
+            graph.corpus.changed_files.len(),
+            graph.edges.len(),
+            graph.snapshot_revision.head,
+            if graph.snapshot_revision.head == snapshot.impact.baseline.head_oid {
+                "matches"
+            } else {
+                "differs"
+            },
+            graph.packet.artifact_sha256,
+            graph.observation_sha256,
         ));
     }
     output.push_str(&format!(
@@ -1315,7 +1465,17 @@ mod tests {
             },
             extensions: EvidenceExtensionOptions::default(),
             evidence_attestation: None,
+            document_graph: None,
         }
+    }
+
+    fn indexed_document_graph(repository: &Path, index_path: &Path) -> PathBuf {
+        let graph = crate::document_graph::test_support::write_snapshot(repository, true);
+        let mut store = Store::open(index_path).unwrap();
+        Indexer::new(repository)
+            .index_all(&mut store, false)
+            .unwrap();
+        graph
     }
 
     #[test]
@@ -1353,6 +1513,8 @@ mod tests {
             serde_json::from_slice(&std::fs::read(output.join("manifest.json")).unwrap()).unwrap();
         assert_eq!(manifest["schema_version"], 1);
         assert_eq!(manifest["package_format"], "mastermind-review");
+        assert!(manifest.get("document_graph").is_none());
+        assert!(manifest["analysis"].get("document_graph_status").is_none());
         assert_eq!(
             manifest["repository"]["head_oid"].as_str().unwrap().len(),
             40
@@ -1386,6 +1548,66 @@ mod tests {
         assert!(matches!(
             export(&options),
             Err(ReviewPackageError::OutputExists)
+        ));
+    }
+
+    #[test]
+    fn export_binds_explicit_document_graph_without_verifying_relations() {
+        let (repository, _state, index_path) = fixture();
+        let graph = indexed_document_graph(repository.path(), &index_path);
+        let output = repository.path().join("document-review");
+        let mut options = export_options(repository.path(), index_path, output.clone());
+        options.document_graph = Some(graph);
+
+        let result = export(&options).unwrap();
+
+        assert!(!result.partial);
+        let manifest: Value =
+            serde_json::from_slice(&std::fs::read(output.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(manifest["document_graph"]["status"], "current");
+        assert_eq!(
+            manifest["document_graph"]["relation_verification"],
+            "unverified"
+        );
+        assert_eq!(manifest["analysis"]["document_graph_status"], "current");
+        assert_eq!(manifest["analysis"]["partial"], false);
+        assert_eq!(manifest["document_graph"]["head_matches_snapshot"], true);
+        let summary = std::fs::read_to_string(output.join("summary.md")).unwrap();
+        assert!(summary.contains("## Declared document evidence"));
+        assert!(summary.contains("all `unverified`"));
+        let html = std::fs::read_to_string(output.join("index.html")).unwrap();
+        assert!(html.contains("mastermind_native_document_evidence_check"));
+    }
+
+    #[test]
+    fn export_rejects_output_that_would_change_the_document_corpus() {
+        let (repository, _state, index_path) = fixture();
+        let graph = indexed_document_graph(repository.path(), &index_path);
+        let output = repository.path().join("docs/adr/review");
+        let mut options = export_options(repository.path(), index_path, output.clone());
+        options.document_graph = Some(graph);
+
+        assert!(matches!(
+            export(&options),
+            Err(ReviewPackageError::OutputInsideDocumentCorpus(ref path))
+                if path == "docs/adr"
+        ));
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn graph_recheck_detects_new_bytes_with_the_same_review_status() {
+        let (repository, _state, index_path) = fixture();
+        let graph = indexed_document_graph(repository.path(), &index_path);
+        let endpoint = repository.path().join("src/handler.rs");
+        std::fs::write(&endpoint, "fn changed_a() {}\n").unwrap();
+        let expected = crate::document_graph::check_bounded(repository.path(), &graph).unwrap();
+        std::fs::write(&endpoint, "fn changed_b() {}\n").unwrap();
+
+        assert_eq!(expected.status, "needs_review");
+        assert!(matches!(
+            ensure_document_graph_unchanged(repository.path(), Some(&graph), Some(&expected)),
+            Err(ReviewPackageError::DocumentGraphChanged(_))
         ));
     }
 

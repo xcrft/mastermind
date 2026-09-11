@@ -312,6 +312,9 @@ enum Cmd {
         /// Do not correlate exact changed-file mentions from indexed specs, ADRs, audits, and lessons.
         #[arg(long)]
         no_project_knowledge: bool,
+        /// Live-check one root-bound portable document graph and show its unverified relation queue.
+        #[arg(long, value_name = "PATH")]
+        document_graph: Option<PathBuf>,
         /// Bound read-only Git churn and contributor evidence. Zero disables it.
         #[arg(long, default_value_t = 200, value_parser = clap::value_parser!(u16).range(0..=1000))]
         git_commits: u16,
@@ -769,6 +772,9 @@ enum ReviewCmd {
         /// Optional strict v1 producer manifest binding repository-relative evidence digests to the same head OID.
         #[arg(long, value_name = "PATH")]
         evidence_attestation: Option<PathBuf>,
+        /// Live-check one root-bound portable document graph and bind it into the package.
+        #[arg(long, value_name = "PATH")]
+        document_graph: Option<PathBuf>,
     },
 }
 
@@ -1536,6 +1542,7 @@ fn run_cli_inner(
             no_project_knowledge,
             git_commits,
             evidence_attestation,
+            document_graph,
         }) => {
             let root = root
                 .canonicalize()
@@ -1566,6 +1573,7 @@ fn run_cli_inner(
                         project_knowledge: !no_project_knowledge,
                     },
                     evidence_attestation,
+                    document_graph,
                 })?;
             println!(
                 "review package: {} | head {} | {} | {} files | evidence {}",
@@ -1593,6 +1601,7 @@ fn run_cli_inner(
             otel,
             codeowners,
             no_project_knowledge,
+            document_graph,
             git_commits,
             port,
         } => {
@@ -1600,7 +1609,7 @@ fn run_cli_inner(
                 .canonicalize()
                 .map_err(|_| mmcg::lens::LensError::RootUnavailable)?;
             let index_path = index_path_for_root(index_override.as_deref(), &root);
-            mmcg::lens::run_with_evidence_extensions(
+            mmcg::lens::run_with_evidence_extensions_and_document_graph(
                 root,
                 index_path,
                 mmcg::lens::LensOptions {
@@ -1622,6 +1631,7 @@ fn run_cli_inner(
                     otel,
                     project_knowledge: !no_project_knowledge,
                 },
+                document_graph,
                 port,
             )?;
         }
@@ -2659,6 +2669,7 @@ mod tests {
                 otel,
                 codeowners: None,
                 no_project_knowledge: false,
+                document_graph: None,
                 git_commits: 200,
                 port: 0,
             } if since == "origin/main"
@@ -2694,6 +2705,8 @@ mod tests {
             "--no-project-knowledge",
             "--codeowners",
             ".github/CODEOWNERS",
+            "--document-graph",
+            ".mastermind/research/graph.json",
             "--git-commits",
             "25",
         ])
@@ -2707,6 +2720,7 @@ mod tests {
                 otel,
                 codeowners: Some(codeowners),
                 no_project_knowledge: true,
+                document_graph: Some(document_graph),
                 git_commits: 25,
                 ..
             } if sarif == [PathBuf::from("semgrep.sarif"), PathBuf::from("codeql.sarif")]
@@ -2714,6 +2728,7 @@ mod tests {
                 && junit == [PathBuf::from("junit.xml")]
                 && otel == [PathBuf::from("traces.json")]
                 && codeowners.as_path() == std::path::Path::new(".github/CODEOWNERS")
+                && document_graph == std::path::Path::new(".mastermind/research/graph.json")
         ));
         assert!(Cli::try_parse_from([
             "mastermind",
@@ -2752,6 +2767,8 @@ mod tests {
             "traces.json",
             "--evidence-attestation",
             "evidence-attestation.json",
+            "--document-graph",
+            ".mastermind/research/graph.json",
             "--git-commits",
             "25",
         ])
@@ -2771,6 +2788,7 @@ mod tests {
                 otel,
                 git_commits: 25,
                 evidence_attestation: Some(attestation),
+                document_graph: Some(document_graph),
                 ..
             }) if since == "origin/main"
                 && out.as_path() == std::path::Path::new("mastermind-review")
@@ -2780,6 +2798,7 @@ mod tests {
                 && junit == [PathBuf::from("junit.xml")]
                 && otel == [PathBuf::from("traces.json")]
                 && attestation.as_path() == std::path::Path::new("evidence-attestation.json")
+                && document_graph == std::path::Path::new(".mastermind/research/graph.json")
         ));
         assert!(Cli::try_parse_from([
             "mastermind",

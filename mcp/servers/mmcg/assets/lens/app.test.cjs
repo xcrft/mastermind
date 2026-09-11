@@ -195,7 +195,7 @@ const ELEMENT_IDS = [
   "clear-search", "fit-button", "review-workspace", "component-list", "graph-frame", "trace-graph", "graph-state",
   "trace-context", "mobile-trace-list", "trace-count", "inspector-body", "precision-list",
   "precision-count", "limits-list", "limits-count", "schema-label", "status-region",
-  "evidence-summary", "evidence-source-list",
+  "evidence-summary", "evidence-source-list", "document-graph-panel", "document-graph-summary", "document-graph-list",
   "temporal-summary", "temporal-events", "temporal-components", "temporal-boundaries",
   "temporal-cycles", "temporal-centrality", "temporal-ownership", "temporal-history",
   "metric-files", "metric-files-note", "metric-symbols", "metric-symbols-note", "metric-impact",
@@ -593,6 +593,55 @@ function fixture() {
   };
 }
 
+function withDocumentGraph(payload, status) {
+  const needsReview = status === "needs_review";
+  payload.document_graph = {
+    schema_version: 1,
+    kind: "mastermind_native_document_evidence_check",
+    status: status,
+    root: "/tmp/example",
+    packet: {
+      path: ".mastermind/research/document-graph.json",
+      artifact_sha256: "c".repeat(64),
+      artifact_bytes: 2048,
+      snapshot_sha256: "d".repeat(64),
+      snapshot_schema_version: 2,
+    },
+    snapshot_revision: { head: "2222222222222222222222222222222222222222", dirty: false },
+    observation_sha256: (needsReview ? "e" : "f").repeat(64),
+    changed_files: needsReview
+      ? [{ path: "docs/adr/004-auth.md", reasons: ["content_changed"] }]
+      : [],
+    corpus: {
+      status: needsReview ? "changed" : "current",
+      directories: ["docs/adr"],
+      changed_files: needsReview
+        ? [{ path: "docs/adr/005-auth.md", reasons: ["added"] }]
+        : [],
+    },
+    edges: [
+      {
+        id: "1".repeat(64),
+        from: { path: "docs/adr/004-auth.md", line: 4 },
+        relation: "supports",
+        to: { path: "src/auth.rs", line: 42 },
+        verification: "unverified",
+        freshness: needsReview ? "needs_review" : "current",
+      },
+      {
+        id: "2".repeat(64),
+        from: { path: "docs/adr/004-auth.md", line: 8 },
+        relation: "verified_by",
+        to: { path: "tests/auth.rs", line: 12 },
+        verification: "unverified",
+        freshness: "current",
+      },
+    ],
+    limits: { relations: 256, corpus_files: 256, union_bytes_per_pass: 16777216 },
+  };
+  return payload;
+}
+
 async function renderFixture(payload, options) {
   const harness = createDocument();
   const settings = options || {};
@@ -772,6 +821,9 @@ async function main() {
     "Review pulse and graph workbench must share one evidence canvas"
   );
   assert.match(APP_SOURCE, /Run mastermind temporal --since <baseline> --format json/);
+  assert.match(HTML_SOURCE, /id="document-graph-panel"[^>]*hidden/i, "Document graph UI must be opt-in");
+  assert.match(HTML_SOURCE, /Relations that still require judgment/i);
+  assert.match(CSS_SOURCE, /\.document-evidence__queue\s*\{[^}]*display:\s*grid/s);
   const mobileCss = CSS_SOURCE;
   assert.match(
     mobileCss,
@@ -885,6 +937,38 @@ async function main() {
   );
   assert.match(harness.nodes.get("evidence-summary").textContent, /9 sources · 3 matched trace files/i);
   assert.equal(harness.nodes.get("evidence-source-list").querySelectorAll(".evidence-source").length, 9);
+  assert.equal(harness.nodes.get("document-graph-panel").hidden, true, "Legacy snapshots must not invent document evidence");
+
+  const currentGraphHarness = await renderFixture(withDocumentGraph(fixture(), "current"));
+  assert.equal(currentGraphHarness.nodes.get("document-graph-panel").hidden, false);
+  assert.match(currentGraphHarness.nodes.get("evidence-summary").textContent, /10 sources/i);
+  assert.equal(currentGraphHarness.nodes.get("evidence-source-list").querySelectorAll(".evidence-source").length, 10);
+  assert.match(currentGraphHarness.nodes.get("evidence-source-list").textContent, /document graph · current/i);
+  assert.match(currentGraphHarness.nodes.get("evidence-source-list").textContent, /all unverified/i);
+  assert.match(currentGraphHarness.nodes.get("document-graph-summary").textContent, /content current · semantics unverified/i);
+  assert.match(currentGraphHarness.nodes.get("document-graph-list").textContent, /supports · unverified/i);
+  assert.match(currentGraphHarness.nodes.get("document-graph-list").textContent, /verified_by · unverified/i);
+  assert.match(currentGraphHarness.nodes.get("precision-list").textContent, /does not verify their meaning/i);
+  assert.match(currentGraphHarness.nodes.get("evidence-source-list").textContent, /review head matches/i);
+  assert.match(currentGraphHarness.nodes.get("completeness-status").textContent, /No truncation reported/i);
+
+  const reviewGraphHarness = await renderFixture(withDocumentGraph(fixture(), "needs_review"));
+  assert.match(reviewGraphHarness.nodes.get("notice-stack").textContent, /Document evidence · needs review/i);
+  assert.match(reviewGraphHarness.nodes.get("notice-stack").textContent, /1 endpoint change · 1 corpus change/i);
+  assert.match(reviewGraphHarness.nodes.get("evidence-summary").textContent, /partial/i);
+  assert.match(reviewGraphHarness.nodes.get("completeness-status").textContent, /Document evidence needs review/i);
+  assert.ok(reviewGraphHarness.nodes.get("completeness-status").classList.contains("is-partial"));
+  assert.match(reviewGraphHarness.nodes.get("document-graph-list").textContent, /Endpoint needs review/i);
+  assert.match(reviewGraphHarness.nodes.get("document-graph-list").textContent, /Corpus changed/i);
+  assert.match(reviewGraphHarness.nodes.get("document-graph-list").textContent, /content needs review/i);
+  assert.match(reviewGraphHarness.nodes.get("status-region").textContent, /Document evidence needs review/i);
+
+  const differentRevision = withDocumentGraph(fixture(), "current");
+  differentRevision.document_graph.snapshot_revision.head = "4".repeat(40);
+  const differentRevisionHarness = await renderFixture(differentRevision);
+  assert.match(differentRevisionHarness.nodes.get("notice-stack").textContent, /different snapshot revision/i);
+  assert.match(differentRevisionHarness.nodes.get("precision-list").textContent, /unrelated changes remain outside/i);
+  assert.match(differentRevisionHarness.nodes.get("evidence-source-list").textContent, /review head differs/i);
 
   const auditHarness = await renderFixture(fixture(), { width: 1200 });
   assert.match(auditHarness.nodes.get("audit-summary").textContent, /2 components across 1 language/i, "Audit summary must explain the codebase shape");

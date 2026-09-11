@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Workflow status and query freshness now reuse one stable read-only index
+  snapshot with bounded source scans. Status no longer opens SQLite for writes,
+  mutates schema, or reports an unreadable freshness scan as changed files.
 - `mastermind doctor` now shares one stable read-only snapshot across database
   diagnostics and starts its handshake only for a validated index. Repository,
   symbol, and freshness checks no longer migrate malformed databases or create

@@ -3,7 +3,6 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
-use rusqlite::OptionalExtension;
 use sha2::{Digest, Sha256};
 
 pub const WORKFLOW_AUDIT_SCHEMA_VERSION: u32 = 1;
@@ -27,6 +26,7 @@ const MAX_WORKFLOW_DIAGNOSTICS: usize = 4_096;
 const MAX_WORKFLOW_CONTEXT_ESTIMATES: usize = 16_384;
 const MAX_STATUS_TASKS: usize = 4_096;
 const MAX_TASK_STATE_BYTES: u64 = 1024 * 1024;
+const STATUS_FRESHNESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 pub struct WorkflowAuditLimits {
@@ -3537,7 +3537,9 @@ pub struct IndexInfo {
     pub symbol_count: u64,
     pub file_count: u64,
     pub stale_count: usize,
+    pub freshness_error: Option<String>,
     pub extractor_contract_current: bool,
+    pub database_error: Option<String>,
     pub root_error: Option<String>,
 }
 
@@ -3578,9 +3580,20 @@ impl WorkflowStatus {
     }
 
     pub fn next_action(&self) -> Option<NextAction> {
+        if let Some(error) = &self.index.database_error {
+            return Some(NextAction {
+                description: format!("Selected index cannot be used safely: {error}"),
+                command: Some(format!("mastermind index {}", self.root.display())),
+                claude_prompt: Some(format!(
+                    "Rebuild the unavailable Mastermind index at {} before relying on graph-backed research. \
+                     The status reader reported: {error}",
+                    self.index.index_path.display()
+                )),
+            });
+        }
         if let Some(error) = &self.index.root_error {
             return Some(NextAction {
-                description: format!("Selected index cannot be used for this repository: {error}"),
+                description: format!("Selected index belongs to another repository: {error}"),
                 command: None,
                 claude_prompt: Some(format!(
                     "Repair the Mastermind index selection for {}. Pass the index that belongs to this repository, \
@@ -3589,6 +3602,17 @@ impl WorkflowStatus {
                     self.root.display(),
                     self.root.display(),
                     self.index.index_path.display()
+                )),
+            });
+        }
+        if let Some(error) = &self.index.freshness_error {
+            return Some(NextAction {
+                description: format!("Index freshness cannot be verified: {error}"),
+                command: Some(format!("mastermind index {}", self.root.display())),
+                claude_prompt: Some(format!(
+                    "Inspect why Mastermind could not verify index freshness for {}: {error}. \
+                     Rebuild the index before relying on graph-backed research.",
+                    self.root.display()
                 )),
             });
         }
@@ -3729,6 +3753,11 @@ impl WorkflowStatus {
                 "  ✗ no index at {} — run `mastermind index .` or `mastermind init`\n",
                 self.index.index_path.display()
             ));
+        } else if let Some(error) = &self.index.database_error {
+            out.push_str(&format!(
+                "  ✗ unavailable index at {} — {error}\n",
+                self.index.index_path.display()
+            ));
         } else {
             out.push_str(&format!(
                 "  ✓ {} — {} symbols, {} files\n",
@@ -3738,16 +3767,19 @@ impl WorkflowStatus {
             ));
             if let Some(error) = &self.index.root_error {
                 out.push_str(&format!("  ✗ index repository mismatch — {error}\n"));
-            } else if self.index.stale_count == 0 && self.index.extractor_contract_current {
+            } else if self.index.freshness_error.is_none()
+                && self.index.stale_count == 0
+                && self.index.extractor_contract_current
+            {
                 out.push_str("  ✓ index up to date\n");
-            } else {
-                if !self.index.extractor_contract_current {
-                    out.push_str(
-                        "  ⚠ extractor contract changed — run `mastermind index .` to rebuild structural data\n",
-                    );
-                }
+            } else if !self.index.extractor_contract_current {
+                out.push_str(
+                    "  ⚠ extractor contract changed — run `mastermind index .` to rebuild structural data\n",
+                );
             }
-            if self.index.stale_count > 0 {
+            if let Some(error) = &self.index.freshness_error {
+                out.push_str(&format!("  ⚠ index freshness unavailable — {error}\n"));
+            } else if self.index.stale_count > 0 {
                 let suffix = if self.index.stale_count >= 10 {
                     " or more"
                 } else {
@@ -3876,10 +3908,24 @@ impl WorkflowStatus {
     }
 
     pub fn render_resume_text(&self, task_name: Option<&str>) -> String {
+        if let Some(error) = &self.index.database_error {
+            return format!(
+                "Cannot resume safely: selected index is unavailable — {error}\n\n\
+                 Rebuild with `mastermind index {}` before relying on graph-backed task state.\n",
+                self.root.display()
+            );
+        }
         if let Some(error) = &self.index.root_error {
             return format!(
                 "Cannot resume safely: selected index repository mismatch — {error}\n\n\
                  Pass the correct `--index` or run `mastermind index {}` to build this repository's default index.\n",
+                self.root.display()
+            );
+        }
+        if let Some(error) = &self.index.freshness_error {
+            return format!(
+                "Cannot resume safely: index freshness is unavailable — {error}\n\n\
+                 Rebuild with `mastermind index {}` before relying on graph-backed task state.\n",
                 self.root.display()
             );
         }
@@ -4082,28 +4128,84 @@ fn extract_section(text: &str, heading: &str) -> String {
 }
 
 fn scan_index(root: &Path, db: &Path) -> IndexInfo {
-    if !db.is_file() {
-        return IndexInfo {
-            index_path: db.to_path_buf(),
-            db_exists: false,
-            symbol_count: 0,
-            file_count: 0,
-            stale_count: 0,
-            extractor_contract_current: false,
-            root_error: None,
-        };
+    let unavailable = |error: String| IndexInfo {
+        index_path: db.to_path_buf(),
+        db_exists: true,
+        symbol_count: 0,
+        file_count: 0,
+        stale_count: 0,
+        freshness_error: None,
+        extractor_contract_current: false,
+        database_error: Some(error),
+        root_error: None,
+    };
+    match std::fs::symlink_metadata(db) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => return unavailable("selected index is not a regular file".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return IndexInfo {
+                index_path: db.to_path_buf(),
+                db_exists: false,
+                symbol_count: 0,
+                file_count: 0,
+                stale_count: 0,
+                freshness_error: None,
+                extractor_contract_current: false,
+                database_error: None,
+                root_error: None,
+            };
+        }
+        Err(error) => return unavailable(format!("cannot inspect {}: {error}", db.display())),
     }
 
-    let (symbol_count, file_count) = db_counts(db).unwrap_or((0, 0));
-
-    let stale_count = stale_paths(root, db, 10)
-        .map(|paths| paths.len())
-        .unwrap_or(1);
-    let extractor_contract_current = db_extractor_contract_current(db).unwrap_or(false);
-    let root_error = crate::store::Store::open(db)
-        .map_err(|error| format!("cannot open {}: {error}", db.display()))
-        .and_then(|store| crate::indexer::validate_index_root(&store, root))
-        .err();
+    let store = match crate::store::Store::open_read_only(db) {
+        Ok(store) => store,
+        Err(error) => {
+            return unavailable(format!("cannot open {} read-only: {error}", db.display()))
+        }
+    };
+    match store.schema_current() {
+        Ok(true) => {}
+        Ok(false) => return unavailable("index schema is missing or outdated".into()),
+        Err(error) => return unavailable(format!("cannot inspect index schema: {error}")),
+    }
+    let symbol_count = match store.symbol_count() {
+        Ok(count) => u64::from(count),
+        Err(error) => return unavailable(format!("cannot query symbol count: {error}")),
+    };
+    let file_count = match store.file_count() {
+        Ok(count) => u64::from(count),
+        Err(error) => return unavailable(format!("cannot query file count: {error}")),
+    };
+    let root_error = crate::indexer::validate_index_root(&store, root).err();
+    let (extractor_contract_current, stale_count, freshness_error) = if root_error.is_some() {
+        (false, 0, None)
+    } else {
+        let extractor_contract_current = match store.extractor_contract_current() {
+            Ok(current) => current,
+            Err(error) => return unavailable(format!("cannot query extractor contract: {error}")),
+        };
+        let deadline = std::time::Instant::now() + STATUS_FRESHNESS_TIMEOUT;
+        match stale_paths_controlled(
+            &store,
+            root,
+            10,
+            crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
+            crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
+            crate::bounded_fs::ReadControl {
+                deadline: Some(deadline),
+                interrupted: None,
+            },
+        ) {
+            Ok(paths) => (extractor_contract_current, paths.len(), None),
+            Err(error) => (extractor_contract_current, 0, Some(error.to_string())),
+        }
+    };
+    match store.source_snapshot_unchanged() {
+        Ok(true) => {}
+        Ok(false) => return unavailable("index changed while status was scanning it".into()),
+        Err(error) => return unavailable(format!("cannot verify index snapshot: {error}")),
+    }
 
     IndexInfo {
         index_path: db.to_path_buf(),
@@ -4111,101 +4213,11 @@ fn scan_index(root: &Path, db: &Path) -> IndexInfo {
         symbol_count,
         file_count,
         stale_count,
+        freshness_error,
         extractor_contract_current,
+        database_error: None,
         root_error,
     }
-}
-
-pub(crate) fn db_extractor_contract_current(db: &Path) -> Option<bool> {
-    let conn = rusqlite::Connection::open_with_flags(
-        db,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .ok()?;
-    let stored = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = ?1",
-            [crate::indexer::EXTRACTOR_CONTRACT_META_KEY],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .ok()?;
-    Some(stored.as_deref() == Some(crate::indexer::EXTRACTOR_CONTRACT_VERSION))
-}
-
-fn db_counts(db: &Path) -> Option<(u64, u64)> {
-    let conn = rusqlite::Connection::open(db).ok()?;
-    let sym: i64 = conn
-        .query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))
-        .ok()?;
-    let fil: i64 = conn
-        .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
-        .ok()?;
-    Some((sym.max(0) as u64, fil.max(0) as u64))
-}
-
-pub(crate) fn stale_paths(root: &Path, db: &Path, cap: usize) -> Option<Vec<String>> {
-    if cap == 0 {
-        return Some(Vec::new());
-    }
-    let conn = rusqlite::Connection::open_with_flags(
-        db,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .ok()?;
-    let mut stmt = conn.prepare("SELECT path, indexed_at FROM files").ok()?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })
-        .ok()?;
-    let indexed: HashMap<String, i64> = rows.collect::<rusqlite::Result<_>>().ok()?;
-    let mut seen = HashSet::new();
-    let mut stale = Vec::new();
-    for path in crate::indexer::source_candidates(root) {
-        if crate::indexer::extractor_for_path(&path).is_none() {
-            continue;
-        }
-        let admitted_mtime = match crate::indexer::source_admission_mtime(root, &path) {
-            Ok(mtime) => Some(mtime),
-            Err(crate::indexer::IndexError::Skipped(_)) => continue,
-            Err(_) => None,
-        };
-        let Ok(relative) = path.strip_prefix(root) else {
-            continue;
-        };
-        let relative = relative.to_string_lossy().replace('\\', "/");
-        seen.insert(relative.clone());
-        if admitted_mtime.is_none() {
-            stale.push(relative);
-            if stale.len() >= cap {
-                return Some(stale);
-            }
-            continue;
-        }
-        if admitted_mtime
-            .is_some_and(|mtime| indexed.get(&relative).is_none_or(|stored| mtime > *stored))
-        {
-            stale.push(relative);
-            if stale.len() >= cap {
-                return Some(stale);
-            }
-        }
-    }
-    for indexed_path in indexed.keys() {
-        let remains_regular =
-            std::fs::symlink_metadata(root.join(indexed_path)).is_ok_and(|metadata| {
-                metadata.file_type().is_file() && !metadata.file_type().is_symlink()
-            });
-        if !seen.contains(indexed_path) && !remains_regular {
-            stale.push(indexed_path.clone());
-            if stale.len() >= cap {
-                break;
-            }
-        }
-    }
-    stale.sort();
-    Some(stale)
 }
 
 pub(crate) fn stale_paths_controlled(
@@ -5850,7 +5862,9 @@ mod tests {
                 symbol_count: 0,
                 file_count: 0,
                 stale_count: 0,
+                freshness_error: None,
                 extractor_contract_current: true,
+                database_error: None,
                 root_error: None,
             },
             install: InstallInfo {
@@ -5942,10 +5956,68 @@ mod tests {
         assert!(status.render_text().contains("index repository mismatch"));
         assert!(status
             .render_next_text()
-            .contains("Selected index cannot be used"));
+            .contains("Selected index belongs to another repository"));
         assert!(status
             .render_resume_text(None)
             .contains("Cannot resume safely"));
+    }
+
+    #[test]
+    fn workflow_status_scan_leaves_the_source_database_unchanged() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let db = root.join("status.db");
+        {
+            let store = crate::store::Store::open(&db).unwrap();
+            store
+                .set_meta("index_root", &root.to_string_lossy())
+                .unwrap();
+        }
+        {
+            let connection = rusqlite::Connection::open(&db).unwrap();
+            let mode: String = connection
+                .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(mode, "delete");
+        }
+        let sidecar_path = |suffix: &str| {
+            let mut value = db.as_os_str().to_os_string();
+            value.push(suffix);
+            PathBuf::from(value)
+        };
+        for suffix in ["-wal", "-shm", "-journal"] {
+            fs::remove_file(sidecar_path(suffix)).ok();
+        }
+        let before = fs::read(&db).unwrap();
+
+        let status = WorkflowStatus::scan_with_index(&root, &db);
+        assert!(status.index.db_exists);
+        assert!(status.index.root_error.is_none());
+        assert_eq!(fs::read(&db).unwrap(), before);
+        for suffix in ["-wal", "-shm", "-journal"] {
+            assert!(!sidecar_path(suffix).exists());
+        }
+    }
+
+    #[test]
+    fn workflow_status_reports_an_invalid_database_without_repairing_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let db = root.join("invalid.db");
+        fs::write(&db, b"not a sqlite database").unwrap();
+        let before = fs::read(&db).unwrap();
+
+        let status = WorkflowStatus::scan_with_index(&root, &db);
+        assert!(status.index.db_exists);
+        assert!(status.index.database_error.is_some());
+        assert!(status.render_text().contains("unavailable index"));
+        assert!(status
+            .render_next_text()
+            .contains("Selected index cannot be used safely"));
+        assert!(status
+            .render_resume_text(None)
+            .contains("selected index is unavailable"));
+        assert_eq!(fs::read(&db).unwrap(), before);
     }
 
     #[test]
@@ -5974,7 +6046,19 @@ mod tests {
             .set_modified(newer)
             .unwrap();
 
-        assert_eq!(stale_paths(&root, &db, 10), Some(vec!["src/lib.rs".into()]));
+        let snapshot = crate::store::Store::open_read_only(&db).unwrap();
+        let stale = stale_paths_controlled(
+            &snapshot,
+            &root,
+            10,
+            crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
+            crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
+            crate::bounded_fs::ReadControl::default(),
+        )
+        .unwrap();
+        assert_eq!(stale, vec!["src/lib.rs".to_string()]);
+        assert!(snapshot.source_snapshot_unchanged().unwrap());
+        drop(snapshot);
         fs::remove_dir_all(root).ok();
     }
 
@@ -6004,7 +6088,19 @@ mod tests {
         store.upsert_file("src/lib.rs", mtime, 1).unwrap();
 
         assert!(root.join("mmcg.db-wal").is_file());
-        assert_eq!(stale_paths(&root, &db, 10), Some(Vec::new()));
+        let snapshot = crate::store::Store::open_read_only(&db).unwrap();
+        let stale = stale_paths_controlled(
+            &snapshot,
+            &root,
+            10,
+            crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
+            crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
+            crate::bounded_fs::ReadControl::default(),
+        )
+        .unwrap();
+        assert!(stale.is_empty());
+        assert!(snapshot.source_snapshot_unchanged().unwrap());
+        drop(snapshot);
         drop(store);
         fs::remove_dir_all(root).ok();
     }

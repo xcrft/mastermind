@@ -601,6 +601,96 @@ fn refresh_durable_history(store: &mut Store, repo_root: &Path) -> Result<u32, S
         .map_err(|error| error.to_string())
 }
 
+fn open_validated_task_index(
+    index_path: &Path,
+    repo_root: &Path,
+    allow_no_index: bool,
+) -> Result<Option<Store>, String> {
+    match std::fs::symlink_metadata(index_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && allow_no_index => {
+            return Ok(None);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!(
+                "no index at `{}`; run `mastermind index .` first, or pass --allow-no-index for docs-only specs",
+                index_path.display()
+            ));
+        }
+        Err(error) => {
+            return Err(format!(
+                "cannot inspect index `{}`: {error}",
+                index_path.display()
+            ));
+        }
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(format!(
+                "index path `{}` is not a regular file",
+                index_path.display()
+            ));
+        }
+    }
+
+    let preview = Store::open_read_only(index_path)
+        .map_err(|error| format!("cannot read index `{}`: {error}", index_path.display()))?;
+    if !preview
+        .schema_current()
+        .map_err(|error| format!("cannot inspect index schema: {error}"))?
+    {
+        return Err(format!(
+            "index schema at `{}` is missing or outdated; rebuild with `mastermind index .`",
+            index_path.display()
+        ));
+    }
+    let symbols = preview
+        .symbol_count()
+        .map_err(|error| format!("cannot query index `{}`: {error}", index_path.display()))?;
+    if symbols == 0 {
+        if preview
+            .meta_value("index_root")
+            .map_err(|error| format!("cannot read index root: {error}"))?
+            .is_some()
+        {
+            validate_index_root(&preview, repo_root)
+                .map_err(|error| format!("index/root mismatch: {error}"))?;
+        }
+        preview
+            .ensure_source_snapshot_current()
+            .map_err(|error| format!("index changed during validation: {error}"))?;
+        return if allow_no_index {
+            Ok(None)
+        } else {
+            Err(format!(
+                "index at `{}` is empty (0 symbols); run `mastermind index .` to populate, or pass --allow-no-index for docs-only specs",
+                index_path.display()
+            ))
+        };
+    }
+    validate_index_root(&preview, repo_root)
+        .map_err(|error| format!("index/root mismatch: {error}"))?;
+    preview
+        .ensure_source_snapshot_current()
+        .map_err(|error| format!("index changed during validation: {error}"))?;
+    drop(preview);
+
+    let store = Store::open_existing(index_path).map_err(|error| {
+        format!(
+            "cannot open existing index `{}`: {error}",
+            index_path.display()
+        )
+    })?;
+    if store
+        .symbol_count()
+        .map_err(|error| format!("cannot query reopened index: {error}"))?
+        == 0
+    {
+        return Err("index changed from populated to empty during validation".into());
+    }
+    validate_index_root(&store, repo_root)
+        .map_err(|error| format!("index/root mismatch after reopen: {error}"))?;
+    Ok(Some(store))
+}
+
 fn display_relative(repo_root: &Path, path: &Path) -> String {
     let resolved = if path.is_absolute() {
         path.to_path_buf()
@@ -1369,21 +1459,26 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts)
                     return Outcome::PostBroken;
                 }
                 if review_complete {
-                    let mut store = match Store::open(index_path) {
+                    let mut store = match open_validated_task_index(
+                        index_path,
+                        repo_root,
+                        state.allow_no_index,
+                    ) {
                         Ok(store) => store,
                         Err(error) => {
                             eprintln!(
-                                "error: opening index `{}` for semantic history refresh: {error}",
-                                index_path.display()
+                                "error: validating index for semantic history refresh: {error}"
                             );
                             return Outcome::PostBroken;
                         }
                     };
-                    if let Err(error) = refresh_durable_history(&mut store, repo_root) {
-                        eprintln!(
-                            "error: refreshing durable history before semantic completion: {error}"
-                        );
-                        return Outcome::PostBroken;
+                    if let Some(store) = store.as_mut() {
+                        if let Err(error) = refresh_durable_history(store, repo_root) {
+                            eprintln!(
+                                "error: refreshing durable history before semantic completion: {error}"
+                            );
+                            return Outcome::PostBroken;
+                        }
                     }
                     if current_history_snapshot(repo_root, spec_path, state)
                         .ok()
@@ -1506,61 +1601,13 @@ fn run_pre(
     // or empty index, verify-spec silently degrades to file-existence checks and
     // audit-spec to git-diff-only. Escape hatch `--allow-no-index` for docs-only
     // specs.
-    let mut store = match std::fs::symlink_metadata(index_path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+    let mut store = match open_validated_task_index(index_path, repo_root, opts.allow_no_index) {
+        Ok(store) => store,
         Err(error) => {
-            eprintln!(
-                "❌ Cannot inspect index `{}`: {error}",
-                index_path.display()
-            );
+            eprintln!("❌ {error}");
             return Outcome::PreFailed;
         }
-        Ok(_) => match Store::open(index_path) {
-            Ok(store) => Some(store),
-            Err(error) => {
-                eprintln!(
-                    "❌ Cannot open existing index `{}`: {error}",
-                    index_path.display()
-                );
-                return Outcome::PreFailed;
-            }
-        },
     };
-    match store.as_ref() {
-        None if !opts.allow_no_index => {
-            eprintln!(
-                "❌ No index at `{}`. Run `mastermind index .` first, or pass --allow-no-index for docs-only specs.",
-                index_path.display()
-            );
-            return Outcome::PreFailed;
-        }
-        Some(index) => match index.symbol_count() {
-            Ok(0) if opts.allow_no_index => {
-                // An empty SQLite shell carries no repository identity and
-                // contributes no graph evidence. Treat it exactly like no index
-                // for an explicitly docs-only task.
-                store = None;
-            }
-            Ok(0) => {
-                eprintln!(
-                    "❌ Index at `{}` is empty (0 symbols). Run `mastermind index .` to populate, or pass --allow-no-index for docs-only specs.",
-                    index_path.display()
-                );
-                return Outcome::PreFailed;
-            }
-            Ok(_) => {
-                if let Err(error) = validate_index_root(index, repo_root) {
-                    eprintln!("❌ Index/root mismatch: {error}");
-                    return Outcome::PreFailed;
-                }
-            }
-            Err(error) => {
-                eprintln!("❌ Cannot query index `{}`: {error}", index_path.display());
-                return Outcome::PreFailed;
-            }
-        },
-        None => {}
-    }
     if let Some(index) = store.as_mut() {
         let refresh = match Indexer::new(repo_root).index_all(index, false) {
             Ok(stats) => stats,
@@ -1745,25 +1792,25 @@ fn run_post(
         return Outcome::PostBroken;
     }
 
-    let mut store = match Store::open(index_path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: opening index `{}`: {e}", index_path.display());
-            return Outcome::PostBroken;
-        }
-    };
-    let populated = match store.symbol_count() {
-        Ok(count) => count > 0,
+    let validated = match open_validated_task_index(index_path, repo_root, state.allow_no_index) {
+        Ok(store) => store,
         Err(error) => {
-            eprintln!("error: querying index `{}`: {error}", index_path.display());
+            eprintln!("error: validating post-flight index: {error}");
             return Outcome::PostBroken;
         }
     };
-    if populated || !state.allow_no_index {
-        if let Err(error) = validate_index_root(&store, repo_root) {
-            eprintln!("error: index/root mismatch: {error}");
-            return Outcome::PostBroken;
-        }
+    let durable_index = validated.is_some();
+    let mut store = match validated {
+        Some(store) => store,
+        None => match Store::open_ephemeral() {
+            Ok(store) => store,
+            Err(error) => {
+                eprintln!("error: creating ephemeral docs-only index: {error}");
+                return Outcome::PostBroken;
+            }
+        },
+    };
+    if durable_index {
         let refresh = match Indexer::new(repo_root).index_all(&mut store, false) {
             Ok(stats) => stats,
             Err(error) => {
@@ -1932,9 +1979,11 @@ fn run_post(
             eprintln!("error: failed to create history review: {error}");
             return Outcome::PostBroken;
         }
-        if let Err(error) = refresh_durable_history(&mut store, repo_root) {
-            eprintln!("error: refreshing durable post-flight history: {error}");
-            return Outcome::PostBroken;
+        if durable_index {
+            if let Err(error) = refresh_durable_history(&mut store, repo_root) {
+                eprintln!("error: refreshing durable post-flight history: {error}");
+                return Outcome::PostBroken;
+            }
         }
         if current_history_snapshot(repo_root, spec_path, state)
             .ok()
@@ -1969,9 +2018,11 @@ fn run_post(
             return Outcome::PostBroken;
         }
     } else {
-        if let Err(error) = refresh_durable_history(&mut store, repo_root) {
-            eprintln!("error: refreshing durable failed-audit history: {error}");
-            return Outcome::PostBroken;
+        if durable_index {
+            if let Err(error) = refresh_durable_history(&mut store, repo_root) {
+                eprintln!("error: refreshing durable failed-audit history: {error}");
+                return Outcome::PostBroken;
+            }
         }
         let mut failed = auditing.clone();
         failed.status = match outcome {
@@ -3182,6 +3233,36 @@ verifications: []\n\
     }
 
     #[test]
+    fn allow_no_index_rejects_an_empty_index_bound_to_another_repository() {
+        let (root, spec, _) = preflight_fixture();
+        let foreign = tempfile::tempdir().unwrap();
+        let index_path = foreign.path().join("empty.db");
+        let store = Store::open(&index_path).unwrap();
+        store
+            .set_meta(
+                "index_root",
+                foreign.path().canonicalize().unwrap().to_str().unwrap(),
+            )
+            .unwrap();
+        drop(store);
+
+        assert_eq!(
+            run(
+                &spec,
+                root.path(),
+                &index_path,
+                RunOpts {
+                    pre_only: true,
+                    allow_no_index: true,
+                    ..Default::default()
+                }
+            ),
+            Outcome::PreFailed
+        );
+        assert!(!state_file_path(root.path(), &spec).exists());
+    }
+
+    #[test]
     fn auto_resume_post_held_emits_release_notes_and_completes_state() {
         let dir = tmp("autoresume_held");
         init_repo(&dir);
@@ -3663,6 +3744,10 @@ verify:
         assert_eq!(
             run(&spec, root.path(), &db, RunOpts::default()),
             Outcome::PostHeld
+        );
+        assert!(
+            !db.exists(),
+            "docs-only post-flight must not materialize an index"
         );
     }
 

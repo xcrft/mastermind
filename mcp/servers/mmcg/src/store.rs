@@ -2727,8 +2727,30 @@ impl Store {
     }
 
     pub fn open(db_path: impl AsRef<Path>) -> SqlResult<Self> {
-        let (parent, db_path) = crate::bounded_fs::prepare_file_target(db_path.as_ref())
-            .map_err(|error| sqlite_bounded_error("prepare writable index", error))?;
+        Self::open_writable(db_path.as_ref(), true)
+    }
+
+    /// Open an existing index for a workflow that is explicitly going to
+    /// refresh it. Unlike [`Store::open`], this never creates the database or
+    /// its parent directories if the selected index disappears.
+    pub(crate) fn open_existing(db_path: impl AsRef<Path>) -> SqlResult<Self> {
+        Self::open_writable(db_path.as_ref(), false)
+    }
+
+    fn open_writable(db_path: &Path, create_if_missing: bool) -> SqlResult<Self> {
+        let (parent, db_path) = if create_if_missing {
+            crate::bounded_fs::prepare_file_target(db_path)
+                .map_err(|error| sqlite_bounded_error("prepare writable index", error))?
+        } else {
+            let db_path = std::path::absolute(db_path)
+                .map_err(|error| sqlite_io_error("resolve existing writable index", error))?;
+            let parent_path = db_path
+                .parent()
+                .ok_or_else(|| rusqlite::Error::InvalidPath(db_path.clone()))?;
+            let parent = crate::bounded_fs::RootCapability::open(parent_path)
+                .map_err(|error| sqlite_bounded_error("open writable index parent", error))?;
+            (parent, db_path)
+        };
         let existing_identity = match crate::bounded_fs::read_regular_file_with_capability(
             &parent,
             &db_path,
@@ -2740,6 +2762,15 @@ impl Store {
             Err(crate::bounded_fs::BoundedReadError::Io(error))
                 if error.kind() == std::io::ErrorKind::NotFound =>
             {
+                if !create_if_missing {
+                    return Err(sqlite_io_error(
+                        "open existing writable index",
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            format!("index `{}` does not exist", db_path.display()),
+                        ),
+                    ));
+                }
                 crate::bounded_fs::inspect_absent_path(
                     &parent,
                     &db_path,
@@ -2816,6 +2847,24 @@ impl Store {
             return Err(sqlite_snapshot_changed());
         }
         validate_writable_sidecars(&parent, store.db_path())?;
+        Ok(store)
+    }
+
+    /// Create a schema-compatible graph shell for checks that explicitly
+    /// permit no repository index. It has no filesystem side effects and no
+    /// repository identity, so callers cannot mistake it for durable evidence.
+    pub(crate) fn open_ephemeral() -> SqlResult<Self> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            r#"
+            PRAGMA foreign_keys = ON;
+            PRAGMA synchronous = OFF;
+            PRAGMA temp_store = MEMORY;
+            PRAGMA cache_size = -65536;
+            "#,
+        )?;
+        let store = Self::from_connection(conn, PathBuf::from(":memory:"), None, None);
+        store.init_schema()?;
         Ok(store)
     }
 
@@ -7302,6 +7351,33 @@ mod tests {
         let store = Store::open(&path).unwrap();
         assert!(store.schema_current().unwrap());
         assert!(path.is_file());
+    }
+
+    #[test]
+    fn existing_writable_open_never_creates_a_missing_index() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("missing/index.db");
+
+        assert!(Store::open_existing(&path).is_err());
+        assert!(!path.exists());
+        assert!(!directory.path().join("missing").exists());
+
+        let existing = directory.path().join("existing.db");
+        drop(Store::open(&existing).unwrap());
+        let store = Store::open_existing(&existing).unwrap();
+        store.set_meta("probe", "updated").unwrap();
+        assert_eq!(
+            store.meta_value("probe").unwrap().as_deref(),
+            Some("updated")
+        );
+    }
+
+    #[test]
+    fn ephemeral_store_has_current_schema_without_a_database_file() {
+        let store = Store::open_ephemeral().unwrap();
+        assert!(store.schema_current().unwrap());
+        assert_eq!(store.symbol_count().unwrap(), 0);
+        assert_eq!(store.db_path(), Path::new(":memory:"));
     }
 
     #[cfg(unix)]

@@ -1137,6 +1137,18 @@ fn index_path_for_root(explicit: Option<&std::path::Path>, root: &std::path::Pat
         .unwrap_or_else(|| root.join(".mastermind/mmcg.db"))
 }
 
+fn open_enrichment_store(
+    index_path: &std::path::Path,
+) -> Result<Store, Box<dyn std::error::Error>> {
+    Store::open_existing(index_path).map_err(|error| {
+        format!(
+            "cannot open existing codegraph index {}: {error}; run `mastermind index .` first",
+            index_path.display()
+        )
+        .into()
+    })
+}
+
 /// Parse argv with the program name pinned to `mastermind` so `--help` and
 /// usage strings read consistently — the npm wrapper spawns the native binary
 /// directly, so argv[0] would otherwise surface the internal `mmcg` name.
@@ -1223,14 +1235,7 @@ fn run_cli_inner(
             trusted_key_ids,
             revoked_key_ids,
         } => {
-            if !index_path.is_file() {
-                return Err(format!(
-                    "codegraph index {} does not exist; run `mastermind index .` first",
-                    index_path.display()
-                )
-                .into());
-            }
-            let store = Store::open(&index_path)?;
+            let store = open_enrichment_store(&index_path)?;
             let summary = match (scip, facts) {
                 (Some(scip), None) => {
                     serde_json::to_value(mmcg::scip_overlay::import(&store, &scip)?)?
@@ -2046,6 +2051,16 @@ mod tests {
             index_path_for_root(Some(std::path::Path::new("custom/index.db")), root),
             PathBuf::from("custom/index.db")
         );
+    }
+
+    #[test]
+    fn enrichment_never_creates_a_missing_index() {
+        let root = tempfile::tempdir().unwrap();
+        let index = root.path().join("missing/index.db");
+
+        assert!(open_enrichment_store(&index).is_err());
+        assert!(!index.exists());
+        assert!(!root.path().join("missing").exists());
     }
 
     #[test]

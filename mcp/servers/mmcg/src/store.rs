@@ -2159,6 +2159,47 @@ fn sqlite_sidecar_path(db_path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
+fn validate_writable_sidecars(
+    root: &crate::bounded_fs::RootCapability,
+    db_path: &Path,
+) -> SqlResult<()> {
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let sidecar = sqlite_sidecar_path(db_path, suffix);
+        match crate::bounded_fs::inspect_path_kind_with_capability(
+            root,
+            &sidecar,
+            crate::bounded_fs::ReadControl::default(),
+        ) {
+            Ok(crate::bounded_fs::BoundedPathKind::RegularFile) => {}
+            Ok(_) => {
+                return Err(sqlite_bounded_error(
+                    "inspect writable index sidecar",
+                    crate::bounded_fs::BoundedReadError::NotRegular,
+                ));
+            }
+            Err(crate::bounded_fs::BoundedReadError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                crate::bounded_fs::inspect_absent_path(
+                    root,
+                    &sidecar,
+                    crate::bounded_fs::ReadControl::default(),
+                )
+                .map_err(|error| sqlite_bounded_error("inspect writable index sidecar", error))?
+                .ok_or_else(sqlite_snapshot_changed)?;
+            }
+            Err(error) => {
+                return Err(sqlite_bounded_error(
+                    "inspect writable index sidecar",
+                    error,
+                ));
+            }
+        }
+    }
+    root.verify()
+        .map_err(|error| sqlite_bounded_error("verify writable index sidecars", error))
+}
+
 fn normalized_schema_sql(value: &str) -> String {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Quote {
@@ -2588,6 +2629,7 @@ impl Store {
             }
             Err(error) => return Err(sqlite_bounded_error("inspect managed index", error)),
         };
+        validate_writable_sidecars(&state, &expected)?;
         if existing_identity.is_some() {
             let mut snapshot = Self::open_read_only(&expected)?;
             let authorized = snapshot
@@ -2669,20 +2711,85 @@ impl Store {
         state
             .verify()
             .map_err(|error| sqlite_bounded_error("verify managed index directory", error))?;
+        let opened_file = crate::bounded_fs::read_regular_file_with_capability(
+            &state,
+            store.db_path(),
+            u64::MAX,
+            0,
+            crate::bounded_fs::ReadControl::default(),
+        )
+        .map_err(|error| sqlite_bounded_error("verify managed index identity", error))?;
+        if !opened_file.identity.same_object(expected_identity) {
+            return Err(sqlite_snapshot_changed());
+        }
+        validate_writable_sidecars(&state, store.db_path())?;
         Ok(store)
     }
 
     pub fn open(db_path: impl AsRef<Path>) -> SqlResult<Self> {
-        let db_path = db_path.as_ref().to_path_buf();
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                rusqlite::Error::SqliteFailure(
-                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
-                    Some(format!("create parent dir: {e}")),
+        let (parent, db_path) = crate::bounded_fs::prepare_file_target(db_path.as_ref())
+            .map_err(|error| sqlite_bounded_error("prepare writable index", error))?;
+        let existing_identity = match crate::bounded_fs::read_regular_file_with_capability(
+            &parent,
+            &db_path,
+            u64::MAX,
+            0,
+            crate::bounded_fs::ReadControl::default(),
+        ) {
+            Ok(file) => Some(file.identity),
+            Err(crate::bounded_fs::BoundedReadError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                crate::bounded_fs::inspect_absent_path(
+                    &parent,
+                    &db_path,
+                    crate::bounded_fs::ReadControl::default(),
                 )
-            })?;
+                .map_err(|error| sqlite_bounded_error("inspect writable index", error))?
+                .ok_or_else(sqlite_snapshot_changed)?;
+                None
+            }
+            Err(error) => return Err(sqlite_bounded_error("inspect writable index", error)),
+        };
+        validate_writable_sidecars(&parent, &db_path)?;
+        let mut created_file = None;
+        let expected_identity = match existing_identity {
+            Some(identity) => identity,
+            None => {
+                let (file, identity) = crate::bounded_fs::create_regular_file_with_capability(
+                    &parent, &db_path, false,
+                )
+                .map_err(|error| sqlite_bounded_error("create writable index", error))?;
+                created_file = Some(file);
+                identity
+            }
+        };
+        let conn = Connection::open_with_flags(
+            &db_path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        parent
+            .verify()
+            .map_err(|error| sqlite_bounded_error("verify writable index parent", error))?;
+        let opened = crate::bounded_fs::read_regular_file_with_capability(
+            &parent,
+            &db_path,
+            u64::MAX,
+            0,
+            crate::bounded_fs::ReadControl::default(),
+        )
+        .map_err(|error| sqlite_bounded_error("verify writable index identity", error))?;
+        let identity_matches = if existing_identity.is_some() {
+            opened.identity == expected_identity
+        } else {
+            opened.identity.same_object(expected_identity)
+        };
+        if !identity_matches {
+            return Err(sqlite_snapshot_changed());
         }
-        let conn = Connection::open(&db_path)?;
+        drop(created_file);
         conn.execute_batch(
             r#"
             PRAGMA foreign_keys = ON;
@@ -2694,6 +2801,21 @@ impl Store {
         )?;
         let store = Self::from_connection(conn, db_path, None, None);
         store.init_schema()?;
+        parent
+            .verify()
+            .map_err(|error| sqlite_bounded_error("verify writable index parent", error))?;
+        let opened = crate::bounded_fs::read_regular_file_with_capability(
+            &parent,
+            store.db_path(),
+            u64::MAX,
+            0,
+            crate::bounded_fs::ReadControl::default(),
+        )
+        .map_err(|error| sqlite_bounded_error("verify writable index identity", error))?;
+        if !opened.identity.same_object(expected_identity) {
+            return Err(sqlite_snapshot_changed());
+        }
+        validate_writable_sidecars(&parent, store.db_path())?;
         Ok(store)
     }
 
@@ -7118,6 +7240,85 @@ mod tests {
             .is_err());
         assert_eq!(read_only.symbol_count().unwrap(), 1);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn writable_open_creates_a_missing_nested_index() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("nested/state/index.db");
+        let store = Store::open(&path).unwrap();
+        assert!(store.schema_current().unwrap());
+        assert!(path.is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_open_rejects_symlinked_database_and_parent() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let victim = directory.path().join("victim.db");
+        {
+            let store = Store::open(&victim).unwrap();
+            store.set_meta("sentinel", "unchanged").unwrap();
+        }
+        let before = std::fs::read(&victim).unwrap();
+        let alias = directory.path().join("alias.db");
+        symlink(&victim, &alias).unwrap();
+        assert!(Store::open(&alias).is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), before);
+
+        let real_parent = directory.path().join("real-parent");
+        let linked_parent = directory.path().join("linked-parent");
+        std::fs::create_dir(&real_parent).unwrap();
+        symlink(&real_parent, &linked_parent).unwrap();
+        assert!(Store::open(linked_parent.join("created.db")).is_err());
+        assert!(!real_parent.join("created.db").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_open_rejects_symlinked_sidecar() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("index.db");
+        {
+            let store = Store::open(&path).unwrap();
+            store.set_meta("sentinel", "database").unwrap();
+        }
+        for suffix in ["-wal", "-shm", "-journal"] {
+            std::fs::remove_file(sqlite_sidecar_path(&path, suffix)).ok();
+        }
+
+        let victim = directory.path().join("victim.txt");
+        std::fs::write(&victim, b"unchanged").unwrap();
+        symlink(&victim, sqlite_sidecar_path(&path, "-wal")).unwrap();
+
+        assert!(Store::open(&path).is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"unchanged");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_open_rejects_fifo_without_blocking() {
+        use std::os::unix::fs::FileTypeExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("index.db");
+        assert!(Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_fifo());
+
+        let started = Instant::now();
+        assert!(Store::open(&path).is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

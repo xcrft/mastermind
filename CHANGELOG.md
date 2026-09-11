@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Writable graph-store opens now create and inspect paths through retained
+  directory capabilities, reject links and special files for the database and
+  its SQLite sidecars, use SQLite no-follow, and verify database identity before
+  and after schema initialization.
 - `MMCG_GIT_TIMEOUT_MS` once again controls the shared bounded Git runner as
   documented. The default is 30 seconds, values are capped at five minutes,
   and a shorter request deadline still takes precedence.

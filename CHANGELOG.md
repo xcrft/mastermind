@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- `doctor` now bounds and no-follow reads project `.gitignore` and `CLAUDE.md`
+  instead of following links or allocating arbitrary repository file sizes.
 - `new-spec` now serializes task-number allocation, publishes specs with
   no-follow create-new handles, and cannot overwrite an existing task spec.
 - `run-task` now closes its refresh writer before pre/post-flight reasoning,

@@ -27,6 +27,7 @@ use serde::Serialize;
 use std::path::Path;
 
 const DOCTOR_FRESHNESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const DOCTOR_PROJECT_FILE_LIMIT: u64 = 1024 * 1024;
 
 /// Per-check verdict. Order matters — Display picks the marker by severity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -595,19 +596,49 @@ fn check_index_freshness(root: &Path, index: &DoctorIndex) -> Check {
     }
 }
 
+fn read_project_text(root: &Path, path: &Path) -> Result<Option<String>, String> {
+    match crate::bounded_fs::read_regular_file(
+        root,
+        path,
+        DOCTOR_PROJECT_FILE_LIMIT,
+        DOCTOR_PROJECT_FILE_LIMIT,
+        crate::bounded_fs::ReadControl::default(),
+    ) {
+        Ok(file) => String::from_utf8(file.bytes)
+            .map(Some)
+            .map_err(|_| "file is not valid UTF-8".into()),
+        Err(crate::bounded_fs::BoundedReadError::Io(error))
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 fn check_gitignore(root: &Path) -> Check {
     let p = root.join(".gitignore");
-    if !p.is_file() {
-        return Check {
-            name: "gitignore",
-            status: Status::Warn,
-            message: "no .gitignore at project root".into(),
-            hint: Some(
-                "add `.mastermind/` to .gitignore — the index + specs are local state".into(),
-            ),
-        };
-    }
-    let body = std::fs::read_to_string(&p).unwrap_or_default();
+    let body = match read_project_text(root, &p) {
+        Ok(Some(body)) => body,
+        Ok(None) => {
+            return Check {
+                name: "gitignore",
+                status: Status::Warn,
+                message: "no .gitignore at project root".into(),
+                hint: Some(
+                    "add `.mastermind/` to .gitignore — the index + specs are local state".into(),
+                ),
+            }
+        }
+        Err(error) => {
+            return Check {
+                name: "gitignore",
+                status: Status::Warn,
+                message: format!("cannot safely inspect .gitignore: {error}"),
+                hint: Some("use a regular UTF-8 .gitignore no larger than 1 MiB".into()),
+            }
+        }
+    };
     let lines: Vec<&str> = body
         .lines()
         .map(|l| l.trim())
@@ -638,18 +669,27 @@ fn check_gitignore(root: &Path) -> Check {
 
 fn check_claude_md(root: &Path) -> Check {
     let p = root.join("CLAUDE.md");
-    if !p.is_file() {
-        return Check {
-            name: "CLAUDE.md",
-            status: Status::Warn,
-            message: "not present at project root".into(),
-            hint: Some(
-                "drop in a workflow template — see `agents/claude-md/mastermind-workflow.md`"
-                    .into(),
-            ),
+    let body =
+        match read_project_text(root, &p) {
+            Ok(Some(body)) => body,
+            Ok(None) => return Check {
+                name: "CLAUDE.md",
+                status: Status::Warn,
+                message: "not present at project root".into(),
+                hint: Some(
+                    "drop in a workflow template — see `agents/claude-md/mastermind-workflow.md`"
+                        .into(),
+                ),
+            },
+            Err(error) => {
+                return Check {
+                    name: "CLAUDE.md",
+                    status: Status::Warn,
+                    message: format!("cannot safely inspect CLAUDE.md: {error}"),
+                    hint: Some("use a regular UTF-8 CLAUDE.md no larger than 1 MiB".into()),
+                }
+            }
         };
-    }
-    let body = std::fs::read_to_string(&p).unwrap_or_default();
     // Canonical markers our templates use. Match any of them so we accept
     // hand-customized variants that mention the workflow by name.
     const MARKERS: &[&str] = &[
@@ -1371,6 +1411,44 @@ mod tests {
         .unwrap();
         assert_eq!(check_claude_md(&root).status, Status::Ok);
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_text_checks_do_not_follow_repository_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = tmp();
+        let outside = tmp();
+        fs::write(outside.join("ignore"), ".mastermind/\n").unwrap();
+        fs::write(outside.join("instructions"), "mastermind-workflow\n").unwrap();
+        symlink(outside.join("ignore"), root.join(".gitignore")).unwrap();
+        symlink(outside.join("instructions"), root.join("CLAUDE.md")).unwrap();
+
+        let gitignore = check_gitignore(&root);
+        assert_eq!(gitignore.status, Status::Warn);
+        assert!(gitignore.message.contains("cannot safely inspect"));
+        let claude = check_claude_md(&root);
+        assert_eq!(claude.status, Status::Warn);
+        assert!(claude.message.contains("cannot safely inspect"));
+
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(outside).ok();
+    }
+
+    #[test]
+    fn project_text_checks_reject_oversized_files() {
+        let root = tmp();
+        fs::write(
+            root.join("CLAUDE.md"),
+            vec![b'x'; DOCTOR_PROJECT_FILE_LIMIT as usize + 1],
+        )
+        .unwrap();
+
+        let check = check_claude_md(&root);
+        assert_eq!(check.status, Status::Warn);
+        assert!(check.message.contains("limit is"));
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

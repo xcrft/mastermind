@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
+const MAX_SPEC_BYTES: u64 = crate::audit_bundle::BUNDLE_INPUT_MAX as u64;
+
 #[derive(Debug, Serialize, Clone)]
 pub struct ParsedSpec {
     pub path: String,
@@ -271,7 +273,39 @@ pub struct SymbolClaim {
 
 /// Parse a spec file from disk.
 pub fn parse_file(path: &Path) -> std::io::Result<ParsedSpec> {
-    let body = std::fs::read_to_string(path)?;
+    let (resolved, source) = crate::bounded_fs::read_selected_regular_file(
+        path,
+        MAX_SPEC_BYTES,
+        MAX_SPEC_BYTES,
+        crate::bounded_fs::ReadControl::default(),
+    )
+    .map_err(|error| match error {
+        crate::bounded_fs::BoundedReadError::TooLarge { .. } => std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("spec exceeds the {MAX_SPEC_BYTES}-byte limit"),
+        ),
+        crate::bounded_fs::BoundedReadError::SnapshotChanged => {
+            std::io::Error::other("spec changed while it was being read")
+        }
+        crate::bounded_fs::BoundedReadError::InvalidPath
+        | crate::bounded_fs::BoundedReadError::OutsideRoot
+        | crate::bounded_fs::BoundedReadError::NotRegular => std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "spec must be a regular file",
+        ),
+        crate::bounded_fs::BoundedReadError::Interrupted
+        | crate::bounded_fs::BoundedReadError::DeadlineExceeded => {
+            std::io::Error::other("spec read was interrupted")
+        }
+        crate::bounded_fs::BoundedReadError::Io(error) => error,
+    })?;
+    if path.canonicalize()? != resolved {
+        return Err(std::io::Error::other(
+            "spec path changed while it was being read",
+        ));
+    }
+    let body = String::from_utf8(source.bytes)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "spec is not UTF-8"))?;
     Ok(parse_str(&path.display().to_string(), &body))
 }
 
@@ -652,6 +686,36 @@ fn parse_backticked(s: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_file_rejects_specs_over_the_bundle_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("spec.md");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_SPEC_BYTES + 1).unwrap();
+        drop(file);
+
+        let error = parse_file(&path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("16777216-byte limit"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_file_rejects_a_fifo_without_blocking() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("spec.md");
+        let raw = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `raw` is a live, NUL-terminated path buffer.
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+
+        let error = parse_file(&path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("regular file"));
+    }
 
     const SAMPLE: &str = "\
 # Add session_count accessor

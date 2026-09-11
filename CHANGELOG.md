@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- `new-spec` now serializes task-number allocation, publishes specs with
+  no-follow create-new handles, and cannot overwrite an existing task spec.
 - `run-task` now closes its refresh writer before pre/post-flight reasoning,
   uses one immutable graph snapshot, and rejects approval if that source moves.
 - `run-task --allow-no-index` now keeps docs-only pre/post-flight fully

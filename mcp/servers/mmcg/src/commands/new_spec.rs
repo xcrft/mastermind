@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::Path;
 
 pub enum Mode {
@@ -27,41 +26,13 @@ impl Mode {
 }
 
 pub fn run(description: &str, mode: Mode, root: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let tasks_dir = root.join(".mastermind").join("tasks");
-    if !tasks_dir.exists() {
-        fs::create_dir_all(&tasks_dir).map_err(|e| format!("create .mastermind/tasks/: {e}"))?;
-    }
-
-    let next_n = next_task_number(&tasks_dir)?;
     let slug = slugify(description);
-    let dir_name = format!("{:03}-{}", next_n, slug);
-    let task_dir = tasks_dir.join(&dir_name);
-    fs::create_dir_all(&task_dir).map_err(|e| format!("create {}: {e}", task_dir.display()))?;
-
-    let spec_path = task_dir.join("spec.md");
-    let content = render_spec(description, next_n, &mode);
-    fs::write(&spec_path, &content).map_err(|e| format!("write {}: {e}", spec_path.display()))?;
+    let spec_path = mmcg::task_scaffold::create_numbered_spec(root, &slug, |number| {
+        render_spec(description, number, &mode)
+    })?;
 
     println!("Created {}", spec_path.display());
     Ok(())
-}
-
-fn next_task_number(tasks_dir: &Path) -> Result<u32, Box<dyn std::error::Error>> {
-    let mut max: u32 = 0;
-    if let Ok(entries) = fs::read_dir(tasks_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let s = name.to_string_lossy();
-            if let Some(prefix) = s.split('-').next() {
-                if let Ok(n) = prefix.parse::<u32>() {
-                    if n > max {
-                        max = n;
-                    }
-                }
-            }
-        }
-    }
-    Ok(max + 1)
 }
 
 fn slugify(s: &str) -> String {

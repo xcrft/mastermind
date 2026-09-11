@@ -1622,8 +1622,10 @@ files and phases do not replace the spec's scope or prove plan coverage.
 `run-task` postflight and CI with `--require-executor-report` or `--bundle-dir`
 reject legacy reports. Ordinary `audit-spec` and CI without those flags retain
 legacy compatibility. Canonical parsing rejects explicit nulls, invalid scalar
-types and ambiguous sentinel blocks. Markdown sentinel comments occupy their
-own unindented lines; marker text inside YAML string evidence remains data.
+types and ambiguous sentinel blocks. Report files are read through a bounded,
+no-follow snapshot and rejected if their selected path changes during the read.
+Markdown sentinel comments occupy their own unindented lines; marker text
+inside YAML string evidence remains data.
 Empty phase/verification lists remain valid under v1. Canonical postflight also
 requires a passing reported result for every nonempty `verify[].cmd` and each
 recognized `VERIFY:`, `**VERIFY**:` or `**VERIFY:**` command line in the spec.

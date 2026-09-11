@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::io::Read;
 use std::path::Path;
 
 const REPORT_BEGIN: &str = "mastermind:report-begin";
@@ -300,17 +299,40 @@ impl TryFrom<CanonicalExecutorReport> for ExecutorReport {
 }
 
 pub fn parse_file(path: &Path) -> Result<ExecutorReport, String> {
-    let file = std::fs::File::open(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let mut bytes = Vec::new();
-    file.take(MAX_EXECUTOR_REPORT_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
-    if bytes.len() as u64 > MAX_EXECUTOR_REPORT_BYTES {
-        return Err(format!(
-            "executor report exceeds {MAX_EXECUTOR_REPORT_BYTES}-byte limit"
-        ));
+    let (resolved, source) = crate::bounded_fs::read_selected_regular_file(
+        path,
+        MAX_EXECUTOR_REPORT_BYTES,
+        MAX_EXECUTOR_REPORT_BYTES,
+        crate::bounded_fs::ReadControl::default(),
+    )
+    .map_err(|error| match error {
+        crate::bounded_fs::BoundedReadError::TooLarge { .. } => {
+            format!("executor report exceeds {MAX_EXECUTOR_REPORT_BYTES}-byte limit")
+        }
+        crate::bounded_fs::BoundedReadError::SnapshotChanged => {
+            "executor report changed while it was being read".into()
+        }
+        crate::bounded_fs::BoundedReadError::InvalidPath
+        | crate::bounded_fs::BoundedReadError::OutsideRoot
+        | crate::bounded_fs::BoundedReadError::NotRegular => {
+            "executor report must be a regular file".into()
+        }
+        crate::bounded_fs::BoundedReadError::Interrupted
+        | crate::bounded_fs::BoundedReadError::DeadlineExceeded => {
+            "executor report read was interrupted".into()
+        }
+        crate::bounded_fs::BoundedReadError::Io(error) => {
+            format!("read {}: {error}", path.display())
+        }
+    })?;
+    if path
+        .canonicalize()
+        .map_err(|error| format!("re-resolve executor report {}: {error}", path.display()))?
+        != resolved
+    {
+        return Err("executor report path changed while it was being read".into());
     }
-    let text = String::from_utf8(bytes)
+    let text = String::from_utf8(source.bytes)
         .map_err(|_| format!("executor report {} is not UTF-8", path.display()))?;
     parse_str(&text)
 }
@@ -588,5 +610,20 @@ mod tests {
         let error = parse_file(&path).unwrap_err();
         assert!(error.contains("1048576-byte limit"));
         std::fs::remove_file(path).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_file_rejects_a_fifo_without_blocking() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("executor-report.md");
+        let raw = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `raw` is a live, NUL-terminated path buffer.
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+
+        assert!(parse_file(&path).unwrap_err().contains("regular file"));
     }
 }

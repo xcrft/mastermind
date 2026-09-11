@@ -631,9 +631,13 @@ fn open_validated_task_index(
         }
     }
 
-    let preview = Store::open_read_only(index_path)
-        .map_err(|error| format!("cannot read index `{}`: {error}", index_path.display()))?;
-    if !preview
+    let store = Store::open_existing_without_migration(index_path).map_err(|error| {
+        format!(
+            "cannot open existing index `{}`: {error}",
+            index_path.display()
+        )
+    })?;
+    if !store
         .schema_current()
         .map_err(|error| format!("cannot inspect index schema: {error}"))?
     {
@@ -642,21 +646,18 @@ fn open_validated_task_index(
             index_path.display()
         ));
     }
-    let symbols = preview
+    let symbols = store
         .symbol_count()
         .map_err(|error| format!("cannot query index `{}`: {error}", index_path.display()))?;
     if symbols == 0 {
-        if preview
+        if store
             .meta_value("index_root")
             .map_err(|error| format!("cannot read index root: {error}"))?
             .is_some()
         {
-            validate_index_root(&preview, repo_root)
+            validate_index_root(&store, repo_root)
                 .map_err(|error| format!("index/root mismatch: {error}"))?;
         }
-        preview
-            .ensure_source_snapshot_current()
-            .map_err(|error| format!("index changed during validation: {error}"))?;
         return if allow_no_index {
             Ok(None)
         } else {
@@ -666,28 +667,8 @@ fn open_validated_task_index(
             ))
         };
     }
-    validate_index_root(&preview, repo_root)
-        .map_err(|error| format!("index/root mismatch: {error}"))?;
-    preview
-        .ensure_source_snapshot_current()
-        .map_err(|error| format!("index changed during validation: {error}"))?;
-    drop(preview);
-
-    let store = Store::open_existing(index_path).map_err(|error| {
-        format!(
-            "cannot open existing index `{}`: {error}",
-            index_path.display()
-        )
-    })?;
-    if store
-        .symbol_count()
-        .map_err(|error| format!("cannot query reopened index: {error}"))?
-        == 0
-    {
-        return Err("index changed from populated to empty during validation".into());
-    }
     validate_index_root(&store, repo_root)
-        .map_err(|error| format!("index/root mismatch after reopen: {error}"))?;
+        .map_err(|error| format!("index/root mismatch: {error}"))?;
     Ok(Some(store))
 }
 

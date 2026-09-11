@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Writable opens and private snapshots no longer disturb SQLite's process-wide
+  POSIX locks; snapshots now use SQLite's consistent online backup protocol.
+- Stack detection now bounds manifest reads, rejects linked or special files,
+  and reports skipped evidence instead of inferring frameworks from outside the repository.
 - `init` now serializes scaffold writes, rejects linked parents and targets,
   preserves forced `CONTEXT.md` and `CLAUDE.md` versions in no-clobber backups.
 - `enrich` now opens only an existing writable codegraph, closing the

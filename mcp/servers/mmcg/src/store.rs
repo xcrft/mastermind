@@ -19,7 +19,6 @@ use rusqlite::{
 use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -2153,6 +2152,75 @@ fn sqlite_snapshot_timeout() -> rusqlite::Error {
     )
 }
 
+#[cfg(unix)]
+fn verify_sqlite_main_file_identity(
+    connection: &Connection,
+    _expected: crate::bounded_fs::StableFileIdentity,
+) -> SqlResult<()> {
+    let mut moved = 0_i32;
+    let result = unsafe {
+        rusqlite::ffi::sqlite3_file_control(
+            connection.handle(),
+            c"main".as_ptr(),
+            rusqlite::ffi::SQLITE_FCNTL_HAS_MOVED,
+            std::ptr::addr_of_mut!(moved).cast(),
+        )
+    };
+    if result == rusqlite::ffi::SQLITE_OK && moved == 0 {
+        Ok(())
+    } else if result == rusqlite::ffi::SQLITE_OK {
+        Err(sqlite_snapshot_changed())
+    } else {
+        Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(result),
+            Some("cannot verify the SQLite database handle".into()),
+        ))
+    }
+}
+
+#[cfg(windows)]
+fn verify_sqlite_main_file_identity(
+    connection: &Connection,
+    expected: crate::bounded_fs::StableFileIdentity,
+) -> SqlResult<()> {
+    let mut handle: windows_sys::Win32::Foundation::HANDLE = std::ptr::null_mut();
+    let result = unsafe {
+        rusqlite::ffi::sqlite3_file_control(
+            connection.handle(),
+            c"main".as_ptr(),
+            rusqlite::ffi::SQLITE_FCNTL_WIN32_GET_HANDLE,
+            std::ptr::addr_of_mut!(handle).cast(),
+        )
+    };
+    if result != rusqlite::ffi::SQLITE_OK {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(result),
+            Some("cannot inspect the SQLite database handle".into()),
+        ));
+    }
+    let actual = crate::bounded_fs::stable_windows_handle_identity(handle)
+        .map_err(|error| sqlite_io_error("inspect SQLite database handle", error))?;
+    if actual.same_object(expected) {
+        Ok(())
+    } else {
+        Err(sqlite_snapshot_changed())
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn verify_sqlite_main_file_identity(
+    _connection: &Connection,
+    _expected: crate::bounded_fs::StableFileIdentity,
+) -> SqlResult<()> {
+    Err(sqlite_io_error(
+        "inspect SQLite database handle",
+        std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "SQLite handle identity is unavailable on this platform",
+        ),
+    ))
+}
+
 fn sqlite_sidecar_path(db_path: &Path, suffix: &str) -> PathBuf {
     let mut value = db_path.as_os_str().to_os_string();
     value.push(suffix);
@@ -2165,29 +2233,12 @@ fn validate_writable_sidecars(
 ) -> SqlResult<()> {
     for suffix in ["-wal", "-shm", "-journal"] {
         let sidecar = sqlite_sidecar_path(db_path, suffix);
-        match crate::bounded_fs::inspect_path_kind_with_capability(
+        match crate::bounded_fs::inspect_direct_regular_file_identity_with_capability(
             root,
             &sidecar,
             crate::bounded_fs::ReadControl::default(),
         ) {
-            Ok(crate::bounded_fs::BoundedPathKind::RegularFile) => {}
-            Ok(_) => {
-                return Err(sqlite_bounded_error(
-                    "inspect writable index sidecar",
-                    crate::bounded_fs::BoundedReadError::NotRegular,
-                ));
-            }
-            Err(crate::bounded_fs::BoundedReadError::Io(error))
-                if error.kind() == std::io::ErrorKind::NotFound =>
-            {
-                crate::bounded_fs::inspect_absent_path(
-                    root,
-                    &sidecar,
-                    crate::bounded_fs::ReadControl::default(),
-                )
-                .map_err(|error| sqlite_bounded_error("inspect writable index sidecar", error))?
-                .ok_or_else(sqlite_snapshot_changed)?;
-            }
+            Ok(_) => {}
             Err(error) => {
                 return Err(sqlite_bounded_error(
                     "inspect writable index sidecar",
@@ -2364,12 +2415,22 @@ fn source_file_state(
     path: &Path,
     control: crate::bounded_fs::ReadControl<'_>,
 ) -> SqlResult<SourceFileState> {
-    let file =
-        crate::bounded_fs::read_regular_file_with_capability(root, path, u64::MAX, 0, control)
-            .map_err(|error| sqlite_bounded_error("read index", error))?;
+    let identity = crate::bounded_fs::inspect_direct_regular_file_identity_with_capability(
+        root, path, control,
+    )
+    .map_err(|error| sqlite_bounded_error("read index", error))?
+    .ok_or_else(|| {
+        sqlite_io_error(
+            "read index",
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("index `{}` does not exist", path.display()),
+            ),
+        )
+    })?;
     Ok(SourceFileState {
-        len: file.declared_len,
-        identity: file.identity,
+        len: identity.length(),
+        identity,
     })
 }
 
@@ -2378,18 +2439,14 @@ fn optional_source_file_state(
     path: &Path,
     control: crate::bounded_fs::ReadControl<'_>,
 ) -> SqlResult<Option<SourceFileState>> {
-    match crate::bounded_fs::read_regular_file_with_capability(root, path, u64::MAX, 0, control) {
-        Ok(file) => Ok(Some(SourceFileState {
-            len: file.declared_len,
-            identity: file.identity,
-        })),
-        Err(crate::bounded_fs::BoundedReadError::Io(error))
-            if error.kind() == std::io::ErrorKind::NotFound =>
-        {
-            Ok(None)
-        }
-        Err(error) => Err(sqlite_bounded_error("read index sidecar", error)),
-    }
+    crate::bounded_fs::inspect_direct_regular_file_identity_with_capability(root, path, control)
+        .map(|identity| {
+            identity.map(|identity| SourceFileState {
+                len: identity.length(),
+                identity,
+            })
+        })
+        .map_err(|error| sqlite_bounded_error("read index sidecar", error))
 }
 
 fn index_file_state(db_path: &Path) -> SqlResult<IndexFileState> {
@@ -2416,7 +2473,7 @@ fn index_file_state_with_control(
 fn copy_index_snapshot(
     db_path: &Path,
     budget: SnapshotCopyBudget,
-) -> SqlResult<(tempfile::TempDir, PathBuf, IndexFileState)> {
+) -> SqlResult<(tempfile::TempDir, Connection, IndexFileState)> {
     if Instant::now() >= budget.deadline {
         return Err(sqlite_snapshot_timeout());
     }
@@ -2435,6 +2492,7 @@ fn copy_index_snapshot(
         database: source_file_state(&root, &absolute, control)?,
         wal: optional_source_file_state(&root, &sqlite_sidecar_path(&absolute, "-wal"), control)?,
     };
+    validate_writable_sidecars(&root, &absolute)?;
     let expected_bytes = before
         .database
         .len
@@ -2451,54 +2509,64 @@ fn copy_index_snapshot(
         .file_name()
         .ok_or_else(|| rusqlite::Error::InvalidPath(absolute.clone()))?;
     let snapshot_path = snapshot_dir.path().join(file_name);
-    let source_wal = sqlite_sidecar_path(&absolute, "-wal");
-    let snapshot_wal = sqlite_sidecar_path(&snapshot_path, "-wal");
-
-    let mut copied = 0_u64;
-    let mut database_output = std::fs::File::create(&snapshot_path)
-        .map_err(|error| sqlite_io_error("create private index snapshot", error))?;
-    let database = crate::bounded_fs::copy_regular_file_with_capability(
-        &root,
-        &absolute,
-        budget.max_bytes,
-        control,
-        Some(before.database.identity),
-        &mut database_output,
-    )
-    .map_err(|error| sqlite_bounded_error("copy index snapshot", error))?;
-    database_output
-        .flush()
-        .map_err(|error| sqlite_io_error("flush private index snapshot", error))?;
-    copied = copied
-        .checked_add(database.declared_len)
-        .filter(|value| *value <= budget.max_bytes)
-        .ok_or_else(sqlite_snapshot_too_large)?;
-    if before.wal.as_ref().is_some_and(|wal| wal.len > 0) {
-        let mut wal_output = std::fs::File::create(&snapshot_wal)
-            .map_err(|error| sqlite_io_error("create private WAL snapshot", error))?;
-        let wal = crate::bounded_fs::copy_regular_file_with_capability(
-            &root,
-            &source_wal,
-            budget.max_bytes.saturating_sub(copied),
-            control,
-            before.wal.as_ref().map(|wal| wal.identity),
-            &mut wal_output,
+    let (source_path, source_flags) = if before.wal.is_none() {
+        (
+            immutable_sqlite_uri(&absolute)?,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
-        .map_err(|error| sqlite_bounded_error("copy index WAL snapshot", error))?;
-        wal_output
-            .flush()
-            .map_err(|error| sqlite_io_error("flush private WAL snapshot", error))?;
-        copied
-            .checked_add(wal.declared_len)
-            .filter(|value| *value <= budget.max_bytes)
-            .ok_or_else(sqlite_snapshot_too_large)?;
+    } else {
+        (
+            absolute.clone(),
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+    };
+    let source = Connection::open_with_flags(&source_path, source_flags)?;
+    verify_sqlite_main_file_identity(&source, before.database.identity)?;
+    let mut snapshot = Connection::open_with_flags(
+        &snapshot_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_CREATE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    {
+        let backup = rusqlite::backup::Backup::new(&source, &mut snapshot)?;
+        loop {
+            if Instant::now() >= budget.deadline {
+                return Err(sqlite_snapshot_timeout());
+            }
+            match backup.step(128)? {
+                rusqlite::backup::StepResult::Done => break,
+                rusqlite::backup::StepResult::More => {}
+                rusqlite::backup::StepResult::Busy | rusqlite::backup::StepResult::Locked => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                _ => return Err(sqlite_snapshot_changed()),
+            }
+        }
+    }
+    snapshot.execute_batch("PRAGMA journal_mode = DELETE;")?;
+    let snapshot_size = std::fs::symlink_metadata(&snapshot_path)
+        .map_err(|error| sqlite_io_error("inspect private index snapshot", error))?
+        .len();
+    if snapshot_size > budget.max_bytes {
+        return Err(sqlite_snapshot_too_large());
     }
     let after = IndexFileState {
         database: source_file_state(&root, &absolute, control)?,
         wal: optional_source_file_state(&root, &sqlite_sidecar_path(&absolute, "-wal"), control)?,
     };
+    validate_writable_sidecars(&root, &absolute)?;
+    verify_sqlite_main_file_identity(&source, before.database.identity)?;
     if after == before {
-        return Ok((snapshot_dir, snapshot_path, before));
+        return Ok((snapshot_dir, snapshot, before));
     }
     Err(sqlite_snapshot_changed())
 }
@@ -2507,17 +2575,10 @@ fn open_private_index_snapshot(
     db_path: &Path,
     budget: SnapshotCopyBudget,
 ) -> SqlResult<(Connection, tempfile::TempDir, IndexFileState)> {
-    let (snapshot_dir, snapshot_path, source_state) = copy_index_snapshot(db_path, budget)?;
-    let connection = Connection::open_with_flags(
-        &snapshot_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE,
-    )?;
+    let (snapshot_dir, connection, source_state) = copy_index_snapshot(db_path, budget)?;
     Ok((connection, snapshot_dir, source_state))
 }
 
-#[cfg(test)]
 fn encode_sqlite_uri_path(path: &[u8]) -> Vec<u8> {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut encoded = Vec::with_capacity(path.len());
@@ -2547,7 +2608,36 @@ fn encode_sqlite_uri_path(path: &[u8]) -> Vec<u8> {
     encoded
 }
 
-#[cfg(test)]
+#[cfg(unix)]
+fn immutable_sqlite_uri(db_path: &Path) -> SqlResult<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    let absolute = std::path::absolute(db_path)
+        .map_err(|_| rusqlite::Error::InvalidPath(db_path.to_path_buf()))?;
+    let mut uri = b"file:".to_vec();
+    uri.extend(encode_sqlite_uri_path(absolute.as_os_str().as_bytes()));
+    uri.extend_from_slice(b"?mode=ro&immutable=1&cache=private");
+    Ok(PathBuf::from(OsString::from_vec(uri)))
+}
+
+#[cfg(not(unix))]
+fn immutable_sqlite_uri(db_path: &Path) -> SqlResult<PathBuf> {
+    let absolute = std::path::absolute(db_path)
+        .map_err(|_| rusqlite::Error::InvalidPath(db_path.to_path_buf()))?;
+    let text = absolute
+        .to_str()
+        .ok_or_else(|| rusqlite::Error::InvalidPath(absolute.clone()))?;
+    let path = windows_sqlite_uri_path(text)
+        .ok_or_else(|| rusqlite::Error::InvalidPath(absolute.clone()))?;
+    let mut uri = b"file:".to_vec();
+    uri.extend(path);
+    uri.extend_from_slice(b"?mode=ro&immutable=1&cache=private");
+    let uri = String::from_utf8(uri).map_err(|_| rusqlite::Error::InvalidPath(absolute))?;
+    Ok(PathBuf::from(uri))
+}
+
+#[cfg(any(test, not(unix)))]
 fn windows_sqlite_uri_path(text: &str) -> Option<Vec<u8>> {
     if text
         .get(..8)
@@ -2614,21 +2704,13 @@ impl Store {
         let state =
             crate::bounded_fs::RootCapability::open(&root.canonical_root().join(".mastermind"))
                 .map_err(|error| sqlite_bounded_error("open managed index directory", error))?;
-        let existing_identity = match crate::bounded_fs::read_regular_file_with_capability(
-            &state,
-            &expected,
-            u64::MAX,
-            0,
-            crate::bounded_fs::ReadControl::default(),
-        ) {
-            Ok(file) => Some(file.identity),
-            Err(crate::bounded_fs::BoundedReadError::Io(error))
-                if error.kind() == std::io::ErrorKind::NotFound =>
-            {
-                None
-            }
-            Err(error) => return Err(sqlite_bounded_error("inspect managed index", error)),
-        };
+        let existing_identity =
+            crate::bounded_fs::inspect_direct_regular_file_identity_with_capability(
+                &state,
+                &expected,
+                crate::bounded_fs::ReadControl::default(),
+            )
+            .map_err(|error| sqlite_bounded_error("inspect managed index", error))?;
         validate_writable_sidecars(&state, &expected)?;
         if existing_identity.is_some() {
             let mut snapshot = Self::open_read_only(&expected)?;
@@ -2642,7 +2724,6 @@ impl Store {
             }
             drop(snapshot);
         }
-        let mut created_file = None;
         let expected_identity = match existing_identity {
             Some(identity) => identity,
             None => {
@@ -2650,7 +2731,7 @@ impl Store {
                     &state, &expected, false,
                 )
                 .map_err(|error| sqlite_bounded_error("create managed index", error))?;
-                created_file = Some(file);
+                drop(file);
                 identity
             }
         };
@@ -2665,23 +2746,23 @@ impl Store {
         state
             .verify()
             .map_err(|error| sqlite_bounded_error("verify managed index directory", error))?;
-        let opened_file = crate::bounded_fs::read_regular_file_with_capability(
-            &state,
-            &expected,
-            u64::MAX,
-            0,
-            crate::bounded_fs::ReadControl::default(),
-        )
-        .map_err(|error| sqlite_bounded_error("verify managed index identity", error))?;
+        let opened_identity =
+            crate::bounded_fs::inspect_direct_regular_file_identity_with_capability(
+                &state,
+                &expected,
+                crate::bounded_fs::ReadControl::default(),
+            )
+            .map_err(|error| sqlite_bounded_error("verify managed index identity", error))?
+            .ok_or_else(sqlite_snapshot_changed)?;
         let identity_matches = if existing_identity.is_some() {
-            opened_file.identity == expected_identity
+            opened_identity == expected_identity
         } else {
-            opened_file.identity.same_object(expected_identity)
+            opened_identity.same_object(expected_identity)
         };
         if !identity_matches {
             return Err(sqlite_snapshot_changed());
         }
-        drop(created_file);
+        verify_sqlite_main_file_identity(&connection, expected_identity)?;
         if existing_identity.is_some() {
             let authorized = connection_index_root(&connection)?
                 .and_then(|stored| PathBuf::from(stored).canonicalize().ok())
@@ -2711,33 +2792,45 @@ impl Store {
         state
             .verify()
             .map_err(|error| sqlite_bounded_error("verify managed index directory", error))?;
-        let opened_file = crate::bounded_fs::read_regular_file_with_capability(
-            &state,
-            store.db_path(),
-            u64::MAX,
-            0,
-            crate::bounded_fs::ReadControl::default(),
-        )
-        .map_err(|error| sqlite_bounded_error("verify managed index identity", error))?;
-        if !opened_file.identity.same_object(expected_identity) {
+        let opened_identity =
+            crate::bounded_fs::inspect_direct_regular_file_identity_with_capability(
+                &state,
+                store.db_path(),
+                crate::bounded_fs::ReadControl::default(),
+            )
+            .map_err(|error| sqlite_bounded_error("verify managed index identity", error))?
+            .ok_or_else(sqlite_snapshot_changed)?;
+        if !opened_identity.same_object(expected_identity) {
             return Err(sqlite_snapshot_changed());
         }
+        verify_sqlite_main_file_identity(&store.conn, expected_identity)?;
         validate_writable_sidecars(&state, store.db_path())?;
         Ok(store)
     }
 
     pub fn open(db_path: impl AsRef<Path>) -> SqlResult<Self> {
-        Self::open_writable(db_path.as_ref(), true)
+        Self::open_writable(db_path.as_ref(), true, true)
     }
 
     /// Open an existing index for an operation that is explicitly going to
     /// mutate it. Unlike [`Store::open`], this never creates the database or
     /// its parent directories if the selected index disappears.
     pub fn open_existing(db_path: impl AsRef<Path>) -> SqlResult<Self> {
-        Self::open_writable(db_path.as_ref(), false)
+        Self::open_writable(db_path.as_ref(), false, true)
     }
 
-    fn open_writable(db_path: &Path, create_if_missing: bool) -> SqlResult<Self> {
+    /// Open an existing writable index without creating or migrating its
+    /// schema. Workflow controllers use this to reject stale indexes before
+    /// performing an intentional refresh.
+    pub(crate) fn open_existing_without_migration(db_path: impl AsRef<Path>) -> SqlResult<Self> {
+        Self::open_writable(db_path.as_ref(), false, false)
+    }
+
+    fn open_writable(
+        db_path: &Path,
+        create_if_missing: bool,
+        initialize_schema: bool,
+    ) -> SqlResult<Self> {
         let (parent, db_path) = if create_if_missing {
             crate::bounded_fs::prepare_file_target(db_path)
                 .map_err(|error| sqlite_bounded_error("prepare writable index", error))?
@@ -2751,39 +2844,34 @@ impl Store {
                 .map_err(|error| sqlite_bounded_error("open writable index parent", error))?;
             (parent, db_path)
         };
-        let existing_identity = match crate::bounded_fs::read_regular_file_with_capability(
-            &parent,
-            &db_path,
-            u64::MAX,
-            0,
-            crate::bounded_fs::ReadControl::default(),
-        ) {
-            Ok(file) => Some(file.identity),
-            Err(crate::bounded_fs::BoundedReadError::Io(error))
-                if error.kind() == std::io::ErrorKind::NotFound =>
-            {
-                if !create_if_missing {
-                    return Err(sqlite_io_error(
-                        "open existing writable index",
-                        std::io::Error::new(
-                            std::io::ErrorKind::NotFound,
-                            format!("index `{}` does not exist", db_path.display()),
-                        ),
-                    ));
-                }
-                crate::bounded_fs::inspect_absent_path(
-                    &parent,
-                    &db_path,
-                    crate::bounded_fs::ReadControl::default(),
-                )
-                .map_err(|error| sqlite_bounded_error("inspect writable index", error))?
-                .ok_or_else(sqlite_snapshot_changed)?;
-                None
+        let existing_identity =
+            match crate::bounded_fs::inspect_direct_regular_file_identity_with_capability(
+                &parent,
+                &db_path,
+                crate::bounded_fs::ReadControl::default(),
+            ) {
+                Ok(identity) => identity,
+                Err(error) => return Err(sqlite_bounded_error("inspect writable index", error)),
+            };
+        if existing_identity.is_none() {
+            if !create_if_missing {
+                return Err(sqlite_io_error(
+                    "open existing writable index",
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("index `{}` does not exist", db_path.display()),
+                    ),
+                ));
             }
-            Err(error) => return Err(sqlite_bounded_error("inspect writable index", error)),
-        };
+            crate::bounded_fs::inspect_absent_path(
+                &parent,
+                &db_path,
+                crate::bounded_fs::ReadControl::default(),
+            )
+            .map_err(|error| sqlite_bounded_error("inspect writable index", error))?
+            .ok_or_else(sqlite_snapshot_changed)?;
+        }
         validate_writable_sidecars(&parent, &db_path)?;
-        let mut created_file = None;
         let expected_identity = match existing_identity {
             Some(identity) => identity,
             None => {
@@ -2791,7 +2879,7 @@ impl Store {
                     &parent, &db_path, false,
                 )
                 .map_err(|error| sqlite_bounded_error("create writable index", error))?;
-                created_file = Some(file);
+                drop(file);
                 identity
             }
         };
@@ -2804,23 +2892,23 @@ impl Store {
         parent
             .verify()
             .map_err(|error| sqlite_bounded_error("verify writable index parent", error))?;
-        let opened = crate::bounded_fs::read_regular_file_with_capability(
-            &parent,
-            &db_path,
-            u64::MAX,
-            0,
-            crate::bounded_fs::ReadControl::default(),
-        )
-        .map_err(|error| sqlite_bounded_error("verify writable index identity", error))?;
+        let opened_identity =
+            crate::bounded_fs::inspect_direct_regular_file_identity_with_capability(
+                &parent,
+                &db_path,
+                crate::bounded_fs::ReadControl::default(),
+            )
+            .map_err(|error| sqlite_bounded_error("verify writable index identity", error))?
+            .ok_or_else(sqlite_snapshot_changed)?;
         let identity_matches = if existing_identity.is_some() {
-            opened.identity == expected_identity
+            opened_identity == expected_identity
         } else {
-            opened.identity.same_object(expected_identity)
+            opened_identity.same_object(expected_identity)
         };
         if !identity_matches {
             return Err(sqlite_snapshot_changed());
         }
-        drop(created_file);
+        verify_sqlite_main_file_identity(&conn, expected_identity)?;
         conn.execute_batch(
             r#"
             PRAGMA foreign_keys = ON;
@@ -2831,21 +2919,24 @@ impl Store {
             "#,
         )?;
         let store = Self::from_connection(conn, db_path, None, None);
-        store.init_schema()?;
+        if initialize_schema {
+            store.init_schema()?;
+        }
         parent
             .verify()
             .map_err(|error| sqlite_bounded_error("verify writable index parent", error))?;
-        let opened = crate::bounded_fs::read_regular_file_with_capability(
-            &parent,
-            store.db_path(),
-            u64::MAX,
-            0,
-            crate::bounded_fs::ReadControl::default(),
-        )
-        .map_err(|error| sqlite_bounded_error("verify writable index identity", error))?;
-        if !opened.identity.same_object(expected_identity) {
+        let opened_identity =
+            crate::bounded_fs::inspect_direct_regular_file_identity_with_capability(
+                &parent,
+                store.db_path(),
+                crate::bounded_fs::ReadControl::default(),
+            )
+            .map_err(|error| sqlite_bounded_error("verify writable index identity", error))?
+            .ok_or_else(sqlite_snapshot_changed)?;
+        if !opened_identity.same_object(expected_identity) {
             return Err(sqlite_snapshot_changed());
         }
+        verify_sqlite_main_file_identity(&store.conn, expected_identity)?;
         validate_writable_sidecars(&parent, store.db_path())?;
         Ok(store)
     }
@@ -7559,6 +7650,42 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_and_writable_reopen_preserve_active_sqlite_locks() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("active.db");
+        let writer = Store::open(&path).unwrap();
+        writer
+            .insert_symbol(
+                "before_snapshot",
+                "function",
+                "src/lib.rs",
+                1,
+                2,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let snapshot = Store::open_read_only(&path).unwrap();
+        assert_eq!(snapshot.symbol_count().unwrap(), 1);
+        drop(snapshot);
+
+        let reopened = Store::open_existing_without_migration(&path).unwrap();
+        assert!(reopened.schema_current().unwrap());
+        reopened.set_meta("reopened_writer", "ready").unwrap();
+        writer.set_meta("original_writer", "ready").unwrap();
+
+        assert_eq!(
+            reopened.meta_value("original_writer").unwrap().as_deref(),
+            Some("ready")
+        );
+        assert_eq!(
+            writer.meta_value("reopened_writer").unwrap().as_deref(),
+            Some("ready")
+        );
+    }
+
+    #[test]
     fn read_only_snapshot_rejects_results_after_the_source_wal_advances() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("active.db");
@@ -7720,7 +7847,8 @@ mod tests {
                 deadline: Instant::now() + Duration::from_secs(1),
             },
         )
-        .unwrap_err();
+        .err()
+        .unwrap();
         assert_eq!(
             too_large.sqlite_error_code(),
             Some(rusqlite::ErrorCode::TooBig)
@@ -7733,7 +7861,8 @@ mod tests {
                 deadline: Instant::now(),
             },
         )
-        .unwrap_err();
+        .err()
+        .unwrap();
         assert_eq!(
             timed_out.sqlite_error_code(),
             Some(rusqlite::ErrorCode::OperationInterrupted)

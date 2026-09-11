@@ -47,8 +47,12 @@ pub fn do_init(root: &Path, opts: InitOpts) -> Result<(), Box<dyn std::error::Er
 
     // Stack detection informs the drafting prompt, but CONTEXT stays lean and
     // stack-agnostic: commands and layout are derivable and belong in CLAUDE.md.
-    let stack = detect_stack(root);
-    created.push(format!("auto-detected stack: {}", stack.label));
+    let Stack {
+        label: stack_label,
+        warnings: stack_warnings,
+    } = detect_stack(root);
+    warnings.extend(stack_warnings);
+    created.push(format!("auto-detected stack: {stack_label}"));
 
     let mastermind_dir = root.join(".mastermind");
     let tasks_dir = mastermind_dir.join("tasks");
@@ -115,7 +119,7 @@ pub fn do_init(root: &Path, opts: InitOpts) -> Result<(), Box<dyn std::error::Er
     if context_created {
         created.push(format!(
             "CONTEXT.md (lean; detected stack: {})",
-            stack.label
+            stack_label
         ));
     } else {
         skipped.push("CONTEXT.md (already exists — pass --force to overwrite)".into());
@@ -310,13 +314,68 @@ fn refresh_project_history(root: &Path, db_path: &Path) -> Result<u32, String> {
 /// one, else the generic scaffold).
 struct Stack {
     label: String,
+    warnings: Vec<String>,
 }
 
 impl Stack {
-    fn new(label: impl Into<String>) -> Self {
+    fn new(label: impl Into<String>, warnings: Vec<String>) -> Self {
         Stack {
             label: label.into(),
+            warnings,
         }
+    }
+}
+
+const STACK_MANIFEST_LIMIT: u64 = 1024 * 1024;
+
+struct StackManifest {
+    name: &'static str,
+    contents: Option<String>,
+    error: Option<String>,
+}
+
+impl StackManifest {
+    fn present(&self) -> bool {
+        self.contents.is_some() || self.error.is_some()
+    }
+
+    fn contains(&self, needle: &str) -> bool {
+        self.contents
+            .as_deref()
+            .is_some_and(|contents| contents.contains(needle))
+    }
+
+    fn warning(&self) -> Option<String> {
+        self.error.as_ref().map(|error| {
+            format!(
+                "stack detection ignored unsafe or unreadable `{}`: {error}",
+                self.name
+            )
+        })
+    }
+}
+
+fn read_stack_manifest(root: &Path, name: &'static str) -> StackManifest {
+    match mmcg::bounded_fs::read_optional_repository_text(
+        root,
+        Path::new(name),
+        STACK_MANIFEST_LIMIT,
+    ) {
+        Ok(Some(contents)) => StackManifest {
+            name,
+            contents: Some(contents.to_ascii_lowercase()),
+            error: None,
+        },
+        Ok(None) => StackManifest {
+            name,
+            contents: None,
+            error: None,
+        },
+        Err(error) => StackManifest {
+            name,
+            contents: None,
+            error: Some(error.to_string()),
+        },
     }
 }
 
@@ -325,27 +384,46 @@ impl Stack {
 /// and within Node, mobile and framework wrappers (React Native, Next, Nuxt)
 /// before the bare runtime.
 fn detect_stack(root: &Path) -> Stack {
-    let exists = |name: &str| root.join(name).exists();
-    let read = |name: &str| {
-        fs::read_to_string(root.join(name))
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-    };
+    let cargo = read_stack_manifest(root, "Cargo.toml");
+    let package = read_stack_manifest(root, "package.json");
+    let pyproject = read_stack_manifest(root, "pyproject.toml");
+    let requirements = read_stack_manifest(root, "requirements.txt");
+    let pipfile = read_stack_manifest(root, "Pipfile");
+    let setup_py = read_stack_manifest(root, "setup.py");
+    let go_mod = read_stack_manifest(root, "go.mod");
+    let composer = read_stack_manifest(root, "composer.json");
+    let pom = read_stack_manifest(root, "pom.xml");
+    let gradle = read_stack_manifest(root, "build.gradle");
+    let manifests = [
+        &cargo,
+        &package,
+        &pyproject,
+        &requirements,
+        &pipfile,
+        &setup_py,
+        &go_mod,
+        &composer,
+        &pom,
+        &gradle,
+    ];
+    let warnings = manifests
+        .iter()
+        .filter_map(|manifest| manifest.warning())
+        .collect::<Vec<_>>();
 
-    if exists("Cargo.toml") {
-        if read("Cargo.toml").contains("tauri") {
-            return Stack::new("rust (tauri desktop)");
+    if cargo.contents.is_some() {
+        if cargo.contains("tauri") {
+            return Stack::new("rust (tauri desktop)", warnings);
         }
-        return Stack::new("rust");
+        return Stack::new("rust", warnings);
     }
 
-    let pkg = read("package.json");
-    if exists("package.json") {
+    if let Some(pkg) = package.contents.as_deref() {
         if pkg.contains("\"react-native\"") || pkg.contains("\"expo\"") {
-            return Stack::new("react native");
+            return Stack::new("react native", warnings);
         }
         if pkg.contains("\"electron\"") {
-            return Stack::new("node (electron desktop)");
+            return Stack::new("node (electron desktop)", warnings);
         }
         // Frameworks, most-specific first (Next wraps React, Nuxt wraps Vue).
         let frontend = if pkg.contains("\"next\"") {
@@ -364,66 +442,43 @@ fn detect_stack(root: &Path) -> Stack {
             None
         };
         if let Some(fw) = frontend {
-            return Stack::new(format!("node ({fw})"));
+            return Stack::new(format!("node ({fw})"), warnings);
         }
         let api = [
             "express", "fastify", "@nestjs", "koa", "graphql", "apollo", "hapi",
         ];
         if api.iter().any(|f| pkg.contains(f)) {
-            return Stack::new("node (api)");
+            return Stack::new("node (api)", warnings);
         }
-        return Stack::new("node");
+        return Stack::new("node", warnings);
     }
 
-    if exists("pyproject.toml")
-        || exists("requirements.txt")
-        || exists("Pipfile")
-        || exists("setup.py")
-    {
-        let py = read("pyproject.toml")
-            + &read("requirements.txt")
-            + &read("Pipfile")
-            + &read("setup.py");
-        if py.contains("fastapi") {
-            return Stack::new("python (fastapi)");
+    let python = [&pyproject, &requirements, &pipfile, &setup_py];
+    if python.iter().any(|manifest| manifest.contents.is_some()) {
+        if python.iter().any(|manifest| manifest.contains("fastapi")) {
+            return Stack::new("python (fastapi)", warnings);
         }
-        if py.contains("django") {
-            return Stack::new("python (django)");
+        if python.iter().any(|manifest| manifest.contains("django")) {
+            return Stack::new("python (django)", warnings);
         }
-        if py.contains("flask") {
-            return Stack::new("python (flask)");
+        if python.iter().any(|manifest| manifest.contains("flask")) {
+            return Stack::new("python (flask)", warnings);
         }
-        return Stack::new("python");
+        return Stack::new("python", warnings);
     }
 
-    if exists("go.mod") {
-        return Stack::new("go");
+    if go_mod.contents.is_some() {
+        return Stack::new("go", warnings);
     }
 
-    if !root_has_manifest(root) {
+    if !manifests.iter().any(|manifest| manifest.present()) {
         let ecos = monorepo_ecosystems(root);
         if ecos.len() >= 2 {
-            return Stack::new(format!("monorepo ({})", ecos.join(", ")));
+            return Stack::new(format!("monorepo ({})", ecos.join(", ")), warnings);
         }
     }
 
-    Stack::new("generic")
-}
-
-/// Any root-level manifest means the repo has its own stack (one package), so it
-/// isn't a bare-root monorepo even when subdirectories also carry manifests.
-fn root_has_manifest(root: &Path) -> bool {
-    const MANIFESTS: &[&str] = &[
-        "package.json",
-        "Cargo.toml",
-        "pyproject.toml",
-        "requirements.txt",
-        "go.mod",
-        "composer.json",
-        "pom.xml",
-        "build.gradle",
-    ];
-    MANIFESTS.iter().any(|m| root.join(m).exists())
+    Stack::new("generic", warnings)
 }
 
 /// Distinct language ecosystems whose manifest lives in a *subdirectory*, via
@@ -651,6 +706,39 @@ mod tests {
         fs::write(d.path().join("go.mod"), "module x\n\ngo 1.22").unwrap();
         let s = detect_stack(d.path());
         assert_eq!(s.label, "go");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detect_stack_does_not_read_a_symlinked_manifest() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let manifest = outside.path().join("package.json");
+        fs::write(&manifest, r#"{"dependencies":{"react":"18"}}"#).unwrap();
+        symlink(&manifest, root.path().join("package.json")).unwrap();
+
+        let stack = detect_stack(root.path());
+
+        assert_eq!(stack.label, "generic");
+        assert_eq!(stack.warnings.len(), 1);
+        assert!(stack.warnings[0].contains("package.json"));
+    }
+
+    #[test]
+    fn detect_stack_does_not_read_an_oversized_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join("package.json");
+        let file = fs::File::create(&manifest).unwrap();
+        file.set_len(STACK_MANIFEST_LIMIT + 1).unwrap();
+        drop(file);
+
+        let stack = detect_stack(root.path());
+
+        assert_eq!(stack.label, "generic");
+        assert_eq!(stack.warnings.len(), 1);
+        assert!(stack.warnings[0].contains("limit"));
     }
 
     #[test]

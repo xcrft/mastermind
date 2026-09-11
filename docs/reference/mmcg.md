@@ -262,6 +262,8 @@ mmcg miner profile . --deep                    # explicit claude -p compatibilit
 # Existing profiles are capped at 1 MiB and must be regular, no-follow files.
 # Publication is serialized and atomic; concurrent mines cannot lose a contribution.
 # A manual edit is rebased with bounded retries and is never silently overwritten.
+# Git history reads are bounded; an oversized patch sample shrinks by whole commits.
+# --deep caps its prompt/output, rejects malformed sections, and times out after 180s.
 # Subdirectories and linked worktrees share one repository contribution.
 # Independent clones remain separate; repeated samples do not prove quality.
 

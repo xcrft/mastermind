@@ -20,9 +20,11 @@
 use super::store::{self, Counts};
 use crate::bounded_fs::{AtomicWriteExpectation, BoundedReadError, ReadControl, RootCapability};
 use crate::diff::{run_bounded_git_with_limit, WorkingTreeDiffError};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Drop a repo's contribution once it hasn't been mined in this many days.
 const RETENTION_DAYS: i64 = 365;
@@ -38,6 +40,13 @@ const PROFILE_REVISION_PREFIX: &str = "<!-- mastermind-style:store-revision:";
 const MAX_STYLE_PROFILE_SIZE: u64 = crate::indexer::MAX_HISTORY_ARTIFACT_SIZE;
 const PROFILE_LOCK_FILE: &str = ".style-profile.lock";
 const PROFILE_WRITE_ATTEMPTS: usize = 3;
+const DEEP_PROMPT_LIMIT: usize = 24 * 1024;
+const DEEP_OUTPUT_LIMIT: usize = 64 * 1024;
+const DEEP_COMMIT_FIELD_LIMIT: usize = 160;
+const DEEP_CODE_SAMPLE_LIMIT: usize = 6000;
+const DEEP_TIMEOUT: Duration = Duration::from_secs(180);
+const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const INTERPRETED_HEADING: &str = "## Design patterns & tendencies (interpreted)";
 
 /// `doctor` nudges to re-mine once the author has this many new commits since.
 const STALE_COMMITS: usize = 25;
@@ -1502,35 +1511,168 @@ fn synthesize(
     lines: &[AddedLine],
 ) -> Result<String, String> {
     let out = run_claude_capture(root, &synthesis_prompt(rules, commits, lines))?;
+    validate_synthesis_output(&out)
+}
+
+fn validate_synthesis_output(out: &str) -> Result<String, String> {
     let trimmed = out.trim();
     if trimmed.is_empty() {
         return Err("claude returned no output".to_string());
+    }
+    let mut lines = trimmed.lines();
+    if lines.next() != Some(INTERPRETED_HEADING) {
+        return Err("claude output did not start with the required section heading".into());
+    }
+    if lines.clone().any(|line| line.trim_start().starts_with('#')) {
+        return Err("claude output contained an unexpected extra heading".into());
+    }
+    let bullets = lines.filter(|line| line.starts_with("- ")).count();
+    if !(1..=8).contains(&bullets) {
+        return Err(format!(
+            "claude output contained {bullets} bullets; expected 1 to 8"
+        ));
+    }
+    if trimmed
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+        || trimmed.contains("```")
+        || trimmed.lines().any(|line| line.trim() == "---")
+        || trimmed.contains("<!-- mastermind-style:")
+    {
+        return Err("claude output contained reserved profile control markup".into());
     }
     Ok(trimmed.to_string())
 }
 
 fn run_claude_capture(root: &Path, prompt: &str) -> Result<String, String> {
-    let out = Command::new("claude")
+    if prompt.len() > DEEP_PROMPT_LIMIT {
+        return Err(format!(
+            "claude prompt has {} bytes, limit is {DEEP_PROMPT_LIMIT}",
+            prompt.len()
+        ));
+    }
+    let claude = crate::setup::resolve_native("claude", root)
+        .map_err(|error| format!("resolve claude: {error}"))?;
+    let mut child = Command::new(claude)
         .arg("-p")
         .arg(prompt)
         .current_dir(root)
-        .stdin(std::process::Stdio::null())
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| {
             format!("spawn claude: {e} — is the Claude Code CLI installed and on PATH?")
         })?;
-    if !out.status.success() {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "capture claude stdout failed".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "capture claude stderr failed".to_string())?;
+    let stdout = read_bounded_pipe(stdout, DEEP_OUTPUT_LIMIT);
+    let stderr = read_bounded_pipe(stderr, DEEP_OUTPUT_LIMIT);
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < DEEP_TIMEOUT => {
+                std::thread::sleep(PROCESS_POLL_INTERVAL);
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "claude timed out after {} seconds",
+                    DEEP_TIMEOUT.as_secs()
+                ));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("wait for claude: {error}"));
+            }
+        }
+    };
+    let (stdout, stdout_exceeded) = stdout
+        .recv_timeout(Duration::from_secs(1))
+        .map_err(|_| "capture claude stdout did not finish".to_string())??;
+    let (stderr, stderr_exceeded) = stderr
+        .recv_timeout(Duration::from_secs(1))
+        .map_err(|_| "capture claude stderr did not finish".to_string())??;
+    if stdout_exceeded || stderr_exceeded {
+        return Err(format!(
+            "claude output exceeded the {DEEP_OUTPUT_LIMIT}-byte limit"
+        ));
+    }
+    if !status.success() {
         // `claude -p` prints its diagnostics (auth, rate limit) to stdout.
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&stderr);
+        let stdout = String::from_utf8_lossy(&stdout);
         let detail = if stderr.trim().is_empty() {
             stdout.trim()
         } else {
             stderr.trim()
         };
-        return Err(format!("claude exited with {}: {detail}", out.status));
+        return Err(format!(
+            "claude exited with {status}: {}",
+            diagnostic_excerpt(detail)
+        ));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    String::from_utf8(stdout).map_err(|_| "claude output was not valid UTF-8".into())
+}
+
+fn read_bounded_pipe<R: Read + Send + 'static>(
+    mut reader: R,
+    limit: usize,
+) -> mpsc::Receiver<Result<(Vec<u8>, bool), String>> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut retained = Vec::new();
+        let mut exceeded = false;
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let count = match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => count,
+                Err(error) => {
+                    let _ = sender.send(Err(format!("read claude output: {error}")));
+                    return;
+                }
+            };
+            if retained.len() < limit + 1 {
+                let keep = count.min(limit + 1 - retained.len());
+                retained.extend_from_slice(&buffer[..keep]);
+            }
+            exceeded |= retained.len() > limit;
+        }
+        let _ = sender.send(Ok((retained, exceeded)));
+    });
+    receiver
+}
+
+fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> &str {
+    let mut end = value.len().min(max_bytes);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
+fn diagnostic_excerpt(value: &str) -> String {
+    let clean: String = value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    truncate_utf8_bytes(clean.trim(), 4096).to_string()
 }
 
 fn synthesis_prompt(rules: &[StyleRule], commits: &[Commit], lines: &[AddedLine]) -> String {
@@ -1544,11 +1686,13 @@ fn synthesis_prompt(rules: &[StyleRule], commits: &[Commit], lines: &[AddedLine]
         .iter()
         .take(40)
         .map(|c| {
+            let subject = truncate_utf8_bytes(c.subject.trim(), DEEP_COMMIT_FIELD_LIMIT);
             if c.body.is_empty() {
-                format!("- {}", c.subject)
+                format!("- {subject}")
             } else {
-                let body: String = c.body.replace('\n', " ").chars().take(200).collect();
-                format!("- {}\n    {body}", c.subject)
+                let body = c.body.replace('\n', " ");
+                let body = truncate_utf8_bytes(body.trim(), DEEP_COMMIT_FIELD_LIMIT);
+                format!("- {subject}\n    {body}")
             }
         })
         .collect::<Vec<_>>()
@@ -1556,10 +1700,12 @@ fn synthesis_prompt(rules: &[StyleRule], commits: &[Commit], lines: &[AddedLine]
 
     let mut code = String::new();
     for l in lines.iter().filter(|l| l.text.trim().len() > 3) {
-        if code.len() > 6000 {
+        if code.len() >= DEEP_CODE_SAMPLE_LIMIT {
             break;
         }
-        code.push_str(l.text.trim_end());
+        let remaining = DEEP_CODE_SAMPLE_LIMIT - code.len();
+        let line = truncate_utf8_bytes(l.text.trim_end(), remaining.saturating_sub(1));
+        code.push_str(line);
         code.push('\n');
     }
 
@@ -2368,6 +2514,50 @@ diff --git a/app/bar.ts b/app/bar.ts
         assert!(p.contains("Indents with 4-space indentation"));
         assert!(p.contains("feat: do thing"));
         assert!(p.contains("let x = compute();"));
+    }
+
+    #[test]
+    fn synthesis_prompt_bounds_individual_untrusted_records() {
+        let commits = vec![Commit {
+            subject: "subject".repeat(20_000),
+            body: "body".repeat(20_000),
+        }];
+        let lines = vec![AddedLine {
+            lang: Lang::Rust,
+            text: "é".repeat(20_000),
+        }];
+        let prompt = synthesis_prompt(&[], &commits, &lines);
+        assert!(prompt.len() <= DEEP_PROMPT_LIMIT, "{}", prompt.len());
+        assert!(!prompt.contains(&"subject".repeat(100)));
+        assert!(!prompt.contains(&"é".repeat(4000)));
+    }
+
+    #[test]
+    fn synthesis_output_must_be_a_bounded_managed_section() {
+        let valid = format!("{INTERPRETED_HEADING}\n\n- Uses typed boundaries (3 public parsers).");
+        assert_eq!(validate_synthesis_output(&valid).unwrap(), valid);
+
+        for invalid in [
+            "- Missing the required heading.".to_string(),
+            format!("{INTERPRETED_HEADING}\n\n{}", "- item\n".repeat(9)),
+            format!("{INTERPRETED_HEADING}\n\n- item\n\n## Extra heading"),
+            format!("{INTERPRETED_HEADING}\n\n- item\n{MANAGED_END}"),
+            format!("{INTERPRETED_HEADING}\n\n- item\n---"),
+            format!("{INTERPRETED_HEADING}\n\n- item\u{1b}[31m"),
+            format!("{INTERPRETED_HEADING}\n\n```text\n- item\n```"),
+        ] {
+            assert!(validate_synthesis_output(&invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn deep_output_reader_retains_only_the_bounded_prefix() {
+        let output = read_bounded_pipe(std::io::Cursor::new(vec![b'x'; 128]), 32)
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(output.0.len(), 33);
+        assert!(output.1);
     }
 
     #[test]

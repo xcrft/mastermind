@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Style mining now bounds and times out every Git history query. Provenance uses
+  compact Git aggregates, freshness counts without materializing commit lines,
+  and oversized patch samples shrink while recording the actual sample size.
 - Generated style profiles now carry a deterministic revision of the aggregate
   that produced them. Diagnostics fail when `style.db` commits but `style.md`
   publication does not, instead of reporting a stale profile as fresh.

@@ -2426,7 +2426,7 @@ mod tests {
             Cmd::History {
                 document_graph: Some(path),
                 ..
-            } if path == PathBuf::from(".mastermind/research/graph.json")
+            } if path == std::path::Path::new(".mastermind/research/graph.json")
         ));
 
         let query_history_with_graph = Cli::try_parse_from([
@@ -2443,7 +2443,7 @@ mod tests {
             Cmd::Query(QueryCmd::History {
                 document_graph: Some(path),
                 ..
-            }) if path == PathBuf::from(".mastermind/research/graph.json")
+            }) if path == std::path::Path::new(".mastermind/research/graph.json")
         ));
 
         let why = Cli::try_parse_from(["mastermind", "why", "idempotency"]).unwrap();

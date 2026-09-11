@@ -2842,14 +2842,8 @@ impl Store {
             crate::bounded_fs::prepare_file_target(db_path)
                 .map_err(|error| sqlite_bounded_error("prepare writable index", error))?
         } else {
-            let db_path = std::path::absolute(db_path)
-                .map_err(|error| sqlite_io_error("resolve existing writable index", error))?;
-            let parent_path = db_path
-                .parent()
-                .ok_or_else(|| rusqlite::Error::InvalidPath(db_path.clone()))?;
-            let parent = crate::bounded_fs::RootCapability::open(parent_path)
-                .map_err(|error| sqlite_bounded_error("open writable index parent", error))?;
-            (parent, db_path)
+            crate::bounded_fs::open_file_target(db_path)
+                .map_err(|error| sqlite_bounded_error("open writable index parent", error))?
         };
         let existing_identity =
             match crate::bounded_fs::inspect_direct_regular_file_identity_with_capability(

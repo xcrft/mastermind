@@ -56,6 +56,7 @@ const BASELINE_BLOB_BATCH_OUTPUT_LIMIT: usize =
 const BASELINE_BLOB_TOTAL_LIMIT: usize = 64 * 1024 * 1024;
 const DEFAULT_GIT_TIMEOUT_MS: u64 = 30_000;
 const MAX_GIT_TIMEOUT_MS: u64 = 300_000;
+const MAX_GIT_PATHSPEC_BYTES: usize = 4096;
 /// Must stay a real `sleep`. `park_timeout` returns instantly when the thread
 /// holds an unpark token, and the sibling drain threads talk over `mpsc`, which
 /// parks and unparks this very thread — a stray token turns the wait into a
@@ -378,9 +379,13 @@ pub(crate) fn repository_git_command() -> Command {
         "GIT_INDEX_FILE",
         "GIT_OBJECT_DIRECTORY",
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_QUARANTINE_PATH",
         "GIT_SHALLOW_FILE",
         "GIT_GRAFT_FILE",
         "GIT_REPLACE_REF_BASE",
+        "GIT_NAMESPACE",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
         "GIT_PREFIX",
         "GIT_IMPLICIT_WORK_TREE",
         "GIT_NO_REPLACE_OBJECTS",
@@ -1186,6 +1191,144 @@ fn run_bounded_git_controlled(
         success: status.success(),
         stdout,
     })
+}
+
+fn run_bounded_git_status_until(
+    repo: &Path,
+    args: &[&str],
+    deadline: Instant,
+) -> Result<bool, WorkingTreeDiffError> {
+    let start = Instant::now();
+    if start >= deadline {
+        return Err(WorkingTreeDiffError::GitTimeout);
+    }
+    let mut child = git_command(args)
+        .current_dir(repo)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| WorkingTreeDiffError::GitUnavailable)?;
+    let timeout = git_timeout().min(deadline.saturating_duration_since(start));
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status.success()),
+            Ok(None) if start.elapsed() < timeout => {
+                std::thread::sleep(CHILD_POLL_INTERVAL);
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(WorkingTreeDiffError::GitTimeout);
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(WorkingTreeDiffError::GitUnavailable);
+            }
+        }
+    }
+}
+
+/// Run output-free, bounded existence probes against Git's tracked-file index.
+/// Results retain the input order. A non-repository returns all `false`.
+#[doc(hidden)]
+pub fn tracked_pathspec_presence(
+    repo: &Path,
+    pathspecs: &[&str],
+) -> Result<Vec<bool>, WorkingTreeDiffError> {
+    if pathspecs.iter().any(|pathspec| {
+        pathspec.is_empty() || pathspec.len() > MAX_GIT_PATHSPEC_BYTES || pathspec.contains('\0')
+    }) {
+        return Err(WorkingTreeDiffError::SnapshotChanged);
+    }
+    let deadline = Instant::now() + git_timeout();
+    if !run_bounded_git_status_until(repo, &["rev-parse", "--git-dir"], deadline)? {
+        return Ok(vec![false; pathspecs.len()]);
+    }
+    pathspecs
+        .iter()
+        .map(|pathspec| {
+            run_bounded_git_status_until(
+                repo,
+                &[
+                    "-c",
+                    "core.fsmonitor=false",
+                    "ls-files",
+                    "--error-unmatch",
+                    "--",
+                    pathspec,
+                ],
+                deadline,
+            )
+        })
+        .collect()
+}
+
+/// Return repository-relative paths changed between a validated commit and the
+/// current HEAD under one literal repository prefix.
+#[doc(hidden)]
+pub fn changed_paths_under(
+    repo: &Path,
+    git_ref: &str,
+    prefix: &str,
+) -> Result<Vec<String>, WorkingTreeDiffError> {
+    let prefix_path = Path::new(prefix);
+    if prefix.is_empty()
+        || prefix.len() > MAX_GIT_PATHSPEC_BYTES
+        || prefix.contains('\0')
+        || prefix_path.is_absolute()
+        || prefix_path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(WorkingTreeDiffError::SnapshotChanged);
+    }
+    let deadline = Some(Instant::now() + git_timeout());
+    let baseline_oid = resolve_commit_controlled(repo, git_ref, deadline, None)?;
+    let head_oid = resolve_head_controlled(repo, deadline, None)?;
+    let literal_pathspec = format!(":(top,literal){prefix}");
+    let output = run_bounded_git_controlled(
+        repo,
+        &[
+            "-c",
+            "diff.external=",
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            &baseline_oid,
+            &head_oid,
+            "--",
+            &literal_pathspec,
+        ],
+        None,
+        GIT_OUTPUT_LIMIT,
+        deadline,
+        None,
+    )?;
+    if !output.success {
+        return Err(WorkingTreeDiffError::InvalidRef);
+    }
+    let mut paths = BTreeSet::new();
+    for raw in nul_fields(&output.stdout) {
+        let path = std::str::from_utf8(raw)
+            .map_err(|_| WorkingTreeDiffError::SnapshotChanged)?
+            .to_string();
+        let parsed = Path::new(&path);
+        if parsed.is_absolute()
+            || parsed
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+            || !parsed.starts_with(prefix_path)
+        {
+            return Err(WorkingTreeDiffError::SnapshotChanged);
+        }
+        paths.insert(path);
+    }
+    Ok(paths.into_iter().collect())
 }
 
 #[cfg(test)]

@@ -7,10 +7,11 @@
 use mmcg::indexer::Indexer;
 use mmcg::store::Store;
 use std::collections::BTreeSet;
+#[cfg(test)]
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use crate::templates;
 
@@ -93,17 +94,22 @@ pub fn do_init(root: &Path, opts: InitOpts) -> Result<(), Box<dyn std::error::Er
         );
     }
 
-    let flat_specs = collect_flat_specs(&tasks_dir);
-    if !flat_specs.is_empty() {
-        let example = flat_specs.first().cloned().unwrap_or_default();
-        let stem = example.strip_suffix(".md").unwrap_or(&example);
-        warnings.push(format!(
-            "found {n} flat spec file(s) under `.mastermind/tasks/` (0.6.x layout, e.g. `{example}`). \
-             Migrate each `NNN-name.md` to `NNN-name/spec.md`. Example: \
-             `mkdir -p .mastermind/tasks/{stem} && mv .mastermind/tasks/{example} .mastermind/tasks/{stem}/spec.md` \
-             — flat specs are no longer indexed.",
-            n = flat_specs.len(),
-        ));
+    match mmcg::task_scaffold::discover_legacy_flat_specs(root) {
+        Ok(flat_specs) if !flat_specs.is_empty() => {
+            let example = flat_specs.first().cloned().unwrap_or_default();
+            let stem = example.strip_suffix(".md").unwrap_or(&example);
+            warnings.push(format!(
+                "found {n} flat spec file(s) under `.mastermind/tasks/` (0.6.x layout, e.g. `{example}`). \
+                 Migrate each `NNN-name.md` to `NNN-name/spec.md`. Example: \
+                 `mkdir -p .mastermind/tasks/{stem} && mv .mastermind/tasks/{example} .mastermind/tasks/{stem}/spec.md` \
+                 — flat specs are no longer indexed.",
+                n = flat_specs.len(),
+            ));
+        }
+        Ok(_) => {}
+        Err(error) => warnings.push(format!(
+            "could not inspect legacy flat specs under `.mastermind/tasks/`: {error}"
+        )),
     }
 
     let context_path = root.join("CONTEXT.md");
@@ -671,39 +677,25 @@ fn detect_stack(root: &Path) -> Stack {
     }
 
     if !manifests.iter().any(|manifest| manifest.present()) {
-        let ecos = monorepo_ecosystems(root);
-        if ecos.len() >= 2 {
-            return Stack::new(format!("monorepo ({})", ecos.join(", ")), warnings);
+        match monorepo_ecosystems(root) {
+            Ok(ecosystems) if ecosystems.len() >= 2 => {
+                return Stack::new(format!("monorepo ({})", ecosystems.join(", ")), warnings);
+            }
+            Ok(_) => {}
+            Err(error) => warnings.push(format!(
+                "stack detection could not inspect tracked nested manifests: {error}"
+            )),
         }
     }
 
     Stack::new("generic", warnings)
 }
 
-fn has_tracked_manifest(root: &Path, pathspec: &str) -> bool {
-    Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args([
-            "-c",
-            "core.fsmonitor=false",
-            "ls-files",
-            "--error-unmatch",
-            "--",
-            pathspec,
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
 /// Distinct language ecosystems whose manifest lives in a *subdirectory*, via
 /// `git ls-files` (tracked files only). Existence probes discard stdout, so a
 /// repository with many packages cannot make `init` retain an unbounded path
 /// listing. Empty when `root` isn't a Git repository.
-fn monorepo_ecosystems(root: &Path) -> Vec<&'static str> {
+fn monorepo_ecosystems(root: &Path) -> Result<Vec<&'static str>, String> {
     let manifest_groups: &[(&str, &[&str])] = &[
         ("javascript", &["*/package.json"]),
         ("rust", &["*/Cargo.toml"]),
@@ -712,38 +704,27 @@ fn monorepo_ecosystems(root: &Path) -> Vec<&'static str> {
         ("php", &["*/composer.json"]),
         ("java", &["*/pom.xml", "*/build.gradle"]),
     ];
+    let probes = manifest_groups
+        .iter()
+        .flat_map(|(ecosystem, pathspecs)| {
+            pathspecs
+                .iter()
+                .map(move |pathspec| (*ecosystem, *pathspec))
+        })
+        .collect::<Vec<_>>();
+    let pathspecs = probes
+        .iter()
+        .map(|(_, pathspec)| *pathspec)
+        .collect::<Vec<_>>();
+    let presence = mmcg::diff::tracked_pathspec_presence(root, &pathspecs)
+        .map_err(|error| error.to_string())?;
     let mut ecosystems = BTreeSet::new();
-    for (ecosystem, pathspecs) in manifest_groups {
-        if pathspecs
-            .iter()
-            .any(|pathspec| has_tracked_manifest(root, pathspec))
-        {
-            ecosystems.insert(*ecosystem);
+    for ((ecosystem, _), present) in probes.into_iter().zip(presence) {
+        if present {
+            ecosystems.insert(ecosystem);
         }
     }
-    ecosystems.into_iter().collect()
-}
-
-fn collect_flat_specs(tasks_dir: &Path) -> Vec<String> {
-    let Ok(entries) = fs::read_dir(tasks_dir) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for dirent in entries.flatten() {
-        let path = dirent.path();
-        if !path.is_file() {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        if !name.ends_with(".md") || name.starts_with('_') || name.starts_with('.') {
-            continue;
-        }
-        out.push(name.to_string());
-    }
-    out.sort();
-    out
+    Ok(ecosystems.into_iter().collect())
 }
 
 fn draft_prompt(context: Option<&Path>, claude_md: Option<&Path>) -> String {

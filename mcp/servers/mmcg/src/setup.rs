@@ -1410,7 +1410,7 @@ fn error_hint(class: &str) -> Option<String> {
     }
 }
 
-fn resolve_native(name: &str, root: &Path) -> Result<PathBuf, String> {
+pub(crate) fn resolve_native(name: &str, root: &Path) -> Result<PathBuf, String> {
     let root = root
         .canonicalize()
         .map_err(|_| "root_resolution_failed".to_string())?;

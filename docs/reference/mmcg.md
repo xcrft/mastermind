@@ -578,7 +578,10 @@ collide. `mmcg team map LOCK` reopens those
 indexes through the read-only snapshot path, proves source/index freshness, and
 returns a bounded repository-namespaced graph. Internal imports remain
 Tree-sitter evidence; cross-repository edges are only explicit
-`team-manifest` claims and are never inferred.
+`team-manifest` claims and are never inferred. Database and WAL hashing retains
+one parent-directory capability per repository inspection and rejects path
+substitution, symlinks, and special files while checking identity before and
+after each bounded stream.
 
 The fixed read-only `mmcg_team_map` MCP tool accepts a locked manifest inside
 the repository served by that MCP process only when the server operator has

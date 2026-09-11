@@ -11,10 +11,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
-use std::fs::File;
-use std::io::Read;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 pub const API_VERSION: &str = "mastermind-team/v1";
 const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
@@ -463,105 +462,83 @@ fn resolve_repositories(
     Ok(output)
 }
 
-fn modified(metadata: &std::fs::Metadata) -> Option<SystemTime> {
-    metadata.modified().ok()
+struct DigestWriter(Sha256);
+
+impl DigestWriter {
+    fn new() -> Self {
+        Self(Sha256::new())
+    }
+
+    fn finish(self) -> String {
+        crate::hex::encode(&self.0.finalize())
+    }
 }
 
-fn open_index_file(path: &Path) -> std::io::Result<File> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(path)
+impl Write for DigestWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
     }
-    #[cfg(not(unix))]
-    {
-        File::open(path)
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn index_read_error(error: crate::bounded_fs::BoundedReadError) -> TeamError {
+    match error {
+        crate::bounded_fs::BoundedReadError::TooLarge { .. }
+        | crate::bounded_fs::BoundedReadError::InvalidPath
+        | crate::bounded_fs::BoundedReadError::OutsideRoot
+        | crate::bounded_fs::BoundedReadError::NotRegular => TeamError::Contract(
+            "index database/WAL must be bounded regular non-symlink files".into(),
+        ),
+        crate::bounded_fs::BoundedReadError::SnapshotChanged => {
+            TeamError::Stale("index database or WAL changed while it was hashed".into())
+        }
+        crate::bounded_fs::BoundedReadError::Interrupted
+        | crate::bounded_fs::BoundedReadError::DeadlineExceeded => {
+            TeamError::Io("index digest deadline exceeded".into())
+        }
+        crate::bounded_fs::BoundedReadError::Io(error) => TeamError::Io(error.to_string()),
     }
 }
 
 fn hash_regular(
+    root: &crate::bounded_fs::RootCapability,
     path: &Path,
     deadline: Instant,
     total_bytes: &mut u64,
 ) -> Result<Option<(String, u64)>, TeamError> {
-    let initial = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(TeamError::Io(format!("read index metadata: {error}"))),
+    let control = crate::bounded_fs::ReadControl {
+        deadline: Some(deadline),
+        interrupted: None,
     };
-    if !initial.file_type().is_file() || initial.len() > MAX_INDEX_FILE_BYTES {
-        return Err(TeamError::Contract(
-            "index database/WAL must be bounded regular files".into(),
-        ));
-    }
-    let mut file = open_index_file(path).map_err(|error| TeamError::Io(error.to_string()))?;
-    let before = file
-        .metadata()
-        .map_err(|error| TeamError::Io(error.to_string()))?;
-    if !before.is_file()
-        || before.len() > MAX_INDEX_FILE_BYTES
-        || initial.len() != before.len()
-        || modified(&initial) != modified(&before)
+    if crate::bounded_fs::inspect_absent_path(root, path, control)
+        .map_err(index_read_error)?
+        .is_some()
     {
-        return Err(TeamError::Stale(
-            "index database or WAL changed before it was hashed".into(),
-        ));
+        return Ok(None);
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if initial.dev() != before.dev() || initial.ino() != before.ino() {
-            return Err(TeamError::Stale(
-                "index database or WAL identity changed before it was hashed".into(),
-            ));
-        }
-    }
+    let mut writer = DigestWriter::new();
+    let source = crate::bounded_fs::copy_regular_file_with_capability(
+        root,
+        path,
+        MAX_INDEX_FILE_BYTES,
+        control,
+        None,
+        &mut writer,
+    )
+    .map_err(index_read_error)?;
     *total_bytes = total_bytes
-        .checked_add(before.len())
+        .checked_add(source.declared_len)
         .ok_or_else(|| TeamError::Contract("index byte total overflow".into()))?;
     if *total_bytes > MAX_INDEX_TOTAL_BYTES {
         return Err(TeamError::Contract(format!(
             "team indexes exceed the {MAX_INDEX_TOTAL_BYTES}-byte total limit"
         )));
     }
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 128 * 1024];
-    let mut read_bytes = 0_u64;
-    loop {
-        if Instant::now() >= deadline {
-            return Err(TeamError::Io("index digest deadline exceeded".into()));
-        }
-        let count = file
-            .read(&mut buffer)
-            .map_err(|error| TeamError::Io(error.to_string()))?;
-        if count == 0 {
-            break;
-        }
-        read_bytes = read_bytes
-            .checked_add(count as u64)
-            .ok_or_else(|| TeamError::Contract("index byte count overflow".into()))?;
-        if read_bytes > before.len() || read_bytes > MAX_INDEX_FILE_BYTES {
-            return Err(TeamError::Stale(
-                "index database or WAL grew while it was hashed".into(),
-            ));
-        }
-        hasher.update(&buffer[..count]);
-    }
-    let after = file
-        .metadata()
-        .map_err(|error| TeamError::Io(error.to_string()))?;
-    if before.len() != after.len()
-        || read_bytes != after.len()
-        || modified(&before) != modified(&after)
-    {
-        return Err(TeamError::Stale(
-            "index database or WAL changed while it was hashed".into(),
-        ));
-    }
-    Ok(Some((crate::hex::encode(&hasher.finalize()), after.len())))
+    Ok(Some((writer.finish(), source.declared_len)))
 }
 
 fn wal_path(index: &Path) -> PathBuf {
@@ -571,13 +548,14 @@ fn wal_path(index: &Path) -> PathBuf {
 }
 
 fn index_digest(
+    root: &crate::bounded_fs::RootCapability,
     index: &Path,
     deadline: Instant,
     total_bytes: &mut u64,
 ) -> Result<String, TeamError> {
-    let database = hash_regular(index, deadline, total_bytes)?
+    let database = hash_regular(root, index, deadline, total_bytes)?
         .ok_or_else(|| TeamError::Io("index database disappeared".into()))?;
-    let wal = hash_regular(&wal_path(index), deadline, total_bytes)?;
+    let wal = hash_regular(root, &wal_path(index), deadline, total_bytes)?;
     let statement = serde_json::json!({
         "database": {"sha256": database.0, "bytes": database.1},
         "domain": "mastermind/team-index-snapshot/v1",
@@ -599,7 +577,13 @@ fn inspect_repository(
     deadline: Instant,
     total_bytes: &mut u64,
 ) -> Result<(Store, String, String, String), TeamError> {
-    let digest_before = index_digest(&repository.index, deadline, total_bytes)?;
+    let index_parent = repository
+        .index
+        .parent()
+        .ok_or_else(|| TeamError::Contract("repository index has no parent directory".into()))?;
+    let index_root =
+        crate::bounded_fs::RootCapability::open(index_parent).map_err(index_read_error)?;
+    let digest_before = index_digest(&index_root, &repository.index, deadline, total_bytes)?;
     let store = Store::open_read_only_with_deadline(&repository.index, Some(deadline))
         .map_err(|error| TeamError::Io(error.to_string()))?;
     crate::lens::validate_index_snapshot(&store, &repository.root, Some(deadline))
@@ -607,7 +591,12 @@ fn inspect_repository(
     let contract = crate::facts::contract(&store)
         .map_err(|error| TeamError::Stale(format!("{}: {error}", repository.manifest.id)))?;
     let mut verification_bytes = 0_u64;
-    let digest_after = index_digest(&repository.index, deadline, &mut verification_bytes)?;
+    let digest_after = index_digest(
+        &index_root,
+        &repository.index,
+        deadline,
+        &mut verification_bytes,
+    )?;
     if digest_before != digest_after {
         return Err(TeamError::Stale(format!(
             "{} index changed during inspection",
@@ -1101,6 +1090,32 @@ mod tests {
         let mut store = Store::open(&index).unwrap();
         Indexer::new(&root).index_all(&mut store, true).unwrap();
         (root, index)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn team_index_digest_rejects_a_fifo_without_blocking() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("index.db");
+        let raw = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `raw` is a live, NUL-terminated path buffer.
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+        let capability = crate::bounded_fs::RootCapability::open(root.path()).unwrap();
+        let mut total_bytes = 0;
+
+        let error = hash_regular(
+            &capability,
+            &path,
+            Instant::now() + Duration::from_secs(1),
+            &mut total_bytes,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, TeamError::Contract(_)));
+        assert_eq!(total_bytes, 0);
     }
 
     #[test]

@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   use bounded, capability-scoped, no-follow reads on every platform. File
   identity is checked before and after each read, and special-file swaps are
   rejected without blocking on FIFOs.
+- Team-graph database and WAL digests now stream through one retained parent
+  capability per repository inspection. Index path swaps, symlinks, special
+  files, and concurrent identity changes fail closed on every platform.
 - SCIP import now makes one bounded, no-follow private snapshot of the selected
   artifact. Its digest and all three streaming decode passes use those same
   bytes, and the source identity and digest are rechecked before replacing the

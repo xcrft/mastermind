@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Style freshness checks are now read-only and fail closed. A missing
+  `style.md` cannot be reported fresh from a leftover database, and malformed,
+  oversized, linked, missing-store, or invalid-schema state is reported as an
+  unusable profile instead of the optional-profile success state.
 - The user-global style store now creates its parent through a retained
   capability, opens a private pre-created database with SQLite no-follow flags,
   and verifies the database and parent identities around schema setup. Linked

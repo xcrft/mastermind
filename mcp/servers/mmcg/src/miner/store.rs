@@ -11,6 +11,8 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Result as SqlRe
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+const MAX_STYLE_STORE_SIZE: u64 = 64 * 1024 * 1024;
+
 /// Raw per-detector tallies, summable across repos. Keys like `indent.space`.
 pub type Counts = BTreeMap<String, i64>;
 
@@ -59,7 +61,7 @@ impl ProfileStore {
         let existing_identity = match crate::bounded_fs::read_regular_file_with_capability(
             &root,
             &target,
-            u64::MAX,
+            MAX_STYLE_STORE_SIZE,
             0,
             ReadControl::default(),
         ) {
@@ -120,6 +122,32 @@ impl ProfileStore {
              );",
         )?;
         verify_store_identity(&root, &target, expected_identity, false)?;
+        Ok(Self { conn })
+    }
+
+    /// Open an existing profile store for diagnostics without creating its
+    /// parent, database, schema, or SQLite sidecars.
+    pub fn open_read_only(path: &Path) -> SqlResult<Self> {
+        let (root, target) = crate::bounded_fs::open_file_target(path)
+            .map_err(|error| sqlite_path_error("open style store parent", error))?;
+        let expected = crate::bounded_fs::read_regular_file_with_capability(
+            &root,
+            &target,
+            MAX_STYLE_STORE_SIZE,
+            0,
+            ReadControl::default(),
+        )
+        .map_err(|error| sqlite_path_error("inspect style store", error))?
+        .identity;
+        let conn = Connection::open_with_flags(
+            &target,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        verify_store_identity(&root, &target, expected, true)?;
+        conn.execute_batch("PRAGMA query_only = ON;")?;
+        verify_store_identity(&root, &target, expected, true)?;
         Ok(Self { conn })
     }
 
@@ -307,7 +335,7 @@ fn verify_store_identity(
     let opened = crate::bounded_fs::read_regular_file_with_capability(
         root,
         target,
-        u64::MAX,
+        MAX_STYLE_STORE_SIZE,
         0,
         ReadControl::default(),
     )
@@ -518,10 +546,34 @@ mod tests {
         let linked_store = dir.path().join("linked.db");
         symlink(&real_store, &linked_store).unwrap();
         assert!(ProfileStore::open(&linked_store).is_err());
+        assert!(ProfileStore::open_read_only(&linked_store).is_err());
 
         let linked_parent = dir.path().join("linked-parent");
         symlink(&real_parent, &linked_parent).unwrap();
         assert!(ProfileStore::open(&linked_parent.join("other.db")).is_err());
         assert!(!real_parent.join("other.db").exists());
+    }
+
+    #[test]
+    fn read_only_open_does_not_create_or_mutate_store_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing/style.db");
+        assert!(ProfileStore::open_read_only(&missing).is_err());
+        assert!(!missing.exists());
+        assert!(!missing.parent().unwrap().exists());
+
+        let path = dir.path().join("style.db");
+        let mut writable = ProfileStore::open(&path).unwrap();
+        writable
+            .upsert_repo("/repo", &prov(None, 1), &[], &counts(&[("x", 1)]), &[])
+            .unwrap();
+        drop(writable);
+        let read_only = ProfileStore::open_read_only(&path).unwrap();
+        assert_eq!(read_only.aggregate().unwrap().counts["x"], 1);
+        let query_only: i64 = read_only
+            .conn
+            .query_row("PRAGMA query_only", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(query_only, 1);
     }
 }

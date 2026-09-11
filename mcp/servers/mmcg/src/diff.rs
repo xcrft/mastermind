@@ -749,7 +749,7 @@ pub(crate) fn symbols_changed_in_worktree_with_declarations(
     let baseline_oid = resolve_commit_controlled(repo_root, git_ref, deadline, interrupted)?;
     let head_oid = resolve_head_controlled(repo_root, deadline, interrupted)?;
     let (files, files_total, files_truncated, skipped_non_utf8_paths) =
-        collect_worktree_paths_controlled(repo_root, &baseline_oid, deadline, interrupted)?;
+        collect_worktree_paths_controlled(repo_root, &baseline_oid, None, deadline, interrupted)?;
     let snapshot_token = working_tree_snapshot_token_controlled(
         repo_root,
         &head_oid,
@@ -1324,12 +1324,13 @@ fn collect_worktree_paths(
     repo: &Path,
     baseline_oid: &str,
 ) -> Result<(Vec<WorkingTreeChangedFile>, Option<u32>, bool, u32), WorkingTreeDiffError> {
-    collect_worktree_paths_controlled(repo, baseline_oid, None, None)
+    collect_worktree_paths_controlled(repo, baseline_oid, None, None, None)
 }
 
 fn collect_worktree_paths_controlled(
     repo: &Path,
     baseline_oid: &str,
+    ignored_path_prefix: Option<&str>,
     deadline: Option<Instant>,
     interrupted: Option<&dyn Fn() -> bool>,
 ) -> Result<(Vec<WorkingTreeChangedFile>, Option<u32>, bool, u32), WorkingTreeDiffError> {
@@ -1359,6 +1360,9 @@ fn collect_worktree_paths_controlled(
     let mut fields = nul_fields(&diff.stdout);
     while let Some(status) = fields.next() {
         let Some(path) = fields.next() else { break };
+        if ignored_path_prefix.is_some_and(|prefix| path_within_prefix(path, prefix)) {
+            continue;
+        }
         let status = match status.first().copied() {
             Some(b'A') => "added",
             Some(b'D') => "deleted",
@@ -1388,10 +1392,21 @@ fn collect_worktree_paths_controlled(
         return Err(WorkingTreeDiffError::GitUnavailable);
     }
     for path in nul_fields(&untracked.stdout) {
+        if ignored_path_prefix.is_some_and(|prefix| path_within_prefix(path, prefix)) {
+            continue;
+        }
         changed.insert(path.to_vec(), "untracked");
     }
 
     Ok(finalize_changed_paths(changed))
+}
+
+fn path_within_prefix(path: &[u8], prefix: &str) -> bool {
+    let prefix = prefix.as_bytes();
+    path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|tail| tail.starts_with(b"/"))
 }
 
 fn finalize_changed_paths(
@@ -1742,6 +1757,7 @@ pub(crate) fn validate_working_tree_snapshot_controlled(
             files_truncated: false,
             skipped_non_utf8_paths: 0,
             token: expected_token,
+            ignored_path_prefix: None,
         },
         deadline,
         interrupted,
@@ -1753,6 +1769,7 @@ pub(crate) struct WorkingTreeSnapshotExpectation<'a> {
     pub files_truncated: bool,
     pub skipped_non_utf8_paths: u32,
     pub token: &'a str,
+    pub ignored_path_prefix: Option<&'a str>,
 }
 
 /// Recheck the exact bounded changed-file projection used to build a partial
@@ -1766,11 +1783,25 @@ pub(crate) fn validate_working_tree_projection_controlled(
     deadline: Option<Instant>,
     interrupted: Option<&dyn Fn() -> bool>,
 ) -> Result<(), WorkingTreeDiffError> {
+    if expected.ignored_path_prefix.is_some_and(|prefix| {
+        prefix.is_empty()
+            || expected
+                .files
+                .iter()
+                .any(|file| path_within_prefix(file.path.as_bytes(), prefix))
+    }) {
+        return Err(WorkingTreeDiffError::SnapshotChanged);
+    }
     if resolve_head_controlled(repo, deadline, interrupted)? != expected_head_oid {
         return Err(WorkingTreeDiffError::SnapshotChanged);
     }
-    let (files, _, files_truncated, skipped_non_utf8_paths) =
-        collect_worktree_paths_controlled(repo, baseline_oid, deadline, interrupted)?;
+    let (files, _, files_truncated, skipped_non_utf8_paths) = collect_worktree_paths_controlled(
+        repo,
+        baseline_oid,
+        expected.ignored_path_prefix,
+        deadline,
+        interrupted,
+    )?;
     if files_truncated != expected.files_truncated
         || skipped_non_utf8_paths != expected.skipped_non_utf8_paths
         || files != expected.files

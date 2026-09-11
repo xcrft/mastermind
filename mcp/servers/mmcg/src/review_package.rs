@@ -13,7 +13,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fmt;
-use std::fs::{File, OpenOptions};
+#[cfg(unix)]
+use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
@@ -511,7 +513,7 @@ pub fn export(options: &ReviewExportOptions) -> Result<ReviewExportResult, Revie
         &serde_json::to_value(&manifest)
             .map_err(|error| ReviewPackageError::Serialization(error.to_string()))?,
     )?;
-    write_package(&output_dir, documents, &manifest_body, || {
+    write_package(&output_dir, documents, &manifest_body, |staging_dir| {
         #[cfg(test)]
         run_review_finalize_test_hook();
         let final_sources = read_sources(&root, &requests)?;
@@ -538,7 +540,7 @@ pub fn export(options: &ReviewExportOptions) -> Result<ReviewExportResult, Revie
             options.document_graph.as_deref(),
             snapshot.document_graph.as_ref(),
         )?;
-        snapshot_validator.validate(&snapshot)?;
+        snapshot_validator.validate_before_publication(&snapshot, staging_dir)?;
         Ok(())
     })?;
 
@@ -1230,7 +1232,7 @@ fn write_package(
     target: &Path,
     documents: Vec<PackageDocument>,
     manifest: &[u8],
-    validate_before_publish: impl FnOnce() -> Result<(), ReviewPackageError>,
+    validate_before_publish: impl FnOnce(&Path) -> Result<(), ReviewPackageError>,
 ) -> Result<(), ReviewPackageError> {
     let parent = target
         .parent()
@@ -1252,7 +1254,7 @@ fn write_package(
             .and_then(|directory| directory.sync_all())
             .map_err(|error| ReviewPackageError::Io(error.to_string()))?;
     }
-    validate_before_publish()?;
+    validate_before_publish(temporary.path())?;
     match rename_package_noclobber(temporary.path(), target) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {

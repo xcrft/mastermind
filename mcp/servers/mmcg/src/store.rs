@@ -6934,6 +6934,27 @@ impl Store {
         prefix: Option<&str>,
         language: Option<&str>,
     ) -> SqlResult<Vec<FileEntry>> {
+        self.files_under_with_limit(prefix, language, None)
+    }
+
+    /// Bounded variant of [`Store::files_under`]. Fetching one row beyond the
+    /// caller's response cap lets it report truncation without materializing the
+    /// whole repository inventory.
+    pub fn files_under_limit(
+        &self,
+        prefix: Option<&str>,
+        language: Option<&str>,
+        limit: usize,
+    ) -> SqlResult<Vec<FileEntry>> {
+        self.files_under_with_limit(prefix, language, Some(limit))
+    }
+
+    fn files_under_with_limit(
+        &self,
+        prefix: Option<&str>,
+        language: Option<&str>,
+        limit: Option<usize>,
+    ) -> SqlResult<Vec<FileEntry>> {
         let row_to_file = |r: &rusqlite::Row| {
             Ok(FileEntry {
                 path: r.get(0)?,
@@ -6948,9 +6969,13 @@ impl Store {
                        SELECT 1 FROM symbols s
                        WHERE s.file_path = f.path AND s.language = ?2 LIMIT 1
                    ))
-             ORDER BY f.path",
+             ORDER BY f.path
+             LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![prefix, language], row_to_file)?;
+        let sql_limit = limit
+            .map(|value| i64::try_from(value).unwrap_or(i64::MAX))
+            .unwrap_or(-1);
+        let rows = stmt.query_map(params![prefix, language, sql_limit], row_to_file)?;
         rows.collect()
     }
 

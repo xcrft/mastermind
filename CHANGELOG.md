@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- MCP file inventory responses now stop at an explicit 200-row default and
+  report truncation instead of materializing a result until the 8 MiB envelope
+  fails; the local CLI retains its complete listing.
 - Recent-change results now expose their source-mtime basis and exact interval,
   exclude future timestamps, and stop describing source mtimes as index times.
 - Markdown workflow parsing now advances across backticked Unicode by byte

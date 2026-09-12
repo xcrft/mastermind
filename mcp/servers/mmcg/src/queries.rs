@@ -680,15 +680,27 @@ pub const CENTRALITY_MAX_TOP: u32 = 200;
 #[derive(Debug, Serialize)]
 pub struct TaskSearchResponse {
     pub query: String,
+    /// Exact matches in the currently indexed task-spec corpus.
+    pub indexed_total: u32,
     pub count: u32,
+    pub truncated: bool,
+    pub row_limit: u32,
     pub results: Vec<TaskSpecHit>,
 }
 
 pub fn tasks(store: &Store, query: &str, top: u32) -> rusqlite::Result<TaskSearchResponse> {
-    let results = store.search_task_specs(query, top)?;
+    store.begin_read_snapshot()?;
+    let snapshot = store.search_task_specs_bounded(query, top);
+    let end_result = store.end_read_snapshot();
+    let (indexed_total, results) = snapshot?;
+    end_result?;
+    let count = results.len() as u32;
     Ok(TaskSearchResponse {
         query: query.to_string(),
-        count: results.len() as u32,
+        indexed_total,
+        count,
+        truncated: count < indexed_total,
+        row_limit: top,
         results,
     })
 }
@@ -698,7 +710,12 @@ pub struct HistorySearchResponse {
     pub query: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// Exact matches in the admitted, currently indexed history corpus.
+    pub indexed_total: u32,
     pub count: u32,
+    /// True when `top` omitted otherwise matching indexed rows.
+    pub result_truncated: bool,
+    pub row_limit: u32,
     /// Direct FTS matches from the indexed Markdown artifacts.
     pub observed: Vec<ProjectHistoryHit>,
     /// Static epistemic contract: the query engine performs retrieval, not reasoning.
@@ -706,8 +723,12 @@ pub struct HistorySearchResponse {
     pub source_of_truth: &'static str,
     /// Candidate files omitted because of admission errors or size limits.
     pub skipped_artifacts: u32,
-    /// True when the 5,000-artifact work limit omitted candidates.
+    /// True when a corpus work limit omitted candidate artifacts.
+    pub corpus_truncated: bool,
+    /// True when either the result page or source corpus was truncated.
     pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation_reason: Option<&'static str>,
     /// History freshness is deliberately not inferred from structural status.
     pub freshness: &'static str,
 }
@@ -836,7 +857,7 @@ pub fn history(
     let data_version_before = store.data_version()?;
     store.begin_read_snapshot()?;
     let snapshot = (|| {
-        let observed = store.search_project_history(query, kind, top)?;
+        let (indexed_total, observed) = store.search_project_history_bounded(query, kind, top)?;
         let skipped_artifacts = store
             .meta_value("project_history_skipped")?
             .map(|value| {
@@ -850,7 +871,7 @@ pub fn history(
             })
             .transpose()?
             .unwrap_or(0);
-        let truncated = store
+        let corpus_truncated = store
             .meta_value("project_history_truncated")?
             .map(|value| {
                 value.parse::<bool>().map_err(|error| {
@@ -875,23 +896,42 @@ pub fn history(
                 Err(_) => "incomplete",
             })
             .unwrap_or("stale");
-        Ok::<_, rusqlite::Error>((observed, skipped_artifacts, truncated, freshness))
+        Ok::<_, rusqlite::Error>((
+            indexed_total,
+            observed,
+            skipped_artifacts,
+            corpus_truncated,
+            freshness,
+        ))
     })();
     let end_result = store.end_read_snapshot();
-    let (observed, skipped_artifacts, truncated, mut freshness) = snapshot?;
+    let (indexed_total, observed, skipped_artifacts, corpus_truncated, mut freshness) = snapshot?;
     end_result?;
     if store.data_version()? != data_version_before {
         freshness = "snapshot_changed";
     }
+    let count = observed.len() as u32;
+    let result_truncated = count < indexed_total;
+    let truncation_reason = match (result_truncated, corpus_truncated) {
+        (true, true) => Some("top_and_corpus_limit"),
+        (true, false) => Some("top"),
+        (false, true) => Some("corpus_limit"),
+        (false, false) => None,
+    };
     Ok(HistorySearchResponse {
         query: query.to_string(),
         kind: kind.map(str::to_string),
-        count: observed.len() as u32,
+        indexed_total,
+        count,
+        result_truncated,
+        row_limit: top,
         observed,
         inference: "none; rank and co-occurrence do not establish causality or correctness",
         source_of_truth: "Markdown artifacts at the returned paths; this FTS index is derived",
         skipped_artifacts,
-        truncated,
+        corpus_truncated,
+        truncated: result_truncated || corpus_truncated,
+        truncation_reason,
         freshness,
     })
 }
@@ -2824,15 +2864,15 @@ fn brief_source_omitted<T>(collection: &Collection<T>, cap: usize) -> BriefSourc
 }
 
 fn brief_history_source_limit(
+    indexed_total: u32,
     returned: u32,
     skipped_artifacts: u32,
     corpus_truncated: bool,
 ) -> BriefSourceLimit {
-    let exact =
-        returned < BRIEF_HISTORY_LIMIT as u32 && skipped_artifacts == 0 && !corpus_truncated;
+    let exact = skipped_artifacts == 0 && !corpus_truncated;
     BriefSourceLimit {
-        total: exact.then_some(returned),
-        omitted: 0,
+        total: exact.then_some(indexed_total),
+        omitted: indexed_total.saturating_sub(returned),
         exact,
     }
 }
@@ -3245,9 +3285,10 @@ pub fn brief(
             _ => {}
         }
         history_source_limit = brief_history_source_limit(
+            response.indexed_total,
             response.count,
             response.skipped_artifacts,
-            response.truncated,
+            response.corpus_truncated,
         );
         raw_history = response.observed;
     } else {
@@ -5288,6 +5329,56 @@ mod tests {
             .set_meta("project_history_truncated", "not-a-boolean")
             .unwrap();
         assert!(history(&store, "decision", None, 10).is_err());
+    }
+
+    #[test]
+    fn task_and_history_searches_report_bounded_page_coverage() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("mmcg.db")).unwrap();
+        store
+            .replace_task_specs(&[
+                crate::store::TaskSpecEntry {
+                    path: ".mastermind/tasks/001-a/spec.md".into(),
+                    title: "First shared decision".into(),
+                    body: "Shared boundary".into(),
+                },
+                crate::store::TaskSpecEntry {
+                    path: ".mastermind/tasks/002-b/spec.md".into(),
+                    title: "Second shared decision".into(),
+                    body: "Shared runtime".into(),
+                },
+            ])
+            .unwrap();
+        store
+            .replace_project_history(&[
+                crate::store::ProjectHistoryEntry {
+                    path: "CONTEXT.md".into(),
+                    kind: "context".into(),
+                    title: "First shared decision".into(),
+                    body: "Shared boundary".into(),
+                },
+                crate::store::ProjectHistoryEntry {
+                    path: ".mastermind/tasks/_lessons.md".into(),
+                    kind: "lesson".into(),
+                    title: "Second shared decision".into(),
+                    body: "Shared runtime".into(),
+                },
+            ])
+            .unwrap();
+
+        let task_page = tasks(&store, "shared", 1).unwrap();
+        assert_eq!(task_page.indexed_total, 2);
+        assert_eq!(task_page.count, 1);
+        assert!(task_page.truncated);
+        assert_eq!(task_page.row_limit, 1);
+
+        let history_page = history(&store, "shared", None, 1).unwrap();
+        assert_eq!(history_page.indexed_total, 2);
+        assert_eq!(history_page.count, 1);
+        assert!(history_page.result_truncated);
+        assert!(!history_page.corpus_truncated);
+        assert!(history_page.truncated);
+        assert_eq!(history_page.truncation_reason, Some("top"));
     }
 
     #[test]
@@ -7855,19 +7946,24 @@ mod tests {
     }
 
     #[test]
-    fn brief_history_totals_are_unknown_at_the_query_cap_or_with_missing_sources() {
+    fn brief_history_totals_use_exact_index_coverage_and_disclose_missing_sources() {
+        let exact_at_cap = brief_history_source_limit(BRIEF_HISTORY_LIMIT as u32, 10, 0, false);
+        assert_eq!(exact_at_cap.total, Some(BRIEF_HISTORY_LIMIT as u32));
+        assert_eq!(exact_at_cap.omitted, 0);
+        assert!(exact_at_cap.exact);
+
         for source_limit in [
-            brief_history_source_limit(BRIEF_HISTORY_LIMIT as u32, 0, false),
-            brief_history_source_limit(3, 1, false),
-            brief_history_source_limit(3, 0, true),
+            brief_history_source_limit(3, 3, 1, false),
+            brief_history_source_limit(3, 3, 0, true),
         ] {
             assert_eq!(source_limit.total, None);
             assert_eq!(source_limit.omitted, 0);
             assert!(!source_limit.exact);
         }
-        let exact = brief_history_source_limit(3, 0, false);
-        assert_eq!(exact.total, Some(3));
-        assert!(exact.exact);
+        let bounded = brief_history_source_limit(12, 10, 0, false);
+        assert_eq!(bounded.total, Some(12));
+        assert_eq!(bounded.omitted, 2);
+        assert!(bounded.exact);
     }
 
     #[test]

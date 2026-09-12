@@ -713,6 +713,9 @@ pub struct ProjectHistoryHit {
     pub(crate) matched_terms: Vec<String>,
 }
 
+pub(crate) type CountedTaskSpecHits = (u32, Vec<TaskSpecHit>);
+pub(crate) type CountedProjectHistoryHits = (u32, Vec<ProjectHistoryHit>);
+
 #[derive(Debug, Clone)]
 struct ConceptDocument {
     name_search: String,
@@ -6971,6 +6974,26 @@ impl Store {
         rows.collect()
     }
 
+    /// Return a bounded result page plus the exact number of FTS matches in
+    /// the currently indexed task-spec corpus.
+    pub(crate) fn search_task_specs_bounded(
+        &self,
+        query: &str,
+        top: u32,
+    ) -> SqlResult<CountedTaskSpecHits> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Ok((0, Vec::new()));
+        }
+        let total = self.conn.query_row(
+            "SELECT COUNT(*) FROM task_specs_fts WHERE task_specs_fts MATCH ?1",
+            params![trimmed],
+            |row| row.get(0),
+        )?;
+        let hits = self.search_task_specs(trimmed, top)?;
+        Ok((total, hits))
+    }
+
     /// Count of task specs currently indexed — for `mastermind status` diagnostics.
     pub fn task_specs_count(&self) -> SqlResult<u32> {
         self.conn
@@ -7030,6 +7053,32 @@ impl Store {
             })
         })?;
         rows.collect()
+    }
+
+    /// Return a bounded result page plus the exact number of FTS matches in
+    /// the currently indexed history corpus. Corpus admission and freshness
+    /// remain separate concerns reported by the query layer.
+    pub(crate) fn search_project_history_bounded(
+        &self,
+        query: &str,
+        kind: Option<&str>,
+        top: u32,
+    ) -> SqlResult<CountedProjectHistoryHits> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Ok((0, Vec::new()));
+        }
+        let kind = kind.map(str::trim).filter(|value| !value.is_empty());
+        let total = self.conn.query_row(
+            "SELECT COUNT(*)
+             FROM project_history_fts
+             WHERE project_history_fts MATCH ?1
+               AND (?2 IS NULL OR kind = ?2)",
+            params![trimmed, kind],
+            |row| row.get(0),
+        )?;
+        let hits = self.search_project_history(trimmed, kind, top)?;
+        Ok((total, hits))
     }
 
     pub(crate) fn search_concepts(
@@ -8982,6 +9031,10 @@ mod tests {
         assert_eq!(stem.len(), 1);
         assert!(stem[0].path.contains("002-cache-invalidation"));
 
+        let (total, bounded) = store.search_task_specs_bounded("with", 1).unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(bounded.len(), 1);
+
         // Empty / whitespace query → no results, no FTS5 syntax error.
         assert!(store.search_task_specs("", 10).unwrap().is_empty());
         assert!(store.search_task_specs("   ", 10).unwrap().is_empty());
@@ -9017,6 +9070,12 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].kind, "lesson");
         assert_eq!(all[0].matched_terms, ["token"]);
+
+        let (total, bounded) = store
+            .search_project_history_bounded("boundary OR failed", None, 1)
+            .unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(bounded.len(), 1);
 
         let stemmed = store
             .search_project_history("idempotent", None, 10)

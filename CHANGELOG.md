@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Task and history FTS responses now report exact indexed-match coverage and
+  bounded-page truncation. History keeps result truncation, skipped artifacts,
+  and corpus work limits separate instead of overloading one completeness flag.
 - Centrality queries now report exact filtered totals, truncation, active
   filters, and ranking limitations instead of making a full `top` page look
   complete.

@@ -8,6 +8,8 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use crate::terminal::escape as escape_terminal;
+
 const MAX_LESSONS_SIZE: u64 = crate::indexer::MAX_HISTORY_ARTIFACT_SIZE;
 const MAX_CONTEXT_SIZE: u64 = crate::indexer::MAX_HISTORY_ARTIFACT_SIZE;
 const MAX_TASK_STATE_SIZE: u64 = crate::indexer::MAX_HISTORY_ARTIFACT_SIZE;
@@ -91,7 +93,7 @@ impl Report {
         let mut out = String::new();
         out.push_str(&format!(
             "mastermind context doctor — checking project memory at {}\n\n",
-            self.root
+            escape_terminal(&self.root)
         ));
         let name_width = self
             .checks
@@ -109,10 +111,10 @@ impl Report {
                 "  {marker} {name:<width$}  {message}\n",
                 name = check.name,
                 width = name_width,
-                message = check.message,
+                message = escape_terminal(&check.message),
             ));
             if let Some(hint) = &check.hint {
-                out.push_str(&format!("       → {hint}\n"));
+                out.push_str(&format!("       → {}\n", escape_terminal(hint)));
             }
         }
         out.push_str(&format!(
@@ -954,6 +956,27 @@ mod tests {
 
     fn reviewed_lesson(id: &str) -> String {
         format!("## {id}\n\n- **Status:** active\n- **Task:** `001`\n- **Kind:** audit_contract_failure\n- **Provenance:** planner review\n- **Evidence:** `audit.md`\n- **Supersedes:** none\n- **Reusable lesson:** Scope the implementation before handing off.\n")
+    }
+
+    #[test]
+    fn report_text_escapes_repository_control_text() {
+        let report = Report::from_checks(
+            Path::new("/tmp/project\u{202e}"),
+            vec![Check {
+                name: "history review",
+                status: Status::Warn,
+                message: "task\u{1b}held".into(),
+                hint: Some("review\nnow".into()),
+            }],
+        );
+
+        let text = report.render_text();
+        assert!(text.contains("\\u{202e}"));
+        assert!(text.contains("task\\u{1b}held"));
+        assert!(text.contains("review\\u{a}now"));
+        assert!(text
+            .chars()
+            .all(|character| character == '\n' || !crate::terminal::unsafe_character(character)));
     }
 
     #[test]

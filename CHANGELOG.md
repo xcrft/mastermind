@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Environment and context doctor text now escapes repository paths, diagnostic
+  messages, hints, and explain-mode paths before writing them to a terminal.
 - `verify-spec` text and JSON reports now say whether index-backed symbol,
   snapshot, and blast-radius checks ran; a default no-index pass no longer hides
   that those checks were skipped. Human findings also escape terminal controls.

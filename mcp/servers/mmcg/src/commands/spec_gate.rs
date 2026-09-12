@@ -46,6 +46,11 @@ pub fn verify(
         .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
     let parsed =
         mmcg::spec::parse_file(spec).map_err(|e| format!("parse {}: {e}", spec.display()))?;
+    let strict = strict
+        || parsed
+            .frontmatter
+            .as_ref()
+            .is_some_and(|frontmatter| frontmatter.mode.as_deref() == Some("strict"));
     let store = open_validated_index(index_path, &root)?;
     let mut report = mmcg::verify_spec::run(&parsed, store.as_ref(), &root);
     if let Some(store) = &store {

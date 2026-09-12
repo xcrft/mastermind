@@ -99,6 +99,10 @@ design criticism, and independent review. A security review is required when
 the change crosses authentication, authorization, secrets, tool permissions,
 agent delegation, or the supply chain.
 
+The declared `mode: strict` enables strict pre-flight checks automatically in
+both `verify-spec` and `run-task`; a separate `--strict` flag is only needed to
+apply those checks to a contract that does not declare strict mode.
+
 A held strict code task must persist an exact architecture-policy snapshot of
 every declared touch file. If that bounded snapshot cannot be created,
 post-flight is broken and semantic review, release notes, and task completion

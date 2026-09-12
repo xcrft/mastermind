@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Specs that declare `mode: strict` now enable strict pre-flight checks in both
+  `verify-spec` and `run-task` without depending on a second CLI flag; controller
+  state also retains the effective strict contract for later retries.
 - `run-task` now re-evaluates inherited `--allow-no-index` against the current
   spec; adding indexed source or symbol evidence restores the index gate and
   clears the docs-only escape from revalidation state.

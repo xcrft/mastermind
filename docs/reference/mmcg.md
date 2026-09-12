@@ -211,7 +211,7 @@ mmcg workflow audit --root ~/.claude --json
 # Catches missing symbols, missing files, empty mandatory sections, snapshot
 # drift, blast-radius warnings. Exit 1 on errors.
 mmcg verify-spec .mastermind/tasks/042-feature/spec.md
-mmcg verify-spec .mastermind/tasks/042-feature/spec.md --strict         # contract mode: require frontmatter scoping + a verify cmd + index
+mmcg verify-spec .mastermind/tasks/042-feature/spec.md --strict         # force strict checks when the spec does not declare mode: strict
 mmcg verify-spec .mastermind/tasks/042-feature/spec.md --require-index  # fail (don't skip live checks) when no index
 
 # Both text and JSON reports state whether index-backed symbol, snapshot, and
@@ -242,7 +242,7 @@ mmcg run-task .mastermind/tasks/042-feature/spec.md --reset     # repeat pre-fli
 mmcg run-task .mastermind/tasks/042-feature/spec.md --pre-only  # pre-flight only; same retry guarantees
 mmcg run-task .mastermind/tasks/042-feature/spec.md --post-only # requires state
 mmcg run-task .mastermind/tasks/042-feature/spec.md --allow-no-index  # docs-only / spec-only specs
-mmcg run-task .mastermind/tasks/042-feature/spec.md --strict          # fold strict spec checks into pre-flight
+mmcg run-task .mastermind/tasks/042-feature/spec.md --strict          # force strict checks when the spec does not declare mode: strict
 mmcg run-task .mastermind/tasks/042-feature/spec.md --max-iterations 5 # raise the default budget (default 3)
 mmcg run-task .mastermind/tasks/042-feature/spec.md --force-iteration  # bypass budget; deduplicated lesson candidate records the signal
 # NOTE: without --allow-no-index, pre-flight hard-fails when the index is missing

@@ -5098,6 +5098,14 @@ pub fn project_map_with_options(
     let language_total = language_counts.len();
     let mut languages = language_items(language_counts);
     languages.truncate(MAP_LANGUAGE_LIMIT);
+    let languages_truncated = paths_truncated || language_total > languages.len();
+    let language_truncation_reason = if paths_truncated {
+        Some("path_work_limit")
+    } else if language_total > languages.len() {
+        Some("language_limit")
+    } else {
+        None
+    };
 
     let mut components_raw = component_counts.into_iter().collect::<Vec<_>>();
     components_raw.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then_with(|| a.0.cmp(&b.0)));
@@ -5205,6 +5213,14 @@ pub fn project_map_with_options(
         .take(MAP_ENTRY_LIMIT)
         .map(|(_, entry)| entry)
         .collect::<Vec<_>>();
+    let entry_points_truncated = paths_truncated || entry_total > entry_points.len();
+    let entry_point_truncation_reason = if paths_truncated {
+        Some("path_work_limit")
+    } else if entry_total > entry_points.len() {
+        Some("entry_point_limit")
+    } else {
+        None
+    };
 
     let hotspot_probe = top as usize + 1;
     let hotspot_rows = store
@@ -5230,23 +5246,34 @@ pub fn project_map_with_options(
     let (import_edges, cycle_work_truncated) = store
         .map_import_edges_capped_filtered(&normalized, kind, MAP_CYCLE_EDGE_LIMIT, production_only)
         .map_err(|error| error.to_string())?;
-    let (cycle_total, cycle_items) = if cycle_work_truncated {
-        (None, Vec::new())
+    let (cycle_total, cycle_items, cycle_output_reason) = if cycle_work_truncated {
+        (None, Vec::new(), None)
     } else {
         let all_cycles = map_cycle_components(&import_edges);
         let total = all_cycles.len();
         let mut memberships = 0usize;
         let mut retained = Vec::new();
+        let mut cycle_limit_reached = false;
+        let mut membership_limit_reached = false;
         for cycle in all_cycles {
             if retained.len() >= MAP_CYCLE_LIMIT {
+                cycle_limit_reached = true;
                 break;
             }
             if memberships + cycle.len() <= MAP_CYCLE_MEMBERSHIP_LIMIT {
                 memberships += cycle.len();
                 retained.push(cycle);
+            } else {
+                membership_limit_reached = true;
             }
         }
-        (Some(total as u32), retained)
+        let reason = match (cycle_limit_reached, membership_limit_reached) {
+            (true, true) => Some("cycle_and_membership_limit"),
+            (true, false) => Some("cycle_limit"),
+            (false, true) => Some("cycle_membership_limit"),
+            (false, false) => None,
+        };
+        (Some(total as u32), retained, reason)
     };
 
     let mut precision_notes = vec![
@@ -5305,8 +5332,8 @@ pub fn project_map_with_options(
         languages: MapSection {
             total: (!paths_truncated).then_some(language_total as u32),
             returned: languages.len() as u32,
-            truncated: paths_truncated || language_total > languages.len(),
-            truncation_reason: paths_truncated.then_some("path_work_limit"),
+            truncated: languages_truncated,
+            truncation_reason: language_truncation_reason,
             items: languages,
         },
         components: MapSection {
@@ -5325,8 +5352,8 @@ pub fn project_map_with_options(
         entry_points: MapSection {
             total: (!paths_truncated).then_some(entry_total as u32),
             returned: entry_points.len() as u32,
-            truncated: paths_truncated || entry_total > entry_points.len(),
-            truncation_reason: paths_truncated.then_some("path_work_limit"),
+            truncated: entry_points_truncated,
+            truncation_reason: entry_point_truncation_reason,
             items: entry_points,
         },
         hotspots: MapSection {
@@ -5345,7 +5372,11 @@ pub fn project_map_with_options(
             returned: cycle_items.len() as u32,
             truncated: cycle_work_truncated
                 || cycle_total.is_some_and(|total| total > cycle_items.len() as u32),
-            truncation_reason: cycle_work_truncated.then_some("work_limit"),
+            truncation_reason: if cycle_work_truncated {
+                Some("work_limit")
+            } else {
+                cycle_output_reason
+            },
             items: cycle_items,
         },
         limits: MapLimits {
@@ -6283,6 +6314,27 @@ mod tests {
     }
 
     #[test]
+    fn project_map_labels_entry_point_output_limit() {
+        let path = tmp_db("project_map_entry_point_limit");
+        let store = Store::open(&path).unwrap();
+        for index in 0..=MAP_ENTRY_LIMIT {
+            store
+                .upsert_file(&format!("src/app{index:02}/main.rs"), 1, 1)
+                .unwrap();
+        }
+
+        let value = serde_json::to_value(project_map(&store, "src", 2, 20).unwrap()).unwrap();
+        assert_eq!(value["entry_points"]["total"], (MAP_ENTRY_LIMIT + 1) as u32);
+        assert_eq!(value["entry_points"]["returned"], MAP_ENTRY_LIMIT as u32);
+        assert_eq!(value["entry_points"]["truncated"], true);
+        assert_eq!(
+            value["entry_points"]["truncation_reason"],
+            "entry_point_limit"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn project_map_production_only_excludes_non_production_paths() {
         let path = tmp_db("project_map_production_only");
         let store = Store::open(&path).unwrap();
@@ -6570,6 +6622,72 @@ mod tests {
             .iter()
             .any(|note| note["code"] == "work_limit"));
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn project_map_labels_cycle_count_and_membership_limits() {
+        let count_path = tmp_db("project_map_cycle_count_output_limit");
+        let count_store = Store::open(&count_path).unwrap();
+        for index in 0..=MAP_CYCLE_LIMIT {
+            let left_file = format!("src/cycle{index:02}/left.rs");
+            let right_file = format!("src/cycle{index:02}/right.rs");
+            let left_name = format!("left_{index}");
+            let right_name = format!("right_{index}");
+            count_store.upsert_file(&left_file, 1, 1).unwrap();
+            count_store.upsert_file(&right_file, 1, 1).unwrap();
+            let left = count_store
+                .insert_symbol(&left_name, "module", &left_file, 1, 1, None, None)
+                .unwrap();
+            let right = count_store
+                .insert_symbol(&right_name, "module", &right_file, 1, 1, None, None)
+                .unwrap();
+            count_store
+                .insert_edge(left, Some(right), &right_name, "imports", 1)
+                .unwrap();
+            count_store
+                .insert_edge(right, Some(left), &left_name, "imports", 1)
+                .unwrap();
+        }
+        let count = serde_json::to_value(project_map(&count_store, "src", 2, 20).unwrap()).unwrap();
+        assert_eq!(count["cycles"]["total"], (MAP_CYCLE_LIMIT + 1) as u32);
+        assert_eq!(count["cycles"]["returned"], MAP_CYCLE_LIMIT as u32);
+        assert_eq!(count["cycles"]["truncated"], true);
+        assert_eq!(count["cycles"]["truncation_reason"], "cycle_limit");
+
+        let member_path = tmp_db("project_map_cycle_membership_output_limit");
+        let member_store = Store::open(&member_path).unwrap();
+        let cycle_size = MAP_CYCLE_MEMBERSHIP_LIMIT + 1;
+        let mut ids = Vec::with_capacity(cycle_size);
+        let mut names = Vec::with_capacity(cycle_size);
+        for index in 0..cycle_size {
+            let file = format!("src/member{index:03}.rs");
+            let name = format!("member_{index}");
+            member_store.upsert_file(&file, 1, 1).unwrap();
+            ids.push(
+                member_store
+                    .insert_symbol(&name, "module", &file, 1, 1, None, None)
+                    .unwrap(),
+            );
+            names.push(name);
+        }
+        for index in 0..cycle_size {
+            let next = (index + 1) % cycle_size;
+            member_store
+                .insert_edge(ids[index], Some(ids[next]), &names[next], "imports", 1)
+                .unwrap();
+        }
+        let member =
+            serde_json::to_value(project_map(&member_store, "src", 2, 20).unwrap()).unwrap();
+        assert_eq!(member["cycles"]["total"], 1);
+        assert_eq!(member["cycles"]["returned"], 0);
+        assert_eq!(member["cycles"]["truncated"], true);
+        assert_eq!(
+            member["cycles"]["truncation_reason"],
+            "cycle_membership_limit"
+        );
+
+        std::fs::remove_file(&count_path).ok();
+        std::fs::remove_file(&member_path).ok();
     }
 
     #[test]

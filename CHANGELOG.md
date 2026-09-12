@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Impact text renderer tests now exercise a public-field view, so binary test
+  targets compile without exposing or constructing private snapshot state.
 - Git history evidence now distinguishes binary changes and malformed `numstat`
   records from exact zero-line churn; Lens labels known text totals and exposes
   per-file line-count completeness instead of presenting missing counts as zero.

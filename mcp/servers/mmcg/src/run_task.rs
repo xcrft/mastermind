@@ -667,6 +667,23 @@ fn open_validated_task_index(
     Ok(Some(store))
 }
 
+fn spec_requires_index_evidence(spec: &ParsedSpec) -> bool {
+    if !spec.pre_edit_snapshot.is_empty()
+        || spec.frontmatter.as_ref().is_some_and(|frontmatter| {
+            frontmatter
+                .touches
+                .iter()
+                .any(|touch| !touch.symbols.is_empty())
+        })
+    {
+        return true;
+    }
+
+    crate::declared_files::paths(spec)
+        .filter_map(|file| crate::declared_files::normalize(file).ok())
+        .any(|file| crate::indexer::extractor_for_path(Path::new(&file)).is_some())
+}
+
 fn open_current_task_snapshot(index_path: &Path, repo_root: &Path) -> Result<Store, String> {
     let store = Store::open_read_only(index_path).map_err(|error| {
         format!(
@@ -1537,7 +1554,7 @@ fn run_pre(
     opts: RunOpts,
     previous: Option<&RunState>,
 ) -> Outcome {
-    let opts = RunOpts {
+    let mut opts = RunOpts {
         strict: opts.strict || previous.is_some_and(|state| state.strict),
         allow_no_index: opts.allow_no_index || previous.is_some_and(|state| state.allow_no_index),
         ..opts
@@ -1548,6 +1565,7 @@ fn run_pre(
     let budget_exhausted = opts.max_iterations > 0 && iteration > opts.max_iterations;
     // Revalidation removes old approval even when it fails or is interrupted.
     // A refused attempt leaves the exhausted counter intact for the next call.
+    let mut revalidation_state = None;
     if let Some(previous) = previous {
         let mut pending = preflight_required_state(previous, "pre-flight validation is required");
         if budget_exhausted && !opts.force_iteration {
@@ -1565,6 +1583,7 @@ fn run_pre(
             eprintln!("error: invalidating previous pre-flight approval: {error}");
             return Outcome::PreFailed;
         }
+        revalidation_state = Some(pending);
     }
     if budget_exhausted {
         let _ = crate::lessons::append_iteration_budget_candidate(repo_root, spec_path, iteration);
@@ -1590,6 +1609,20 @@ fn run_pre(
         }
     };
     let parsed = spec::parse_str(&spec_path.display().to_string(), &spec_body);
+
+    if opts.allow_no_index && spec_requires_index_evidence(&parsed) {
+        opts.allow_no_index = false;
+        if let Some(pending) = revalidation_state.as_mut() {
+            pending.allow_no_index = false;
+            if let Err(error) = save_state_in_repository(repo_root, state_path, pending) {
+                eprintln!("error: tightening revalidation index requirement: {error}");
+                return Outcome::PreFailed;
+            }
+        }
+        println!(
+            "Index gate enabled: the current spec declares indexed source or symbol evidence."
+        );
+    }
 
     println!("=== Pre-flight: {} ===", spec_path.display());
 
@@ -3818,6 +3851,65 @@ verify:
             !db.exists(),
             "docs-only post-flight must not materialize an index"
         );
+    }
+
+    #[test]
+    fn inherited_allow_no_index_does_not_bypass_revised_code_scope() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        fs::create_dir_all(root.path().join("docs")).unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::write(root.path().join("docs/guide.md"), "before\n").unwrap();
+        fs::write(root.path().join("src/lib.py"), "def target(): pass\n").unwrap();
+        git(root.path(), &["add", "-A"]);
+        git(root.path(), &["commit", "-qm", "baseline"]);
+
+        let spec = root
+            .path()
+            .join(".mastermind/tasks/071-index-scope/spec.md");
+        fs::create_dir_all(spec.parent().unwrap()).unwrap();
+        let body = |file: &str| {
+            format!(
+                "---\ntouches:\n  - file: {file}\n---\n# Index scope\n\n## Goals\n- Edit `{file}`\n## Alternatives Considered\n- a — rejected: r\n## Tests Plan\n- t\n## Documentation Plan\n- d\n## Observability Plan\n- n/a\n## Performance Considerations\n- O(1)\n"
+            )
+        };
+        fs::write(&spec, body("docs/guide.md")).unwrap();
+        let index_path = root.path().join("missing.db");
+
+        assert_eq!(
+            run(
+                &spec,
+                root.path(),
+                &index_path,
+                RunOpts {
+                    pre_only: true,
+                    allow_no_index: true,
+                    ..Default::default()
+                }
+            ),
+            Outcome::PreReady
+        );
+        let state_path = state_file_path(root.path(), &spec);
+        assert!(load_state(&state_path).unwrap().unwrap().allow_no_index);
+
+        fs::write(&spec, body("src/lib.py")).unwrap();
+        assert_eq!(
+            run(
+                &spec,
+                root.path(),
+                &index_path,
+                RunOpts {
+                    pre_only: true,
+                    ..Default::default()
+                }
+            ),
+            Outcome::PreFailed,
+            "a docs-only escape must not survive a revision into indexed source"
+        );
+        let failed = load_state(&state_path).unwrap().unwrap();
+        assert_eq!(failed.next_step.as_deref(), Some("run_preflight"));
+        assert!(!failed.allow_no_index);
+        assert!(!index_path.exists());
     }
 
     #[test]

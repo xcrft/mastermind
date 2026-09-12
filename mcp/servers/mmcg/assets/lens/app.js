@@ -2229,9 +2229,9 @@
     const testMetric = metricPresentation(model.tests);
     let summary;
     if (files === 0 && symbols === 0) {
-      summary = model.truncations.length > 0
-        ? "No returned change evidence. The snapshot is partial; inspect its limits."
-        : "No changes were captured against the requested baseline.";
+      summary = completeZeroChange()
+        ? "No changes were captured against the requested baseline."
+        : "No returned change evidence. The snapshot is incomplete; inspect its limits.";
     } else if (crossings > 0) {
       summary = crossingMetric.value + " API crossing" + (crossings === 1 ? "" : "s") + " · " + testMetric.value + " test candidate" + (tests === 1 ? "" : "s") + ".";
     } else if (impacts > 0) {
@@ -4596,6 +4596,7 @@
   function snapshotAnnouncement() {
     const model = state.model;
     const semanticSourceCount = isRecord(record(model.semantic).source) ? 1 : 0;
+    const temporalUnavailable = text(model.temporalEnvelope.status, "unavailable") !== "available";
     const evidenceSourceMetric = additiveMetricPresentation(
       model.evidenceSources,
       semanticSourceCount + (model.documentGraph ? 1 : 0)
@@ -4607,7 +4608,11 @@
       + evidenceSourceMetric.value + " evidence sources were evaluated. "
       + (model.documentGraph && text(model.documentGraph.status, "needs_review") === "needs_review"
         ? "Document evidence needs review."
-        : (model.truncations.length > 0 ? "The result is partial." : "No truncation was reported."));
+        : temporalUnavailable
+          ? "Temporal comparison is unavailable."
+          : snapshotIsPartial()
+            ? "The result is partial."
+            : "No truncation was reported.");
   }
 
   function announceVisibleClaims() {

@@ -1524,6 +1524,23 @@ async function main() {
   assert.ok(emptyHarness.nodes.get("review-workspace").classList.contains("is-zero-change"));
   assert.doesNotMatch(emptyHarness.nodes.get("graph-state").textContent, /Select a trace claim/i);
 
+  const incompleteEmpty = emptyFixture();
+  incompleteEmpty.temporal = {
+    status: "unavailable",
+    diagnostic: { code: "snapshot_unavailable", message: "Temporal snapshot stayed bounded." },
+  };
+  const incompleteEmptyHarness = await renderFixture(incompleteEmpty, { width: 900 });
+  assert.match(incompleteEmptyHarness.nodes.get("instrument-summary").textContent, /No returned change evidence\. The snapshot is incomplete/i);
+  assert.doesNotMatch(incompleteEmptyHarness.nodes.get("instrument-summary").textContent, /No changes were captured/i);
+  assert.match(incompleteEmptyHarness.nodes.get("status-region").textContent, /Temporal comparison is unavailable/i);
+
+  const semanticPartialEmpty = emptyFixture();
+  semanticPartialEmpty.semantic.partial = true;
+  semanticPartialEmpty.semantic.source.revision_verified = false;
+  const semanticPartialEmptyHarness = await renderFixture(semanticPartialEmpty, { width: 900 });
+  assert.match(semanticPartialEmptyHarness.nodes.get("instrument-summary").textContent, /snapshot is incomplete/i);
+  assert.match(semanticPartialEmptyHarness.nodes.get("status-region").textContent, /The result is partial/i);
+
   const keyboardHarness = await renderFixture(fixture(), { width: 900 });
   const graphChildren = keyboardHarness.nodes.get("trace-graph").children;
   const clusterLayerIndex = graphChildren.findIndex((node) => node.classList && node.classList.contains("graph-clusters"));

@@ -751,7 +751,9 @@ repository-wide clean result.
 The overall audit verdict also follows the snapshot-wide evidence boundary.
 Partial SCIP evidence, unavailable or partial temporal analysis, and a selected
 document graph that needs review make the verdict `Incomplete`, even when the
-audit-specific rankings themselves are complete.
+audit-specific rankings themselves are complete. The zero-change headline and
+screen-reader announcement use the same boundary and do not turn missing
+temporal or partial semantic evidence into a complete result.
 
 ### Optional AI audit narrative
 

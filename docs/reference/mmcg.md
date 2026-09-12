@@ -753,6 +753,12 @@ missing ownership evidence as a clean result. An unavailable SQLite or Git
 source returns a null total with its failure reason, so an empty partial result
 cannot appear as a clean zero.
 
+Churn and ownership history use Git's NUL-delimited path protocol, so Unicode,
+whitespace, and embedded newlines in tracked paths are not dropped or rewritten.
+Ownership identities use canonical mailmap name-and-email pairs; equal display
+names do not collapse distinct contributors, and configured aliases do not
+inflate the author count.
+
 Audit overview counts use exact totals when known, lower bounds for non-empty
 partial collections, and `?` for an empty collection whose total is unknown.
 This applies to mapped files, components, languages, entry points, centrality

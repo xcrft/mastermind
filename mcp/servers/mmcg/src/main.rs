@@ -1000,7 +1000,7 @@ enum QueryCmd {
         /// Name or fully-qualified path to look up
         query: String,
         /// How to match — by leaf binding name (default) or by fully-qualified path
-        #[arg(long, default_value = "name")]
+        #[arg(long, default_value = "name", value_parser = ["name", "path"])]
         match_kind: String,
         #[arg(long)]
         language: Option<String>,

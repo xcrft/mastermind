@@ -3659,10 +3659,23 @@ pub struct ImportsResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ImportedByResponse {
+    /// Backward-compatible alias for `query`.
     pub name: String,
+    pub query: String,
+    pub match_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    pub total: u32,
     pub count: u32,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_limit: Option<u32>,
     pub files: Vec<String>,
+    pub precision_notes: Vec<String>,
 }
+
+pub const IMPORTED_BY_DEFAULT_TOP: u32 = 200;
+pub const IMPORTED_BY_MAX_TOP: u32 = 500;
 
 pub fn imports(store: &Store, file: &str) -> rusqlite::Result<ImportsResponse> {
     let triples = store.imports_of(file)?;
@@ -3769,15 +3782,42 @@ pub fn imported_by(
     query: &str,
     match_kind: &str,
     language: Option<&str>,
+    row_limit: Option<u32>,
 ) -> rusqlite::Result<ImportedByResponse> {
-    let files = match match_kind {
-        "path" => store.imported_by_path(query, language)?,
-        _ => store.imported_by_name(query, language)?,
+    let effective_match_kind = if match_kind == "path" { "path" } else { "name" };
+    let limit = row_limit.map(|value| usize::try_from(value).unwrap_or(usize::MAX));
+    let (total, files) = match (effective_match_kind, limit) {
+        ("path", Some(limit)) => store.imported_by_path_bounded(query, language, limit)?,
+        ("path", None) => {
+            let files = store.imported_by_path(query, language)?;
+            (u32::try_from(files.len()).unwrap_or(u32::MAX), files)
+        }
+        (_, Some(limit)) => store.imported_by_name_bounded(query, language, limit)?,
+        (_, None) => {
+            let files = store.imported_by_name(query, language)?;
+            (u32::try_from(files.len()).unwrap_or(u32::MAX), files)
+        }
     };
+    let count = u32::try_from(files.len()).unwrap_or(u32::MAX);
+    let mut precision_notes = vec![
+        "matches_indexed_static_import_declarations_only".to_string(),
+        "dynamic_or_cross_language_dependencies_may_be_missing".to_string(),
+    ];
+    precision_notes.push(match effective_match_kind {
+        "path" => "path_matching_requires_a_recorded_fully_qualified_import_path".to_string(),
+        _ => "leaf_name_matching_can_pool_unrelated_import_paths".to_string(),
+    });
     Ok(ImportedByResponse {
         name: query.to_string(),
-        count: files.len() as u32,
+        query: query.to_string(),
+        match_kind: effective_match_kind.to_string(),
+        language: language.map(String::from),
+        total,
+        count,
+        truncated: row_limit.is_some() && total > count,
+        row_limit,
         files,
+        precision_notes,
     })
 }
 
@@ -5967,6 +6007,47 @@ mod tests {
         assert_eq!(complete.count, 3);
         assert_eq!(complete.row_limit, None);
         assert!(!complete.truncated);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn imported_by_response_reports_selector_precision_and_bounded_rows() {
+        let path = tmp_db("imported_by_response_limit");
+        let store = Store::open(&path).unwrap();
+        for file in ["src/a.rs", "src/b.rs", "src/c.rs"] {
+            let module = store
+                .insert_symbol("<module>", "module", file, 1, 1, None, None)
+                .unwrap();
+            store
+                .insert_edge(module, None, "core", "imports", 1)
+                .unwrap();
+        }
+
+        let bounded = imported_by(&store, "core", "name", None, Some(2)).unwrap();
+        assert_eq!(bounded.name, "core");
+        assert_eq!(bounded.query, "core");
+        assert_eq!(bounded.match_kind, "name");
+        assert_eq!(bounded.total, 3);
+        assert_eq!(bounded.count, 2);
+        assert_eq!(bounded.row_limit, Some(2));
+        assert!(bounded.truncated);
+        assert_eq!(
+            bounded.files,
+            vec![String::from("src/a.rs"), String::from("src/b.rs")]
+        );
+        assert!(bounded
+            .precision_notes
+            .iter()
+            .any(|note| note == "leaf_name_matching_can_pool_unrelated_import_paths"));
+
+        let complete = imported_by(&store, "core", "name", None, None).unwrap();
+        assert_eq!(complete.total, 3);
+        assert_eq!(complete.count, 3);
+        assert_eq!(complete.row_limit, None);
+        assert!(!complete.truncated);
+
+        let normalized = imported_by(&store, "core", "unsupported", None, Some(2)).unwrap();
+        assert_eq!(normalized.match_kind, "name");
         std::fs::remove_file(path).ok();
     }
 

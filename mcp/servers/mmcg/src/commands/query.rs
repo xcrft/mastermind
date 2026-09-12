@@ -782,6 +782,7 @@ fn execute(store: &Store, q: QueryCmd) -> Result<Value, Box<dyn std::error::Erro
             &query,
             &match_kind,
             language.as_deref(),
+            None,
         )?)?,
         QueryCmd::Explain { name, language } => {
             serde_json::to_value(queries::explain(store, &name, language.as_deref())?)?

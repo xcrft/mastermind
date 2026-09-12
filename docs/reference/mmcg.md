@@ -460,10 +460,13 @@ When you run `mmcg index`, mmcg compares each file's filesystem mtime against th
 - **binary-looking or larger than 5 MiB** → skip safely and report the count plus a bounded path sample
 - **unsupported extension** → skip and report the count plus a bounded path sample
 
-The database also stores an extractor-contract version. When parser/extractor
-semantics change, the next ordinary `index` run automatically performs a full
-structural rebuild even when file mtimes are unchanged. `status`, `doctor`, and
-`mmcg_status` expose contract drift so agents do not trust structurally stale data.
+The database also stores extractor and concept-corpus contract versions. When
+parser, extractor, or concept-normalization semantics change, the next ordinary
+`index` run automatically performs the required rebuild even when file mtimes
+are unchanged. `status`, `doctor`, and `mmcg_status` expose contract drift so
+agents do not trust stale derived data. `mastermind status` also checks the live
+durable-history inventory under the same ten-second deadline as source
+freshness. It reports the index as up to date only when all four checks pass.
 
 Output example:
 

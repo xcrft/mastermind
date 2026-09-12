@@ -978,15 +978,35 @@ impl Indexer {
             .map(|(_, freshness)| freshness)
     }
 
+    pub(crate) fn project_history_freshness_controlled(
+        &self,
+        store: &Store,
+        control: ReadControl<'_>,
+    ) -> Result<ProjectHistoryFreshness, IndexError> {
+        self.live_project_history_inventory_controlled(store, control)
+            .map(|(_, freshness)| freshness)
+    }
+
     pub(crate) fn live_project_history_inventory(
         &self,
         store: &Store,
     ) -> Result<(String, ProjectHistoryFreshness), IndexError> {
         let interrupted = || store.work_interrupted();
-        let snapshot = match self.project_history_snapshot(ReadControl {
-            deadline: store.request_deadline(),
-            interrupted: Some(&interrupted),
-        }) {
+        self.live_project_history_inventory_controlled(
+            store,
+            ReadControl {
+                deadline: store.request_deadline(),
+                interrupted: Some(&interrupted),
+            },
+        )
+    }
+
+    fn live_project_history_inventory_controlled(
+        &self,
+        store: &Store,
+        control: ReadControl<'_>,
+    ) -> Result<(String, ProjectHistoryFreshness), IndexError> {
+        let snapshot = match self.project_history_snapshot(control) {
             Ok(snapshot) => snapshot,
             Err(IndexError::SnapshotChanged) => {
                 return Ok((String::new(), ProjectHistoryFreshness::SnapshotChanged))

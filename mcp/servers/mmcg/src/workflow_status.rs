@@ -27,6 +27,8 @@ const MAX_WORKFLOW_CONTEXT_ESTIMATES: usize = 16_384;
 const MAX_STATUS_TASKS: usize = 4_096;
 const MAX_TASK_STATE_BYTES: u64 = 1024 * 1024;
 const STATUS_FRESHNESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const STATUS_STALE_FILE_LIMIT: usize = 10;
+const STATUS_STALE_FILE_PROBE_LIMIT: usize = STATUS_STALE_FILE_LIMIT + 1;
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 pub struct WorkflowAuditLimits {
@@ -3537,8 +3539,12 @@ pub struct IndexInfo {
     pub symbol_count: u64,
     pub file_count: u64,
     pub stale_count: usize,
+    pub stale_count_truncated: bool,
     pub freshness_error: Option<String>,
     pub extractor_contract_current: bool,
+    pub concept_contract_current: bool,
+    pub history_freshness: &'static str,
+    pub history_freshness_error: Option<String>,
     pub database_error: Option<String>,
     pub root_error: Option<String>,
 }
@@ -3770,17 +3776,51 @@ impl WorkflowStatus {
             } else if self.index.freshness_error.is_none()
                 && self.index.stale_count == 0
                 && self.index.extractor_contract_current
+                && self.index.concept_contract_current
+                && self.index.history_freshness == "fresh"
+                && self.index.history_freshness_error.is_none()
             {
-                out.push_str("  ✓ index up to date\n");
+                out.push_str(
+                    "  ✓ index up to date — structural, concept, and durable history current\n",
+                );
             } else if !self.index.extractor_contract_current {
                 out.push_str(
                     "  ⚠ extractor contract changed — run `mastermind index .` to rebuild structural data\n",
                 );
             }
+            if self.index.root_error.is_none() && !self.index.concept_contract_current {
+                out.push_str(
+                    "  ⚠ concept corpus contract changed or is incomplete — run `mastermind index .`\n",
+                );
+            }
+            if self.index.root_error.is_none() {
+                match (
+                    self.index.history_freshness,
+                    self.index.history_freshness_error.as_deref(),
+                ) {
+                    ("stale", _) => out.push_str(
+                        "  ⚠ durable history changed since last index — run `mastermind index .`\n",
+                    ),
+                    ("incomplete", Some(error)) => out.push_str(&format!(
+                        "  ⚠ durable-history corpus is incomplete — {error}\n"
+                    )),
+                    ("incomplete", None) => out.push_str(
+                        "  ⚠ durable-history corpus is incomplete — inspect skipped or over-limit Markdown, then re-index\n",
+                    ),
+                    ("snapshot_changed", _) => out.push_str(
+                        "  ⚠ durable history changed during the status scan — run `mastermind status` again\n",
+                    ),
+                    ("fresh", None) => {}
+                    (_, Some(error)) => out.push_str(&format!(
+                        "  ⚠ durable-history freshness unavailable — {error}\n"
+                    )),
+                    _ => out.push_str("  ⚠ durable-history freshness is unknown\n"),
+                }
+            }
             if let Some(error) = &self.index.freshness_error {
                 out.push_str(&format!("  ⚠ index freshness unavailable — {error}\n"));
             } else if self.index.stale_count > 0 {
-                let suffix = if self.index.stale_count >= 10 {
+                let suffix = if self.index.stale_count_truncated {
                     " or more"
                 } else {
                     ""
@@ -4134,8 +4174,12 @@ fn scan_index(root: &Path, db: &Path) -> IndexInfo {
         symbol_count: 0,
         file_count: 0,
         stale_count: 0,
+        stale_count_truncated: false,
         freshness_error: None,
         extractor_contract_current: false,
+        concept_contract_current: false,
+        history_freshness: "unknown",
+        history_freshness_error: None,
         database_error: Some(error),
         root_error: None,
     };
@@ -4149,8 +4193,12 @@ fn scan_index(root: &Path, db: &Path) -> IndexInfo {
                 symbol_count: 0,
                 file_count: 0,
                 stale_count: 0,
+                stale_count_truncated: false,
                 freshness_error: None,
                 extractor_contract_current: false,
+                concept_contract_current: false,
+                history_freshness: "unknown",
+                history_freshness_error: None,
                 database_error: None,
                 root_error: None,
             };
@@ -4158,7 +4206,8 @@ fn scan_index(root: &Path, db: &Path) -> IndexInfo {
         Err(error) => return unavailable(format!("cannot inspect {}: {error}", db.display())),
     }
 
-    let store = match crate::store::Store::open_read_only(db) {
+    let deadline = std::time::Instant::now() + STATUS_FRESHNESS_TIMEOUT;
+    let store = match crate::store::Store::open_read_only_with_deadline(db, Some(deadline)) {
         Ok(store) => store,
         Err(error) => {
             return unavailable(format!("cannot open {} read-only: {error}", db.display()))
@@ -4178,18 +4227,29 @@ fn scan_index(root: &Path, db: &Path) -> IndexInfo {
         Err(error) => return unavailable(format!("cannot query file count: {error}")),
     };
     let root_error = crate::indexer::validate_index_root(&store, root).err();
-    let (extractor_contract_current, stale_count, freshness_error) = if root_error.is_some() {
-        (false, 0, None)
+    let (
+        extractor_contract_current,
+        concept_contract_current,
+        stale_count,
+        stale_count_truncated,
+        freshness_error,
+        history_freshness,
+        history_freshness_error,
+    ) = if root_error.is_some() {
+        (false, false, 0, false, None, "unknown", None)
     } else {
         let extractor_contract_current = match store.extractor_contract_current() {
             Ok(current) => current,
             Err(error) => return unavailable(format!("cannot query extractor contract: {error}")),
         };
-        let deadline = std::time::Instant::now() + STATUS_FRESHNESS_TIMEOUT;
-        match stale_paths_controlled(
+        let concept_contract_current = match store.concept_contract_current() {
+            Ok(current) => current,
+            Err(error) => return unavailable(format!("cannot query concept contract: {error}")),
+        };
+        let (stale_count, stale_count_truncated, freshness_error) = match stale_paths_controlled(
             &store,
             root,
-            10,
+            STATUS_STALE_FILE_PROBE_LIMIT,
             crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
             crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
             crate::bounded_fs::ReadControl {
@@ -4197,9 +4257,42 @@ fn scan_index(root: &Path, db: &Path) -> IndexInfo {
                 interrupted: None,
             },
         ) {
-            Ok(paths) => (extractor_contract_current, paths.len(), None),
-            Err(error) => (extractor_contract_current, 0, Some(error.to_string())),
-        }
+            Ok(paths) => (
+                paths.len().min(STATUS_STALE_FILE_LIMIT),
+                paths.len() > STATUS_STALE_FILE_LIMIT,
+                None,
+            ),
+            Err(error) => (0, false, Some(error.to_string())),
+        };
+        let (history_freshness, history_freshness_error) = match crate::indexer::Indexer::new(root)
+            .project_history_freshness_controlled(
+                &store,
+                crate::bounded_fs::ReadControl {
+                    deadline: Some(deadline),
+                    interrupted: None,
+                },
+            ) {
+            Ok(freshness) => (freshness.as_str(), None),
+            Err(crate::indexer::IndexError::LimitExceeded { .. }) => (
+                "incomplete",
+                Some("durable-history scan exceeded its work limit".into()),
+            ),
+            Err(crate::indexer::IndexError::Cancelled)
+            | Err(crate::indexer::IndexError::DeadlineExceeded) => (
+                "unknown",
+                Some("durable-history freshness deadline exceeded".into()),
+            ),
+            Err(error) => ("unknown", Some(error.to_string())),
+        };
+        (
+            extractor_contract_current,
+            concept_contract_current,
+            stale_count,
+            stale_count_truncated,
+            freshness_error,
+            history_freshness,
+            history_freshness_error,
+        )
     };
     match store.source_snapshot_unchanged() {
         Ok(true) => {}
@@ -4213,8 +4306,12 @@ fn scan_index(root: &Path, db: &Path) -> IndexInfo {
         symbol_count,
         file_count,
         stale_count,
+        stale_count_truncated,
         freshness_error,
         extractor_contract_current,
+        concept_contract_current,
+        history_freshness,
+        history_freshness_error,
         database_error: None,
         root_error,
     }
@@ -5878,8 +5975,12 @@ mod tests {
                 symbol_count: 0,
                 file_count: 0,
                 stale_count: 0,
+                stale_count_truncated: false,
                 freshness_error: None,
                 extractor_contract_current: true,
+                concept_contract_current: true,
+                history_freshness: "fresh",
+                history_freshness_error: None,
                 database_error: None,
                 root_error: None,
             },
@@ -6185,6 +6286,8 @@ mod tests {
 
         let current = WorkflowStatus::scan(&root);
         assert!(current.index.extractor_contract_current);
+        assert!(current.index.concept_contract_current);
+        assert_eq!(current.index.history_freshness, "fresh");
         assert!(current.render_text().contains("index up to date"));
 
         store
@@ -6198,6 +6301,121 @@ mod tests {
         assert!(drifted.render_text().contains("extractor contract changed"));
 
         drop(store);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn workflow_status_reports_concept_and_history_drift_independently() {
+        let root = std::env::temp_dir().join(format!(
+            "mmcg-status-derived-corpora-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join(".mastermind")).unwrap();
+        init_git_repository(&root);
+        fs::write(root.join("lib.rs"), "pub fn current() {}\n").unwrap();
+        fs::write(root.join("CONTEXT.md"), "# Current decision\nInitial.\n").unwrap();
+        let db = root.join(".mastermind/mmcg.db");
+        let mut store = crate::store::Store::open(&db).unwrap();
+        crate::indexer::Indexer::new(&root)
+            .index_all(&mut store, false)
+            .unwrap();
+
+        store
+            .set_meta(
+                crate::store::CONCEPT_NORMALIZATION_META_KEY,
+                "obsolete-concept-contract",
+            )
+            .unwrap();
+        let concept_drift = WorkflowStatus::scan(&root);
+        assert!(concept_drift.index.extractor_contract_current);
+        assert!(!concept_drift.index.concept_contract_current);
+        assert_eq!(concept_drift.index.stale_count, 0);
+        assert_eq!(concept_drift.index.history_freshness, "fresh");
+        assert!(concept_drift
+            .render_text()
+            .contains("concept corpus contract changed"));
+        assert!(!concept_drift.render_text().contains("index up to date"));
+
+        store
+            .set_meta(
+                crate::store::CONCEPT_NORMALIZATION_META_KEY,
+                crate::store::CONCEPT_NORMALIZATION_VERSION,
+            )
+            .unwrap();
+        fs::write(
+            root.join("CONTEXT.md"),
+            "# Current decision\nChanged after indexing.\n",
+        )
+        .unwrap();
+        let history_drift = WorkflowStatus::scan(&root);
+        assert!(history_drift.index.extractor_contract_current);
+        assert!(history_drift.index.concept_contract_current);
+        assert_eq!(history_drift.index.stale_count, 0);
+        assert_eq!(history_drift.index.history_freshness, "stale");
+        assert!(history_drift
+            .render_text()
+            .contains("durable history changed since last index"));
+        assert!(!history_drift.render_text().contains("index up to date"));
+
+        drop(store);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn workflow_status_distinguishes_exact_stale_count_from_lower_bound() {
+        let root = std::env::temp_dir().join(format!(
+            "mmcg-status-stale-count-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        init_git_repository(&root);
+        for index in 0..=STATUS_STALE_FILE_LIMIT {
+            fs::write(
+                root.join(format!("src/file{index:02}.rs")),
+                format!("pub fn value_{index}() {{}}\n"),
+            )
+            .unwrap();
+        }
+        let db = root.join(".mastermind/mmcg.db");
+        let mut store = crate::store::Store::open(&db).unwrap();
+        crate::indexer::Indexer::new(&root)
+            .index_all(&mut store, false)
+            .unwrap();
+        drop(store);
+
+        let restored = std::time::UNIX_EPOCH + std::time::Duration::from_secs(5);
+        for index in 0..STATUS_STALE_FILE_LIMIT {
+            fs::File::options()
+                .write(true)
+                .open(root.join(format!("src/file{index:02}.rs")))
+                .unwrap()
+                .set_modified(restored)
+                .unwrap();
+        }
+        let exact = WorkflowStatus::scan(&root);
+        assert_eq!(exact.index.stale_count, STATUS_STALE_FILE_LIMIT);
+        assert!(!exact.index.stale_count_truncated);
+        assert!(!exact.render_text().contains("source file(s) or more"));
+
+        fs::File::options()
+            .write(true)
+            .open(root.join(format!("src/file{:02}.rs", STATUS_STALE_FILE_LIMIT)))
+            .unwrap()
+            .set_modified(restored)
+            .unwrap();
+        let lower_bound = WorkflowStatus::scan(&root);
+        assert_eq!(lower_bound.index.stale_count, STATUS_STALE_FILE_LIMIT);
+        assert!(lower_bound.index.stale_count_truncated);
+        assert!(lower_bound.render_text().contains("source file(s) or more"));
+
         fs::remove_dir_all(root).ok();
     }
 }

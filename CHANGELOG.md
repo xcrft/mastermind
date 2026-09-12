@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- `mastermind status` now requires structural sources, extractor and concept
+  contracts, and live durable history to be current before it reports the index
+  as up to date. Its shared bounded scan also distinguishes exactly ten stale
+  source files from the lower bound of ten or more.
 - Project-map text now reports section coverage and returned cycles, Mermaid
   marks both source truncation and its visual-summary omissions, and SARIF
   derives partial state from every map section and component boundary.

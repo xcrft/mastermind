@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- `run-task` now re-evaluates inherited `--allow-no-index` against the current
+  spec; adding indexed source or symbol evidence restores the index gate and
+  clears the docs-only escape from revalidation state.
 - Strict code tasks now fail post-flight when their exact architecture-policy
   snapshot cannot be created; they can no longer reach semantic review or
   `learned` with policy evidence that downstream checks silently ignore.

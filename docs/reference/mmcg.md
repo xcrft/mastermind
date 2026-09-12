@@ -250,6 +250,9 @@ mmcg run-task .mastermind/tasks/042-feature/spec.md --force-iteration  # bypass 
 # only — mmcg's value comes from the structural truth layer, not the heuristics.
 # Query errors or an incomplete dependency-cycle graph also block approval.
 # --allow-no-index does not bypass failures in a populated index.
+# Retries inherit it only while the current contract remains free of indexed
+# source and symbol evidence. Revising a docs-only task into a code task
+# automatically restores the index requirement.
 
 # Initialize a project. Stack detection informs drafting, while CONTEXT stays
 # lean and stack-agnostic; commands and layouts belong in CLAUDE.md.

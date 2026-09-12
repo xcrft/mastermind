@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Lens accessibility announcements now preserve simultaneous document-corpus,
+  temporal, and partial-evidence limits instead of reporting only the first
+  matching condition.
 - Architecture policy now reports task-like regular files and non-UTF-8 entries
   in workflow evidence inventories, instead of ignoring them beside otherwise
   valid coverage.

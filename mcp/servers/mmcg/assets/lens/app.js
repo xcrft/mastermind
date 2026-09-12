@@ -4733,26 +4733,36 @@
     const model = state.model;
     const semanticSourceCount = isRecord(record(model.semantic).source) ? 1 : 0;
     const temporalUnavailable = text(model.temporalEnvelope.status, "unavailable") !== "available";
+    const documentReview = model.documentGraph
+      && text(model.documentGraph.status, "needs_review") === "needs_review";
     const documentCorpusNotTracked = model.documentGraph
       && text(record(model.documentGraph.corpus).status, "not_tracked") === "not_tracked";
     const evidenceSourceMetric = additiveMetricPresentation(
       model.evidenceSources,
       semanticSourceCount + (model.documentGraph ? 1 : 0)
     );
+    const conditions = [];
+    if (documentReview) {
+      conditions.push("Document evidence needs review.");
+    }
+    if (documentCorpusNotTracked) {
+      conditions.push("The document corpus is not tracked; only named endpoints were checked.");
+    }
+    if (temporalUnavailable) {
+      conditions.push("Temporal comparison is unavailable.");
+    }
+    if (snapshotIsPartial() && !documentReview) {
+      conditions.push("The result is partial.");
+    }
+    if (conditions.length === 0) {
+      conditions.push("No truncation was reported.");
+    }
     return "Lens snapshot loaded. "
       + metricPresentation(model.changedSymbols).value + " changed symbols, "
       + metricPresentation(model.impactedSymbols).value + " impacted symbols, and "
       + metricPresentation(model.tests).value + " candidate tests. "
       + evidenceSourceMetric.value + " evidence sources were evaluated. "
-      + (model.documentGraph && text(model.documentGraph.status, "needs_review") === "needs_review"
-        ? "Document evidence needs review."
-        : documentCorpusNotTracked
-          ? "The document corpus is not tracked; only named endpoints were checked."
-          : temporalUnavailable
-          ? "Temporal comparison is unavailable."
-          : snapshotIsPartial()
-            ? "The result is partial."
-            : "No truncation was reported.");
+      + conditions.join(" ");
   }
 
   function announceVisibleClaims() {

@@ -1029,6 +1029,20 @@ async function main() {
   assert.match(endpointOnlyGraphHarness.nodes.get("precision-list").textContent, /Only named endpoints are freshness-checked/i);
   assert.match(endpointOnlyGraphHarness.nodes.get("status-region").textContent, /document corpus is not tracked/i);
 
+  const endpointOnlyPartialGraph = withDocumentGraph(fixture(), "current");
+  endpointOnlyPartialGraph.document_graph.packet.snapshot_schema_version = 1;
+  endpointOnlyPartialGraph.document_graph.corpus = { status: "not_tracked", directories: [], changed_files: [] };
+  endpointOnlyPartialGraph.temporal = {
+    status: "unavailable",
+    diagnostic: { code: "snapshot_unavailable", message: "Temporal snapshot stayed bounded." },
+  };
+  endpointOnlyPartialGraph.semantic.partial = true;
+  const endpointOnlyPartialGraphHarness = await renderFixture(endpointOnlyPartialGraph);
+  const combinedAnnouncement = endpointOnlyPartialGraphHarness.nodes.get("status-region").textContent;
+  assert.match(combinedAnnouncement, /document corpus is not tracked/i);
+  assert.match(combinedAnnouncement, /Temporal comparison is unavailable/i);
+  assert.match(combinedAnnouncement, /The result is partial/i);
+
   const reviewGraphHarness = await renderFixture(withDocumentGraph(fixture(), "needs_review"));
   assert.match(reviewGraphHarness.nodes.get("notice-stack").textContent, /Document evidence · needs review/i);
   assert.match(reviewGraphHarness.nodes.get("notice-stack").textContent, /1 endpoint change · 1 corpus change/i);

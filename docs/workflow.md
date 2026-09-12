@@ -140,7 +140,8 @@ The controller rejects unknown state fields and unsupported lifecycle statuses
 instead of applying legacy defaults or continuing from a misspelled or newer
 contract. It applies the same validation before writing state. `status`, `next`,
 and `resume` project their display fields only after that complete controller
-schema has been validated.
+schema has been validated. Context health checks use the full state contract too,
+so partial completion records cannot enter the semantic review queue.
 The same repository-bound replacement protects controller-written `audit.md`,
 release-note drafts, `history-review.md`, and review archives.
 

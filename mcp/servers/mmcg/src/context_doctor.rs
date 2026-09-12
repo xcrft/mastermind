@@ -739,7 +739,7 @@ fn history_review_task_dirs(
 fn read_task_state_with_capability(
     root: &crate::bounded_fs::RootCapability,
     task: &Path,
-) -> std::io::Result<Option<crate::workflow_status::TaskState>> {
+) -> std::io::Result<Option<crate::run_task::RunState>> {
     let state_path = task.join("state.json");
     match crate::bounded_fs::read_regular_file_with_capability(
         root,
@@ -748,17 +748,9 @@ fn read_task_state_with_capability(
         MAX_TASK_STATE_SIZE,
         crate::bounded_fs::ReadControl::default(),
     ) {
-        Ok(file) => {
-            let body = String::from_utf8(file.bytes).map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "task state is not valid UTF-8",
-                )
-            })?;
-            serde_json::from_str(&body)
-                .map(Some)
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
-        }
+        Ok(file) => serde_json::from_slice(&file.bytes)
+            .map(Some)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
         Err(crate::bounded_fs::BoundedReadError::Io(error))
             if error.kind() == std::io::ErrorKind::NotFound =>
         {
@@ -950,6 +942,36 @@ fn format_bytes(bytes: u64) -> String {
 mod tests {
     use super::*;
 
+    fn write_task_state(task: &Path, status: &str, snapshot: Option<&str>) {
+        let state = crate::run_task::RunState {
+            status: status.into(),
+            risk: Some("low".into()),
+            next_step: Some(
+                if status == "learned" {
+                    "close"
+                } else if status == "history_review_required" {
+                    "review_history"
+                } else {
+                    "planner_review"
+                }
+                .into(),
+            ),
+            blocking_reason: None,
+            last_artifact: Some("history-review.md".into()),
+            spec_path: task.join("spec.md").display().to_string(),
+            spec_hash: "0".repeat(64),
+            baseline_ref: "0".repeat(40),
+            held_snapshot_sha256: None,
+            held_snapshot_version: crate::run_task::STRICT_SNAPSHOT_VERSION,
+            history_snapshot_sha256: snapshot.map(str::to_string),
+            started_at: 1,
+            iteration: 1,
+            allow_no_index: false,
+            strict: false,
+        };
+        std::fs::write(task.join("state.json"), serde_json::to_vec(&state).unwrap()).unwrap();
+    }
+
     fn context() -> &'static str {
         "# Demo — Context\n\n## Identity\n\n**What it is:** A deterministic codegraph and workflow CLI for coding agents.\n\n**What it is not:** A hosted execution platform.\n\n**Primary users:** Open-source maintainers and coding-agent users.\n\n## Active goals\n\n- Preserve evidence-backed workflow state across sessions.\n\n## Decision log\n\n"
     }
@@ -1045,17 +1067,9 @@ mod tests {
         std::fs::create_dir_all(&learned).unwrap();
         std::fs::create_dir_all(&awaiting).unwrap();
         std::fs::create_dir_all(&unrelated).unwrap();
-        std::fs::write(learned.join("state.json"), r#"{"status":"learned"}"#).unwrap();
-        std::fs::write(
-            awaiting.join("state.json"),
-            r#"{"status":"history_review_required"}"#,
-        )
-        .unwrap();
-        std::fs::write(
-            unrelated.join("state.json"),
-            r#"{"status":"held","blocking_reason":"not learned yet"}"#,
-        )
-        .unwrap();
+        write_task_state(&learned, "learned", None);
+        write_task_state(&awaiting, "history_review_required", None);
+        write_task_state(&unrelated, "held", None);
         let root = crate::bounded_fs::RootCapability::open(dir.path()).unwrap();
         assert_eq!(
             history_review_task_dirs(&root, &tasks).unwrap(),
@@ -1064,21 +1078,23 @@ mod tests {
     }
 
     #[test]
-    fn malformed_task_state_cannot_be_reported_as_an_empty_history_queue() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("CONTEXT.md"), context()).unwrap();
-        let task = dir.path().join(".mastermind/tasks/001-broken");
-        std::fs::create_dir_all(&task).unwrap();
-        std::fs::write(task.join("state.json"), "{broken state").unwrap();
+    fn malformed_or_partial_task_state_cannot_be_reported_as_an_empty_history_queue() {
+        for state in ["{broken state", r#"{"status":"learned"}"#] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("CONTEXT.md"), context()).unwrap();
+            let task = dir.path().join(".mastermind/tasks/001-broken");
+            std::fs::create_dir_all(&task).unwrap();
+            std::fs::write(task.join("state.json"), state).unwrap();
 
-        let report = run(dir.path());
-        let check = report
-            .checks
-            .iter()
-            .find(|check| check.name == "history review")
-            .unwrap();
-        assert_eq!(check.status, Status::Fail);
-        assert!(check.message.contains("cannot read task state"));
+            let report = run(dir.path());
+            let check = report
+                .checks
+                .iter()
+                .find(|check| check.name == "history review")
+                .unwrap();
+            assert_eq!(check.status, Status::Fail, "{state}");
+            assert!(check.message.contains("cannot read task state"));
+        }
     }
 
     #[cfg(unix)]
@@ -1181,11 +1197,7 @@ mod tests {
         std::fs::write(dir.path().join("CONTEXT.md"), context()).unwrap();
         let task = dir.path().join(".mastermind/tasks/001-awaiting");
         std::fs::create_dir_all(&task).unwrap();
-        std::fs::write(
-            task.join("state.json"),
-            r#"{"status":"history_review_required"}"#,
-        )
-        .unwrap();
+        write_task_state(&task, "history_review_required", None);
         let review = task.join("history-review.md");
         std::fs::write(
             &review,
@@ -1238,11 +1250,7 @@ mod tests {
         std::fs::create_dir_all(&task).unwrap();
         let complete = "- **Context:** not applicable\n- **Lesson:** not applicable\n- **Reason:** The audited typo fix introduces no durable decision.\n";
         for status in ["history_review_required", "learned"] {
-            std::fs::write(
-                task.join("state.json"),
-                format!(r#"{{"status":"{status}","history_snapshot_sha256":"current"}}"#),
-            )
-            .unwrap();
+            write_task_state(&task, status, Some("current"));
             for (marker, expected) in [
                 ("", Status::Warn),
                 ("- **Audit snapshot:** previous\n", Status::Warn),
@@ -1262,7 +1270,7 @@ mod tests {
                 assert_eq!(check.status, expected, "{status}: {marker}");
             }
         }
-        std::fs::write(task.join("state.json"), r#"{"status":"learned"}"#).unwrap();
+        write_task_state(&task, "learned", None);
         std::fs::write(task.join("history-review.md"), complete).unwrap();
         assert!(run(dir.path())
             .checks

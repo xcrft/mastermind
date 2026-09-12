@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Context health checks now parse the complete controller state before selecting
+  learned tasks, instead of accepting partial completion records through a
+  display-only projection.
 - Controller state now rejects unsupported lifecycle statuses during both read
   and write, so a corrupted or newer status cannot silently enter post-flight.
 - `status`, `next`, and `resume` now validate task state with the complete

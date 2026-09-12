@@ -907,16 +907,53 @@ pub fn render_change_impact(
         crate::ImpactFormat::Json => {
             let mut output = serde_json::to_string_pretty(response)?;
             output.push('\n');
-            return Ok(output);
+            Ok(output)
         }
         crate::ImpactFormat::Sarif => {
             let mut output =
                 serde_json::to_string_pretty(&mmcg::sarif_export::change_impact(response))?;
             output.push('\n');
-            return Ok(output);
+            Ok(output)
         }
-        crate::ImpactFormat::Text => {}
+        crate::ImpactFormat::Text => Ok(render_change_impact_text(ChangeImpactTextView::from(
+            response,
+        ))),
     }
+}
+
+struct ChangeImpactTextView<'a> {
+    baseline: &'a queries::ImpactBaseline,
+    scope: &'a queries::ImpactScope,
+    changes: &'a queries::ImpactChanges,
+    affected_components: &'a queries::Collection<queries::ComponentImpact>,
+    impact: &'a queries::Collection<queries::ImpactedSymbol>,
+    api_crossings: &'a queries::Collection<queries::ApiCrossing>,
+    tests: &'a queries::Collection<queries::TestCandidate>,
+    disciplines: &'a queries::ImpactDisciplines,
+    precision_notes: &'a [String],
+    partial: bool,
+    truncation_reasons: Vec<&'a str>,
+}
+
+impl<'a> From<&'a queries::ChangeImpactResponse> for ChangeImpactTextView<'a> {
+    fn from(response: &'a queries::ChangeImpactResponse) -> Self {
+        Self {
+            baseline: &response.baseline,
+            scope: &response.scope,
+            changes: &response.changes,
+            affected_components: &response.affected_components,
+            impact: &response.impact,
+            api_crossings: &response.api_crossings,
+            tests: &response.tests,
+            disciplines: &response.disciplines,
+            precision_notes: &response.precision_notes,
+            partial: response.is_partial(),
+            truncation_reasons: response.truncation_reasons(),
+        }
+    }
+}
+
+fn render_change_impact_text(response: ChangeImpactTextView<'_>) -> String {
     let mut output = format!(
         "mastermind impact — {}..working copy\nBaseline: {}\nHEAD: {}\nScope: {}\nIncludes worktree: {} · untracked: {}\n\nCoverage: {}\n",
         safe_text(&response.baseline.requested_ref),
@@ -925,7 +962,7 @@ pub fn render_change_impact(
         safe_text(&response.scope.repository_relative_root),
         response.baseline.includes_worktree,
         response.baseline.includes_untracked,
-        if response.is_partial() {
+        if response.partial {
             "partial"
         } else {
             "complete"
@@ -952,10 +989,10 @@ pub fn render_change_impact(
         &response.api_crossings,
     ));
     output.push_str(&impact_section_coverage("candidate tests", &response.tests));
-    if response.is_partial() {
+    if response.partial {
         output.push_str(&format!(
             "  reasons: {}\n",
-            safe_text(&response.truncation_reasons().join(", "))
+            safe_text(&response.truncation_reasons.join(", "))
         ));
     }
     output.push_str("\nChanged files\n");
@@ -1085,10 +1122,10 @@ pub fn render_change_impact(
         ));
     }
     output.push_str("\nPrecision notes\n");
-    for note in &response.precision_notes {
+    for note in response.precision_notes {
         output.push_str(&format!("  {}\n", safe_text(note)));
     }
-    Ok(output)
+    output
 }
 
 fn brief_collection_is_partial<T>(
@@ -1636,95 +1673,91 @@ mod map_tests {
             kind: "function".into(),
             line: 19,
         };
-        let response = queries::ChangeImpactResponse {
-            schema_version: 1,
-            snapshot_token: "snapshot".into(),
-            checked_snapshot: None,
-            worktree_files_truncated: false,
-            skipped_non_utf8_paths: 0,
-            baseline: queries::ImpactBaseline {
-                requested_ref: "main".into(),
-                baseline_oid: "111".into(),
-                head_oid: "222".into(),
-                includes_worktree: true,
-                includes_untracked: true,
-            },
-            scope: queries::ImpactScope {
-                repository_relative_root: ".".into(),
-            },
-            changes: queries::ImpactChanges {
-                files: complete_impact_collection(vec![queries::ChangedFile {
-                    path: "docs/guide\n.md".into(),
-                    status: "modified".into(),
-                }]),
-                symbols: complete_impact_collection(vec![queries::ChangedSymbol {
-                    file: seed.file.clone(),
-                    name: seed.name.clone(),
-                    kind: seed.kind.clone(),
-                    line: seed.line,
-                    change: seed.change.clone(),
-                }]),
-            },
-            affected_components: complete_impact_collection(vec![queries::ComponentImpact {
-                component: "src".into(),
-                changed_symbols: 1,
-                impacted_symbols: 1,
-                candidate_tests: 1,
+        let baseline = queries::ImpactBaseline {
+            requested_ref: "main".into(),
+            baseline_oid: "111".into(),
+            head_oid: "222".into(),
+            includes_worktree: true,
+            includes_untracked: true,
+        };
+        let scope = queries::ImpactScope {
+            repository_relative_root: ".".into(),
+        };
+        let changes = queries::ImpactChanges {
+            files: complete_impact_collection(vec![queries::ChangedFile {
+                path: "docs/guide\n.md".into(),
+                status: "modified".into(),
             }]),
-            impact: complete_impact_collection(vec![queries::ImpactedSymbol {
-                symbol: impacted.clone(),
-                minimum_depth: 1,
-                seeds: vec![seed.clone()],
-                name_collision_count: 0,
-                edge_precision: vec!["syntax_only".into()],
+            symbols: complete_impact_collection(vec![queries::ChangedSymbol {
+                file: seed.file.clone(),
+                name: seed.name.clone(),
+                kind: seed.kind.clone(),
+                line: seed.line,
+                change: seed.change.clone(),
             }]),
-            api_crossings: complete_impact_collection(vec![queries::ApiCrossing {
-                seed: seed.clone(),
-                changed_component: "core".into(),
-                impacted: impacted.clone(),
-                impacted_component: "api".into(),
-                minimum_depth: 1,
-            }]),
-            tests: complete_impact_collection(vec![queries::TestCandidate {
-                symbol: queries::SymbolEvidence {
-                    file: "tests/core.rs".into(),
-                    name: "checks_change".into(),
-                    kind: "test".into(),
-                    line: 31,
-                },
-                classification: "direct".into(),
-                minimum_depth: Some(1),
-                confidence: "medium".into(),
-                evidence: vec![queries::TestEvidence {
-                    kind: "graph_seed".into(),
-                    seed: Some(seed),
-                    component: None,
-                }],
-            }]),
-            disciplines: queries::ImpactDisciplines {
-                detected: vec![queries::DisciplineSignal {
-                    name: "documentation".into(),
-                    basis: "path_extension".into(),
-                    file_count: 1,
-                    files: vec!["docs/guide\n.md".into()],
-                }],
-                unclassified: vec!["unknown.file".into()],
-                note: "Review the returned paths.".into(),
+        };
+        let affected_components = complete_impact_collection(vec![queries::ComponentImpact {
+            component: "src".into(),
+            changed_symbols: 1,
+            impacted_symbols: 1,
+            candidate_tests: 1,
+        }]);
+        let impact = complete_impact_collection(vec![queries::ImpactedSymbol {
+            symbol: impacted.clone(),
+            minimum_depth: 1,
+            seeds: vec![seed.clone()],
+            name_collision_count: 0,
+            edge_precision: vec!["syntax_only".into()],
+        }]);
+        let api_crossings = complete_impact_collection(vec![queries::ApiCrossing {
+            seed: seed.clone(),
+            changed_component: "core".into(),
+            impacted: impacted.clone(),
+            impacted_component: "api".into(),
+            minimum_depth: 1,
+        }]);
+        let tests = complete_impact_collection(vec![queries::TestCandidate {
+            symbol: queries::SymbolEvidence {
+                file: "tests/core.rs".into(),
+                name: "checks_change".into(),
+                kind: "test".into(),
+                line: 31,
             },
-            limits: queries::ImpactLimits {
-                changed_files: 100,
-                changed_seeds: 200,
-                graph_rows: 5_000,
-                impact: 100,
-                tests: 500,
-                crossings: 500,
-                heuristic_paths: 50_000,
-                max_depth: 3,
-            },
-            precision_notes: vec!["syntax_only".into()],
+            classification: "direct".into(),
+            minimum_depth: Some(1),
+            confidence: "medium".into(),
+            evidence: vec![queries::TestEvidence {
+                kind: "graph_seed".into(),
+                seed: Some(seed),
+                component: None,
+            }],
+        }]);
+        let disciplines = queries::ImpactDisciplines {
+            detected: vec![queries::DisciplineSignal {
+                name: "documentation".into(),
+                basis: "path_extension".into(),
+                file_count: 1,
+                files: vec!["docs/guide\n.md".into()],
+            }],
+            unclassified: vec!["unknown.file".into()],
+            note: "Review the returned paths.".into(),
+        };
+        let precision_notes = vec!["syntax_only".into()];
+        let response = ChangeImpactTextView {
+            baseline: &baseline,
+            scope: &scope,
+            changes: &changes,
+            affected_components: &affected_components,
+            impact: &impact,
+            api_crossings: &api_crossings,
+            tests: &tests,
+            disciplines: &disciplines,
+            precision_notes: &precision_notes,
+            partial: false,
+            truncation_reasons: Vec::new(),
         };
 
-        let text = render_change_impact(&response, crate::ImpactFormat::Text).unwrap();
+        let text = render_change_impact_text(response);
 
         assert!(text.contains("main..working copy\nBaseline: 111\nHEAD: 222\nScope: ."));
         assert!(text.contains("docs/guide\\n.md (modified)"));

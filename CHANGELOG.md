@@ -16,7 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Symbol, file, history, and task research calls now reject blank selectors
   instead of returning a plausible empty result. Scratchpad writes also reject
-  blank labels and multi-line bodies.
+  blank labels and multi-line bodies. Revision tools reject blank explicit roots
+  instead of resolving them through the MCP process directory.
 - `mmcg_change_class` now resolves normalized repository-relative files against
   the root bound into the index, independent of the MCP process directory, and
   rejects comparisons spanning an index update.

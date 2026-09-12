@@ -7081,6 +7081,27 @@ impl Store {
         rows.collect()
     }
 
+    pub(crate) fn search_concepts_bounded(
+        &self,
+        match_query: &str,
+        top: u32,
+    ) -> SqlResult<(u32, Vec<ConceptStoreHit>)> {
+        // FTS5 does not allow bm25() in the same SELECT as a window aggregate.
+        // The query layer holds one read snapshot across this exact count and
+        // the ranked page, so both values still describe one corpus revision.
+        let total = self.conn.query_row(
+            "SELECT COUNT(*)
+             FROM symbol_concepts_fts
+             JOIN symbol_concepts c ON c.symbol_id = symbol_concepts_fts.rowid
+             JOIN symbols s ON s.id = c.symbol_id
+             WHERE symbol_concepts_fts MATCH ?1",
+            [match_query],
+            |row| row.get(0),
+        )?;
+        let hits = self.search_concepts(match_query, top)?;
+        Ok((total, hits))
+    }
+
     /// Deterministic bounded read of the derived project-history corpus for
     /// local evidence correlation. Markdown remains authoritative.
     pub fn project_history_entries_bounded(

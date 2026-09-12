@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Concept retrieval schema v2 now reports exact indexed-match coverage, page
+  truncation, and observed output-safety omissions from one SQLite snapshot.
 - Impact queries now report exact filtered coverage, keep a full 5,000-row
   result complete, echo the language scope, and apply that scope consistently
   to seed definitions, collision counts, and every transitive walk step.

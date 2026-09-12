@@ -1466,7 +1466,14 @@ pub struct ConceptResponse {
     pub schema_version: u32,
     pub repository_content_untrusted: bool,
     pub query_terms: Vec<String>,
+    /// Exact FTS matches in the checked derived corpus before output-safety
+    /// validation of the bounded ranked page.
+    pub indexed_total: u32,
     pub count: u32,
+    pub result_truncated: bool,
+    pub unsafe_candidates_omitted: u32,
+    pub truncated: bool,
+    pub truncation_reason: Option<&'static str>,
     pub top: u32,
     pub freshness: ConceptFreshness,
     pub limits: ConceptLimits,
@@ -1542,7 +1549,7 @@ pub(crate) fn concept_verified(
     store
         .begin_read_snapshot()
         .map_err(|_| ConceptError::SnapshotChanged)?;
-    let search = store.search_concepts(&match_query, top);
+    let search = store.search_concepts_bounded(&match_query, top);
     let documentation_stats = store.concept_documentation_stats();
     let end = store.end_read_snapshot();
     let data_version_after = store.data_version().map_err(|_| {
@@ -1556,7 +1563,7 @@ pub(crate) fn concept_verified(
     if data_version_after != expected_data_version {
         return Err(ConceptError::SnapshotChanged);
     }
-    let hits = search.map_err(|_| {
+    let (indexed_total, hits) = search.map_err(|_| {
         if store.interrupt_source().is_some() {
             ConceptError::WorkLimitExceeded
         } else {
@@ -1571,6 +1578,8 @@ pub(crate) fn concept_verified(
         }
     })?;
 
+    let fetched_count = brief_u32(hits.len());
+    let result_truncated = indexed_total > fetched_count;
     let mut unsafe_omitted = 0u32;
     let mut candidates = Vec::with_capacity(hits.len());
     for hit in hits {
@@ -1630,11 +1639,22 @@ pub(crate) fn concept_verified(
     if unsafe_omitted > 0 {
         precision_notes.push(format!("unsafe_candidates_omitted:{unsafe_omitted}"));
     }
+    let truncation_reason = match (result_truncated, unsafe_omitted > 0) {
+        (true, true) => Some("top_and_unsafe_candidates"),
+        (true, false) => Some("top"),
+        (false, true) => Some("unsafe_candidates"),
+        (false, false) => None,
+    };
     Ok(ConceptResponse {
-        schema_version: 1,
+        schema_version: 2,
         repository_content_untrusted: true,
         query_terms,
+        indexed_total,
         count: brief_u32(candidates.len()),
+        result_truncated,
+        unsafe_candidates_omitted: unsafe_omitted,
+        truncated: truncation_reason.is_some(),
+        truncation_reason,
         top,
         freshness,
         limits: ConceptLimits {
@@ -5833,6 +5853,13 @@ mod tests {
             verified_concept_freshness(),
         )
         .unwrap();
+        assert_eq!(response.schema_version, 2);
+        assert_eq!(response.indexed_total, 100);
+        assert_eq!(response.count, 10);
+        assert!(response.result_truncated);
+        assert_eq!(response.unsafe_candidates_omitted, 0);
+        assert!(response.truncated);
+        assert_eq!(response.truncation_reason, Some("top"));
         let expected = (0..10)
             .map(|index| format!("src/p{index:03}.rs"))
             .collect::<Vec<_>>();
@@ -5882,6 +5909,12 @@ mod tests {
             verified_concept_freshness(),
         )
         .unwrap();
+        assert_eq!(response.indexed_total, 1);
+        assert_eq!(response.count, 1);
+        assert!(!response.result_truncated);
+        assert_eq!(response.unsafe_candidates_omitted, 0);
+        assert!(!response.truncated);
+        assert_eq!(response.truncation_reason, None);
         let candidate = response.candidates.first().unwrap();
         assert_eq!(candidate.name, hostile_name);
         assert_eq!(candidate.path, hostile_path);

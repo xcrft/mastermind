@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Centrality queries now report exact filtered totals, truncation, active
+  filters, and ranking limitations instead of making a full `top` page look
+  complete.
 - MCP symbol diffs now bound every returned collection while preserving their
   flat arrays, expose per-collection coverage, and keep totals unknown when the
   upstream Git file scope is partial; CLI and audit consumers stay complete.

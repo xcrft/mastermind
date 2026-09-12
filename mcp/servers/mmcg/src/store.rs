@@ -655,6 +655,8 @@ pub(crate) type ImportRow = (String, Option<String>, u32);
 pub(crate) type CountedImportRows = (u32, Vec<ImportRow>);
 pub(crate) type CalleeRow = (String, u32);
 pub(crate) type CountedCalleeRows = (u32, Vec<CalleeRow>);
+pub(crate) type CentralityRow = (Symbol, u32, u32);
+pub(crate) type CountedCentralityRows = (u32, Vec<CentralityRow>);
 
 /// One task-spec file ready to be inserted into the FTS5 corpus.
 #[derive(Debug, Clone)]
@@ -6237,6 +6239,27 @@ impl Store {
         kind: Option<&str>,
         top: u32,
     ) -> SqlResult<Vec<(Symbol, u32, u32)>> {
+        self.centrality_rows(path_prefix, language, kind, top)
+            .map(|(_, rows)| rows)
+    }
+
+    pub(crate) fn centrality_bounded(
+        &self,
+        path_prefix: Option<&str>,
+        language: Option<&str>,
+        kind: Option<&str>,
+        top: u32,
+    ) -> SqlResult<CountedCentralityRows> {
+        self.centrality_rows(path_prefix, language, kind, top.max(1))
+    }
+
+    fn centrality_rows(
+        &self,
+        path_prefix: Option<&str>,
+        language: Option<&str>,
+        kind: Option<&str>,
+        top: u32,
+    ) -> SqlResult<CountedCentralityRows> {
         // In-degree = distinct CALLER symbols, not call sites. Mirrors
         // `mmcg_callers` — 5 calls to `foo` from the same caller count once.
         let references = reference_groups_ctes();
@@ -6249,7 +6272,8 @@ impl Store {
              defs AS (
                  SELECT name, COUNT(*) AS n FROM symbols WHERE kind != 'module' GROUP BY name
              )
-             SELECT {SYMBOL_COLS_S}, deg.d AS in_degree, defs.n AS name_collision
+             SELECT {SYMBOL_COLS_S}, deg.d AS in_degree, defs.n AS name_collision,
+                    COUNT(*) OVER() AS total
              FROM symbols s
              JOIN deg ON deg.nm = s.name AND deg.target_kind = s.kind
              JOIN defs ON defs.name = s.name
@@ -6266,9 +6290,17 @@ impl Store {
             // in_degree / name_collision follow the 9 SYMBOL_COLS_S columns.
             let in_degree: u32 = r.get(9)?;
             let name_collision: u32 = r.get(10)?;
-            Ok((sym, in_degree, name_collision))
+            let total: i64 = r.get(11)?;
+            Ok((sym, in_degree, name_collision, total))
         })?;
-        rows.collect()
+        let mut total = 0;
+        let mut results = Vec::with_capacity(top as usize);
+        for row in rows {
+            let (symbol, in_degree, name_collision, row_total) = row?;
+            total = row_total;
+            results.push((symbol, in_degree, name_collision));
+        }
+        Ok((total.clamp(0, i64::from(u32::MAX)) as u32, results))
     }
 
     pub fn map_paths(&self, scope: &str, kind: &str, limit: usize) -> SqlResult<Vec<String>> {
@@ -8906,6 +8938,9 @@ mod tests {
         let top1 = store.centrality(None, None, None, 1).unwrap();
         assert_eq!(top1.len(), 1);
         assert_eq!(top1[0].0.name, "popular");
+        let (total, bounded) = store.centrality_bounded(None, None, None, 1).unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(bounded.len(), 1);
         std::fs::remove_file(&path).ok();
     }
 

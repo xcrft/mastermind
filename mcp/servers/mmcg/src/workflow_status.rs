@@ -4281,7 +4281,7 @@ pub(crate) fn stale_paths_controlled(
                 stale.push(relative.clone());
                 seen.insert(relative);
                 if stale.len() >= cap {
-                    return Ok(stale);
+                    break;
                 }
                 continue;
             }
@@ -4305,29 +4305,31 @@ pub(crate) fn stale_paths_controlled(
         {
             stale.push(relative);
             if stale.len() >= cap {
-                return Ok(stale);
+                break;
             }
         }
     }
-    for indexed_path in indexed.keys() {
-        control
-            .check()
-            .map_err(crate::indexer::index_error_from_read)?;
-        if seen.contains(indexed_path) {
-            continue;
-        }
-        let remains_regular = crate::bounded_fs::read_regular_file_with_capability(
-            &root_capability,
-            Path::new(indexed_path),
-            u64::MAX,
-            0,
-            control,
-        )
-        .is_ok();
-        if !remains_regular {
-            stale.push(indexed_path.clone());
-            if stale.len() >= cap {
-                break;
+    if stale.len() < cap {
+        for indexed_path in indexed.keys() {
+            control
+                .check()
+                .map_err(crate::indexer::index_error_from_read)?;
+            if seen.contains(indexed_path) {
+                continue;
+            }
+            let remains_regular = crate::bounded_fs::read_regular_file_with_capability(
+                &root_capability,
+                Path::new(indexed_path),
+                u64::MAX,
+                0,
+                control,
+            )
+            .is_ok();
+            if !remains_regular {
+                stale.push(indexed_path.clone());
+                if stale.len() >= cap {
+                    break;
+                }
             }
         }
     }

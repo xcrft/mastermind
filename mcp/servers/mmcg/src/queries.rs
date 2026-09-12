@@ -434,6 +434,8 @@ pub struct FilesResponse {
 
 pub const FILES_DEFAULT_TOP: u32 = 200;
 pub const FILES_MAX_TOP: u32 = 500;
+pub const STATUS_STALE_FILE_LIMIT: usize = 100;
+pub const STATUS_STALE_FILE_PROBE_LIMIT: usize = STATUS_STALE_FILE_LIMIT + 1;
 
 #[derive(Debug, Serialize)]
 pub struct StatusResponse {
@@ -441,9 +443,15 @@ pub struct StatusResponse {
     pub symbol_count: u32,
     pub file_count: u32,
     /// Indexable source paths that are added, deleted, or newer than the indexed
-    /// snapshot (capped at 100). A non-zero count means structural answers must
-    /// not be trusted before re-indexing.
+    /// snapshot. A non-zero count means structural answers must not be trusted
+    /// before re-indexing.
     pub stale_files: usize,
+    /// True when more stale paths exist than `stale_files` reports.
+    pub stale_files_truncated: bool,
+    /// Stable reason that freshness could not be checked. In this case
+    /// `stale_files` is the conservative compatibility sentinel `1`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub freshness_error: Option<&'static str>,
     /// False when extractor semantics changed after the stored index was built.
     pub extractor_contract_current: bool,
 }
@@ -4254,15 +4262,17 @@ pub fn api_surface(
 
 pub fn status(store: &Store) -> rusqlite::Result<StatusResponse> {
     let db_path = store.db_path();
-    let stale_files = store
+    let (stale_files, stale_files_truncated, freshness_error) = store
         .meta_value("index_root")?
         .map(|root| stale_count(store, std::path::Path::new(&root)))
-        .unwrap_or(1);
+        .unwrap_or((1, false, Some("index_root_missing")));
     Ok(StatusResponse {
         db_path: db_path.to_string_lossy().to_string(),
         symbol_count: store.symbol_count()?,
         file_count: store.file_count()?,
         stale_files,
+        stale_files_truncated,
+        freshness_error,
         extractor_contract_current: store.extractor_contract_current()?,
     })
 }
@@ -4273,9 +4283,9 @@ pub fn status(store: &Store) -> rusqlite::Result<StatusResponse> {
 /// The repository root comes from the index binding rather than the DB location
 /// because `--index` may place SQLite anywhere. Reuse the caller's exact Store
 /// snapshot so status cannot silently mix rows from two index revisions.
-fn stale_count(store: &Store, index_root: &std::path::Path) -> usize {
+fn stale_count(store: &Store, index_root: &std::path::Path) -> (usize, bool, Option<&'static str>) {
     let Ok(root) = index_root.canonicalize() else {
-        return 1;
+        return (1, false, Some("index_root_unavailable"));
     };
     let hard_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let deadline = store
@@ -4285,7 +4295,7 @@ fn stale_count(store: &Store, index_root: &std::path::Path) -> usize {
     match crate::workflow_status::stale_paths_controlled(
         store,
         &root,
-        100,
+        STATUS_STALE_FILE_PROBE_LIMIT,
         crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
         crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
         crate::bounded_fs::ReadControl {
@@ -4293,8 +4303,16 @@ fn stale_count(store: &Store, index_root: &std::path::Path) -> usize {
             interrupted: Some(&interrupted),
         },
     ) {
-        Ok(paths) if store.source_snapshot_unchanged().unwrap_or(false) => paths.len(),
-        _ => 1,
+        Ok(paths) => match store.source_snapshot_unchanged() {
+            Ok(true) => (
+                paths.len().min(STATUS_STALE_FILE_LIMIT),
+                paths.len() > STATUS_STALE_FILE_LIMIT,
+                None,
+            ),
+            Ok(false) => (1, false, Some("snapshot_changed")),
+            Err(_) => (1, false, Some("snapshot_check_failed")),
+        },
+        Err(_) => (1, false, Some("freshness_scan_failed")),
     }
 }
 
@@ -8224,8 +8242,21 @@ mod tests {
 
         let response = status(&store).unwrap();
         assert_eq!(response.stale_files, 0);
+        assert!(!response.stale_files_truncated);
+        assert_eq!(response.freshness_error, None);
         assert!(response.extractor_contract_current);
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn status_marks_a_missing_index_root_as_unchecked() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path().join("mmcg.db")).unwrap();
+
+        let response = status(&store).unwrap();
+        assert_eq!(response.stale_files, 1);
+        assert!(!response.stale_files_truncated);
+        assert_eq!(response.freshness_error, Some("index_root_missing"));
     }
 
     #[test]

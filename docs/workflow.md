@@ -79,7 +79,9 @@ Both `--pre-only` and `--reset` retain the task's original Git baseline, prior
 strict/index options, and iteration count. Already committed implementation
 therefore remains in the audit diff. Failed retries revoke approval and keep
 the counter; `--force-iteration` overrides only that budget. Use a new task for
-a new baseline.
+a new baseline. Controller state transitions require an atomic `state.json`
+write; a failed fallback write is reported and cannot be described as a kept
+Drift/Broken state.
 
 Pre-flight also stops when graph queries fail or dependency-cycle analysis hits
 its work limit. An incomplete result cannot establish zero risk. Cycle analysis

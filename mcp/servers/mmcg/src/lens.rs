@@ -150,7 +150,7 @@ impl<T: Serialize> Serialize for LensProjectedCollection<'_, T> {
     where
         S: Serializer,
     {
-        let projected = self.source.truncated && self.source.items.len() > self.limit;
+        let projected = self.source.items.len() > self.limit;
         let items = if projected {
             &self.source.items[..self.limit]
         } else {
@@ -161,11 +161,17 @@ impl<T: Serialize> Serialize for LensProjectedCollection<'_, T> {
         } else {
             self.source.returned
         };
+        let truncated = self.source.truncated || projected;
+        let truncation_reason = self
+            .source
+            .truncation_reason
+            .as_deref()
+            .or_else(|| projected.then_some("lens_payload_limit"));
         let mut state = serializer.serialize_struct("Collection", if projected { 8 } else { 5 })?;
         state.serialize_field("total", &self.source.total)?;
         state.serialize_field("returned", &returned)?;
-        state.serialize_field("truncated", &self.source.truncated)?;
-        state.serialize_field("truncation_reason", &self.source.truncation_reason)?;
+        state.serialize_field("truncated", &truncated)?;
+        state.serialize_field("truncation_reason", &truncation_reason)?;
         if projected {
             state.serialize_field("observed", &self.source.returned)?;
             state.serialize_field("projection_truncated", &true)?;
@@ -2435,6 +2441,37 @@ mod tests {
             error,
             LensError::ImpactUnavailable(ChangeImpactError::SnapshotChanged)
         ));
+    }
+
+    #[test]
+    fn serialized_snapshot_projects_complete_changed_file_collection_above_lens_limit() {
+        let (repo, _index_dir, index_path) = fixture();
+        let store = Store::open_read_only(&index_path).unwrap();
+        let mut snapshot = build_snapshot(&store, repo.path(), &options()).unwrap();
+        let sample = snapshot.impact.changes.files.items[0].clone();
+        let source_count = LENS_CHANGED_FILE_ITEM_LIMIT + 1;
+        snapshot.impact.changes.files = queries::Collection {
+            total: Some(source_count as u32),
+            returned: source_count as u32,
+            truncated: false,
+            truncation_reason: None,
+            items: vec![sample; source_count],
+        };
+
+        let json = serde_json::to_value(&snapshot).unwrap();
+        let files = &json["impact"]["changes"]["files"];
+
+        assert_eq!(
+            files["items"].as_array().unwrap().len(),
+            LENS_CHANGED_FILE_ITEM_LIMIT
+        );
+        assert_eq!(files["total"], source_count as u64);
+        assert_eq!(files["returned"], LENS_CHANGED_FILE_ITEM_LIMIT as u64);
+        assert_eq!(files["observed"], source_count as u64);
+        assert_eq!(files["truncated"], true);
+        assert_eq!(files["truncation_reason"], "lens_payload_limit");
+        assert_eq!(files["projection_truncated"], true);
+        assert_eq!(files["projection_reason"], "lens_payload_limit");
     }
 
     #[test]

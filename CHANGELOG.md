@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Lens and review packages now retain the selected document-corpus roots and
+  exact bounded endpoint/corpus change records instead of reducing research
+  scope and stale evidence to status labels and counts.
 - Lens accessibility announcements now preserve simultaneous document-corpus,
   temporal, and partial-evidence limits instead of reporting only the first
   matching condition.

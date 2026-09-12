@@ -949,7 +949,9 @@ The package contains:
 - `summary.md`: a short, bounded reviewer summary with links to the HTML and
   SARIF payloads;
 - `manifest.json`: strict schema-v1 repository, scope, evidence, payload digest,
-  and partial/truncation state bindings;
+  and partial/truncation state bindings. When a document graph is selected, it
+  also retains the tracked corpus roots and every bounded endpoint/corpus change
+  path with its reason;
 - `mastermind-review.yml`: the pinned
   [GitHub Actions example](../examples/mastermind-review-pr.yml) for artifact
   and SARIF upload.
@@ -966,6 +968,8 @@ The export accepts the same `--path`, `--depth`, `--top`,
 `--production-only`, `--sarif`, `--coverage`, `--junit`, `--otel`,
 `--codeowners`, `--git-commits`, `--no-project-knowledge`, and
 `--document-graph` inputs as Lens.
+Lens displays the selected corpus roots beside document freshness, and the
+review summary repeats them so `current` remains tied to its declared scope.
 It reads external files before and after analysis, then rechecks them and the
 optional attestation after the private package directory is fully written and
 synced. The manifest records their SHA-256 digests next to the resolved head

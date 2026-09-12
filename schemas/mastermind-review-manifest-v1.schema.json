@@ -211,8 +211,11 @@
         "snapshot_dirty",
         "head_matches_snapshot",
         "endpoint_changes",
+        "endpoint_changed_files",
         "corpus_status",
+        "corpus_directories",
         "corpus_changes",
+        "corpus_changed_files",
         "relations",
         "relation_verification"
       ],
@@ -231,10 +234,53 @@
         "snapshot_dirty": { "type": "boolean" },
         "head_matches_snapshot": { "type": "boolean" },
         "endpoint_changes": { "type": "integer", "minimum": 0, "maximum": 128 },
+        "endpoint_changed_files": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/document_graph_change" }
+        },
         "corpus_status": { "enum": ["not_tracked", "current", "changed"] },
+        "corpus_directories": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        },
         "corpus_changes": { "type": "integer", "minimum": 0, "maximum": 512 },
+        "corpus_changed_files": {
+          "type": "array",
+          "maxItems": 512,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/document_graph_change" }
+        },
         "relations": { "type": "integer", "minimum": 1, "maximum": 256 },
         "relation_verification": { "const": "unverified" }
+      }
+    },
+    "document_graph_change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "reasons"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "reasons": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "added",
+              "content_changed",
+              "line_out_of_range",
+              "missing",
+              "not_regular",
+              "unsafe_path",
+              "unsupported_text"
+            ]
+          }
+        }
       }
     },
     "evidence_source": {

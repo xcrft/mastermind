@@ -2855,6 +2855,16 @@
       + " · semantics unverified.";
 
     const rows = [];
+    const corpusDirectories = array(corpus.directories).map(function (directory) {
+      return text(directory, "");
+    }).filter(Boolean);
+    if (corpusDirectories.length > 0) {
+      rows.push({
+        review: corpusStatus === "changed",
+        label: "Tracked corpus roots",
+        detail: corpusDirectories.join(" · "),
+      });
+    }
     endpointChanges.forEach(function (change) {
       rows.push({
         review: true,

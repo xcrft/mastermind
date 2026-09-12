@@ -1456,12 +1456,21 @@ def validate_review_package_contract() -> list[Issue]:
         if path == manifest_path:
             properties = schema.get("properties", {})
             graph = schema.get("$defs", {}).get("document_graph", {})
+            graph_change = schema.get("$defs", {}).get("document_graph_change", {})
             analysis = properties.get("analysis", {}).get("properties", {})
             states = analysis.get("states", {}).get("items", {}).get("properties", {})
             if properties.get("document_graph", {}).get("$ref") != "#/$defs/document_graph":
                 issues.append(Issue(path, "error", "review manifest must define optional document_graph binding"))
             if graph.get("additionalProperties") is not False or graph.get("properties", {}).get("relation_verification", {}).get("const") != "unverified":
                 issues.append(Issue(path, "error", "document graph binding must stay strict and semantically unverified"))
+            graph_fields = graph.get("properties", {})
+            if not {"corpus_directories", "endpoint_changed_files", "corpus_changed_files"} <= set(graph.get("required", [])):
+                issues.append(Issue(path, "error", "document graph binding must preserve scope and changed paths"))
+            if any(graph_fields.get(name, {}).get("items", {}).get("$ref") != "#/$defs/document_graph_change"
+                   for name in ("endpoint_changed_files", "corpus_changed_files")):
+                issues.append(Issue(path, "error", "document graph changed paths must use the strict change contract"))
+            if graph_change.get("additionalProperties") is not False or set(graph_change.get("required", [])) != {"path", "reasons"}:
+                issues.append(Issue(path, "error", "document graph change records must be strict"))
             if set(analysis.get("document_graph_status", {}).get("enum", [])) != {"current", "needs_review"}:
                 issues.append(Issue(path, "error", "review analysis must expose document graph freshness"))
             if "needs_review" not in states.get("state", {}).get("enum", []):
@@ -1487,6 +1496,9 @@ def validate_review_package_contract() -> list[Issue]:
             "producer-attested",
             "head_matches_snapshot",
             "observation_sha256",
+            "corpus_directories",
+            "endpoint_changed_files",
+            "corpus_changed_files",
             "from_json_strict",
         ):
             if token not in rust:

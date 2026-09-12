@@ -223,10 +223,19 @@ struct DocumentGraphBinding {
     snapshot_dirty: bool,
     head_matches_snapshot: bool,
     endpoint_changes: u32,
+    endpoint_changed_files: Vec<DocumentGraphChangeBinding>,
     corpus_status: &'static str,
+    corpus_directories: Vec<String>,
     corpus_changes: u32,
+    corpus_changed_files: Vec<DocumentGraphChangeBinding>,
     relations: u32,
     relation_verification: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct DocumentGraphChangeBinding {
+    path: String,
+    reasons: Vec<&'static str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -948,6 +957,15 @@ fn document_graph_binding(
     graph: &crate::document_graph::DocumentGraphCheck,
     review_head: &str,
 ) -> DocumentGraphBinding {
+    let changes = |items: &[crate::document_graph::DocumentGraphChange]| {
+        items
+            .iter()
+            .map(|change| DocumentGraphChangeBinding {
+                path: change.path.clone(),
+                reasons: change.reasons.clone(),
+            })
+            .collect()
+    };
     DocumentGraphBinding {
         status: graph.status,
         packet_path: graph.packet.path.clone(),
@@ -958,8 +976,11 @@ fn document_graph_binding(
         snapshot_dirty: graph.snapshot_revision.dirty,
         head_matches_snapshot: graph.snapshot_revision.head == review_head,
         endpoint_changes: graph.changed_files.len() as u32,
+        endpoint_changed_files: changes(&graph.changed_files),
         corpus_status: graph.corpus.status,
+        corpus_directories: graph.corpus.directories.clone(),
         corpus_changes: graph.corpus.changed_files.len() as u32,
+        corpus_changed_files: changes(&graph.corpus.changed_files),
         relations: graph.edges.len() as u32,
         relation_verification: "unverified",
     }
@@ -1184,13 +1205,25 @@ fn summary_markdown(
         ));
     }
     if let Some(graph) = &snapshot.document_graph {
+        let corpus_scope = if graph.corpus.directories.is_empty() {
+            "not tracked".to_string()
+        } else {
+            graph
+                .corpus
+                .directories
+                .iter()
+                .map(|path| format!("`{}`", markdown_text(path)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         output.push_str(&format!(
-            "\n## Declared document evidence\n\n- Packet: `{}`\n- Content status: `{}`\n- Endpoint changes: {}\n- Corpus status: `{}` · {} changes\n- Declared relations: {} · all `unverified`\n- Snapshot revision: `{}` · review head {}\n- Packet SHA-256: `{}`\n- Live observation SHA-256: `{}`\n\nContent freshness shows which declarations need rereading. It does not verify the meaning of a declared relation.\n",
+            "\n## Declared document evidence\n\n- Packet: `{}`\n- Content status: `{}`\n- Endpoint changes: {}\n- Corpus status: `{}` · {} changes\n- Corpus roots: {}\n- Declared relations: {} · all `unverified`\n- Snapshot revision: `{}` · review head {}\n- Packet SHA-256: `{}`\n- Live observation SHA-256: `{}`\n",
             markdown_text(&graph.packet.path),
             graph.status,
             graph.changed_files.len(),
             graph.corpus.status,
             graph.corpus.changed_files.len(),
+            corpus_scope,
             graph.edges.len(),
             graph.snapshot_revision.head,
             if graph.snapshot_revision.head == snapshot.impact.baseline.head_oid {
@@ -1201,6 +1234,37 @@ fn summary_markdown(
             graph.packet.artifact_sha256,
             graph.observation_sha256,
         ));
+        let changes = graph
+            .changed_files
+            .iter()
+            .map(|change| ("Endpoint", change))
+            .chain(
+                graph
+                    .corpus
+                    .changed_files
+                    .iter()
+                    .map(|change| ("Corpus", change)),
+            )
+            .collect::<Vec<_>>();
+        if !changes.is_empty() {
+            output.push_str("\nChanged document evidence:\n");
+            for (kind, change) in changes.iter().take(12) {
+                output.push_str(&format!(
+                    "  - {kind}: `{}` ({})\n",
+                    markdown_text(&change.path),
+                    change.reasons.join(", "),
+                ));
+            }
+            if changes.len() > 12 {
+                output.push_str(&format!(
+                    "  - {} additional changed paths are recorded in `manifest.json`.\n",
+                    changes.len() - 12
+                ));
+            }
+        }
+        output.push_str(
+            "\nContent freshness shows which source material needs rereading. It does not verify the meaning of a declared relation.\n",
+        );
     }
     output.push_str(&format!(
         "\n## Evidence and limits\n\n- External evidence inputs: {}\n- Lens evidence status: {}\n- Temporal status: `{}`\n- AI audit narrative: `{}`{}\n- Bounded/partial states: {}\n",
@@ -1819,9 +1883,22 @@ mod tests {
         assert_eq!(manifest["analysis"]["document_graph_status"], "current");
         assert_eq!(manifest["analysis"]["partial"], false);
         assert_eq!(manifest["document_graph"]["head_matches_snapshot"], true);
+        assert_eq!(
+            manifest["document_graph"]["corpus_directories"],
+            json!(["docs/adr"])
+        );
+        assert_eq!(
+            manifest["document_graph"]["endpoint_changed_files"],
+            json!([])
+        );
+        assert_eq!(
+            manifest["document_graph"]["corpus_changed_files"],
+            json!([])
+        );
         let summary = std::fs::read_to_string(output.join("summary.md")).unwrap();
         assert!(summary.contains("## Declared document evidence"));
         assert!(summary.contains("all `unverified`"));
+        assert!(summary.contains("Corpus roots: `docs/adr`"));
         assert!(summary.contains("AI audit narrative: `absent`"));
         let html = std::fs::read_to_string(output.join("index.html")).unwrap();
         assert!(html.contains("mastermind_native_document_evidence_check"));
@@ -1850,6 +1927,14 @@ mod tests {
         let endpoint = repository.path().join("src/handler.rs");
         std::fs::write(&endpoint, "fn changed_a() {}\n").unwrap();
         let expected = crate::document_graph::check_bounded(repository.path(), &graph).unwrap();
+        let binding = document_graph_binding(&expected, &expected.snapshot_revision.head);
+        assert_eq!(binding.endpoint_changes, 1);
+        assert_eq!(binding.endpoint_changed_files.len(), 1);
+        assert_eq!(binding.endpoint_changed_files[0].path, "src/handler.rs");
+        assert_eq!(
+            binding.endpoint_changed_files[0].reasons,
+            vec!["content_changed", "line_out_of_range"]
+        );
         std::fs::write(&endpoint, "fn changed_b() {}\n").unwrap();
 
         assert_eq!(expected.status, "needs_review");
@@ -1857,6 +1942,22 @@ mod tests {
             ensure_document_graph_unchanged(repository.path(), Some(&graph), Some(&expected)),
             Err(ReviewPackageError::DocumentGraphChanged(_))
         ));
+    }
+
+    #[test]
+    fn document_graph_binding_preserves_corpus_scope_and_changed_paths() {
+        let repository = tempfile::tempdir().unwrap();
+        let graph = crate::document_graph::test_support::write_snapshot(repository.path(), true);
+        std::fs::write(repository.path().join("docs/adr/0002.md"), "# Later\n").unwrap();
+
+        let observed = crate::document_graph::check_bounded(repository.path(), &graph).unwrap();
+        let binding = document_graph_binding(&observed, &observed.snapshot_revision.head);
+
+        assert_eq!(binding.corpus_directories, vec!["docs/adr"]);
+        assert_eq!(binding.corpus_changes, 1);
+        assert_eq!(binding.corpus_changed_files.len(), 1);
+        assert_eq!(binding.corpus_changed_files[0].path, "docs/adr/0002.md");
+        assert_eq!(binding.corpus_changed_files[0].reasons, vec!["added"]);
     }
 
     #[test]

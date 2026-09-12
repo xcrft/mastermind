@@ -1358,6 +1358,10 @@ diagnostics and cannot replace the rejected contract. A declaration must name
 a contained regular file using a valid relative path. Directory, symlink/reparse, special-file, absolute, parent and empty paths
 cannot satisfy it. Leading `./` and separator aliases are normalized consistently
 in scope comparisons, bundles and controller snapshots, independently of cwd.
+Unknown frontmatter fields are rejected at every schema level so misspelled
+scope, symbol, verification, and breaking-change keys cannot disappear silently.
+`mode` accepts `verified` and `strict` plus legacy `lite` and `standard`; `risk`
+accepts only `low`, `medium`, or `high`.
 
 Admission opens files without following links and rechecks their identity and
 metadata through one root capability. It reads no content, imposes no file-size

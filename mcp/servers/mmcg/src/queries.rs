@@ -7201,14 +7201,6 @@ mod tests {
         assert_eq!(bounded.language, None);
         assert_eq!(bounded.row_limit, Some(2));
         assert!(bounded.truncated);
-        assert!(bounded
-            .symbols
-            .iter()
-            .all(|symbol| symbol.precision.is_some()));
-        assert!(bounded
-            .precision_notes
-            .iter()
-            .any(|note| note.contains("not_definition_resolved")));
         assert_eq!(
             bounded
                 .files
@@ -7251,6 +7243,14 @@ mod tests {
         assert_eq!(bounded.count, 2);
         assert_eq!(bounded.row_limit, Some(2));
         assert!(bounded.truncated);
+        assert!(bounded
+            .symbols
+            .iter()
+            .all(|symbol| symbol.precision.is_some()));
+        assert!(bounded
+            .precision_notes
+            .iter()
+            .any(|note| note.contains("not_definition_resolved")));
         assert_eq!(
             bounded
                 .symbols

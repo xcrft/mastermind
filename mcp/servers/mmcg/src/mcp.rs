@@ -2164,7 +2164,7 @@ fn schema_temporal() -> Value {
 fn schema_semantic() -> Value {
     json!({
         "name": "mmcg_semantic",
-        "description": "Inspect optional compiler-resolved SCIP definitions, references, implementations, and type-definition relationships. Results carry provenance=scip and confidence=high. If no SCIP overlay was imported, fallback_active=true and the normal Tree-sitter graph remains available. Import or replace the overlay explicitly with `mastermind enrich --scip index.scip`.",
+        "description": "Inspect optional compiler-resolved SCIP definitions, references, implementations, and type-definition relationships. Results carry provenance=scip and confidence=high. Each collection reports exact stored-match coverage when known and counts facts omitted because their source document is stale. Unverified repository identity, an unreadable overlay, query limits, stale documents, or missing embedded source revision evidence keep the response partial. If no SCIP overlay was imported, fallback_active=true and the normal Tree-sitter graph remains available. Import or replace the overlay explicitly with `mastermind enrich --scip index.scip`.",
         "inputSchema": {
             "type": "object",
             "properties": {

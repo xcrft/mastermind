@@ -3569,10 +3569,10 @@ impl TaskPhase {
     }
 }
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TaskState {
     pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub history_snapshot_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub risk: Option<String>,

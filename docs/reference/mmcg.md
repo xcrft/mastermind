@@ -1134,7 +1134,7 @@ update its SHM coordination file. Incompatible custom schemas return
 | `mmcg_symbols_in_file` | `file` | All symbols defined in a file, source order. Flat list. |
 | `mmcg_outline` | `file` | Symbol tree of a file — classes/impls own their methods, modules own top-level functions. One call replaces a search + multiple lookups. |
 | `mmcg_files` | optional `prefix`, `language` | Indexed files with symbol counts. |
-| `mmcg_recent_changes` | `since` (e.g. `2h`, `30m`, `1d`) | Files re-indexed within the given window. Useful for "what changed recently?" during incident investigation. |
+| `mmcg_recent_changes` | `since` (e.g. `2h`, `30m`, `1d`) | Indexed file snapshots whose stored source mtime falls between `window_start_unix_ms` and `as_of_unix_ms`. The response identifies `timestamp_basis`, excludes future mtimes, and carries precision notes; this is a filesystem recency signal rather than indexing-time or Git evidence. |
 | `mmcg_scratchpad_append` | `agent`, `kind`, `body` | Append a one-line intent / note / handoff to the cross-agent scratchpad — live in-session channel between Mastermind subagents (planner → executor → auditor). Persists in `.mastermind/mmcg.db`. Body capped at 8 KiB. Cross-session counterpart is `_lessons.md`. |
 | `mmcg_scratchpad_read` | optional `since`, `agent`, `kind`, `limit` | Read recent scratchpad entries, newest first. `since` is a unix timestamp (seconds); omit for the last `limit` entries (default 20, max 200). |
 | `mmcg_change_class` | `file` | Classify a file's last change as `structural`, `cosmetic`, or `first-seen`. Backed by an FNV-1a 64-bit hash of the file's parsed structural shape — line numbers and whitespace excluded. Pre-edit signal for planner and auditor: large diffs that are mostly cosmetic have smaller real scope than line count suggests. |
@@ -1587,8 +1587,10 @@ provenance and does not silently upgrade these default graph queries.
 - `mmcg_api_surface` is empirical: it returns symbols currently referenced from
   outside a prefix, regardless of declared visibility. It is not a language
   public-API declaration query.
-- `mmcg_recent_changes` reports index timestamps, not Git history. After a
-  rebase or forced re-index, use `git log --since=...` for Git truth.
+- `mmcg_recent_changes` reports the source mtimes stored in the index, not the
+  time indexing ran or Git history. A stale index can omit newer worktree
+  changes. After a rebase or forced re-index, use `git log --since=...` for Git
+  truth.
 - `mmcg_unreferenced` suppresses recognized framework entry points:
   pytest fixtures/marks, common web routes, JIT/task/CLI decorators, Rust test
   attributes, C# test/web/benchmark attributes, JUnit/Spring annotations, and

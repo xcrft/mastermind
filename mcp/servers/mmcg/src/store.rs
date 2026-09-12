@@ -6901,15 +6901,20 @@ impl Store {
             })
     }
 
-    /// Files with `indexed_at >= threshold_unix`. Backs `mmcg_recent_changes`
-    /// ("what has the watcher touched lately").
-    pub fn files_indexed_since(&self, threshold_unix: i64) -> SqlResult<Vec<FileEntry>> {
+    /// Indexed file snapshots whose stored source mtime is inside the inclusive
+    /// millisecond interval. Backs `mmcg_recent_changes`; `indexed_at` is a
+    /// legacy column name and does not record when the indexer ran.
+    pub fn files_with_mtime_between(
+        &self,
+        start_unix_ms: i64,
+        end_unix_ms: i64,
+    ) -> SqlResult<Vec<FileEntry>> {
         let mut stmt = self.conn.prepare(
             "SELECT path, indexed_at, symbol_count FROM files
-             WHERE indexed_at >= ?1
-             ORDER BY indexed_at DESC",
+             WHERE indexed_at >= ?1 AND indexed_at <= ?2
+             ORDER BY indexed_at DESC, path",
         )?;
-        let rows = stmt.query_map(params![threshold_unix], |r| {
+        let rows = stmt.query_map(params![start_unix_ms, end_unix_ms], |r| {
             Ok(FileEntry {
                 path: r.get(0)?,
                 indexed_at: r.get(1)?,

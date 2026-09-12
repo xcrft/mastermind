@@ -2255,7 +2255,7 @@ fn schema_change_class() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "file": { "type": "string", "description": "Path relative to the project root (e.g. `src/auth/login.ts`)." }
+                "file": { "type": "string", "minLength": 1, "description": "Path relative to the indexed project root (e.g. `src/auth/login.ts`)." }
             },
             "required": ["file"]
         }
@@ -3238,11 +3238,13 @@ fn handle_scratchpad_read(store: &mut Store, args: &Value) -> Result<Value, Hand
 }
 
 fn handle_change_class(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
-    let file = str_arg(args, "file")?;
+    let file = queries::normalize_map_path(str_arg(args, "file")?)
+        .ok()
+        .filter(|file| !file.is_empty())
+        .ok_or_else(|| HandlerError::InvalidArguments("Invalid argument: file".into()))?;
     ensure_schema_compatible(store)?;
-    let root = std::env::current_dir()
-        .map_err(|error| HandlerError::internal("change_class_root", error))?;
-    let r = queries::classify_change(store, &root, file)
+    let root = changed_since_root(store, None)?;
+    let r = queries::classify_change(store, &root, &file)
         .map_err(|error| HandlerError::internal("change_class_query", error))?;
     serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
@@ -5633,6 +5635,9 @@ mod checks {
         std::fs::create_dir_all(tmp.join("src")).unwrap();
         let db_path = tmp.join("mmcg.db");
         let mut store = crate::store::Store::open(&db_path).unwrap();
+        store
+            .set_meta("index_root", tmp.canonicalize().unwrap().to_str().unwrap())
+            .unwrap();
 
         let foo_path = tmp.join("src/foo.rs");
         let rel = "src/foo.rs";
@@ -5715,11 +5720,12 @@ mod checks {
         }
 
         let tmp = tempfile::tempdir().unwrap();
+        let unrelated_cwd = tempfile::tempdir().unwrap();
         let original_cwd = std::env::current_dir().unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("change_class_round_trip_via_tools_call")
             .env(CHILD_ROOT, tmp.path())
-            .current_dir(tmp.path())
+            .current_dir(unrelated_cwd.path())
             .output()
             .unwrap();
         assert!(
@@ -5729,6 +5735,24 @@ mod checks {
             String::from_utf8_lossy(&output.stderr)
         );
         assert_eq!(std::env::current_dir().unwrap(), original_cwd);
+    }
+
+    #[test]
+    fn change_class_rejects_paths_outside_the_index_root() {
+        let (root, mut store) = fresh_test_store();
+        store
+            .set_meta(
+                "index_root",
+                root.path().canonicalize().unwrap().to_str().unwrap(),
+            )
+            .unwrap();
+        for file in ["", ".", "../outside.rs", "/absolute.rs", "src/\0bad.rs"] {
+            assert!(matches!(
+                handle_change_class(&mut store, &json!({ "file": file })),
+                Err(HandlerError::InvalidArguments(message))
+                    if message == "Invalid argument: file"
+            ));
+        }
     }
 
     #[test]

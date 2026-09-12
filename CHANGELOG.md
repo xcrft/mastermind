@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Human workflow-audit output now lists the bounded node/edge graph, context
+  estimates, and the complete limit set instead of exposing only graph counts
+  and diagnostics.
 - Architecture-policy text reports now preserve full config and revision
   identity, evaluated rules, related locations, result properties, incomplete
   evidence, and precision notes, while escaping repository-controlled terminal

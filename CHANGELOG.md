@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Review-package analysis states now preserve explicit reasons such as
+  `lens_payload_limit` for named truncation flags and deduplicate an equivalent
+  generic truncation entry.
 - Lens claim accessibility labels now report error, warning, and informational
   finding counts separately instead of flattening every level into one total.
 - Lens now applies its 200-record changed-file transport cap to every oversized

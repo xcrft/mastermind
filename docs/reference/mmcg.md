@@ -946,6 +946,10 @@ byte through no-follow handles before the atomic rename. A race removes the
 private staging directory and publishes no output. When staging is inside the
 repository, the worktree check excludes only that exact newly created private
 directory; sibling and pre-existing changes remain part of validation.
+The analysis-state ledger uses explicit sibling reason fields for named
+truncation flags. A Lens transport projection is therefore recorded as
+`lens_payload_limit`, and an equivalent generic `truncated` state collapses to
+one entry instead of producing a duplicate with the literal flag name.
 
 With `--document-graph PATH`, the manifest also binds the packet digest, its
 internal snapshot digest, the stable live observation digest, snapshot Git

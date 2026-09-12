@@ -119,6 +119,9 @@ Status, next-action, and resume read task inventories and lifecycle state
 through bounded, no-follow repository capabilities. An unreadable, malformed,
 oversized, unknown, or special-file state is shown as held, and an ambiguous or
 changing inventory blocks resume instead of being treated as a new ready task.
+Generated `status`, `next`, and `resume` commands quote each filesystem path as
+one shell argument. Paths containing terminal-control or bidi characters remain
+visible in escaped form but do not produce a copy/paste command.
 Controller updates replace `state.json` atomically through the retained task
 directory after syncing the private temporary file. A process interruption
 therefore leaves either the previous complete state or the next complete state.

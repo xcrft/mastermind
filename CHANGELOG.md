@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Automatic CODEOWNERS discovery is now bounded, exact-case, no-follow, and
+  fail-closed across Lens, temporal ownership, and review export; unreadable or
+  invalid priority locations can no longer look like an absent ownership file.
 - Offline review export now selects automatic CODEOWNERS evidence once and
   rechecks that path before publication, preventing Lens analysis and manifest
   bindings from using different priority candidates during a concurrent change.

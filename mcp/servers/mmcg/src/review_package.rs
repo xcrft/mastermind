@@ -341,7 +341,7 @@ pub fn export(options: &ReviewExportOptions) -> Result<ReviewExportResult, Revie
         .canonicalize()
         .map_err(|_| ReviewPackageError::Lens(LensError::RootUnavailable))?;
     let output_dir = output_target(&options.out)?;
-    let (evidence, discovered_codeowners) = bound_evidence_options(&root, &options.evidence);
+    let (evidence, discovered_codeowners) = bound_evidence_options(&root, &options.evidence)?;
     let requests = evidence_requests(&evidence, &options.extensions);
     let before_sources = read_sources(&root, &requests)?;
     let before_attestation = options
@@ -578,15 +578,23 @@ pub fn export(options: &ReviewExportOptions) -> Result<ReviewExportResult, Revie
 fn bound_evidence_options(
     root: &Path,
     evidence: &EvidenceOptions,
-) -> (EvidenceOptions, Option<Option<PathBuf>>) {
+) -> Result<(EvidenceOptions, Option<Option<PathBuf>>), ReviewPackageError> {
     let mut bound = evidence.clone();
-    let discovered = (evidence.codeowners.is_none() && evidence.discover_codeowners)
-        .then(|| crate::evidence::discover_codeowners(root));
+    let discovered = if evidence.codeowners.is_none() && evidence.discover_codeowners {
+        Some(crate::evidence::discover_codeowners(root).map_err(|error| {
+            ReviewPackageError::EvidenceUnavailable(format!(
+                "CODEOWNERS auto-discovery ({})",
+                error.code()
+            ))
+        })?)
+    } else {
+        None
+    };
     if let Some(path) = &discovered {
         bound.codeowners = path.clone();
         bound.discover_codeowners = false;
     }
-    (bound, discovered)
+    Ok((bound, discovered))
 }
 
 fn ensure_codeowners_discovery_unchanged(
@@ -594,7 +602,8 @@ fn ensure_codeowners_discovery_unchanged(
     expected: Option<&Option<PathBuf>>,
 ) -> Result<(), ReviewPackageError> {
     if let Some(expected) = expected {
-        let observed = crate::evidence::discover_codeowners(root);
+        let observed = crate::evidence::discover_codeowners(root)
+            .map_err(|_| ReviewPackageError::EvidenceChanged("CODEOWNERS auto-discovery".into()))?;
         if &observed != expected {
             return Err(ReviewPackageError::EvidenceChanged(
                 "CODEOWNERS auto-discovery".into(),

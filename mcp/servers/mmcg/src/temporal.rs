@@ -1230,15 +1230,31 @@ fn ownership_delta(
     let paths_truncated = candidates.len() > OWNERSHIP_PATH_LIMIT;
     candidates.truncate(OWNERSHIP_PATH_LIMIT);
 
-    let requested_head_path = override_path
-        .map(|path| {
-            if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                root.join(path)
+    let requested_head_path = match override_path {
+        Some(path) => Some(if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            root.join(path)
+        }),
+        None => match crate::evidence::discover_codeowners(root) {
+            Ok(path) => path,
+            Err(error) => {
+                diagnostics.push(diagnostic(error.code(), error.message()));
+                return Ok(TemporalOwnership {
+                    base_source: None,
+                    head_source: None,
+                    changes: TemporalCollection {
+                        total: None,
+                        returned: 0,
+                        truncated: true,
+                        truncation_reason: Some("source_unavailable"),
+                        items: Vec::new(),
+                    },
+                    diagnostics_truncated: false,
+                });
             }
-        })
-        .or_else(|| crate::evidence::discover_codeowners(root));
+        },
+    };
     let head_path = requested_head_path
         .as_deref()
         .and_then(|path| path.canonicalize().ok());
@@ -1246,11 +1262,19 @@ fn ownership_delta(
         .as_deref()
         .and_then(|path| path.strip_prefix(root).ok())
         .map(|path| path.to_string_lossy().replace('\\', "/"));
-    if override_path.is_some() && head_source.is_none() {
-        diagnostics.push(diagnostic(
-            "external_codeowners_baseline_unavailable",
-            "An unavailable or external CODEOWNERS override has no Git-baseline counterpart; ownership drift was omitted.",
-        ));
+    if requested_head_path.is_some() && head_source.is_none() {
+        let (code, message) = if override_path.is_some() {
+            (
+                "external_codeowners_baseline_unavailable",
+                "An unavailable or external CODEOWNERS override has no Git-baseline counterpart; ownership drift was omitted.",
+            )
+        } else {
+            (
+                "codeowners_discovery_changed",
+                "The discovered CODEOWNERS path became unavailable or escaped the repository; ownership drift was omitted.",
+            )
+        };
+        diagnostics.push(diagnostic(code, message));
         return Ok(TemporalOwnership {
             base_source: None,
             head_source: requested_head_path.map(|path| path.to_string_lossy().to_string()),

@@ -25,6 +25,7 @@ use std::time::Instant;
 pub(crate) const MAX_ARTIFACT_BYTES: u64 = 32 * 1024 * 1024;
 pub(crate) const MAX_CODEOWNERS_BYTES: u64 = 3 * 1024 * 1024;
 pub(crate) const MAX_ARTIFACT_SOURCES: usize = 64;
+const MAX_CODEOWNERS_DISCOVERY_ENTRIES: usize = 16_384;
 const MAX_RELEVANT_FILES: usize = 1_000;
 const MAX_TRUNCATED_CHANGED_FILES: usize = 200;
 const MAX_FINDINGS: usize = 5_000;
@@ -373,6 +374,36 @@ struct SourceInput {
     bytes: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CodeownersDiscoveryError {
+    Unavailable,
+    Changed,
+    EntryLimit,
+    InvalidType,
+}
+
+impl CodeownersDiscoveryError {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::Unavailable => "codeowners_discovery_unavailable",
+            Self::Changed => "codeowners_discovery_changed",
+            Self::EntryLimit => "codeowners_discovery_limit",
+            Self::InvalidType => "codeowners_discovery_invalid_type",
+        }
+    }
+
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::Unavailable => "The CODEOWNERS search locations could not be read safely.",
+            Self::Changed => "The CODEOWNERS search locations changed during discovery.",
+            Self::EntryLimit => "CODEOWNERS discovery exceeded its 16,384-entry directory budget.",
+            Self::InvalidType => {
+                "A CODEOWNERS search location exists with an unsupported file type."
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 enum SourceFailure {
     Unavailable,
@@ -383,6 +414,7 @@ enum SourceFailure {
     InvalidUtf8,
     InvalidFormat,
     CodeownersTooLarge,
+    CodeownersDiscovery(CodeownersDiscoveryError),
     Deadline,
     Git(WorkingTreeDiffError),
 }
@@ -398,6 +430,7 @@ impl SourceFailure {
             Self::InvalidUtf8 => "invalid_utf8",
             Self::InvalidFormat => "invalid_format",
             Self::CodeownersTooLarge => "codeowners_too_large",
+            Self::CodeownersDiscovery(error) => error.code(),
             Self::Deadline => "deadline_exceeded",
             Self::Git(WorkingTreeDiffError::GitTimeout) => "git_timeout",
             Self::Git(WorkingTreeDiffError::GitOutputLimit) => "git_output_limit",
@@ -421,6 +454,7 @@ impl SourceFailure {
             Self::CodeownersTooLarge => {
                 "The CODEOWNERS file is not under GitHub's 3 MiB ingestion limit."
             }
+            Self::CodeownersDiscovery(error) => error.message(),
             Self::Deadline => "Evidence loading reached the Lens request deadline.",
             Self::Git(WorkingTreeDiffError::GitTimeout) => {
                 "Git history collection exceeded its deadline."
@@ -622,12 +656,22 @@ fn collect_internal(
         loaded_artifacts += 1;
     }
 
-    let codeowners = options.codeowners.clone().or_else(|| {
-        options
-            .discover_codeowners
-            .then(|| discover_codeowners(root))
-            .flatten()
-    });
+    let codeowners = match &options.codeowners {
+        Some(path) => Some(path.clone()),
+        None if options.discover_codeowners => match discover_codeowners(root) {
+            Ok(path) => path,
+            Err(error) => {
+                collector.source_error(
+                    "codeowners".into(),
+                    "codeowners",
+                    "CODEOWNERS auto-discovery".into(),
+                    SourceFailure::CodeownersDiscovery(error),
+                );
+                None
+            }
+        },
+        None => None,
+    };
     if let Some(path) = codeowners {
         collector.notes.push(EvidencePrecisionNote {
             source_id: "codeowners",
@@ -2200,34 +2244,92 @@ fn excerpt_around(body: &str, start: usize, end: usize) -> String {
     truncate_text(output.trim(), 280)
 }
 
-pub(crate) fn discover_codeowners(root: &Path) -> Option<PathBuf> {
-    exact_directory(root, ".github")
-        .and_then(|directory| exact_regular_file(&directory, "CODEOWNERS"))
-        .or_else(|| exact_regular_file(root, "CODEOWNERS"))
-        .or_else(|| {
-            exact_directory(root, "docs")
-                .and_then(|directory| exact_regular_file(&directory, "CODEOWNERS"))
-        })
-}
+pub(crate) fn discover_codeowners(
+    root: &Path,
+) -> Result<Option<PathBuf>, CodeownersDiscoveryError> {
+    use crate::bounded_fs::{BoundedPathKind, BoundedReadError, ReadControl, RootCapability};
 
-fn exact_directory(parent: &Path, name: &str) -> Option<PathBuf> {
-    exact_child(parent, name).filter(|path| {
-        std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
-    })
-}
+    fn map_error(error: BoundedReadError) -> CodeownersDiscoveryError {
+        match error {
+            BoundedReadError::SnapshotChanged => CodeownersDiscoveryError::Changed,
+            BoundedReadError::TooLarge { .. } => CodeownersDiscoveryError::EntryLimit,
+            _ => CodeownersDiscoveryError::Unavailable,
+        }
+    }
 
-fn exact_regular_file(parent: &Path, name: &str) -> Option<PathBuf> {
-    exact_child(parent, name).filter(|path| {
-        std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
-    })
-}
+    fn names(
+        capability: &RootCapability,
+        directory: &Path,
+        budget: &mut usize,
+    ) -> Result<Vec<std::ffi::OsString>, CodeownersDiscoveryError> {
+        let names = crate::bounded_fs::read_directory_names_with_capability(
+            capability,
+            directory,
+            *budget,
+            ReadControl::default(),
+        )
+        .map_err(map_error)?;
+        *budget = (*budget).saturating_sub(names.len());
+        Ok(names)
+    }
 
-fn exact_child(parent: &Path, name: &str) -> Option<PathBuf> {
-    std::fs::read_dir(parent)
-        .ok()?
-        .filter_map(Result::ok)
-        .find(|entry| entry.file_name() == OsStr::new(name))
-        .map(|entry| entry.path())
+    fn require_kind(
+        capability: &RootCapability,
+        path: &Path,
+        expected: BoundedPathKind,
+    ) -> Result<(), CodeownersDiscoveryError> {
+        let observed = crate::bounded_fs::inspect_path_kind_with_capability(
+            capability,
+            path,
+            ReadControl::default(),
+        )
+        .map_err(map_error)?;
+        if observed != expected {
+            return Err(CodeownersDiscoveryError::InvalidType);
+        }
+        Ok(())
+    }
+
+    let capability = RootCapability::open(root).map_err(map_error)?;
+    let root = capability.requested_root();
+    let mut budget = MAX_CODEOWNERS_DISCOVERY_ENTRIES;
+    let root_names = names(&capability, root, &mut budget)?;
+    let has = |names: &[std::ffi::OsString], name: &str| {
+        names
+            .iter()
+            .any(|entry| entry.as_os_str() == OsStr::new(name))
+    };
+
+    if has(&root_names, ".github") {
+        let directory = root.join(".github");
+        require_kind(&capability, &directory, BoundedPathKind::Directory)?;
+        let github_names = names(&capability, &directory, &mut budget)?;
+        if has(&github_names, "CODEOWNERS") {
+            let path = directory.join("CODEOWNERS");
+            require_kind(&capability, &path, BoundedPathKind::RegularFile)?;
+            capability.verify().map_err(map_error)?;
+            return Ok(Some(path));
+        }
+    }
+    if has(&root_names, "CODEOWNERS") {
+        let path = root.join("CODEOWNERS");
+        require_kind(&capability, &path, BoundedPathKind::RegularFile)?;
+        capability.verify().map_err(map_error)?;
+        return Ok(Some(path));
+    }
+    if has(&root_names, "docs") {
+        let directory = root.join("docs");
+        require_kind(&capability, &directory, BoundedPathKind::Directory)?;
+        let docs_names = names(&capability, &directory, &mut budget)?;
+        if has(&docs_names, "CODEOWNERS") {
+            let path = directory.join("CODEOWNERS");
+            require_kind(&capability, &path, BoundedPathKind::RegularFile)?;
+            capability.verify().map_err(map_error)?;
+            return Ok(Some(path));
+        }
+    }
+    capability.verify().map_err(map_error)?;
+    Ok(None)
 }
 
 fn sarif_tool(run: &Value) -> String {
@@ -3401,7 +3503,7 @@ mod tests {
         fs::write(root.path().join(".GitHub/CODEOWNERS"), "* @wrong-case\n").unwrap();
         fs::write(root.path().join("CODEOWNERS"), "* @root\n").unwrap();
         assert_eq!(
-            discover_codeowners(root.path()).unwrap(),
+            discover_codeowners(root.path()).unwrap().unwrap(),
             root.path().join("CODEOWNERS")
         );
 
@@ -3410,8 +3512,20 @@ mod tests {
         fs::create_dir(root.path().join(".github")).unwrap();
         fs::write(root.path().join(".github/CODEOWNERS"), "* @github\n").unwrap();
         assert_eq!(
-            discover_codeowners(root.path()).unwrap(),
+            discover_codeowners(root.path()).unwrap().unwrap(),
             root.path().join(".github/CODEOWNERS")
+        );
+    }
+
+    #[test]
+    fn codeowners_discovery_rejects_invalid_priority_locations() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join(".github"), "not a directory").unwrap();
+        fs::write(root.path().join("CODEOWNERS"), "* @fallback\n").unwrap();
+
+        assert_eq!(
+            discover_codeowners(root.path()),
+            Err(CodeownersDiscoveryError::InvalidType)
         );
     }
 

@@ -5,9 +5,9 @@
 //! in parallel via rayon, and serializes writes through one SQLite connection.
 
 use crate::bounded_fs::{
-    inspect_path_kind_with_capability, read_directory_names_with_capability, read_regular_file,
-    read_regular_file_expected, read_regular_file_with_capability, BoundedPathKind,
-    BoundedReadError, ReadControl, RootCapability, StableFileIdentity,
+    inspect_absent_path, inspect_path_kind_with_capability, read_directory_names_with_capability,
+    read_regular_file, read_regular_file_expected, read_regular_file_with_capability, AbsentPath,
+    BoundedPathKind, BoundedReadError, ReadControl, RootCapability, StableFileIdentity,
 };
 use crate::store::{
     normalize_concept_documentation, PendingConceptCorpus, PendingConceptDocumentation,
@@ -718,6 +718,8 @@ impl Indexer {
         let mut current_paths: std::collections::HashSet<String> =
             std::collections::HashSet::with_capacity(candidates.len());
         let mut admitted_identities: HashMap<PathBuf, StableFileIdentity> = HashMap::new();
+        let mut absent_candidates: Vec<(PathBuf, AbsentPath)> = Vec::new();
+        let mut manual_absence_root = None;
         let mut declared_source_bytes = 0_u64;
 
         for path in &candidates {
@@ -753,6 +755,33 @@ impl Indexer {
                 Err(IndexError::Skipped(IndexSkipReason::TooLarge { .. })) => {
                     stats.files_skipped_too_large += 1;
                     push_path_sample(&mut stats.skipped_too_large_paths, &rel);
+                    continue;
+                }
+                Err(IndexError::Missing) => {
+                    let absence_root = if let Some(root) = root_capability.as_ref() {
+                        root
+                    } else {
+                        if manual_absence_root.is_none() {
+                            manual_absence_root = Some(
+                                RootCapability::open(&self.root).map_err(index_error_from_read)?,
+                            );
+                        }
+                        manual_absence_root
+                            .as_ref()
+                            .expect("manual absence root was initialized")
+                    };
+                    let interrupted = || store.work_interrupted();
+                    let absence = inspect_absent_path(
+                        absence_root,
+                        path,
+                        ReadControl {
+                            deadline: store.request_deadline(),
+                            interrupted: Some(&interrupted),
+                        },
+                    )
+                    .map_err(index_error_from_read)?
+                    .ok_or(IndexError::SnapshotChanged)?;
+                    absent_candidates.push((path.clone(), absence));
                     continue;
                 }
                 Err(error @ (IndexError::Cancelled | IndexError::DeadlineExceeded))
@@ -911,6 +940,28 @@ impl Indexer {
         stats.task_specs_indexed = history.task_specs_indexed;
         stats.history_entries_skipped = history.skipped;
         stats.history_entries_truncated = history.truncated;
+        if !absent_candidates.is_empty() {
+            let verification_root =
+                RootCapability::open(&self.root).map_err(index_error_from_read)?;
+            for (path, expected) in &absent_candidates {
+                let interrupted = || store.work_interrupted();
+                let observed = inspect_absent_path(
+                    &verification_root,
+                    path,
+                    ReadControl {
+                        deadline: store.request_deadline(),
+                        interrupted: Some(&interrupted),
+                    },
+                )
+                .map_err(index_error_from_read)?;
+                if observed
+                    .as_ref()
+                    .is_none_or(|observed| !expected.matches(observed))
+                {
+                    return Err(IndexError::SnapshotChanged);
+                }
+            }
+        }
         if stats.files_failed == 0 && contracts_need_finalization {
             ensure_indexing_active(store)?;
             let finalized = store
@@ -1892,6 +1943,9 @@ pub(crate) fn index_error_from_read(error: BoundedReadError) -> IndexError {
         | BoundedReadError::OutsideRoot
         | BoundedReadError::InvalidPath
         | BoundedReadError::NotRegular => IndexError::SnapshotChanged,
+        BoundedReadError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            IndexError::Missing
+        }
         BoundedReadError::Io(error) => IndexError::Io(error.to_string()),
     }
 }
@@ -2051,6 +2105,7 @@ pub enum IndexError {
     Parse(String),
     Other(String),
     Skipped(IndexSkipReason),
+    Missing,
     SnapshotChanged,
     Cancelled,
     DeadlineExceeded,
@@ -2081,6 +2136,7 @@ impl std::fmt::Display for IndexError {
             IndexError::Io(m) => write!(f, "io: {m}"),
             IndexError::Parse(m) => write!(f, "parse: {m}"),
             IndexError::Other(m) => write!(f, "other: {m}"),
+            IndexError::Missing => write!(f, "source path is absent"),
             IndexError::SnapshotChanged => write!(f, "snapshot changed during bounded read"),
             IndexError::Cancelled => write!(f, "indexing cancelled"),
             IndexError::DeadlineExceeded => write!(f, "indexing deadline exceeded"),
@@ -3304,7 +3360,7 @@ def candidate(value: ImportantType) -> ResultType"#
 
     #[test]
     fn tracked_inventory_retains_a_missing_source_path() {
-        let (dir, _db) = setup("tracked_missing_source");
+        let (dir, db) = setup("tracked_missing_source");
         fs::write(dir.join("missing.rs"), "pub fn missing() {}\n").unwrap();
         git(&dir, &["init", "-q", "--initial-branch=main"]);
         git(&dir, &["add", "missing.rs"]);
@@ -3314,6 +3370,11 @@ def candidate(value: ImportantType) -> ResultType"#
             tracked_relative_paths(&dir).unwrap(),
             [PathBuf::from("missing.rs")]
         );
+        let mut store = Store::open(&db).unwrap();
+        let stats = Indexer::new(&dir).index_all(&mut store, false).unwrap();
+        assert_eq!(stats.files_failed, 0);
+        assert!(store.extractor_contract_current().unwrap());
+        assert!(store.indexed_paths().unwrap().is_empty());
         fs::remove_dir_all(&dir).ok();
     }
 

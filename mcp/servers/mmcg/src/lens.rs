@@ -771,9 +771,18 @@ fn snapshot_from_paths_until_with_validator(
 
 /// Render a single-file, offline Lens application. The snapshot, stylesheet,
 /// and application code are embedded under content hashes; the resulting CSP
-/// disables all network connections and external resources.
+/// disables all network connections and external resources. The shareable
+/// projection omits the canonical document-graph root; callers retain the
+/// original snapshot for live root-bound validation.
 pub(crate) fn standalone_html(snapshot: &LensSnapshot) -> Result<Vec<u8>, LensError> {
-    let snapshot_json = serde_json::to_string(snapshot).map_err(|_| LensError::Serialization)?;
+    let mut snapshot = serde_json::to_value(snapshot).map_err(|_| LensError::Serialization)?;
+    if let Some(graph) = snapshot
+        .get_mut("document_graph")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        graph.remove("root");
+    }
+    let snapshot_json = serde_json::to_string(&snapshot).map_err(|_| LensError::Serialization)?;
     standalone_html_from_json(&snapshot_json)
 }
 

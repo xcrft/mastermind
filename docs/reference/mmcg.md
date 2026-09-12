@@ -943,7 +943,10 @@ The package contains:
 
 - `index.html`: one autonomous Lens document with the snapshot, CSS, and JS
   embedded under a hash-only CSP. It has no fetch, CDN, telemetry, or write
-  path;
+  path. Its published projection omits the native document graph's canonical
+  local root; the exporter retains the original root-bound check for final live
+  validation, while the repository-relative root label, packet path, and
+  evidence bindings remain in the artifact;
 - `mastermind.sarif`: the project-map and change-impact SARIF projections as
   two independently identified runs;
 - `summary.md`: a short, bounded reviewer summary with links to the HTML and

@@ -350,13 +350,73 @@ fn mermaid_label(value: &str) -> String {
     out
 }
 
+fn map_count_label(total: Option<u32>, returned: u32) -> String {
+    total.map_or_else(
+        || format!("{returned}/unknown"),
+        |total| format!("{returned}/{total}"),
+    )
+}
+
+fn map_section_coverage<T>(name: &str, section: &queries::MapSection<T>) -> String {
+    let mut line = format!(
+        "  {name}: {}",
+        map_count_label(section.total, section.returned)
+    );
+    if section.truncated {
+        line.push_str(&format!(
+            " (partial: {})",
+            section
+                .truncation_reason
+                .unwrap_or("unspecified_truncation")
+        ));
+    }
+    line.push('\n');
+    line
+}
+
 fn render_map_text(map: &queries::ProjectMapResponse) -> String {
+    let displayed_files = map.files.total.map_or_else(
+        || format!("at least {}", map.files.returned),
+        |total| total.to_string(),
+    );
     let mut out = format!(
-        "mastermind map — {} ({}, {} files)\n\nLanguages\n",
+        "mastermind map — {} ({}, {} files, response coverage {})\n\nCoverage\n",
         safe_text(&map.scope.path),
         map.scope.kind,
-        map.files.total.unwrap_or(map.files.returned)
+        displayed_files,
+        if map.is_partial() {
+            "partial"
+        } else {
+            "complete"
+        }
     );
+    out.push_str(&format!(
+        "  files: {}{}\n",
+        map_count_label(map.files.total, map.files.returned),
+        if map.files.truncated {
+            format!(
+                " (partial: {})",
+                map.files
+                    .truncation_reason
+                    .unwrap_or("unspecified_truncation")
+            )
+        } else {
+            String::new()
+        }
+    ));
+    out.push_str(&map_section_coverage("languages", &map.languages));
+    out.push_str(&map_section_coverage("components", &map.components));
+    out.push_str(&map_section_coverage("entry points", &map.entry_points));
+    out.push_str(&map_section_coverage("hotspots", &map.hotspots));
+    out.push_str(&map_section_coverage("cycles", &map.cycles));
+    if map.is_partial() {
+        out.push_str(&format!(
+            "  reasons: {}\n",
+            map.truncation_reasons().join(", ")
+        ));
+    }
+
+    out.push_str("\nLanguages\n");
     for language in &map.languages.items {
         out.push_str(&format!(
             "  {}: {}\n",
@@ -366,11 +426,23 @@ fn render_map_text(map: &queries::ProjectMapResponse) -> String {
     }
     out.push_str("\nComponents\n");
     for component in &map.components.items {
+        let boundary_state = if component.boundaries.truncated {
+            format!(
+                " (partial: {})",
+                component
+                    .boundaries
+                    .truncation_reason
+                    .unwrap_or("unspecified_truncation")
+            )
+        } else {
+            String::new()
+        };
         out.push_str(&format!(
-            "  {} ({} files, {} boundaries)\n",
+            "  {} ({} files, boundaries {}{})\n",
             safe_text(&component.path),
             component.file_count,
-            component.boundaries.returned
+            map_count_label(component.boundaries.total, component.boundaries.returned),
+            boundary_state
         ));
     }
     out.push_str("\nLikely entry points (heuristic)\n");
@@ -388,6 +460,21 @@ fn render_map_text(map: &queries::ProjectMapResponse) -> String {
             hotspot.name_collision
         ));
     }
+    out.push_str("\nCycles\n");
+    if map.cycles.items.is_empty() {
+        out.push_str(if map.cycles.truncated {
+            "  no cycle rows returned from the partial analysis\n"
+        } else {
+            "  no indexed dependency-cycle candidates\n"
+        });
+    } else {
+        for (index, cycle) in map.cycles.items.iter().enumerate() {
+            out.push_str(&format!("  cycle {} ({} files)\n", index + 1, cycle.len()));
+            for member in cycle {
+                out.push_str(&format!("    {}\n", safe_text(member)));
+            }
+        }
+    }
     out.push_str("\nPrecision notes\n");
     for note in &map.precision_notes {
         out.push_str(&format!("  {}: {}\n", note.code, safe_text(note.message)));
@@ -398,9 +485,14 @@ fn render_map_text(map: &queries::ProjectMapResponse) -> String {
 fn render_map_mermaid(map: &queries::ProjectMapResponse) -> String {
     let mut out = String::from("flowchart TD\n");
     out.push_str("  classDef boundary fill:#e8f1ff,stroke:#4b75b8\n");
+    out.push_str("  classDef entry fill:#eefbe8,stroke:#4d8a3a\n");
     out.push_str("  classDef hotspot fill:#fff0e6,stroke:#c35b22\n");
     out.push_str("  classDef cycle fill:#ffe8e8,stroke:#b84b4b\n");
-    let file_count = map.files.total.unwrap_or(map.files.returned);
+    out.push_str("  classDef notice fill:#fff8d6,stroke:#9a7b13,stroke-dasharray: 4 3\n");
+    let file_count = map.files.total.map_or_else(
+        || format!("at least {}", map.files.returned),
+        |total| total.to_string(),
+    );
     let language_summary = map
         .languages
         .items
@@ -415,6 +507,57 @@ fn render_map_mermaid(map: &queries::ProjectMapResponse) -> String {
         file_count,
         mermaid_label(&language_summary)
     ));
+    if map.is_partial() {
+        out.push_str(&format!(
+            "  partial[\"partial response | {}\"]:::notice\n  n0 -.-> partial\n",
+            mermaid_label(&map.truncation_reasons().join(", "))
+        ));
+    }
+
+    let mut projection_omissions = Vec::new();
+    let language_omissions = map.languages.items.len().saturating_sub(4);
+    if language_omissions > 0 {
+        projection_omissions.push(format!("{language_omissions} languages"));
+    }
+    let component_language_omissions = map
+        .components
+        .items
+        .iter()
+        .map(|component| component.languages.len().saturating_sub(3))
+        .sum::<usize>();
+    if component_language_omissions > 0 {
+        projection_omissions.push(format!(
+            "{component_language_omissions} component language labels"
+        ));
+    }
+    let entry_point_omissions = map.entry_points.items.len().saturating_sub(10);
+    if entry_point_omissions > 0 {
+        projection_omissions.push(format!("{entry_point_omissions} entry points"));
+    }
+    let boundary_omissions = map
+        .components
+        .items
+        .iter()
+        .map(|component| component.boundaries.items.len().saturating_sub(5))
+        .sum::<usize>();
+    if boundary_omissions > 0 {
+        projection_omissions.push(format!("{boundary_omissions} boundaries"));
+    }
+    let hotspot_omissions = map.hotspots.items.len().saturating_sub(10);
+    if hotspot_omissions > 0 {
+        projection_omissions.push(format!("{hotspot_omissions} hotspots"));
+    }
+    let cycle_omissions = map.cycles.items.len().saturating_sub(5);
+    if cycle_omissions > 0 {
+        projection_omissions.push(format!("{cycle_omissions} cycles"));
+    }
+    if !projection_omissions.is_empty() {
+        out.push_str(&format!(
+            "  projection[\"diagram omits {} | use JSON or text for all returned rows\"]:::notice\n  n0 -.-> projection\n",
+            mermaid_label(&projection_omissions.join(", "))
+        ));
+    }
+
     for (index, component) in map.components.items.iter().enumerate() {
         let id = index + 1;
         let languages = component
@@ -439,6 +582,12 @@ fn render_map_mermaid(map: &queries::ProjectMapResponse) -> String {
                 boundary.line
             ));
         }
+    }
+    for (index, entry) in map.entry_points.items.iter().take(10).enumerate() {
+        out.push_str(&format!(
+            "  e{index}[\"entry {}\"]:::entry\n  n0 --> e{index}\n",
+            mermaid_label(&entry.file)
+        ));
     }
     for (index, hotspot) in map.hotspots.items.iter().take(10).enumerate() {
         out.push_str(&format!(
@@ -999,7 +1148,7 @@ mod map_tests {
         let path = std::env::temp_dir().join(format!("mmcg-mermaid-map-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let store = Store::open(&path).unwrap();
-        for file in ["src/a.py", "src/b.py", "outside.py"] {
+        for file in ["src/a.py", "src/b.py", "src/main.py", "outside.py"] {
             store.upsert_file(file, 1, 1).unwrap();
         }
         let a = store
@@ -1018,13 +1167,31 @@ mod map_tests {
         store
             .insert_edge(b, Some(a), "alpha", "imports", 2)
             .unwrap();
+        for index in 0..11 {
+            let file = format!("src/hotspot{index}.py");
+            let name = format!("hotspot_{index}");
+            store.upsert_file(&file, 1, 1).unwrap();
+            let target = store
+                .insert_symbol(&name, "function", &file, 1, 3, None, None)
+                .unwrap();
+            store
+                .insert_edge(outside, Some(target), &name, "calls", index + 3)
+                .unwrap();
+        }
 
         let map = queries::project_map(&store, ".", 2, 20).unwrap();
+        let text = render_map_text(&map);
+        assert!(text.contains("Coverage"));
+        assert!(text.contains("cycles: 1/1"));
+        assert!(text.contains("cycle 1 (2 files)"));
         let rendered = render_map_mermaid(&map);
         assert!(rendered.contains("files"));
+        assert!(rendered.contains("entry src/main.py"));
         assert!(rendered.contains("boundary alpha"));
         assert!(rendered.contains("hotspot alpha"));
         assert!(rendered.contains("cycle 1"));
+        assert!(rendered.contains("diagram omits"));
+        assert!(rendered.contains("hotspots"));
         std::fs::remove_file(path).ok();
     }
 
@@ -1047,7 +1214,9 @@ mod map_tests {
             .insert_edge(b, Some(a), "alpha", "imports", 2)
             .unwrap();
 
-        let map = queries::project_map(&store, ".", 2, 20).unwrap();
+        let mut map = queries::project_map(&store, ".", 2, 20).unwrap();
+        map.entry_points.truncated = true;
+        map.entry_points.truncation_reason = Some("entry_point_limit");
         let sarif = mmcg::sarif_export::project_map(&map);
         assert_eq!(sarif["version"], "2.1.0");
         assert_eq!(
@@ -1070,6 +1239,12 @@ mod map_tests {
                 .len(),
             2
         );
+        assert_eq!(sarif["runs"][0]["properties"]["partial"], true);
+        assert!(sarif["runs"][0]["properties"]["partialReasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason == "entry_point_limit"));
         std::fs::remove_file(path).ok();
     }
 }

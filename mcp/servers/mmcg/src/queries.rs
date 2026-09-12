@@ -4817,6 +4817,78 @@ pub struct ProjectMapResponse {
     pub precision_notes: Vec<MapNote>,
 }
 
+impl ProjectMapResponse {
+    pub fn is_partial(&self) -> bool {
+        self.scope.aggregation_paths_truncated
+            || self.files.truncated
+            || self.languages.truncated
+            || self.components.truncated
+            || self.entry_points.truncated
+            || self.hotspots.truncated
+            || self.cycles.truncated
+            || self
+                .components
+                .items
+                .iter()
+                .any(|component| component.boundaries.truncated)
+    }
+
+    pub fn truncation_reasons(&self) -> Vec<&'static str> {
+        fn record(
+            reasons: &mut BTreeSet<&'static str>,
+            truncated: bool,
+            reason: Option<&'static str>,
+        ) {
+            if truncated {
+                reasons.insert(reason.unwrap_or("unspecified_truncation"));
+            }
+        }
+
+        let mut reasons = BTreeSet::new();
+        if self.scope.aggregation_paths_truncated {
+            reasons.insert("path_work_limit");
+        }
+        record(
+            &mut reasons,
+            self.files.truncated,
+            self.files.truncation_reason,
+        );
+        record(
+            &mut reasons,
+            self.languages.truncated,
+            self.languages.truncation_reason,
+        );
+        record(
+            &mut reasons,
+            self.components.truncated,
+            self.components.truncation_reason,
+        );
+        record(
+            &mut reasons,
+            self.entry_points.truncated,
+            self.entry_points.truncation_reason,
+        );
+        record(
+            &mut reasons,
+            self.hotspots.truncated,
+            self.hotspots.truncation_reason,
+        );
+        record(
+            &mut reasons,
+            self.cycles.truncated,
+            self.cycles.truncation_reason,
+        );
+        for component in &self.components.items {
+            record(
+                &mut reasons,
+                component.boundaries.truncated,
+                component.boundaries.truncation_reason,
+            );
+        }
+        reasons.into_iter().collect()
+    }
+}
+
 pub fn normalize_map_path(input: &str) -> Result<String, String> {
     let replaced = input.replace('\\', "/");
     if replaced.starts_with('/')
@@ -6323,7 +6395,10 @@ mod tests {
                 .unwrap();
         }
 
-        let value = serde_json::to_value(project_map(&store, "src", 2, 20).unwrap()).unwrap();
+        let map = project_map(&store, "src", 2, 20).unwrap();
+        assert!(map.is_partial());
+        assert_eq!(map.truncation_reasons(), vec!["entry_point_limit"]);
+        let value = serde_json::to_value(map).unwrap();
         assert_eq!(value["entry_points"]["total"], (MAP_ENTRY_LIMIT + 1) as u32);
         assert_eq!(value["entry_points"]["returned"], MAP_ENTRY_LIMIT as u32);
         assert_eq!(value["entry_points"]["truncated"], true);

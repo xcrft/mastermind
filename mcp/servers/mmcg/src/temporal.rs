@@ -846,18 +846,7 @@ impl ArchitectureProjection {
                 (hotspot_key(&hotspot), hotspot)
             })
             .collect();
-        let partial = map.files.truncated
-            || map.languages.truncated
-            || map.components.truncated
-            || map
-                .components
-                .items
-                .iter()
-                .any(|item| item.boundaries.truncated)
-            || map.entry_points.truncated
-            || map.hotspots.truncated
-            || map.cycles.truncated
-            || map.scope.aggregation_paths_truncated;
+        let partial = map.is_partial();
         Self {
             components,
             boundaries,

@@ -14,15 +14,7 @@ const CROSSING_RULE: &str = "mastermind/component-boundary-change";
 const POLICY_INCOMPLETE_RULE: &str = "mastermind/policy-evaluation-incomplete";
 
 pub fn project_map(map: &ProjectMapResponse) -> Value {
-    let mut partial_reasons = Vec::new();
-    if let Some(reason) = map.cycles.truncation_reason {
-        partial_reasons.push(reason);
-    }
-    if map.scope.aggregation_paths_truncated {
-        partial_reasons.push("path_work_limit");
-    }
-    partial_reasons.sort_unstable();
-    partial_reasons.dedup();
+    let partial_reasons = map.truncation_reasons();
     let results = map
         .cycles
         .items
@@ -74,7 +66,7 @@ pub fn project_map(map: &ProjectMapResponse) -> Value {
             "analysis": "project-map",
             "scope": map.scope.path,
             "productionOnly": map.scope.production_only,
-            "partial": map.cycles.truncated || map.scope.aggregation_paths_truncated,
+            "partial": map.is_partial(),
             "cyclesReturned": map.cycles.returned,
             "cyclesTotal": map.cycles.total,
             "partialReasons": partial_reasons

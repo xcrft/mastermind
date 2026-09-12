@@ -44,7 +44,9 @@ pub struct TemporalOptions {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TemporalCollection<T> {
-    pub total: u32,
+    /// Exact delta size when both source projections were complete.
+    /// `None` means the returned rows are only an observed bounded window.
+    pub total: Option<u32>,
     pub returned: u32,
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -202,20 +204,23 @@ pub struct TemporalComponents {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TemporalSummary {
-    pub architecture_changed: bool,
-    pub components_added: u32,
-    pub components_removed: u32,
-    pub boundaries_added: u32,
-    pub boundaries_removed: u32,
-    pub boundaries_changed: u32,
-    pub cycles_introduced: u32,
-    pub cycles_resolved: u32,
-    pub cycles_changed: u32,
-    pub centrality_increases: u32,
-    pub hotspot_entries: u32,
-    pub hotspot_exits: u32,
-    pub ownership_changes: u32,
-    pub history_review_candidates: u32,
+    /// `None` means no drift was observed in the returned projection, but an
+    /// incomplete source prevents proving that the architecture is unchanged.
+    pub architecture_changed: Option<bool>,
+    pub components_added: Option<u32>,
+    pub components_removed: Option<u32>,
+    pub components_changed: Option<u32>,
+    pub boundaries_added: Option<u32>,
+    pub boundaries_removed: Option<u32>,
+    pub boundaries_changed: Option<u32>,
+    pub cycles_introduced: Option<u32>,
+    pub cycles_resolved: Option<u32>,
+    pub cycles_changed: Option<u32>,
+    pub centrality_increases: Option<u32>,
+    pub hotspot_entries: Option<u32>,
+    pub hotspot_exits: Option<u32>,
+    pub ownership_changes: Option<u32>,
+    pub history_review_candidates: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -331,6 +336,10 @@ struct ArchitectureProjection {
     boundaries: BTreeMap<BoundaryKey, TemporalBoundary>,
     cycles: BTreeSet<Vec<String>>,
     hotspots: BTreeMap<HotspotKey, TemporalHotspot>,
+    components_partial: bool,
+    boundaries_partial: bool,
+    cycles_partial: bool,
+    hotspots_partial: bool,
     partial: bool,
 }
 
@@ -549,7 +558,7 @@ pub(crate) fn analyze_with_impact(
     let components = component_delta(&base, &head);
     let boundaries = boundary_delta(&base, &head);
     let cycles = cycle_delta(&base, &head);
-    let (centrality, hotspots) = centrality_delta(&base, &head);
+    let (centrality, hotspots, centrality_increases) = centrality_delta(&base, &head);
     let public_api = boundaries.clone();
     let ownership = ownership_delta(
         OwnershipInput {
@@ -590,11 +599,6 @@ pub(crate) fn analyze_with_impact(
         Some(&interrupted),
     )?;
 
-    let centrality_increases = centrality
-        .items
-        .iter()
-        .filter(|item| item.in_degree_delta > 0)
-        .count() as u32;
     let summary = TemporalSummary {
         architecture_changed: architecture_changed(
             &components,
@@ -606,6 +610,7 @@ pub(crate) fn analyze_with_impact(
         ),
         components_added: components.added.total,
         components_removed: components.removed.total,
+        components_changed: components.changed.total,
         boundaries_added: boundaries.added.total,
         boundaries_removed: boundaries.removed.total,
         boundaries_changed: boundaries.changed.total,
@@ -733,20 +738,37 @@ fn architecture_changed(
     centrality: &TemporalCollection<TemporalCentralityDrift>,
     hotspots: &TemporalHotspotDrift,
     ownership: &TemporalOwnership,
-) -> bool {
-    components.added.total > 0
-        || components.removed.total > 0
-        || components.changed.total > 0
-        || boundaries.added.total > 0
-        || boundaries.removed.total > 0
-        || boundaries.changed.total > 0
-        || cycles.added.total > 0
-        || cycles.removed.total > 0
-        || cycles.changed.total > 0
-        || centrality.total > 0
-        || hotspots.entered.total > 0
-        || hotspots.exited.total > 0
-        || ownership.changes.total > 0
+) -> Option<bool> {
+    let observed_change = components.added.returned > 0
+        || components.removed.returned > 0
+        || components.changed.returned > 0
+        || boundaries.added.returned > 0
+        || boundaries.removed.returned > 0
+        || boundaries.changed.returned > 0
+        || cycles.added.returned > 0
+        || cycles.removed.returned > 0
+        || cycles.changed.returned > 0
+        || centrality.returned > 0
+        || hotspots.entered.returned > 0
+        || hotspots.exited.returned > 0
+        || ownership.changes.returned > 0;
+    if observed_change {
+        return Some(true);
+    }
+    let complete = components.added.total.is_some()
+        && components.removed.total.is_some()
+        && components.changed.total.is_some()
+        && boundaries.added.total.is_some()
+        && boundaries.removed.total.is_some()
+        && boundaries.changed.total.is_some()
+        && cycles.added.total.is_some()
+        && cycles.removed.total.is_some()
+        && cycles.changed.total.is_some()
+        && centrality.total.is_some()
+        && hotspots.entered.total.is_some()
+        && hotspots.exited.total.is_some()
+        && ownership.changes.total.is_some();
+    complete.then_some(false)
 }
 
 fn ownership_scope_paths(
@@ -846,12 +868,25 @@ impl ArchitectureProjection {
                 (hotspot_key(&hotspot), hotspot)
             })
             .collect();
+        let components_partial = map.components.truncated;
+        let boundaries_partial = components_partial
+            || map
+                .components
+                .items
+                .iter()
+                .any(|component| component.boundaries.truncated);
+        let cycles_partial = map.cycles.truncated;
+        let hotspots_partial = map.hotspots.truncated;
         let partial = map.is_partial();
         Self {
             components,
             boundaries,
             cycles,
             hotspots,
+            components_partial,
+            boundaries_partial,
+            cycles_partial,
+            hotspots_partial,
             partial,
         }
     }
@@ -898,6 +933,7 @@ fn component_delta(
     base: &ArchitectureProjection,
     head: &ArchitectureProjection,
 ) -> TemporalComponents {
+    let source_partial = base.components_partial || head.components_partial;
     let base_keys = base.components.keys().cloned().collect::<BTreeSet<_>>();
     let head_keys = head.components.keys().cloned().collect::<BTreeSet<_>>();
     let added = head_keys
@@ -924,10 +960,16 @@ fn component_delta(
             })
         })
         .collect();
+    let mut added = bounded(added, COMPONENT_DELTA_LIMIT);
+    let mut removed = bounded(removed, COMPONENT_DELTA_LIMIT);
+    let mut changed = bounded(changed, COMPONENT_DELTA_LIMIT);
+    mark_projection_partial(&mut added, source_partial);
+    mark_projection_partial(&mut removed, source_partial);
+    mark_projection_partial(&mut changed, source_partial);
     TemporalComponents {
-        added: bounded(added, COMPONENT_DELTA_LIMIT),
-        removed: bounded(removed, COMPONENT_DELTA_LIMIT),
-        changed: bounded(changed, COMPONENT_DELTA_LIMIT),
+        added,
+        removed,
+        changed,
     }
 }
 
@@ -935,6 +977,7 @@ fn boundary_delta(
     base: &ArchitectureProjection,
     head: &ArchitectureProjection,
 ) -> TemporalBoundaryDelta {
+    let source_partial = base.boundaries_partial || head.boundaries_partial;
     let base_keys = base.boundaries.keys().cloned().collect::<BTreeSet<_>>();
     let head_keys = head.boundaries.keys().cloned().collect::<BTreeSet<_>>();
     let added = head_keys
@@ -962,14 +1005,21 @@ fn boundary_delta(
             })
         })
         .collect();
+    let mut added = bounded(added, BOUNDARY_DELTA_LIMIT);
+    let mut removed = bounded(removed, BOUNDARY_DELTA_LIMIT);
+    let mut changed = bounded(changed, BOUNDARY_DELTA_LIMIT);
+    mark_projection_partial(&mut added, source_partial);
+    mark_projection_partial(&mut removed, source_partial);
+    mark_projection_partial(&mut changed, source_partial);
     TemporalBoundaryDelta {
-        added: bounded(added, BOUNDARY_DELTA_LIMIT),
-        removed: bounded(removed, BOUNDARY_DELTA_LIMIT),
-        changed: bounded(changed, BOUNDARY_DELTA_LIMIT),
+        added,
+        removed,
+        changed,
     }
 }
 
 fn cycle_delta(base: &ArchitectureProjection, head: &ArchitectureProjection) -> TemporalCycleDelta {
+    let source_partial = base.cycles_partial || head.cycles_partial;
     let exact = base
         .cycles
         .intersection(&head.cycles)
@@ -1058,10 +1108,16 @@ fn cycle_delta(base: &ArchitectureProjection, head: &ArchitectureProjection) -> 
         .enumerate()
         .filter_map(|(index, cycle)| (!used_base[index]).then_some(cycle))
         .collect();
+    let mut added = bounded(added, CYCLE_DELTA_LIMIT);
+    let mut removed = bounded(removed, CYCLE_DELTA_LIMIT);
+    let mut changed = bounded(changed, CYCLE_DELTA_LIMIT);
+    mark_projection_partial(&mut added, source_partial);
+    mark_projection_partial(&mut removed, source_partial);
+    mark_projection_partial(&mut changed, source_partial);
     TemporalCycleDelta {
-        added: bounded(added, CYCLE_DELTA_LIMIT),
-        removed: bounded(removed, CYCLE_DELTA_LIMIT),
-        changed: bounded(changed, CYCLE_DELTA_LIMIT),
+        added,
+        removed,
+        changed,
     }
 }
 
@@ -1071,7 +1127,9 @@ fn centrality_delta(
 ) -> (
     TemporalCollection<TemporalCentralityDrift>,
     TemporalHotspotDrift,
+    Option<u32>,
 ) {
+    let source_partial = base.hotspots_partial || head.hotspots_partial;
     let base_keys = base.hotspots.keys().cloned().collect::<BTreeSet<_>>();
     let head_keys = head.hotspots.keys().cloned().collect::<BTreeSet<_>>();
     let entered = head_keys
@@ -1109,15 +1167,24 @@ fn centrality_delta(
                 (&left.file, &left.name, &left.kind).cmp(&(&right.file, &right.name, &right.kind))
             })
     });
-    let centrality = bounded(drift.clone(), CENTRALITY_DELTA_LIMIT);
-    let moved = bounded(drift, CENTRALITY_DELTA_LIMIT);
+    let centrality_increases = (!source_partial)
+        .then_some(drift.iter().filter(|item| item.in_degree_delta > 0).count() as u32);
+    let mut centrality = bounded(drift.clone(), CENTRALITY_DELTA_LIMIT);
+    let mut entered = bounded(entered, CENTRALITY_DELTA_LIMIT);
+    let mut exited = bounded(exited, CENTRALITY_DELTA_LIMIT);
+    let mut moved = bounded(drift, CENTRALITY_DELTA_LIMIT);
+    mark_projection_partial(&mut centrality, source_partial);
+    mark_projection_partial(&mut entered, source_partial);
+    mark_projection_partial(&mut exited, source_partial);
+    mark_projection_partial(&mut moved, source_partial);
     (
         centrality,
         TemporalHotspotDrift {
-            entered: bounded(entered, CENTRALITY_DELTA_LIMIT),
-            exited: bounded(exited, CENTRALITY_DELTA_LIMIT),
+            entered,
+            exited,
             moved,
         },
+        centrality_increases,
     )
 }
 
@@ -1188,7 +1255,7 @@ fn ownership_delta(
             base_source: None,
             head_source: requested_head_path.map(|path| path.to_string_lossy().to_string()),
             changes: TemporalCollection {
-                total: 0,
+                total: None,
                 returned: 0,
                 truncated: true,
                 truncation_reason: Some("baseline_unavailable"),
@@ -1292,7 +1359,7 @@ fn ownership_delta(
             base_source,
             head_source,
             changes: TemporalCollection {
-                total: 0,
+                total: None,
                 returned: 0,
                 truncated: true,
                 truncation_reason: Some("source_unavailable"),
@@ -1342,6 +1409,7 @@ fn ownership_delta(
         || head_resolution.as_ref().is_some_and(|value| value.partial);
     let mut changes = bounded(changes, OWNERSHIP_PATH_LIMIT);
     if paths_truncated || parser_partial {
+        changes.total = None;
         changes.truncated = true;
         changes.truncation_reason = Some(if paths_truncated {
             "path_limit"
@@ -1468,6 +1536,7 @@ fn history_review_candidates(
         HISTORY_CANDIDATE_LIMIT,
     );
     if history_truncated || overflow {
+        response.total = None;
         response.truncated = true;
         response.truncation_reason = Some(if overflow {
             "candidate_limit"
@@ -1519,12 +1588,26 @@ fn bounded<T>(mut items: Vec<T>, limit: usize) -> TemporalCollection<T> {
     let truncated = total > limit;
     items.truncate(limit);
     TemporalCollection {
-        total: total as u32,
+        total: Some(total as u32),
         returned: items.len() as u32,
         truncated,
         truncation_reason: truncated.then_some("output_limit"),
         items,
     }
+}
+
+fn mark_projection_partial<T>(collection: &mut TemporalCollection<T>, partial: bool) {
+    if !partial {
+        return;
+    }
+    let output_limited = collection.truncated;
+    collection.total = None;
+    collection.truncated = true;
+    collection.truncation_reason = Some(if output_limited {
+        "map_projection_and_output_limit"
+    } else {
+        "map_projection"
+    });
 }
 
 fn diagnostic(code: impl Into<String>, message: impl Into<String>) -> TemporalDiagnostic {
@@ -1603,11 +1686,12 @@ mod tests {
 
         let api = boundary_delta(&base, &head);
         let cycles = cycle_delta(&base, &head);
-        let (centrality, hotspots) = centrality_delta(&base, &head);
+        let (centrality, hotspots, centrality_increases) = centrality_delta(&base, &head);
 
-        assert_eq!(api.changed.total, 1);
+        assert_eq!(api.changed.total, Some(1));
         assert_eq!(cycles.added.items, [vec!["c.py", "d.py"]]);
         assert_eq!(centrality.items[0].in_degree_delta, 5);
+        assert_eq!(centrality_increases, Some(1));
         assert_eq!(hotspots.moved.items[0].base_rank, 2);
         assert_eq!(hotspots.moved.items[0].head_rank, 1);
     }
@@ -1641,12 +1725,78 @@ mod tests {
         let cycles = cycle_delta(&base, &head);
         let api = boundary_delta(&base, &head);
 
-        assert_eq!(cycles.added.total, 0);
-        assert_eq!(cycles.removed.total, 0);
-        assert_eq!(cycles.changed.total, 1);
+        assert_eq!(cycles.added.total, Some(0));
+        assert_eq!(cycles.removed.total, Some(0));
+        assert_eq!(cycles.changed.total, Some(1));
         assert_eq!(cycles.changed.items[0].added_members, ["c.py"]);
         assert!(cycles.changed.items[0].removed_members.is_empty());
-        assert_eq!(api.changed.total, 0, "line motion is not API drift");
+        assert_eq!(api.changed.total, Some(0), "line motion is not API drift");
+    }
+
+    #[test]
+    fn partial_map_projection_keeps_delta_totals_and_no_change_unknown() {
+        let mut base = ArchitectureProjection::default();
+        base.components_partial = true;
+        let head = ArchitectureProjection::default();
+        let components = component_delta(&base, &head);
+        let boundaries = boundary_delta(&base, &head);
+        let cycles = cycle_delta(&base, &head);
+        let (centrality, hotspots, centrality_increases) = centrality_delta(&base, &head);
+        let ownership = TemporalOwnership {
+            base_source: None,
+            head_source: None,
+            changes: bounded(Vec::new(), OWNERSHIP_PATH_LIMIT),
+            diagnostics_truncated: false,
+        };
+
+        assert_eq!(components.added.total, None);
+        assert!(components.added.truncated);
+        assert_eq!(components.added.truncation_reason, Some("map_projection"));
+        assert_eq!(centrality_increases, Some(0));
+        assert_eq!(
+            architecture_changed(
+                &components,
+                &boundaries,
+                &cycles,
+                &centrality,
+                &hotspots,
+                &ownership,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn centrality_summary_counts_the_complete_delta_before_output_bounding() {
+        let mut base = ArchitectureProjection::default();
+        let mut head = ArchitectureProjection::default();
+        for index in 0..=CENTRALITY_DELTA_LIMIT {
+            let file = format!("src/{index:03}.rs");
+            let base_hotspot = TemporalHotspot {
+                file: file.clone(),
+                name: "work".into(),
+                kind: "function".into(),
+                line: 1,
+                rank: index as u32 + 1,
+                in_degree: 1,
+            };
+            let mut head_hotspot = base_hotspot.clone();
+            head_hotspot.in_degree = 2;
+            base.hotspots
+                .insert(hotspot_key(&base_hotspot), base_hotspot);
+            head.hotspots
+                .insert(hotspot_key(&head_hotspot), head_hotspot);
+        }
+
+        let (centrality, _, increases) = centrality_delta(&base, &head);
+        assert_eq!(centrality.total, Some((CENTRALITY_DELTA_LIMIT + 1) as u32));
+        assert_eq!(centrality.returned, CENTRALITY_DELTA_LIMIT as u32);
+        assert!(centrality.truncated);
+        assert_eq!(
+            increases,
+            Some((CENTRALITY_DELTA_LIMIT + 1) as u32),
+            "the summary must not count only the returned page"
+        );
     }
 
     #[test]
@@ -1678,14 +1828,17 @@ mod tests {
             diagnostics_truncated: false,
         };
 
-        assert!(architecture_changed(
-            &components,
-            &boundaries,
-            &cycles,
-            &centrality,
-            &hotspots,
-            &ownership,
-        ));
+        assert_eq!(
+            architecture_changed(
+                &components,
+                &boundaries,
+                &cycles,
+                &centrality,
+                &hotspots,
+                &ownership,
+            ),
+            Some(true)
+        );
     }
 
     fn git(root: &Path, args: &[&str]) {
@@ -1819,7 +1972,7 @@ mod tests {
             "history candidates: {:?}",
             response.history_review_candidates.items
         );
-        assert!(response.summary.architecture_changed);
+        assert_eq!(response.summary.architecture_changed, Some(true));
 
         let deleted_scope = analyze(
             &store,
@@ -1834,7 +1987,7 @@ mod tests {
             },
         )
         .expect("a fully deleted scope must still be reconstructed from the baseline");
-        assert_eq!(deleted_scope.components.removed.total, 1);
+        assert_eq!(deleted_scope.components.removed.total, Some(1));
         assert_eq!(deleted_scope.components.removed.items[0].path, ".");
 
         let error = analyze(
@@ -1997,8 +2150,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(response.components.added.total, 0);
-        assert_eq!(response.components.removed.total, 0);
+        assert_eq!(response.components.added.total, Some(0));
+        assert_eq!(response.components.removed.total, Some(0));
         assert!(!response
             .diagnostics
             .iter()
@@ -2090,7 +2243,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(candidates.total, 1);
+        assert_eq!(candidates.total, Some(1));
         assert_eq!(candidates.items[0].trigger, "public_api_changed");
     }
 }

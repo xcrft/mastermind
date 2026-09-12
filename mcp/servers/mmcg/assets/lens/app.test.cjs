@@ -294,7 +294,7 @@ function fixture() {
         baseline: { requested_ref: "main" },
         summary: {
           architecture_changed: true,
-          components_added: 1, components_removed: 0,
+          components_added: 1, components_removed: 0, components_changed: 0,
           boundaries_added: 1, boundaries_removed: 0, boundaries_changed: 0,
           cycles_introduced: 1, cycles_resolved: 0,
           centrality_increases: 1, hotspot_entries: 1, hotspot_exits: 0,
@@ -1400,9 +1400,15 @@ async function main() {
 
   const partial = fixture();
   partial.temporal.data.partial = true;
+  partial.temporal.data.summary.architecture_changed = null;
+  partial.temporal.data.summary.ownership_changes = null;
+  partial.temporal.data.components.added.total = null;
+  partial.temporal.data.components.added.truncated = true;
   partial.temporal.data.diagnostics = [{ code: "bounded_map_projection", message: "Only the returned temporal window is comparable." }];
   const partialHarness = await renderFixture(partial);
-  assert.match(partialHarness.nodes.get("temporal-summary").textContent, /bounded projection is partial/i);
+  assert.match(partialHarness.nodes.get("temporal-components").textContent, /\+≥1/);
+  assert.equal(partialHarness.nodes.get("temporal-ownership").textContent, "?");
+  assert.match(partialHarness.nodes.get("temporal-summary").textContent, /prevents an unchanged conclusion/i);
   assert.match(partialHarness.nodes.get("precision-list").textContent, /returned temporal window/i);
   const changedCandidate = harness.nodes.get("mobile-trace-list").querySelectorAll(".mobile-candidate")[0];
   assert.ok(changedCandidate, "Changed claim with overlays must remain selectable on mobile");

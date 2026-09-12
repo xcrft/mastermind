@@ -1147,17 +1147,18 @@ fn summary_markdown(
     if let Some(temporal) = snapshot.temporal.data.as_ref() {
         let summary = &temporal.summary;
         output.push_str(&format!(
-            "\n## Architecture drift\n\n- Components: +{} / -{}\n- Public boundaries: +{} / -{} / ~{}\n- Cycles: +{} / -{} / ~{}\n- Ownership changes: {}\n- History review candidates: {}\n",
-            summary.components_added,
-            summary.components_removed,
-            summary.boundaries_added,
-            summary.boundaries_removed,
-            summary.boundaries_changed,
-            summary.cycles_introduced,
-            summary.cycles_resolved,
-            summary.cycles_changed,
-            summary.ownership_changes,
-            summary.history_review_candidates,
+            "\n## Architecture drift\n\n- Components: +{} / -{} / ~{}\n- Public boundaries: +{} / -{} / ~{}\n- Cycles: +{} / -{} / ~{}\n- Ownership changes: {}\n- History review candidates: {}\n",
+            optional_count_label(summary.components_added),
+            optional_count_label(summary.components_removed),
+            optional_count_label(summary.components_changed),
+            optional_count_label(summary.boundaries_added),
+            optional_count_label(summary.boundaries_removed),
+            optional_count_label(summary.boundaries_changed),
+            optional_count_label(summary.cycles_introduced),
+            optional_count_label(summary.cycles_resolved),
+            optional_count_label(summary.cycles_changed),
+            optional_count_label(summary.ownership_changes),
+            optional_count_label(summary.history_review_candidates),
         ));
     }
     if let Some(graph) = &snapshot.document_graph {
@@ -1466,6 +1467,10 @@ fn count_label(total: Option<u32>, returned: u32) -> String {
         Some(total) => format!("{returned} returned / {total} total"),
         None => format!("{returned} returned / total unknown"),
     }
+}
+
+fn optional_count_label(total: Option<u32>) -> String {
+    total.map_or_else(|| "unknown".to_string(), |total| total.to_string())
 }
 
 fn markdown_text(value: &str) -> String {

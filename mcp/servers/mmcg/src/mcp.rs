@@ -1776,7 +1776,8 @@ fn schema_search() -> Value {
                 "name": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Symbol name (exact match)" },
                 "kind": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Optional kind filter (function, class, method, struct, enum, trait, interface, record, property, etc.)" },
                 "language": { "type": "string", "enum": LANGUAGES, "description": "Optional language filter" },
-                "collapse_partials": { "type": "boolean", "default": true, "description": "When true (default), C# `partial class Foo` declarations across N files return one hit with a `locations` array of all N declarations. Set false to see each declaration as a separate row." }
+                "collapse_partials": { "type": "boolean", "default": true, "description": "When true (default), C# `partial class Foo` declarations across N files return one hit with a `locations` array of all N declarations. Set false to see each declaration as a separate row." },
+                "top": { "type": "integer", "minimum": 1, "maximum": queries::SEARCH_MAX_TOP, "default": queries::SEARCH_DEFAULT_TOP, "description": "Maximum effective symbol hits to return" }
             },
             "required": ["name"]
         }
@@ -2305,8 +2306,15 @@ fn handle_search(store: &mut Store, args: &Value) -> Result<Value, HandlerError>
     let kind = opt_non_blank_str_arg(args, "kind")?;
     let language = opt_enum_arg(args, "language", &LANGUAGES)?;
     let collapse = opt_bool_arg(args, "collapse_partials")?.unwrap_or(true);
+    let top = bounded_u64_arg(
+        args,
+        "top",
+        u64::from(queries::SEARCH_DEFAULT_TOP),
+        1,
+        u64::from(queries::SEARCH_MAX_TOP),
+    )? as u32;
     ensure_fresh_index(store)?;
-    let r = queries::search(store, name, kind, language, collapse)
+    let r = queries::search_bounded(store, name, kind, language, collapse, top)
         .map_err(|error| HandlerError::internal("search_query", error))?;
     serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
@@ -4243,6 +4251,11 @@ mod tests {
                 "Invalid argument: top",
             ),
             (handle_files, json!({ "top": 0 }), "Invalid argument: top"),
+            (
+                handle_search,
+                json!({ "name": "target", "top": 201 }),
+                "Invalid argument: top",
+            ),
             (
                 handle_callees,
                 json!({ "name": "target", "top": 501 }),

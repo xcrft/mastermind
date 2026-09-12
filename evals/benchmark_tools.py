@@ -28,6 +28,13 @@ CALL_LIMIT = 128
 LANGUAGES = ("python", "typescript", "tsx", "javascript", "vue", "rust", "csharp", "go", "java", "php", "cpp")
 EDGE_KINDS = ("calls", "imports", "inherits", "references")
 GRAPH_TOOLS = ("mmcg_concept", "mmcg_search", "mmcg_outline", "mmcg_files", "mmcg_callers", "mmcg_callees")
+GRAPH_TOP_LIMITS = {
+    "mmcg_concept": 50,
+    "mmcg_search": 200,
+    "mmcg_files": 500,
+    "mmcg_callers": 500,
+    "mmcg_callees": 500,
+}
 
 
 def _text(value, name, maximum=1024):
@@ -72,15 +79,19 @@ def tool_definitions(graph: bool) -> list[dict]:
             ("mmcg_concept", "Search indexed name/path/signature/documentation tokens. Preserves evidence limitations; not embedding search.",
              _object({"query": {**text, "maxLength": 256}, "top": {"type": "integer", "minimum": 1, "maximum": 50}}, ["query"])),
             ("mmcg_search", "Find exact case-sensitive symbol names, preserving collisions and signatures.",
-             _object({"name": text, "kind": text, "language": language, "collapse_partials": {"type": "boolean"}}, ["name"])),
+             _object({"name": text, "kind": text, "language": language, "collapse_partials": {"type": "boolean"},
+                      "top": {"type": "integer", "minimum": 1, "maximum": 200}}, ["name"])),
             ("mmcg_outline", "List symbol ranges for one allowed indexed file; read bodies with source_read.",
              _object({"file": text}, ["file"])),
             ("mmcg_files", "List indexed files. Prefix is a relative literal prefix; wildcard input is not accepted.",
-             _object({"prefix": text, "language": language}, [])),
+             _object({"prefix": text, "language": language,
+                      "top": {"type": "integer", "minimum": 1, "maximum": 500}}, [])),
             ("mmcg_callers", "Find incoming extracted edges; preserve name collisions and precision notes. References are syntactic, not all textual mentions.",
-             _object({"name": text, "language": language, "edge_kind": edge}, ["name"])),
+             _object({"name": text, "language": language, "edge_kind": edge,
+                      "top": {"type": "integer", "minimum": 1, "maximum": 500}}, ["name"])),
             ("mmcg_callees", "Find outgoing extracted edges for a selected symbol. A returned callee line is its call site, not the target definition.",
-             _object({"name": text, "file": text, "line": line, "language": language, "edge_kind": edge}, ["name"])),
+             _object({"name": text, "file": text, "line": line, "language": language, "edge_kind": edge,
+                      "top": {"type": "integer", "minimum": 1, "maximum": 500}}, ["name"])),
         ]
     return [{"name": name, "description": description, "inputSchema": schema,
              "annotations": {"readOnlyHint": True, "destructiveHint": False,
@@ -230,17 +241,17 @@ class SourceBroker:
     def graph_arguments(self, name, args):
         signatures = {
             "mmcg_concept": (("query",), ("top",)),
-            "mmcg_search": (("name",), ("kind", "language", "collapse_partials")),
-            "mmcg_outline": (("file",), ()), "mmcg_files": ((), ("prefix", "language")),
-            "mmcg_callers": (("name",), ("language", "edge_kind")),
-            "mmcg_callees": (("name",), ("file", "line", "language", "edge_kind")),
+            "mmcg_search": (("name",), ("kind", "language", "collapse_partials", "top")),
+            "mmcg_outline": (("file",), ()), "mmcg_files": ((), ("prefix", "language", "top")),
+            "mmcg_callers": (("name",), ("language", "edge_kind", "top")),
+            "mmcg_callees": (("name",), ("file", "line", "language", "edge_kind", "top")),
         }
         _fields(args, *signatures[name])
         for key, value in args.items():
             if key == "file":
                 self.path(value)
             elif key == "top":
-                _integer(value, key, 1, 50)
+                _integer(value, key, 1, GRAPH_TOP_LIMITS[name])
             elif key == "line":
                 _integer(value, key, 1, 4294967295)
                 if "file" not in args:

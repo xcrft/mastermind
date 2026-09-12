@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- MCP exact-name search now bounds returned hits and partial-type grouping work,
+  reports raw candidate coverage, and leaves the grouped total unknown when the
+  work cap prevents complete partial locations; CLI output stays complete and
+  the isolated benchmark advertises the same bounded graph-tool arguments.
 - MCP callee responses now bound both ambiguous definition candidates and
   outgoing edges, report each truncation independently, and query precise
   file/line selectors outside the broad candidate cap; CLI output stays complete.

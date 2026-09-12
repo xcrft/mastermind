@@ -563,8 +563,14 @@ fn extract_mentioned_files(body: &str) -> Vec<String> {
         if looks_like_path(token) && seen.insert(token.to_string()) {
             out.push(token.to_string());
         }
-        // Skip past closing backtick.
-        for _ in 0..end_rel + 1 {
+        // `find` returns a byte offset while `char_indices` advances by Unicode
+        // scalar values. Compare absolute byte positions so a non-ASCII span
+        // cannot consume the opening backtick of the next token.
+        let closing_index = i + 1 + end_rel;
+        while chars
+            .peek()
+            .is_some_and(|(index, _)| *index <= closing_index)
+        {
             chars.next();
         }
     }
@@ -850,6 +856,12 @@ pub fn refresh(&self) -> Result<Session> {
         // Backticked identifiers without path shape are NOT files.
         assert!(!s.mentioned_files.contains(&"SessionStore".to_string()));
         assert!(!s.mentioned_files.contains(&"refresh".to_string()));
+    }
+
+    #[test]
+    fn extracts_path_after_unicode_code_span() {
+        let s = parse_str("test.md", "## Goals\n`💥``src/after.rs`\n");
+        assert_eq!(s.mentioned_files, vec![String::from("src/after.rs")]);
     }
 
     #[test]

@@ -1602,7 +1602,11 @@ fn extract_planned_test_names(body: &str) -> Vec<String> {
         if is_test_name(token) && seen.insert(token.to_string()) {
             out.push(token.to_string());
         }
-        for _ in 0..end + 1 {
+        let closing_index = i + 1 + end;
+        while chars
+            .peek()
+            .is_some_and(|(index, _)| *index <= closing_index)
+        {
             chars.next();
         }
     }

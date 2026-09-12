@@ -1093,7 +1093,15 @@ fn collect_analysis_states(value: &Value, path: &str, states: &mut BTreeSet<Anal
                         reason: match key.as_str() {
                             "partial" => None,
                             "truncated" => reason.clone().or_else(|| Some("truncated".to_string())),
-                            _ => Some(key.to_string()),
+                            _ => key
+                                .strip_suffix("_truncated")
+                                .and_then(|prefix| {
+                                    object
+                                        .get(&format!("{prefix}_reason"))
+                                        .and_then(Value::as_str)
+                                        .map(str::to_string)
+                                })
+                                .or_else(|| Some(key.to_string())),
                         },
                     });
                 }
@@ -2162,6 +2170,12 @@ mod tests {
                     "failures_truncated": true,
                     "contributors_truncated": true
                 }},
+                "lens": {
+                    "truncated": true,
+                    "truncation_reason": "lens_payload_limit",
+                    "projection_truncated": true,
+                    "projection_reason": "lens_payload_limit"
+                },
                 "audit": {"largest_files": {"status": "unavailable"}}
             }),
             "$",
@@ -2186,6 +2200,12 @@ mod tests {
                     && state.reason.as_deref() == Some(reason)
             }));
         }
+        let lens_states = states
+            .iter()
+            .filter(|state| state.path == "$.lens" && state.state == "truncated")
+            .collect::<Vec<_>>();
+        assert_eq!(lens_states.len(), 1);
+        assert_eq!(lens_states[0].reason.as_deref(), Some("lens_payload_limit"));
         assert!(states.iter().any(|state| {
             state.path == "$.audit.largest_files" && state.state == "unavailable"
         }));

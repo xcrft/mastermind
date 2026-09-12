@@ -4910,13 +4910,12 @@ fn read_inflight_spec(
             ));
         }
     };
-    let state: crate::run_task::RunState =
-        serde_json::from_slice(&file.bytes).map_err(|error| {
-            format!(
-                "cannot parse legacy workflow state {}: {error}",
-                state_file.display()
-            )
-        })?;
+    let state = crate::run_task::parse_run_state(&file.bytes).map_err(|error| {
+        format!(
+            "cannot parse legacy workflow state {}: {error}",
+            state_file.display()
+        )
+    })?;
     Ok(Some(PathBuf::from(state.spec_path)))
 }
 
@@ -4941,7 +4940,7 @@ fn read_task_state(
             ));
         }
     };
-    let state: crate::run_task::RunState = serde_json::from_slice(&file.bytes)
+    let state = crate::run_task::parse_run_state(&file.bytes)
         .map_err(|error| format!("cannot parse task state {}: {error}", path.display()))?;
     Ok(Some(TaskState {
         status: state.status,
@@ -6081,7 +6080,13 @@ mod tests {
 
     #[test]
     fn malformed_or_unknown_task_state_is_held() {
-        for case in ["malformed", "future_status", "unknown_field"] {
+        for case in [
+            "malformed",
+            "future_status",
+            "unknown_field",
+            "invalid_risk",
+            "incompatible_step",
+        ] {
             let root = tempfile::tempdir().unwrap();
             let task = root.path().join(".mastermind/tasks/001-ambiguous");
             fs::create_dir_all(&task).unwrap();
@@ -6101,6 +6106,19 @@ mod tests {
                         .unwrap()
                         .insert("stats".into(), serde_json::json!({"status": "complete"}));
                     (serde_json::to_vec(&state).unwrap(), "unknown field `stats`")
+                }
+                "invalid_risk" => {
+                    let mut state = controller_state(&spec, "approved");
+                    state.risk = Some("critical".into());
+                    (
+                        serde_json::to_vec(&state).unwrap(),
+                        "unsupported controller risk",
+                    )
+                }
+                "incompatible_step" => {
+                    let mut state = controller_state(&spec, "learned");
+                    state.next_step = Some("run_executor".into());
+                    (serde_json::to_vec(&state).unwrap(), "cannot use next step")
                 }
                 _ => unreachable!(),
             };

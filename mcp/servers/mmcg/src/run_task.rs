@@ -114,6 +114,39 @@ pub(crate) fn validate_run_status(status: &str) -> Result<(), String> {
     }
 }
 
+pub(crate) fn validate_run_state(state: &RunState) -> Result<(), String> {
+    validate_run_status(&state.status)?;
+    if let Some(risk) = state.risk.as_deref() {
+        if !matches!(risk, "low" | "medium" | "high") {
+            return Err(format!("unsupported controller risk {risk:?}"));
+        }
+    }
+    if let Some(next_step) = state.next_step.as_deref() {
+        let compatible = match state.status.as_str() {
+            "approved" | "executing" => next_step == "run_executor",
+            "audit_required" => next_step == "run_audit",
+            "history_review_required" => next_step == "review_history",
+            "learned" => next_step == "close",
+            "held" => matches!(next_step, "run_preflight" | "planner_review"),
+            "drift" | "broken" => next_step == "planner_review",
+            _ => false,
+        };
+        if !compatible {
+            return Err(format!(
+                "controller status {:?} cannot use next step {next_step:?}",
+                state.status
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn parse_run_state(bytes: &[u8]) -> Result<RunState, String> {
+    let state: RunState = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    validate_run_state(&state)?;
+    Ok(state)
+}
+
 fn deserialize_run_status<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -799,8 +832,8 @@ pub fn load_state(path: &Path) -> std::io::Result<Option<RunState>> {
         }
         Err(error) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
     };
-    let state: RunState = serde_json::from_slice(&body)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let state = parse_run_state(&body)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     Ok(Some(state))
 }
 
@@ -821,7 +854,7 @@ pub fn save_state_in_repository(
     path: &Path,
     state: &RunState,
 ) -> std::io::Result<()> {
-    validate_run_status(&state.status)
+    validate_run_state(state)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     let body = serde_json::to_vec_pretty(state)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -2454,6 +2487,19 @@ verifications: []\n\
             load_state(&path).unwrap_err().kind(),
             std::io::ErrorKind::InvalidData
         );
+        for (field, value) in [("risk", "critical"), ("next_step", "close")] {
+            let mut invalid = serde_json::to_value(&state).unwrap();
+            invalid
+                .as_object_mut()
+                .unwrap()
+                .insert(field.into(), serde_json::Value::String(value.into()));
+            fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+            assert_eq!(
+                load_state(&path).unwrap_err().kind(),
+                std::io::ErrorKind::InvalidData,
+                "{field}"
+            );
+        }
         let mut unsupported = serde_json::to_value(&state).unwrap();
         unsupported
             .as_object_mut()
@@ -2468,6 +2514,12 @@ verifications: []\n\
         unsupported.status = "future".into();
         assert_eq!(
             save_state(&path, &unsupported).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        let mut incompatible = state.clone();
+        incompatible.next_step = Some("close".into());
+        assert_eq!(
+            save_state(&path, &incompatible).unwrap_err().kind(),
             std::io::ErrorKind::InvalidData
         );
         delete_state(&path).unwrap();

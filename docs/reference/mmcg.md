@@ -733,6 +733,11 @@ totals are exact within the stated 2,000-commit history window before its
 total with its failure reason, so an empty partial result cannot appear as a
 clean zero.
 
+Audit overview counts use exact totals when known, lower bounds for non-empty
+partial collections, and `?` for an empty collection whose total is unknown.
+This applies to mapped files, components, languages, entry points, centrality
+hotspots, dependency cycles, and the audit-specific rankings.
+
 SQLite or Git failures stay explicit. A failed audit query is reported as
 unavailable and cannot produce a `Healthy` or `Clear` presentation. Component
 map truncation is also visible; omitted components are not represented by the

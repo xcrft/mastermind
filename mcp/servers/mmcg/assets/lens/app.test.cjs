@@ -1094,8 +1094,31 @@ async function main() {
   assert.equal(unknownZeroHarness.nodes.get("audit-bugs-sev").textContent, "Partial", "An incomplete empty size ranking cannot be labelled Sized");
   assert.equal(unknownZeroHarness.nodes.get("audit-bus-sev").textContent, "Partial", "An incomplete empty authorship ranking cannot be labelled No signal");
   assert.match(boundedHarness.nodes.get("audit-structural").textContent, /cycle analysis is partial/i);
+  assert.match(boundedHarness.nodes.get("audit-structural").textContent, /Dependency cycles\?/i, "An unknown empty cycle result must use an unknown count");
+  assert.match(boundedHarness.nodes.get("audit-summary").textContent, /\? cycles/i);
+  assert.match(boundedHarness.nodes.get("audit-pillars").textContent, /Structure[\s\S]*\?/i);
   assert.doesNotMatch(boundedHarness.nodes.get("audit-structural").textContent, /acyclic/i, "A partial zero-cycle window is not presented as acyclic");
   assert.equal(boundedHarness.nodes.get("audit-structural-sev").textContent, "Partial");
+
+  var mapCoveragePayload = fixture();
+  mapCoveragePayload.map.files = { total: null, returned: 4, truncated: true, truncation_reason: "file_limit", items: [] };
+  mapCoveragePayload.map.components.total = null;
+  mapCoveragePayload.map.components.truncated = true;
+  mapCoveragePayload.map.components.truncation_reason = "component_limit";
+  mapCoveragePayload.map.languages.total = null;
+  mapCoveragePayload.map.languages.truncated = true;
+  mapCoveragePayload.map.languages.truncation_reason = "language_limit";
+  mapCoveragePayload.map.entry_points.total = null;
+  mapCoveragePayload.map.entry_points.truncated = true;
+  mapCoveragePayload.map.entry_points.truncation_reason = "entry_point_limit";
+  mapCoveragePayload.map.hotspots.total = null;
+  mapCoveragePayload.map.hotspots.truncated = true;
+  mapCoveragePayload.map.hotspots.truncation_reason = "hotspot_limit";
+  var mapCoverageHarness = await renderFixture(mapCoveragePayload, { width: 1200 });
+  assert.match(mapCoverageHarness.nodes.get("audit-explain").textContent, /≥2[\s\S]*Components[\s\S]*≥1[\s\S]*Entry points[\s\S]*≥1[\s\S]*Languages[\s\S]*≥4[\s\S]*Files \(mapped\)/i);
+  assert.match(mapCoverageHarness.nodes.get("audit-lede").textContent, /≥2 components · ≥4 mapped files · ≥1 language/i);
+  assert.match(mapCoverageHarness.nodes.get("audit-summary").textContent, /≥2 components across ≥1 language[\s\S]*≥1 hotspots/i);
+  assert.match(mapCoverageHarness.nodes.get("audit-security").textContent, /Attack surface — entry points≥1/i);
 
   var truncatedMapPayload = fixture();
   truncatedMapPayload.map.components = {

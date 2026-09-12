@@ -404,15 +404,17 @@ pub struct ImpactEntry {
 pub struct ImpactResponse {
     pub target: String,
     pub max_depth: u32,
+    pub language: Option<String>,
+    /// Exact number of extracted graph rows matching the effective scope.
+    pub total: u32,
     pub count: u32,
     /// How many definitions share `target`'s name (same caveat as
-    /// `CallersResponse`): > 1 means the blast radius pools across same-named
-    /// symbols and over-approximates real reach.
+    /// `CallersResponse`) after the language filter: > 1 means the blast radius
+    /// pools across same-named symbols and over-approximates real reach.
     pub name_collision: u32,
-    /// `true` when the underlying walk hit `row_limit` rows — the result is a
-    /// prefix of the candidate dependency graph, not the whole result.
+    /// `true` when `count` is smaller than `total`.
     pub truncated: bool,
-    /// The row cap applied to this walk (see `IMPACT_WORK_LIMIT`).
+    /// The public row cap applied to this walk (see `IMPACT_ROW_LIMIT`).
     pub row_limit: u32,
     pub impact: Vec<ImpactEntry>,
     pub precision_notes: Vec<String>,
@@ -1135,7 +1137,7 @@ pub fn bounded_symbol_diff_response(
 }
 
 pub const CHANGE_SEED_LIMIT: usize = 200;
-pub const IMPACT_WORK_LIMIT: usize = 5_001;
+pub const IMPACT_ROW_LIMIT: usize = 5_000;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Collection<T> {
@@ -2429,30 +2431,31 @@ pub fn change_impact(
     let graph_seed_overflow = seed_names.len() > CHANGE_SEED_LIMIT;
     let graph_had_parent_budget = store.work_budget_depth() > 0;
     let graph_interrupt_before = store.interrupt_source();
-    let (graph_rows, graph_budget_exhausted) = if seed_names.is_empty() || graph_seed_overflow {
-        (Vec::new(), false)
-    } else {
-        match store.impact_of_many(&seed_names, max_depth, IMPACT_WORK_LIMIT, None) {
-            Ok(rows) => (rows, false),
-            Err(rusqlite::Error::SqliteFailure(error, _))
-                if error.code == rusqlite::ErrorCode::OperationInterrupted
-                    && consume_graph_precision_interrupt(
-                        store,
-                        graph_had_parent_budget,
-                        graph_interrupt_before,
-                    ) =>
-            {
-                precision_notes.push("graph_work_limit".to_string());
-                (Vec::new(), true)
+    let (graph_total, graph_rows, graph_budget_exhausted) =
+        if seed_names.is_empty() || graph_seed_overflow {
+            (0, Vec::new(), false)
+        } else {
+            match store.impact_of_many_bounded(&seed_names, max_depth, IMPACT_ROW_LIMIT, None) {
+                Ok((total, rows)) => (total, rows, false),
+                Err(rusqlite::Error::SqliteFailure(error, _))
+                    if error.code == rusqlite::ErrorCode::OperationInterrupted
+                        && consume_graph_precision_interrupt(
+                            store,
+                            graph_had_parent_budget,
+                            graph_interrupt_before,
+                        ) =>
+                {
+                    precision_notes.push("graph_work_limit".to_string());
+                    (0, Vec::new(), true)
+                }
+                Err(_) => return Err(ChangeImpactError::SnapshotChanged),
             }
-            Err(_) => return Err(ChangeImpactError::SnapshotChanged),
-        }
-    };
+        };
     let graph_overflow =
-        graph_seed_overflow || graph_budget_exhausted || graph_rows.len() >= IMPACT_WORK_LIMIT;
+        graph_seed_overflow || graph_budget_exhausted || graph_total > IMPACT_ROW_LIMIT as u32;
     if graph_seed_overflow {
         precision_notes.push("changed_seed_work_limit".to_string());
-    } else if graph_rows.len() >= IMPACT_WORK_LIMIT {
+    } else if graph_total > IMPACT_ROW_LIMIT as u32 {
         precision_notes.push("graph_work_limit".to_string());
     }
 
@@ -2847,7 +2850,7 @@ pub fn change_impact(
         limits: ImpactLimits {
             changed_files: crate::diff::CHANGE_FILE_LIMIT as u32,
             changed_seeds: CHANGE_SEED_LIMIT as u32,
-            graph_rows: (IMPACT_WORK_LIMIT - 1) as u32,
+            graph_rows: IMPACT_ROW_LIMIT as u32,
             impact: top as u32,
             tests: 500,
             crossings: 500,
@@ -3890,17 +3893,27 @@ pub fn explain(
 /// Served by the same guarded, visited-set walk as `change_impact`'s
 /// many-seed call (`Store::impact_of_many`) — single-seed here. Terminates on
 /// cyclic call graphs (the visited set prevents revisiting a symbol id within
-/// a path) and is bounded by `IMPACT_WORK_LIMIT` rows — part of the tool's
-/// documented contract, surfaced through the `truncated`/`row_limit` fields.
+/// a path) and is bounded by `IMPACT_ROW_LIMIT` rows — part of the tool's
+/// documented contract, surfaced with exact `total` coverage.
 pub fn impact(
     store: &Store,
     name: &str,
     max_depth: u32,
     language: Option<&str>,
 ) -> rusqlite::Result<ImpactResponse> {
+    impact_with_row_limit(store, name, max_depth, language, IMPACT_ROW_LIMIT)
+}
+
+fn impact_with_row_limit(
+    store: &Store,
+    name: &str,
+    max_depth: u32,
+    language: Option<&str>,
+    row_limit: usize,
+) -> rusqlite::Result<ImpactResponse> {
     let depth = max_depth.clamp(1, 10);
-    let rows = store.impact_of_many(&[name.to_string()], depth, IMPACT_WORK_LIMIT, language)?;
-    let truncated = rows.len() >= IMPACT_WORK_LIMIT;
+    let (total, rows) =
+        store.impact_of_many_bounded(&[name.to_string()], depth, row_limit, language)?;
     let impact: Vec<ImpactEntry> = rows
         .into_iter()
         .map(|row| ImpactEntry {
@@ -3908,13 +3921,16 @@ pub fn impact(
             depth: row.depth,
         })
         .collect();
+    let count = u32::try_from(impact.len()).unwrap_or(u32::MAX);
     Ok(ImpactResponse {
         target: name.to_string(),
         max_depth: depth,
-        count: impact.len() as u32,
-        name_collision: store.definition_count(name)?,
-        truncated,
-        row_limit: IMPACT_WORK_LIMIT as u32,
+        language: language.map(String::from),
+        total,
+        count,
+        name_collision: store.definition_count_filtered(name, language)?,
+        truncated: count < total,
+        row_limit: u32::try_from(row_limit).unwrap_or(u32::MAX),
         impact,
         precision_notes: impact_precision_notes(),
     })
@@ -5966,7 +5982,9 @@ mod tests {
 
         let response = impact(&store, "a", 10, None).unwrap();
         assert!(!response.truncated);
-        assert_eq!(response.row_limit, IMPACT_WORK_LIMIT as u32);
+        assert_eq!(response.total, response.count);
+        assert_eq!(response.language, None);
+        assert_eq!(response.row_limit, IMPACT_ROW_LIMIT as u32);
         let names: Vec<&str> = response
             .impact
             .iter()
@@ -5974,6 +5992,94 @@ mod tests {
             .collect();
         assert!(names.contains(&"b"));
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn impact_reports_exact_limit_and_scopes_seed_kinds_by_language() {
+        use crate::store::{PendingEdge, PendingFile, PendingSymbol};
+
+        let path = tmp_db("impact_exact_language_scope");
+        let mut store = Store::open(&path).unwrap();
+        let symbol = |name: &str, kind: &str, line: u32| PendingSymbol {
+            name: name.to_string(),
+            kind: kind.to_string(),
+            line_start: line,
+            line_end: line,
+            signature: None,
+            parent_index: None,
+            decorators: None,
+        };
+        let edge = |from_index: usize, target_kind: &str| PendingEdge {
+            from_index,
+            to_name: "target".to_string(),
+            to_path: None,
+            to_type: None,
+            target_kind: Some(target_kind.to_string()),
+            kind: "calls".to_string(),
+            line: 1,
+        };
+
+        store
+            .commit_file(PendingFile {
+                path: "src/target.rs".to_string(),
+                mtime: 1,
+                content_sha256: "rust-target".to_string(),
+                language: "rust".to_string(),
+                symbols: vec![symbol("target", "function", 1)],
+                edges: Vec::new(),
+            })
+            .unwrap();
+        store
+            .commit_file(PendingFile {
+                path: "src/target.py".to_string(),
+                mtime: 1,
+                content_sha256: "python-target".to_string(),
+                language: "python".to_string(),
+                symbols: vec![symbol("target", "method", 1)],
+                edges: Vec::new(),
+            })
+            .unwrap();
+        store
+            .commit_file(PendingFile {
+                path: "src/callers.rs".to_string(),
+                mtime: 1,
+                content_sha256: "rust-callers".to_string(),
+                language: "rust".to_string(),
+                symbols: vec![
+                    symbol("good_a", "function", 1),
+                    symbol("good_b", "function", 2),
+                    symbol("wrong_kind", "function", 3),
+                ],
+                edges: vec![edge(0, "function"), edge(1, "function"), edge(2, "method")],
+            })
+            .unwrap();
+
+        let exact = impact_with_row_limit(&store, "target", 1, Some("rust"), 2).unwrap();
+        assert_eq!(exact.language.as_deref(), Some("rust"));
+        assert_eq!(exact.name_collision, 1);
+        assert_eq!(exact.total, 2);
+        assert_eq!(exact.count, 2);
+        assert!(!exact.truncated);
+        assert!(exact
+            .impact
+            .iter()
+            .all(|entry| entry.symbol.name != "wrong_kind"));
+
+        store
+            .commit_file(PendingFile {
+                path: "src/more.rs".to_string(),
+                mtime: 1,
+                content_sha256: "rust-more".to_string(),
+                language: "rust".to_string(),
+                symbols: vec![symbol("good_c", "function", 1)],
+                edges: vec![edge(0, "function")],
+            })
+            .unwrap();
+        let overflow = impact_with_row_limit(&store, "target", 1, Some("rust"), 2).unwrap();
+        assert_eq!(overflow.total, 3);
+        assert_eq!(overflow.count, 2);
+        assert!(overflow.truncated);
+        std::fs::remove_file(path).ok();
     }
 
     #[test]

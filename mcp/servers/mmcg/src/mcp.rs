@@ -1824,7 +1824,7 @@ fn schema_callees() -> Value {
 fn schema_impact() -> Value {
     json!({
         "name": "mmcg_impact",
-        "description": "Transitive dependency candidates through calls and syntactic references up to max_depth. References include function-value and Rust macro-body usages, not proof of invocation. Targets use names and available syntax/type hints without compiler resolution; `name_collision` reports pooled definitions. `precision_notes` describe missing dynamic/generated edges and extraction limits: empty results or `truncated: false` do not prove complete runtime reachability. At the 5,001-row cap, `truncated: true` marks a partial query result — narrow `max_depth` or add a `language` filter.",
+        "description": "Transitive dependency candidates through calls and syntactic references up to max_depth. References include function-value and Rust macro-body usages, not proof of invocation. Targets use names and available syntax/type hints without compiler resolution; `name_collision` reports pooled definitions in the effective language scope. Responses echo the language and report exact `total`, returned `count`, and truncation at the 5,000-row result cap. `precision_notes` describe missing dynamic/generated edges and extraction limits: complete indexed coverage does not prove complete runtime reachability.",
         "inputSchema": {
             "type": "object",
             "properties": {

@@ -5719,6 +5719,27 @@ impl Store {
         row_limit: usize,
         language: Option<&str>,
     ) -> SqlResult<Vec<SeedImpact>> {
+        self.impact_of_many_rows(names, max_depth, row_limit, language)
+            .map(|(_, rows)| rows)
+    }
+
+    pub(crate) fn impact_of_many_bounded(
+        &self,
+        names: &[String],
+        max_depth: u32,
+        row_limit: usize,
+        language: Option<&str>,
+    ) -> SqlResult<(u32, Vec<SeedImpact>)> {
+        self.impact_of_many_rows(names, max_depth, row_limit, language)
+    }
+
+    fn impact_of_many_rows(
+        &self,
+        names: &[String],
+        max_depth: u32,
+        row_limit: usize,
+        language: Option<&str>,
+    ) -> SqlResult<(u32, Vec<SeedImpact>)> {
         if names.is_empty() || names.len() > 200 {
             return Err(rusqlite::Error::InvalidParameterName(
                 "seed_count".to_string(),
@@ -5747,6 +5768,7 @@ impl Store {
              seed_targets AS MATERIALIZED (
                  SELECT DISTINCT target.name, target.kind
                  FROM seed JOIN symbols target ON target.name = seed.seed
+                 WHERE (?{lang_param} IS NULL OR target.language = ?{lang_param})
              ),
              walk(seed, sym_id, name, depth, visited) AS (
                  SELECT seed.seed, s.id, s.name, 1, ',' || s.id || ','
@@ -5807,7 +5829,8 @@ impl Store {
                  FROM walk
                  GROUP BY seed, sym_id
              )
-             SELECT minimum.seed, {SYMBOL_COLS_S}, minimum.depth
+             SELECT minimum.seed, {SYMBOL_COLS_S}, minimum.depth,
+                    COUNT(*) OVER() AS total
              FROM minimum
              JOIN symbols s ON s.id = minimum.sym_id
              ORDER BY minimum.depth, s.file_path, s.line_start, minimum.seed,
@@ -5826,23 +5849,33 @@ impl Store {
         self.with_local_work_budget(budget, || {
             let mut statement = self.conn.prepare(&sql)?;
             let rows = statement.query_map(rusqlite::params_from_iter(values), |row| {
-                Ok(SeedImpact {
-                    seed: row.get(0)?,
-                    symbol: Symbol {
-                        id: row.get(1)?,
-                        name: row.get(2)?,
-                        kind: row.get(3)?,
-                        file_path: row.get(4)?,
-                        line_start: row.get(5)?,
-                        line_end: row.get(6)?,
-                        signature: row.get(7)?,
-                        parent_id: row.get(8)?,
-                        decorators: row.get(9)?,
+                Ok((
+                    SeedImpact {
+                        seed: row.get(0)?,
+                        symbol: Symbol {
+                            id: row.get(1)?,
+                            name: row.get(2)?,
+                            kind: row.get(3)?,
+                            file_path: row.get(4)?,
+                            line_start: row.get(5)?,
+                            line_end: row.get(6)?,
+                            signature: row.get(7)?,
+                            parent_id: row.get(8)?,
+                            decorators: row.get(9)?,
+                        },
+                        depth: row.get(10)?,
                     },
-                    depth: row.get(10)?,
-                })
+                    row.get::<_, i64>(11)?,
+                ))
             })?;
-            rows.collect()
+            let mut total = 0_i64;
+            let mut impact = Vec::with_capacity(row_limit);
+            for row in rows {
+                let (entry, row_total) = row?;
+                total = row_total;
+                impact.push(entry);
+            }
+            Ok((total.clamp(0, i64::from(u32::MAX)) as u32, impact))
         })
     }
 
@@ -7570,9 +7603,19 @@ impl Store {
     /// factor for name-resolved edges (`callers` / `impact`). High = results pool
     /// call sites across many same-named definitions.
     pub fn definition_count(&self, name: &str) -> SqlResult<u32> {
+        self.definition_count_filtered(name, None)
+    }
+
+    pub(crate) fn definition_count_filtered(
+        &self,
+        name: &str,
+        language: Option<&str>,
+    ) -> SqlResult<u32> {
         self.conn.query_row(
-            "SELECT COUNT(*) FROM symbols WHERE name = ?1 AND kind != 'module'",
-            [name],
+            "SELECT COUNT(*) FROM symbols
+             WHERE name = ?1 AND kind != 'module'
+               AND (?2 IS NULL OR language = ?2)",
+            params![name, language],
             |r| r.get(0),
         )
     }

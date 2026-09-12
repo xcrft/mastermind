@@ -2225,7 +2225,13 @@ fn schema_recent_changes() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "since": { "type": "string", "description": "Time window — e.g. '2h', '30m', '1d'" }
+                "since": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 21,
+                    "pattern": "^[0-9]+[smhd]$",
+                    "description": "Time window — e.g. '2h', '30m', '1d'"
+                }
             },
             "required": ["since"]
         }
@@ -4201,6 +4207,11 @@ mod tests {
                 handle_scratchpad_read,
                 json!({ "limit": 0 }),
                 "Invalid argument: limit",
+            ),
+            (
+                handle_recent_changes,
+                json!({ "since": "18446744073709551615d" }),
+                "Invalid argument: since",
             ),
             (
                 handle_symbols_changed_since,

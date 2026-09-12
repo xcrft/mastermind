@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Recent-change duration parsing now rejects numeric and millisecond-range
+  overflow instead of panicking or wrapping into an incorrect research window.
 - File listing, API-surface, and centrality scopes now treat percent and
   underscore as literal path-prefix characters instead of SQL wildcards.
 - Symbol, file, history, and task research calls now reject blank selectors

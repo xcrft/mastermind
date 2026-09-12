@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- `run-task` now rejects unknown fields in controller `state.json`, preventing
+  misspelled or newer lifecycle data from silently inheriting weaker defaults.
 - Index freshness checks now retain missing and non-regular Git-tracked source
   paths for admission and reject non-UTF-8 tracked inventory, preventing Lens
   from treating a filtered source set as a complete fresh index.

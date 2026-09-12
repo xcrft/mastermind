@@ -136,6 +136,8 @@ visible in escaped form but do not produce a copy/paste command.
 Controller updates replace `state.json` atomically through the retained task
 directory after syncing the private temporary file. A process interruption
 therefore leaves either the previous complete state or the next complete state.
+The controller rejects unknown state fields instead of applying legacy defaults
+to a misspelled or newer lifecycle contract.
 The same repository-bound replacement protects controller-written `audit.md`,
 release-note drafts, `history-review.md`, and review archives.
 

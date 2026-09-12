@@ -678,11 +678,12 @@ does not maintain a second analysis engine: `/api/lens` wraps the existing
 schema-v1 project-map and change-impact responses, including their truncation,
 precision, collision, and work-limit notes.
 
-If the shared changed-file collection has already hit its 10,000-file cap,
-Lens serializes at most 200 of those file records. The Lens-only collection
-fields keep the distinction explicit: `returned` is the displayed item count,
-`observed` is the impact engine's lower bound, and `projection_truncated` with
-`projection_reason: lens_payload_limit` identifies the transport projection.
+Lens serializes at most 200 changed-file records, whether or not the shared
+collection has already hit its 10,000-file cap. The Lens-only collection fields
+keep the distinction explicit: `returned` is the displayed item count,
+`observed` is the impact engine's count or lower bound, and
+`projection_truncated` with `projection_reason: lens_payload_limit` identifies
+the transport projection.
 Impact analysis, SARIF, summaries, and manifests continue to use the full
 bounded collection in memory. A changed path that cannot be represented as
 UTF-8 is omitted, makes the source collection partial with

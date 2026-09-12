@@ -3655,10 +3655,17 @@ pub struct RecentChangesResponse {
     pub window_start_unix_ms: i64,
     pub as_of_unix_ms: i64,
     pub timestamp_basis: &'static str,
+    pub total: u32,
     pub count: u32,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_limit: Option<u32>,
     pub files: Vec<FileEntry>,
     pub precision_notes: Vec<&'static str>,
 }
+
+pub const RECENT_CHANGES_DEFAULT_TOP: u32 = 200;
+pub const RECENT_CHANGES_MAX_TOP: u32 = 500;
 
 /// Indexed file snapshots whose stored source mtime falls within the last
 /// `since` window (e.g. "2h"). This is a filesystem recency signal, not Git
@@ -3667,6 +3674,22 @@ pub struct RecentChangesResponse {
 /// The legacy `indexed_at` column stores source metadata mtime in milliseconds,
 /// so both interval bounds use that unit.
 pub fn recent_changes(store: &Store, since: &str) -> Result<RecentChangesResponse, String> {
+    recent_changes_with_limit(store, since, None)
+}
+
+pub fn recent_changes_bounded(
+    store: &Store,
+    since: &str,
+    top: u32,
+) -> Result<RecentChangesResponse, String> {
+    recent_changes_with_limit(store, since, Some(top.max(1)))
+}
+
+fn recent_changes_with_limit(
+    store: &Store,
+    since: &str,
+    row_limit: Option<u32>,
+) -> Result<RecentChangesResponse, String> {
     let window_secs = parse_duration(since)?;
     let now_ms = i64::try_from(
         std::time::SystemTime::now()
@@ -3682,16 +3705,33 @@ pub fn recent_changes(store: &Store, since: &str) -> Result<RecentChangesRespons
     let threshold_ms = now_ms
         .checked_sub(window_ms)
         .ok_or_else(|| format!("duration too large: {since:?}"))?;
-    let files = store
-        .files_with_mtime_between(threshold_ms, now_ms)
-        .map_err(|e| e.to_string())?;
+    let (total, files) = match row_limit {
+        Some(limit) => store
+            .files_with_mtime_between_bounded(
+                threshold_ms,
+                now_ms,
+                usize::try_from(limit).unwrap_or(usize::MAX),
+            )
+            .map_err(|error| error.to_string())?,
+        None => {
+            let files = store
+                .files_with_mtime_between(threshold_ms, now_ms)
+                .map_err(|error| error.to_string())?;
+            let total = u32::try_from(files.len()).unwrap_or(u32::MAX);
+            (total, files)
+        }
+    };
+    let count = u32::try_from(files.len()).unwrap_or(u32::MAX);
     Ok(RecentChangesResponse {
         since: since.to_string(),
         window_secs,
         window_start_unix_ms: threshold_ms,
         as_of_unix_ms: now_ms,
         timestamp_basis: "stored_source_mtime",
-        count: files.len() as u32,
+        total,
+        count,
+        truncated: row_limit.is_some() && total > count,
+        row_limit,
         files,
         precision_notes: vec![
             "indexed_at_is_stored_source_mtime_not_indexing_time",
@@ -6665,6 +6705,13 @@ mod tests {
         let wider = recent_changes(&store, "3h").unwrap();
         assert_eq!(wider.count, 2);
         assert!(wider.files.iter().all(|file| file.path != "future.py"));
+
+        let bounded = recent_changes_bounded(&store, "3h", 1).unwrap();
+        assert_eq!(bounded.total, 2);
+        assert_eq!(bounded.count, 1);
+        assert!(bounded.truncated);
+        assert_eq!(bounded.row_limit, Some(1));
+        assert_eq!(bounded.files[0].path, "file_a.py");
 
         std::fs::remove_file(&path).ok();
     }

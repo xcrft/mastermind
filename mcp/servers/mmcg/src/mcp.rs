@@ -2241,7 +2241,8 @@ fn schema_recent_changes() -> Value {
                     "maxLength": 21,
                     "pattern": "^[0-9]+[smhd]$",
                     "description": "Time window — e.g. '2h', '30m', '1d'"
-                }
+                },
+                "top": { "type": "integer", "minimum": 1, "maximum": queries::RECENT_CHANGES_MAX_TOP, "default": queries::RECENT_CHANGES_DEFAULT_TOP, "description": "Maximum matching file snapshots to return" }
             },
             "required": ["since"]
         }
@@ -3313,8 +3314,15 @@ fn handle_recent_changes(store: &mut Store, args: &Value) -> Result<Value, Handl
     let since = str_arg(args, "since")?;
     queries::parse_duration(since)
         .map_err(|_| HandlerError::InvalidArguments("Invalid argument: since".into()))?;
+    let top = bounded_u64_arg(
+        args,
+        "top",
+        u64::from(queries::RECENT_CHANGES_DEFAULT_TOP),
+        1,
+        u64::from(queries::RECENT_CHANGES_MAX_TOP),
+    )? as u32;
     ensure_schema_compatible(store)?;
-    let r = queries::recent_changes(store, since)
+    let r = queries::recent_changes_bounded(store, since, top)
         .map_err(|error| HandlerError::internal("recent_changes_query", error))?;
     serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
@@ -4292,6 +4300,11 @@ mod tests {
             (
                 handle_imported_by,
                 json!({ "query": "core", "top": 501 }),
+                "Invalid argument: top",
+            ),
+            (
+                handle_recent_changes,
+                json!({ "since": "1h", "top": 501 }),
                 "Invalid argument: top",
             ),
             (

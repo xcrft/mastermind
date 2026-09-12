@@ -105,67 +105,325 @@ pub fn dispatch_temporal(
 
 pub fn render_temporal_text(response: &mmcg::temporal::TemporalResponse) -> String {
     let mut output = format!(
-        "Temporal architecture · {} → working copy\nScope: {} · changed: {} · partial: {}\n\n",
+        "Temporal architecture · {} → working copy\nSchema: v{}\nBaseline: {}\nHEAD: {}\nScope: {} · depth {} · production only {}\nIncludes worktree: {} · untracked: {}\nArchitecture changed: {}\nCoverage: {}\nDiagnostics truncated: {}\n\nCoverage\n",
         safe_text(&response.baseline.requested_ref),
+        response.schema_version,
+        safe_text(&response.baseline.baseline_oid),
+        safe_text(&response.baseline.head_oid),
         safe_text(&response.scope.path),
+        response.scope.depth,
+        response.scope.production_only,
+        response.baseline.includes_worktree,
+        response.baseline.includes_untracked,
         match response.summary.architecture_changed {
             Some(true) => "yes",
             Some(false) => "no",
             None => "unknown",
         },
-        if response.partial { "yes" } else { "no" }
+        if response.partial {
+            "partial"
+        } else {
+            "complete"
+        },
+        response.diagnostics_truncated,
     );
+    output.push_str(&temporal_collection_coverage(
+        "components added",
+        &response.components.added,
+    ));
+    output.push_str(&temporal_collection_coverage(
+        "components removed",
+        &response.components.removed,
+    ));
+    output.push_str(&temporal_collection_coverage(
+        "components changed",
+        &response.components.changed,
+    ));
+    output.push_str(&temporal_collection_coverage(
+        "boundaries added",
+        &response.boundaries.added,
+    ));
+    output.push_str(&temporal_collection_coverage(
+        "boundaries removed",
+        &response.boundaries.removed,
+    ));
+    output.push_str(&temporal_collection_coverage(
+        "boundaries changed",
+        &response.boundaries.changed,
+    ));
+    output.push_str(&temporal_collection_coverage(
+        "public API added",
+        &response.public_api.added,
+    ));
+    output.push_str(&temporal_collection_coverage(
+        "public API removed",
+        &response.public_api.removed,
+    ));
+    output.push_str(&temporal_collection_coverage(
+        "public API changed",
+        &response.public_api.changed,
+    ));
+    output.push_str(&temporal_collection_coverage(
+        "cycles introduced",
+        &response.cycles.added,
+    ));
+    output.push_str(&temporal_collection_coverage(
+        "cycles resolved",
+        &response.cycles.removed,
+    ));
+    output.push_str(&temporal_collection_coverage(
+        "cycles changed",
+        &response.cycles.changed,
+    ));
+    output.push_str(&temporal_collection_coverage(
+        "centrality drift",
+        &response.centrality,
+    ));
+    output.push_str(&temporal_collection_coverage(
+        "hotspot entries",
+        &response.hotspots.entered,
+    ));
+    output.push_str(&temporal_collection_coverage(
+        "hotspot exits",
+        &response.hotspots.exited,
+    ));
+    output.push_str(&temporal_collection_coverage(
+        "hotspot movements",
+        &response.hotspots.moved,
+    ));
+    output.push_str(&temporal_collection_coverage(
+        "ownership changes",
+        &response.ownership.changes,
+    ));
+    output.push_str(&temporal_collection_coverage(
+        "history review candidates",
+        &response.history_review_candidates,
+    ));
+    output.push('\n');
     output.push_str(&render_temporal_counts(&response.summary));
-    if !response.cycles.added.items.is_empty() {
-        output.push_str("\nIntroduced cycles\n");
-        for cycle in &response.cycles.added.items {
-            output.push_str(&format!("  {}\n", safe_text(&cycle.join(" -> "))));
-        }
+
+    output.push_str("\nComponents added\n");
+    for component in &response.components.added.items {
+        output.push_str(&format!(
+            "  {} — {} files · {}\n",
+            safe_text(&component.path),
+            component.file_count,
+            temporal_languages(&component.languages)
+        ));
     }
-    if !response.cycles.changed.items.is_empty() {
-        output.push_str("\nChanged cycle membership\n");
-        for cycle in &response.cycles.changed.items {
-            output.push_str(&format!(
-                "  +[{}] -[{}]\n",
-                safe_text(&cycle.added_members.join(", ")),
-                safe_text(&cycle.removed_members.join(", "))
-            ));
-        }
+    output.push_str("\nComponents removed\n");
+    for component in &response.components.removed.items {
+        output.push_str(&format!(
+            "  {} — {} files · {}\n",
+            safe_text(&component.path),
+            component.file_count,
+            temporal_languages(&component.languages)
+        ));
     }
-    if !response.centrality.items.is_empty() {
-        output.push_str("\nCentrality drift\n");
-        for item in &response.centrality.items {
-            output.push_str(&format!(
-                "  {} — {} → {} ({:+})\n",
-                safe_text(&item.name),
-                item.base_in_degree,
-                item.head_in_degree,
-                item.in_degree_delta
-            ));
-        }
+    output.push_str("\nComponents changed\n");
+    for component in &response.components.changed.items {
+        output.push_str(&format!(
+            "  {} — files {} -> {} · languages [{}] -> [{}]\n",
+            safe_text(&component.path),
+            component.base_file_count,
+            component.head_file_count,
+            temporal_languages(&component.base_languages),
+            temporal_languages(&component.head_languages)
+        ));
     }
-    if !response.history_review_candidates.items.is_empty() {
-        output.push_str("\nHistory review candidates\n");
-        for item in &response.history_review_candidates.items {
-            output.push_str(&format!(
-                "  {} mentions {} ({})\n",
-                safe_text(&item.artifact_path),
-                safe_text(&item.referenced_path),
-                safe_text(&item.trigger)
-            ));
-        }
+
+    output.push_str("\nBoundaries added (observed public API)\n");
+    for boundary in &response.boundaries.added.items {
+        output.push_str(&temporal_boundary_line(boundary));
     }
-    if !response.diagnostics.is_empty() {
-        output.push_str("\nPrecision notes\n");
-        for item in &response.diagnostics {
-            output.push_str(&format!(
-                "  {} — {}\n",
-                safe_text(&item.code),
-                safe_text(&item.message)
-            ));
-        }
+    output.push_str("\nBoundaries removed (observed public API)\n");
+    for boundary in &response.boundaries.removed.items {
+        output.push_str(&temporal_boundary_line(boundary));
+    }
+    output.push_str("\nBoundaries changed (observed public API)\n");
+    for boundary in &response.boundaries.changed.items {
+        output.push_str(&format!(
+            "  {} :: {} {} — {}:{} -> {} (signature {} -> {})\n",
+            safe_text(&boundary.component),
+            safe_text(&boundary.kind),
+            safe_text(&boundary.name),
+            safe_text(&boundary.file),
+            boundary.base_line,
+            boundary.head_line,
+            temporal_signature(boundary.base_signature.as_deref()),
+            temporal_signature(boundary.head_signature.as_deref())
+        ));
+    }
+
+    output.push_str("\nIntroduced cycles\n");
+    for cycle in &response.cycles.added.items {
+        output.push_str(&format!("  {}\n", safe_text(&cycle.join(" -> "))));
+    }
+    output.push_str("\nResolved cycles\n");
+    for cycle in &response.cycles.removed.items {
+        output.push_str(&format!("  {}\n", safe_text(&cycle.join(" -> "))));
+    }
+    output.push_str("\nChanged cycle membership\n");
+    for cycle in &response.cycles.changed.items {
+        output.push_str(&format!(
+            "  base {} -> head {}\n    members +[{}] -[{}]\n",
+            temporal_cycle_groups(&cycle.base_cycles),
+            temporal_cycle_groups(&cycle.head_cycles),
+            safe_text(&cycle.added_members.join(", ")),
+            safe_text(&cycle.removed_members.join(", "))
+        ));
+    }
+
+    output.push_str("\nCentrality drift\n");
+    for item in &response.centrality.items {
+        output.push_str(&format!(
+            "  {} {} — {} (rank {} -> {}, in-degree {} -> {}, delta {:+})\n",
+            safe_text(&item.kind),
+            safe_text(&item.name),
+            safe_text(&item.file),
+            item.base_rank,
+            item.head_rank,
+            item.base_in_degree,
+            item.head_in_degree,
+            item.in_degree_delta
+        ));
+    }
+    output.push_str("\nHotspot entries\n");
+    for item in &response.hotspots.entered.items {
+        output.push_str(&temporal_hotspot_line(item));
+    }
+    output.push_str("\nHotspot exits\n");
+    for item in &response.hotspots.exited.items {
+        output.push_str(&temporal_hotspot_line(item));
+    }
+
+    output.push_str(&format!(
+        "\nOwnership changes\n  base source: {}\n  head source: {}\n",
+        temporal_signature(response.ownership.base_source.as_deref()),
+        temporal_signature(response.ownership.head_source.as_deref())
+    ));
+    for item in &response.ownership.changes.items {
+        output.push_str(&format!(
+            "  {} — [{}] -> [{}]\n",
+            safe_text(&item.path),
+            safe_text(&item.base_owners.join(", ")),
+            safe_text(&item.head_owners.join(", "))
+        ));
+    }
+
+    output.push_str("\nHistory review candidates\n");
+    for item in &response.history_review_candidates.items {
+        output.push_str(&format!(
+            "  {} [{}] {} mentions {} ({})\n",
+            safe_text(&item.artifact_path),
+            safe_text(&item.kind),
+            safe_text(&item.title),
+            safe_text(&item.referenced_path),
+            safe_text(&item.trigger)
+        ));
+    }
+
+    output.push_str(&format!(
+        "\nProvenance\n  baseline graph: {}\n  head graph: {}\n  graph edges: {}\n  ownership: {}\n  history: {}\n",
+        safe_text(response.provenance.baseline_graph),
+        safe_text(response.provenance.head_graph),
+        safe_text(response.provenance.graph_edges),
+        safe_text(response.provenance.ownership),
+        safe_text(response.provenance.history)
+    ));
+    output.push_str(&format!(
+        "\nLimits\n  changed files {} · components/direction {} · boundaries/direction {} · cycles/direction {} · centrality rows {} · ownership paths {} · history candidates {} · history artifacts {} · history bytes {} · diagnostics {}\n",
+        response.limits.changed_files,
+        response.limits.components_per_direction,
+        response.limits.boundaries_per_direction,
+        response.limits.cycles_per_direction,
+        response.limits.centrality_rows,
+        response.limits.ownership_paths,
+        response.limits.history_candidates,
+        response.limits.history_artifacts,
+        response.limits.history_bytes,
+        response.limits.diagnostics
+    ));
+    output.push_str("\nPrecision notes\n");
+    for item in &response.diagnostics {
+        output.push_str(&format!(
+            "  {} — {}\n",
+            safe_text(&item.code),
+            safe_text(&item.message)
+        ));
     }
     output
+}
+
+fn temporal_collection_coverage<T>(
+    name: &str,
+    collection: &mmcg::temporal::TemporalCollection<T>,
+) -> String {
+    let incomplete = collection.truncated || collection.total.is_none();
+    let mut output = format!(
+        "  {name}: {}",
+        map_count_label(collection.total, collection.returned)
+    );
+    if incomplete {
+        output.push_str(&format!(
+            " (partial: {})",
+            collection.truncation_reason.unwrap_or("incomplete_count")
+        ));
+    }
+    output.push('\n');
+    output
+}
+
+fn temporal_languages(languages: &[mmcg::temporal::TemporalLanguage]) -> String {
+    if languages.is_empty() {
+        return "none".to_string();
+    }
+    languages
+        .iter()
+        .map(|language| format!("{}:{}", safe_text(&language.language), language.file_count))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn temporal_signature(signature: Option<&str>) -> String {
+    signature
+        .map(safe_text)
+        .unwrap_or_else(|| "none".to_string())
+}
+
+fn temporal_boundary_line(boundary: &mmcg::temporal::TemporalBoundary) -> String {
+    format!(
+        "  {} :: {} {} — {}:{} (signature {})\n",
+        safe_text(&boundary.component),
+        safe_text(&boundary.kind),
+        safe_text(&boundary.name),
+        safe_text(&boundary.file),
+        boundary.line,
+        temporal_signature(boundary.signature.as_deref())
+    )
+}
+
+fn temporal_cycle_groups(cycles: &[Vec<String>]) -> String {
+    if cycles.is_empty() {
+        return "none".to_string();
+    }
+    cycles
+        .iter()
+        .map(|cycle| format!("[{}]", safe_text(&cycle.join(" -> "))))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn temporal_hotspot_line(hotspot: &mmcg::temporal::TemporalHotspot) -> String {
+    format!(
+        "  {} {} — {}:{} (rank {}, in-degree {})\n",
+        safe_text(&hotspot.kind),
+        safe_text(&hotspot.name),
+        safe_text(&hotspot.file),
+        hotspot.line,
+        hotspot.rank,
+        hotspot.in_degree
+    )
 }
 
 fn render_temporal_counts(summary: &mmcg::temporal::TemporalSummary) -> String {
@@ -1665,6 +1923,62 @@ mod map_tests {
         assert!(text.contains(
             "limits: query bytes 256 · query terms 16 · term bytes 64 · top 50 · signature shape bytes 256"
         ));
+    }
+
+    #[test]
+    fn temporal_text_helpers_preserve_partial_reasons_and_event_evidence() {
+        let unknown = mmcg::temporal::TemporalCollection::<()> {
+            total: None,
+            returned: 0,
+            truncated: true,
+            truncation_reason: Some("map_projection"),
+            items: Vec::new(),
+        };
+        assert_eq!(
+            temporal_collection_coverage("components added", &unknown),
+            "  components added: 0/unknown (partial: map_projection)\n"
+        );
+
+        let boundary = mmcg::temporal::TemporalBoundary {
+            component: "api".into(),
+            file: "src/api\n.rs".into(),
+            name: "serve".into(),
+            kind: "function".into(),
+            line: 12,
+            signature: Some("fn serve()".into()),
+        };
+        assert_eq!(
+            temporal_boundary_line(&boundary),
+            "  api :: function serve — src/api\\n.rs:12 (signature fn serve())\n"
+        );
+        assert_eq!(
+            temporal_languages(&[
+                mmcg::temporal::TemporalLanguage {
+                    language: "Rust".into(),
+                    file_count: 2,
+                },
+                mmcg::temporal::TemporalLanguage {
+                    language: "TypeScript".into(),
+                    file_count: 1,
+                },
+            ]),
+            "Rust:2, TypeScript:1"
+        );
+        assert_eq!(
+            temporal_cycle_groups(&[vec!["api".into(), "core".into()]]),
+            "[api -> core]"
+        );
+        assert_eq!(
+            temporal_hotspot_line(&mmcg::temporal::TemporalHotspot {
+                file: "src/api.rs".into(),
+                name: "serve".into(),
+                kind: "function".into(),
+                line: 12,
+                rank: 2,
+                in_degree: 7,
+            }),
+            "  function serve — src/api.rs:12 (rank 2, in-degree 7)\n"
+        );
     }
 
     #[test]

@@ -1167,12 +1167,12 @@ fn summary_markdown(
         "clean commit"
     };
     let mut output = format!(
-        "# Mastermind review\n\n[Open the autonomous Lens report](index.html) · [SARIF results](mastermind.sarif)\n\n- Repository: {}\n- Baseline: `{}` (`{}`)\n- Head: `{}` ({revision_kind})\n- Scope: `{}` · depth {} · top {}\n- Analysis: **{}**\n- Evidence binding: `{}`\n\n## Change summary\n\n- Changed files: {}\n- Changed symbols: {}\n- Impacted symbols: {}\n- Cross-component impacts: {}\n- Candidate tests: {}\n\n## Architecture snapshot\n\n- Indexed files in scope: {}\n- Components: {}\n- Dependency cycles: {}\n- Hotspots: {}\n",
+        "# Mastermind review\n\n[Open the autonomous Lens report](index.html) · [SARIF results](mastermind.sarif)\n\n- Repository: {}\n- Baseline: {} (`{}`)\n- Head: `{}` ({revision_kind})\n- Scope: {} · depth {} · top {}\n- Analysis: **{}**\n- Evidence binding: `{}`\n\n## Change summary\n\n- Changed files: {}\n- Changed symbols: {}\n- Impacted symbols: {}\n- Cross-component impacts: {}\n- Candidate tests: {}\n\n## Architecture snapshot\n\n- Indexed files in scope: {}\n- Components: {}\n- Dependency cycles: {}\n- Hotspots: {}\n",
         markdown_text(&snapshot.repository.name),
-        markdown_text(&impact.baseline.requested_ref),
+        markdown_code(&impact.baseline.requested_ref),
         short_oid(&impact.baseline.baseline_oid),
         short_oid(&impact.baseline.head_oid),
-        markdown_text(&snapshot.options.path),
+        markdown_code(&snapshot.options.path),
         snapshot.options.depth,
         snapshot.options.top,
         if analysis.partial { "partial" } else { "complete" },
@@ -1212,13 +1212,13 @@ fn summary_markdown(
                 .corpus
                 .directories
                 .iter()
-                .map(|path| format!("`{}`", markdown_text(path)))
+                .map(|path| markdown_code(path))
                 .collect::<Vec<_>>()
                 .join(", ")
         };
         output.push_str(&format!(
-            "\n## Declared document evidence\n\n- Packet: `{}`\n- Content status: `{}`\n- Endpoint changes: {}\n- Corpus status: `{}` · {} changes\n- Corpus roots: {}\n- Declared relations: {} · all `unverified`\n- Snapshot revision: `{}` · review head {}\n- Packet SHA-256: `{}`\n- Live observation SHA-256: `{}`\n",
-            markdown_text(&graph.packet.path),
+            "\n## Declared document evidence\n\n- Packet: {}\n- Content status: `{}`\n- Endpoint changes: {}\n- Corpus status: `{}` · {} changes\n- Corpus roots: {}\n- Declared relations: {} · all `unverified`\n- Snapshot revision: `{}` · review head {}\n- Packet SHA-256: `{}`\n- Live observation SHA-256: `{}`\n",
+            markdown_code(&graph.packet.path),
             graph.status,
             graph.changed_files.len(),
             graph.corpus.status,
@@ -1250,9 +1250,14 @@ fn summary_markdown(
             output.push_str("\nChanged document evidence:\n");
             for (kind, change) in changes.iter().take(12) {
                 output.push_str(&format!(
-                    "  - {kind}: `{}` ({})\n",
-                    markdown_text(&change.path),
-                    change.reasons.join(", "),
+                    "  - {kind}: {} ({})\n",
+                    markdown_code(&change.path),
+                    change
+                        .reasons
+                        .iter()
+                        .map(|reason| markdown_code(reason))
+                        .collect::<Vec<_>>()
+                        .join(", "),
                 ));
             }
             if changes.len() > 12 {
@@ -1276,14 +1281,14 @@ fn summary_markdown(
             .audit
             .narrative_state
             .reason
-            .map(|reason| format!(" (`{}`)", markdown_text(reason)))
+            .map(|reason| format!(" ({})", markdown_code(reason)))
             .unwrap_or_default(),
         analysis.states.len(),
     ));
     for state in analysis.states.iter().take(8) {
         output.push_str(&format!(
-            "  - `{}`: {}{}\n",
-            markdown_text(&state.path),
+            "  - {}: {}{}\n",
+            markdown_code(&state.path),
             state.state,
             state
                 .reason
@@ -1567,6 +1572,18 @@ fn optional_count_label(total: Option<u32>) -> String {
 }
 
 fn markdown_text(value: &str) -> String {
+    let value = normalized_markdown_text(value);
+    let mut output = String::new();
+    for character in value.chars() {
+        if matches!(character, '`' | '*' | '_' | '[' | ']' | '<' | '>') {
+            output.push('\\');
+        }
+        output.push(character);
+    }
+    output
+}
+
+fn normalized_markdown_text(value: &str) -> String {
     let mut output = String::new();
     let mut previous_space = false;
     for character in value.chars() {
@@ -1576,14 +1593,34 @@ fn markdown_text(value: &str) -> String {
                 previous_space = true;
             }
         } else {
-            if matches!(character, '`' | '*' | '_' | '[' | ']' | '<' | '>') {
-                output.push('\\');
-            }
             output.push(character);
             previous_space = false;
         }
     }
     output.trim().to_string()
+}
+
+fn markdown_code(value: &str) -> String {
+    let value = normalized_markdown_text(value);
+    if value.is_empty() {
+        return "` `".to_string();
+    }
+    let mut longest_run = 0_usize;
+    let mut current_run = 0_usize;
+    for character in value.chars() {
+        if character == '`' {
+            current_run += 1;
+            longest_run = longest_run.max(current_run);
+        } else {
+            current_run = 0;
+        }
+    }
+    let delimiter = "`".repeat(longest_run + 1);
+    if value.starts_with('`') || value.ends_with('`') {
+        format!("{delimiter} {value} {delimiter}")
+    } else {
+        format!("{delimiter}{value}{delimiter}")
+    }
 }
 
 #[cfg(test)]
@@ -1593,6 +1630,15 @@ mod tests {
     use crate::store::Store;
     use sha2::{Digest, Sha256};
     use std::process::Command;
+
+    #[test]
+    fn markdown_code_preserves_dynamic_backticks_as_literal_text() {
+        assert_eq!(markdown_code("docs/adr"), "`docs/adr`");
+        assert_eq!(markdown_code("docs/a`b.md"), "``docs/a`b.md``");
+        assert_eq!(markdown_code("`edge`"), "`` `edge` ``");
+        assert_eq!(markdown_code("feature\nname"), "`feature name`");
+        assert_eq!(markdown_text("repo_[x]"), "repo\\_\\[x\\]");
+    }
 
     fn git(root: &Path, args: &[&str]) -> String {
         let output = Command::new("git")

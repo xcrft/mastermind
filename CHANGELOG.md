@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Lens zero-change headlines and accessibility announcements now preserve
+  snapshot-wide incomplete states beyond collection truncation.
 - The Lens audit verdict now becomes incomplete when SCIP evidence is partial,
   temporal analysis is unavailable or partial, or selected document evidence
   needs review.

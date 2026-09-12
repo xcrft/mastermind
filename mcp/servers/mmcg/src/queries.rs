@@ -888,16 +888,30 @@ pub fn history(
 
 #[derive(Debug, Serialize)]
 pub struct DependencyCyclesResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// Exact cycle count when the import graph fit within its work cap.
+    pub total: Option<u32>,
     pub count: u32,
     pub min_size: u32,
+    pub returned_members: u32,
+    pub total_members: Option<u32>,
     /// Each entry is one cycle (SCC) — file paths in lex order.
     pub cycles: Vec<Vec<String>>,
-    /// `true` when the file-pair import graph exceeded the work cap —
-    /// Tarjan was **not** run, so `cycles` is empty and the true cycle set is
-    /// incomplete and possibly inaccurate, not merely "more available".
-    /// Narrow the scope (`language` filter) and retry.
     pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation_reason: Option<&'static str>,
+    pub graph_truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_limit: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member_limit: Option<u32>,
+    pub precision_notes: Vec<String>,
 }
+
+pub const DEPENDENCY_CYCLES_DEFAULT_TOP: u32 = 50;
+pub const DEPENDENCY_CYCLES_MAX_TOP: u32 = 200;
+pub const DEPENDENCY_CYCLES_MEMBER_LIMIT: u32 = 500;
 
 pub fn symbols_changed_since(
     store: &Store,
@@ -3304,13 +3318,115 @@ pub fn dependency_cycles(
     language: Option<&str>,
     min_size: u32,
 ) -> rusqlite::Result<DependencyCyclesResponse> {
+    dependency_cycles_with_limits(store, language, min_size, None, None)
+}
+
+pub fn dependency_cycles_bounded(
+    store: &Store,
+    language: Option<&str>,
+    min_size: u32,
+    top: u32,
+) -> rusqlite::Result<DependencyCyclesResponse> {
+    dependency_cycles_with_limits(
+        store,
+        language,
+        min_size,
+        Some(top.max(1)),
+        Some(DEPENDENCY_CYCLES_MEMBER_LIMIT),
+    )
+}
+
+fn dependency_cycles_with_limits(
+    store: &Store,
+    language: Option<&str>,
+    min_size: u32,
+    row_limit: Option<u32>,
+    member_limit: Option<u32>,
+) -> rusqlite::Result<DependencyCyclesResponse> {
     let (cycles, truncated) = store.dependency_cycles(language, min_size as usize)?;
-    Ok(DependencyCyclesResponse {
-        count: cycles.len() as u32,
+    Ok(format_dependency_cycles(
+        language,
         min_size,
         cycles,
         truncated,
-    })
+        row_limit,
+        member_limit,
+    ))
+}
+
+fn format_dependency_cycles(
+    language: Option<&str>,
+    min_size: u32,
+    cycles: Vec<Vec<String>>,
+    graph_truncated: bool,
+    row_limit: Option<u32>,
+    member_limit: Option<u32>,
+) -> DependencyCyclesResponse {
+    let total = (!graph_truncated).then(|| u32::try_from(cycles.len()).unwrap_or(u32::MAX));
+    let total_members = (!graph_truncated).then(|| {
+        cycles.iter().fold(0u32, |count, cycle| {
+            count.saturating_add(u32::try_from(cycle.len()).unwrap_or(u32::MAX))
+        })
+    });
+    let row_limit_usize = row_limit
+        .map(|value| usize::try_from(value).unwrap_or(usize::MAX))
+        .unwrap_or(usize::MAX);
+    let member_limit_usize = member_limit
+        .map(|value| usize::try_from(value).unwrap_or(usize::MAX))
+        .unwrap_or(usize::MAX);
+    let mut selected = Vec::new();
+    let mut returned_members = 0usize;
+    let mut output_reason = None;
+    if !graph_truncated {
+        for cycle in cycles {
+            if selected.len() >= row_limit_usize {
+                output_reason = Some("top");
+                break;
+            }
+            if cycle.len() > member_limit_usize.saturating_sub(returned_members) {
+                output_reason = Some("member_limit");
+                break;
+            }
+            returned_members = returned_members.saturating_add(cycle.len());
+            selected.push(cycle);
+        }
+    }
+    let count = u32::try_from(selected.len()).unwrap_or(u32::MAX);
+    let truncated = graph_truncated || total.is_some_and(|value| count < value);
+    let truncation_reason = if graph_truncated {
+        Some("graph_work_limit")
+    } else {
+        output_reason
+    };
+    let mut precision_notes = vec![
+        "cycles_are_syntactic_import_graph_sccs_not_runtime_dependency_proof".to_string(),
+        "every_returned_cycle_contains_its_complete_scc_membership".to_string(),
+    ];
+    if graph_truncated {
+        precision_notes.push(
+            "cycle_detection_was_skipped_because_the_import_graph_exceeded_its_work_limit"
+                .to_string(),
+        );
+    } else if output_reason == Some("member_limit") {
+        precision_notes.push(
+            "next_complete_scc_was_omitted_instead_of_returning_partial_membership".to_string(),
+        );
+    }
+    DependencyCyclesResponse {
+        language: language.map(String::from),
+        total,
+        count,
+        min_size,
+        returned_members: u32::try_from(returned_members).unwrap_or(u32::MAX),
+        total_members,
+        cycles: selected,
+        truncated,
+        truncation_reason,
+        graph_truncated,
+        row_limit,
+        member_limit,
+        precision_notes,
+    }
 }
 
 pub fn centrality(
@@ -6714,6 +6830,38 @@ mod tests {
         assert_eq!(bounded.files[0].path, "file_a.py");
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn dependency_cycle_bounds_never_return_partial_scc_membership() {
+        let cycles = vec![
+            vec!["a.rs".into(), "b.rs".into(), "c.rs".into()],
+            vec!["d.rs".into(), "e.rs".into()],
+            vec!["f.rs".into(), "g.rs".into()],
+        ];
+        let member_limited =
+            format_dependency_cycles(None, 2, cycles.clone(), false, Some(10), Some(4));
+        assert_eq!(member_limited.total, Some(3));
+        assert_eq!(member_limited.total_members, Some(7));
+        assert_eq!(member_limited.count, 1);
+        assert_eq!(member_limited.returned_members, 3);
+        assert_eq!(member_limited.cycles[0], cycles[0]);
+        assert!(member_limited.truncated);
+        assert_eq!(member_limited.truncation_reason, Some("member_limit"));
+
+        let top_limited =
+            format_dependency_cycles(Some("rust"), 2, cycles, false, Some(1), Some(100));
+        assert_eq!(top_limited.language.as_deref(), Some("rust"));
+        assert_eq!(top_limited.count, 1);
+        assert_eq!(top_limited.truncation_reason, Some("top"));
+
+        let graph_limited =
+            format_dependency_cycles(None, 2, Vec::new(), true, Some(10), Some(100));
+        assert_eq!(graph_limited.total, None);
+        assert_eq!(graph_limited.total_members, None);
+        assert_eq!(graph_limited.count, 0);
+        assert!(graph_limited.graph_truncated);
+        assert_eq!(graph_limited.truncation_reason, Some("graph_work_limit"));
     }
 
     #[test]

@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- MCP dependency-cycle results now bound both SCC count and total file
+  memberships, omit rather than mislabel partial SCCs, and distinguish response
+  truncation from an import-graph work cutoff; CLI output stays complete.
 - MCP recent-file queries now apply their advertised response bound in SQL and
   report exact filtered totals; CLI output stays complete.
 - MCP file outlines now use a bounded parent-before-child traversal, report

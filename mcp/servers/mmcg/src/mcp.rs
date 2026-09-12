@@ -1963,12 +1963,13 @@ fn schema_symbols_changed_since() -> Value {
 fn schema_dependency_cycles() -> Value {
     json!({
         "name": "mmcg_dependency_cycles",
-        "description": "Detect circular imports — strongly-connected components in the file-level import graph. Returns each cycle as a list of files. Pre-merge guard: 'does this PR introduce a new cycle?'. Architectural hygiene: 'what cycles already exist?'. Edges are resolved by leaf-name match (over-approximating — two unrelated symbols sharing a name produce a cross-edge; verify before acting). Set `min_size` higher to hide trivial A↔B and surface only larger structural issues. Work-capped: above a large import-graph size, `truncated: true` is returned with an empty `cycles` list — the true cycle set is incomplete and possibly inaccurate, not merely 'more available'; narrow with `language` and retry.",
+        "description": "Detect circular imports — strongly-connected components in the file-level import graph. Returns up to `top` complete SCCs within a 500-file membership budget; a cycle that cannot fit is omitted rather than returned partially. Edges are resolved by leaf-name match (over-approximating — two unrelated symbols sharing a name produce a cross-edge; verify before acting). Work-capped: above a large import-graph size, Tarjan is skipped, totals are null, and `graph_work_limit` marks the result incomplete; narrow with `language` and retry.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "language": { "type": "string", "enum": LANGUAGES, "description": "Optional language filter" },
-                "min_size": { "type": "integer", "minimum": 2, "maximum": 100, "default": 2, "description": "Smallest SCC to report. 2 = any cycle. 3 hides trivial A↔B pairs." }
+                "min_size": { "type": "integer", "minimum": 2, "maximum": 100, "default": 2, "description": "Smallest SCC to report. 2 = any cycle. 3 hides trivial A↔B pairs." },
+                "top": { "type": "integer", "minimum": 1, "maximum": queries::DEPENDENCY_CYCLES_MAX_TOP, "default": queries::DEPENDENCY_CYCLES_DEFAULT_TOP, "description": "Maximum complete SCCs to return" }
             }
         }
     })
@@ -2564,8 +2565,15 @@ fn handle_symbols_changed_since(store: &mut Store, args: &Value) -> Result<Value
 fn handle_dependency_cycles(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let language = opt_enum_arg(args, "language", &LANGUAGES)?;
     let min_size = bounded_u64_arg(args, "min_size", 2, 2, 100)? as u32;
+    let top = bounded_u64_arg(
+        args,
+        "top",
+        u64::from(queries::DEPENDENCY_CYCLES_DEFAULT_TOP),
+        1,
+        u64::from(queries::DEPENDENCY_CYCLES_MAX_TOP),
+    )? as u32;
     ensure_fresh_index(store)?;
-    let r = queries::dependency_cycles(store, language, min_size)
+    let r = queries::dependency_cycles_bounded(store, language, min_size, top)
         .map_err(|error| HandlerError::internal("dependency_cycles_query", error))?;
     serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
@@ -4305,6 +4313,11 @@ mod tests {
             (
                 handle_recent_changes,
                 json!({ "since": "1h", "top": 501 }),
+                "Invalid argument: top",
+            ),
+            (
+                handle_dependency_cycles,
+                json!({ "top": 201 }),
                 "Invalid argument: top",
             ),
             (

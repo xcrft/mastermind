@@ -1580,12 +1580,20 @@
     var audit = record(model.audit);
     var impact = record(model.impact);
     var changes = record(impact.changes);
+    var temporalEnvelope = record(model.temporalEnvelope);
+    var temporal = record(model.temporal);
+    var semantic = record(model.semantic);
+    var documentGraph = model.documentGraph;
     var sections = [
       map.files, map.languages, map.components, map.entry_points, map.hotspots, map.cycles,
       changes.files, changes.symbols, impact.impact, impact.api_crossings, impact.tests,
       audit.dead_code, audit.change_hotspots, audit.largest_files, audit.bus_factor,
     ];
     return record(model.evidence).partial === true
+      || semantic.partial === true
+      || text(temporalEnvelope.status, "unavailable") !== "available"
+      || temporal.partial === true
+      || Boolean(documentGraph && text(documentGraph.status, "needs_review") === "needs_review")
       || record(map.scope).aggregation_paths_truncated === true
       || sections.some(function (section) {
         var value = collection(section);

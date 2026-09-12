@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- The Lens audit verdict now becomes incomplete when SCIP evidence is partial,
+  temporal analysis is unavailable or partial, or selected document evidence
+  needs review.
 - Lens change headlines now retain unknown and lower-bound impact, API-crossing,
   and candidate-test counts instead of restating partial zeroes as exact.
 - Lens evidence cards and accessibility announcements now preserve unknown and

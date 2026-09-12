@@ -1080,6 +1080,29 @@ async function main() {
   assert.equal(auditUnavailableHarness.nodes.get("audit-bugs-sev").textContent, "No data", "Unavailable size data is explicit");
   assert.equal(auditUnavailableHarness.nodes.get("audit-bus-sev").textContent, "No data", "Unavailable authorship data is explicit");
 
+  var semanticPartialPayload = fixture();
+  semanticPartialPayload.evidence.files.items.forEach((file) => { file.findings = []; });
+  semanticPartialPayload.semantic.partial = true;
+  semanticPartialPayload.semantic.edges.total = null;
+  semanticPartialPayload.semantic.edges.truncated = true;
+  semanticPartialPayload.semantic.edges.truncation_reason = "semantic_edge_limit";
+  var semanticPartialHarness = await renderFixture(semanticPartialPayload, { width: 1200 });
+  assert.equal(semanticPartialHarness.nodes.get("audit-verdict-word").textContent, "Incomplete", "Partial semantic evidence cannot produce a complete audit verdict");
+
+  var temporalUnavailablePayload = fixture();
+  temporalUnavailablePayload.evidence.files.items.forEach((file) => { file.findings = []; });
+  temporalUnavailablePayload.temporal = {
+    status: "unavailable",
+    diagnostic: { code: "base_map_unavailable", message: "Temporal architecture is unavailable." },
+  };
+  var temporalUnavailableHarness = await renderFixture(temporalUnavailablePayload, { width: 1200 });
+  assert.equal(temporalUnavailableHarness.nodes.get("audit-verdict-word").textContent, "Incomplete", "Unavailable temporal analysis cannot produce a complete audit verdict");
+
+  var documentReviewAuditPayload = withDocumentGraph(fixture(), "needs_review");
+  documentReviewAuditPayload.evidence.files.items.forEach((file) => { file.findings = []; });
+  var documentReviewAuditHarness = await renderFixture(documentReviewAuditPayload, { width: 1200 });
+  assert.equal(documentReviewAuditHarness.nodes.get("audit-verdict-word").textContent, "Incomplete", "Document evidence needing review cannot produce a complete audit verdict");
+
   var boundedPayload = fixture();
   boundedPayload.evidence.files.items.forEach((file) => { file.findings = []; });
   boundedPayload.audit.change_hotspots.items = boundedPayload.audit.change_hotspots.items.slice(0, 1);

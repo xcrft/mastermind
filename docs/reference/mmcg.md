@@ -748,6 +748,11 @@ remain change-scoped evidence because evidence overlays are correlated only to
 the returned change, impact, and candidate-test trace. They are not a
 repository-wide clean result.
 
+The overall audit verdict also follows the snapshot-wide evidence boundary.
+Partial SCIP evidence, unavailable or partial temporal analysis, and a selected
+document graph that needs review make the verdict `Incomplete`, even when the
+audit-specific rankings themselves are complete.
+
 ### Optional AI audit narrative
 
 mmcg never invokes a model. It can read an optional bounded interpretation from

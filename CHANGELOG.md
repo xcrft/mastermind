@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Lens evidence cards and accessibility announcements now preserve unknown and
+  lower-bound source, fact, and matched-file counts, and source collection caps
+  appear in the method ledger.
 - Change-impact SARIF now includes candidate-test truncation in both its
   `partial` state and reason list through one shared response completeness
   contract.

@@ -712,8 +712,7 @@ pub(crate) fn open_locked_regular_file_with_capability(
         root.verify()?;
         let current_parent = open_relative_directory_nofollow(&root.directory, parent_relative)
             .map_err(|_| BoundedReadError::SnapshotChanged)?;
-        if !directory_identity(&current_parent)?.same_object(parent_identity)
-        {
+        if !directory_identity(&current_parent)?.same_object(parent_identity) {
             return Err(BoundedReadError::SnapshotChanged);
         }
         let current = open(&current_parent).map_err(|error| match error {

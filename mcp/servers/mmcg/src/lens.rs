@@ -1403,6 +1403,57 @@ fn audit_path_in_scope(path: &str, map: &ProjectMapResponse) -> bool {
     }
 }
 
+/// Parse `git log -z --name-only` output whose pretty format starts each
+/// commit with two NULs followed by canonical author name and email fields.
+/// The first path after a pretty-format record carries one separator newline;
+/// all other path bytes, including whitespace and embedded newlines, are data.
+fn parse_author_history(output: &[u8]) -> Option<Vec<(Vec<u8>, String)>> {
+    let fields = output.split(|byte| *byte == 0).collect::<Vec<_>>();
+    let mut offset = 0;
+    let mut author = None;
+    let mut first_path = false;
+    let mut entries = Vec::new();
+    while offset < fields.len() {
+        let field = fields[offset];
+        if field.is_empty() && fields.get(offset + 1).is_some_and(|next| next.is_empty()) {
+            let name = *fields.get(offset + 2)?;
+            let email = *fields.get(offset + 3)?;
+            let mut identity = Vec::with_capacity(name.len() + email.len() + 1);
+            identity.extend_from_slice(name);
+            identity.push(0);
+            identity.extend_from_slice(email);
+            author = Some(identity);
+            first_path = true;
+            offset += 4;
+            continue;
+        }
+        offset += 1;
+        if field.is_empty() {
+            continue;
+        }
+        let identity = author.as_ref()?;
+        let path = if first_path {
+            first_path = false;
+            field.strip_prefix(b"\n")?
+        } else {
+            field
+        };
+        if path.is_empty() {
+            return None;
+        }
+        entries.push((identity.clone(), String::from_utf8_lossy(path).into_owned()));
+    }
+    Some(entries)
+}
+
+fn parse_nul_history_paths(output: &[u8]) -> Vec<String> {
+    output
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect()
+}
+
 /// Distinct authors by selected map component over bounded git history.
 /// Renames are not followed; git failure makes this advisory section unavailable.
 fn authors_by_component(
@@ -1419,9 +1470,12 @@ fn authors_by_component(
         root,
         &[
             "log",
+            "--no-renames",
             "--no-merges",
-            "--format=%x00%an",
+            "--use-mailmap",
+            "--format=%x00%x00%aN%x00%aE",
             "--name-only",
+            "-z",
             "-n",
             &max_count,
         ],
@@ -1433,7 +1487,6 @@ fn authors_by_component(
     if !output.success {
         return None;
     }
-    let text = String::from_utf8_lossy(&output.stdout);
     let returned_components = map
         .components
         .items
@@ -1445,32 +1498,24 @@ fn authors_by_component(
     let mut components = returned_components
         .iter()
         .cloned()
-        .map(|component| (component, HashMap::<String, u32>::new()))
+        .map(|component| (component, HashMap::<Vec<u8>, u32>::new()))
         .collect::<HashMap<_, _>>();
-    let mut author = String::new();
-    for line in text.lines() {
-        if let Some(name) = line.strip_prefix('\u{0}') {
-            author = name.to_string();
-            continue;
-        }
-        let path = line.trim();
-        if path.is_empty()
-            || author.is_empty()
-            || !audit_path_in_scope(path, map)
-            || !indexed_paths.contains(path)
-            || production_only && !crate::store::is_production_path(path)
+    for (author, path) in parse_author_history(&output.stdout)? {
+        if !audit_path_in_scope(&path, map)
+            || !indexed_paths.contains(&path)
+            || production_only && !crate::store::is_production_path(&path)
         {
             continue;
         }
         let component =
-            queries::component_for_file(audit_scope(map), &map.scope.kind, path, map.scope.depth);
+            queries::component_for_file(audit_scope(map), &map.scope.kind, &path, map.scope.depth);
         if !returned_components.contains(&component) {
             continue;
         }
         *components
             .entry(component)
             .or_default()
-            .entry(author.clone())
+            .entry(author)
             .or_insert(0) += 1;
     }
     let mut rows: Vec<LensComponentAuthors> = components
@@ -1523,6 +1568,7 @@ fn churn_by_file(
             "--no-merges",
             "--pretty=format:",
             "--name-only",
+            "-z",
             "-n",
             &max_count,
         ],
@@ -1534,18 +1580,15 @@ fn churn_by_file(
     if !output.success {
         return None;
     }
-    let text = String::from_utf8_lossy(&output.stdout);
     let mut counts: HashMap<String, u32> = HashMap::new();
-    for line in text.lines() {
-        let path = line.trim();
-        if path.is_empty()
-            || !audit_path_in_scope(path, map)
-            || !indexed_paths.contains(path)
-            || production_only && !crate::store::is_production_path(path)
+    for path in parse_nul_history_paths(&output.stdout) {
+        if !audit_path_in_scope(&path, map)
+            || !indexed_paths.contains(&path)
+            || production_only && !crate::store::is_production_path(&path)
         {
             continue;
         }
-        *counts.entry(path.to_string()).or_insert(0) += 1;
+        *counts.entry(path).or_insert(0) += 1;
     }
     Some(counts)
 }
@@ -2482,6 +2525,26 @@ mod tests {
             top: 100,
             production_only: false,
         }
+    }
+
+    #[test]
+    fn git_history_parsers_preserve_paths_and_canonical_identity() {
+        let author_log = b"\0\0Canonical Name\0canonical@example.test\0\nsrc/caf\xc3\xa9.rs\0src/ leading .rs\0\0\0Canonical Name\0canonical@example.test\0\nsrc/line\nbreak.rs\0\0\0Canonical Name\0other@example.test\0\nsrc/other.rs\0";
+        let parsed = parse_author_history(author_log).unwrap();
+
+        assert_eq!(parsed[0].1, "src/café.rs");
+        assert_eq!(parsed[1].1, "src/ leading .rs");
+        assert_eq!(parsed[2].1, "src/line\nbreak.rs");
+        assert_eq!(parsed[0].0, parsed[2].0);
+        assert_ne!(parsed[0].0, parsed[3].0);
+
+        let paths = parse_nul_history_paths(
+            b"src/caf\xc3\xa9.rs\0\0src/line\nbreak.rs\0src/ trailing .rs\0",
+        );
+        assert_eq!(
+            paths,
+            vec!["src/café.rs", "src/line\nbreak.rs", "src/ trailing .rs"]
+        );
     }
 
     #[test]

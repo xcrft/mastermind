@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Lens Git-history parsing now uses NUL-delimited paths and canonical mailmap
+  name-and-email identities, preserving unusual filenames and preventing author
+  aliases or equal display names from distorting ownership concentration.
 - Lens now carries the minimum ownership-history threshold and its coverage in
   the bus-factor payload; components below five touches make the assessment
   partial instead of allowing a complete verdict with an unjudgeable signal.

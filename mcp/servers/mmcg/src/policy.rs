@@ -1156,6 +1156,10 @@ fn location(path: &str, line: Option<u32>, message: &str) -> PolicyLocation {
     }
 }
 
+fn policy_text(value: &str) -> String {
+    value.chars().flat_map(char::escape_default).collect()
+}
+
 pub fn render_text(report: &PolicyReport) -> String {
     let verdict = if report.passed {
         "PASS"
@@ -1165,14 +1169,32 @@ pub fn render_text(report: &PolicyReport) -> String {
         "INCOMPLETE"
     };
     let mut output = format!(
-        "Architecture policy: {verdict}\n  config: {} ({})\n  baseline: {}\n  rules: {} | violations: {} | diagnostics: {}\n",
-        report.config.path,
-        &report.config.sha256[..12],
-        report.baseline.baseline_oid,
+        "Architecture policy: {verdict}\n  schema: v{}\n  config: {}\n  config sha256: {}\n  config version: {}\n  requested baseline: {}\n  baseline oid: {}\n  HEAD oid: {}\n  includes worktree: {} | untracked: {}\n  passed: {} | complete: {}\n  rules: {} | violations: {} | diagnostics: {}\n",
+        report.schema_version,
+        policy_text(&report.config.path),
+        policy_text(&report.config.sha256),
+        report.config.version,
+        policy_text(&report.baseline.requested_ref),
+        policy_text(&report.baseline.baseline_oid),
+        policy_text(&report.baseline.head_oid),
+        report.baseline.includes_worktree,
+        report.baseline.includes_untracked,
+        report.passed,
+        report.complete,
         report.summary.rules_evaluated,
         report.summary.violations,
         report.summary.diagnostics,
     );
+    output.push_str("\nRules\n");
+    for rule in &report.rules {
+        output.push_str(&format!(
+            "  [{}] {} — {}\n",
+            policy_text(&rule.id),
+            policy_text(rule.kind),
+            policy_text(rule.description)
+        ));
+    }
+    output.push_str("\nViolations\n");
     for violation in &report.violations {
         let line = violation
             .location
@@ -1180,15 +1202,50 @@ pub fn render_text(report: &PolicyReport) -> String {
             .map(|line| format!(":{line}"))
             .unwrap_or_default();
         output.push_str(&format!(
-            "  error [{}] {}{} — {}\n",
-            violation.rule_id, violation.location.path, line, violation.message
+            "  {} [{}] {} — {}{} — {}\n",
+            policy_text(violation.level),
+            policy_text(&violation.rule_id),
+            policy_text(violation.rule_kind),
+            policy_text(&violation.location.path),
+            line,
+            policy_text(&violation.message)
         ));
+        output.push_str(&format!(
+            "    location evidence: {}\n",
+            policy_text(&violation.location.message)
+        ));
+        for related in &violation.related_locations {
+            let line = related
+                .line
+                .map(|line| format!(":{line}"))
+                .unwrap_or_default();
+            output.push_str(&format!(
+                "    related: {}{} — {}\n",
+                policy_text(&related.path),
+                line,
+                policy_text(&related.message)
+            ));
+        }
+        for (name, value) in &violation.properties {
+            output.push_str(&format!(
+                "    property {}: {}\n",
+                policy_text(name),
+                policy_text(&value.to_string())
+            ));
+        }
     }
+    output.push_str("\nIncomplete evidence\n");
     for diagnostic in &report.diagnostics {
         output.push_str(&format!(
             "  incomplete [{}:{}] {}\n",
-            diagnostic.rule_id, diagnostic.code, diagnostic.message
+            policy_text(&diagnostic.rule_id),
+            policy_text(&diagnostic.code),
+            policy_text(&diagnostic.message)
         ));
+    }
+    output.push_str("\nPrecision notes\n");
+    for note in &report.precision_notes {
+        output.push_str(&format!("  {}\n", policy_text(note)));
     }
     output
 }
@@ -1239,6 +1296,65 @@ rules:
             includes_worktree: true,
             includes_untracked: true,
         }
+    }
+
+    #[test]
+    fn text_report_preserves_policy_evidence_and_escapes_repository_text() {
+        let mut config = identity();
+        config.path = "policy\n.yml".into();
+        let report = PolicyReport {
+            schema_version: 1,
+            config,
+            baseline: baseline(),
+            passed: false,
+            complete: false,
+            summary: PolicySummary {
+                rules_evaluated: 1,
+                violations: 1,
+                diagnostics: 1,
+            },
+            rules: vec![PolicyRuleSummary {
+                id: "boundary-rule".into(),
+                kind: "forbidden-dependency-direction",
+                description: "A forbidden dependency direction was observed.",
+            }],
+            violations: vec![PolicyViolation {
+                rule_id: "boundary-rule".into(),
+                rule_kind: "forbidden-dependency-direction",
+                level: "error",
+                message: "src/api\n.rs imports the forbidden target".into(),
+                location: PolicyLocation {
+                    path: "src/api\n.rs".into(),
+                    line: Some(12),
+                    message: "Importing source".into(),
+                },
+                related_locations: vec![PolicyLocation {
+                    path: "src/core.rs".into(),
+                    line: Some(4),
+                    message: "Forbidden target".into(),
+                }],
+                properties: BTreeMap::from([("threshold".into(), json!(0))]),
+            }],
+            diagnostics: vec![PolicyDiagnostic {
+                rule_id: "boundary-rule".into(),
+                code: "graph_partial".into(),
+                message: "Graph evidence is incomplete.".into(),
+            }],
+            precision_notes: vec!["Static graph evidence only."],
+        };
+
+        let text = render_text(&report);
+
+        assert!(text.contains("Architecture policy: INCOMPLETE\n  schema: v1"));
+        assert!(text.contains("config: policy\\n.yml"));
+        assert!(text.contains(&format!("HEAD oid: {}", "2".repeat(40))));
+        assert!(text.contains("[boundary-rule] forbidden-dependency-direction"));
+        assert!(text.contains("src/api\\n.rs:12"));
+        assert!(!text.contains("src/api\n.rs"));
+        assert!(text.contains("related: src/core.rs:4 — Forbidden target"));
+        assert!(text.contains("property threshold:"));
+        assert!(text.contains("incomplete [boundary-rule:graph_partial]"));
+        assert!(text.contains("Static graph evidence only."));
     }
 
     #[test]

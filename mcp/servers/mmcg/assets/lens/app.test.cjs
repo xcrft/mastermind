@@ -583,7 +583,11 @@ function fixture() {
       },
       bus_factor: {
         status: "available",
+        partial: false,
         window_commits: 2000,
+        components_evaluated: 3,
+        components_with_history: 3,
+        components_without_history: 0,
         total: 3,
         returned: 3,
         truncated: false,
@@ -1080,6 +1084,23 @@ async function main() {
   assert.match(auditHarness.nodes.get("audit-bus").textContent, /src\/core[\s\S]*100% · 1 author/i, "Bus card shows single-owner concentration");
   assert.match(auditHarness.nodes.get("audit-bus-sev").textContent, /Concentrated/i, "Single-author history is reported as concentrated");
   assert.match(auditHarness.nodes.get("audit-map-note").textContent, /All 2 returned components/i, "Map states how much of the returned component set it represents");
+
+  var missingBusHistoryPayload = fixture();
+  missingBusHistoryPayload.evidence.files.items.forEach((file) => { file.findings = []; });
+  missingBusHistoryPayload.audit.change_hotspots.items = [];
+  missingBusHistoryPayload.audit.change_hotspots.total = 0;
+  missingBusHistoryPayload.audit.change_hotspots.returned = 0;
+  missingBusHistoryPayload.audit.bus_factor.partial = true;
+  missingBusHistoryPayload.audit.bus_factor.partial_reason = "components_without_history";
+  missingBusHistoryPayload.audit.bus_factor.components_evaluated = 4;
+  missingBusHistoryPayload.audit.bus_factor.components_without_history = 1;
+  missingBusHistoryPayload.audit.bus_factor.items.push({ component: "src/new", authors: 0, touches: 0, top_author_pct: 0 });
+  missingBusHistoryPayload.audit.bus_factor.returned = 4;
+  missingBusHistoryPayload.audit.bus_factor.total = 4;
+  var missingBusHistoryHarness = await renderFixture(missingBusHistoryPayload, { width: 1200 });
+  assert.equal(missingBusHistoryHarness.nodes.get("audit-verdict-word").textContent, "Incomplete", "A component without Git history keeps the audit incomplete");
+  assert.equal(missingBusHistoryHarness.nodes.get("audit-bus-sev").textContent, "Concentrated", "Known concentration still keeps the stronger risk signal");
+  assert.match(missingBusHistoryHarness.nodes.get("audit-bus").textContent, /1 of 4 evaluated components[\s\S]*no commits[\s\S]*unknown[\s\S]*src\/new/i, "The bus card exposes the missing-history denominator and component");
 
   var auditUnavailablePayload = fixture();
   auditUnavailablePayload.evidence.files.items.forEach((file) => { file.findings = []; });

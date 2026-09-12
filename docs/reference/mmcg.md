@@ -742,10 +742,15 @@ become unknown when a cap-plus-one probe finds more than 20 ranked files.
 Change-hotspot totals become
 unknown when the 2,000-row centrality candidate window fills, because churn can
 change the final order; its displayed ranking remains capped at 20. Bus-factor
-totals are exact within the stated 2,000-commit history window before its
-20-component response cap. An unavailable SQLite or Git source returns a null
-total with its failure reason, so an empty partial result cannot appear as a
-clean zero.
+checks every returned map component against the stated 2,000-commit history
+window, retains zero-history components, and reports how many evaluated
+components have or lack history. Its `total` reuses the map component
+denominator, and map or response caps remain explicit. A readable Git history
+with a zero-history component sets `partial` with
+`components_without_history`; Lens does not treat unknown ownership
+concentration as a clean result. An unavailable SQLite or Git source returns a
+null total with its failure reason, so an empty partial result cannot appear as
+a clean zero.
 
 Audit overview counts use exact totals when known, lower bounds for non-empty
 partial collections, and `?` for an empty collection whose total is unknown.

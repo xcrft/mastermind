@@ -314,7 +314,16 @@ pub struct LensLargestFiles {
 pub struct LensBusFactor {
     /// `"available"`, or `"unavailable"` when git history could not be read.
     pub status: &'static str,
+    /// True when Git was readable but at least one evaluated component had no
+    /// commits in the selected history window, so its concentration is unknown.
+    pub partial: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partial_reason: Option<&'static str>,
     pub window_commits: u32,
+    /// Components from the returned map set checked against the Git window.
+    pub components_evaluated: Option<u32>,
+    pub components_with_history: Option<u32>,
+    pub components_without_history: Option<u32>,
     pub total: Option<u32>,
     pub returned: u32,
     pub truncated: bool,
@@ -1421,7 +1430,19 @@ fn authors_by_component(
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    let mut components: HashMap<String, HashMap<String, u32>> = HashMap::new();
+    let returned_components = map
+        .components
+        .items
+        .iter()
+        .map(|component| component.path.clone())
+        .collect::<HashSet<_>>();
+    // Seed the returned map set so a new component with no commits in the
+    // bounded history window remains explicit instead of disappearing.
+    let mut components = returned_components
+        .iter()
+        .cloned()
+        .map(|component| (component, HashMap::<String, u32>::new()))
+        .collect::<HashMap<_, _>>();
     let mut author = String::new();
     for line in text.lines() {
         if let Some(name) = line.strip_prefix('\u{0}') {
@@ -1439,6 +1460,9 @@ fn authors_by_component(
         }
         let component =
             queries::component_for_file(audit_scope(map), &map.scope.kind, path, map.scope.depth);
+        if !returned_components.contains(&component) {
+            continue;
+        }
         *components
             .entry(component)
             .or_default()
@@ -1807,7 +1831,12 @@ fn build_snapshot_until(
     ) {
         None => LensBusFactor {
             status: "unavailable",
+            partial: false,
+            partial_reason: None,
             window_commits: 0,
+            components_evaluated: None,
+            components_with_history: None,
+            components_without_history: None,
             total: None,
             returned: 0,
             truncated: true,
@@ -1815,16 +1844,34 @@ fn build_snapshot_until(
             items: Vec::new(),
         },
         Some(mut rows) => {
-            let total = rows.len() as u32;
-            let truncated = rows.len() > BUS_FACTOR_CAP;
+            let components_evaluated = rows.len() as u32;
+            let components_with_history = rows.iter().filter(|row| row.touches > 0).count() as u32;
+            let components_without_history = components_evaluated - components_with_history;
+            let partial = components_without_history > 0;
+            let output_truncated = rows.len() > BUS_FACTOR_CAP;
+            let truncated = map.components.truncated || output_truncated;
+            let truncation_reason = match (map.components.truncated, output_truncated) {
+                (true, true) => Some("map_and_bus_component_limits"),
+                (true, false) => map
+                    .components
+                    .truncation_reason
+                    .or(Some("map_component_scope_incomplete")),
+                (false, true) => Some("component_limit"),
+                (false, false) => None,
+            };
             rows.truncate(BUS_FACTOR_CAP);
             LensBusFactor {
                 status: "available",
+                partial,
+                partial_reason: partial.then_some("components_without_history"),
                 window_commits: BUS_FACTOR_WINDOW_COMMITS,
-                total: Some(total),
+                components_evaluated: Some(components_evaluated),
+                components_with_history: Some(components_with_history),
+                components_without_history: Some(components_without_history),
+                total: map.components.total,
                 returned: rows.len() as u32,
                 truncated,
-                truncation_reason: truncated.then_some("component_limit"),
+                truncation_reason,
                 items: rows,
             }
         }
@@ -3076,12 +3123,54 @@ mod tests {
         assert_eq!(bus["returned"], bus_items.len() as u64);
         assert_eq!(bus["total"], bus_items.len() as u64);
         assert_eq!(bus["truncated"], false);
+        assert_eq!(bus["partial"], false);
+        assert_eq!(bus["components_evaluated"], bus_items.len() as u64);
+        assert_eq!(bus["components_with_history"], bus_items.len() as u64);
+        assert_eq!(bus["components_without_history"], 0);
         let src = bus_items
             .iter()
             .find(|row| row["component"] == "src")
             .expect("the src component must appear");
         assert_eq!(src["authors"].as_u64().unwrap(), 1);
         assert_eq!(src["top_author_pct"].as_u64().unwrap(), 100);
+    }
+
+    #[test]
+    fn snapshot_retains_components_without_git_history() {
+        let (repo, _index_dir, index_path) = fixture();
+        fs::create_dir(repo.path().join("new")).unwrap();
+        fs::write(
+            repo.path().join("new/module.rs"),
+            "pub fn first_seen() -> i32 { 1 }\n",
+        )
+        .unwrap();
+        let mut writable = Store::open(&index_path).unwrap();
+        Indexer::new(repo.path())
+            .index_all(&mut writable, false)
+            .unwrap();
+        drop(writable);
+
+        let store = Store::open_read_only(&index_path).unwrap();
+        let snapshot = build_snapshot(&store, repo.path(), &options()).unwrap();
+        let json = serde_json::to_value(snapshot).unwrap();
+        let bus = &json["audit"]["bus_factor"];
+        let bus_items = bus["items"].as_array().unwrap();
+
+        assert_eq!(bus["status"], "available");
+        assert_eq!(bus["partial"], true);
+        assert_eq!(bus["partial_reason"], "components_without_history");
+        assert_eq!(bus["components_evaluated"], 2);
+        assert_eq!(bus["components_with_history"], 1);
+        assert_eq!(bus["components_without_history"], 1);
+        assert_eq!(bus["total"], json["map"]["components"]["total"]);
+        assert_eq!(bus["returned"], bus_items.len() as u64);
+        let first_seen = bus_items
+            .iter()
+            .find(|row| row["component"] == "new")
+            .expect("the returned component without Git history must remain visible");
+        assert_eq!(first_seen["authors"], 0);
+        assert_eq!(first_seen["touches"], 0);
+        assert_eq!(first_seen["top_author_pct"], 0);
     }
 
     #[test]

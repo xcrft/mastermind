@@ -1102,7 +1102,10 @@ fn collect_analysis_states(value: &Value, path: &str, states: &mut BTreeSet<Anal
                         path: path.into(),
                         state,
                         reason: match key.as_str() {
-                            "partial" => None,
+                            "partial" => object
+                                .get("partial_reason")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
                             "truncated" => reason.clone().or_else(|| Some("truncated".to_string())),
                             _ => key
                                 .strip_suffix("_truncated")
@@ -2181,7 +2184,7 @@ mod tests {
         let mut states = BTreeSet::new();
         collect_analysis_states(
             &serde_json::json!({
-                "map": {"partial": true},
+                "map": {"partial": true, "partial_reason": "coverage_gap"},
                 "impact": {"rows": {
                     "truncated": true,
                     "truncation_reason": "row_limit",
@@ -2200,9 +2203,11 @@ mod tests {
             "$",
             &mut states,
         );
-        assert!(states
-            .iter()
-            .any(|state| state.path == "$.map" && state.state == "partial"));
+        assert!(states.iter().any(|state| {
+            state.path == "$.map"
+                && state.state == "partial"
+                && state.reason.as_deref() == Some("coverage_gap")
+        }));
         assert!(states.iter().any(|state| {
             state.path == "$.impact.rows"
                 && state.state == "truncated"

@@ -1654,6 +1654,7 @@
       || temporal.partial === true
       || Boolean(documentGraph && text(documentGraph.status, "needs_review") === "needs_review")
       || record(map.scope).aggregation_paths_truncated === true
+      || record(audit.bus_factor).partial === true
       || sections.some(function (section) {
         var value = collection(section);
         return value.truncated || value.totalUnknown;
@@ -1948,6 +1949,27 @@
       return;
     }
     var busCollection = collection(bus);
+    var evaluated = finiteNumber(bus.components_evaluated);
+    var withoutHistory = finiteNumber(bus.components_without_history);
+    if (withoutHistory !== null && withoutHistory > 0) {
+      var missingNames = busCollection.items.map(record).filter(function (row) {
+        return (finiteNumber(row.touches) || 0) === 0;
+      }).map(function (row) {
+        return text(row.component, "?");
+      });
+      var coverage = withoutHistory + (evaluated === null
+        ? " evaluated component" + (withoutHistory === 1 ? "" : "s")
+        : " of " + evaluated + " evaluated components");
+      var examples = missingNames.length > 0 ? " Returned: " + missingNames.join(" · ") + "." : "";
+      node.appendChild(createElement(
+        "p",
+        "audit-empty",
+        coverage + (withoutHistory === 1 ? " has" : " have") +
+          " no commits in the selected " + displayNumber(finiteNumber(bus.window_commits) || 0) +
+          "-commit window. Authorship concentration is unknown for " +
+          (withoutHistory === 1 ? "that component." : "those components.") + examples
+      ));
+    }
     var rows = busCollection.items.map(record).filter(function (r) {
       return (finiteNumber(r.touches) || 0) >= 5;
     });
@@ -1977,7 +1999,7 @@
     });
     node.appendChild(list);
     if (busCollection.truncated || busCollection.totalUnknown) {
-      node.appendChild(createElement("p", "audit-empty", "Showing a bounded subset of components with Git authorship history."));
+      node.appendChild(createElement("p", "audit-empty", "Showing a bounded subset of selected components; omitted components were not evaluated for authorship concentration."));
     }
   }
 
@@ -2165,13 +2187,15 @@
       var concentrated = judged.filter(function (r) {
         return (finiteNumber(r.touches) || 0) >= 5 && ((finiteNumber(r.authors) || 0) === 1 || (finiteNumber(r.top_author_pct) || 0) >= 80);
       });
-      if (judged.length === 0 && (busCollection.truncated || busCollection.totalUnknown)) {
+      var busPartial = bus.partial === true || busCollection.truncated || busCollection.totalUnknown;
+      if (concentrated.length > 0) {
+        auditSetSev("audit-bus-sev", "risk", "Concentrated");
+      } else if (busPartial) {
         auditSetSev("audit-bus-sev", "info", "Partial");
       } else if (judged.length === 0) {
         auditSetSev("audit-bus-sev", "info", "No signal");
       } else {
-        auditSetSev("audit-bus-sev", concentrated.length > 0 ? "risk" : "attention",
-          concentrated.length > 0 ? "Concentrated" : "Distributed");
+        auditSetSev("audit-bus-sev", "attention", "Distributed");
       }
     }
     auditSetSev("audit-explain-sev", "info", "Overview");

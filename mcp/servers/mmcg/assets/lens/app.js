@@ -394,7 +394,18 @@
     }
     const signals = [];
     if (overlayEnabled("findings") && evidence.findings.length > 0) {
-      signals.push(evidence.findings.length + " file-level finding" + (evidence.findings.length === 1 ? "" : "s"));
+      const findingCounts = findingSeverityCounts(evidence);
+      const labels = [];
+      if (findingCounts.error > 0) {
+        labels.push(findingCountLabel(findingCounts.error, "error"));
+      }
+      if (findingCounts.warning > 0) {
+        labels.push(findingCountLabel(findingCounts.warning, "warning"));
+      }
+      if (findingCounts.informational > 0) {
+        labels.push(findingCountLabel(findingCounts.informational, "informational"));
+      }
+      signals.push(labels.join(", ") + " · file-level");
     }
     if (overlayEnabled("coverage") && evidence.coverage) {
       signals.push(coverageLabel(evidence.coverage));

@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Lens claim accessibility labels now report error, warning, and informational
+  finding counts separately instead of flattening every level into one total.
 - Lens now applies its 200-record changed-file transport cap to every oversized
   collection, including complete 201–10,000-file snapshots that previously
   bypassed the cap.

@@ -724,16 +724,14 @@ impl Indexer {
 
         for path in &candidates {
             ensure_indexing_active(store)?;
-            let rel = path
-                .strip_prefix(&self.root)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .replace('\\', "/");
             if extractor_for_path(path).is_none() {
                 stats.files_skipped += 1;
-                push_path_sample(&mut stats.skipped_paths, &rel);
+                if let Ok(rel) = repository_relative_path(&self.root, path) {
+                    push_path_sample(&mut stats.skipped_paths, &rel);
+                }
                 continue;
             }
+            let rel = repository_relative_path(&self.root, path)?;
             let admission = {
                 let interrupted = || store.work_interrupted();
                 let control = ReadControl {
@@ -875,11 +873,7 @@ impl Indexer {
 
             for (path, outcome) in parsed {
                 ensure_indexing_active(store)?;
-                let rel = path
-                    .strip_prefix(&self.root)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
+                let rel = repository_relative_path(&self.root, &path)?;
                 match outcome {
                     Ok(indexed) => {
                         stats.symbols_total += indexed.pending.symbols.len() as u32;
@@ -1119,11 +1113,7 @@ impl Indexer {
         let mut aggregate_bytes = 0_u64;
         for (path, kind) in candidates {
             control.check().map_err(index_error_from_read)?;
-            let relative = path
-                .strip_prefix(root.canonical_root())
-                .map_err(|_| IndexError::SnapshotChanged)?
-                .to_string_lossy()
-                .replace('\\', "/");
+            let relative = repository_relative_path(root.canonical_root(), &path)?;
             digest.update(relative.as_bytes());
             digest.update([0]);
             digest.update(kind.as_bytes());
@@ -1498,6 +1488,27 @@ fn has_skipped_component(path: &Path) -> bool {
         .any(|component| is_skipped_dir(component.as_os_str().to_str().unwrap_or("")))
 }
 
+pub(crate) fn repository_relative_path(root: &Path, path: &Path) -> Result<String, IndexError> {
+    if let Ok(relative) = path.strip_prefix(root) {
+        return crate::bounded_fs::normalize_repository_relative_path(relative)
+            .map_err(index_error_from_read);
+    }
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|_| IndexError::SnapshotChanged)?;
+    let relative = path
+        .strip_prefix(canonical_root)
+        .map_err(|_| IndexError::SnapshotChanged)?;
+    crate::bounded_fs::normalize_repository_relative_path(relative).map_err(index_error_from_read)
+}
+
+fn git_relative_path(raw: &[u8]) -> Result<PathBuf, IndexError> {
+    let raw = std::str::from_utf8(raw).map_err(|_| IndexError::SnapshotChanged)?;
+    crate::bounded_fs::normalize_repository_relative_path(Path::new(raw))
+        .map(PathBuf::from)
+        .map_err(index_error_from_read)
+}
+
 /// Tracked files remain source-of-truth even when a later or overly broad
 /// ignore rule matches them. Git itself applies ignore rules to untracked
 /// discovery, not to entries already present in the index. Failure to query Git
@@ -1537,16 +1548,8 @@ fn tracked_relative_paths_controlled(
         if raw.is_empty() {
             continue;
         }
-        let path = PathBuf::from(
-            std::str::from_utf8(raw).map_err(|_| crate::diff::WorkingTreeDiffError::IndexStale)?,
-        );
-        if path.is_absolute()
-            || path
-                .components()
-                .any(|component| !matches!(component, std::path::Component::Normal(_)))
-        {
-            return Err(crate::diff::WorkingTreeDiffError::IndexStale);
-        }
+        let path =
+            git_relative_path(raw).map_err(|_| crate::diff::WorkingTreeDiffError::IndexStale)?;
         if !has_skipped_component(&path) {
             // Retain missing and non-regular tracked entries. Admission and
             // freshness checks must see them and fail closed instead of
@@ -1614,15 +1617,8 @@ pub(crate) fn source_candidates_bounded(
         if raw.is_empty() {
             continue;
         }
-        let relative = std::str::from_utf8(raw)
-            .map(PathBuf::from)
-            .map_err(|_| IndexError::SnapshotChanged)?;
-        if relative.is_absolute()
-            || relative
-                .components()
-                .any(|component| !matches!(component, std::path::Component::Normal(_)))
-            || has_skipped_component(&relative)
-        {
+        let relative = git_relative_path(raw)?;
+        if has_skipped_component(&relative) {
             continue;
         }
         paths.insert(root.canonical_root().join(relative));
@@ -1804,11 +1800,7 @@ pub(crate) fn parse_one(
     extractor: &dyn LanguageExtractor,
 ) -> Result<PendingFile, IndexError> {
     let source = read_source_bounded(path, root, ReadControl::default())?;
-    let rel = path
-        .strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/");
+    let rel = repository_relative_path(root, path)?;
     parse_blob(&rel, &source.bytes, source.modified_millis, extractor)
 }
 
@@ -1818,11 +1810,7 @@ fn parse_one_with_concepts(
     extractor: &dyn LanguageExtractor,
 ) -> Result<IndexedPendingFile, IndexError> {
     let source = read_source_bounded(path, root, ReadControl::default())?;
-    let rel = path
-        .strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/");
+    let rel = repository_relative_path(root, path)?;
     parse_blob_with_concepts(&rel, &source.bytes, source.modified_millis, extractor)
 }
 
@@ -1848,11 +1836,7 @@ fn parse_one_controlled(
         return Err(IndexError::Skipped(IndexSkipReason::Binary));
     }
 
-    let rel = path
-        .strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/");
+    let rel = repository_relative_path(root, path)?;
 
     parse_blob(&rel, &source.bytes, source.modified_millis, extractor)
 }
@@ -1877,11 +1861,7 @@ fn parse_one_with_concepts_controlled(
     if is_binary_content(&source.bytes[..source.bytes.len().min(BINARY_SNIFF_BYTES as usize)]) {
         return Err(IndexError::Skipped(IndexSkipReason::Binary));
     }
-    let rel = path
-        .strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/");
+    let rel = repository_relative_path(root, path)?;
     parse_blob_with_concepts(&rel, &source.bytes, source.modified_millis, extractor)
 }
 
@@ -3379,6 +3359,29 @@ def candidate(value: ImportantType) -> ResultType"#
     }
 
     #[cfg(unix)]
+    #[test]
+    fn tracked_inventory_rejects_backslash_path_aliases() {
+        let (dir, db) = setup("tracked_backslash_alias");
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(dir.join("src/pay.rs"), "pub fn canonical() {}\n").unwrap();
+        fs::write(dir.join("src\\pay.rs"), "pub fn alias() {}\n").unwrap();
+        git(&dir, &["init", "-q", "--initial-branch=main"]);
+        git(&dir, &["add", "-A"]);
+
+        assert!(matches!(
+            tracked_relative_paths(&dir),
+            Err(crate::diff::WorkingTreeDiffError::IndexStale)
+        ));
+        let mut store = Store::open(&db).unwrap();
+        assert!(matches!(
+            Indexer::new(&dir).index_all(&mut store, false),
+            Err(IndexError::SnapshotChanged)
+        ));
+        assert!(store.indexed_paths().unwrap().is_empty());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn tracked_inventory_rejects_non_utf8_source_paths() {
         use std::os::unix::ffi::OsStringExt;

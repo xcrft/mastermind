@@ -1037,7 +1037,8 @@ fn validated_index_paths(
         if crate::indexer::extractor_for_path(&relative).is_none() {
             continue;
         }
-        let normalized = relative.to_string_lossy().replace('\\', "/");
+        let normalized = crate::bounded_fs::normalize_repository_relative_path(&relative)
+            .map_err(|_| LensError::IndexStale)?;
         if indexed_paths.contains(&normalized) {
             continue;
         }

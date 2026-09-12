@@ -270,10 +270,7 @@ fn flush_settled(indexer: &Indexer, store: &mut Store, pending: &mut HashMap<Pat
 }
 
 fn relative_path(absolute: &Path, root: &Path) -> Option<String> {
-    absolute
-        .strip_prefix(root)
-        .ok()
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
+    crate::indexer::repository_relative_path(root, absolute).ok()
 }
 
 fn rename_event_path_is_old(mode: &RenameMode, position: usize) -> bool {
@@ -318,6 +315,17 @@ fn is_project_history_container(path: &Path, root: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn removal_paths_do_not_alias_literal_backslashes() {
+        let root = Path::new("/repo");
+        assert_eq!(
+            relative_path(Path::new("/repo/src/pay.rs"), root).as_deref(),
+            Some("src/pay.rs")
+        );
+        assert_eq!(relative_path(Path::new("/repo/src\\pay.rs"), root), None);
+    }
 
     #[test]
     fn changing_ignore_rules_rebuilds_matcher_and_purges_newly_ignored_files() {

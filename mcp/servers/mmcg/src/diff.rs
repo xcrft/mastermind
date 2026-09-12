@@ -1454,17 +1454,9 @@ fn git_diff_name_only_controlled(
         if is_mastermind_runtime_artifact(raw) {
             continue;
         }
-        let path = std::str::from_utf8(raw)
-            .map_err(|_| WorkingTreeDiffError::SnapshotChanged)?
-            .replace('\\', "/");
-        let parsed = Path::new(&path);
-        if parsed.is_absolute()
-            || parsed
-                .components()
-                .any(|component| !matches!(component, std::path::Component::Normal(_)))
-        {
-            return Err(WorkingTreeDiffError::SnapshotChanged);
-        }
+        let path = std::str::from_utf8(raw).map_err(|_| WorkingTreeDiffError::SnapshotChanged)?;
+        let path = crate::bounded_fs::normalize_repository_relative_path(Path::new(path))
+            .map_err(|_| WorkingTreeDiffError::SnapshotChanged)?;
         if retained.len() < CHANGE_FILE_LIMIT {
             retained.insert(path);
         } else if !retained.contains(&path) {
@@ -1585,7 +1577,7 @@ fn finalize_changed_paths(
     for (path, status) in changed.into_iter().take(CHANGE_FILE_LIMIT) {
         match String::from_utf8(path) {
             Ok(path) => files.push(WorkingTreeChangedFile {
-                path: path.replace('\\', "/"),
+                path,
                 status: status.to_string(),
             }),
             Err(_) => skipped_non_utf8_paths += 1,
@@ -2310,6 +2302,25 @@ mod tests {
         assert_eq!(total, Some(2));
         assert!(!truncated);
         assert_eq!(skipped_non_utf8_paths, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn changed_path_projection_does_not_alias_literal_backslashes() {
+        let changed = BTreeMap::from([
+            (b"src/pay.rs".to_vec(), "modified"),
+            (b"src\\pay.rs".to_vec(), "untracked"),
+        ]);
+
+        let (files, total, truncated, skipped) = finalize_changed_paths(changed);
+        let paths = files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, vec!["src/pay.rs", "src\\pay.rs"]);
+        assert_eq!(total, Some(2));
+        assert!(!truncated);
+        assert_eq!(skipped, 0);
     }
 
     #[test]

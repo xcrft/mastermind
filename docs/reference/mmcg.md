@@ -1274,6 +1274,12 @@ and the index and remains absent through the check. Non-regular and non-UTF-8
 tracked paths make the inventory incomplete. These and other failed or
 unavailable refreshes return `index_stale`.
 
+Indexed source keys use one lossless repository-relative encoding. Native path
+components are joined with `/`; a non-UTF-8 component or a literal backslash in
+a Unix source filename is rejected rather than rewritten onto another file's
+key. NUL-delimited Git collection still preserves other valid filename bytes,
+including embedded newlines. Watcher removals use the same identity rule.
+
 ## MCP tools
 
 | Tool | Args | What it returns |

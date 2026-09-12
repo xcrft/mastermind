@@ -1601,6 +1601,9 @@ async function main() {
   informationalPayload.impact.impact = { total: 0, returned: 0, truncated: false, items: [] };
   informationalPayload.impact.tests = { total: 0, returned: 0, truncated: false, items: [] };
   informationalPayload.impact.api_crossings = { total: 0, returned: 0, truncated: false, items: [] };
+  informationalPayload.audit.change_hotspots = {
+    status: "available", window_commits: 500, total: 0, returned: 0, truncated: false, items: [],
+  };
   informationalPayload.evidence.files.items[0].findings = [{
     source_id: "sarif:0", tool: "Semgrep", rule_id: "style.note", level: "note",
     message: "Informational result", line: 42, column: 3,
@@ -1617,6 +1620,8 @@ async function main() {
   assert.equal(informationalNode.classList.contains("graph-node--risk-warning"), false, "A note-level finding must not become a warning claim");
   assert.match(informationalNode.textContent, /1 informational finding/i, "Informational findings remain visible without inflating severity");
   assert.equal(informationalHarness.nodes.get("audit-security").querySelectorAll(".audit-count--serious").length, 0, "A note-only finding count must not use the serious badge");
+  assert.equal(informationalHarness.nodes.get("audit-verdict-word").textContent, "Healthy", "An informational result alone must not turn the overall audit into attention");
+  assert.match(informationalHarness.nodes.get("audit-security-sev").textContent, /Surface/i, "An informational result keeps the security chip informational");
   informationalNode.dispatch("keydown", { key: "Enter" });
   assert.equal(informationalHarness.nodes.get("inspector-body").querySelectorAll(".claim-list--risk").length, 0, "A note-only finding list must not use the risk marker");
 
@@ -1632,6 +1637,7 @@ async function main() {
   assert.ok(warningNode.classList.contains("graph-node--risk-warning"), "A warning finding must retain its warning tier");
   assert.match(warningNode.textContent, /1 warning finding/i, "Warning findings retain their severity label");
   assert.equal(warningHarness.nodes.get("audit-security").querySelectorAll(".audit-count--warning").length, 1, "A warning-only finding count must use the warning badge");
+  assert.equal(warningHarness.nodes.get("audit-verdict-word").textContent, "Attention", "A warning finding must retain the overall attention posture");
   warningNode.dispatch("keydown", { key: "Enter" });
   assert.equal(warningHarness.nodes.get("inspector-body").querySelectorAll(".claim-list--warning").length, 1, "A warning-only finding list must use the warning marker");
   assert.match(CSS_SOURCE, /\.claim-list--warning li::before[\s\S]*?var\(--amber\)/, "Warning finding lists need a distinct warning marker");

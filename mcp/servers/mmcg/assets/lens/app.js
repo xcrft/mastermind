@@ -1675,8 +1675,9 @@
     var incomplete = auditIsIncomplete(model);
     var findings = auditSecurityFindings(model);
     var hasError = findings.some(function (f) { return f.level === "error"; });
+    var hasWarning = findings.some(function (f) { return f.level === "warning"; });
     var posture = cycleCount > 0 || hasError ? "risk"
-      : (incomplete || changeCount > 0 || findings.length > 0) ? "attention" : "healthy";
+      : (incomplete || changeCount > 0 || hasWarning) ? "attention" : "healthy";
     var word = posture === "risk" ? "Risk" : incomplete ? "Incomplete" : posture === "attention" ? "Attention" : "Healthy";
     if (elements.auditVerdict) {
       elements.auditVerdict.className = "audit-verdict audit-verdict--" + posture;
@@ -2144,8 +2145,8 @@
     } else {
       auditSetSev("audit-change-sev", changeCount > 0 ? "attention" : "healthy", changeCount > 0 ? "Watch" : "Clear");
     }
-    auditSetSev("audit-security-sev", hasErr ? "risk" : (hasWarn || findings.length > 0) ? "attention" : "info",
-      hasErr ? "Findings" : (hasWarn || findings.length > 0) ? "Review" : "Surface");
+    auditSetSev("audit-security-sev", hasErr ? "risk" : hasWarn ? "attention" : "info",
+      hasErr ? "Findings" : hasWarn ? "Review" : "Surface");
   }
 
   function renderAudit() {

@@ -751,9 +751,9 @@ remain change-scoped evidence because evidence overlays are correlated only to
 the returned change, impact, and candidate-test trace. They are not a
 repository-wide clean result. Lens preserves finding severity when prioritizing
 that trace: errors are serious, warnings are warnings, and note/none results
-remain visible without becoming risk claims. The bounded audit card orders
-errors and warnings ahead of informational results, so its six visible rows do
-not hide a later severe finding.
+remain visible without changing the overall posture. The bounded audit card
+orders errors and warnings ahead of informational results, so its six visible
+rows do not hide a later severe finding.
 
 The overall audit verdict also follows the snapshot-wide evidence boundary.
 Partial SCIP evidence, unavailable or partial temporal analysis, and a selected

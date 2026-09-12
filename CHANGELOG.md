@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Note/none findings no longer turn Lens's security chip or overall audit
+  verdict into `Attention`; warnings and errors still retain their stronger
+  postures.
 - The bounded Lens audit card now orders errors and warnings before
   informational findings, so an early run of notes cannot hide a severe result
   beyond the six displayed rows.

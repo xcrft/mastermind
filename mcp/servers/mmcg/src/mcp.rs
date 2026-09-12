@@ -2509,6 +2509,11 @@ fn changed_since_root(
     store: &Store,
     root_arg: Option<&str>,
 ) -> Result<std::path::PathBuf, HandlerError> {
+    if root_arg.is_some_and(|value| value.trim().is_empty()) {
+        return Err(HandlerError::InvalidArguments(
+            "Invalid argument: root".into(),
+        ));
+    }
     let stored = store
         .meta_value("index_root")
         .map_err(|error| HandlerError::internal("changed_since_root", error))?
@@ -2518,11 +2523,6 @@ fn changed_since_root(
         .map_err(|_| HandlerError::InvalidArguments("root_mismatch".into()))?;
     let requested = match root_arg {
         None => stored.clone(),
-        Some(value) if value.trim().is_empty() => {
-            return Err(HandlerError::InvalidArguments(
-                "Invalid argument: root".into(),
-            ))
-        }
         Some(value) => std::path::PathBuf::from(value)
             .canonicalize()
             .map_err(|_| HandlerError::InvalidArguments("root_mismatch".into()))?,

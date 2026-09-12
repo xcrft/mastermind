@@ -12,7 +12,7 @@
 //! | 2 | `index database`       | selected index is a valid current-schema database       |
 //! | 3 | `index repository`     | selected index belongs to the requested repository     |
 //! | 4 | `symbols indexed`      | non-empty index (catches "I ran init but not index")   |
-//! | 5 | `index freshness`      | no source file newer than the index                    |
+//! | 5 | `index freshness`      | source paths and mtimes match the index                |
 //! | 6 | `gitignore`            | `.mastermind/` is excluded from VCS                    |
 //! | 7 | `CLAUDE.md`            | exists and references the workflow                     |
 //! | 8 | `MCP config`           | mmcg registered in `~/.claude.json` (user) or `./.mcp.json` (project) |
@@ -487,7 +487,7 @@ fn check_symbols_indexed(index: &DoctorIndex) -> Check {
     }
 }
 
-/// Compare each indexable path with its stored source mtime.
+/// Compare each indexable path and source mtime with the stored snapshot.
 /// Stops at 10 hits to keep the doctor fast on large repos.
 fn check_index_freshness(root: &Path, index: &DoctorIndex) -> Check {
     let store = match index {

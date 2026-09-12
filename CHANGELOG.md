@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Incremental indexing and structural freshness now treat an older source mtime
+  as changed instead of silently trusting restored or checked-out content; status
+  identifies its path-and-mtime basis and documents the exact-mtime limitation.
 - Index status now distinguishes an exact stale-file count from a bounded lower
   bound or failed freshness scan, rechecks the SQLite snapshot after walking
   sources, and verifies the repository capability even when the path cap fires.

@@ -4301,7 +4301,7 @@ pub(crate) fn stale_paths_controlled(
         seen.insert(relative.clone());
         if indexed
             .get(&relative)
-            .is_none_or(|stored| admitted.modified_millis > *stored)
+            .is_none_or(|stored| admitted.modified_millis != *stored)
         {
             stale.push(relative);
             if stale.len() >= cap {
@@ -6062,6 +6062,47 @@ mod tests {
             .unwrap()
             .set_modified(newer)
             .unwrap();
+
+        let snapshot = crate::store::Store::open_read_only(&db).unwrap();
+        let stale = stale_paths_controlled(
+            &snapshot,
+            &root,
+            10,
+            crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
+            crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
+            crate::bounded_fs::ReadControl::default(),
+        )
+        .unwrap();
+        assert_eq!(stale, vec!["src/lib.rs".to_string()]);
+        assert!(snapshot.source_snapshot_unchanged().unwrap());
+        drop(snapshot);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn stale_paths_detect_an_older_source_mtime() {
+        let root = std::env::temp_dir().join(format!(
+            "mmcg-status-older-mtime-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        init_git_repository(&root);
+        let db = root.join("mmcg.db");
+        let source = root.join("src/lib.rs");
+        fs::write(&source, b"fn restored() {}\n").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(5))
+            .unwrap();
+        let store = crate::store::Store::open(&db).unwrap();
+        store.upsert_file("src/lib.rs", 10, 1).unwrap();
+        drop(store);
 
         let snapshot = crate::store::Store::open_read_only(&db).unwrap();
         let stale = stale_paths_controlled(

@@ -488,7 +488,8 @@ pub struct IndexStats {
     pub files_skipped_too_large: u32,
     /// Bounded deterministic sample of oversized source paths.
     pub skipped_too_large_paths: Vec<String>,
-    /// Indexable files whose stored mtime is current — skipped without parsing.
+    /// Indexable files whose filesystem mtime exactly matches the stored value —
+    /// skipped without parsing.
     pub files_unchanged: u32,
     /// In the index but gone from disk — purged.
     pub files_purged: u32,
@@ -629,7 +630,8 @@ impl Indexer {
     }
 
     /// Index everything reachable from `root`. Incremental by default — files whose
-    /// filesystem mtime is `<=` stored mtime are skipped. `force_full=true` re-indexes
+    /// filesystem mtime exactly matches the stored value are skipped. A timestamp
+    /// change in either direction triggers parsing. `force_full=true` re-indexes
     /// regardless of mtime (e.g. after a schema change or to recover a corrupted index).
     ///
     /// Files in the index but gone from disk are purged at the end. Writes to `store`.
@@ -769,7 +771,7 @@ impl Indexer {
                 let fs_mtime = Some(admitted.modified_millis);
 
                 if let (Some(fs_mt), Ok(Some(stored_mt))) = (fs_mtime, store.file_mtime(&rel)) {
-                    if fs_mt <= stored_mt {
+                    if fs_mt == stored_mt {
                         stats.files_unchanged += 1;
                         continue;
                     }
@@ -2507,6 +2509,39 @@ def placeholder():
             second.files_unchanged, 2,
             "both files should be marked unchanged"
         );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn incremental_reindexes_content_with_an_older_mtime() {
+        let (dir, db) = setup("reindexes_older_mtime");
+        let source = dir.join("a.py");
+        fs::write(&source, "def original(): pass\n").unwrap();
+
+        let mut store = Store::open(&db).unwrap();
+        let indexer = Indexer::new(&dir);
+        indexer.index_all(&mut store, false).unwrap();
+        assert!(store
+            .symbols_in_file("a.py")
+            .unwrap()
+            .iter()
+            .any(|symbol| symbol.name == "original"));
+
+        fs::write(&source, "def restored(): pass\n").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1))
+            .unwrap();
+
+        let refreshed = indexer.index_all(&mut store, false).unwrap();
+        assert_eq!(refreshed.files_indexed, 1);
+        assert_eq!(refreshed.files_unchanged, 0);
+        let symbols = store.symbols_in_file("a.py").unwrap();
+        assert!(symbols.iter().any(|symbol| symbol.name == "restored"));
+        assert!(!symbols.iter().any(|symbol| symbol.name == "original"));
 
         fs::remove_dir_all(&dir).ok();
     }

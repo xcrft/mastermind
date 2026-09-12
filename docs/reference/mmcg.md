@@ -870,8 +870,12 @@ and 100 per file, coverage at 500,000 unique lines, JUnit at 100,000 cases and
 pairs, project knowledge at 500 exact matches, and combined artifact inputs at
 64. CODEOWNERS stays below GitHub's 3 MiB limit and at 50,000 rules and 50
 owners per rule, contributor details at five recent names per file, and
-diagnostics at 100. Churn totals stay complete when contributor names are
-truncated. Git output is capped at 8 MiB.
+diagnostics at 100. Automatic CODEOWNERS discovery has a shared 16,384-entry
+directory budget, preserves exact case and does not follow links. An unreadable,
+changing, over-budget, or invalid priority location makes Lens evidence partial
+and temporal ownership totals unknown instead of looking like an absent file.
+Churn totals stay complete when contributor names are truncated. Git output is
+capped at 8 MiB.
 
 Lens preserves this coverage in the source cards, summary, accessibility
 announcement, and method ledger. Exact totals are shown when known, non-empty
@@ -886,6 +890,8 @@ Review export also fixes the automatically discovered CODEOWNERS path before
 Lens analysis and rechecks that priority selection before publication. A file
 appearing, disappearing, or moving between `.github`, the repository root, and
 `docs` aborts the package instead of binding different ownership evidence.
+If that discovery cannot be completed safely, review export fails before it
+publishes a package.
 
 When the changed-file inventory is already truncated, evidence selects symbol,
 impact, and candidate-test paths first, then admits at most 200 file-only paths.

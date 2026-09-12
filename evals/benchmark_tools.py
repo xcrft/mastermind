@@ -31,6 +31,7 @@ GRAPH_TOOLS = ("mmcg_concept", "mmcg_search", "mmcg_outline", "mmcg_files", "mmc
 GRAPH_TOP_LIMITS = {
     "mmcg_concept": 50,
     "mmcg_search": 200,
+    "mmcg_outline": 500,
     "mmcg_files": 500,
     "mmcg_callers": 500,
     "mmcg_callees": 500,
@@ -82,7 +83,7 @@ def tool_definitions(graph: bool) -> list[dict]:
              _object({"name": text, "kind": text, "language": language, "collapse_partials": {"type": "boolean"},
                       "top": {"type": "integer", "minimum": 1, "maximum": 200}}, ["name"])),
             ("mmcg_outline", "List symbol ranges for one allowed indexed file; read bodies with source_read.",
-             _object({"file": text}, ["file"])),
+             _object({"file": text, "top": {"type": "integer", "minimum": 1, "maximum": 500}}, ["file"])),
             ("mmcg_files", "List indexed files. Prefix is a relative literal prefix; wildcard input is not accepted.",
              _object({"prefix": text, "language": language,
                       "top": {"type": "integer", "minimum": 1, "maximum": 500}}, [])),
@@ -242,7 +243,7 @@ class SourceBroker:
         signatures = {
             "mmcg_concept": (("query",), ("top",)),
             "mmcg_search": (("name",), ("kind", "language", "collapse_partials", "top")),
-            "mmcg_outline": (("file",), ()), "mmcg_files": ((), ("prefix", "language", "top")),
+            "mmcg_outline": (("file",), ("top",)), "mmcg_files": ((), ("prefix", "language", "top")),
             "mmcg_callers": (("name",), ("language", "edge_kind", "top")),
             "mmcg_callees": (("name",), ("file", "line", "language", "edge_kind", "top")),
         }

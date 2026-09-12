@@ -1859,7 +1859,8 @@ fn schema_outline() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "file": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Relative file path (as it appears in the index)" }
+                "file": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Relative file path (as it appears in the index)" },
+                "top": { "type": "integer", "minimum": 1, "maximum": queries::OUTLINE_MAX_TOP, "default": queries::OUTLINE_DEFAULT_TOP, "description": "Maximum tree nodes to return across all nesting levels" }
             },
             "required": ["file"]
         }
@@ -2404,8 +2405,15 @@ fn handle_symbols_in_file(store: &mut Store, args: &Value) -> Result<Value, Hand
 
 fn handle_outline(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let file = non_blank_str_arg(args, "file")?;
+    let top = bounded_u64_arg(
+        args,
+        "top",
+        u64::from(queries::OUTLINE_DEFAULT_TOP),
+        1,
+        u64::from(queries::OUTLINE_MAX_TOP),
+    )? as u32;
     ensure_fresh_index(store)?;
-    let r = queries::outline(store, file)
+    let r = queries::outline_bounded(store, file, top)
         .map_err(|error| HandlerError::internal("outline_query", error))?;
     serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
@@ -4263,6 +4271,11 @@ mod tests {
             ),
             (
                 handle_symbols_in_file,
+                json!({ "file": "src/app.py", "top": 501 }),
+                "Invalid argument: top",
+            ),
+            (
+                handle_outline,
                 json!({ "file": "src/app.py", "top": 501 }),
                 "Invalid argument: top",
             ),

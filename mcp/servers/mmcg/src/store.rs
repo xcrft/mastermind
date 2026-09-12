@@ -7203,6 +7203,81 @@ impl Store {
         self.symbols_in_file_rows(file_path, Some(limit))
     }
 
+    /// Return a bounded, parent-before-child prefix for an outline tree.
+    ///
+    /// The recursive queue is ordered by a stable source path and capped in
+    /// SQL, so callers never have to materialize the whole file just to emit a
+    /// bounded tree. Missing or cross-file parents are treated as roots. The
+    /// boolean reports whether a returned node hit the traversal depth limit
+    /// while still having an indexed child in this file.
+    pub(crate) fn outline_symbols_bounded(
+        &self,
+        file_path: &str,
+        limit: usize,
+        depth_limit: u32,
+    ) -> SqlResult<(u32, Vec<Symbol>, bool)> {
+        let total = self.conn.query_row(
+            "SELECT COUNT(*) FROM symbols WHERE file_path = ?1",
+            params![file_path],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let total = total.clamp(0, i64::from(u32::MAX)) as u32;
+        let sql = format!(
+            "WITH RECURSIVE tree(
+                 id, name, kind, file_path, line_start, line_end, signature,
+                 parent_id, decorators, sort_path, depth
+             ) AS (
+                 SELECT s.id, s.name, s.kind, s.file_path, s.line_start,
+                        s.line_end, s.signature, NULL AS parent_id, s.decorators,
+                        printf('%010d:%020d', s.line_start, s.id) AS sort_path,
+                        0 AS depth
+                 FROM symbols s INDEXED BY idx_symbols_file
+                 WHERE s.file_path = ?1
+                   AND (s.parent_id IS NULL OR NOT EXISTS (
+                       SELECT 1 FROM symbols parent
+                       WHERE parent.id = s.parent_id AND parent.file_path = ?1
+                   ))
+                 UNION ALL
+                 SELECT child.id, child.name, child.kind, child.file_path,
+                        child.line_start, child.line_end, child.signature,
+                        child.parent_id, child.decorators,
+                        tree.sort_path || '/' ||
+                            printf('%010d:%020d', child.line_start, child.id)
+                            AS sort_path,
+                        tree.depth + 1 AS depth
+                 FROM symbols child INDEXED BY idx_symbols_parent
+                 JOIN tree ON child.parent_id = tree.id
+                 WHERE child.file_path = ?1 AND tree.depth < ?2
+                 ORDER BY sort_path
+                 LIMIT ?3
+             )
+             SELECT {SYMBOL_COLS}, EXISTS (
+                 SELECT 1 FROM tree boundary
+                 JOIN symbols child ON child.parent_id = boundary.id
+                 WHERE boundary.depth = ?2 AND child.file_path = ?1
+             ) AS depth_limited
+             FROM tree
+             ORDER BY sort_path"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            params![
+                file_path,
+                i64::from(depth_limit),
+                i64::try_from(limit.max(1)).unwrap_or(i64::MAX)
+            ],
+            |row| Ok((Self::row_to_symbol(row)?, row.get::<_, bool>(9)?)),
+        )?;
+        let mut symbols = Vec::with_capacity(limit);
+        let mut depth_limited = false;
+        for row in rows {
+            let (symbol, row_depth_limited) = row?;
+            symbols.push(symbol);
+            depth_limited |= row_depth_limited;
+        }
+        Ok((total, symbols, depth_limited))
+    }
+
     fn symbols_in_file_rows(
         &self,
         file_path: &str,

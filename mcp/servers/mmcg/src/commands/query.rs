@@ -728,6 +728,7 @@ fn execute(store: &Store, q: QueryCmd) -> Result<Value, Box<dyn std::error::Erro
             store,
             kind.as_deref(),
             language.as_deref(),
+            None,
         )?)?,
         QueryCmd::ApiSurface { prefix, language } => {
             serde_json::to_value(queries::api_surface(store, &prefix, language.as_deref())?)?

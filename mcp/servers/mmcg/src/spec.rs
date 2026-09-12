@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 const MAX_SPEC_BYTES: u64 = crate::audit_bundle::BUNDLE_INPUT_MAX as u64;
+const MAX_FRONTMATTER_DEPTH: usize = 64;
 
 #[derive(Debug, Serialize, Clone)]
 pub struct ParsedSpec {
@@ -98,7 +99,7 @@ impl ParsedSpec {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Frontmatter {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_frontmatter_id")]
     pub id: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
@@ -246,6 +247,27 @@ pub struct BreakingChanges {
     /// like ``Do not remove `old_api` ``.
     #[serde(default)]
     pub removed_symbols: Vec<SymbolSpec>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum FrontmatterId {
+    Text(String),
+    Signed(i64),
+    Unsigned(u64),
+}
+
+fn deserialize_frontmatter_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(
+        Option::<FrontmatterId>::deserialize(deserializer)?.map(|id| match id {
+            FrontmatterId::Text(id) => id,
+            FrontmatterId::Signed(id) => id.to_string(),
+            FrontmatterId::Unsigned(id) => id.to_string(),
+        }),
+    )
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -404,23 +426,14 @@ fn extract_frontmatter(body: &str) -> (Option<Frontmatter>, Option<String>, &str
     };
     let yaml_src = &after_open[..yaml_end];
     let rest = &after_open[rest_start..];
-    // Inspect YAML types before typed deserialization can coerce path scalars.
-    // Keep the existing parser for older metadata, including numeric task IDs.
-    let valid_shape = serde_norway::from_str::<serde_norway::Value>(yaml_src)
-        .ok()
-        .is_some_and(|value| {
-            let serde_norway::Value::Mapping(fields) = value else {
-                return false;
-            };
-            fields.get("creates").is_none_or(|creates| {
-                matches!(creates, serde_norway::Value::Sequence(paths)
-                    if paths.iter().all(|path| matches!(path, serde_norway::Value::String(_))))
-            })
-        });
-    if !valid_shape {
-        return (None, Some("frontmatter_invalid".into()), rest);
-    }
-    match serde_norway::from_str::<Frontmatter>(yaml_src) {
+    // Preserve YAML scalar types before typed deserialization. Deserializing a
+    // struct directly from YAML can coerce numbers and booleans into strings,
+    // silently changing file, symbol, and verification declarations.
+    let parsed = serde_norway::from_str::<serde_norway::Value>(yaml_src)
+        .map_err(|_| ())
+        .and_then(|value| strict_frontmatter_value(value, 0))
+        .and_then(|value| serde_json::from_value::<Frontmatter>(value).map_err(|_| ()));
+    match parsed {
         Ok(fm)
             if fm
                 .mode
@@ -436,6 +449,46 @@ fn extract_frontmatter(body: &str) -> (Option<Frontmatter>, Option<String>, &str
         Ok(_) => (None, Some("frontmatter_invalid".into()), rest),
         Err(_) => (None, Some("frontmatter_invalid".into()), rest),
     }
+}
+
+fn strict_frontmatter_value(
+    value: serde_norway::Value,
+    depth: usize,
+) -> Result<serde_json::Value, ()> {
+    use serde_norway::Value;
+
+    if depth > MAX_FRONTMATTER_DEPTH {
+        return Err(());
+    }
+    Ok(match value {
+        Value::Null => serde_json::Value::Null,
+        Value::Bool(value) => serde_json::Value::Bool(value),
+        Value::Number(value) => {
+            let value = serde_json::to_value(value).map_err(|_| ())?;
+            if !value.is_number() {
+                return Err(());
+            }
+            value
+        }
+        Value::String(value) => serde_json::Value::String(value),
+        Value::Sequence(values) => serde_json::Value::Array(
+            values
+                .into_iter()
+                .map(|value| strict_frontmatter_value(value, depth + 1))
+                .collect::<Result<_, _>>()?,
+        ),
+        Value::Mapping(values) => {
+            let mut object = serde_json::Map::new();
+            for (key, value) in values {
+                let Value::String(key) = key else {
+                    return Err(());
+                };
+                object.insert(key, strict_frontmatter_value(value, depth + 1)?);
+            }
+            serde_json::Value::Object(object)
+        }
+        Value::Tagged(_) => return Err(()),
+    })
 }
 
 /// Whitespace-trimmed BODY of a named section. Case-insensitive lookup,
@@ -1128,10 +1181,23 @@ touches:
         for field in [
             "mode: strcit",
             "risk: urgent",
+            "title: 42",
+            "id: true",
+            "id: 4.2",
+            "mode: true",
+            "risk: 7",
             "touchess: []",
+            "touches:\n  - file: 7",
+            "touches:\n  - file: src/x.rs\n    language: false",
+            "touches:\n  - file: src/x.rs\n    symbols:\n      - name: false",
+            "touches:\n  - file: src/x.rs\n    symbols:\n      - name: target\n        callers: '4'",
             "touches:\n  - file: src/x.rs\n    symbolz: []",
             "touches:\n  - file: src/x.rs\n    symbols:\n      - name: target\n        callerz: 1",
+            "verify:\n  - 7",
+            "verify:\n  - cmd: true",
             "verify:\n  - cmd: echo checked\n    result: pass",
+            "expected_docs: [true]",
+            "breaking_changes:\n  removed_symbols: [7]",
             "breaking_changes:\n  removed_symbolz: []",
         ] {
             let parsed = parse_str(

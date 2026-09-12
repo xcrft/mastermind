@@ -3386,18 +3386,21 @@ pub fn files(
 /// Errors on missing suffix, unknown suffix, a non-numeric prefix, or a value
 /// that cannot be represented safely as an `i64` millisecond timestamp delta.
 pub fn parse_duration(s: &str) -> Result<u64, String> {
-    if s.len() < 2 {
+    let Some((suffix_index, suffix)) = s.char_indices().next_back() else {
+        return Err(format!("duration too short: {s:?}"));
+    };
+    if suffix_index == 0 {
         return Err(format!("duration too short: {s:?}"));
     }
-    let (num_part, suffix) = s.split_at(s.len() - 1);
+    let num_part = &s[..suffix_index];
     let n: u64 = num_part
         .parse()
         .map_err(|_| format!("duration prefix not a non-negative integer: {num_part:?}"))?;
     let multiplier: u64 = match suffix {
-        "s" => 1,
-        "m" => 60,
-        "h" => 3600,
-        "d" => 86400,
+        's' => 1,
+        'm' => 60,
+        'h' => 3600,
+        'd' => 86400,
         other => {
             return Err(format!(
                 "unknown duration suffix {other:?}; expected s/m/h/d"
@@ -5777,6 +5780,9 @@ mod tests {
         assert!(parse_duration("h").is_err()); // too short to have a number
         assert!(parse_duration("5y").is_err()); // unknown suffix
         assert!(parse_duration("abc").is_err());
+        assert!(parse_duration("é").is_err());
+        assert!(parse_duration("1é").is_err());
+        assert!(parse_duration("💥").is_err());
         assert!(parse_duration("9223372036854776s").is_err());
         assert!(parse_duration("18446744073709551615d").is_err());
     }

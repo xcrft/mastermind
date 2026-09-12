@@ -4214,6 +4214,11 @@ mod tests {
                 "Invalid argument: since",
             ),
             (
+                handle_recent_changes,
+                json!({ "since": "1é" }),
+                "Invalid argument: since",
+            ),
+            (
                 handle_symbols_changed_since,
                 json!({ "git_ref": "HEAD", "root": false }),
                 "Invalid argument: root",

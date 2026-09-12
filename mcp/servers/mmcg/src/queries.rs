@@ -3551,25 +3551,47 @@ pub struct ApiSurfaceResponse {
     pub prefix: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    /// Number of symbols matching the filters before the MCP row cap.
+    pub total: u32,
+    /// Number of symbols included in this response.
     pub count: u32,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_limit: Option<u32>,
     pub symbols: Vec<SymbolHit>,
 }
+
+pub const API_SURFACE_DEFAULT_TOP: u32 = 100;
+pub const API_SURFACE_MAX_TOP: u32 = 500;
 
 /// Symbols under `prefix` that are referenced from outside `prefix`.
 pub fn api_surface(
     store: &Store,
     prefix: &str,
     language: Option<&str>,
+    row_limit: Option<u32>,
 ) -> rusqlite::Result<ApiSurfaceResponse> {
-    let syms: Vec<SymbolHit> = store
-        .api_surface(prefix, language)?
-        .into_iter()
-        .map(SymbolHit::from)
-        .collect();
+    let (total, symbols) = match row_limit {
+        Some(limit) => store.api_surface_bounded(
+            prefix,
+            language,
+            usize::try_from(limit).unwrap_or(usize::MAX),
+        )?,
+        None => {
+            let symbols = store.api_surface(prefix, language)?;
+            let total = u32::try_from(symbols.len()).unwrap_or(u32::MAX);
+            (total, symbols)
+        }
+    };
+    let syms: Vec<SymbolHit> = symbols.into_iter().map(SymbolHit::from).collect();
+    let count = u32::try_from(syms.len()).unwrap_or(u32::MAX);
     Ok(ApiSurfaceResponse {
         prefix: prefix.to_string(),
         language: language.map(String::from),
-        count: syms.len() as u32,
+        total,
+        count,
+        truncated: row_limit.is_some() && total > count,
+        row_limit,
         symbols: syms,
     })
 }
@@ -5899,6 +5921,48 @@ mod tests {
         );
 
         let complete = unreferenced(&store, Some("function"), None, None).unwrap();
+        assert_eq!(complete.total, 3);
+        assert_eq!(complete.count, 3);
+        assert_eq!(complete.row_limit, None);
+        assert!(!complete.truncated);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn api_surface_response_reports_exact_total_and_bounded_rows() {
+        let path = tmp_db("api_surface_response_limit");
+        let store = Store::open(&path).unwrap();
+        let caller = store
+            .insert_symbol("outside", "function", "src/main.rs", 1, 3, None, None)
+            .unwrap();
+        for (name, file) in [
+            ("alpha", "src/api/a.rs"),
+            ("beta", "src/api/b.rs"),
+            ("gamma", "src/api/c.rs"),
+        ] {
+            let target = store
+                .insert_symbol(name, "function", file, 1, 2, None, None)
+                .unwrap();
+            store
+                .insert_edge(caller, Some(target), name, "calls", 2)
+                .unwrap();
+        }
+
+        let bounded = api_surface(&store, "src/api/", None, Some(2)).unwrap();
+        assert_eq!(bounded.total, 3);
+        assert_eq!(bounded.count, 2);
+        assert_eq!(bounded.row_limit, Some(2));
+        assert!(bounded.truncated);
+        assert_eq!(
+            bounded
+                .symbols
+                .iter()
+                .map(|symbol| symbol.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "beta"]
+        );
+
+        let complete = api_surface(&store, "src/api/", None, None).unwrap();
         assert_eq!(complete.total, 3);
         assert_eq!(complete.count, 3);
         assert_eq!(complete.row_limit, None);

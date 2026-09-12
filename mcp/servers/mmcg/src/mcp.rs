@@ -1930,7 +1930,8 @@ fn schema_api_surface() -> Value {
             "type": "object",
             "properties": {
                 "prefix": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Literal path prefix (e.g. 'src/runtime/'); percent and underscore are ordinary path characters." },
-                "language": { "type": "string", "enum": LANGUAGES }
+                "language": { "type": "string", "enum": LANGUAGES },
+                "top": { "type": "integer", "minimum": 1, "maximum": queries::API_SURFACE_MAX_TOP, "default": queries::API_SURFACE_DEFAULT_TOP, "description": "Maximum symbols to return; narrow the literal prefix or add language when truncated" }
             },
             "required": ["prefix"]
         }
@@ -2432,8 +2433,15 @@ fn handle_unreferenced(store: &mut Store, args: &Value) -> Result<Value, Handler
 fn handle_api_surface(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let prefix = non_blank_str_arg(args, "prefix")?;
     let language = opt_enum_arg(args, "language", &LANGUAGES)?;
+    let top = bounded_u64_arg(
+        args,
+        "top",
+        u64::from(queries::API_SURFACE_DEFAULT_TOP),
+        1,
+        u64::from(queries::API_SURFACE_MAX_TOP),
+    )? as u32;
     ensure_fresh_index(store)?;
-    let r = queries::api_surface(store, prefix, language)
+    let r = queries::api_surface(store, prefix, language, Some(top))
         .map_err(|error| HandlerError::internal("api_surface_query", error))?;
     serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
@@ -4198,6 +4206,11 @@ mod tests {
             (
                 handle_unreferenced,
                 json!({ "top": 501 }),
+                "Invalid argument: top",
+            ),
+            (
+                handle_api_surface,
+                json!({ "prefix": "src", "top": 0 }),
                 "Invalid argument: top",
             ),
             (

@@ -5984,25 +5984,82 @@ impl Store {
     /// `path_prefix` is a literal string prefix. SQL wildcard characters have
     /// no special meaning. Optional `language` filter.
     pub fn api_surface(&self, path_prefix: &str, language: Option<&str>) -> SqlResult<Vec<Symbol>> {
+        self.api_surface_rows(path_prefix, language, None)
+            .map(|(_, symbols)| symbols)
+    }
+
+    pub(crate) fn api_surface_bounded(
+        &self,
+        path_prefix: &str,
+        language: Option<&str>,
+        limit: usize,
+    ) -> SqlResult<(u32, Vec<Symbol>)> {
+        self.api_surface_rows(path_prefix, language, Some(limit))
+    }
+
+    fn api_surface_rows(
+        &self,
+        path_prefix: &str,
+        language: Option<&str>,
+        limit: Option<usize>,
+    ) -> SqlResult<(u32, Vec<Symbol>)> {
         let references = reference_groups_ctes();
-        let sql = format!(
+        let surface_sql = format!(
             "WITH {references}, external_refs AS (
                  SELECT DISTINCT r.nm, r.target_kind
                  FROM target_refs r
                  JOIN symbols caller ON caller.id = r.from_id
                  WHERE substr(caller.file_path, 1, length(?1)) != ?1
-             )
-             SELECT DISTINCT {SYMBOL_COLS_S}
-             FROM symbols s
-             JOIN external_refs r ON r.nm = s.name AND r.target_kind = s.kind
-             WHERE substr(s.file_path, 1, length(?1)) = ?1
-               AND (?2 IS NULL OR s.language = ?2)
-               AND s.kind != 'module'
-             ORDER BY s.file_path, s.line_start"
+             ), surface AS (
+                 SELECT DISTINCT {SYMBOL_COLS_S}
+                 FROM symbols s
+                 JOIN external_refs r ON r.nm = s.name AND r.target_kind = s.kind
+                 WHERE substr(s.file_path, 1, length(?1)) = ?1
+                   AND (?2 IS NULL OR s.language = ?2)
+                   AND s.kind != 'module'
+             )"
         );
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![path_prefix, language], Self::row_to_symbol)?;
-        rows.collect()
+        match limit {
+            None => {
+                let sql = format!(
+                    "{surface_sql}
+                     SELECT {SYMBOL_COLS} FROM surface
+                     ORDER BY file_path, line_start, name, kind, id"
+                );
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows = stmt.query_map(params![path_prefix, language], Self::row_to_symbol)?;
+                let symbols: Vec<_> = rows.collect::<SqlResult<_>>()?;
+                let total = u32::try_from(symbols.len()).unwrap_or(u32::MAX);
+                Ok((total, symbols))
+            }
+            Some(limit) => {
+                let sql = format!(
+                    "{surface_sql}
+                     SELECT {SYMBOL_COLS}, COUNT(*) OVER() AS total FROM surface
+                     ORDER BY file_path, line_start, name, kind, id
+                     LIMIT ?3"
+                );
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows = stmt.query_map(
+                    params![
+                        path_prefix,
+                        language,
+                        i64::try_from(limit.max(1)).unwrap_or(i64::MAX)
+                    ],
+                    |row| Ok((Self::row_to_symbol(row)?, row.get::<_, i64>(9)?)),
+                )?;
+                let mut total = 0;
+                let mut symbols = Vec::with_capacity(limit);
+                for row in rows {
+                    let (symbol, row_total) = row?;
+                    total = row_total;
+                    if symbols.len() < limit {
+                        symbols.push(symbol);
+                    }
+                }
+                Ok((total.clamp(0, i64::from(u32::MAX)) as u32, symbols))
+            }
+        }
     }
 
     /// Rank symbols by **in-degree** — how many distinct symbols call them

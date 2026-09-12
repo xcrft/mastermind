@@ -148,6 +148,7 @@ impl WorkflowAuditReport {
     pub fn render_text(&self) -> String {
         let mut output = String::new();
         output.push_str("Mastermind workflow audit\n\n");
+        output.push_str(&format!("  schema:   v{}\n", self.schema_version));
         output.push_str(&format!("  root:     {}\n", escape_terminal(&self.root)));
         output.push_str(&format!("  layout:   {}\n", escape_terminal(&self.layout)));
         if let Some(client) = &self.client {
@@ -174,15 +175,93 @@ impl WorkflowAuditReport {
             self.complete
         ));
         output.push_str(&format!(
-            "  limits:   {} agents, {} skills, {} B/file, {} B total, {} nodes, {} edges\n",
+            "  limits:   {} agents, {} skills, {} B Markdown, {} B manifest, {} B total text, {} nodes, {} edges, YAML depth {}, {} directory entries, {} directories\n",
             self.limits.agents,
             self.limits.skills,
             self.limits.markdown_bytes,
+            self.limits.manifest_bytes,
             self.limits.total_text_bytes,
             self.limits.nodes,
-            self.limits.edges
+            self.limits.edges,
+            self.limits.yaml_depth,
+            self.limits.directory_entries,
+            self.limits.directories
+        ));
+        output.push_str(&format!(
+            "            {} relations/component, {} writes/component, {} tool grants/component, {} servers/component, {} writers, {} diagnostics, {} context estimates\n",
+            self.limits.relations_per_component,
+            self.limits.writes_per_component,
+            self.limits.tool_grants_per_component,
+            self.limits.servers_per_component,
+            self.limits.writers,
+            self.limits.diagnostics,
+            self.limits.context_estimates
         ));
         output.push_str("  estimate: ceil(UTF-8 bytes / 4), component scenarios only\n");
+
+        output.push_str("\nNodes\n");
+        for node in &self.nodes {
+            output.push_str(&format!(
+                "  {} [{}] — {}",
+                escape_terminal(&node.id),
+                escape_terminal(&node.kind),
+                escape_terminal(&node.label)
+            ));
+            if let Some(path) = &node.path {
+                output.push_str(&format!(" — {}", escape_terminal(path)));
+            }
+            output.push('\n');
+        }
+
+        output.push_str("\nEdges\n");
+        for edge in &self.edges {
+            output.push_str(&format!(
+                "  {} -> {} [{}; precision={}]\n",
+                escape_terminal(&edge.from),
+                escape_terminal(&edge.to),
+                escape_terminal(&edge.kind),
+                escape_terminal(&edge.precision)
+            ));
+        }
+
+        output.push_str("\nContext estimates\n");
+        for estimate in &self.context_estimates {
+            let bytes = estimate
+                .bytes
+                .map_or_else(|| "unknown".to_string(), |value| value.to_string());
+            let tokens = estimate
+                .estimated_tokens
+                .map_or_else(|| "unknown".to_string(), |value| value.to_string());
+            output.push_str(&format!(
+                "  {} [{}] — {} bytes, {} estimated tokens\n",
+                escape_terminal(&estimate.component_id),
+                escape_terminal(&estimate.scenario),
+                bytes,
+                tokens
+            ));
+            if !estimate.components.is_empty() {
+                output.push_str(&format!(
+                    "    components: {}\n",
+                    estimate
+                        .components
+                        .iter()
+                        .map(|value| escape_terminal(value))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            if !estimate.unavailable.is_empty() {
+                output.push_str(&format!(
+                    "    unavailable: {}\n",
+                    estimate
+                        .unavailable
+                        .iter()
+                        .map(|value| escape_terminal(value))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
 
         if self.diagnostics.is_empty() {
             output.push_str("\n  no findings\n");
@@ -5747,10 +5826,28 @@ mod tests {
             )
         }));
         assert_eq!(report, audit_workflow(root.path()));
-        assert!(report.render_text().contains(&format!(
+        let text = report.render_text();
+        assert!(text.contains(&format!(
             "{} nodes, {} edges",
             report.nodes.len(),
             report.edges.len()
+        )));
+        assert!(text.contains("schema:   v1"));
+        assert!(text.contains("B manifest"));
+        let node = report.nodes.first().expect("fixture should produce nodes");
+        assert!(text.contains(&format!("{} [{}]", node.id, node.kind)));
+        let edge = report.edges.first().expect("fixture should produce edges");
+        assert!(text.contains(&format!(
+            "{} -> {} [{}; precision={}]",
+            edge.from, edge.to, edge.kind, edge.precision
+        )));
+        let estimate = report
+            .context_estimates
+            .first()
+            .expect("fixture should produce context estimates");
+        assert!(text.contains(&format!(
+            "{} [{}]",
+            estimate.component_id, estimate.scenario
         )));
         assert_eq!(
             escape_terminal("x\u{1b}]8;;bad\u{7}\u{202e}"),

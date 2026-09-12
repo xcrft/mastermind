@@ -413,7 +413,8 @@ JSON strings; human text renders syntax-forming characters as Unicode escapes.
 `diagnostics`, `limits`, `complete`, and `context_estimates`. Node IDs are
 kind-prefixed (`agent:`, `skill:`, `model:`, `server:`, `tool:`, `artifact:`,
 `writer:`). Edges identify their relation and precision. Human and JSON output
-come from the same report. Exit 0 means complete input and no error diagnostic;
+come from the same report. Human output includes every returned node and edge,
+each context estimate, all diagnostics, and the complete limit set. Exit 0 means complete input and no error diagnostic;
 exit 1 means an error or incomplete input; clap usage errors remain exit 2.
 
 The loader limits source/installed input to 128 agents, 512 skills, 256 KiB per

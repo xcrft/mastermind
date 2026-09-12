@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Project-map text now reports section coverage and returned cycles, Mermaid
+  marks both source truncation and its visual-summary omissions, and SARIF
+  derives partial state from every map section and component boundary.
 - `mmcg_map` now supplies a stable reason whenever language, entry-point, or
   complete-cycle output is truncated, including separate cycle-count and
   cycle-membership caps.

@@ -43,7 +43,10 @@ pub(crate) const STRICT_SNAPSHOT_VERSION: u32 = 2;
 #[serde(deny_unknown_fields)]
 pub struct RunState {
     /// User-facing lifecycle state consumed by `mastermind status` / `next`.
-    #[serde(default = "default_run_status")]
+    #[serde(
+        default = "default_run_status",
+        deserialize_with = "deserialize_run_status"
+    )]
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub risk: Option<String>,
@@ -91,6 +94,33 @@ pub struct RunState {
 
 fn default_run_status() -> String {
     "approved".into()
+}
+
+pub(crate) fn validate_run_status(status: &str) -> Result<(), String> {
+    if matches!(
+        status,
+        "history_review_required"
+            | "learned"
+            | "audit_required"
+            | "approved"
+            | "executing"
+            | "held"
+            | "drift"
+            | "broken"
+    ) {
+        Ok(())
+    } else {
+        Err(format!("unsupported controller status {status:?}"))
+    }
+}
+
+fn deserialize_run_status<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let status = String::deserialize(deserializer)?;
+    validate_run_status(&status).map_err(serde::de::Error::custom)?;
+    Ok(status)
 }
 
 fn legacy_snapshot_version() -> u32 {
@@ -791,6 +821,8 @@ pub fn save_state_in_repository(
     path: &Path,
     state: &RunState,
 ) -> std::io::Result<()> {
+    validate_run_status(&state.status)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     let body = serde_json::to_vec_pretty(state)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     if body.len() as u64 > RUN_STATE_BYTE_LIMIT {
@@ -2420,6 +2452,22 @@ verifications: []\n\
         fs::write(&path, serde_json::to_vec(&unknown).unwrap()).unwrap();
         assert_eq!(
             load_state(&path).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        let mut unsupported = serde_json::to_value(&state).unwrap();
+        unsupported
+            .as_object_mut()
+            .unwrap()
+            .insert("status".into(), serde_json::Value::String("future".into()));
+        fs::write(&path, serde_json::to_vec(&unsupported).unwrap()).unwrap();
+        assert_eq!(
+            load_state(&path).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        let mut unsupported = state.clone();
+        unsupported.status = "future".into();
+        assert_eq!(
+            save_state(&path, &unsupported).unwrap_err().kind(),
             std::io::ErrorKind::InvalidData
         );
         delete_state(&path).unwrap();

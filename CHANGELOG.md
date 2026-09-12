@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Controller state now rejects unsupported lifecycle statuses during both read
+  and write, so a corrupted or newer status cannot silently enter post-flight.
 - `status`, `next`, and `resume` now validate task state with the complete
   controller schema before projecting display fields, so a state rejected by
   `run-task` cannot still appear ready or complete in workflow navigation.

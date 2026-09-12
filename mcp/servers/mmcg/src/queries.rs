@@ -457,6 +457,9 @@ pub struct StatusResponse {
     pub freshness_error: Option<&'static str>,
     /// False when extractor semantics changed after the stored index was built.
     pub extractor_contract_current: bool,
+    /// False when the derived deterministic concept corpus is incomplete or was
+    /// built under a different normalization contract.
+    pub concept_contract_current: bool,
 }
 
 pub fn search(
@@ -4278,6 +4281,7 @@ pub fn status(store: &Store) -> rusqlite::Result<StatusResponse> {
         stale_files_truncated,
         freshness_error,
         extractor_contract_current: store.extractor_contract_current()?,
+        concept_contract_current: store.concept_contract_current()?,
     })
 }
 
@@ -8249,6 +8253,7 @@ mod tests {
         assert!(!response.stale_files_truncated);
         assert_eq!(response.freshness_error, None);
         assert!(response.extractor_contract_current);
+        assert!(response.concept_contract_current);
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -8261,6 +8266,7 @@ mod tests {
         assert_eq!(response.stale_files, 1);
         assert!(!response.stale_files_truncated);
         assert_eq!(response.freshness_error, Some("index_root_missing"));
+        assert!(!response.concept_contract_current);
     }
 
     #[test]

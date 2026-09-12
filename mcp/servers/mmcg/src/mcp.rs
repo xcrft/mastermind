@@ -112,6 +112,7 @@ enum HandlerError {
         stale_files_truncated: bool,
         freshness_error: Option<&'static str>,
         extractor_contract_current: bool,
+        concept_contract_current: bool,
         refresh_attempted: bool,
     },
     RefreshLimit {
@@ -1284,12 +1285,14 @@ fn handle_tools_call_inner(
                 stale_files_truncated,
                 freshness_error,
                 extractor_contract_current,
+                concept_contract_current,
                 ..
             })) => Some((
                 *stale_files,
                 *stale_files_truncated,
                 *freshness_error,
                 *extractor_contract_current,
+                *concept_contract_current,
             )),
             _ => None,
         }
@@ -1297,8 +1300,13 @@ fn handle_tools_call_inner(
         None
     };
     let mut refresh_completed = false;
-    if let Some((stale_files, stale_files_truncated, freshness_error, extractor_contract_current)) =
-        stale_index
+    if let Some((
+        stale_files,
+        stale_files_truncated,
+        freshness_error,
+        extractor_contract_current,
+        concept_contract_current,
+    )) = stale_index
     {
         let refresh = refresh_stale_index(
             store,
@@ -1306,6 +1314,7 @@ fn handle_tools_call_inner(
             stale_files_truncated,
             freshness_error,
             extractor_contract_current,
+            concept_contract_current,
         );
         if store.interrupt_source().is_none() {
             match refresh {
@@ -1339,6 +1348,7 @@ fn handle_tools_call_inner(
                 stale_files_truncated,
                 freshness_error,
                 extractor_contract_current,
+                concept_contract_current,
                 refresh_attempted,
             } => tool_result(
                 version,
@@ -1347,6 +1357,7 @@ fn handle_tools_call_inner(
                     stale_files_truncated,
                     freshness_error,
                     extractor_contract_current,
+                    concept_contract_current,
                     refresh_attempted || refresh_completed,
                 ),
                 true,
@@ -1390,6 +1401,7 @@ fn index_stale_payload(
     stale_files_truncated: bool,
     freshness_error: Option<&'static str>,
     extractor_contract_current: bool,
+    concept_contract_current: bool,
     refresh_attempted: bool,
 ) -> Value {
     let guidance = if refresh_attempted {
@@ -1404,6 +1416,7 @@ fn index_stale_payload(
         "stale_files_truncated": stale_files_truncated,
         "freshness_error": freshness_error,
         "extractor_contract_current": extractor_contract_current,
+        "concept_contract_current": concept_contract_current,
         "refresh_attempted": refresh_attempted,
         "guidance": guidance
     })
@@ -1419,6 +1432,7 @@ fn index_stale_error(
         false,
         None,
         extractor_contract_current,
+        true,
         refresh_attempted,
     )
 }
@@ -1432,6 +1446,7 @@ fn index_stale_error_from_status(
         status.stale_files_truncated,
         status.freshness_error,
         status.extractor_contract_current,
+        status.concept_contract_current,
         refresh_attempted,
     )
 }
@@ -1441,6 +1456,7 @@ fn index_stale_error_with_coverage(
     stale_files_truncated: bool,
     freshness_error: Option<&'static str>,
     extractor_contract_current: bool,
+    concept_contract_current: bool,
     refresh_attempted: bool,
 ) -> HandlerError {
     HandlerError::IndexStale {
@@ -1448,6 +1464,7 @@ fn index_stale_error_with_coverage(
         stale_files_truncated,
         freshness_error,
         extractor_contract_current,
+        concept_contract_current,
         refresh_attempted,
     }
 }
@@ -1478,6 +1495,9 @@ fn safe_index_status(store: &Store) -> Result<queries::StatusResponse, HandlerEr
     let extractor_contract_current = store
         .extractor_contract_current()
         .map_err(|error| HandlerError::internal("extractor_contract_query", error))?;
+    let concept_contract_current = store
+        .concept_contract_current()
+        .map_err(|error| HandlerError::internal("concept_contract_query", error))?;
     let index_root = store
         .meta_value("index_root")
         .map_err(|error| HandlerError::internal("index_root_query", error))?
@@ -1544,6 +1564,7 @@ fn safe_index_status(store: &Store) -> Result<queries::StatusResponse, HandlerEr
         stale_files_truncated,
         freshness_error,
         extractor_contract_current,
+        concept_contract_current,
     })
 }
 
@@ -1576,6 +1597,7 @@ fn refresh_stale_index(
     stale_files_truncated: bool,
     freshness_error: Option<&'static str>,
     extractor_contract_current: bool,
+    concept_contract_current: bool,
 ) -> Result<(), HandlerError> {
     let Some(root) = managed_auto_refresh_root(store) else {
         return Err(index_stale_error_with_coverage(
@@ -1583,6 +1605,7 @@ fn refresh_stale_index(
             stale_files_truncated,
             freshness_error,
             extractor_contract_current,
+            concept_contract_current,
             false,
         ));
     };
@@ -1610,6 +1633,7 @@ fn refresh_stale_index(
                 stale_files_truncated,
                 freshness_error,
                 extractor_contract_current,
+                concept_contract_current,
                 true,
             ));
         }
@@ -2331,7 +2355,7 @@ fn schema_recent_changes() -> Value {
 fn schema_status() -> Value {
     json!({
         "name": "mmcg_status",
-        "description": "Show index health — file count, symbol count, db path, extractor-contract compatibility, and bounded source freshness. `freshness_basis: path_and_mtime` states the metadata contract. `stale_files` counts up to 100 added, deleted, or mtime-changed indexable paths; `stale_files_truncated` discloses a larger set, and `freshness_error` explains when the scan could not establish a count. Structural tools automatically refresh a stale managed `.mastermind/mmcg.db` before querying. Custom external indexes remain manual-refresh-only; unavailable or failed refreshes return `index_stale` with the same coverage fields.",
+        "description": "Show index health — file count, symbol count, db path, structural extractor compatibility, deterministic concept-corpus compatibility, and bounded source freshness. `freshness_basis: path_and_mtime` states the metadata contract. `stale_files` counts up to 100 added, deleted, or mtime-changed indexable paths; `stale_files_truncated` discloses a larger set, and `freshness_error` explains when the scan could not establish a count. Structural tools automatically refresh a stale managed `.mastermind/mmcg.db` before querying. Custom external indexes remain manual-refresh-only; unavailable or failed refreshes return `index_stale` with the same coverage fields.",
         "inputSchema": { "type": "object", "properties": {} }
     })
 }
@@ -3096,6 +3120,7 @@ pub fn build_brief_current(
         stale_files_truncated: false,
         freshness_error: Some("freshness_check_failed"),
         extractor_contract_current: true,
+        concept_contract_current: false,
     });
     refresh_stale_index(
         store,
@@ -3103,6 +3128,7 @@ pub fn build_brief_current(
         status.stale_files_truncated,
         status.freshness_error,
         status.extractor_contract_current,
+        status.concept_contract_current,
     )
     .map_err(|error| match error {
         HandlerError::SchemaIncompatible => queries::BriefError::SchemaIncompatible,
@@ -3138,10 +3164,7 @@ fn concept_current_attempt(
     if status.stale_files > 0 || !status.extractor_contract_current {
         return Err(queries::ConceptError::IndexStale);
     }
-    if !store
-        .concept_contract_current()
-        .map_err(|_| queries::ConceptError::IndexStale)?
-    {
+    if !status.concept_contract_current {
         return Err(queries::ConceptError::IndexStale);
     }
     queries::concept_verified(
@@ -3182,6 +3205,7 @@ pub fn build_concept_current(
         status.stale_files_truncated,
         status.freshness_error,
         status.extractor_contract_current,
+        status.concept_contract_current,
     )
     .map_err(|error| match error {
         HandlerError::SchemaIncompatible => queries::ConceptError::SchemaIncompatible,
@@ -3333,19 +3357,9 @@ fn map_concept_error(store: &Store, error: queries::ConceptError) -> HandlerErro
                 stale_files_truncated: false,
                 freshness_error: Some("freshness_check_failed"),
                 extractor_contract_current: true,
+                concept_contract_current: false,
             });
-            let concept_current = store.concept_contract_current().unwrap_or(false);
-            index_stale_error_with_coverage(
-                if concept_current {
-                    status.stale_files
-                } else {
-                    status.stale_files.max(1)
-                },
-                status.stale_files_truncated,
-                status.freshness_error,
-                status.extractor_contract_current,
-                store.managed_root().is_some(),
-            )
+            index_stale_error_from_status(&status, store.managed_root().is_some())
         }
         queries::ConceptError::SchemaIncompatible => HandlerError::SchemaIncompatible,
         queries::ConceptError::SnapshotChanged => HandlerError::SnapshotChanged,
@@ -5302,6 +5316,9 @@ mod tests {
         assert_eq!(concept["isError"], true);
         let payload = unwrap_content(&concept);
         assert_eq!(payload["code"], "index_stale");
+        assert_eq!(payload["stale_files"], 0);
+        assert_eq!(payload["extractor_contract_current"], true);
+        assert_eq!(payload["concept_contract_current"], false);
         assert_eq!(payload["refresh_attempted"], false);
         assert_eq!(std::fs::read(&db).unwrap(), before);
         assert!(!db.with_extension("db-wal").exists());
@@ -6439,6 +6456,50 @@ mod checks {
         .unwrap();
         assert_eq!(
             unwrap_content(&fresh_status)["extractor_contract_current"],
+            true
+        );
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn status_reports_concept_contract_drift_without_fake_source_staleness() {
+        let (root, mut store) = impact_fixture("stale-concept-contract");
+        store
+            .set_meta(
+                crate::store::CONCEPT_NORMALIZATION_META_KEY,
+                "outdated-concept-contract",
+            )
+            .unwrap();
+
+        let stale_status = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({ "name": "mmcg_status", "arguments": {} }),
+        )
+        .unwrap();
+        assert_eq!(stale_status["isError"], false);
+        let stale_payload = unwrap_content(&stale_status);
+        assert_eq!(stale_payload["stale_files"], 0);
+        assert_eq!(stale_payload["extractor_contract_current"], true);
+        assert_eq!(stale_payload["concept_contract_current"], false);
+
+        let rebuilt = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({ "name": "mmcg_concept", "arguments": { "query": "value" } }),
+        )
+        .unwrap();
+        assert_eq!(rebuilt["isError"], false);
+
+        let fresh_status = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({ "name": "mmcg_status", "arguments": {} }),
+        )
+        .unwrap();
+        assert_eq!(
+            unwrap_content(&fresh_status)["concept_contract_current"],
             true
         );
 

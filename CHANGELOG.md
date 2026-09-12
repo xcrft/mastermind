@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- `mmcg_status` and `index_stale` now expose concept-corpus contract health
+  separately from structural extractor health; concept drift no longer appears
+  as a fabricated stale source-file count.
 - Incremental indexing and structural freshness now treat an older source mtime
   as changed instead of silently trusting restored or checked-out content; status
   identifies its path-and-mtime basis and documents the exact-mtime limitation.

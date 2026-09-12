@@ -7068,34 +7068,93 @@ impl Store {
     /// Files whose module imports the given name. Matches `to_name` (leaf
     /// binding). Optional `language` filter.
     pub fn imported_by_name(&self, name: &str, language: Option<&str>) -> SqlResult<Vec<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT s.file_path FROM edges e
-             JOIN symbols s ON s.id = e.from_id
-             WHERE e.kind = 'imports'
-               AND e.to_name = ?1
-               AND s.kind = 'module'
-               AND (?2 IS NULL OR s.language = ?2)
-             ORDER BY s.file_path",
-        )?;
-        let rows = stmt.query_map(params![name, language], |r| r.get::<_, String>(0))?;
-        rows.collect()
+        self.imported_by_rows(name, language, false, None)
+            .map(|(_, files)| files)
+    }
+
+    pub(crate) fn imported_by_name_bounded(
+        &self,
+        name: &str,
+        language: Option<&str>,
+        limit: usize,
+    ) -> SqlResult<(u32, Vec<String>)> {
+        self.imported_by_rows(name, language, false, Some(limit))
     }
 
     /// Files whose module imports exactly this fully-qualified path. Matches
     /// `to_path` precisely — use when the same leaf name is imported from
     /// multiple modules and you want only one. Optional `language` filter.
     pub fn imported_by_path(&self, path: &str, language: Option<&str>) -> SqlResult<Vec<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT s.file_path FROM edges e
-             JOIN symbols s ON s.id = e.from_id
-             WHERE e.kind = 'imports'
-               AND e.to_path = ?1
-               AND s.kind = 'module'
-               AND (?2 IS NULL OR s.language = ?2)
-             ORDER BY s.file_path",
-        )?;
-        let rows = stmt.query_map(params![path, language], |r| r.get::<_, String>(0))?;
-        rows.collect()
+        self.imported_by_rows(path, language, true, None)
+            .map(|(_, files)| files)
+    }
+
+    pub(crate) fn imported_by_path_bounded(
+        &self,
+        path: &str,
+        language: Option<&str>,
+        limit: usize,
+    ) -> SqlResult<(u32, Vec<String>)> {
+        self.imported_by_rows(path, language, true, Some(limit))
+    }
+
+    fn imported_by_rows(
+        &self,
+        query: &str,
+        language: Option<&str>,
+        match_path: bool,
+        limit: Option<usize>,
+    ) -> SqlResult<(u32, Vec<String>)> {
+        let selector_column = if match_path { "e.to_path" } else { "e.to_name" };
+        let matching_sql = format!(
+            "WITH matching AS (
+                 SELECT DISTINCT s.file_path
+                 FROM edges e
+                 JOIN symbols s ON s.id = e.from_id
+                 WHERE e.kind = 'imports'
+                   AND {selector_column} = ?1
+                   AND s.kind = 'module'
+                   AND (?2 IS NULL OR s.language = ?2)
+             )"
+        );
+        match limit {
+            None => {
+                let sql =
+                    format!("{matching_sql} SELECT file_path FROM matching ORDER BY file_path");
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows = stmt.query_map(params![query, language], |row| row.get(0))?;
+                let files: Vec<_> = rows.collect::<SqlResult<_>>()?;
+                let total = u32::try_from(files.len()).unwrap_or(u32::MAX);
+                Ok((total, files))
+            }
+            Some(limit) => {
+                let sql = format!(
+                    "{matching_sql}
+                     SELECT file_path, COUNT(*) OVER() AS total FROM matching
+                     ORDER BY file_path
+                     LIMIT ?3"
+                );
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows = stmt.query_map(
+                    params![
+                        query,
+                        language,
+                        i64::try_from(limit.max(1)).unwrap_or(i64::MAX)
+                    ],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )?;
+                let mut total = 0;
+                let mut files = Vec::with_capacity(limit);
+                for row in rows {
+                    let (file, row_total) = row?;
+                    total = row_total;
+                    if files.len() < limit {
+                        files.push(file);
+                    }
+                }
+                Ok((total.clamp(0, i64::from(u32::MAX)) as u32, files))
+            }
+        }
     }
 
     /// Back-compat name — defaults to leaf-name lookup. No language filter.

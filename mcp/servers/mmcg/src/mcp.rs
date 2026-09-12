@@ -1900,7 +1900,8 @@ fn schema_imported_by() -> Value {
             "properties": {
                 "query": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Name or path to look up" },
                 "match": { "type": "string", "enum": ["name", "path"], "default": "name", "description": "How to match the query — by leaf binding name or fully-qualified path" },
-                "language": { "type": "string", "enum": LANGUAGES, "description": "Optional language filter" }
+                "language": { "type": "string", "enum": LANGUAGES, "description": "Optional language filter" },
+                "top": { "type": "integer", "minimum": 1, "maximum": queries::IMPORTED_BY_MAX_TOP, "default": queries::IMPORTED_BY_DEFAULT_TOP, "description": "Maximum importing files to return; use path matching or language when truncated" }
             },
             "required": ["query"]
         }
@@ -2408,8 +2409,15 @@ fn handle_imported_by(store: &mut Store, args: &Value) -> Result<Value, HandlerE
     };
     let match_kind = opt_enum_arg(args, "match", &IMPORT_MATCH_KINDS)?.unwrap_or("name");
     let language = opt_enum_arg(args, "language", &LANGUAGES)?;
+    let top = bounded_u64_arg(
+        args,
+        "top",
+        u64::from(queries::IMPORTED_BY_DEFAULT_TOP),
+        1,
+        u64::from(queries::IMPORTED_BY_MAX_TOP),
+    )? as u32;
     ensure_fresh_index(store)?;
-    let r = queries::imported_by(store, query, match_kind, language)
+    let r = queries::imported_by(store, query, match_kind, language, Some(top))
         .map_err(|error| HandlerError::internal("imported_by_query", error))?;
     serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
@@ -4203,6 +4211,11 @@ mod tests {
                 "Invalid argument: top",
             ),
             (handle_files, json!({ "top": 0 }), "Invalid argument: top"),
+            (
+                handle_imported_by,
+                json!({ "query": "core", "top": 501 }),
+                "Invalid argument: top",
+            ),
             (
                 handle_unreferenced,
                 json!({ "top": 501 }),

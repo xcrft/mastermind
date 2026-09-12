@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- MCP reverse-import responses now stop at an explicit 200-row default, apply
+  the cap inside SQLite, expose exact truncation and the effective selector,
+  and state that dynamic dependencies can be missing; CLI output stays complete.
 - MCP API-surface responses now stop at an explicit 100-row default, expose the
   exact filtered total and truncation, and apply the cap inside SQLite; the
   local CLI retains its complete listing.

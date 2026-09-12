@@ -364,6 +364,25 @@
     return Math.round((hit / found) * 100) + "% reported lines covered (" + hit + "/" + found + ")";
   }
 
+  function findingSeverityCounts(evidence) {
+    const counts = { error: 0, warning: 0, informational: 0 };
+    array(record(evidence).findings).forEach(function (value) {
+      const level = text(record(value).level, "note");
+      if (level === "error") {
+        counts.error += 1;
+      } else if (level === "warning") {
+        counts.warning += 1;
+      } else {
+        counts.informational += 1;
+      }
+    });
+    return counts;
+  }
+
+  function findingCountLabel(count, severity) {
+    return count + " " + severity + " finding" + (count === 1 ? "" : "s");
+  }
+
   function evidenceSignals(node) {
     const evidence = node.evidence;
     if (!evidence) {
@@ -409,7 +428,13 @@
       }
     }
     if (evidence && overlayEnabled("findings") && evidence.findings.length > 0) {
-      serious.push(evidence.findings.length + " finding" + (evidence.findings.length === 1 ? "" : "s"));
+      const findingCounts = findingSeverityCounts(evidence);
+      if (findingCounts.error > 0) {
+        serious.push(findingCountLabel(findingCounts.error, "error"));
+      }
+      if (findingCounts.warning > 0) {
+        warning.push(findingCountLabel(findingCounts.warning, "warning"));
+      }
     }
     // Self-contained or work-limited changes do not prove missing test reach.
     if (node.type === "changed" && node.blast && node.blast.symbols > 0 && node.blast.testPaths === 0) {
@@ -446,6 +471,12 @@
     const marks = risk.serious.concat(risk.warning);
     const evidence = node.evidence;
     if (evidence) {
+      if (overlayEnabled("findings") && evidence.findings.length > 0) {
+        const informational = findingSeverityCounts(evidence).informational;
+        if (informational > 0) {
+          marks.push(findingCountLabel(informational, "informational"));
+        }
+      }
       if (overlayEnabled("coverage") && evidence.coverage && risk.warning.every(function (label) { return label.indexOf("cov ") !== 0; })) {
         const found = finiteNumber(evidence.coverage.lines_found);
         const hit = finiteNumber(evidence.coverage.lines_hit);
@@ -1499,7 +1530,11 @@
 
     var findHead = createElement("p", "audit-subhead");
     findHead.appendChild(document.createTextNode("Static findings on the review trace"));
-    findHead.appendChild(createElement("span", "audit-count" + (findings.length === 0 ? "" : " audit-count--serious"), String(findings.length)));
+    var findingCounts = findingSeverityCounts({ findings: findings });
+    var findingCountClass = findingCounts.error > 0
+      ? " audit-count--serious"
+      : findingCounts.warning > 0 ? " audit-count--warning" : "";
+    findHead.appendChild(createElement("span", "audit-count" + findingCountClass, String(findings.length)));
     node.appendChild(findHead);
     if (findings.length === 0) {
       node.appendChild(createElement("p", "audit-empty", "No static findings were loaded for the review trace. This is not a repository-wide clean result."));
@@ -4405,7 +4440,9 @@
         return text(finding.level, "warning").toUpperCase() + " · " + text(finding.tool, "SARIF") + " / " + text(finding.rule_id, "unclassified") + location + " · " + text(finding.message, "No message returned");
       });
       if (findings.length > 0) {
-        appendClaimList("Findings · file-level", findings, "risk", "No matching findings returned.");
+        const counts = findingSeverityCounts(evidence);
+        const variant = counts.error > 0 ? "risk" : counts.warning > 0 ? "warning" : "";
+        appendClaimList("Findings · file-level", findings, variant, "No matching findings returned.");
       }
     }
     if (overlayEnabled("coverage") && evidence.coverage) {

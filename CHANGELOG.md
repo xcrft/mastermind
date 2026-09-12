@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Lens now preserves SARIF finding severity in trace ranking, cluster counts,
+  evidence marks, audit badges, and inspector markers; note/none results no
+  longer become serious claims.
 - Lens now exposes endpoint-only document packets as `corpus not tracked`
   across visible, precision, notice, and accessibility surfaces instead of
   hiding their unobserved-document boundary behind a current endpoint status.

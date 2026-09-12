@@ -2168,6 +2168,10 @@ body:has(.workspace[data-trace-mode="mobile"].has-selection) .inspector {
   background: var(--coral);
 }
 
+.claim-list--warning li::before {
+  background: var(--amber);
+}
+
 .claim-list--coverage li::before {
   background: var(--amber);
 }
@@ -3813,6 +3817,11 @@ body[data-mode="audit"] .method-ledger {
 .audit-count--serious {
   background: var(--coral-soft);
   color: var(--coral-dark);
+}
+
+.audit-count--warning {
+  background: var(--amber-soft);
+  color: var(--amber);
 }
 
 .audit-count--clean {

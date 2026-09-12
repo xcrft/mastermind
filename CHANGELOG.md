@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Architecture-policy text reports now preserve full config and revision
+  identity, evaluated rules, related locations, result properties, incomplete
+  evidence, and precision notes, while escaping repository-controlled terminal
+  text.
 - Default text output from `mmcg temporal` now exposes revision binding,
   per-collection coverage and truncation reasons, and returned component,
   boundary, resolved-cycle, hotspot, ownership, history, provenance, and limit

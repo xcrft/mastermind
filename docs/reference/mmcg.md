@@ -1144,6 +1144,9 @@ bind at most 1,000 touch files, 16 MiB each and 32 MiB total. Reports stop at
 become incomplete rather than allocating unbounded SARIF. Any relevant cap, stale index, concurrent snapshot
 change, or unreadable required evidence exits non-zero. JSON and SARIF preserve
 `complete`, diagnostics, baseline/head OIDs, config path, and config SHA-256.
+The default text report preserves those identities plus every evaluated rule,
+primary and related locations, result properties, incomplete-evidence details,
+and precision notes; repository-controlled text is terminal-escaped.
 SARIF uses each configured rule ID as its stable `ruleId`; incomplete evaluation emits
 `mastermind/policy-evaluation-incomplete` at the config location.
 Policy results also include deterministic `partialFingerprints` so repeated

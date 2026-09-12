@@ -1572,10 +1572,55 @@ async function main() {
     "A changed claim with findings, a failing test, and no test path must carry the serious tier"
   );
   assert.match(node.textContent, /UNTESTED/, "A changed claim with no returned test path must be flagged in text, not color alone");
-  assert.match(node.textContent, /1 fail · 2 findings · untested/i, "Evidence marks must be human-readable, risk first");
+  assert.match(node.textContent, /1 fail · 1 error finding/i, "Evidence marks must put serious findings after failing tests");
   assert.match(node.textContent, /→ 1 sym · 1 comp/, "Changed claims must state their blast reach");
   node.dispatch("keydown", { key: " " });
   assert.doesNotMatch(keyboardHarness.nodes.get("inspector-body").textContent, /Select a trace claim/i);
+
+  const informationalPayload = fixture();
+  informationalPayload.evidence.files.items.forEach((file) => {
+    file.findings = [];
+    delete file.coverage;
+    delete file.test_results;
+  });
+  informationalPayload.impact.impact = { total: 0, returned: 0, truncated: false, items: [] };
+  informationalPayload.impact.tests = { total: 0, returned: 0, truncated: false, items: [] };
+  informationalPayload.impact.api_crossings = { total: 0, returned: 0, truncated: false, items: [] };
+  informationalPayload.evidence.files.items[0].findings = [{
+    source_id: "sarif:0", tool: "Semgrep", rule_id: "style.note", level: "note",
+    message: "Informational result", line: 42, column: 3,
+  }];
+  const informationalHarness = await renderFixture(informationalPayload, { width: 900 });
+  const informationalCluster = informationalHarness.nodes.get("trace-graph").querySelectorAll("[data-cluster-id]")
+    .find((candidate) => candidate.getAttribute("data-cluster-id") === "cluster:changed:0");
+  assert.ok(informationalCluster, "The informational finding fixture must expose its changed cluster");
+  informationalCluster.dispatch("keydown", { key: "Enter" });
+  const informationalNode = informationalHarness.nodes.get("trace-graph").querySelectorAll("[data-node-id]")
+    .find((candidate) => candidate.getAttribute("data-node-id") === "changed:0");
+  assert.ok(informationalNode, "The informational finding fixture must expose its changed claim");
+  assert.equal(informationalNode.classList.contains("graph-node--risk-serious"), false, "A note-level finding must not become a serious claim");
+  assert.equal(informationalNode.classList.contains("graph-node--risk-warning"), false, "A note-level finding must not become a warning claim");
+  assert.match(informationalNode.textContent, /1 informational finding/i, "Informational findings remain visible without inflating severity");
+  assert.equal(informationalHarness.nodes.get("audit-security").querySelectorAll(".audit-count--serious").length, 0, "A note-only finding count must not use the serious badge");
+  informationalNode.dispatch("keydown", { key: "Enter" });
+  assert.equal(informationalHarness.nodes.get("inspector-body").querySelectorAll(".claim-list--risk").length, 0, "A note-only finding list must not use the risk marker");
+
+  const warningPayload = JSON.parse(JSON.stringify(informationalPayload));
+  warningPayload.evidence.files.items[0].findings[0].level = "warning";
+  const warningHarness = await renderFixture(warningPayload, { width: 900 });
+  const warningCluster = warningHarness.nodes.get("trace-graph").querySelectorAll("[data-cluster-id]")
+    .find((candidate) => candidate.getAttribute("data-cluster-id") === "cluster:changed:0");
+  warningCluster.dispatch("keydown", { key: "Enter" });
+  const warningNode = warningHarness.nodes.get("trace-graph").querySelectorAll("[data-node-id]")
+    .find((candidate) => candidate.getAttribute("data-node-id") === "changed:0");
+  assert.equal(warningNode.classList.contains("graph-node--risk-serious"), false, "A warning finding must not become a serious claim");
+  assert.ok(warningNode.classList.contains("graph-node--risk-warning"), "A warning finding must retain its warning tier");
+  assert.match(warningNode.textContent, /1 warning finding/i, "Warning findings retain their severity label");
+  assert.equal(warningHarness.nodes.get("audit-security").querySelectorAll(".audit-count--warning").length, 1, "A warning-only finding count must use the warning badge");
+  warningNode.dispatch("keydown", { key: "Enter" });
+  assert.equal(warningHarness.nodes.get("inspector-body").querySelectorAll(".claim-list--warning").length, 1, "A warning-only finding list must use the warning marker");
+  assert.match(CSS_SOURCE, /\.claim-list--warning li::before[\s\S]*?var\(--amber\)/, "Warning finding lists need a distinct warning marker");
+  assert.match(CSS_SOURCE, /\.audit-count--warning[\s\S]*?var\(--amber-soft\)/, "Warning finding counts need a distinct warning badge");
 
   const unavailable = fixture();
   unavailable.temporal = {

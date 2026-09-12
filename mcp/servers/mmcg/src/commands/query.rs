@@ -978,17 +978,17 @@ fn render_change_impact_text(response: ChangeImpactTextView<'_>) -> String {
     ));
     output.push_str(&impact_section_coverage(
         "affected components",
-        &response.affected_components,
+        response.affected_components,
     ));
     output.push_str(&impact_section_coverage(
         "impacted callers",
-        &response.impact,
+        response.impact,
     ));
     output.push_str(&impact_section_coverage(
         "API crossings",
-        &response.api_crossings,
+        response.api_crossings,
     ));
-    output.push_str(&impact_section_coverage("candidate tests", &response.tests));
+    output.push_str(&impact_section_coverage("candidate tests", response.tests));
     if response.partial {
         output.push_str(&format!(
             "  reasons: {}\n",

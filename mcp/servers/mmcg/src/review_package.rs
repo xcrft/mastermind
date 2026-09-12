@@ -2014,15 +2014,15 @@ mod tests {
         assert_eq!(manifest["document_graph"]["head_matches_snapshot"], true);
         assert_eq!(
             manifest["document_graph"]["corpus_directories"],
-            json!(["docs/adr"])
+            serde_json::json!(["docs/adr"])
         );
         assert_eq!(
             manifest["document_graph"]["endpoint_changed_files"],
-            json!([])
+            serde_json::json!([])
         );
         assert_eq!(
             manifest["document_graph"]["corpus_changed_files"],
-            json!([])
+            serde_json::json!([])
         );
         let summary = std::fs::read_to_string(output.join("summary.md")).unwrap();
         assert!(summary.contains("## Declared document evidence"));

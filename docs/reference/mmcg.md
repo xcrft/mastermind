@@ -1459,7 +1459,10 @@ The fixed schema-v1 fields are `repository_content_untrusted`, `role`,
 `freshness`, `baseline`, `scope`, `budget`, `changes`, `callers`, `tests`,
 `history`, `citations`, `omitted`, `limits`, and `precision_notes` (plus
 `schema_version`). Structural and history freshness have separate checked
-tokens and statuses.
+tokens and statuses. The default text rendering exposes the same revision
+binding, overall and per-section coverage, all three omission classes, history
+query state, limits, and precision notes; an unknown source total is printed as
+unknown and a non-exact source omission as a lower bound.
 
 Candidate caps are 100 changed files, 100 changed symbols, 100 callers, 50
 tests, 10 history citations, and eight derived history terms. History performs

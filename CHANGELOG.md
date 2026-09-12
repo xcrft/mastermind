@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Lens now carries the minimum ownership-history threshold and its coverage in
+  the bus-factor payload; components below five touches make the assessment
+  partial instead of allowing a complete verdict with an unjudgeable signal.
 - Lens bus-factor analysis now evaluates every returned map component, retains
   components with no commits in the bounded history window, exposes its
   coverage denominator, and marks unknown ownership concentration as partial.

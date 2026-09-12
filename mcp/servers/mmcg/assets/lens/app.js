@@ -1950,28 +1950,33 @@
     }
     var busCollection = collection(bus);
     var evaluated = finiteNumber(bus.components_evaluated);
+    var minimumTouches = Math.max(1, finiteNumber(bus.minimum_touches) || 5);
+    var belowMinimum = finiteNumber(bus.components_below_minimum);
     var withoutHistory = finiteNumber(bus.components_without_history);
-    if (withoutHistory !== null && withoutHistory > 0) {
-      var missingNames = busCollection.items.map(record).filter(function (row) {
-        return (finiteNumber(row.touches) || 0) === 0;
+    if (belowMinimum !== null && belowMinimum > 0) {
+      var insufficientNames = busCollection.items.map(record).filter(function (row) {
+        return (finiteNumber(row.touches) || 0) < minimumTouches;
       }).map(function (row) {
         return text(row.component, "?");
       });
-      var coverage = withoutHistory + (evaluated === null
-        ? " evaluated component" + (withoutHistory === 1 ? "" : "s")
+      var coverage = belowMinimum + (evaluated === null
+        ? " evaluated component" + (belowMinimum === 1 ? "" : "s")
         : " of " + evaluated + " evaluated components");
-      var examples = missingNames.length > 0 ? " Returned: " + missingNames.join(" · ") + "." : "";
+      var noHistory = withoutHistory !== null && withoutHistory > 0
+        ? " " + withoutHistory + (withoutHistory === 1 ? " has" : " have") + " no commits."
+        : "";
+      var examples = insufficientNames.length > 0 ? " Returned below minimum: " + insufficientNames.join(" · ") + "." : "";
       node.appendChild(createElement(
         "p",
         "audit-empty",
-        coverage + (withoutHistory === 1 ? " has" : " have") +
-          " no commits in the selected " + displayNumber(finiteNumber(bus.window_commits) || 0) +
-          "-commit window. Authorship concentration is unknown for " +
-          (withoutHistory === 1 ? "that component." : "those components.") + examples
+        coverage + (belowMinimum === 1 ? " falls" : " fall") + " below the " + minimumTouches +
+          "-touch minimum in the selected " + displayNumber(finiteNumber(bus.window_commits) || 0) +
+          "-commit window." + noHistory + " Authorship concentration is not judged for " +
+          (belowMinimum === 1 ? "that component." : "those components.") + examples
       ));
     }
     var rows = busCollection.items.map(record).filter(function (r) {
-      return (finiteNumber(r.touches) || 0) >= 5;
+      return (finiteNumber(r.touches) || 0) >= minimumTouches;
     });
     if (rows.length === 0) {
       node.appendChild(createElement(
@@ -2178,14 +2183,15 @@
     }
     var bus = record(record(model.audit).bus_factor);
     var busCollection = collection(bus);
+    var minimumTouches = Math.max(1, finiteNumber(bus.minimum_touches) || 5);
     if (text(bus.status, "") !== "available") {
       auditSetSev("audit-bus-sev", "info", "No data");
     } else {
       var judged = busCollection.items.map(record).filter(function (r) {
-        return (finiteNumber(r.touches) || 0) >= 5;
+        return (finiteNumber(r.touches) || 0) >= minimumTouches;
       });
       var concentrated = judged.filter(function (r) {
-        return (finiteNumber(r.touches) || 0) >= 5 && ((finiteNumber(r.authors) || 0) === 1 || (finiteNumber(r.top_author_pct) || 0) >= 80);
+        return (finiteNumber(r.authors) || 0) === 1 || (finiteNumber(r.top_author_pct) || 0) >= 80;
       });
       var busPartial = bus.partial === true || busCollection.truncated || busCollection.totalUnknown;
       if (concentrated.length > 0) {

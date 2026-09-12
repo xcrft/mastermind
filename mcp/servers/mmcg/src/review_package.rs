@@ -1561,6 +1561,20 @@ mod tests {
         git(repository.path(), &["config", "user.name", "Review Export"]);
         git(repository.path(), &["add", "."]);
         git(repository.path(), &["commit", "-qm", "baseline"]);
+        for revision in 2..=5 {
+            std::fs::write(
+                repository.path().join("src/lib.rs"),
+                format!(
+                    "pub fn charge() -> i32 {{ 1 }}\npub fn checkout() -> i32 {{ charge() }}\n// history {revision}\n"
+                ),
+            )
+            .unwrap();
+            git(repository.path(), &["add", "."]);
+            git(
+                repository.path(),
+                &["commit", "-qm", &format!("history {revision}")],
+            );
+        }
         std::fs::write(
             repository.path().join("src/lib.rs"),
             "pub fn charge() -> i32 { 2 }\npub fn checkout() -> i32 { charge() }\n",

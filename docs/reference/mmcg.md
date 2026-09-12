@@ -744,13 +744,14 @@ unknown when the 2,000-row centrality candidate window fills, because churn can
 change the final order; its displayed ranking remains capped at 20. Bus-factor
 checks every returned map component against the stated 2,000-commit history
 window, retains zero-history components, and reports how many evaluated
-components have or lack history. Its `total` reuses the map component
-denominator, and map or response caps remain explicit. A readable Git history
-with a zero-history component sets `partial` with
-`components_without_history`; Lens does not treat unknown ownership
-concentration as a clean result. An unavailable SQLite or Git source returns a
-null total with its failure reason, so an empty partial result cannot appear as
-a clean zero.
+components have or lack history. The payload also owns the five-touch minimum
+used for a concentration judgment and reports how many components meet it. Its
+`total` reuses the map component denominator, and map or response caps remain
+explicit. A readable Git history with any component below the minimum sets
+`partial` with `components_below_minimum_history`; Lens does not treat thin or
+missing ownership evidence as a clean result. An unavailable SQLite or Git
+source returns a null total with its failure reason, so an empty partial result
+cannot appear as a clean zero.
 
 Audit overview counts use exact totals when known, lower bounds for non-empty
 partial collections, and `?` for an empty collection whose total is unknown.

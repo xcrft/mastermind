@@ -1360,6 +1360,9 @@ cannot satisfy it. Leading `./` and separator aliases are normalized consistentl
 in scope comparisons, bundles and controller snapshots, independently of cwd.
 Unknown frontmatter fields are rejected at every schema level so misspelled
 scope, symbol, verification, and breaking-change keys cannot disappear silently.
+String contract fields also require YAML strings; unquoted numbers and booleans
+cannot be coerced into file paths, symbol names, commands, or labels. Integer
+task IDs remain accepted for compatibility and are normalized to strings.
 `mode` accepts `verified` and `strict` plus legacy `lite` and `standard`; `risk`
 accepts only `low`, `medium`, or `high`.
 

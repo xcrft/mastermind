@@ -97,7 +97,9 @@ and truncation caveats; source reads and tests remain authoritative for runtime 
    `mastermind-auditor`.
 
 The controller is the only owner of `state.json`, `audit.md`, lessons, and
-release eligibility. A missing or malformed executor report fails post-flight.
+release eligibility. `audit.md` retains the complete bounded symbol diff, every
+claim check, and the checked executor report used for its verdict. A missing or
+malformed executor report fails post-flight.
 
 ### Discipline routing
 

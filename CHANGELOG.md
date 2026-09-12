@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Controller-written `audit.md` now retains the complete bounded symbol diff,
+  every claim-check result, and the checked executor report used by post-flight,
+  while escaping terminal controls in human and structured evidence.
 - `status`, `next`, and `resume` now shell-quote generated filesystem arguments,
   suppress commands for control or bidi paths that cannot be represented
   safely, and terminal-escape task, state, goal, path, and error text.

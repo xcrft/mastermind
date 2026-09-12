@@ -1610,18 +1610,28 @@ fn run_pre(
     };
     let parsed = spec::parse_str(&spec_path.display().to_string(), &spec_body);
 
+    if parsed
+        .frontmatter
+        .as_ref()
+        .is_some_and(|frontmatter| frontmatter.mode.as_deref() == Some("strict"))
+    {
+        opts.strict = true;
+    }
     if opts.allow_no_index && spec_requires_index_evidence(&parsed) {
         opts.allow_no_index = false;
-        if let Some(pending) = revalidation_state.as_mut() {
-            pending.allow_no_index = false;
-            if let Err(error) = save_state_in_repository(repo_root, state_path, pending) {
-                eprintln!("error: tightening revalidation index requirement: {error}");
-                return Outcome::PreFailed;
-            }
-        }
         println!(
             "Index gate enabled: the current spec declares indexed source or symbol evidence."
         );
+    }
+    if let Some(pending) = revalidation_state.as_mut() {
+        if pending.strict != opts.strict || pending.allow_no_index != opts.allow_no_index {
+            pending.strict = opts.strict;
+            pending.allow_no_index = opts.allow_no_index;
+            if let Err(error) = save_state_in_repository(repo_root, state_path, pending) {
+                eprintln!("error: tightening revalidation contract: {error}");
+                return Outcome::PreFailed;
+            }
+        }
     }
 
     println!("=== Pre-flight: {} ===", spec_path.display());
@@ -3417,7 +3427,7 @@ verify:
         let outcome = run(&spec_path, &dir, &index_path, RunOpts::default());
         assert_eq!(outcome, Outcome::PreReady);
         let state_path = state_file_path(&dir, &spec_path);
-        assert!(load_state(&state_path).unwrap().is_some());
+        assert!(load_state(&state_path).unwrap().unwrap().strict);
 
         // Simulate executor: add the new function, commit.
         fs::write(

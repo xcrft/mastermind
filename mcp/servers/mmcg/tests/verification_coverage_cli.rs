@@ -406,6 +406,36 @@ fn verification_coverage_cli_strict_preflight_rejects_labels_and_empty_commands(
 }
 
 #[test]
+fn verification_coverage_cli_honors_strict_spec_mode_without_a_flag() {
+    let fixture = Fixture::new(&[]);
+    let mandatory = "\
+## Alternatives Considered
+- none
+## Tests Plan
+- focused
+## Documentation Plan
+- n/a
+## Observability Plan
+- n/a
+## Performance Considerations
+- O(1)
+";
+    let strict = spec_text(json!(["typecheck"]), mandatory).replace("mode: lite", "mode: strict");
+    std::fs::write(fixture.spec(), strict).unwrap();
+
+    let output = fixture.command(&["verify-spec", SPEC, "--json"]);
+    assert!(!output.status.success(), "{output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report["errors"].as_array().unwrap().iter().any(|finding| {
+        finding["kind"] == "strict_violation"
+            && finding["reason"]
+                .as_str()
+                .unwrap()
+                .contains("no verify command")
+    }));
+}
+
+#[test]
 fn verification_coverage_cli_ci_and_bundle_preserve_missing_command_errors() {
     for legacy_declaration in [false, true] {
         let mut fixture = Fixture::new(&[FIRST, SECOND]);

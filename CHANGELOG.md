@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Workflow status now blocks on malformed task-like inventory entries and holds
+  canonical task directories that lack `spec.md`, instead of silently omitting
+  them from readiness and completion decisions.
 - Context health checks now parse the complete controller state before selecting
   learned tasks, instead of accepting partial completion records through a
   display-only projection.

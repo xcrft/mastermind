@@ -142,6 +142,8 @@ contract. It applies the same validation before writing state. `status`, `next`,
 and `resume` project their display fields only after that complete controller
 schema has been validated. Context health checks use the full state contract too,
 so partial completion records cannot enter the semantic review queue.
+Task-like inventory entries must be no-follow directories containing `spec.md`;
+malformed entries are surfaced as blocked workflow state instead of disappearing.
 The same repository-bound replacement protects controller-written `audit.md`,
 release-note drafts, `history-review.md`, and review archives.
 

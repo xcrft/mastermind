@@ -4731,6 +4731,12 @@ fn scan_tasks(root: &Path) -> TaskScan {
 
     let mut tasks = Vec::new();
     for file_name in &entries {
+        let Some(folder) = file_name.to_str() else {
+            return TaskScan::failed("task inventory contains a non-UTF-8 entry");
+        };
+        if folder.starts_with('_') || folder.starts_with('.') || folder.ends_with(".md") {
+            continue;
+        }
         let task_dir = tasks_dir.join(file_name);
         match crate::bounded_fs::inspect_path_kind_with_capability(
             &root_capability,
@@ -4738,7 +4744,12 @@ fn scan_tasks(root: &Path) -> TaskScan {
             crate::bounded_fs::ReadControl::default(),
         ) {
             Ok(crate::bounded_fs::BoundedPathKind::Directory) => {}
-            Ok(_) => continue,
+            Ok(_) => {
+                return TaskScan::failed(format!(
+                    "task inventory entry is not a regular no-follow directory: {}",
+                    task_dir.display()
+                ));
+            }
             Err(error) => {
                 return TaskScan::failed(format!(
                     "cannot inspect task directory {}: {error}",
@@ -4747,7 +4758,7 @@ fn scan_tasks(root: &Path) -> TaskScan {
             }
         }
 
-        let folder = file_name.to_string_lossy().to_string();
+        let folder = folder.to_string();
         let spec_path = task_dir.join("spec.md");
         match crate::bounded_fs::read_regular_file_with_capability(
             &root_capability,
@@ -4757,7 +4768,14 @@ fn scan_tasks(root: &Path) -> TaskScan {
             crate::bounded_fs::ReadControl::default(),
         ) {
             Ok(_) => {}
-            Err(error) if bounded_read_missing(&error) => continue,
+            Err(error) if bounded_read_missing(&error) => {
+                tasks.push(held_task(
+                    folder,
+                    spec_path,
+                    "canonical task directory is missing spec.md".into(),
+                ));
+                continue;
+            }
             Err(error) => {
                 tasks.push(held_task(
                     folder,
@@ -6099,6 +6117,41 @@ mod tests {
                 .is_some_and(|reason| reason.contains(expected)));
             assert!(status.next_action().unwrap().command.is_none());
         }
+    }
+
+    #[test]
+    fn malformed_task_inventory_entry_blocks_status_actions() {
+        let root = tempfile::tempdir().unwrap();
+        let tasks = root.path().join(".mastermind/tasks");
+        fs::create_dir_all(&tasks).unwrap();
+        fs::write(tasks.join("_lessons.md"), "# Lessons\n").unwrap();
+        fs::write(tasks.join("001-not-a-directory"), "# Hidden task\n").unwrap();
+
+        let status = WorkflowStatus::scan(root.path());
+        assert!(status.tasks.is_empty());
+        assert!(status
+            .task_scan_error
+            .as_deref()
+            .is_some_and(|error| error.contains("not a regular no-follow directory")));
+        assert!(status.next_action().unwrap().command.is_none());
+    }
+
+    #[test]
+    fn canonical_task_without_spec_is_held() {
+        let root = tempfile::tempdir().unwrap();
+        let task = root.path().join(".mastermind/tasks/001-missing-spec");
+        fs::create_dir_all(&task).unwrap();
+
+        let status = WorkflowStatus::scan(root.path());
+        assert!(status.task_scan_error.is_none());
+        assert_eq!(status.tasks.len(), 1);
+        assert_eq!(status.tasks[0].phase, TaskPhase::Held);
+        assert!(status.tasks[0]
+            .state
+            .as_ref()
+            .and_then(|state| state.blocking_reason.as_deref())
+            .is_some_and(|reason| reason.contains("missing spec.md")));
+        assert!(status.next_action().unwrap().command.is_none());
     }
 
     #[test]

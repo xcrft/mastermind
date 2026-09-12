@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Change-impact analysis now fails closed when collision or changed-test lookups
+  fail instead of reporting zero collisions or omitting test candidates.
 - Writable opens and private snapshots no longer disturb SQLite's process-wide
   POSIX locks; snapshots now use SQLite's consistent online backup protocol,
   existing writable indexes and snapshots resolve aliased parent directories

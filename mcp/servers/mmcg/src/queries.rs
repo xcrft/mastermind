@@ -2093,8 +2093,11 @@ pub fn change_impact(
     }
     let mut impacts = Vec::new();
     for (_, (symbol, minimum_depth, seeds)) in impact_grouped {
+        let name_collision_count = store
+            .definition_count(&symbol.name)
+            .map_err(|_| ChangeImpactError::SnapshotChanged)?;
         impacts.push(ImpactedSymbol {
-            name_collision_count: store.definition_count(&symbol.name).unwrap_or(0),
+            name_collision_count,
             edge_precision: visible_precision(&symbol.file_path),
             symbol: symbol_evidence(&symbol),
             minimum_depth,
@@ -2156,7 +2159,9 @@ pub fn change_impact(
         if changed.change == "removed" {
             continue;
         }
-        let indexed = store.symbols_in_file(&changed.file).unwrap_or_default();
+        let indexed = store
+            .symbols_in_file(&changed.file)
+            .map_err(|_| ChangeImpactError::SnapshotChanged)?;
         if let Some(symbol) = indexed.into_iter().find(|symbol| {
             symbol.name == changed.name
                 && symbol.kind == changed.kind

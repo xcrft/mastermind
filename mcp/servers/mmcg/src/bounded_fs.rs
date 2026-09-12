@@ -646,7 +646,7 @@ pub(crate) fn open_locked_regular_file_with_capability(
             .map_err(BoundedReadError::Io)?;
     }
     let parent_relative = relative.parent().unwrap_or_else(|| Path::new(""));
-    let parent_identity = directory_identity(&parent).map_err(BoundedReadError::Io)?;
+    let parent_identity = directory_identity(&parent)?;
 
     let mut existing_options = OpenOptions::new();
     existing_options
@@ -712,9 +712,7 @@ pub(crate) fn open_locked_regular_file_with_capability(
         root.verify()?;
         let current_parent = open_relative_directory_nofollow(&root.directory, parent_relative)
             .map_err(|_| BoundedReadError::SnapshotChanged)?;
-        if !directory_identity(&current_parent)
-            .map_err(BoundedReadError::Io)?
-            .same_object(parent_identity)
+        if !directory_identity(&current_parent)?.same_object(parent_identity)
         {
             return Err(BoundedReadError::SnapshotChanged);
         }

@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Strict code tasks now fail post-flight when their exact architecture-policy
+  snapshot cannot be created; they can no longer reach semantic review or
+  `learned` with policy evidence that downstream checks silently ignore.
 - `run-task` now reports every failed fallback state write and escalates a
   failed Drift/Broken-state persistence instead of claiming the task state was
   kept when the write did not succeed.

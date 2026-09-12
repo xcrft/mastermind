@@ -1957,9 +1957,21 @@ fn run_post(
                     Ok(snapshot) => Some(snapshot),
                     Err(error) => {
                         eprintln!(
-                            "warning: held audit has no architecture-policy snapshot: {error}"
+                            "error: held strict audit cannot bind its architecture-policy snapshot: {error}"
                         );
-                        None
+                        let mut failed = auditing.clone();
+                        failed.status = "broken".into();
+                        failed.risk = Some("high".into());
+                        failed.next_step = Some("planner_review".into());
+                        failed.blocking_reason =
+                            Some(format!("strict workflow snapshot unavailable: {error}"));
+                        failed.last_artifact = Some("audit.md".into());
+                        if let Err(state_error) =
+                            save_state_in_repository(repo_root, state_path, &failed)
+                        {
+                            eprintln!("error: persisting strict-snapshot failure: {state_error}");
+                        }
+                        return Outcome::PostBroken;
                     }
                 }
             }

@@ -40,6 +40,7 @@ pub(crate) const STRICT_SNAPSHOT_VERSION: u32 = 2;
 /// specs keep it beside the spec as `<task>/state.json`; legacy flat specs use
 /// `<repo_root>/.mastermind/run-state/<spec-basename>.json`.
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct RunState {
     /// User-facing lifecycle state consumed by `mastermind status` / `next`.
     #[serde(default = "default_run_status")]
@@ -2411,6 +2412,16 @@ verifications: []\n\
         );
         assert_eq!(loaded.started_at, state.started_at);
         assert!(loaded.allow_no_index);
+        let mut unknown = serde_json::to_value(&state).unwrap();
+        unknown
+            .as_object_mut()
+            .unwrap()
+            .insert("stats".into(), serde_json::Value::String("learned".into()));
+        fs::write(&path, serde_json::to_vec(&unknown).unwrap()).unwrap();
+        assert_eq!(
+            load_state(&path).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
         delete_state(&path).unwrap();
         assert!(load_state(&path).unwrap().is_none());
         fs::remove_dir_all(&dir).ok();

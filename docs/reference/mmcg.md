@@ -956,6 +956,11 @@ The package contains:
   [GitHub Actions example](../examples/mastermind-review-pr.yml) for artifact
   and SARIF upload.
 
+Dynamic repository names remain escaped as Markdown text. Dynamic refs, scopes,
+packet paths, corpus roots, changed paths, and diagnostic paths use code-span
+delimiters longer than any backtick run in their content, so an admitted name
+cannot alter the reviewer summary structure.
+
 The workflow builds the checked-out binary when it runs in the Mastermind
 source repository, so a command introduced by the pull request is exercised
 before release. In consuming repositories it installs the exact npm version

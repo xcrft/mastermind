@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Review summaries now format dynamic refs and evidence paths with safe
+  variable-length Markdown code spans, preventing admitted backticks from
+  breaking or reshaping the reviewer-facing evidence.
 - Lens and review packages now retain the selected document-corpus roots and
   exact bounded endpoint/corpus change records instead of reducing research
   scope and stale evidence to status labels and counts.

@@ -1915,7 +1915,8 @@ fn schema_unreferenced() -> Value {
             "type": "object",
             "properties": {
                 "kind": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Filter by symbol kind (function / class / method / struct / etc.)" },
-                "language": { "type": "string", "enum": LANGUAGES }
+                "language": { "type": "string", "enum": LANGUAGES },
+                "top": { "type": "integer", "minimum": 1, "maximum": queries::UNREFERENCED_MAX_TOP, "default": queries::UNREFERENCED_DEFAULT_TOP, "description": "Maximum candidates to return; add kind or language when the result is truncated" }
             }
         }
     })
@@ -2415,8 +2416,15 @@ fn handle_imported_by(store: &mut Store, args: &Value) -> Result<Value, HandlerE
 fn handle_unreferenced(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let kind = opt_non_blank_str_arg(args, "kind")?;
     let language = opt_enum_arg(args, "language", &LANGUAGES)?;
+    let top = bounded_u64_arg(
+        args,
+        "top",
+        u64::from(queries::UNREFERENCED_DEFAULT_TOP),
+        1,
+        u64::from(queries::UNREFERENCED_MAX_TOP),
+    )? as u32;
     ensure_fresh_index(store)?;
-    let r = queries::unreferenced(store, kind, language)
+    let r = queries::unreferenced(store, kind, language, Some(top))
         .map_err(|error| HandlerError::internal("unreferenced_query", error))?;
     serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
@@ -4187,6 +4195,11 @@ mod tests {
                 "Invalid argument: top",
             ),
             (handle_files, json!({ "top": 0 }), "Invalid argument: top"),
+            (
+                handle_unreferenced,
+                json!({ "top": 501 }),
+                "Invalid argument: top",
+            ),
             (
                 handle_history,
                 json!({ "query": "decision", "kind": false }),

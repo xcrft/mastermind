@@ -3493,29 +3493,54 @@ pub struct UnreferencedResponse {
     pub kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    /// Number of candidates matching the filters before the MCP row cap.
+    pub total: u32,
+    /// Number of candidates included in this response.
     pub count: u32,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_limit: Option<u32>,
     pub symbols: Vec<SymbolHit>,
     pub precision_notes: Vec<String>,
 }
+
+pub const UNREFERENCED_DEFAULT_TOP: u32 = 100;
+pub const UNREFERENCED_MAX_TOP: u32 = 500;
 
 /// Symbols with no indexed reference candidates, not proven dead code.
 pub fn unreferenced(
     store: &Store,
     kind: Option<&str>,
     language: Option<&str>,
+    row_limit: Option<u32>,
 ) -> rusqlite::Result<UnreferencedResponse> {
-    let syms: Vec<SymbolHit> = store
-        .unreferenced(kind, language)?
-        .into_iter()
-        .map(symbol_hit_with_precision)
-        .collect();
+    let (total, symbols) = match row_limit {
+        Some(limit) => store.unreferenced_bounded(
+            kind,
+            language,
+            "",
+            "root",
+            false,
+            usize::try_from(limit).unwrap_or(usize::MAX),
+        )?,
+        None => {
+            let symbols = store.unreferenced(kind, language)?;
+            let total = u32::try_from(symbols.len()).unwrap_or(u32::MAX);
+            (total, symbols)
+        }
+    };
+    let syms: Vec<SymbolHit> = symbols.into_iter().map(symbol_hit_with_precision).collect();
+    let count = u32::try_from(syms.len()).unwrap_or(u32::MAX);
     let mut precision_notes = graph_precision_notes();
     precision_notes.push("unreferenced_candidates_are_not_proven_dead_code".into());
     precision_notes.push("external_entry_points_and_runtime_registration_may_be_missing".into());
     Ok(UnreferencedResponse {
         kind: kind.map(String::from),
         language: language.map(String::from),
-        count: syms.len() as u32,
+        total,
+        count,
+        truncated: row_limit.is_some() && total > count,
+        row_limit,
         symbols: syms,
         precision_notes,
     })
@@ -4557,7 +4582,7 @@ mod tests {
         let incoming = callers(&store, "missing", None, None).unwrap();
         let outgoing = callees(&store, "missing", None, None, None, None).unwrap();
         let affected = impact(&store, "missing", 2, None).unwrap();
-        let candidates = unreferenced(&store, Some("function"), None).unwrap();
+        let candidates = unreferenced(&store, Some("function"), None, None).unwrap();
         assert_eq!(incoming.count, 0);
         assert_eq!(outgoing.count, 0);
         assert_eq!(affected.count, 0);
@@ -5839,6 +5864,42 @@ mod tests {
         );
 
         let complete = files(&store, None, None, None).unwrap();
+        assert_eq!(complete.count, 3);
+        assert_eq!(complete.row_limit, None);
+        assert!(!complete.truncated);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn unreferenced_response_reports_exact_total_and_bounded_rows() {
+        let path = tmp_db("unreferenced_response_limit");
+        let store = Store::open(&path).unwrap();
+        for (name, file) in [
+            ("alpha", "src/a.rs"),
+            ("beta", "src/b.rs"),
+            ("gamma", "src/c.rs"),
+        ] {
+            store
+                .insert_symbol(name, "function", file, 1, 2, None, None)
+                .unwrap();
+        }
+
+        let bounded = unreferenced(&store, Some("function"), None, Some(2)).unwrap();
+        assert_eq!(bounded.total, 3);
+        assert_eq!(bounded.count, 2);
+        assert_eq!(bounded.row_limit, Some(2));
+        assert!(bounded.truncated);
+        assert_eq!(
+            bounded
+                .symbols
+                .iter()
+                .map(|symbol| symbol.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "beta"]
+        );
+
+        let complete = unreferenced(&store, Some("function"), None, None).unwrap();
+        assert_eq!(complete.total, 3);
         assert_eq!(complete.count, 3);
         assert_eq!(complete.row_limit, None);
         assert!(!complete.truncated);

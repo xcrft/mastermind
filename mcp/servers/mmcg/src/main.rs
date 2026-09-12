@@ -922,6 +922,8 @@ enum QueryCmd {
     SymbolsInFile { file: String },
     /// Show the symbol tree of a file (classes own their methods, etc.).
     Outline { file: String },
+    /// List indexed static imports declared by a file.
+    Imports { file: String },
     /// Indexed snapshots with source mtimes in a recent window. `--since 2h` / `30m` / `1d`.
     Recent {
         #[arg(long)]

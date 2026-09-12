@@ -1885,7 +1885,8 @@ fn schema_imports() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "file": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Relative file path (as it appears in the index)" }
+                "file": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Relative file path (as it appears in the index)" },
+                "top": { "type": "integer", "minimum": 1, "maximum": queries::IMPORTS_MAX_TOP, "default": queries::IMPORTS_DEFAULT_TOP, "description": "Maximum static import declarations to return" }
             },
             "required": ["file"]
         }
@@ -2403,8 +2404,15 @@ fn handle_files(store: &mut Store, args: &Value) -> Result<Value, HandlerError> 
 
 fn handle_imports(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let file = non_blank_str_arg(args, "file")?;
+    let top = bounded_u64_arg(
+        args,
+        "top",
+        u64::from(queries::IMPORTS_DEFAULT_TOP),
+        1,
+        u64::from(queries::IMPORTS_MAX_TOP),
+    )? as u32;
     ensure_fresh_index(store)?;
-    let r = queries::imports(store, file)
+    let r = queries::imports(store, file, Some(top))
         .map_err(|error| HandlerError::internal("imports_query", error))?;
     serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
@@ -4219,6 +4227,11 @@ mod tests {
                 "Invalid argument: top",
             ),
             (handle_files, json!({ "top": 0 }), "Invalid argument: top"),
+            (
+                handle_imports,
+                json!({ "file": "src/app.py", "top": 501 }),
+                "Invalid argument: top",
+            ),
             (
                 handle_callers,
                 json!({ "name": "target", "top": 501 }),

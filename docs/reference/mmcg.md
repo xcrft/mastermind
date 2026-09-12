@@ -819,6 +819,12 @@ owners per rule, contributor details at five recent names per file, and
 diagnostics at 100. Churn totals stay complete when contributor names are
 truncated. Git output is capped at 8 MiB.
 
+Lens preserves this coverage in the source cards, summary, accessibility
+announcement, and method ledger. Exact totals are shown when known, non-empty
+partial inventories use a lower bound, and an empty inventory with an unknown
+total uses `?`. Per-source fact counts follow the same rule and label matched
+file counts as observations when parsing was partial.
+
 Explicit evidence paths are resolved once and then read through a retained
 parent capability with no-follow handles. Only bounded regular files are
 accepted; path substitutions and special files fail closed.

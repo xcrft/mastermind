@@ -942,6 +942,39 @@ async function main() {
   assert.equal(harness.nodes.get("evidence-source-list").querySelectorAll(".evidence-source").length, 9);
   assert.equal(harness.nodes.get("document-graph-panel").hidden, true, "Legacy snapshots must not invent document evidence");
 
+  const partialEvidencePayload = fixture();
+  partialEvidencePayload.evidence.partial = true;
+  partialEvidencePayload.evidence.sources.total = null;
+  partialEvidencePayload.evidence.sources.truncated = true;
+  partialEvidencePayload.evidence.sources.truncation_reason = "source_limit";
+  partialEvidencePayload.evidence.sources.items[0].status = "partial";
+  partialEvidencePayload.evidence.sources.items[0].facts_total = null;
+  partialEvidencePayload.evidence.sources.items[0].facts_returned = 0;
+  partialEvidencePayload.evidence.sources.items[0].files_matched = 0;
+  partialEvidencePayload.evidence.files.total = null;
+  partialEvidencePayload.evidence.files.truncated = true;
+  partialEvidencePayload.evidence.files.truncation_reason = "evidence_source_partial";
+  const partialEvidenceHarness = await renderFixture(partialEvidencePayload);
+  assert.match(partialEvidenceHarness.nodes.get("evidence-summary").textContent, /≥9 sources · ≥3 matched trace files · partial/i);
+  assert.match(partialEvidenceHarness.nodes.get("evidence-source-list").textContent, /\? facts \/ total unknown · 0 matched files observed/i);
+  assert.match(partialEvidenceHarness.nodes.get("status-region").textContent, /≥9 evidence sources were evaluated/i);
+  assert.match(partialEvidenceHarness.nodes.get("limits-list").textContent, /Limited \/ Evidence sources[\s\S]*source_limit/i);
+
+  const unknownEvidencePayload = fixture();
+  unknownEvidencePayload.evidence.partial = true;
+  unknownEvidencePayload.evidence.sources = { total: null, returned: 0, truncated: true, truncation_reason: "source_limit", items: [] };
+  unknownEvidencePayload.evidence.files = { total: null, returned: 0, truncated: true, truncation_reason: "evidence_source_partial", items: [] };
+  unknownEvidencePayload.evidence.fact_relationships = { total: 0, returned: 0, truncated: false, items: [] };
+  unknownEvidencePayload.semantic.source = null;
+  unknownEvidencePayload.semantic.partial = true;
+  unknownEvidencePayload.semantic.edges = { total: 0, returned: 0, truncated: false, items: [] };
+  unknownEvidencePayload.impact.tests = { total: null, returned: 0, truncated: true, truncation_reason: "work_limit", items: [] };
+  const unknownEvidenceHarness = await renderFixture(unknownEvidencePayload);
+  assert.match(unknownEvidenceHarness.nodes.get("evidence-summary").textContent, /\? sources · \? matched trace files · partial/i);
+  assert.match(unknownEvidenceHarness.nodes.get("evidence-source-list").textContent, /source inventory is partial/i);
+  assert.doesNotMatch(unknownEvidenceHarness.nodes.get("evidence-source-list").textContent, /Use mastermind enrich/i);
+  assert.match(unknownEvidenceHarness.nodes.get("status-region").textContent, /\? candidate tests[\s\S]*\? evidence sources were evaluated/i);
+
   const currentGraphHarness = await renderFixture(withDocumentGraph(fixture(), "current"));
   assert.equal(currentGraphHarness.nodes.get("document-graph-panel").hidden, false);
   assert.match(currentGraphHarness.nodes.get("evidence-summary").textContent, /10 sources/i);

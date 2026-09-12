@@ -889,6 +889,7 @@
       ["Map entry points", map.entry_points],
       ["Map hotspots", map.hotspots],
       ["Map cycles", map.cycles],
+      ["Evidence sources", evidence.sources],
       ["Evidence files", evidence.files],
       ["Runtime evidence edges", evidence.runtime_edges],
       ["Normalized fact provenance", evidence.fact_artifacts],
@@ -2175,6 +2176,24 @@
     return { value: metricValue, note: note, partial: partial };
   }
 
+  function additiveMetricPresentation(value, exactExtra) {
+    const extra = Math.max(0, finiteNumber(exactExtra) || 0);
+    const observed = observedCount(value) + extra;
+    const total = value.total === null ? null : value.total + extra;
+    const totalUnknown = value.totalUnknown;
+    const metricValue = total !== null
+      ? displayNumber(total)
+      : totalUnknown
+        ? observed > 0 ? "≥" + displayNumber(observed) : "?"
+        : displayNumber(observed);
+    return {
+      value: metricValue,
+      count: total === null ? observed : total,
+      partial: value.truncated || totalUnknown,
+      knownZero: total !== null ? total === 0 : !totalUnknown && observed === 0,
+    };
+  }
+
   function applyMetric(name, value) {
     const presentation = metricPresentation(value);
     elements.metric[name].value.textContent = presentation.value;
@@ -2529,7 +2548,10 @@
     const semantic = record(state.model.semantic);
     const semanticSource = isRecord(semantic.source) ? record(semantic.source) : null;
     const documentGraph = state.model.documentGraph;
-    const sourceCount = sources.length + (semanticSource ? 1 : 0) + (documentGraph ? 1 : 0);
+    const sourceMetric = additiveMetricPresentation(
+      state.model.evidenceSources,
+      (semanticSource ? 1 : 0) + (documentGraph ? 1 : 0)
+    );
     const matchedPaths = new Set();
     state.model.evidenceFiles.items.map(record).forEach(function (file) {
       const path = text(file.path, "");
@@ -2558,12 +2580,24 @@
       }
     });
     const matchedFiles = matchedPaths.size;
+    const matchedFilesPartial = [
+      state.model.evidenceFiles,
+      state.model.semanticEdges,
+      state.model.factRelationships,
+    ].some(function (value) { return value.truncated || value.totalUnknown; });
+    const matchedFilesValue = matchedFilesPartial
+      ? matchedFiles > 0 ? "≥" + displayNumber(matchedFiles) : "?"
+      : displayNumber(matchedFiles);
     const documentReview = documentGraph && text(documentGraph.status, "needs_review") === "needs_review";
-    elements.evidenceSummary.textContent = sourceCount === 0
+    elements.evidenceSummary.textContent = sourceMetric.knownZero
       ? "No external evidence sources loaded; the static graph remains available."
-      : sourceCount + " source" + (sourceCount === 1 ? "" : "s") + " · " + matchedFiles + " matched trace file" + (matchedFiles === 1 ? "" : "s") + ((record(state.model.evidence).partial === true || semantic.partial === true || documentReview) ? " · partial" : "");
-    if (sourceCount === 0) {
+      : sourceMetric.value + " source" + (sourceMetric.count === 1 ? "" : "s") + " · " + matchedFilesValue + " matched trace file" + (matchedFiles === 1 ? "" : "s") + ((record(state.model.evidence).partial === true || semantic.partial === true || documentReview || sourceMetric.partial || matchedFilesPartial) ? " · partial" : "");
+    if (sourceMetric.knownZero) {
       elements.evidenceSourceList.appendChild(createElement("p", "evidence-source-list__empty", "Use mastermind enrich --scip index.scip, enrich --facts facts.json, or external evidence flags to add corroborating facts."));
+      return;
+    }
+    if (sourceMetric.count === 0) {
+      elements.evidenceSourceList.appendChild(createElement("p", "evidence-source-list__empty", "No evidence source record was returned, but the source inventory is partial."));
       return;
     }
     if (documentGraph) {
@@ -2607,8 +2641,15 @@
       card.appendChild(createElement("span", "evidence-source__label", text(source.label, "Unnamed source")));
       const returned = finiteNumber(source.facts_returned);
       const total = finiteNumber(source.facts_total);
-      const facts = displayNumber(returned) + " facts" + (total === null ? "" : " / " + displayNumber(total)) + " · " + displayNumber(finiteNumber(source.files_matched)) + " files";
-      card.appendChild(createElement("span", "evidence-source__facts", facts));
+      const returnedFacts = returned === null ? 0 : returned;
+      const facts = total === null
+        ? (returnedFacts > 0 ? "≥" + displayNumber(returnedFacts) + " facts observed" : "? facts") + " / total unknown"
+        : total === returnedFacts
+          ? displayNumber(total) + " facts"
+          : displayNumber(returnedFacts) + " facts returned / " + displayNumber(total) + " total";
+      const matched = displayNumber(finiteNumber(source.files_matched))
+        + (total === null ? " matched files observed" : " matched files");
+      card.appendChild(createElement("span", "evidence-source__facts", facts + " · " + matched));
       if (text(source.kind, "") === "facts") {
         const artifactCount = factArtifacts.filter(function (artifact) {
           return text(artifact.source_id, "") === text(source.id, "");
@@ -4542,12 +4583,15 @@
   function snapshotAnnouncement() {
     const model = state.model;
     const semanticSourceCount = isRecord(record(model.semantic).source) ? 1 : 0;
-    const evidenceSourceCount = returnedCount(model.evidenceSources) + semanticSourceCount + (model.documentGraph ? 1 : 0);
+    const evidenceSourceMetric = additiveMetricPresentation(
+      model.evidenceSources,
+      semanticSourceCount + (model.documentGraph ? 1 : 0)
+    );
     return "Lens snapshot loaded. "
-      + totalOrReturned(model.changedSymbols) + " changed symbols, "
-      + totalOrReturned(model.impactedSymbols) + " impacted symbols, and "
-      + totalOrReturned(model.tests) + " candidate tests. "
-      + evidenceSourceCount + " evidence sources were evaluated. "
+      + metricPresentation(model.changedSymbols).value + " changed symbols, "
+      + metricPresentation(model.impactedSymbols).value + " impacted symbols, and "
+      + metricPresentation(model.tests).value + " candidate tests. "
+      + evidenceSourceMetric.value + " evidence sources were evaluated. "
       + (model.documentGraph && text(model.documentGraph.status, "needs_review") === "needs_review"
         ? "Document evidence needs review."
         : (model.truncations.length > 0 ? "The result is partial." : "No truncation was reported."));

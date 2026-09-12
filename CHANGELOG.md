@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Default text output from `mmcg impact` now identifies the working-copy scope,
+  starts with exact per-section coverage and every partial reason, and preserves
+  changed files, affected components, API crossings, test evidence, and evidence
+  disciplines instead of presenting an incomplete result summary.
 - Review-package analysis states now preserve explicit reasons such as
   `lens_payload_limit` for named truncation flags and deduplicate an equivalent
   generic truncation entry.

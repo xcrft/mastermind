@@ -379,6 +379,25 @@ fn map_section_coverage<T>(name: &str, section: &queries::MapSection<T>) -> Stri
     line
 }
 
+fn impact_section_coverage<T>(name: &str, section: &queries::Collection<T>) -> String {
+    let incomplete = section.truncated || section.total.is_none();
+    let mut line = format!(
+        "  {name}: {}",
+        map_count_label(section.total, section.returned)
+    );
+    if incomplete {
+        line.push_str(&format!(
+            " (partial: {})",
+            section
+                .truncation_reason
+                .as_deref()
+                .unwrap_or("incomplete_count")
+        ));
+    }
+    line.push('\n');
+    line
+}
+
 fn render_map_text(map: &queries::ProjectMapResponse) -> String {
     let displayed_files = map.files.total.map_or_else(
         || format!("at least {}", map.files.returned),
@@ -641,10 +660,55 @@ pub fn render_change_impact(
         crate::ImpactFormat::Text => {}
     }
     let mut output = format!(
-        "mastermind impact — {}..{}\n\nChanged symbols\n",
+        "mastermind impact — {}..working copy\nBaseline: {}\nHEAD: {}\nScope: {}\nIncludes worktree: {} · untracked: {}\n\nCoverage: {}\n",
         safe_text(&response.baseline.requested_ref),
-        safe_text(&response.baseline.head_oid)
+        safe_text(&response.baseline.baseline_oid),
+        safe_text(&response.baseline.head_oid),
+        safe_text(&response.scope.repository_relative_root),
+        response.baseline.includes_worktree,
+        response.baseline.includes_untracked,
+        if response.is_partial() {
+            "partial"
+        } else {
+            "complete"
+        }
     );
+    output.push_str(&impact_section_coverage(
+        "changed files",
+        &response.changes.files,
+    ));
+    output.push_str(&impact_section_coverage(
+        "changed symbols",
+        &response.changes.symbols,
+    ));
+    output.push_str(&impact_section_coverage(
+        "affected components",
+        &response.affected_components,
+    ));
+    output.push_str(&impact_section_coverage(
+        "impacted callers",
+        &response.impact,
+    ));
+    output.push_str(&impact_section_coverage(
+        "API crossings",
+        &response.api_crossings,
+    ));
+    output.push_str(&impact_section_coverage("candidate tests", &response.tests));
+    if response.is_partial() {
+        output.push_str(&format!(
+            "  reasons: {}\n",
+            safe_text(&response.truncation_reasons().join(", "))
+        ));
+    }
+    output.push_str("\nChanged files\n");
+    for file in &response.changes.files.items {
+        output.push_str(&format!(
+            "  {} ({})\n",
+            safe_text(&file.path),
+            safe_text(&file.status)
+        ));
+    }
+    output.push_str("\nChanged symbols\n");
     for symbol in &response.changes.symbols.items {
         output.push_str(&format!(
             "  {} {} — {}:{} ({})\n",
@@ -655,26 +719,111 @@ pub fn render_change_impact(
             safe_text(&symbol.change)
         ));
     }
+    output.push_str("\nAffected components\n");
+    for component in &response.affected_components.items {
+        output.push_str(&format!(
+            "  {} — {} changed, {} impacted, {} candidate tests\n",
+            safe_text(&component.component),
+            component.changed_symbols,
+            component.impacted_symbols,
+            component.candidate_tests
+        ));
+    }
     output.push_str("\nImpacted callers\n");
     for impact in &response.impact.items {
         output.push_str(&format!(
-            "  {} — {}:{} (depth {}, {} seeds)\n",
+            "  {} {} — {}:{} (depth {}, {} seeds, {} name collisions)\n",
+            safe_text(&impact.symbol.kind),
             safe_text(&impact.symbol.name),
             safe_text(&impact.symbol.file),
             impact.symbol.line,
             impact.minimum_depth,
-            impact.seeds.len()
+            impact.seeds.len(),
+            impact.name_collision_count
+        ));
+        if !impact.edge_precision.is_empty() {
+            output.push_str(&format!(
+                "    edge precision: {}\n",
+                safe_text(&impact.edge_precision.join(", "))
+            ));
+        }
+    }
+    output.push_str("\nAPI crossings\n");
+    for crossing in &response.api_crossings.items {
+        output.push_str(&format!(
+            "  {} :: {} {} — {}:{} ({}) -> {} :: {} {} — {}:{} (depth {})\n",
+            safe_text(&crossing.changed_component),
+            safe_text(&crossing.seed.kind),
+            safe_text(&crossing.seed.name),
+            safe_text(&crossing.seed.file),
+            crossing.seed.line,
+            safe_text(&crossing.seed.change),
+            safe_text(&crossing.impacted_component),
+            safe_text(&crossing.impacted.kind),
+            safe_text(&crossing.impacted.name),
+            safe_text(&crossing.impacted.file),
+            crossing.impacted.line,
+            crossing.minimum_depth
         ));
     }
     output.push_str("\nCandidate tests\n");
     for test in &response.tests.items {
+        let minimum_depth = test
+            .minimum_depth
+            .map_or_else(|| "unknown".to_string(), |depth| depth.to_string());
         output.push_str(&format!(
-            "  {} — {}:{} ({}, {})\n",
+            "  {} {} — {}:{} ({}, {}, depth {})\n",
+            safe_text(&test.symbol.kind),
             safe_text(&test.symbol.name),
             safe_text(&test.symbol.file),
             test.symbol.line,
             safe_text(&test.classification),
-            safe_text(&test.confidence)
+            safe_text(&test.confidence),
+            minimum_depth
+        ));
+        for evidence in &test.evidence {
+            output.push_str(&format!("    evidence: {}", safe_text(&evidence.kind)));
+            if let Some(seed) = &evidence.seed {
+                output.push_str(&format!(
+                    " — {} {} at {}:{} ({})",
+                    safe_text(&seed.kind),
+                    safe_text(&seed.name),
+                    safe_text(&seed.file),
+                    seed.line,
+                    safe_text(&seed.change)
+                ));
+            }
+            if let Some(component) = &evidence.component {
+                output.push_str(&format!(" — component {}", safe_text(component)));
+            }
+            output.push('\n');
+        }
+    }
+    output.push_str("\nEvidence disciplines\n");
+    for discipline in &response.disciplines.detected {
+        let file_label = if discipline.file_count == 1 {
+            "file"
+        } else {
+            "files"
+        };
+        output.push_str(&format!(
+            "  {} — {} ({} {})\n",
+            safe_text(&discipline.name),
+            safe_text(&discipline.basis),
+            discipline.file_count,
+            file_label
+        ));
+        for file in &discipline.files {
+            output.push_str(&format!("    {}\n", safe_text(file)));
+        }
+    }
+    for file in &response.disciplines.unclassified {
+        output.push_str(&format!("  unclassified — {}\n", safe_text(file)));
+    }
+    if !response.disciplines.note.is_empty() {
+        output.push_str(&format!(
+            "  note — {}\n",
+            safe_text(&response.disciplines.note)
         ));
     }
     output.push_str("\nPrecision notes\n");
@@ -962,6 +1111,17 @@ fn execute(store: &Store, q: QueryCmd) -> Result<Value, Box<dyn std::error::Erro
 mod map_tests {
     use super::*;
 
+    fn complete_impact_collection<T>(items: Vec<T>) -> queries::Collection<T> {
+        let count = u32::try_from(items.len()).unwrap();
+        queries::Collection {
+            total: Some(count),
+            returned: count,
+            truncated: false,
+            truncation_reason: None,
+            items,
+        }
+    }
+
     #[test]
     fn query_open_never_creates_a_missing_index() {
         let directory = tempfile::tempdir().unwrap();
@@ -1008,6 +1168,161 @@ mod map_tests {
         assert!(!label.contains("%%"));
         assert!(!label.contains('['));
         assert!(!label.contains('"'));
+    }
+
+    #[test]
+    fn impact_text_coverage_distinguishes_exact_bounded_and_unknown_counts() {
+        let exact = queries::Collection {
+            total: Some(2),
+            returned: 2,
+            truncated: false,
+            truncation_reason: None,
+            items: vec![(), ()],
+        };
+        assert_eq!(
+            impact_section_coverage("candidate tests", &exact),
+            "  candidate tests: 2/2\n"
+        );
+
+        let bounded = queries::Collection {
+            total: Some(3),
+            returned: 2,
+            truncated: true,
+            truncation_reason: Some("top_limit".into()),
+            items: vec![(), ()],
+        };
+        assert_eq!(
+            impact_section_coverage("impacted callers", &bounded),
+            "  impacted callers: 2/3 (partial: top_limit)\n"
+        );
+
+        let unknown = queries::Collection::<()> {
+            total: None,
+            returned: 0,
+            truncated: false,
+            truncation_reason: None,
+            items: Vec::new(),
+        };
+        assert_eq!(
+            impact_section_coverage("changed files", &unknown),
+            "  changed files: 0/unknown (partial: incomplete_count)\n"
+        );
+    }
+
+    #[test]
+    fn impact_text_preserves_file_component_crossing_test_and_discipline_evidence() {
+        let seed = queries::SeedEvidence {
+            file: "src/core.rs".into(),
+            name: "change\nme".into(),
+            kind: "function".into(),
+            line: 7,
+            change: "body_changed".into(),
+        };
+        let impacted = queries::SymbolEvidence {
+            file: "src/api.rs".into(),
+            name: "caller".into(),
+            kind: "function".into(),
+            line: 19,
+        };
+        let response = queries::ChangeImpactResponse {
+            schema_version: 1,
+            snapshot_token: "snapshot".into(),
+            checked_snapshot: None,
+            worktree_files_truncated: false,
+            skipped_non_utf8_paths: 0,
+            baseline: queries::ImpactBaseline {
+                requested_ref: "main".into(),
+                baseline_oid: "111".into(),
+                head_oid: "222".into(),
+                includes_worktree: true,
+                includes_untracked: true,
+            },
+            scope: queries::ImpactScope {
+                repository_relative_root: ".".into(),
+            },
+            changes: queries::ImpactChanges {
+                files: complete_impact_collection(vec![queries::ChangedFile {
+                    path: "docs/guide\n.md".into(),
+                    status: "modified".into(),
+                }]),
+                symbols: complete_impact_collection(vec![queries::ChangedSymbol {
+                    file: seed.file.clone(),
+                    name: seed.name.clone(),
+                    kind: seed.kind.clone(),
+                    line: seed.line,
+                    change: seed.change.clone(),
+                }]),
+            },
+            affected_components: complete_impact_collection(vec![queries::ComponentImpact {
+                component: "src".into(),
+                changed_symbols: 1,
+                impacted_symbols: 1,
+                candidate_tests: 1,
+            }]),
+            impact: complete_impact_collection(vec![queries::ImpactedSymbol {
+                symbol: impacted.clone(),
+                minimum_depth: 1,
+                seeds: vec![seed.clone()],
+                name_collision_count: 0,
+                edge_precision: vec!["syntax_only".into()],
+            }]),
+            api_crossings: complete_impact_collection(vec![queries::ApiCrossing {
+                seed: seed.clone(),
+                changed_component: "core".into(),
+                impacted: impacted.clone(),
+                impacted_component: "api".into(),
+                minimum_depth: 1,
+            }]),
+            tests: complete_impact_collection(vec![queries::TestCandidate {
+                symbol: queries::SymbolEvidence {
+                    file: "tests/core.rs".into(),
+                    name: "checks_change".into(),
+                    kind: "test".into(),
+                    line: 31,
+                },
+                classification: "direct".into(),
+                minimum_depth: Some(1),
+                confidence: "medium".into(),
+                evidence: vec![queries::TestEvidence {
+                    kind: "graph_seed".into(),
+                    seed: Some(seed),
+                    component: None,
+                }],
+            }]),
+            disciplines: queries::ImpactDisciplines {
+                detected: vec![queries::DisciplineSignal {
+                    name: "documentation".into(),
+                    basis: "path_extension".into(),
+                    file_count: 1,
+                    files: vec!["docs/guide\n.md".into()],
+                }],
+                unclassified: vec!["unknown.file".into()],
+                note: "Review the returned paths.".into(),
+            },
+            limits: queries::ImpactLimits {
+                changed_files: 100,
+                changed_seeds: 200,
+                graph_rows: 5_000,
+                impact: 100,
+                tests: 500,
+                crossings: 500,
+                heuristic_paths: 50_000,
+                max_depth: 3,
+            },
+            precision_notes: vec!["syntax_only".into()],
+        };
+
+        let text = render_change_impact(&response, crate::ImpactFormat::Text).unwrap();
+
+        assert!(text.contains("main..working copy\nBaseline: 111\nHEAD: 222\nScope: ."));
+        assert!(text.contains("docs/guide\\n.md (modified)"));
+        assert!(!text.contains("docs/guide\n.md"));
+        assert!(text.contains("src — 1 changed, 1 impacted, 1 candidate tests"));
+        assert!(text.contains("core :: function change\\nme — src/core.rs:7 (body_changed) -> api"));
+        assert!(text.contains("test checks_change — tests/core.rs:31 (direct, medium, depth 1)"));
+        assert!(text.contains("evidence: graph_seed — function change\\nme at src/core.rs:7"));
+        assert!(text.contains("documentation — path_extension (1 file)"));
+        assert!(text.contains("unclassified — unknown.file"));
     }
 
     #[test]

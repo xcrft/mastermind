@@ -6398,11 +6398,11 @@ mod tests {
         let store = Store::open(&path).unwrap();
         for index in 0..=MAP_ENTRY_LIMIT {
             store
-                .upsert_file(&format!("src/app{index:02}/main.rs"), 1, 1)
+                .upsert_file(&format!("src/app/n{index:02}/main.rs"), 1, 1)
                 .unwrap();
         }
 
-        let map = project_map(&store, "src", 2, (MAP_ENTRY_LIMIT + 1).try_into().unwrap()).unwrap();
+        let map = project_map(&store, "src", 1, (MAP_ENTRY_LIMIT + 1).try_into().unwrap()).unwrap();
         assert!(map.is_partial());
         assert_eq!(map.truncation_reasons(), vec!["entry_point_limit"]);
         let value = serde_json::to_value(map).unwrap();
@@ -7243,14 +7243,6 @@ mod tests {
         assert_eq!(bounded.count, 2);
         assert_eq!(bounded.row_limit, Some(2));
         assert!(bounded.truncated);
-        assert!(bounded
-            .symbols
-            .iter()
-            .all(|symbol| symbol.precision.is_some()));
-        assert!(bounded
-            .precision_notes
-            .iter()
-            .any(|note| note.contains("not_definition_resolved")));
         assert_eq!(
             bounded
                 .symbols
@@ -7293,6 +7285,14 @@ mod tests {
         assert_eq!(bounded.count, 2);
         assert_eq!(bounded.row_limit, Some(2));
         assert!(bounded.truncated);
+        assert!(bounded
+            .symbols
+            .iter()
+            .all(|symbol| symbol.precision.is_some()));
+        assert!(bounded
+            .precision_notes
+            .iter()
+            .any(|note| note.contains("not_definition_resolved")));
         assert_eq!(
             bounded
                 .symbols

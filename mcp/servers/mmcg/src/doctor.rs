@@ -1283,6 +1283,19 @@ mod tests {
             .unwrap_or_default()
     }
 
+    fn init_git_repository(root: &Path) {
+        let output = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn mcp_handshake_sequence_uses_current_revision() {
         let initialize = doctor_initialize_request();
@@ -1390,6 +1403,7 @@ mod tests {
     fn index_freshness_reports_concept_and_history_drift() {
         let root = tmp().canonicalize().unwrap();
         fs::create_dir_all(root.join(".mastermind")).unwrap();
+        init_git_repository(&root);
         fs::write(root.join("lib.rs"), "pub fn current() {}\n").unwrap();
         fs::write(root.join("CONTEXT.md"), "# Current decision\nInitial.\n").unwrap();
         let db = root.join(".mastermind/mmcg.db");

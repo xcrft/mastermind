@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Git history evidence now distinguishes binary changes and malformed `numstat`
+  records from exact zero-line churn; Lens labels known text totals and exposes
+  per-file line-count completeness instead of presenting missing counts as zero.
 - Automatic CODEOWNERS discovery is now bounded, exact-case, no-follow, and
   fail-closed across Lens, temporal ownership, and review export; unreadable or
   invalid priority locations can no longer look like an absent ownership file.

@@ -364,6 +364,23 @@
     return Math.round((hit / found) * 100) + "% reported lines covered (" + hit + "/" + found + ")";
   }
 
+  function churnLabel(churn) {
+    const value = record(churn);
+    const commits = finiteNumber(value.commits);
+    const linesAdded = finiteNumber(value.lines_added);
+    const linesDeleted = finiteNumber(value.lines_deleted);
+    const prefix = displayNumber(commits) + " commits · +" + displayNumber(linesAdded)
+      + " / −" + displayNumber(linesDeleted);
+    if (value.line_counts_complete === true) {
+      return prefix + " lines in the configured history window";
+    }
+    const binaryChanges = finiteNumber(value.binary_changes);
+    const limitation = binaryChanges !== null && binaryChanges > 0
+      ? displayNumber(binaryChanges) + " binary change" + (binaryChanges === 1 ? "" : "s") + " without line counts"
+      : "some changes without line counts";
+    return prefix + " known text lines in the configured history window · " + limitation;
+  }
+
   function findingSeverityCounts(evidence) {
     const counts = { error: 0, warning: 0, informational: 0 };
     array(record(evidence).findings).forEach(function (value) {
@@ -4563,7 +4580,7 @@
     if (overlayEnabled("churn") && evidence.churn) {
       appendClaimList(
         "Recent churn · file-level",
-        [displayNumber(finiteNumber(evidence.churn.commits)) + " commits · +" + displayNumber(finiteNumber(evidence.churn.lines_added)) + " / −" + displayNumber(finiteNumber(evidence.churn.lines_deleted)) + " lines in the configured history window"],
+        [churnLabel(evidence.churn)],
         "churn",
         "No churn facts returned."
       );

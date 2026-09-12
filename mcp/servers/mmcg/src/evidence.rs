@@ -235,6 +235,8 @@ pub struct ChurnEvidence {
     pub commits: u32,
     pub lines_added: u64,
     pub lines_deleted: u64,
+    pub binary_changes: u32,
+    pub line_counts_complete: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -327,6 +329,8 @@ struct ChurnAccumulator {
     commits: u32,
     lines_added: u64,
     lines_deleted: u64,
+    binary_changes: u32,
+    line_counts_incomplete: bool,
     contributors: BTreeMap<String, u32>,
     contributors_truncated: bool,
     source_id: Option<String>,
@@ -1882,12 +1886,15 @@ impl Collector<'_> {
             }
         };
         let mut stats = SourceStats::default();
+        let mut binary_line_counts = false;
+        let mut all_line_counts_incomplete = false;
         for record in output
             .split(|byte| *byte == 0x1e)
             .filter(|part| !part.is_empty())
         {
             if self.deadline_reached() {
                 stats.partial = true;
+                all_line_counts_incomplete = true;
                 self.diagnostic(
                     id.clone(),
                     SourceFailure::Deadline.code(),
@@ -1897,6 +1904,8 @@ impl Collector<'_> {
             }
             let Some(header_end) = record.iter().position(|byte| *byte == 0) else {
                 stats.partial = true;
+                stats.invalid_records = true;
+                all_line_counts_incomplete = true;
                 continue;
             };
             let header = &record[..header_end];
@@ -1914,14 +1923,29 @@ impl Collector<'_> {
             {
                 let entry = trim_ascii_whitespace_start(entry);
                 let mut fields = entry.splitn(3, |byte| *byte == b'\t');
-                let Some(added) = fields.next() else { continue };
-                let Some(deleted) = fields.next() else {
+                let Some(added) = fields.next() else {
+                    stats.partial = true;
+                    stats.invalid_records = true;
+                    all_line_counts_incomplete = true;
                     continue;
                 };
-                let Some(path) = fields.next() else { continue };
+                let Some(deleted) = fields.next() else {
+                    stats.partial = true;
+                    stats.invalid_records = true;
+                    all_line_counts_incomplete = true;
+                    continue;
+                };
+                let Some(path) = fields.next() else {
+                    stats.partial = true;
+                    stats.invalid_records = true;
+                    all_line_counts_incomplete = true;
+                    continue;
+                };
                 stats.facts_total += 1;
                 let Some(path) = std::str::from_utf8(path).ok() else {
                     stats.partial = true;
+                    stats.invalid_records = true;
+                    all_line_counts_incomplete = true;
                     continue;
                 };
                 let path = path.replace('\\', "/");
@@ -1930,14 +1954,36 @@ impl Collector<'_> {
                 }
                 let accumulator = self.files.entry(path.clone()).or_default();
                 accumulator.churn.source_id = Some(id.clone());
-                accumulator.churn.lines_added = accumulator
-                    .churn
-                    .lines_added
-                    .saturating_add(parse_numstat(added));
-                accumulator.churn.lines_deleted = accumulator
-                    .churn
-                    .lines_deleted
-                    .saturating_add(parse_numstat(deleted));
+                match parse_numstat(added, deleted) {
+                    NumstatLineCounts::Text {
+                        lines_added,
+                        lines_deleted,
+                    } => {
+                        let next_added = accumulator.churn.lines_added.checked_add(lines_added);
+                        let next_deleted =
+                            accumulator.churn.lines_deleted.checked_add(lines_deleted);
+                        if let (Some(next_added), Some(next_deleted)) = (next_added, next_deleted) {
+                            accumulator.churn.lines_added = next_added;
+                            accumulator.churn.lines_deleted = next_deleted;
+                        } else {
+                            accumulator.churn.line_counts_incomplete = true;
+                            stats.partial = true;
+                            stats.invalid_records = true;
+                        }
+                    }
+                    NumstatLineCounts::Binary => {
+                        accumulator.churn.binary_changes =
+                            accumulator.churn.binary_changes.saturating_add(1);
+                        accumulator.churn.line_counts_incomplete = true;
+                        binary_line_counts = true;
+                        stats.partial = true;
+                    }
+                    NumstatLineCounts::Invalid => {
+                        accumulator.churn.line_counts_incomplete = true;
+                        stats.partial = true;
+                        stats.invalid_records = true;
+                    }
+                }
                 if commit_paths.insert(path.clone()) {
                     accumulator.churn.commits = accumulator.churn.commits.saturating_add(1);
                     if let Some(existing) = accumulator.churn.contributors.get_mut(&author) {
@@ -1953,6 +1999,13 @@ impl Collector<'_> {
                 stats.files.insert(path);
             }
         }
+        if all_line_counts_incomplete {
+            for accumulator in self.files.values_mut() {
+                if accumulator.churn.source_id.as_deref() == Some(id.as_str()) {
+                    accumulator.churn.line_counts_incomplete = true;
+                }
+            }
+        }
         if stats.partial
             && self
                 .files
@@ -1962,7 +2015,21 @@ impl Collector<'_> {
             self.diagnostic(
                 id.clone(),
                 "git_contributor_limit",
-                "Contributor details are limited to five names per trace file; churn counts remain complete.",
+                "Contributor details are limited to five names per trace file; commit counts and available line counts are unaffected.",
+            );
+        }
+        if binary_line_counts {
+            self.diagnostic(
+                id.clone(),
+                "git_binary_line_counts_unavailable",
+                "Git does not provide added/deleted line counts for binary changes; per-file churn reports known text lines and the number of binary changes separately.",
+            );
+        }
+        if stats.invalid_records {
+            self.diagnostic(
+                id.clone(),
+                "invalid_git_history_record",
+                "Some Git history records or line counts were invalid and were omitted from exact churn totals.",
             );
         }
         self.source_done(id, "git_history", label, stats);
@@ -2033,6 +2100,8 @@ impl Collector<'_> {
                     commits: accumulator.churn.commits,
                     lines_added: accumulator.churn.lines_added,
                     lines_deleted: accumulator.churn.lines_deleted,
+                    binary_changes: accumulator.churn.binary_changes,
+                    line_counts_complete: !accumulator.churn.line_counts_incomplete,
                 });
                 let test_results = (accumulator.tests.total > 0).then(|| TestResultsEvidence {
                     source_ids: accumulator.tests.source_ids.into_iter().collect(),
@@ -2901,11 +2970,36 @@ fn trim_ascii_whitespace_start(mut value: &[u8]) -> &[u8] {
     value
 }
 
-fn parse_numstat(value: &[u8]) -> u64 {
-    std::str::from_utf8(value)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NumstatLineCounts {
+    Text {
+        lines_added: u64,
+        lines_deleted: u64,
+    },
+    Binary,
+    Invalid,
+}
+
+fn parse_numstat(added: &[u8], deleted: &[u8]) -> NumstatLineCounts {
+    if added == b"-" && deleted == b"-" {
+        return NumstatLineCounts::Binary;
+    }
+    let Some(lines_added) = std::str::from_utf8(added)
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(0)
+    else {
+        return NumstatLineCounts::Invalid;
+    };
+    let Some(lines_deleted) = std::str::from_utf8(deleted)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return NumstatLineCounts::Invalid;
+    };
+    NumstatLineCounts::Text {
+        lines_added,
+        lines_deleted,
+    }
 }
 
 fn sanitize_identity(value: &str) -> String {
@@ -3383,6 +3477,8 @@ mod tests {
         let churn = file.churn.as_ref().unwrap();
         assert_eq!(churn.commits, 2);
         assert_eq!(churn.lines_added, 3);
+        assert_eq!(churn.binary_changes, 0);
+        assert!(churn.line_counts_complete);
         let contributors = &file.ownership.as_ref().unwrap().contributors;
         assert_eq!(contributors.len(), 2);
         assert!(contributors.iter().any(|item| item.name == "First Author"));
@@ -3391,6 +3487,56 @@ mod tests {
         let json = serde_json::to_string(&snapshot).unwrap();
         assert!(!json.contains("example.test"));
         assert!(!json.contains("src/other.rs"));
+    }
+
+    #[test]
+    fn git_history_exposes_binary_changes_without_claiming_zero_line_churn() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("assets")).unwrap();
+        fs::write(root.path().join("assets/logo.bin"), [0, 1, 2]).unwrap();
+        git(root.path(), &["init", "-q"]);
+        git(root.path(), &["config", "user.email", "one@example.test"]);
+        git(root.path(), &["config", "user.name", "Binary Author"]);
+        git(root.path(), &["add", "assets/logo.bin"]);
+        git(root.path(), &["commit", "-qm", "first binary"]);
+        fs::write(root.path().join("assets/logo.bin"), [0, 1, 2, 3]).unwrap();
+        git(root.path(), &["add", "assets/logo.bin"]);
+        git(root.path(), &["commit", "-qm", "second binary"]);
+
+        let mut collector = collector(root.path(), &["assets/logo.bin"]);
+        let head_oid = crate::diff::current_head_oid(root.path()).unwrap();
+        collector.load_git_history(10, "git-history".into(), &head_oid);
+        let snapshot = collector.finish(10);
+
+        assert!(snapshot.partial);
+        assert_eq!(snapshot.sources.items[0].status, "partial");
+        assert!(snapshot.diagnostics.items.iter().any(|item| {
+            item.code == "git_binary_line_counts_unavailable" && item.source_id == "git-history"
+        }));
+        let churn = snapshot.files.items[0].churn.as_ref().unwrap();
+        assert_eq!(churn.commits, 2);
+        assert_eq!(churn.lines_added, 0);
+        assert_eq!(churn.lines_deleted, 0);
+        assert_eq!(churn.binary_changes, 2);
+        assert!(!churn.line_counts_complete);
+    }
+
+    #[test]
+    fn numstat_parser_distinguishes_text_binary_and_invalid_counts() {
+        assert_eq!(
+            parse_numstat(b"12", b"3"),
+            NumstatLineCounts::Text {
+                lines_added: 12,
+                lines_deleted: 3,
+            }
+        );
+        assert_eq!(parse_numstat(b"-", b"-"), NumstatLineCounts::Binary);
+        assert_eq!(parse_numstat(b"-", b"0"), NumstatLineCounts::Invalid);
+        assert_eq!(parse_numstat(b"x", b"0"), NumstatLineCounts::Invalid);
+        assert_eq!(
+            parse_numstat(b"18446744073709551616", b"0"),
+            NumstatLineCounts::Invalid
+        );
     }
 
     #[test]

@@ -1948,12 +1948,13 @@ fn schema_api_surface() -> Value {
 fn schema_symbols_changed_since() -> Value {
     json!({
         "name": "mmcg_symbols_changed_since",
-        "description": "Symbol-level diff between a git ref and the current index. Returns {added, removed, signature_changed} symbol sets across the files in `git diff --name-only <ref>..HEAD`. Re-parses old blobs from `git show <ref>:<path>` with the same extractor used at index time. Different from `mmcg_recent_changes` (which uses watcher mtime) — this is git-ref-based and answers 'what symbols did THIS PR/branch touch?'. Use cases: PR-review pre-flight, auditor verifying executor's claimed-files vs reality, 'what new public API appeared in v2.3?'.",
+        "description": "Symbol-level diff between a git ref and the current index. Returns bounded flat arrays for files, added/removed/signature-changed symbols, and errors, plus per-collection coverage. Re-parses old blobs from `git show <ref>:<path>` with the same extractor used at index time. When the 10,000-file source scope is truncated, complete totals are null. Different from `mmcg_recent_changes` (watcher mtime): this answers which declarations the Git range touched.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "git_ref": { "type": "string", "description": "Git ref to diff against (tag, branch, commit, HEAD~3, main, etc.). Must resolve via `git rev-parse`." },
-                "root": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Project root — symbol paths are relative to this. Defaults to the index's working directory." }
+                "root": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Project root — symbol paths are relative to this. Defaults to the index's working directory." },
+                "top": { "type": "integer", "minimum": 1, "maximum": queries::SYMBOL_DIFF_MAX_TOP, "default": queries::SYMBOL_DIFF_DEFAULT_TOP, "description": "Maximum items returned in each diff collection" }
             },
             "required": ["git_ref"]
         }
@@ -2534,6 +2535,13 @@ fn changed_since_root(
 
 fn handle_symbols_changed_since(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let git_ref = str_arg(args, "git_ref")?;
+    let top = bounded_u64_arg(
+        args,
+        "top",
+        u64::from(queries::SYMBOL_DIFF_DEFAULT_TOP),
+        1,
+        u64::from(queries::SYMBOL_DIFF_MAX_TOP),
+    )? as u32;
     let root = changed_since_root(store, opt_str_arg(args, "root")?)?;
     ensure_fresh_index(store)?;
     let interrupted = || store.work_interrupted();
@@ -2559,7 +2567,8 @@ fn handle_symbols_changed_since(store: &mut Store, args: &Value) -> Result<Value
         }
         error => HandlerError::internal("git_diff", error),
     })?;
-    serde_json::to_value(diff).map_err(|error| HandlerError::internal("serialize_response", error))
+    serde_json::to_value(queries::bounded_symbol_diff_response(diff, top))
+        .map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
 fn handle_dependency_cycles(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
@@ -4318,6 +4327,11 @@ mod tests {
             (
                 handle_dependency_cycles,
                 json!({ "top": 201 }),
+                "Invalid argument: top",
+            ),
+            (
+                handle_symbols_changed_since,
+                json!({ "git_ref": "HEAD", "top": 501 }),
                 "Invalid argument: top",
             ),
             (

@@ -6395,10 +6395,11 @@ mod tests {
                 .unwrap();
         }
 
-        let map = project_map(&store, "src", 2, 20).unwrap();
+        let map = project_map(&store, "src", 2, MAP_ENTRY_LIMIT + 1).unwrap();
         assert!(map.is_partial());
         assert_eq!(map.truncation_reasons(), vec!["entry_point_limit"]);
         let value = serde_json::to_value(map).unwrap();
+        assert_eq!(value["components"]["truncated"], false);
         assert_eq!(value["entry_points"]["total"], (MAP_ENTRY_LIMIT + 1) as u32);
         assert_eq!(value["entry_points"]["returned"], MAP_ENTRY_LIMIT as u32);
         assert_eq!(value["entry_points"]["truncated"], true);

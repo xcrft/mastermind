@@ -959,7 +959,8 @@ The package contains:
   [GitHub Actions example](../examples/mastermind-review-pr.yml) for artifact
   and SARIF upload.
 
-Dynamic repository names remain escaped as Markdown text. Dynamic refs, scopes,
+Dynamic repository names escape every ASCII punctuation mark as Markdown text.
+Dynamic refs, scopes,
 packet paths, corpus roots, changed paths, and diagnostic paths use code-span
 delimiters longer than any backtick run in their content, so an admitted name
 cannot alter the reviewer summary structure.

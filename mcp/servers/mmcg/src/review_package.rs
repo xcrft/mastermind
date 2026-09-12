@@ -1575,7 +1575,7 @@ fn markdown_text(value: &str) -> String {
     let value = normalized_markdown_text(value);
     let mut output = String::new();
     for character in value.chars() {
-        if matches!(character, '`' | '*' | '_' | '[' | ']' | '<' | '>') {
+        if character.is_ascii_punctuation() {
             output.push('\\');
         }
         output.push(character);
@@ -1638,6 +1638,8 @@ mod tests {
         assert_eq!(markdown_code("`edge`"), "`` `edge` ``");
         assert_eq!(markdown_code("feature\nname"), "`feature name`");
         assert_eq!(markdown_text("repo_[x]"), "repo\\_\\[x\\]");
+        assert_eq!(markdown_text(r"repo\*name*"), r"repo\\\*name\*");
+        assert_eq!(markdown_text("repo.name"), r"repo\.name");
     }
 
     fn git(root: &Path, args: &[&str]) -> String {

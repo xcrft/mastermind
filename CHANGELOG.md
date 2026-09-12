@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- `mmcg_api_surface` now carries per-symbol graph precision and explicit
+  name-resolution caveats, so same-named definitions are not presented as
+  compiler-resolved module boundaries.
 - `mastermind doctor` now uses the same bounded index-health scan as workflow
   status, including concept-contract and live durable-history drift. Its database
   snapshot open is deadline-bound, and stale source counts no longer expose raw

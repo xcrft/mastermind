@@ -4214,6 +4214,7 @@ pub struct ApiSurfaceResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub row_limit: Option<u32>,
     pub symbols: Vec<SymbolHit>,
+    pub precision_notes: Vec<String>,
 }
 
 pub const API_SURFACE_DEFAULT_TOP: u32 = 100;
@@ -4238,8 +4239,13 @@ pub fn api_surface(
             (total, symbols)
         }
     };
-    let syms: Vec<SymbolHit> = symbols.into_iter().map(SymbolHit::from).collect();
+    let syms: Vec<SymbolHit> = symbols.into_iter().map(symbol_hit_with_precision).collect();
     let count = u32::try_from(syms.len()).unwrap_or(u32::MAX);
+    let mut precision_notes = graph_precision_notes();
+    precision_notes
+        .push("external_surface_is_name_and_kind_matched_not_definition_resolved".to_string());
+    precision_notes
+        .push("same_named_definitions_can_be_false_positive_surface_candidates".to_string());
     Ok(ApiSurfaceResponse {
         prefix: prefix.to_string(),
         language: language.map(String::from),
@@ -4248,6 +4254,7 @@ pub fn api_surface(
         truncated: row_limit.is_some() && total > count,
         row_limit,
         symbols: syms,
+        precision_notes,
     })
 }
 
@@ -7194,6 +7201,14 @@ mod tests {
         assert_eq!(bounded.language, None);
         assert_eq!(bounded.row_limit, Some(2));
         assert!(bounded.truncated);
+        assert!(bounded
+            .symbols
+            .iter()
+            .all(|symbol| symbol.precision.is_some()));
+        assert!(bounded
+            .precision_notes
+            .iter()
+            .any(|note| note.contains("not_definition_resolved")));
         assert_eq!(
             bounded
                 .files

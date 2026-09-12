@@ -2033,7 +2033,7 @@ fn schema_unreferenced() -> Value {
 fn schema_api_surface() -> Value {
     json!({
         "name": "mmcg_api_surface",
-        "description": "Symbols defined under `prefix` that have at least one caller from OUTSIDE `prefix`. Empirical 'who-uses-this-module' map — does not require declared visibility. Useful for boundary planning before refactor / extract / rename.",
+        "description": "Symbols defined under `prefix` that have at least one syntactic name-and-kind reference candidate from OUTSIDE `prefix`. Empirical 'who-uses-this-module' map — does not require declared visibility or prove compiler-resolved identity. Inspect per-symbol precision and response precision_notes before boundary decisions.",
         "inputSchema": {
             "type": "object",
             "properties": {

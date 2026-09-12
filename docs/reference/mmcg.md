@@ -928,7 +928,9 @@ establish semantic correctness.
 Endpoint-only v1 packets expose `corpus: not_tracked` in Lens's document
 summary, evidence card, notice stack, precision ledger, and accessible snapshot
 announcement. A current endpoint check therefore cannot hide that new or
-unlisted documents remain outside the packet's freshness scope.
+unlisted documents remain outside the packet's freshness scope. The accessible
+announcement lists this boundary alongside temporal unavailability and other
+partial evidence when several conditions apply to the same snapshot.
 
 ### PR evidence package (`mmcg review export`)
 

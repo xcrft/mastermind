@@ -683,25 +683,48 @@ pub struct TaskSearchResponse {
     /// Exact matches in the currently indexed task-spec corpus.
     pub indexed_total: u32,
     pub count: u32,
+    pub result_truncated: bool,
     pub truncated: bool,
     pub row_limit: u32,
     pub results: Vec<TaskSpecHit>,
+    /// Existing history artifacts omitted by admission checks.
+    pub skipped_artifacts: u32,
+    /// True when a history-corpus work limit may have omitted task specs.
+    pub corpus_truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation_reason: Option<&'static str>,
+    pub freshness: &'static str,
+    pub inference: &'static str,
+    pub source_of_truth: &'static str,
 }
 
 pub fn tasks(store: &Store, query: &str, top: u32) -> rusqlite::Result<TaskSearchResponse> {
-    store.begin_read_snapshot()?;
-    let snapshot = store.search_task_specs_bounded(query, top);
-    let end_result = store.end_read_snapshot();
-    let (indexed_total, results) = snapshot?;
-    end_result?;
-    let count = results.len() as u32;
+    let history = history(store, query, Some("task_spec"), top)?;
+    let results = history
+        .observed
+        .into_iter()
+        .map(|hit| TaskSpecHit {
+            path: hit.path,
+            title: hit.title,
+            excerpt: hit.excerpt,
+            score: hit.score,
+        })
+        .collect();
     Ok(TaskSearchResponse {
         query: query.to_string(),
-        indexed_total,
-        count,
-        truncated: count < indexed_total,
-        row_limit: top,
+        indexed_total: history.indexed_total,
+        count: history.count,
+        result_truncated: history.result_truncated,
+        truncated: history.truncated,
+        row_limit: history.row_limit,
         results,
+        skipped_artifacts: history.skipped_artifacts,
+        corpus_truncated: history.corpus_truncated,
+        truncation_reason: history.truncation_reason,
+        freshness: history.freshness,
+        inference:
+            "none; a matching task spec does not prove current behavior or an accepted decision",
+        source_of_truth: history.source_of_truth,
     })
 }
 
@@ -5336,30 +5359,16 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("mmcg.db")).unwrap();
         store
-            .replace_task_specs(&[
-                crate::store::TaskSpecEntry {
-                    path: ".mastermind/tasks/001-a/spec.md".into(),
-                    title: "First shared decision".into(),
-                    body: "Shared boundary".into(),
-                },
-                crate::store::TaskSpecEntry {
-                    path: ".mastermind/tasks/002-b/spec.md".into(),
-                    title: "Second shared decision".into(),
-                    body: "Shared runtime".into(),
-                },
-            ])
-            .unwrap();
-        store
             .replace_project_history(&[
                 crate::store::ProjectHistoryEntry {
-                    path: "CONTEXT.md".into(),
-                    kind: "context".into(),
+                    path: ".mastermind/tasks/001-a/spec.md".into(),
+                    kind: "task_spec".into(),
                     title: "First shared decision".into(),
                     body: "Shared boundary".into(),
                 },
                 crate::store::ProjectHistoryEntry {
-                    path: ".mastermind/tasks/_lessons.md".into(),
-                    kind: "lesson".into(),
+                    path: ".mastermind/tasks/002-b/spec.md".into(),
+                    kind: "task_spec".into(),
                     title: "Second shared decision".into(),
                     body: "Shared runtime".into(),
                 },
@@ -5369,8 +5378,12 @@ mod tests {
         let task_page = tasks(&store, "shared", 1).unwrap();
         assert_eq!(task_page.indexed_total, 2);
         assert_eq!(task_page.count, 1);
+        assert!(task_page.result_truncated);
         assert!(task_page.truncated);
         assert_eq!(task_page.row_limit, 1);
+        assert_eq!(task_page.freshness, "stale");
+        assert_eq!(task_page.skipped_artifacts, 0);
+        assert!(!task_page.corpus_truncated);
 
         let history_page = history(&store, "shared", None, 1).unwrap();
         assert_eq!(history_page.indexed_total, 2);

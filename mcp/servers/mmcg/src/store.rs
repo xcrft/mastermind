@@ -713,7 +713,6 @@ pub struct ProjectHistoryHit {
     pub(crate) matched_terms: Vec<String>,
 }
 
-pub(crate) type CountedTaskSpecHits = (u32, Vec<TaskSpecHit>);
 pub(crate) type CountedProjectHistoryHits = (u32, Vec<ProjectHistoryHit>);
 
 #[derive(Debug, Clone)]
@@ -6974,26 +6973,6 @@ impl Store {
         rows.collect()
     }
 
-    /// Return a bounded result page plus the exact number of FTS matches in
-    /// the currently indexed task-spec corpus.
-    pub(crate) fn search_task_specs_bounded(
-        &self,
-        query: &str,
-        top: u32,
-    ) -> SqlResult<CountedTaskSpecHits> {
-        let trimmed = query.trim();
-        if trimmed.is_empty() {
-            return Ok((0, Vec::new()));
-        }
-        let total = self.conn.query_row(
-            "SELECT COUNT(*) FROM task_specs_fts WHERE task_specs_fts MATCH ?1",
-            params![trimmed],
-            |row| row.get(0),
-        )?;
-        let hits = self.search_task_specs(trimmed, top)?;
-        Ok((total, hits))
-    }
-
     /// Count of task specs currently indexed — for `mastermind status` diagnostics.
     pub fn task_specs_count(&self) -> SqlResult<u32> {
         self.conn
@@ -9030,10 +9009,6 @@ mod tests {
         let stem = store.search_task_specs("invalidate", 10).unwrap();
         assert_eq!(stem.len(), 1);
         assert!(stem[0].path.contains("002-cache-invalidation"));
-
-        let (total, bounded) = store.search_task_specs_bounded("with", 1).unwrap();
-        assert_eq!(total, 2);
-        assert_eq!(bounded.len(), 1);
 
         // Empty / whitespace query → no results, no FTS5 syntax error.
         assert!(store.search_task_specs("", 10).unwrap().is_empty());

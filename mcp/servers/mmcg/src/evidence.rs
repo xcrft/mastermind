@@ -1942,13 +1942,13 @@ impl Collector<'_> {
                     continue;
                 };
                 stats.facts_total += 1;
-                let Some(path) = std::str::from_utf8(path).ok() else {
+                let Some(path) = parse_git_repo_path(path) else {
                     stats.partial = true;
                     stats.invalid_records = true;
                     all_line_counts_incomplete = true;
                     continue;
                 };
-                let path = path.replace('\\', "/");
+                let path = path.to_string();
                 if !self.relevant.contains(&path) {
                     continue;
                 }
@@ -3002,6 +3002,21 @@ fn parse_numstat(added: &[u8], deleted: &[u8]) -> NumstatLineCounts {
     }
 }
 
+fn parse_git_repo_path(value: &[u8]) -> Option<&str> {
+    let path = std::str::from_utf8(value).ok()?;
+    let parsed = Path::new(path);
+    if path.is_empty()
+        || path.contains('\\')
+        || parsed.is_absolute()
+        || parsed
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    Some(path)
+}
+
 fn sanitize_identity(value: &str) -> String {
     truncate_text(
         &value
@@ -3537,6 +3552,15 @@ mod tests {
             parse_numstat(b"18446744073709551616", b"0"),
             NumstatLineCounts::Invalid
         );
+    }
+
+    #[test]
+    fn git_history_paths_reject_aliasing_and_non_canonical_forms() {
+        assert_eq!(parse_git_repo_path(b"src/pay.rs"), Some("src/pay.rs"));
+        assert_eq!(parse_git_repo_path(b"src\\pay.rs"), None);
+        assert_eq!(parse_git_repo_path(b"../src/pay.rs"), None);
+        assert_eq!(parse_git_repo_path(b"/src/pay.rs"), None);
+        assert_eq!(parse_git_repo_path(b"src/\xff.rs"), None);
     }
 
     #[test]

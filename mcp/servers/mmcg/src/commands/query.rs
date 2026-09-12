@@ -722,6 +722,7 @@ fn execute(store: &Store, q: QueryCmd) -> Result<Value, Box<dyn std::error::Erro
             serde_json::to_value(queries::symbols_in_file(store, &file)?)?
         }
         QueryCmd::Outline { file } => serde_json::to_value(queries::outline(store, &file)?)?,
+        QueryCmd::Imports { file } => serde_json::to_value(queries::imports(store, &file, None)?)?,
         QueryCmd::Recent { since } => serde_json::to_value(
             queries::recent_changes(store, &since).map_err(|e| format!("recent_changes: {e}"))?,
         )?,

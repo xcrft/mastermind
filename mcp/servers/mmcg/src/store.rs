@@ -7110,20 +7110,84 @@ impl Store {
 
     /// Imports declared by a file. Returns (name, path, line).
     pub fn imports_of(&self, file_path: &str) -> SqlResult<Vec<(String, Option<String>, u32)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT e.to_name, e.to_path, e.line FROM edges e
-             JOIN symbols s ON s.id = e.from_id
-             WHERE s.file_path = ?1 AND s.kind = 'module' AND e.kind = 'imports'
-             ORDER BY e.line",
-        )?;
-        let rows = stmt.query_map(params![file_path], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, Option<String>>(1)?,
-                r.get::<_, u32>(2)?,
-            ))
-        })?;
-        rows.collect()
+        self.imports_of_rows(file_path, None)
+            .map(|(_, imports)| imports)
+    }
+
+    pub(crate) fn imports_of_bounded(
+        &self,
+        file_path: &str,
+        limit: usize,
+    ) -> SqlResult<(u32, Vec<(String, Option<String>, u32)>)> {
+        self.imports_of_rows(file_path, Some(limit))
+    }
+
+    fn imports_of_rows(
+        &self,
+        file_path: &str,
+        limit: Option<usize>,
+    ) -> SqlResult<(u32, Vec<(String, Option<String>, u32)>)> {
+        let matching_sql = "WITH matching AS (
+                 SELECT e.id AS edge_id, e.to_name, e.to_path, e.line
+                 FROM edges e
+                 JOIN symbols s ON s.id = e.from_id
+                 WHERE s.file_path = ?1
+                   AND s.kind = 'module'
+                   AND e.kind = 'imports'
+             )";
+        match limit {
+            None => {
+                let sql = format!(
+                    "{matching_sql}
+                     SELECT to_name, to_path, line FROM matching
+                     ORDER BY line, to_name, COALESCE(to_path, ''), edge_id"
+                );
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows = stmt.query_map(params![file_path], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, u32>(2)?,
+                    ))
+                })?;
+                let imports: Vec<_> = rows.collect::<SqlResult<_>>()?;
+                let total = u32::try_from(imports.len()).unwrap_or(u32::MAX);
+                Ok((total, imports))
+            }
+            Some(limit) => {
+                let sql = format!(
+                    "{matching_sql}
+                     SELECT to_name, to_path, line, COUNT(*) OVER() AS total
+                     FROM matching
+                     ORDER BY line, to_name, COALESCE(to_path, ''), edge_id
+                     LIMIT ?2"
+                );
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows = stmt.query_map(
+                    params![file_path, i64::try_from(limit.max(1)).unwrap_or(i64::MAX)],
+                    |row| {
+                        Ok((
+                            (
+                                row.get::<_, String>(0)?,
+                                row.get::<_, Option<String>>(1)?,
+                                row.get::<_, u32>(2)?,
+                            ),
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )?;
+                let mut total = 0;
+                let mut imports = Vec::with_capacity(limit);
+                for row in rows {
+                    let (entry, row_total) = row?;
+                    total = row_total;
+                    if imports.len() < limit {
+                        imports.push(entry);
+                    }
+                }
+                Ok((total.clamp(0, i64::from(u32::MAX)) as u32, imports))
+            }
+        }
     }
 
     /// Files whose module imports the given name. Matches `to_name` (leaf

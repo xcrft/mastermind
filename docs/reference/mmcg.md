@@ -292,7 +292,8 @@ mmcg query explain process --language rust          # diagnose definition and ed
 mmcg query impact extract --depth 3
 mmcg query files --prefix src/indexer
 mmcg query outline src/store.rs                    # symbol tree of one file
-mmcg query recent --since 2h                       # files re-indexed in last 2 hours
+mmcg query imports src/store.rs                    # indexed static imports of one file
+mmcg query recent --since 2h                       # stored source mtimes in last 2 hours
 mmcg query unreferenced --kind function            # dead-code candidates (review manually)
 mmcg query api-surface src/runtime/                # symbols under prefix used externally
 
@@ -1129,7 +1130,7 @@ update its SHM coordination file. Incompatible custom schemas return
 | `mmcg_callers` | `name`, optional `language`, `edge_kind` (default `calls`), `top` (default 100, max 500) | **Containing functions** that reference `name` by the given edge kind. MCP responses report exact `total`, returned `count`, `truncated`, and `row_limit`; add language when truncated. The CLI retains its complete local listing. Count = distinct containing units, not distinct call sites (a function with 3 calls to `name` counts once). Pass `edge_kind: imports` for importers or `references` for function-value and Rust macro-body usages. Returns the effective filters, per-symbol precision, and `precision_notes`; references are not proof of invocation. |
 | `mmcg_callees` | `name`, optional `language`, `edge_kind` (default `calls`), `file`, `line` (requires `file`) | Outgoing names from one definition. `match_status` is `matched`, `ambiguous`, or `not_found`; ambiguous results contain `candidates` and no selected edges. Select using the exact indexed `file` and declaration start `line`. `name_collision` counts exact-name definitions after the language filter, before location selection. Partial-class declarations remain separate candidates. |
 | `mmcg_impact` | `name`, optional `max_depth` (1-10, default 2), `language` | Transitive dependency candidates through `calls` and syntactic `references` edges. At the 5,001-row cap, `truncated: true` is returned alongside `row_limit` and the partial `impact` list. Narrow `max_depth` or add a `language` filter. `precision_notes` remain present on empty results; `truncated: false` describes query limits, not complete runtime reachability. |
-| `mmcg_imports` | `file` | Names imported by this file's top-level imports — each entry has `name`, `path` (fully-qualified), `line`. |
+| `mmcg_imports` | `file`, optional `top` (default 200, max 500) | Indexed static imports declared by the file; each entry has `name`, fully-qualified `path` when extracted, and `line`. MCP responses report exact `total`, returned `count`, `truncated`, `row_limit`, and precision notes for missing dynamic imports. `mmcg query imports` retains the complete local listing. |
 | `mmcg_imported_by` | `query`, optional `match: name`(default)/`path`, `language`, `top` (default 200, max 500) | Files whose indexed static imports reference the given name or fully-qualified path. The response echoes the selector and language, reports exact `total`, returned `count`, `truncated`, `row_limit`, and precision notes. Use `match: path` when a leaf name is ambiguous; narrow by path or language when truncated. The CLI retains its complete local listing. |
 | `mmcg_symbols_in_file` | `file` | All symbols defined in a file, source order. Flat list. |
 | `mmcg_outline` | `file` | Symbol tree of a file — classes/impls own their methods, modules own top-level functions. One call replaces a search + multiple lookups. |

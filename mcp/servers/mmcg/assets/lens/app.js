@@ -477,6 +477,7 @@
     const impact = record(raw.impact);
     const evidence = record(raw.evidence);
     const semantic = record(raw.semantic);
+    const audit = record(raw.audit);
     const documentGraph = isRecord(raw.document_graph) ? record(raw.document_graph) : null;
     const temporalEnvelope = record(raw.temporal);
     const temporal = record(temporalEnvelope.data);
@@ -686,7 +687,7 @@
         source: "Temporal",
       });
     }
-    const truncations = collectTruncations(map, impact, evidence, semantic);
+    const truncations = collectTruncations(map, impact, evidence, semantic, audit);
     appendTemporalTruncations(truncations, temporal);
     const limits = collectLimits(raw, map, impact, evidence);
     flattenPrimitiveEntries("Temporal", temporal.limits, 0, limits);
@@ -725,7 +726,7 @@
       nodes: nodes,
       edges: edges,
       maxBlast: maxBlast,
-      audit: record(raw.audit),
+      audit: audit,
       components: componentRows,
       precisionNotes: precisionNotes,
       truncations: truncations,
@@ -872,7 +873,7 @@
     });
   }
 
-  function collectTruncations(map, impact, evidence, semantic) {
+  function collectTruncations(map, impact, evidence, semantic, audit) {
     const results = [];
     const changes = record(impact.changes);
     const candidates = [
@@ -895,6 +896,10 @@
       ["Evidence diagnostics", evidence.diagnostics],
       ["SCIP semantic definitions", semantic.definitions],
       ["SCIP semantic edges", semantic.edges],
+      ["Dead-code candidates", audit.dead_code],
+      ["Change-hotspot ranking", audit.change_hotspots],
+      ["Largest-file ranking", audit.largest_files],
+      ["Bus-factor ranking", audit.bus_factor],
     ];
     candidates.forEach(function (candidate) {
       const value = collection(candidate[1]);
@@ -1412,14 +1417,20 @@
       node.appendChild(createElement("p", "audit-empty", "Churn or centrality could not be read, so change-hotspot ranking is unavailable."));
       return;
     }
-    var items = array(hotspots.items).map(record);
+    var hotspotCollection = collection(hotspots);
+    var hotspotMetric = metricPresentation(hotspotCollection);
+    var items = hotspotCollection.items.map(record);
     var head = createElement("p", "audit-subhead");
     head.appendChild(document.createTextNode("Churn × centrality"));
-    head.appendChild(createElement("span", "audit-count" + (items.length === 0 ? " audit-count--clean" : ""), String(items.length)));
+    head.appendChild(createElement(
+      "span",
+      "audit-count" + (items.length === 0 && !hotspotMetric.partial ? " audit-count--clean" : ""),
+      hotspotMetric.value
+    ));
     node.appendChild(head);
     if (items.length === 0) {
       node.appendChild(createElement("p", "audit-empty", "No file is both heavily changed and heavily depended on in the returned window."));
-      if (hotspots.truncated === true) {
+      if (hotspotMetric.partial) {
         node.appendChild(createElement("p", "audit-empty", "The centrality candidate window was bounded, so this is not a complete zero."));
       }
       return;
@@ -1436,7 +1447,7 @@
     }));
     node.appendChild(createElement("p", "audit-empty",
       "Ranked by commits × incoming edges over the last " + displayNumber(finiteNumber(hotspots.window_commits) || 0) + " commits."));
-    if (hotspots.truncated === true) {
+    if (hotspotMetric.partial) {
       node.appendChild(createElement("p", "audit-empty", "Showing a bounded subset of change-hotspot candidates."));
     }
   }
@@ -1564,7 +1575,10 @@
     ];
     return record(model.evidence).partial === true
       || record(map.scope).aggregation_paths_truncated === true
-      || sections.some(function (section) { return record(section).truncated === true; })
+      || sections.some(function (section) {
+        var value = collection(section);
+        return value.truncated || value.totalUnknown;
+      })
       || text(record(audit.change_hotspots).status, "") !== "available"
       || text(record(audit.largest_files).status, "") !== "available"
       || text(record(audit.bus_factor).status, "") !== "available";
@@ -1582,7 +1596,9 @@
     var compCount = components.total === null ? components.items.length : components.total;
     var cycleCount = cycles.total === null ? cycles.items.length : cycles.total;
     var cycleIncomplete = cycles.truncated || cycles.totalUnknown;
-    var changeCount = change.returned === null ? change.items.length : change.returned;
+    var changeCount = totalOrReturned(change);
+    var changeMetric = metricPresentation(change);
+    var changeKnownZero = !changeMetric.partial && changeCount === 0;
 
     var incomplete = auditIsIncomplete(model);
     var findings = auditSecurityFindings(model);
@@ -1605,7 +1621,7 @@
           ? "Cycle analysis is partial. "
           : cycleCount === 0 ? "No dependency cycles — the selected module graph is acyclic. " : cycleCount + " dependency cycles — refactors carry structural risk. ") +
         (text(changeSource.status, "") === "available"
-          ? changeCount + " change-hotspot" + (changeCount === 1 ? "" : "s") + " concentrate the regression risk."
+          ? changeMetric.value + " change-hotspot" + (changeCount === 1 ? "" : "s") + " concentrate the regression risk."
           : "Change-hotspot history is unavailable.")
       );
     }
@@ -1614,7 +1630,7 @@
       [
         { lab: "Scale", big: displayNumber(fileTotal), sub: compCount + " components · " + languages.items.length + " languages", sev: "attention" },
         { lab: "Structure", big: cycleIncomplete ? "≥" + String(cycleCount) : String(cycleCount), sub: cycleIncomplete ? "dependency-cycle window is partial" : cycleCount === 0 ? "dependency cycles — acyclic" : "dependency cycles", sev: cycleIncomplete ? "attention" : cycleCount === 0 ? "healthy" : "risk" },
-        { lab: "Change safety", big: text(changeSource.status, "") === "available" ? String(changeCount) : "—", sub: text(changeSource.status, "") === "available" ? "change-hotspots — churn × dependence" : "history unavailable", sev: text(changeSource.status, "") === "available" && changeCount === 0 ? "healthy" : "attention" }
+        { lab: "Change safety", big: text(changeSource.status, "") === "available" ? changeMetric.value : "—", sub: text(changeSource.status, "") === "available" ? "change-hotspots — churn × dependence" : "history unavailable", sev: text(changeSource.status, "") === "available" && changeKnownZero ? "healthy" : "attention" }
       ].forEach(function (p) {
         var el = createElement("article", "audit-pillar audit-pillar--" + p.sev);
         var top = createElement("div", "p-top");
@@ -1804,10 +1820,17 @@
       node.appendChild(createElement("p", "audit-empty", "Indexed file sizes are unavailable because the index query failed."));
       return;
     }
-    var files = collection(largest).items.map(record)
+    var largestCollection = collection(largest);
+    var files = largestCollection.items.map(record)
       .sort(function (a, b) { return (finiteNumber(b.lines) || 0) - (finiteNumber(a.lines) || 0); });
     if (files.length === 0) {
-      node.appendChild(createElement("p", "audit-empty", "No indexed files were sized in this scope."));
+      node.appendChild(createElement(
+        "p",
+        "audit-empty",
+        largestCollection.truncated || largestCollection.totalUnknown
+          ? "No file size was returned from the bounded ranking, so an empty scope is not established."
+          : "No indexed files were sized in this scope."
+      ));
       return;
     }
     var max = files.reduce(function (m, f) { return Math.max(m, finiteNumber(f.lines) || 0); }, 1);
@@ -1825,7 +1848,7 @@
       list.appendChild(row);
     });
     node.appendChild(list);
-    if (largest.truncated === true) {
+    if (largestCollection.truncated || largestCollection.totalUnknown) {
       node.appendChild(createElement("p", "audit-empty", "Showing the largest returned files from a bounded ranking."));
     }
   }
@@ -1839,11 +1862,18 @@
       node.appendChild(createElement("p", "audit-empty", "Git history could not be read, so authorship concentration is unavailable."));
       return;
     }
-    var rows = array(bus.items).map(record).filter(function (r) {
+    var busCollection = collection(bus);
+    var rows = busCollection.items.map(record).filter(function (r) {
       return (finiteNumber(r.touches) || 0) >= 5;
     });
     if (rows.length === 0) {
-      node.appendChild(createElement("p", "audit-empty", "No component carries enough history to judge concentration."));
+      node.appendChild(createElement(
+        "p",
+        "audit-empty",
+        busCollection.truncated || busCollection.totalUnknown
+          ? "No judgeable component was returned from the bounded authorship ranking."
+          : "No component carries enough history to judge concentration."
+      ));
       return;
     }
     node.appendChild(createElement("p", "audit-subhead", "Most knowledge-concentrated components"));
@@ -1861,7 +1891,7 @@
       list.appendChild(row);
     });
     node.appendChild(list);
-    if (bus.truncated === true) {
+    if (busCollection.truncated || busCollection.totalUnknown) {
       node.appendChild(createElement("p", "audit-empty", "Showing a bounded subset of components with Git authorship history."));
     }
   }
@@ -1991,30 +2021,37 @@
     var cycleCount = cycles.total === null ? cycles.items.length : cycles.total;
     var changeSource = record(record(model.audit).change_hotspots);
     var change = collection(changeSource);
-    var changeCount = change.returned === null ? change.items.length : change.returned;
+    var changeCount = totalOrReturned(change);
+    var changePartial = change.truncated || change.totalUnknown;
     var findings = auditSecurityFindings(model);
     var hasErr = findings.some(function (f) { return f.level === "error"; });
     var hasWarn = findings.some(function (f) { return f.level === "warning"; });
     var largest = record(record(model.audit).largest_files);
-    var big = collection(largest).items.map(record)
+    var largestCollection = collection(largest);
+    var big = largestCollection.items.map(record)
       .reduce(function (m, f) { return Math.max(m, finiteNumber(f.lines) || 0); }, 0);
     if (text(largest.status, "") !== "available") {
       auditSetSev("audit-bugs-sev", "info", "No data");
+    } else if ((largestCollection.truncated || largestCollection.totalUnknown) && big === 0) {
+      auditSetSev("audit-bugs-sev", "info", "Partial");
     } else {
       auditSetSev("audit-bugs-sev", big >= 2000 ? "risk" : big >= 800 ? "attention" : "info",
         big >= 2000 ? "Very large" : big >= 800 ? "Large files" : "Sized");
     }
     var bus = record(record(model.audit).bus_factor);
+    var busCollection = collection(bus);
     if (text(bus.status, "") !== "available") {
       auditSetSev("audit-bus-sev", "info", "No data");
     } else {
-      var judged = array(bus.items).map(record).filter(function (r) {
+      var judged = busCollection.items.map(record).filter(function (r) {
         return (finiteNumber(r.touches) || 0) >= 5;
       });
       var concentrated = judged.filter(function (r) {
         return (finiteNumber(r.touches) || 0) >= 5 && ((finiteNumber(r.authors) || 0) === 1 || (finiteNumber(r.top_author_pct) || 0) >= 80);
       });
-      if (judged.length === 0) {
+      if (judged.length === 0 && (busCollection.truncated || busCollection.totalUnknown)) {
+        auditSetSev("audit-bus-sev", "info", "Partial");
+      } else if (judged.length === 0) {
         auditSetSev("audit-bus-sev", "info", "No signal");
       } else {
         auditSetSev("audit-bus-sev", concentrated.length > 0 ? "risk" : "attention",
@@ -2030,6 +2067,8 @@
     auditSetSev("audit-health-sev", "info", "Candidates");
     if (text(changeSource.status, "") !== "available") {
       auditSetSev("audit-change-sev", "info", "No data");
+    } else if (changePartial && changeCount === 0) {
+      auditSetSev("audit-change-sev", "info", "Partial");
     } else {
       auditSetSev("audit-change-sev", changeCount > 0 ? "attention" : "healthy", changeCount > 0 ? "Watch" : "Clear");
     }
@@ -2099,7 +2138,7 @@
     if (value.total !== null) {
       metricValue = displayNumber(value.total);
     } else if (value.totalUnknown) {
-      metricValue = "≥" + displayNumber(observed);
+      metricValue = observed > 0 ? "≥" + displayNumber(observed) : "?";
     } else {
       metricValue = displayNumber(observed);
     }
@@ -2121,7 +2160,7 @@
     elements.metric[name].note.textContent = presentation.note;
     const article = elements.metric[name].value.closest(".metric");
     article.classList.toggle("is-partial", presentation.partial);
-    article.classList.toggle("is-zero", totalOrReturned(value) === 0);
+    article.classList.toggle("is-zero", !value.totalUnknown && totalOrReturned(value) === 0);
   }
 
   function renderMetrics() {

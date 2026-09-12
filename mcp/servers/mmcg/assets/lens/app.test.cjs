@@ -550,7 +550,7 @@ function fixture() {
       dead_code: {
         total: 3,
         returned: 3,
-        truncated: true,
+        truncated: false,
         items: [
           { name: "unused_helper", kind: "function", file: "src/dead.rs", line: 9 },
           { name: "OldWidget", kind: "class", file: "src/old.rs", line: 2 },
@@ -560,6 +560,7 @@ function fixture() {
       change_hotspots: {
         status: "available",
         window_commits: 500,
+        total: 2,
         returned: 2,
         truncated: false,
         items: [
@@ -569,6 +570,7 @@ function fixture() {
       },
       largest_files: {
         status: "available",
+        total: 4,
         returned: 4,
         truncated: false,
         items: [
@@ -581,6 +583,7 @@ function fixture() {
       bus_factor: {
         status: "available",
         window_commits: 2000,
+        total: 3,
         returned: 3,
         truncated: false,
         items: [
@@ -980,7 +983,7 @@ async function main() {
   assert.match(auditHarness.nodes.get("audit-structural").textContent, /authorize · src\/auth\.rs[\s\S]*5 in/i, "Structural must rank hotspots by in-degree");
   assert.match(auditHarness.nodes.get("audit-health").textContent, /Dead-code candidates/i);
   assert.match(auditHarness.nodes.get("audit-health").textContent, /unused_helper · function/i, "Health must list dead-code candidates");
-  assert.match(auditHarness.nodes.get("audit-health").textContent, /Showing 3 of 3 candidates/i, "Health must be honest about truncation");
+  assert.doesNotMatch(auditHarness.nodes.get("audit-health").textContent, /Showing .* candidates/i, "Complete health results must not claim a bounded page");
 
   assert.match(auditHarness.nodes.get("audit-change").textContent, /Churn × centrality/i);
   assert.match(auditHarness.nodes.get("audit-change").textContent, /src\/auth\.rs[\s\S]*9 commits × 5 in/i, "Change card must show both axes");
@@ -1013,9 +1016,9 @@ async function main() {
 
   var auditUnavailablePayload = fixture();
   auditUnavailablePayload.evidence.files.items.forEach((file) => { file.findings = []; });
-  auditUnavailablePayload.audit.change_hotspots = { status: "unavailable", window_commits: 500, returned: 0, items: [] };
-  auditUnavailablePayload.audit.largest_files = { status: "unavailable", returned: 0, items: [] };
-  auditUnavailablePayload.audit.bus_factor = { status: "unavailable", window_commits: 2000, returned: 0, items: [] };
+  auditUnavailablePayload.audit.change_hotspots = { status: "unavailable", window_commits: 0, total: null, returned: 0, truncated: true, truncation_reason: "git_history_unavailable", items: [] };
+  auditUnavailablePayload.audit.largest_files = { status: "unavailable", total: null, returned: 0, truncated: true, truncation_reason: "index_query_unavailable", items: [] };
+  auditUnavailablePayload.audit.bus_factor = { status: "unavailable", window_commits: 0, total: null, returned: 0, truncated: true, truncation_reason: "git_history_unavailable", items: [] };
   var auditUnavailableHarness = await renderFixture(auditUnavailablePayload, { width: 1200 });
   assert.equal(auditUnavailableHarness.nodes.get("audit-verdict-word").textContent, "Incomplete", "Missing audit inputs cannot produce a Healthy verdict");
   assert.equal(auditUnavailableHarness.nodes.get("audit-change-sev").textContent, "No data", "Unavailable churn is not labelled Clear");
@@ -1026,9 +1029,17 @@ async function main() {
   boundedPayload.evidence.files.items.forEach((file) => { file.findings = []; });
   boundedPayload.audit.change_hotspots.items = boundedPayload.audit.change_hotspots.items.slice(0, 1);
   boundedPayload.audit.change_hotspots.returned = 1;
+  boundedPayload.audit.change_hotspots.total = null;
   boundedPayload.audit.change_hotspots.truncated = true;
+  boundedPayload.audit.change_hotspots.truncation_reason = "centrality_candidate_limit";
+  boundedPayload.audit.dead_code.total = 4;
+  boundedPayload.audit.dead_code.truncated = true;
+  boundedPayload.audit.dead_code.truncation_reason = "symbol_limit";
+  boundedPayload.audit.largest_files.total = null;
   boundedPayload.audit.largest_files.truncated = true;
+  boundedPayload.audit.largest_files.truncation_reason = "file_ranking_limit";
   boundedPayload.audit.bus_factor.truncated = true;
+  boundedPayload.audit.bus_factor.truncation_reason = "component_limit";
   boundedPayload.map.cycles = { total: null, returned: 0, truncated: true, truncation_reason: "cycle_limit", items: [] };
   var boundedHarness = await renderFixture(boundedPayload, { width: 1200 });
   assert.equal(boundedHarness.nodes.get("audit-verdict-word").textContent, "Incomplete", "Available but capped audit inputs cannot produce a Healthy verdict");
@@ -1036,6 +1047,52 @@ async function main() {
   assert.match(boundedHarness.nodes.get("audit-change").textContent, /bounded subset/i);
   assert.match(boundedHarness.nodes.get("audit-bugs").textContent, /bounded ranking/i);
   assert.match(boundedHarness.nodes.get("audit-bus").textContent, /bounded subset/i);
+  assert.match(boundedHarness.nodes.get("limits-list").textContent, /Limited \/ Dead-code candidates[\s\S]*symbol_limit/i);
+  assert.match(boundedHarness.nodes.get("limits-list").textContent, /Limited \/ Change-hotspot ranking[\s\S]*centrality_candidate_limit/i);
+  assert.match(boundedHarness.nodes.get("limits-list").textContent, /Limited \/ Largest-file ranking[\s\S]*file_ranking_limit/i);
+  assert.match(boundedHarness.nodes.get("limits-list").textContent, /Limited \/ Bus-factor ranking[\s\S]*component_limit/i);
+
+  var uncertainHotspotsPayload = fixture();
+  uncertainHotspotsPayload.audit.change_hotspots.total = null;
+  uncertainHotspotsPayload.audit.change_hotspots.truncated = true;
+  uncertainHotspotsPayload.audit.change_hotspots.truncation_reason = "centrality_candidate_limit";
+  var uncertainHotspotsHarness = await renderFixture(uncertainHotspotsPayload, { width: 1200 });
+  assert.match(uncertainHotspotsHarness.nodes.get("audit-change").textContent, /Churn × centrality≥2/i, "Unknown hotspot totals must render as a lower bound");
+  assert.match(uncertainHotspotsHarness.nodes.get("audit-lede").textContent, /≥2 change-hotspots/i);
+
+  var unknownZeroPayload = fixture();
+  unknownZeroPayload.audit.change_hotspots = {
+    status: "available",
+    window_commits: 500,
+    total: null,
+    returned: 0,
+    truncated: true,
+    truncation_reason: "centrality_candidate_limit",
+    items: [],
+  };
+  unknownZeroPayload.audit.largest_files = {
+    status: "available",
+    total: null,
+    returned: 0,
+    truncated: true,
+    truncation_reason: "file_ranking_limit",
+    items: [],
+  };
+  unknownZeroPayload.audit.bus_factor = {
+    status: "available",
+    window_commits: 2000,
+    total: null,
+    returned: 0,
+    truncated: true,
+    truncation_reason: "component_limit",
+    items: [],
+  };
+  var unknownZeroHarness = await renderFixture(unknownZeroPayload, { width: 1200 });
+  assert.match(unknownZeroHarness.nodes.get("audit-change").textContent, /Churn × centrality\?/i, "An unknown empty result must not render as zero");
+  assert.doesNotMatch(unknownZeroHarness.nodes.get("audit-change").textContent, /≥0/i);
+  assert.equal(unknownZeroHarness.nodes.get("audit-change-sev").textContent, "Partial", "An incomplete empty result cannot be labelled Clear");
+  assert.equal(unknownZeroHarness.nodes.get("audit-bugs-sev").textContent, "Partial", "An incomplete empty size ranking cannot be labelled Sized");
+  assert.equal(unknownZeroHarness.nodes.get("audit-bus-sev").textContent, "Partial", "An incomplete empty authorship ranking cannot be labelled No signal");
   assert.match(boundedHarness.nodes.get("audit-structural").textContent, /cycle analysis is partial/i);
   assert.doesNotMatch(boundedHarness.nodes.get("audit-structural").textContent, /acyclic/i, "A partial zero-cycle window is not presented as acyclic");
   assert.equal(boundedHarness.nodes.get("audit-structural-sev").textContent, "Partial");
@@ -1145,10 +1202,13 @@ async function main() {
   productionPayload.audit.dead_code = { total: 2, returned: 2, truncated: false, items: productionPayload.audit.dead_code.items.slice(0, 2) };
   productionPayload.audit.change_hotspots.items = productionPayload.audit.change_hotspots.items.slice(0, 1);
   productionPayload.audit.change_hotspots.returned = 1;
+  productionPayload.audit.change_hotspots.total = 1;
   productionPayload.audit.largest_files.items = productionPayload.audit.largest_files.items.filter((item) => item.file.startsWith("src/"));
   productionPayload.audit.largest_files.returned = productionPayload.audit.largest_files.items.length;
+  productionPayload.audit.largest_files.total = productionPayload.audit.largest_files.items.length;
   productionPayload.audit.bus_factor.items = productionPayload.audit.bus_factor.items.filter((item) => item.component.startsWith("src"));
   productionPayload.audit.bus_factor.returned = productionPayload.audit.bus_factor.items.length;
+  productionPayload.audit.bus_factor.total = productionPayload.audit.bus_factor.items.length;
   var productionHarness = await renderFixture(productionPayload, { width: 1200 });
   assert.equal(productionHarness.nodes.get("audit-production").textContent, "Production paths only");
   assert.doesNotMatch(productionHarness.nodes.get("audit-change").textContent, /tests\/auth\.rs/i, "Backend-filtered change data stays production-only");

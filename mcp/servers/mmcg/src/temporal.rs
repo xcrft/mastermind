@@ -1735,8 +1735,10 @@ mod tests {
 
     #[test]
     fn partial_map_projection_keeps_delta_totals_and_no_change_unknown() {
-        let mut base = ArchitectureProjection::default();
-        base.components_partial = true;
+        let base = ArchitectureProjection {
+            components_partial: true,
+            ..ArchitectureProjection::default()
+        };
         let head = ArchitectureProjection::default();
         let components = component_delta(&base, &head);
         let boundaries = boundary_delta(&base, &head);

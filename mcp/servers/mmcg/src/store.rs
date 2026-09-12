@@ -7099,13 +7099,65 @@ impl Store {
 
     /// All symbols defined in a given file, ordered by line.
     pub fn symbols_in_file(&self, file_path: &str) -> SqlResult<Vec<Symbol>> {
-        let sql = format!(
-            "SELECT {SYMBOL_COLS}
-             FROM symbols WHERE file_path = ?1 ORDER BY line_start"
+        self.symbols_in_file_rows(file_path, None)
+            .map(|(_, symbols)| symbols)
+    }
+
+    pub(crate) fn symbols_in_file_bounded(
+        &self,
+        file_path: &str,
+        limit: usize,
+    ) -> SqlResult<(u32, Vec<Symbol>)> {
+        self.symbols_in_file_rows(file_path, Some(limit))
+    }
+
+    fn symbols_in_file_rows(
+        &self,
+        file_path: &str,
+        limit: Option<usize>,
+    ) -> SqlResult<(u32, Vec<Symbol>)> {
+        let matching_sql = format!(
+            "WITH matching AS (
+                 SELECT {SYMBOL_COLS} FROM symbols WHERE file_path = ?1
+             )"
         );
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![file_path], Self::row_to_symbol)?;
-        rows.collect()
+        match limit {
+            None => {
+                let sql = format!(
+                    "{matching_sql}
+                     SELECT {SYMBOL_COLS} FROM matching
+                     ORDER BY line_start, line_end, name, kind, id"
+                );
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows = stmt.query_map(params![file_path], Self::row_to_symbol)?;
+                let symbols: Vec<_> = rows.collect::<SqlResult<_>>()?;
+                let total = u32::try_from(symbols.len()).unwrap_or(u32::MAX);
+                Ok((total, symbols))
+            }
+            Some(limit) => {
+                let sql = format!(
+                    "{matching_sql}
+                     SELECT {SYMBOL_COLS}, COUNT(*) OVER() AS total FROM matching
+                     ORDER BY line_start, line_end, name, kind, id
+                     LIMIT ?2"
+                );
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows = stmt.query_map(
+                    params![file_path, i64::try_from(limit.max(1)).unwrap_or(i64::MAX)],
+                    |row| Ok((Self::row_to_symbol(row)?, row.get::<_, i64>(9)?)),
+                )?;
+                let mut total = 0;
+                let mut symbols = Vec::with_capacity(limit);
+                for row in rows {
+                    let (symbol, row_total) = row?;
+                    total = row_total;
+                    if symbols.len() < limit {
+                        symbols.push(symbol);
+                    }
+                }
+                Ok((total.clamp(0, i64::from(u32::MAX)) as u32, symbols))
+            }
+        }
     }
 
     /// Imports declared by a file. Returns (name, path, line).

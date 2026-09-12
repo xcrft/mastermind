@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- MCP per-file symbol inventories now stop at an explicit 200-row default,
+  apply the cap inside SQLite, expose exact truncation and extraction limits,
+  and retain complete local CLI output.
 - MCP per-file import responses now stop at an explicit 200-row default, apply
   the cap inside SQLite, expose exact truncation and static-analysis limits, and
   have a complete `mmcg query imports` CLI counterpart.

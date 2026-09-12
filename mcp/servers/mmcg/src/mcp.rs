@@ -1626,12 +1626,50 @@ fn str_arg<'a>(args: &'a Value, name: &str) -> Result<&'a str, HandlerError> {
         .ok_or_else(|| HandlerError::InvalidArguments(format!("Invalid argument: {name}")))
 }
 
-fn opt_str_arg<'a>(args: &'a Value, name: &str) -> Option<&'a str> {
-    args.get(name).and_then(|v| v.as_str())
+fn opt_str_arg<'a>(args: &'a Value, name: &str) -> Result<Option<&'a str>, HandlerError> {
+    match args.get(name) {
+        None => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value)),
+        Some(_) => Err(HandlerError::InvalidArguments(format!(
+            "Invalid argument: {name}"
+        ))),
+    }
 }
 
-fn opt_bool_arg(args: &Value, name: &str) -> Option<bool> {
-    args.get(name).and_then(|v| v.as_bool())
+fn opt_bool_arg(args: &Value, name: &str) -> Result<Option<bool>, HandlerError> {
+    match args.get(name) {
+        None => Ok(None),
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        Some(_) => Err(HandlerError::InvalidArguments(format!(
+            "Invalid argument: {name}"
+        ))),
+    }
+}
+
+fn bounded_u64_arg(
+    args: &Value,
+    name: &str,
+    default: u64,
+    minimum: u64,
+    maximum: u64,
+) -> Result<u64, HandlerError> {
+    match args.get(name) {
+        None => Ok(default),
+        Some(value) => value
+            .as_u64()
+            .filter(|value| (minimum..=maximum).contains(value))
+            .ok_or_else(|| HandlerError::InvalidArguments(format!("Invalid argument: {name}"))),
+    }
+}
+
+fn opt_i64_arg(args: &Value, name: &str) -> Result<Option<i64>, HandlerError> {
+    match args.get(name) {
+        None => Ok(None),
+        Some(value) => value
+            .as_i64()
+            .map(Some)
+            .ok_or_else(|| HandlerError::InvalidArguments(format!("Invalid argument: {name}"))),
+    }
 }
 
 /// Every language the indexer can parse. One list so a new extractor cannot
@@ -2170,9 +2208,9 @@ fn schema_change_class() -> Value {
 
 fn handle_search(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let name = str_arg(args, "name")?;
-    let kind = opt_str_arg(args, "kind");
-    let language = opt_str_arg(args, "language");
-    let collapse = opt_bool_arg(args, "collapse_partials").unwrap_or(true);
+    let kind = opt_str_arg(args, "kind")?;
+    let language = opt_str_arg(args, "language")?;
+    let collapse = opt_bool_arg(args, "collapse_partials")?.unwrap_or(true);
     ensure_fresh_index(store)?;
     let r = queries::search(store, name, kind, language, collapse)
         .map_err(|error| HandlerError::internal("search_query", error))?;
@@ -2181,8 +2219,8 @@ fn handle_search(store: &mut Store, args: &Value) -> Result<Value, HandlerError>
 
 fn handle_callers(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let name = str_arg(args, "name")?;
-    let language = opt_str_arg(args, "language");
-    let edge_kind = opt_str_arg(args, "edge_kind");
+    let language = opt_str_arg(args, "language")?;
+    let edge_kind = opt_str_arg(args, "edge_kind")?;
     ensure_fresh_index(store)?;
     let r = queries::callers(store, name, language, edge_kind)
         .map_err(|error| HandlerError::internal("callers_query", error))?;
@@ -2191,8 +2229,8 @@ fn handle_callers(store: &mut Store, args: &Value) -> Result<Value, HandlerError
 
 fn handle_callees(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let name = str_arg(args, "name")?;
-    let language = opt_str_arg(args, "language");
-    let edge_kind = opt_str_arg(args, "edge_kind");
+    let language = opt_str_arg(args, "language")?;
+    let edge_kind = opt_str_arg(args, "edge_kind")?;
     let file = args
         .get("file")
         .map(|value| {
@@ -2225,8 +2263,8 @@ fn handle_callees(store: &mut Store, args: &Value) -> Result<Value, HandlerError
 
 fn handle_impact(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let name = str_arg(args, "name")?;
-    let max_depth = args.get("max_depth").and_then(|v| v.as_u64()).unwrap_or(2) as u32;
-    let language = opt_str_arg(args, "language");
+    let max_depth = bounded_u64_arg(args, "max_depth", 2, 1, 10)? as u32;
+    let language = opt_str_arg(args, "language")?;
     ensure_fresh_index(store)?;
     let r = queries::impact(store, name, max_depth, language)
         .map_err(|error| HandlerError::internal("impact_query", error))?;
@@ -2250,8 +2288,8 @@ fn handle_outline(store: &mut Store, args: &Value) -> Result<Value, HandlerError
 }
 
 fn handle_files(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
-    let prefix = opt_str_arg(args, "prefix");
-    let language = opt_str_arg(args, "language");
+    let prefix = opt_str_arg(args, "prefix")?;
+    let language = opt_str_arg(args, "language")?;
     ensure_fresh_index(store)?;
     let r = queries::files(store, prefix, language)
         .map_err(|error| HandlerError::internal("files_query", error))?;
@@ -2267,9 +2305,13 @@ fn handle_imports(store: &mut Store, args: &Value) -> Result<Value, HandlerError
 }
 
 fn handle_imported_by(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
-    let query = str_arg(args, "query").or_else(|_| str_arg(args, "name"))?;
-    let match_kind = opt_str_arg(args, "match").unwrap_or("name");
-    let language = opt_str_arg(args, "language");
+    let query = if args.get("query").is_some() {
+        str_arg(args, "query")?
+    } else {
+        str_arg(args, "name")?
+    };
+    let match_kind = opt_str_arg(args, "match")?.unwrap_or("name");
+    let language = opt_str_arg(args, "language")?;
     ensure_fresh_index(store)?;
     let r = queries::imported_by(store, query, match_kind, language)
         .map_err(|error| HandlerError::internal("imported_by_query", error))?;
@@ -2277,8 +2319,8 @@ fn handle_imported_by(store: &mut Store, args: &Value) -> Result<Value, HandlerE
 }
 
 fn handle_unreferenced(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
-    let kind = opt_str_arg(args, "kind");
-    let language = opt_str_arg(args, "language");
+    let kind = opt_str_arg(args, "kind")?;
+    let language = opt_str_arg(args, "language")?;
     ensure_fresh_index(store)?;
     let r = queries::unreferenced(store, kind, language)
         .map_err(|error| HandlerError::internal("unreferenced_query", error))?;
@@ -2287,7 +2329,7 @@ fn handle_unreferenced(store: &mut Store, args: &Value) -> Result<Value, Handler
 
 fn handle_api_surface(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let prefix = str_arg(args, "prefix")?;
-    let language = opt_str_arg(args, "language");
+    let language = opt_str_arg(args, "language")?;
     ensure_fresh_index(store)?;
     let r = queries::api_surface(store, prefix, language)
         .map_err(|error| HandlerError::internal("api_surface_query", error))?;
@@ -2318,7 +2360,7 @@ fn changed_since_root(
 
 fn handle_symbols_changed_since(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let git_ref = str_arg(args, "git_ref")?;
-    let root = changed_since_root(store, opt_str_arg(args, "root"))?;
+    let root = changed_since_root(store, opt_str_arg(args, "root")?)?;
     ensure_fresh_index(store)?;
     let interrupted = || store.work_interrupted();
     let diff = queries::symbols_changed_since_controlled(
@@ -2347,13 +2389,8 @@ fn handle_symbols_changed_since(store: &mut Store, args: &Value) -> Result<Value
 }
 
 fn handle_dependency_cycles(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
-    let language = opt_str_arg(args, "language");
-    let min_size = args
-        .get("min_size")
-        .and_then(|v| v.as_u64())
-        .and_then(|n| u32::try_from(n).ok())
-        .unwrap_or(2)
-        .clamp(2, 100);
+    let language = opt_str_arg(args, "language")?;
+    let min_size = bounded_u64_arg(args, "min_size", 2, 2, 100)? as u32;
     ensure_fresh_index(store)?;
     let r = queries::dependency_cycles(store, language, min_size)
         .map_err(|error| HandlerError::internal("dependency_cycles_query", error))?;
@@ -2362,12 +2399,7 @@ fn handle_dependency_cycles(store: &mut Store, args: &Value) -> Result<Value, Ha
 
 fn handle_tasks(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let query = str_arg(args, "query")?;
-    let top = args
-        .get("top")
-        .and_then(|v| v.as_u64())
-        .and_then(|n| u32::try_from(n).ok())
-        .unwrap_or(10)
-        .clamp(1, 50);
+    let top = bounded_u64_arg(args, "top", 10, 1, 50)? as u32;
     ensure_schema_compatible(store)?;
     let r = queries::tasks(store, query, top)
         .map_err(|error| HandlerError::internal("tasks_query", error))?;
@@ -2376,7 +2408,7 @@ fn handle_tasks(store: &mut Store, args: &Value) -> Result<Value, HandlerError> 
 
 fn handle_history(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let query = str_arg(args, "query")?;
-    let kind = opt_str_arg(args, "kind");
+    let kind = opt_str_arg(args, "kind")?;
     let document_graph = match args.get("document_graph") {
         None => None,
         Some(Value::String(path)) if !path.is_empty() => Some(PathBuf::from(path)),
@@ -2386,12 +2418,7 @@ fn handle_history(store: &mut Store, args: &Value) -> Result<Value, HandlerError
             ))
         }
     };
-    let top = args
-        .get("top")
-        .and_then(|value| value.as_u64())
-        .and_then(|value| u32::try_from(value).ok())
-        .unwrap_or(10)
-        .clamp(1, 50);
+    let top = bounded_u64_arg(args, "top", 10, 1, 50)? as u32;
     ensure_schema_compatible(store)?;
     let response = match document_graph {
         Some(path) => serde_json::to_value(
@@ -2430,15 +2457,10 @@ fn handle_history(store: &mut Store, args: &Value) -> Result<Value, HandlerError
 }
 
 fn handle_centrality(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
-    let prefix = opt_str_arg(args, "prefix");
-    let language = opt_str_arg(args, "language");
-    let kind = opt_str_arg(args, "kind");
-    let top = args
-        .get("top")
-        .and_then(|v| v.as_u64())
-        .and_then(|n| u32::try_from(n).ok())
-        .unwrap_or(20)
-        .clamp(1, 200);
+    let prefix = opt_str_arg(args, "prefix")?;
+    let language = opt_str_arg(args, "language")?;
+    let kind = opt_str_arg(args, "kind")?;
+    let top = bounded_u64_arg(args, "top", 20, 1, 200)? as u32;
     ensure_fresh_index(store)?;
     let r = queries::centrality(store, prefix, language, kind, top)
         .map_err(|error| HandlerError::internal("centrality_query", error))?;
@@ -3148,14 +3170,10 @@ fn handle_scratchpad_append(store: &mut Store, args: &Value) -> Result<Value, Ha
 }
 
 fn handle_scratchpad_read(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
-    let since = args.get("since").and_then(|v| v.as_i64());
-    let agent = opt_str_arg(args, "agent");
-    let kind = opt_str_arg(args, "kind");
-    let limit = args
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(20)
-        .min(200) as u32;
+    let since = opt_i64_arg(args, "since")?;
+    let agent = opt_str_arg(args, "agent")?;
+    let kind = opt_str_arg(args, "kind")?;
+    let limit = bounded_u64_arg(args, "limit", 20, 1, 200)? as u32;
     ensure_schema_compatible(store)?;
     let r = store
         .scratchpad_read(since, agent, kind, limit)
@@ -3859,6 +3877,83 @@ mod tests {
         }
         assert_eq!(readers, 8);
         assert_eq!(refreshers, 21);
+    }
+
+    #[test]
+    fn research_tools_reject_explicit_invalid_optional_arguments() {
+        type TestHandler = fn(&mut Store, &Value) -> Result<Value, HandlerError>;
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("mmcg.db")).unwrap();
+        let cases: Vec<(TestHandler, Value, &str)> = vec![
+            (
+                handle_search,
+                json!({ "name": "target", "language": false }),
+                "Invalid argument: language",
+            ),
+            (
+                handle_search,
+                json!({ "name": "target", "collapse_partials": "false" }),
+                "Invalid argument: collapse_partials",
+            ),
+            (
+                handle_impact,
+                json!({ "name": "target", "max_depth": u64::from(u32::MAX) + 3 }),
+                "Invalid argument: max_depth",
+            ),
+            (
+                handle_dependency_cycles,
+                json!({ "min_size": 1 }),
+                "Invalid argument: min_size",
+            ),
+            (
+                handle_tasks,
+                json!({ "query": "decision", "top": 0 }),
+                "Invalid argument: top",
+            ),
+            (
+                handle_history,
+                json!({ "query": "decision", "kind": false }),
+                "Invalid argument: kind",
+            ),
+            (
+                handle_history,
+                json!({ "query": "decision", "top": 51 }),
+                "Invalid argument: top",
+            ),
+            (
+                handle_centrality,
+                json!({ "top": "20" }),
+                "Invalid argument: top",
+            ),
+            (
+                handle_scratchpad_read,
+                json!({ "since": 1.5 }),
+                "Invalid argument: since",
+            ),
+            (
+                handle_scratchpad_read,
+                json!({ "limit": 0 }),
+                "Invalid argument: limit",
+            ),
+            (
+                handle_symbols_changed_since,
+                json!({ "git_ref": "HEAD", "root": false }),
+                "Invalid argument: root",
+            ),
+            (
+                handle_imported_by,
+                json!({ "query": false, "name": "legacy" }),
+                "Invalid argument: query",
+            ),
+        ];
+
+        for (handler, arguments, expected) in cases {
+            match handler(&mut store, &arguments) {
+                Err(HandlerError::InvalidArguments(message)) => assert_eq!(message, expected),
+                result => panic!("expected `{expected}`, got {result:?}"),
+            }
+        }
     }
 
     #[test]

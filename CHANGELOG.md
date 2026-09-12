@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- MCP research tools now reject explicit optional arguments with the wrong type
+  or an out-of-schema range instead of silently dropping, clamping, or wrapping
+  them into a different query.
 - History retrieval now rejects malformed corpus-coverage metadata instead of
   treating it as a complete result with no omitted artifacts.
 - Change-impact analysis now fails closed when collision or changed-test lookups

@@ -721,6 +721,18 @@ does not reclassify or post-filter capped results. Dead-code, centrality,
 change-hotspot, largest-file, and authorship windows expose truncation instead
 of presenting a capped page as complete.
 
+The four audit result collections report `total`, `returned`, `truncated`, and
+`truncation_reason`, and Lens includes them in the method ledger. Dead-code
+totals stay exact across the 100-symbol response cap. Largest-file totals
+become unknown when a cap-plus-one probe finds more than 20 ranked files.
+Change-hotspot totals become
+unknown when the 2,000-row centrality candidate window fills, because churn can
+change the final order; its displayed ranking remains capped at 20. Bus-factor
+totals are exact within the stated 2,000-commit history window before its
+20-component response cap. An unavailable SQLite or Git source returns a null
+total with its failure reason, so an empty partial result cannot appear as a
+clean zero.
+
 SQLite or Git failures stay explicit. A failed audit query is reported as
 unavailable and cannot produce a `Healthy` or `Clear` presentation. Component
 map truncation is also visible; omitted components are not represented by the

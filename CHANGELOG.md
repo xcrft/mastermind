@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Lens audit collections now expose exact or explicitly unknown totals with
+  truncation reasons. Audit limits appear in the method ledger, and a bounded
+  empty change-hotspot ranking no longer renders as a clean zero.
 - Temporal deltas now leave totals and summary counts unknown when their map,
   CODEOWNERS, or history source is incomplete; centrality increases count the
   complete measured delta before response bounding, and component-shape drift

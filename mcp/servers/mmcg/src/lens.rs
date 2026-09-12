@@ -238,8 +238,11 @@ pub struct AuditRedTeam {
 #[derive(Debug, Serialize)]
 pub struct LensLargestFiles {
     pub status: &'static str,
+    pub total: Option<u32>,
     pub returned: u32,
     pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation_reason: Option<&'static str>,
     pub items: Vec<crate::store::FileSize>,
 }
 
@@ -248,8 +251,11 @@ pub struct LensBusFactor {
     /// `"available"`, or `"unavailable"` when git history could not be read.
     pub status: &'static str,
     pub window_commits: u32,
+    pub total: Option<u32>,
     pub returned: u32,
     pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation_reason: Option<&'static str>,
     pub items: Vec<LensComponentAuthors>,
 }
 
@@ -269,8 +275,11 @@ pub struct LensChangeHotspots {
     pub status: &'static str,
     /// Commits inspected in the churn window (0 when unavailable).
     pub window_commits: u32,
+    pub total: Option<u32>,
     pub returned: u32,
     pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation_reason: Option<&'static str>,
     pub items: Vec<LensChangeHotspot>,
 }
 
@@ -289,6 +298,8 @@ pub struct LensDeadCode {
     pub total: u32,
     pub returned: u32,
     pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation_reason: Option<&'static str>,
     pub items: Vec<crate::queries::SymbolHit>,
 }
 
@@ -1496,8 +1507,10 @@ fn build_snapshot_until(
         None => LensChangeHotspots {
             status: "unavailable",
             window_commits: 0,
+            total: None,
             returned: 0,
-            truncated: false,
+            truncated: true,
+            truncation_reason: Some("git_history_unavailable"),
             items: Vec::new(),
         },
         Some(churn) => match store.file_in_degrees_scoped(
@@ -1509,8 +1522,10 @@ fn build_snapshot_until(
             Err(_) => LensChangeHotspots {
                 status: "unavailable",
                 window_commits: 0,
+                total: None,
                 returned: 0,
-                truncated: false,
+                truncated: true,
+                truncation_reason: Some("index_query_unavailable"),
                 items: Vec::new(),
             },
             Ok(mut degrees) => {
@@ -1534,13 +1549,21 @@ fn build_snapshot_until(
                         .cmp(&left.score)
                         .then_with(|| left.file.cmp(&right.file))
                 });
-                let result_truncated = ranked.len() > CHANGE_HOTSPOT_CAP;
+                let result_total = ranked.len();
+                let result_truncated = result_total > CHANGE_HOTSPOT_CAP;
                 ranked.truncate(CHANGE_HOTSPOT_CAP);
                 LensChangeHotspots {
                     status: "available",
                     window_commits: CHURN_WINDOW_COMMITS,
+                    total: (!centrality_truncated).then_some(result_total as u32),
                     returned: ranked.len() as u32,
                     truncated: centrality_truncated || result_truncated,
+                    truncation_reason: match (centrality_truncated, result_truncated) {
+                        (true, true) => Some("centrality_candidate_and_output_limit"),
+                        (true, false) => Some("centrality_candidate_limit"),
+                        (false, true) => Some("output_limit"),
+                        (false, false) => None,
+                    },
                     items: ranked,
                 }
             }
@@ -1559,15 +1582,19 @@ fn build_snapshot_until(
             items.truncate(LARGEST_FILES_CAP);
             LensLargestFiles {
                 status: "available",
+                total: (!truncated).then_some(items.len() as u32),
                 returned: items.len() as u32,
                 truncated,
+                truncation_reason: truncated.then_some("file_ranking_limit"),
                 items,
             }
         }
         Err(_) => LensLargestFiles {
             status: "unavailable",
+            total: None,
             returned: 0,
-            truncated: false,
+            truncated: true,
+            truncation_reason: Some("index_query_unavailable"),
             items: Vec::new(),
         },
     };
@@ -1585,18 +1612,23 @@ fn build_snapshot_until(
         None => LensBusFactor {
             status: "unavailable",
             window_commits: 0,
+            total: None,
             returned: 0,
-            truncated: false,
+            truncated: true,
+            truncation_reason: Some("git_history_unavailable"),
             items: Vec::new(),
         },
         Some(mut rows) => {
+            let total = rows.len() as u32;
             let truncated = rows.len() > BUS_FACTOR_CAP;
             rows.truncate(BUS_FACTOR_CAP);
             LensBusFactor {
                 status: "available",
                 window_commits: BUS_FACTOR_WINDOW_COMMITS,
+                total: Some(total),
                 returned: rows.len() as u32,
                 truncated,
+                truncation_reason: truncated.then_some("component_limit"),
                 items: rows,
             }
         }
@@ -1616,6 +1648,7 @@ fn build_snapshot_until(
             total: dead_total,
             returned: dead_items.len() as u32,
             truncated: dead_truncated,
+            truncation_reason: dead_truncated.then_some("symbol_limit"),
             items: dead_items,
         },
         change_hotspots,
@@ -2503,7 +2536,15 @@ mod tests {
         let all =
             serde_json::to_value(build_snapshot(&store, repo.path(), &options()).unwrap()).unwrap();
         assert_eq!(all["audit"]["largest_files"]["returned"], 20);
+        assert_eq!(
+            all["audit"]["largest_files"]["total"],
+            serde_json::Value::Null
+        );
         assert_eq!(all["audit"]["largest_files"]["truncated"], true);
+        assert_eq!(
+            all["audit"]["largest_files"]["truncation_reason"],
+            "file_ranking_limit"
+        );
         assert!(all["audit"]["largest_files"]["items"]
             .as_array()
             .unwrap()
@@ -2555,6 +2596,8 @@ mod tests {
         );
         let items = hotspots["items"].as_array().unwrap();
         assert_eq!(hotspots["returned"], items.len() as u64);
+        assert_eq!(hotspots["total"], items.len() as u64);
+        assert_eq!(hotspots["truncated"], false);
         let entry = items
             .iter()
             .find(|item| item["file"] == "src/lib.rs")
@@ -2737,9 +2780,12 @@ mod tests {
         let json = serde_json::to_value(snapshot).unwrap();
 
         assert_eq!(json["audit"]["largest_files"]["status"], "available");
-        let files: Vec<&str> = json["audit"]["largest_files"]["items"]
-            .as_array()
-            .unwrap()
+        let largest = &json["audit"]["largest_files"];
+        let largest_items = largest["items"].as_array().unwrap();
+        assert_eq!(largest["returned"], largest_items.len() as u64);
+        assert_eq!(largest["total"], largest_items.len() as u64);
+        assert_eq!(largest["truncated"], false);
+        let files: Vec<&str> = largest_items
             .iter()
             .map(|item| item["file"].as_str().unwrap())
             .collect();
@@ -2750,9 +2796,11 @@ mod tests {
 
         let bus = &json["audit"]["bus_factor"];
         assert_eq!(bus["status"], "available", "the fixture has git history");
-        let src = bus["items"]
-            .as_array()
-            .unwrap()
+        let bus_items = bus["items"].as_array().unwrap();
+        assert_eq!(bus["returned"], bus_items.len() as u64);
+        assert_eq!(bus["total"], bus_items.len() as u64);
+        assert_eq!(bus["truncated"], false);
+        let src = bus_items
             .iter()
             .find(|row| row["component"] == "src")
             .expect("the src component must appear");

@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- MCP callee responses now bound both ambiguous definition candidates and
+  outgoing edges, report each truncation independently, and query precise
+  file/line selectors outside the broad candidate cap; CLI output stays complete.
 - MCP per-file symbol inventories now stop at an explicit 200-row default,
   apply the cap inside SQLite, expose exact truncation and extraction limits,
   and retain complete local CLI output.

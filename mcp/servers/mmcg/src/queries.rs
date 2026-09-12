@@ -286,22 +286,40 @@ pub enum CalleesMatchStatus {
 pub struct CalleesResponse {
     pub symbol: String,
     pub edge_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
     /// Distinguishes an empty edge list for a selected symbol from no selection.
     /// A match still does not establish complete runtime reachability.
     pub match_status: CalleesMatchStatus,
     /// Definitions with this exact name after the language filter, before selectors.
     pub name_collision: u32,
+    /// Definitions remaining after the optional file and line selectors.
+    pub candidate_total: u32,
+    pub candidate_count: u32,
+    pub candidates_truncated: bool,
     /// Raw definitions remaining after file/line selection. Partial declarations
     /// are not collapsed because their outgoing edges belong to individual rows.
     pub candidates: Vec<SymbolHit>,
     pub matched: Option<SymbolHit>,
+    /// Outgoing edges before the MCP row cap. Zero when no definition is selected.
+    pub total: u32,
     pub count: u32,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_limit: Option<u32>,
     pub callees: Vec<CalleesEntry>,
     /// Edge precision for calls made by this symbol, from its language.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edge_precision: Option<EdgePrecision>,
     pub precision_notes: Vec<String>,
 }
+
+pub const CALLEES_DEFAULT_TOP: u32 = 100;
+pub const CALLEES_MAX_TOP: u32 = 500;
 
 /// A matched symbol with debug metadata for `mmcg query explain`.
 #[derive(Debug, Serialize)]
@@ -3243,38 +3261,86 @@ pub fn callees(
     edge_kind: Option<&str>,
     file: Option<&str>,
     line: Option<u32>,
+    row_limit: Option<u32>,
 ) -> rusqlite::Result<CalleesResponse> {
+    let row_limit = row_limit.map(|limit| limit.max(1));
     let selected_edge_kind = edge_kind.unwrap_or("calls");
-    let mut candidates = store.search_symbols(name, None, language)?;
-    let name_collision = candidates.len() as u32;
-    candidates.retain(|symbol| {
-        file.is_none_or(|file| symbol.file_path == file)
-            && line.is_none_or(|line| symbol.line_start == line)
-    });
-    let match_status = match candidates.len() {
+    let (name_collision, candidate_total, candidates) = match row_limit {
+        Some(limit) => {
+            let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+            if file.is_none() && line.is_none() {
+                let (total, candidates) =
+                    store.search_symbols_bounded(name, None, language, None, None, limit)?;
+                (total, total, candidates)
+            } else {
+                let (name_collision, _) =
+                    store.search_symbols_bounded(name, None, language, None, None, 0)?;
+                let (candidate_total, candidates) =
+                    store.search_symbols_bounded(name, None, language, file, line, limit)?;
+                (name_collision, candidate_total, candidates)
+            }
+        }
+        None => {
+            let mut candidates = store.search_symbols(name, None, language)?;
+            let name_collision = u32::try_from(candidates.len()).unwrap_or(u32::MAX);
+            candidates.retain(|symbol| {
+                file.is_none_or(|file| symbol.file_path == file)
+                    && line.is_none_or(|line| symbol.line_start == line)
+            });
+            let candidate_total = u32::try_from(candidates.len()).unwrap_or(u32::MAX);
+            (name_collision, candidate_total, candidates)
+        }
+    };
+    let match_status = match candidate_total {
         0 => CalleesMatchStatus::NotFound,
         1 => CalleesMatchStatus::Matched,
         _ => CalleesMatchStatus::Ambiguous,
     };
-    let matched = (candidates.len() == 1).then(|| &candidates[0]);
-    let edge_precision = matched.as_ref().map(|s| lang_precision(&s.file_path));
-    let callees: Vec<CalleesEntry> = if let Some(sym) = matched {
-        store
-            .callees_of(sym.id, edge_kind)?
-            .into_iter()
-            .map(|(n, l)| CalleesEntry { name: n, line: l })
-            .collect()
+    let matched = if candidate_total == 1 {
+        candidates.first()
     } else {
-        Vec::new()
+        None
     };
+    let edge_precision = matched.as_ref().map(|s| lang_precision(&s.file_path));
+    let (total, edges) = if let Some(sym) = matched {
+        match row_limit {
+            Some(limit) => store.callees_of_bounded(
+                sym.id,
+                edge_kind,
+                usize::try_from(limit).unwrap_or(usize::MAX),
+            )?,
+            None => {
+                let edges = store.callees_of(sym.id, edge_kind)?;
+                let total = u32::try_from(edges.len()).unwrap_or(u32::MAX);
+                (total, edges)
+            }
+        }
+    } else {
+        (0, Vec::new())
+    };
+    let callees: Vec<CalleesEntry> = edges
+        .into_iter()
+        .map(|(name, line)| CalleesEntry { name, line })
+        .collect();
+    let count = u32::try_from(callees.len()).unwrap_or(u32::MAX);
+    let candidate_count = u32::try_from(candidates.len()).unwrap_or(u32::MAX);
     Ok(CalleesResponse {
         symbol: name.to_string(),
         edge_kind: selected_edge_kind.to_string(),
+        language: language.map(String::from),
+        file: file.map(String::from),
+        line,
         match_status,
         name_collision,
+        candidate_total,
+        candidate_count,
+        candidates_truncated: row_limit.is_some() && candidate_total > candidate_count,
         matched: matched.cloned().map(SymbolHit::from),
         candidates: candidates.into_iter().map(SymbolHit::from).collect(),
-        count: callees.len() as u32,
+        total,
+        count,
+        truncated: row_limit.is_some() && total > count,
+        row_limit,
         callees,
         edge_precision,
         precision_notes: edge_query_precision_notes(selected_edge_kind),
@@ -4720,7 +4786,7 @@ mod tests {
         let path = tmp_db("empty_dependency_precision");
         let store = Store::open(&path).unwrap();
         let incoming = callers(&store, "missing", None, None, None).unwrap();
-        let outgoing = callees(&store, "missing", None, None, None, None).unwrap();
+        let outgoing = callees(&store, "missing", None, None, None, None, None).unwrap();
         let affected = impact(&store, "missing", 2, None).unwrap();
         let candidates = unreferenced(&store, Some("function"), None, None).unwrap();
         assert_eq!(incoming.count, 0);
@@ -4782,7 +4848,16 @@ mod tests {
             .precision_notes
             .iter()
             .any(|note| note == "references_do_not_prove_invocation"));
-        let outgoing = callees(&store, "register", None, Some("references"), None, None).unwrap();
+        let outgoing = callees(
+            &store,
+            "register",
+            None,
+            Some("references"),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(outgoing.edge_kind, "references");
         assert_eq!(outgoing.count, 1);
         assert_eq!(
@@ -4810,7 +4885,7 @@ mod tests {
             .index_all(&mut store, true)
             .unwrap();
 
-        let ambiguous = callees(&store, "process", None, None, None, None).unwrap();
+        let ambiguous = callees(&store, "process", None, None, None, None, None).unwrap();
         assert!(matches!(
             ambiguous.match_status,
             CalleesMatchStatus::Ambiguous
@@ -4829,20 +4904,30 @@ mod tests {
             vec![("first.rs", 1), ("second.rs", 1)]
         );
 
-        let selected = callees(&store, "process", None, None, Some("second.rs"), None).unwrap();
+        let selected =
+            callees(&store, "process", None, None, Some("second.rs"), None, None).unwrap();
         assert!(matches!(selected.match_status, CalleesMatchStatus::Matched));
         assert_eq!(selected.name_collision, 2);
         assert_eq!(selected.matched.unwrap().file, "second.rs");
         assert_eq!(selected.count, 1);
         assert_eq!(selected.callees[0].name, "second_leaf");
 
-        let missing = callees(&store, "process", None, None, Some("missing.rs"), None).unwrap();
+        let missing = callees(
+            &store,
+            "process",
+            None,
+            None,
+            Some("missing.rs"),
+            None,
+            None,
+        )
+        .unwrap();
         assert!(matches!(missing.match_status, CalleesMatchStatus::NotFound));
         assert!(missing.matched.is_none());
         assert!(missing.candidates.is_empty());
         assert!(missing.callees.is_empty());
 
-        let unique = callees(&store, "first_leaf", None, None, None, None).unwrap();
+        let unique = callees(&store, "first_leaf", None, None, None, None, None).unwrap();
         assert!(matches!(unique.match_status, CalleesMatchStatus::Matched));
         assert!(unique.matched.is_some());
         assert!(unique.callees.is_empty());
@@ -4861,7 +4946,16 @@ mod tests {
         crate::indexer::Indexer::new(root.path())
             .index_all(&mut store, true)
             .unwrap();
-        let ambiguous = callees(&store, "process", None, None, Some("modules.rs"), None).unwrap();
+        let ambiguous = callees(
+            &store,
+            "process",
+            None,
+            None,
+            Some("modules.rs"),
+            None,
+            None,
+        )
+        .unwrap();
         assert!(matches!(
             ambiguous.match_status,
             CalleesMatchStatus::Ambiguous
@@ -4869,13 +4963,30 @@ mod tests {
         assert!(ambiguous.matched.is_none());
         assert_eq!(ambiguous.candidates.len(), 2);
 
-        let selected = callees(&store, "process", None, None, Some("modules.rs"), Some(5)).unwrap();
+        let selected = callees(
+            &store,
+            "process",
+            None,
+            None,
+            Some("modules.rs"),
+            Some(5),
+            None,
+        )
+        .unwrap();
         assert!(matches!(selected.match_status, CalleesMatchStatus::Matched));
         assert_eq!(selected.matched.unwrap().line, 5);
         assert_eq!(selected.callees[0].name, "second_leaf");
 
-        let wrong_line =
-            callees(&store, "process", None, None, Some("modules.rs"), Some(6)).unwrap();
+        let wrong_line = callees(
+            &store,
+            "process",
+            None,
+            None,
+            Some("modules.rs"),
+            Some(6),
+            None,
+        )
+        .unwrap();
         assert!(matches!(
             wrong_line.match_status,
             CalleesMatchStatus::NotFound
@@ -4901,7 +5012,7 @@ mod tests {
             .index_all(&mut store, true)
             .unwrap();
 
-        let selected = callees(&store, "process", Some("python"), None, None, None).unwrap();
+        let selected = callees(&store, "process", Some("python"), None, None, None, None).unwrap();
         assert!(matches!(selected.match_status, CalleesMatchStatus::Matched));
         assert_eq!(selected.name_collision, 1);
         assert_eq!(selected.matched.unwrap().file, "app.py");
@@ -4912,6 +5023,7 @@ mod tests {
             "process",
             Some("python"),
             Some("imports"),
+            None,
             None,
             None,
         )
@@ -4938,7 +5050,7 @@ mod tests {
         let collapsed = search(&store, "Processor", None, Some("csharp"), true).unwrap();
         assert_eq!(collapsed.results.len(), 1);
         assert_eq!(collapsed.results[0].locations.as_ref().unwrap().len(), 2);
-        let ambiguous = callees(&store, "Processor", None, None, None, None).unwrap();
+        let ambiguous = callees(&store, "Processor", None, None, None, None, None).unwrap();
         assert!(matches!(
             ambiguous.match_status,
             CalleesMatchStatus::Ambiguous
@@ -4949,6 +5061,76 @@ mod tests {
             .candidates
             .iter()
             .all(|candidate| candidate.locations.is_none()));
+    }
+
+    #[test]
+    fn callees_bounds_candidates_without_hiding_an_exact_selection() {
+        let path = tmp_db("callees_response_limits");
+        let store = Store::open(&path).unwrap();
+        for (name, file) in [
+            ("process", "src/a.rs"),
+            ("process", "src/b.rs"),
+            ("process", "src/c.rs"),
+        ] {
+            let definition = store
+                .insert_symbol(name, "function", file, 1, 3, None, None)
+                .unwrap();
+            if file == "src/c.rs" {
+                for (callee, line) in [("alpha", 1), ("beta", 2), ("gamma", 3)] {
+                    store
+                        .insert_edge(definition, None, callee, "calls", line)
+                        .unwrap();
+                }
+            }
+        }
+
+        let ambiguous = callees(&store, "process", None, None, None, None, Some(2)).unwrap();
+        assert!(matches!(
+            ambiguous.match_status,
+            CalleesMatchStatus::Ambiguous
+        ));
+        assert_eq!(ambiguous.name_collision, 3);
+        assert_eq!(ambiguous.candidate_total, 3);
+        assert_eq!(ambiguous.candidate_count, 2);
+        assert!(ambiguous.candidates_truncated);
+        assert_eq!(ambiguous.total, 0);
+        assert!(!ambiguous.truncated);
+
+        let selected = callees(
+            &store,
+            "process",
+            None,
+            None,
+            Some("src/c.rs"),
+            None,
+            Some(2),
+        )
+        .unwrap();
+        assert!(matches!(selected.match_status, CalleesMatchStatus::Matched));
+        assert_eq!(selected.file.as_deref(), Some("src/c.rs"));
+        assert_eq!(selected.name_collision, 3);
+        assert_eq!(selected.candidate_total, 1);
+        assert_eq!(selected.candidate_count, 1);
+        assert!(!selected.candidates_truncated);
+        assert_eq!(selected.total, 3);
+        assert_eq!(selected.count, 2);
+        assert!(selected.truncated);
+        assert_eq!(selected.row_limit, Some(2));
+        assert_eq!(
+            selected
+                .callees
+                .iter()
+                .map(|callee| callee.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "beta"]
+        );
+
+        let complete =
+            callees(&store, "process", None, None, Some("src/c.rs"), None, None).unwrap();
+        assert_eq!(complete.total, 3);
+        assert_eq!(complete.count, 3);
+        assert!(!complete.truncated);
+        std::fs::remove_file(path).ok();
     }
 
     fn verified_concept_freshness() -> ConceptFreshness {

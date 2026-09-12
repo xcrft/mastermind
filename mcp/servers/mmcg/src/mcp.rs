@@ -1811,7 +1811,8 @@ fn schema_callees() -> Value {
                 "file": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Exact relative file path from a candidate, as stored in the index" },
                 "line": { "type": "integer", "minimum": 1, "maximum": 4294967295_u64, "description": "Exact declaration start line from a candidate; requires file" },
                 "language": { "type": "string", "enum": LANGUAGES },
-                "edge_kind": { "type": "string", "enum": ["calls", "imports", "inherits", "references"], "default": "calls" }
+                "edge_kind": { "type": "string", "enum": ["calls", "imports", "inherits", "references"], "default": "calls" },
+                "top": { "type": "integer", "minimum": 1, "maximum": queries::CALLEES_MAX_TOP, "default": queries::CALLEES_DEFAULT_TOP, "description": "Maximum candidates and outgoing edges to return" }
             },
             "required": ["name"],
             "dependentRequired": { "line": ["file"] }
@@ -2355,8 +2356,15 @@ fn handle_callees(store: &mut Store, args: &Value) -> Result<Value, HandlerError
                 })
         })
         .transpose()?;
+    let top = bounded_u64_arg(
+        args,
+        "top",
+        u64::from(queries::CALLEES_DEFAULT_TOP),
+        1,
+        u64::from(queries::CALLEES_MAX_TOP),
+    )? as u32;
     ensure_fresh_index(store)?;
-    let r = queries::callees(store, name, language, edge_kind, file, line)
+    let r = queries::callees(store, name, language, edge_kind, file, line, Some(top))
         .map_err(|error| HandlerError::internal("callees_query", error))?;
     serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
@@ -4235,6 +4243,11 @@ mod tests {
                 "Invalid argument: top",
             ),
             (handle_files, json!({ "top": 0 }), "Invalid argument: top"),
+            (
+                handle_callees,
+                json!({ "name": "target", "top": 501 }),
+                "Invalid argument: top",
+            ),
             (
                 handle_symbols_in_file,
                 json!({ "file": "src/app.py", "top": 501 }),

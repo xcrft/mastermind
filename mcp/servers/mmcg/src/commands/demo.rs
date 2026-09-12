@@ -201,7 +201,7 @@ fn hallucinated_symbol() -> Result<(), Box<dyn std::error::Error>> {
     println!("Auditor running mmcg_search ProcessPayment ...\n");
 
     let search = queries::search(&store, "ProcessPayment", None, None, true)?;
-    let callees = queries::callees(&store, "CancelOrder", None, None, None, None)?;
+    let callees = queries::callees(&store, "CancelOrder", None, None, None, None, None)?;
     let _ = fs::remove_dir_all(&tmp);
 
     let process_payment_found = !search.results.is_empty();

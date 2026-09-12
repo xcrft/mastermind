@@ -681,6 +681,20 @@ fn collect_workflow_evidence(
     let mut files: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for task_name in &task_names {
         let task_dir = path.join(task_name);
+        let Some(task_name_text) = task_name.to_str() else {
+            gaps.push(gap(
+                FAMILY_WORKFLOW,
+                "workflow_inventory_invalid",
+                "Workflow evidence inventory contains a non-UTF-8 entry.",
+            ));
+            continue;
+        };
+        let auxiliary = task_name_text.starts_with('_')
+            || task_name_text.starts_with('.')
+            || task_name_text.ends_with(".md");
+        if auxiliary {
+            continue;
+        }
         match bounded_fs::inspect_path_kind_with_capability(
             &artifacts.root,
             &task_dir,
@@ -690,7 +704,15 @@ fn collect_workflow_evidence(
                 task_kinds.push((task_dir.clone(), BoundedPathKind::Directory))
             }
             Ok(BoundedPathKind::RegularFile) => {
-                task_kinds.push((task_dir, BoundedPathKind::RegularFile));
+                task_kinds.push((task_dir.clone(), BoundedPathKind::RegularFile));
+                gaps.push(gap(
+                    FAMILY_WORKFLOW,
+                    "workflow_inventory_invalid",
+                    format!(
+                        "Workflow task entry `{}` is not a no-follow directory.",
+                        task_dir.display()
+                    ),
+                ));
                 continue;
             }
             result => {
@@ -1217,6 +1239,19 @@ mod tests {
                 "{invalid}"
             );
         }
+    }
+
+    #[test]
+    fn task_like_workflow_inventory_files_remain_incomplete_beside_valid_coverage() {
+        let (repo, evidence, baseline) = external_workflow_fixture(2);
+        fs::write(evidence.path().join("_lessons.md"), "# Lessons\n").unwrap();
+        fs::write(evidence.path().join("002-not-a-directory"), "# Task\n").unwrap();
+
+        let (files, gaps, _) = external_workflow(repo.path(), evidence.path(), &baseline);
+        assert!(files.contains_key("critical.txt"));
+        assert!(gaps
+            .iter()
+            .any(|gap| gap.code == "workflow_inventory_invalid"));
     }
 
     #[test]

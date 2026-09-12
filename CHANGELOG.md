@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Architecture policy now reports task-like regular files and non-UTF-8 entries
+  in workflow evidence inventories, instead of ignoring them beside otherwise
+  valid coverage.
 - All workflow state readers now share one semantic decoder that rejects invalid
   risk values and incompatible `status`/`next_step` pairs, preventing divergent
   readiness decisions from the same state file. Architecture policy reports

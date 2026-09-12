@@ -146,6 +146,8 @@ health checks use the full state contract too, so partial completion records
 cannot enter the semantic review queue.
 Task-like inventory entries must be no-follow directories containing `spec.md`;
 malformed entries are surfaced as blocked workflow state instead of disappearing.
+Architecture policy applies the same task-entry rule and marks malformed evidence
+inventories incomplete even when another task covers the changed file.
 The same repository-bound replacement protects controller-written `audit.md`,
 release-note drafts, `history-review.md`, and review archives.
 

@@ -108,10 +108,10 @@ pub fn render_temporal_text(response: &mmcg::temporal::TemporalResponse) -> Stri
         "Temporal architecture · {} → working copy\nScope: {} · changed: {} · partial: {}\n\n",
         safe_text(&response.baseline.requested_ref),
         safe_text(&response.scope.path),
-        if response.summary.architecture_changed {
-            "yes"
-        } else {
-            "no"
+        match response.summary.architecture_changed {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "unknown",
         },
         if response.partial { "yes" } else { "no" }
     );
@@ -170,21 +170,26 @@ pub fn render_temporal_text(response: &mmcg::temporal::TemporalResponse) -> Stri
 
 fn render_temporal_counts(summary: &mmcg::temporal::TemporalSummary) -> String {
     format!(
-        "Components  +{}  -{}\nBoundaries  +{}  -{}  ~{}\nCycles      +{}  -{}  ~{}\nCentrality  {} increases · hotspots +{} -{}\nOwnership   {} changes\nHistory     {} review candidates\n",
-        summary.components_added,
-        summary.components_removed,
-        summary.boundaries_added,
-        summary.boundaries_removed,
-        summary.boundaries_changed,
-        summary.cycles_introduced,
-        summary.cycles_resolved,
-        summary.cycles_changed,
-        summary.centrality_increases,
-        summary.hotspot_entries,
-        summary.hotspot_exits,
-        summary.ownership_changes,
-        summary.history_review_candidates,
+        "Components  +{}  -{}  ~{}\nBoundaries  +{}  -{}  ~{}\nCycles      +{}  -{}  ~{}\nCentrality  {} increases · hotspots +{} -{}\nOwnership   {} changes\nHistory     {} review candidates\n",
+        temporal_count_label(summary.components_added),
+        temporal_count_label(summary.components_removed),
+        temporal_count_label(summary.components_changed),
+        temporal_count_label(summary.boundaries_added),
+        temporal_count_label(summary.boundaries_removed),
+        temporal_count_label(summary.boundaries_changed),
+        temporal_count_label(summary.cycles_introduced),
+        temporal_count_label(summary.cycles_resolved),
+        temporal_count_label(summary.cycles_changed),
+        temporal_count_label(summary.centrality_increases),
+        temporal_count_label(summary.hotspot_entries),
+        temporal_count_label(summary.hotspot_exits),
+        temporal_count_label(summary.ownership_changes),
+        temporal_count_label(summary.history_review_candidates),
     )
+}
+
+fn temporal_count_label(value: Option<u32>) -> String {
+    value.map_or_else(|| "unknown".to_string(), |value| value.to_string())
 }
 
 pub fn dispatch_history(
@@ -1070,23 +1075,24 @@ mod map_tests {
     #[test]
     fn temporal_text_summary_keeps_every_drift_category() {
         let rendered = render_temporal_counts(&mmcg::temporal::TemporalSummary {
-            architecture_changed: true,
-            components_added: 1,
-            components_removed: 2,
-            boundaries_added: 3,
-            boundaries_removed: 4,
-            boundaries_changed: 5,
-            cycles_introduced: 6,
-            cycles_resolved: 7,
-            cycles_changed: 8,
-            centrality_increases: 9,
-            hotspot_entries: 10,
-            hotspot_exits: 11,
-            ownership_changes: 12,
-            history_review_candidates: 13,
+            architecture_changed: Some(true),
+            components_added: Some(1),
+            components_removed: Some(2),
+            components_changed: Some(14),
+            boundaries_added: Some(3),
+            boundaries_removed: Some(4),
+            boundaries_changed: Some(5),
+            cycles_introduced: Some(6),
+            cycles_resolved: Some(7),
+            cycles_changed: Some(8),
+            centrality_increases: Some(9),
+            hotspot_entries: Some(10),
+            hotspot_exits: Some(11),
+            ownership_changes: Some(12),
+            history_review_candidates: Some(13),
         });
 
-        assert!(rendered.contains("Components  +1  -2"));
+        assert!(rendered.contains("Components  +1  -2  ~14"));
         assert!(rendered.contains("Boundaries  +3  -4  ~5"));
         assert!(rendered.contains("Cycles      +6  -7  ~8"));
         assert!(rendered.contains("hotspots +10 -11"));

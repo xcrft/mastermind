@@ -2144,7 +2144,7 @@ fn schema_map() -> Value {
 fn schema_temporal() -> Value {
     json!({
         "name": "mmcg_temporal",
-        "description": "Compare bounded base-vs-worktree architecture snapshots: components, cross-component boundaries/public API, cycles, centrality/hotspot drift, CODEOWNERS changes, and exact history review candidates. The baseline is rewound in a private temporary SQLite snapshot; the repository and source index remain read-only.",
+        "description": "Compare bounded base-vs-worktree architecture snapshots: components, cross-component boundaries/public API, cycles, centrality/hotspot drift, CODEOWNERS changes, and history review candidates. Each delta reports an exact total when both source projections are complete; incomplete maps, CODEOWNERS, or history leave totals and affected summary counts null. Observed drift remains true, while no observed drift stays unknown until coverage is complete. The baseline is rewound in a private temporary SQLite snapshot; the repository and source index remain read-only.",
         "inputSchema": {
             "type": "object",
             "properties": {

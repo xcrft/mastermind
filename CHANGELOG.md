@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Temporal deltas now leave totals and summary counts unknown when their map,
+  CODEOWNERS, or history source is incomplete; centrality increases count the
+  complete measured delta before response bounding, and component-shape drift
+  is retained as `components_changed` across JSON, text, Lens, and review output.
 - `mmcg_semantic` now marks rows withheld for stale SCIP documents in each
   collection, preserves their exact stored-match total when known, and treats
   unverified repository or revision evidence as partial instead of presenting

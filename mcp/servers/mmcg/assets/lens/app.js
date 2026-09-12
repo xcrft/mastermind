@@ -2335,10 +2335,16 @@
   }
 
   function temporalPair(added, removed, changed) {
-    const plus = totalOrReturned(collection(added));
-    const minus = totalOrReturned(collection(removed));
-    const drift = changed === undefined ? null : totalOrReturned(collection(changed));
-    return "+" + displayNumber(plus) + " −" + displayNumber(minus) + (drift === null ? "" : " ~" + displayNumber(drift));
+    const metric = function (source) {
+      const value = collection(source);
+      if (value.total !== null) {
+        return displayNumber(value.total);
+      }
+      const observed = observedCount(value);
+      return observed > 0 ? "≥" + displayNumber(observed) : "?";
+    };
+    const drift = changed === undefined ? null : metric(changed);
+    return "+" + metric(added) + " −" + metric(removed) + (drift === null ? "" : " ~" + drift);
   }
 
   function renderTemporal() {
@@ -2367,13 +2373,20 @@
     elements.temporalMetric.components.textContent = temporalPair(components.added, components.removed, components.changed);
     elements.temporalMetric.boundaries.textContent = temporalPair(boundaries.added, boundaries.removed, boundaries.changed);
     elements.temporalMetric.cycles.textContent = temporalPair(cycles.added, cycles.removed, cycles.changed);
-    elements.temporalMetric.centrality.textContent = "↑" + displayNumber(finiteNumber(summary.centrality_increases));
-    elements.temporalMetric.ownership.textContent = displayNumber(finiteNumber(summary.ownership_changes));
-    elements.temporalMetric.history.textContent = displayNumber(finiteNumber(summary.history_review_candidates));
+    const summaryCount = function (value) {
+      const count = finiteNumber(value);
+      return count === null ? "?" : displayNumber(count);
+    };
+    elements.temporalMetric.centrality.textContent = "↑" + summaryCount(summary.centrality_increases);
+    elements.temporalMetric.ownership.textContent = summaryCount(summary.ownership_changes);
+    elements.temporalMetric.history.textContent = summaryCount(summary.history_review_candidates);
     const changed = summary.architecture_changed === true;
+    const changeKnown = typeof summary.architecture_changed === "boolean";
     elements.temporalSummary.textContent = changed
       ? "Architecture drift detected between " + text(record(temporal.baseline).requested_ref, "the baseline") + " and the indexed working copy" + (temporal.partial === true ? "; bounded projection is partial." : ".")
-      : "No architecture drift was observed in the returned base/head projection.";
+      : (changeKnown
+        ? "No architecture drift was observed in the complete base/head projection."
+        : "No architecture drift was observed in the returned base/head projection; incomplete coverage prevents an unchanged conclusion.");
 
     const events = [];
     collection(components.added).items.forEach(function (value) {

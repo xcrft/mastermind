@@ -1588,6 +1588,7 @@ async function main() {
   );
   assert.match(node.textContent, /UNTESTED/, "A changed claim with no returned test path must be flagged in text, not color alone");
   assert.match(node.textContent, /1 fail · 1 error finding/i, "Evidence marks must put serious findings after failing tests");
+  assert.match(node.getAttribute("aria-label"), /1 error finding, 1 warning finding · file-level/i, "Accessible claim labels must preserve finding severity");
   assert.match(node.textContent, /→ 1 sym · 1 comp/, "Changed claims must state their blast reach");
   node.dispatch("keydown", { key: " " });
   assert.doesNotMatch(keyboardHarness.nodes.get("inspector-body").textContent, /Select a trace claim/i);
@@ -1619,6 +1620,7 @@ async function main() {
   assert.equal(informationalNode.classList.contains("graph-node--risk-serious"), false, "A note-level finding must not become a serious claim");
   assert.equal(informationalNode.classList.contains("graph-node--risk-warning"), false, "A note-level finding must not become a warning claim");
   assert.match(informationalNode.textContent, /1 informational finding/i, "Informational findings remain visible without inflating severity");
+  assert.match(informationalNode.getAttribute("aria-label"), /1 informational finding · file-level/i, "Accessible claim labels keep informational severity neutral");
   assert.equal(informationalHarness.nodes.get("audit-security").querySelectorAll(".audit-count--serious").length, 0, "A note-only finding count must not use the serious badge");
   assert.equal(informationalHarness.nodes.get("audit-verdict-word").textContent, "Healthy", "An informational result alone must not turn the overall audit into attention");
   assert.match(informationalHarness.nodes.get("audit-security-sev").textContent, /Surface/i, "An informational result keeps the security chip informational");
@@ -1636,6 +1638,7 @@ async function main() {
   assert.equal(warningNode.classList.contains("graph-node--risk-serious"), false, "A warning finding must not become a serious claim");
   assert.ok(warningNode.classList.contains("graph-node--risk-warning"), "A warning finding must retain its warning tier");
   assert.match(warningNode.textContent, /1 warning finding/i, "Warning findings retain their severity label");
+  assert.match(warningNode.getAttribute("aria-label"), /1 warning finding · file-level/i, "Accessible claim labels retain warning severity");
   assert.equal(warningHarness.nodes.get("audit-security").querySelectorAll(".audit-count--warning").length, 1, "A warning-only finding count must use the warning badge");
   assert.equal(warningHarness.nodes.get("audit-verdict-word").textContent, "Attention", "A warning finding must retain the overall attention posture");
   warningNode.dispatch("keydown", { key: "Enter" });

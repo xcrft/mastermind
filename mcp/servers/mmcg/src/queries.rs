@@ -1212,6 +1212,59 @@ pub struct ChangeImpactResponse {
     pub precision_notes: Vec<String>,
 }
 
+impl ChangeImpactResponse {
+    pub fn is_partial(&self) -> bool {
+        self.changes.files.truncated
+            || self.changes.files.total.is_none()
+            || self.changes.symbols.truncated
+            || self.changes.symbols.total.is_none()
+            || self.affected_components.truncated
+            || self.affected_components.total.is_none()
+            || self.impact.truncated
+            || self.impact.total.is_none()
+            || self.api_crossings.truncated
+            || self.api_crossings.total.is_none()
+            || self.tests.truncated
+            || self.tests.total.is_none()
+    }
+
+    pub fn truncation_reasons(&self) -> Vec<&str> {
+        let sections = [
+            (
+                self.changes.files.truncated || self.changes.files.total.is_none(),
+                self.changes.files.truncation_reason.as_deref(),
+            ),
+            (
+                self.changes.symbols.truncated || self.changes.symbols.total.is_none(),
+                self.changes.symbols.truncation_reason.as_deref(),
+            ),
+            (
+                self.affected_components.truncated || self.affected_components.total.is_none(),
+                self.affected_components.truncation_reason.as_deref(),
+            ),
+            (
+                self.impact.truncated || self.impact.total.is_none(),
+                self.impact.truncation_reason.as_deref(),
+            ),
+            (
+                self.api_crossings.truncated || self.api_crossings.total.is_none(),
+                self.api_crossings.truncation_reason.as_deref(),
+            ),
+            (
+                self.tests.truncated || self.tests.total.is_none(),
+                self.tests.truncation_reason.as_deref(),
+            ),
+        ];
+        let mut reasons = BTreeSet::new();
+        for (incomplete, reason) in sections {
+            if incomplete {
+                reasons.insert(reason.unwrap_or("incomplete_count"));
+            }
+        }
+        reasons.into_iter().collect()
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ImpactBaseline {
     pub requested_ref: String,

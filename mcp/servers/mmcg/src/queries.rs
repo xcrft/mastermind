@@ -660,12 +660,22 @@ pub struct CentralityHit {
 
 #[derive(Debug, Serialize)]
 pub struct CentralityResponse {
+    pub total: u32,
     pub count: u32,
+    pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefix: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     pub top: u32,
     pub results: Vec<CentralityHit>,
+    pub precision_notes: Vec<String>,
 }
+
+pub const CENTRALITY_DEFAULT_TOP: u32 = 20;
+pub const CENTRALITY_MAX_TOP: u32 = 200;
 
 #[derive(Debug, Serialize)]
 pub struct TaskSearchResponse {
@@ -3564,7 +3574,7 @@ pub fn centrality(
     kind: Option<&str>,
     top: u32,
 ) -> rusqlite::Result<CentralityResponse> {
-    let raw = store.centrality(prefix, language, kind, top)?;
+    let (total, raw) = store.centrality_bounded(prefix, language, kind, top)?;
     let results: Vec<CentralityHit> = raw
         .into_iter()
         .map(|(s, in_degree, name_collision)| CentralityHit {
@@ -3578,11 +3588,21 @@ pub fn centrality(
             decorators: s.decorators,
         })
         .collect();
+    let count = u32::try_from(results.len()).unwrap_or(u32::MAX);
     Ok(CentralityResponse {
-        count: results.len() as u32,
+        total,
+        count,
+        truncated: total > count,
         prefix: prefix.map(String::from),
+        language: language.map(String::from),
+        kind: kind.map(String::from),
         top,
         results,
+        precision_notes: vec![
+            "in_degree_counts_distinct_syntactic_caller_symbols_not_call_sites".to_string(),
+            "name_based_resolution_can_pool_same_named_definitions".to_string(),
+            "ranking_does_not_prove_runtime_importance".to_string(),
+        ],
     })
 }
 

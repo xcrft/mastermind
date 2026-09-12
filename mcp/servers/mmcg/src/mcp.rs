@@ -2018,7 +2018,7 @@ fn schema_centrality() -> Value {
                 "prefix": { "type": "string", "description": "Optional literal path prefix to limit ranking scope (e.g. 'src/auth/'); percent and underscore are ordinary path characters." },
                 "language": { "type": "string", "enum": LANGUAGES },
                 "kind": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Optional kind filter (function, class, method, struct, etc.)" },
-                "top": { "type": "integer", "minimum": 1, "maximum": 200, "default": 20, "description": "How many results to return" }
+                "top": { "type": "integer", "minimum": 1, "maximum": queries::CENTRALITY_MAX_TOP, "default": queries::CENTRALITY_DEFAULT_TOP, "description": "How many results to return" }
             }
         }
     })
@@ -2650,7 +2650,13 @@ fn handle_centrality(store: &mut Store, args: &Value) -> Result<Value, HandlerEr
     let prefix = opt_str_arg(args, "prefix")?;
     let language = opt_enum_arg(args, "language", &LANGUAGES)?;
     let kind = opt_non_blank_str_arg(args, "kind")?;
-    let top = bounded_u64_arg(args, "top", 20, 1, 200)? as u32;
+    let top = bounded_u64_arg(
+        args,
+        "top",
+        u64::from(queries::CENTRALITY_DEFAULT_TOP),
+        1,
+        u64::from(queries::CENTRALITY_MAX_TOP),
+    )? as u32;
     ensure_fresh_index(store)?;
     let r = queries::centrality(store, prefix, language, kind, top)
         .map_err(|error| HandlerError::internal("centrality_query", error))?;
@@ -4362,6 +4368,11 @@ mod tests {
             (
                 handle_centrality,
                 json!({ "top": "20" }),
+                "Invalid argument: top",
+            ),
+            (
+                handle_centrality,
+                json!({ "top": 201 }),
                 "Invalid argument: top",
             ),
             (

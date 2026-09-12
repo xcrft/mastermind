@@ -706,6 +706,7 @@ fn execute(store: &Store, q: QueryCmd) -> Result<Value, Box<dyn std::error::Erro
             edge_kind.as_deref(),
             file.as_deref(),
             line,
+            None,
         )?)?,
         QueryCmd::Impact {
             name,

@@ -653,6 +653,8 @@ pub struct FileEntry {
 
 pub(crate) type ImportRow = (String, Option<String>, u32);
 pub(crate) type CountedImportRows = (u32, Vec<ImportRow>);
+pub(crate) type CalleeRow = (String, u32);
+pub(crate) type CountedCalleeRows = (u32, Vec<CalleeRow>);
 
 /// One task-spec file ready to be inserted into the FTS5 corpus.
 #[derive(Debug, Clone)]
@@ -5278,6 +5280,53 @@ impl Store {
         rows.collect()
     }
 
+    pub(crate) fn search_symbols_bounded(
+        &self,
+        name: &str,
+        kind: Option<&str>,
+        language: Option<&str>,
+        file: Option<&str>,
+        line: Option<u32>,
+        limit: usize,
+    ) -> SqlResult<(u32, Vec<Symbol>)> {
+        let sql = format!(
+            "WITH matching AS (
+                 SELECT {SYMBOL_COLS}
+                 FROM symbols
+                 WHERE name = ?1
+                   AND (?2 IS NULL OR kind = ?2)
+                   AND (?3 IS NULL OR language = ?3)
+                   AND (?4 IS NULL OR file_path = ?4)
+                   AND (?5 IS NULL OR line_start = ?5)
+             )
+             SELECT {SYMBOL_COLS}, COUNT(*) OVER() AS total FROM matching
+             ORDER BY file_path, line_start, line_end, name, kind, id
+             LIMIT ?6"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            params![
+                name,
+                kind,
+                language,
+                file,
+                line,
+                i64::try_from(limit.max(1)).unwrap_or(i64::MAX)
+            ],
+            |row| Ok((Self::row_to_symbol(row)?, row.get::<_, i64>(9)?)),
+        )?;
+        let mut total = 0;
+        let mut symbols = Vec::with_capacity(limit);
+        for row in rows {
+            let (symbol, row_total) = row?;
+            total = row_total;
+            if symbols.len() < limit {
+                symbols.push(symbol);
+            }
+        }
+        Ok((total.clamp(0, i64::from(u32::MAX)) as u32, symbols))
+    }
+
     /// Raw named-declaration candidates for spec resolution. Compound namespace
     /// names and nested namespace nodes must expose the same final component.
     pub(crate) fn spec_symbol_candidates(
@@ -5449,6 +5498,46 @@ impl Store {
             Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?))
         })?;
         rows.collect()
+    }
+
+    pub(crate) fn callees_of_bounded(
+        &self,
+        symbol_id: i64,
+        edge_kind: Option<&str>,
+        limit: usize,
+    ) -> SqlResult<CountedCalleeRows> {
+        let mut stmt = self.conn.prepare(
+            "WITH matching AS (
+                 SELECT DISTINCT to_name, line FROM edges
+                 WHERE from_id = ?1 AND kind = COALESCE(?2, 'calls')
+             )
+             SELECT to_name, line, COUNT(*) OVER() AS total FROM matching
+             ORDER BY line, to_name
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                symbol_id,
+                edge_kind,
+                i64::try_from(limit.max(1)).unwrap_or(i64::MAX)
+            ],
+            |row| {
+                Ok((
+                    (row.get::<_, String>(0)?, row.get::<_, u32>(1)?),
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+        let mut total = 0;
+        let mut callees = Vec::with_capacity(limit);
+        for row in rows {
+            let (callee, row_total) = row?;
+            total = row_total;
+            if callees.len() < limit {
+                callees.push(callee);
+            }
+        }
+        Ok((total.clamp(0, i64::from(u32::MAX)) as u32, callees))
     }
 
     pub(crate) fn symbol_language(&self, id: i64) -> SqlResult<String> {

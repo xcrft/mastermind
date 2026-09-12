@@ -107,8 +107,13 @@ pub struct SemanticEdge {
 
 #[derive(Debug, Serialize)]
 pub struct SemanticCollection<T> {
+    /// Exact matching rows in the stored overlay when the query limit was not
+    /// reached. This includes rows omitted below because their source changed.
     pub total: Option<u32>,
     pub returned: u32,
+    /// Matching rows withheld because at least one endpoint document no longer
+    /// matches the source snapshot captured during SCIP import.
+    pub omitted_stale: u32,
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncation_reason: Option<&'static str>,
@@ -1592,6 +1597,7 @@ fn empty_snapshot() -> SemanticOverlaySnapshot {
         definitions: SemanticCollection {
             total: Some(0),
             returned: 0,
+            omitted_stale: 0,
             truncated: false,
             truncation_reason: None,
             items: Vec::new(),
@@ -1599,6 +1605,7 @@ fn empty_snapshot() -> SemanticOverlaySnapshot {
         edges: SemanticCollection {
             total: Some(0),
             returned: 0,
+            omitted_stale: 0,
             truncated: false,
             truncation_reason: None,
             items: Vec::new(),
@@ -1611,6 +1618,8 @@ fn empty_snapshot() -> SemanticOverlaySnapshot {
 pub fn unavailable_with_diagnostic() -> SemanticOverlaySnapshot {
     let mut snapshot = empty_snapshot();
     snapshot.partial = true;
+    snapshot.definitions = unknown_collection("semantic_overlay_unavailable");
+    snapshot.edges = unknown_collection("semantic_overlay_unavailable");
     snapshot.diagnostics.push(SemanticDiagnostic {
         code: "semantic_overlay_unavailable",
         message: "The SCIP overlay could not be read safely. Tree-sitter remains available; re-run `mastermind enrich --scip <index.scip>` to replace it.".into(),
@@ -1665,6 +1674,8 @@ pub fn query(
             }))
             .collect::<Vec<_>>();
     let stale = stale_semantic_paths(store, &root, semantic_paths)?;
+    let definition_candidates = definitions.len();
+    let edge_candidates = edges.len();
     definitions.retain(|definition| !stale.contains(&definition.file));
     edges.retain(|edge| {
         !stale.contains(&edge.from_file)
@@ -1678,11 +1689,24 @@ pub fn query(
     Ok(SemanticOverlaySnapshot {
         schema_version: 1,
         available: true,
-        partial: definitions_truncated || edges_truncated || !stale.is_empty(),
+        partial: definitions_truncated
+            || edges_truncated
+            || !stale.is_empty()
+            || !source.revision_verified,
         fallback_active: false,
         source: Some(source),
-        definitions: collection(definitions, definitions_truncated, "definition_limit"),
-        edges: collection(edges, edges_truncated, "semantic_edge_limit"),
+        definitions: collection(
+            definitions,
+            definition_candidates,
+            definitions_truncated,
+            "definition_limit",
+        ),
+        edges: collection(
+            edges,
+            edge_candidates,
+            edges_truncated,
+            "semantic_edge_limit",
+        ),
         diagnostics,
         resolution: resolution(),
     })
@@ -1693,6 +1717,8 @@ fn unverified_repository_snapshot(source: SemanticSource) -> SemanticOverlaySnap
     snapshot.available = true;
     snapshot.partial = true;
     snapshot.source = Some(source);
+    snapshot.definitions = unknown_collection("repository_unverified");
+    snapshot.edges = unknown_collection("repository_unverified");
     snapshot.diagnostics.push(SemanticDiagnostic {
         code: "semantic_repository_unverified",
         message: "SCIP evidence was omitted because its repository identity is not verified. Re-import it with `mastermind enrich --scip <index.scip>`.".into(),
@@ -1700,14 +1726,39 @@ fn unverified_repository_snapshot(source: SemanticSource) -> SemanticOverlaySnap
     snapshot
 }
 
-fn collection<T>(items: Vec<T>, truncated: bool, reason: &'static str) -> SemanticCollection<T> {
+fn collection<T>(
+    items: Vec<T>,
+    candidates: usize,
+    limit_truncated: bool,
+    limit_reason: &'static str,
+) -> SemanticCollection<T> {
     let returned = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    let candidate_count = u32::try_from(candidates).unwrap_or(u32::MAX);
+    let omitted_stale = candidate_count.saturating_sub(returned);
+    let truncated = limit_truncated || omitted_stale > 0;
     SemanticCollection {
-        total: (!truncated).then_some(returned),
+        total: (!limit_truncated).then_some(candidate_count),
         returned,
+        omitted_stale,
         truncated,
-        truncation_reason: truncated.then_some(reason),
+        truncation_reason: match (limit_truncated, omitted_stale > 0) {
+            (true, true) => Some("query_limit_and_stale_documents"),
+            (true, false) => Some(limit_reason),
+            (false, true) => Some("stale_documents"),
+            (false, false) => None,
+        },
         items,
+    }
+}
+
+fn unknown_collection<T>(reason: &'static str) -> SemanticCollection<T> {
+    SemanticCollection {
+        total: None,
+        returned: 0,
+        omitted_stale: 0,
+        truncated: true,
+        truncation_reason: Some(reason),
+        items: Vec::new(),
     }
 }
 
@@ -1796,6 +1847,7 @@ pub fn for_lens(
         .flat_map(|edge| std::iter::once(edge.from_file.clone()).chain(edge.to_file.clone()))
         .collect::<Vec<_>>();
     let stale = stale_semantic_paths(store, root, edge_paths)?;
+    let edge_candidates = edges.len();
     edges.retain(|edge| {
         !stale.contains(&edge.from_file)
             && edge
@@ -1805,15 +1857,20 @@ pub fn for_lens(
     });
     let mut diagnostics = revision_diagnostic(&source).into_iter().collect::<Vec<_>>();
     diagnostics.extend(stale_diagnostic(&stale));
-    let partial = edges_truncated || !stale.is_empty();
+    let partial = edges_truncated || !stale.is_empty() || !source.revision_verified;
     Ok(SemanticOverlaySnapshot {
         schema_version: 1,
         available: true,
         partial,
         fallback_active: false,
         source: Some(source),
-        definitions: collection(Vec::new(), false, "definition_limit"),
-        edges: collection(edges, edges_truncated, "semantic_edge_limit"),
+        definitions: collection(Vec::new(), 0, false, "definition_limit"),
+        edges: collection(
+            edges,
+            edge_candidates,
+            edges_truncated,
+            "semantic_edge_limit",
+        ),
         diagnostics,
         resolution: resolution(),
     })
@@ -2119,15 +2176,80 @@ mod tests {
         assert!(snapshot.available);
         assert!(snapshot.partial);
         assert!(snapshot.edges.items.is_empty());
+        assert!(snapshot.edges.truncated);
+        assert_eq!(snapshot.edges.truncation_reason, Some("stale_documents"));
+        assert!(snapshot.edges.omitted_stale > 0);
+        assert_eq!(snapshot.edges.total, Some(snapshot.edges.omitted_stale));
         assert_eq!(snapshot.diagnostics[0].code, "semantic_overlay_stale");
         assert_eq!(snapshot.resolution.default_graph, "tree-sitter");
 
         let queried = query(&store, "target", 20).unwrap();
         assert!(queried.edges.items.is_empty());
+        assert!(queried.edges.truncated);
+        assert_eq!(queried.edges.truncation_reason, Some("stale_documents"));
+        assert!(queried.edges.omitted_stale > 0);
+        assert_eq!(queried.edges.total, Some(queried.edges.omitted_stale));
         assert!(queried
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == "semantic_overlay_stale"));
+    }
+
+    #[test]
+    fn textless_scip_documents_keep_the_overlay_partial() {
+        let (_temp, store, path) = fixture();
+        let bytes = std::fs::read(&path).unwrap();
+        let mut index = Index::parse_from_bytes(&bytes).unwrap();
+        index.documents[0].text.clear();
+        scip::write_message_to_file(&path, index).unwrap();
+
+        let summary = import(&store, &path).unwrap();
+        assert!(summary.source.repository_verified);
+        assert!(!summary.source.revision_verified);
+
+        let snapshot = query(&store, "target", 20).unwrap();
+        assert!(snapshot.available);
+        assert!(snapshot.partial);
+        assert!(snapshot
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "semantic_artifact_revision_unverified"));
+        assert!(!snapshot.definitions.truncated);
+        assert_eq!(snapshot.definitions.omitted_stale, 0);
+    }
+
+    #[test]
+    fn unverified_repository_does_not_claim_empty_semantic_coverage() {
+        let snapshot = unverified_repository_snapshot(SemanticSource {
+            format: "scip",
+            tool_name: "legacy".into(),
+            tool_version: "1".into(),
+            project_root: "/repo".into(),
+            artifact_path: "/tmp/index.scip".into(),
+            artifact_sha256: "sha256:unknown".into(),
+            imported_at: 1,
+            documents: 1,
+            definitions: 1,
+            edges: 1,
+            text_verified_documents: 0,
+            repository_verified: false,
+            revision_verified: false,
+        });
+
+        assert_eq!(snapshot.definitions.total, None);
+        assert_eq!(snapshot.definitions.returned, 0);
+        assert!(snapshot.definitions.truncated);
+        assert_eq!(
+            snapshot.definitions.truncation_reason,
+            Some("repository_unverified")
+        );
+        assert_eq!(snapshot.edges.total, None);
+        assert_eq!(snapshot.edges.returned, 0);
+        assert!(snapshot.edges.truncated);
+        assert_eq!(
+            snapshot.edges.truncation_reason,
+            Some("repository_unverified")
+        );
     }
 
     #[test]
@@ -2137,7 +2259,11 @@ mod tests {
         let snapshot = query(&store, "anything", 10).unwrap();
         assert!(!snapshot.available);
         assert!(snapshot.fallback_active);
+        assert!(!snapshot.partial);
+        assert_eq!(snapshot.edges.total, Some(0));
         assert_eq!(snapshot.edges.returned, 0);
+        assert_eq!(snapshot.edges.omitted_stale, 0);
+        assert!(!snapshot.edges.truncated);
     }
 
     #[test]

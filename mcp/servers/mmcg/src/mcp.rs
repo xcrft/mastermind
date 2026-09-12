@@ -109,6 +109,8 @@ enum HandlerError {
     },
     IndexStale {
         stale_files: usize,
+        stale_files_truncated: bool,
+        freshness_error: Option<&'static str>,
         extractor_contract_current: bool,
         refresh_attempted: bool,
     },
@@ -1279,17 +1281,32 @@ fn handle_tools_call_inner(
         match handled.as_ref() {
             Some(Err(HandlerError::IndexStale {
                 stale_files,
+                stale_files_truncated,
+                freshness_error,
                 extractor_contract_current,
                 ..
-            })) => Some((*stale_files, *extractor_contract_current)),
+            })) => Some((
+                *stale_files,
+                *stale_files_truncated,
+                *freshness_error,
+                *extractor_contract_current,
+            )),
             _ => None,
         }
     } else {
         None
     };
     let mut refresh_completed = false;
-    if let Some((stale_files, extractor_contract_current)) = stale_index {
-        let refresh = refresh_stale_index(store, stale_files, extractor_contract_current);
+    if let Some((stale_files, stale_files_truncated, freshness_error, extractor_contract_current)) =
+        stale_index
+    {
+        let refresh = refresh_stale_index(
+            store,
+            stale_files,
+            stale_files_truncated,
+            freshness_error,
+            extractor_contract_current,
+        );
         if store.interrupt_source().is_none() {
             match refresh {
                 Ok(()) => {
@@ -1319,12 +1336,16 @@ fn handle_tools_call_inner(
             }
             HandlerError::IndexStale {
                 stale_files,
+                stale_files_truncated,
+                freshness_error,
                 extractor_contract_current,
                 refresh_attempted,
             } => tool_result(
                 version,
                 index_stale_payload(
                     stale_files,
+                    stale_files_truncated,
+                    freshness_error,
                     extractor_contract_current,
                     refresh_attempted || refresh_completed,
                 ),
@@ -1366,6 +1387,8 @@ fn handle_tools_call_inner(
 
 fn index_stale_payload(
     stale_files: usize,
+    stale_files_truncated: bool,
+    freshness_error: Option<&'static str>,
     extractor_contract_current: bool,
     refresh_attempted: bool,
 ) -> Value {
@@ -1377,6 +1400,8 @@ fn index_stale_payload(
     json!({
         "code": "index_stale",
         "stale_files": stale_files,
+        "stale_files_truncated": stale_files_truncated,
+        "freshness_error": freshness_error,
         "extractor_contract_current": extractor_contract_current,
         "refresh_attempted": refresh_attempted,
         "guidance": guidance
@@ -1388,8 +1413,39 @@ fn index_stale_error(
     extractor_contract_current: bool,
     refresh_attempted: bool,
 ) -> HandlerError {
+    index_stale_error_with_coverage(
+        stale_files,
+        false,
+        None,
+        extractor_contract_current,
+        refresh_attempted,
+    )
+}
+
+fn index_stale_error_from_status(
+    status: &queries::StatusResponse,
+    refresh_attempted: bool,
+) -> HandlerError {
+    index_stale_error_with_coverage(
+        status.stale_files,
+        status.stale_files_truncated,
+        status.freshness_error,
+        status.extractor_contract_current,
+        refresh_attempted,
+    )
+}
+
+fn index_stale_error_with_coverage(
+    stale_files: usize,
+    stale_files_truncated: bool,
+    freshness_error: Option<&'static str>,
+    extractor_contract_current: bool,
+    refresh_attempted: bool,
+) -> HandlerError {
     HandlerError::IndexStale {
         stale_files,
+        stale_files_truncated,
+        freshness_error,
         extractor_contract_current,
         refresh_attempted,
     }
@@ -1421,53 +1477,70 @@ fn safe_index_status(store: &Store) -> Result<queries::StatusResponse, HandlerEr
     let extractor_contract_current = store
         .extractor_contract_current()
         .map_err(|error| HandlerError::internal("extractor_contract_query", error))?;
-    let root = store
+    let index_root = store
         .meta_value("index_root")
         .map_err(|error| HandlerError::internal("index_root_query", error))?
-        .map(PathBuf::from)
-        .and_then(|root| root.canonicalize().ok());
-    let stale_files = match root {
-        Some(root)
-            if store
-                .serve_root()
-                .is_some_and(|authorized| authorized != root.as_path()) =>
-        {
-            1
-        }
-        Some(root) => {
-            let interrupted = || store.work_interrupted();
-            match crate::workflow_status::stale_paths_controlled(
-                store,
-                &root,
-                100,
-                crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
-                crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
-                crate::bounded_fs::ReadControl {
-                    deadline: store.request_deadline(),
-                    interrupted: Some(&interrupted),
-                },
-            ) {
-                Ok(paths) => paths.len(),
-                Err(crate::indexer::IndexError::LimitExceeded { dimension, cap }) => {
-                    return Err(HandlerError::RefreshLimit { dimension, cap })
-                }
-                Err(crate::indexer::IndexError::Cancelled)
-                | Err(crate::indexer::IndexError::DeadlineExceeded) => {
-                    return Err(HandlerError::internal(
-                        "freshness_interrupted",
-                        "request interrupted",
-                    ))
-                }
-                Err(_) => 1,
+        .map(PathBuf::from);
+    let (stale_files, stale_files_truncated, freshness_error) = match index_root {
+        Some(index_root) => match index_root.canonicalize() {
+            Err(_) => (1, false, Some("index_root_unavailable")),
+            Ok(root)
+                if store
+                    .serve_root()
+                    .is_some_and(|authorized| authorized != root.as_path()) =>
+            {
+                (1, false, Some("index_root_mismatch"))
             }
-        }
-        None => 1,
+            Ok(root) => {
+                let interrupted = || store.work_interrupted();
+                match crate::workflow_status::stale_paths_controlled(
+                    store,
+                    &root,
+                    queries::STATUS_STALE_FILE_PROBE_LIMIT,
+                    crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
+                    crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
+                    crate::bounded_fs::ReadControl {
+                        deadline: store.request_deadline(),
+                        interrupted: Some(&interrupted),
+                    },
+                ) {
+                    Ok(paths) => match store.source_snapshot_unchanged() {
+                        Ok(true) => (
+                            paths.len().min(queries::STATUS_STALE_FILE_LIMIT),
+                            paths.len() > queries::STATUS_STALE_FILE_LIMIT,
+                            None,
+                        ),
+                        Ok(false) => return Err(HandlerError::SnapshotChanged),
+                        Err(error) => {
+                            return Err(HandlerError::internal("freshness_snapshot_query", error))
+                        }
+                    },
+                    Err(crate::indexer::IndexError::LimitExceeded { dimension, cap }) => {
+                        return Err(HandlerError::RefreshLimit { dimension, cap })
+                    }
+                    Err(crate::indexer::IndexError::SnapshotChanged) => {
+                        return Err(HandlerError::SnapshotChanged)
+                    }
+                    Err(crate::indexer::IndexError::Cancelled)
+                    | Err(crate::indexer::IndexError::DeadlineExceeded) => {
+                        return Err(HandlerError::internal(
+                            "freshness_interrupted",
+                            "request interrupted",
+                        ))
+                    }
+                    Err(_) => (1, false, Some("freshness_scan_failed")),
+                }
+            }
+        },
+        None => (1, false, Some("index_root_missing")),
     };
     Ok(queries::StatusResponse {
         db_path: store.db_path().to_string_lossy().to_string(),
         symbol_count,
         file_count,
         stale_files,
+        stale_files_truncated,
+        freshness_error,
         extractor_contract_current,
     })
 }
@@ -1476,11 +1549,7 @@ fn ensure_fresh_index(store: &Store) -> Result<(), HandlerError> {
     ensure_schema_compatible(store)?;
     let status = safe_index_status(store)?;
     if status.stale_files > 0 || !status.extractor_contract_current {
-        return Err(index_stale_error(
-            status.stale_files,
-            status.extractor_contract_current,
-            false,
-        ));
+        return Err(index_stale_error_from_status(&status, false));
     }
     Ok(())
 }
@@ -1502,11 +1571,15 @@ fn managed_auto_refresh_root(store: &Store) -> Option<PathBuf> {
 fn refresh_stale_index(
     store: &mut Store,
     stale_files: usize,
+    stale_files_truncated: bool,
+    freshness_error: Option<&'static str>,
     extractor_contract_current: bool,
 ) -> Result<(), HandlerError> {
     let Some(root) = managed_auto_refresh_root(store) else {
-        return Err(index_stale_error(
+        return Err(index_stale_error_with_coverage(
             stale_files,
+            stale_files_truncated,
+            freshness_error,
             extractor_contract_current,
             false,
         ));
@@ -1530,8 +1603,10 @@ fn refresh_stale_index(
             ));
         }
         _ => {
-            return Err(index_stale_error(
+            return Err(index_stale_error_with_coverage(
                 stale_files,
+                stale_files_truncated,
+                freshness_error,
                 extractor_contract_current,
                 true,
             ));
@@ -2254,7 +2329,7 @@ fn schema_recent_changes() -> Value {
 fn schema_status() -> Value {
     json!({
         "name": "mmcg_status",
-        "description": "Show index health — file count, symbol count, db path, extractor-contract compatibility, and `stale_files`: the number of added, deleted, or newer indexable source paths relative to their stored snapshot (capped at 100). Structural tools automatically refresh a stale managed `.mastermind/mmcg.db` before querying. Custom external indexes remain manual-refresh-only; unavailable or failed refreshes return `index_stale`.",
+        "description": "Show index health — file count, symbol count, db path, extractor-contract compatibility, and bounded source freshness. `stale_files` counts up to 100 added, deleted, or newer indexable paths; `stale_files_truncated` discloses a larger set, and `freshness_error` explains when the scan could not establish a count. Structural tools automatically refresh a stale managed `.mastermind/mmcg.db` before querying. Custom external indexes remain manual-refresh-only; unavailable or failed refreshes return `index_stale` with the same coverage fields.",
         "inputSchema": { "type": "object", "properties": {} }
     })
 }
@@ -3015,18 +3090,25 @@ pub fn build_brief_current(
         symbol_count: 0,
         file_count: 0,
         stale_files: 1,
+        stale_files_truncated: false,
+        freshness_error: Some("freshness_check_failed"),
         extractor_contract_current: true,
     });
-    refresh_stale_index(store, status.stale_files, status.extractor_contract_current).map_err(
-        |error| match error {
-            HandlerError::SchemaIncompatible => queries::BriefError::SchemaIncompatible,
-            HandlerError::SnapshotChanged => queries::BriefError::SnapshotChanged,
-            HandlerError::WorkLimitExceeded | HandlerError::RefreshLimit { .. } => {
-                queries::BriefError::WorkLimitExceeded
-            }
-            _ => queries::BriefError::IndexStale,
-        },
-    )?;
+    refresh_stale_index(
+        store,
+        status.stale_files,
+        status.stale_files_truncated,
+        status.freshness_error,
+        status.extractor_contract_current,
+    )
+    .map_err(|error| match error {
+        HandlerError::SchemaIncompatible => queries::BriefError::SchemaIncompatible,
+        HandlerError::SnapshotChanged => queries::BriefError::SnapshotChanged,
+        HandlerError::WorkLimitExceeded | HandlerError::RefreshLimit { .. } => {
+            queries::BriefError::WorkLimitExceeded
+        }
+        _ => queries::BriefError::IndexStale,
+    })?;
     brief_current_attempt(store, &root, since, role, budget_tokens)
 }
 
@@ -3091,19 +3173,24 @@ pub fn build_concept_current(
         }
         _ => queries::ConceptError::IndexStale,
     })?;
-    refresh_stale_index(store, status.stale_files, status.extractor_contract_current).map_err(
-        |error| match error {
-            HandlerError::SchemaIncompatible => queries::ConceptError::SchemaIncompatible,
-            HandlerError::SnapshotChanged => queries::ConceptError::SnapshotChanged,
-            HandlerError::WorkLimitExceeded | HandlerError::RefreshLimit { .. } => {
-                queries::ConceptError::WorkLimitExceeded
-            }
-            HandlerError::Internal { .. } if store.interrupt_source().is_some() => {
-                queries::ConceptError::WorkLimitExceeded
-            }
-            _ => queries::ConceptError::IndexStale,
-        },
-    )?;
+    refresh_stale_index(
+        store,
+        status.stale_files,
+        status.stale_files_truncated,
+        status.freshness_error,
+        status.extractor_contract_current,
+    )
+    .map_err(|error| match error {
+        HandlerError::SchemaIncompatible => queries::ConceptError::SchemaIncompatible,
+        HandlerError::SnapshotChanged => queries::ConceptError::SnapshotChanged,
+        HandlerError::WorkLimitExceeded | HandlerError::RefreshLimit { .. } => {
+            queries::ConceptError::WorkLimitExceeded
+        }
+        HandlerError::Internal { .. } if store.interrupt_source().is_some() => {
+            queries::ConceptError::WorkLimitExceeded
+        }
+        _ => queries::ConceptError::IndexStale,
+    })?;
     concept_current_attempt(store, query, top)
 }
 
@@ -3119,9 +3206,7 @@ fn map_brief_error(store: &Store, error: queries::BriefError) -> HandlerError {
             code: "root_mismatch",
         },
         queries::BriefError::IndexStale => match safe_index_status(store) {
-            Ok(status) => {
-                index_stale_error(status.stale_files, status.extractor_contract_current, false)
-            }
+            Ok(status) => index_stale_error_from_status(&status, false),
             Err(_) => index_stale_error(1, true, false),
         },
         queries::BriefError::SchemaIncompatible => HandlerError::SchemaIncompatible,
@@ -3241,15 +3326,19 @@ fn map_concept_error(store: &Store, error: queries::ConceptError) -> HandlerErro
                 symbol_count: 0,
                 file_count: 0,
                 stale_files: 1,
+                stale_files_truncated: false,
+                freshness_error: Some("freshness_check_failed"),
                 extractor_contract_current: true,
             });
             let concept_current = store.concept_contract_current().unwrap_or(false);
-            index_stale_error(
+            index_stale_error_with_coverage(
                 if concept_current {
                     status.stale_files
                 } else {
                     status.stale_files.max(1)
                 },
+                status.stale_files_truncated,
+                status.freshness_error,
                 status.extractor_contract_current,
                 store.managed_root().is_some(),
             )
@@ -6273,7 +6362,36 @@ mod checks {
             &json!({ "name": "mmcg_status", "arguments": {} }),
         )
         .unwrap();
-        assert_eq!(unwrap_content(&fresh_status)["stale_files"], 0);
+        let fresh_payload = unwrap_content(&fresh_status);
+        assert_eq!(fresh_payload["stale_files"], 0);
+        assert_eq!(fresh_payload["stale_files_truncated"], false);
+        assert!(fresh_payload.get("freshness_error").is_none());
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn status_discloses_stale_file_count_truncation() {
+        let (root, mut store) = impact_fixture("status-stale-coverage");
+        for index in 0..=queries::STATUS_STALE_FILE_LIMIT {
+            std::fs::write(
+                root.join(format!("src/unindexed_{index}.py")),
+                format!("def unindexed_{index}():\n    return {index}\n"),
+            )
+            .unwrap();
+        }
+
+        let result = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({ "name": "mmcg_status", "arguments": {} }),
+        )
+        .unwrap();
+        assert_eq!(result["isError"], false);
+        let payload = unwrap_content(&result);
+        assert_eq!(payload["stale_files"], queries::STATUS_STALE_FILE_LIMIT);
+        assert_eq!(payload["stale_files_truncated"], true);
+        assert!(payload.get("freshness_error").is_none());
 
         std::fs::remove_dir_all(root).ok();
     }
@@ -6348,7 +6466,10 @@ mod checks {
         )
         .unwrap();
         assert_eq!(status["isError"], false);
-        assert_eq!(unwrap_content(&status)["stale_files"], 1);
+        let status_payload = unwrap_content(&status);
+        assert_eq!(status_payload["stale_files"], 1);
+        assert_eq!(status_payload["stale_files_truncated"], false);
+        assert_eq!(status_payload["freshness_error"], "index_root_mismatch");
 
         let result = handle_tools_call(
             ProtocolVersion::Current,

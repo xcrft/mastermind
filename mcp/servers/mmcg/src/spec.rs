@@ -96,6 +96,7 @@ impl ParsedSpec {
 ///       reason: "deprecated since 2025-01"
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Frontmatter {
     #[serde(default)]
     pub id: Option<String>,
@@ -147,6 +148,7 @@ impl Frontmatter {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TouchEntry {
     pub file: String,
     #[serde(default)]
@@ -159,7 +161,7 @@ pub struct TouchEntry {
 /// (`- {name: foo, signature: "...", callers: 4}`). Untagged so YAML parses
 /// both forms transparently.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(untagged, deny_unknown_fields)]
 pub enum SymbolSpec {
     Name(String),
     Detailed {
@@ -211,7 +213,7 @@ impl SymbolSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(untagged, deny_unknown_fields)]
 pub enum VerifyEntry {
     Label(String),
     Command { cmd: String },
@@ -235,6 +237,7 @@ impl VerifyEntry {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BreakingChanges {
     /// Symbols intentionally removed in this spec. Audit cross-references the
     /// git diff: a symbol removed but NOT listed here is flagged
@@ -418,7 +421,19 @@ fn extract_frontmatter(body: &str) -> (Option<Frontmatter>, Option<String>, &str
         return (None, Some("frontmatter_invalid".into()), rest);
     }
     match serde_norway::from_str::<Frontmatter>(yaml_src) {
-        Ok(fm) => (Some(fm), None, rest),
+        Ok(fm)
+            if fm
+                .mode
+                .as_deref()
+                .is_none_or(|mode| matches!(mode, "lite" | "standard" | "verified" | "strict"))
+                && fm
+                    .risk
+                    .as_deref()
+                    .is_none_or(|risk| matches!(risk, "low" | "medium" | "high")) =>
+        {
+            (Some(fm), None, rest)
+        }
+        Ok(_) => (None, Some("frontmatter_invalid".into()), rest),
         Err(_) => (None, Some("frontmatter_invalid".into()), rest),
     }
 }
@@ -1106,6 +1121,30 @@ touches:
         let fm = numeric_names.frontmatter.unwrap();
         assert_eq!(fm.id.as_deref(), Some("42"));
         assert_eq!(fm.creates, ["7", "true", "null"]);
+    }
+
+    #[test]
+    fn frontmatter_rejects_unknown_fields_and_invalid_contract_values() {
+        for field in [
+            "mode: strcit",
+            "risk: urgent",
+            "touchess: []",
+            "touches:\n  - file: src/x.rs\n    symbolz: []",
+            "touches:\n  - file: src/x.rs\n    symbols:\n      - name: target\n        callerz: 1",
+            "verify:\n  - cmd: echo checked\n    result: pass",
+            "breaking_changes:\n  removed_symbolz: []",
+        ] {
+            let parsed = parse_str(
+                "spec.md",
+                &format!("---\n{field}\n---\n## Goals\nChange files.\n"),
+            );
+            assert_eq!(
+                parsed.frontmatter_error.as_deref(),
+                Some("frontmatter_invalid"),
+                "{field}"
+            );
+            assert!(parsed.frontmatter.is_none(), "{field}");
+        }
     }
 
     #[test]

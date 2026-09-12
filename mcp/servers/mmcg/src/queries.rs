@@ -889,7 +889,7 @@ fn history_with_document_graph_using(
         checked_snapshot_token(store, Path::new(&root), "").map_err(history_composition_error)?;
     let history =
         history(store, query, kind, top.clamp(1, 50)).map_err(HistoryDocumentGraphError::Query)?;
-    if history.freshness != history_status(checked.history_freshness) {
+    if history.freshness != checked.history_freshness.as_str() {
         if store.work_interrupted() {
             return Err(HistoryDocumentGraphError::WorkLimitExceeded);
         }
@@ -962,13 +962,7 @@ pub fn history(
             .meta_value("index_root")?
             .map(PathBuf::from)
             .map(|root| crate::indexer::Indexer::new(root).project_history_freshness(store))
-            .map(|result| match result {
-                Ok(crate::indexer::ProjectHistoryFreshness::Fresh) => "fresh",
-                Ok(crate::indexer::ProjectHistoryFreshness::Stale) => "stale",
-                Ok(crate::indexer::ProjectHistoryFreshness::Incomplete) => "incomplete",
-                Ok(crate::indexer::ProjectHistoryFreshness::SnapshotChanged) => "snapshot_changed",
-                Err(_) => "incomplete",
-            })
+            .map(|result| result.map_or("incomplete", |freshness| freshness.as_str()))
             .unwrap_or("stale");
         Ok::<_, rusqlite::Error>((
             indexed_total,
@@ -3105,15 +3099,6 @@ fn brief_history_query(terms: &[String]) -> String {
         .join(" OR ")
 }
 
-fn history_status(freshness: crate::indexer::ProjectHistoryFreshness) -> &'static str {
-    match freshness {
-        crate::indexer::ProjectHistoryFreshness::Fresh => "fresh",
-        crate::indexer::ProjectHistoryFreshness::Stale => "stale",
-        crate::indexer::ProjectHistoryFreshness::Incomplete => "incomplete",
-        crate::indexer::ProjectHistoryFreshness::SnapshotChanged => "snapshot_changed",
-    }
-}
-
 fn sync_brief_counts(packet: &mut BriefPacket) {
     packet.changes.files.returned = brief_u32(packet.changes.files.items.len());
     packet.changes.symbols.returned = brief_u32(packet.changes.symbols.items.len());
@@ -3532,7 +3517,7 @@ pub fn brief(
                 checked_token: structural_token,
             },
             history: BriefFreshnessState {
-                status: history_status(checked.history_freshness).to_string(),
+                status: checked.history_freshness.as_str().to_string(),
                 checked_token: history_token,
             },
         },

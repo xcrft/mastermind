@@ -556,6 +556,17 @@ pub(crate) enum ProjectHistoryFreshness {
     SnapshotChanged,
 }
 
+impl ProjectHistoryFreshness {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::Stale => "stale",
+            Self::Incomplete => "incomplete",
+            Self::SnapshotChanged => "snapshot_changed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct IndexLimits {
     source_candidates: Option<usize>,

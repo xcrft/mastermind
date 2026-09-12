@@ -2355,7 +2355,7 @@ fn schema_recent_changes() -> Value {
 fn schema_status() -> Value {
     json!({
         "name": "mmcg_status",
-        "description": "Show index health — file count, symbol count, db path, structural extractor compatibility, deterministic concept-corpus compatibility, and bounded source freshness. `freshness_basis: path_and_mtime` states the metadata contract. `stale_files` counts up to 100 added, deleted, or mtime-changed indexable paths; `stale_files_truncated` discloses a larger set, and `freshness_error` explains when the scan could not establish a count. Structural tools automatically refresh a stale managed `.mastermind/mmcg.db` before querying. Custom external indexes remain manual-refresh-only; unavailable or failed refreshes return `index_stale` with the same coverage fields.",
+        "description": "Show index health — file count, symbol count, db path, structural extractor compatibility, deterministic concept-corpus compatibility, live durable-history freshness, and bounded source freshness. `history_freshness` is `fresh`, `stale`, `incomplete`, `snapshot_changed`, or `unknown`; an unavailable scan includes `history_freshness_error`. `freshness_basis: path_and_mtime` states the structural metadata contract. `stale_files` counts up to 100 added, deleted, or mtime-changed indexable paths; `stale_files_truncated` discloses a larger set, and `freshness_error` explains when the scan could not establish a count. Structural tools automatically refresh a stale managed `.mastermind/mmcg.db` before querying. Custom external indexes remain manual-refresh-only; unavailable or failed refreshes return `index_stale` with the same coverage fields.",
         "inputSchema": { "type": "object", "properties": {} }
     })
 }
@@ -3457,10 +3457,73 @@ fn handle_recent_changes(store: &mut Store, args: &Value) -> Result<Value, Handl
     serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
+#[derive(Serialize)]
+struct StatusPayload {
+    #[serde(flatten)]
+    index: queries::StatusResponse,
+    history_freshness: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history_freshness_error: Option<&'static str>,
+}
+
+fn status_history_freshness(
+    store: &Store,
+    status: &queries::StatusResponse,
+) -> Result<(&'static str, Option<&'static str>), HandlerError> {
+    if let Some(error @ ("index_root_missing" | "index_root_unavailable" | "index_root_mismatch")) =
+        status.freshness_error
+    {
+        return Ok(("unknown", Some(error)));
+    }
+    let root = store
+        .meta_value("index_root")
+        .map_err(|error| HandlerError::internal("history_index_root_query", error))?
+        .map(PathBuf::from)
+        .and_then(|root| root.canonicalize().ok());
+    let Some(root) = root else {
+        return Ok(("unknown", Some("index_root_unavailable")));
+    };
+    if store
+        .serve_root()
+        .is_some_and(|authorized| authorized != root.as_path())
+    {
+        return Ok(("unknown", Some("index_root_mismatch")));
+    }
+    Ok(
+        match crate::indexer::Indexer::new(root).project_history_freshness(store) {
+            Ok(freshness) => (freshness.as_str(), None),
+            Err(crate::indexer::IndexError::Cancelled)
+            | Err(crate::indexer::IndexError::DeadlineExceeded) => {
+                ("unknown", Some("history_scan_interrupted"))
+            }
+            Err(crate::indexer::IndexError::LimitExceeded { .. }) => {
+                ("incomplete", Some("history_work_limit"))
+            }
+            Err(_) => ("unknown", Some("history_scan_failed")),
+        },
+    )
+}
+
 fn handle_status(store: &mut Store, _args: &Value) -> Result<Value, HandlerError> {
     ensure_schema_compatible(store)?;
-    let r = safe_index_status(store)?;
-    serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
+    let expected_data_version = store
+        .data_version()
+        .map_err(|error| HandlerError::internal("status_snapshot_query", error))?;
+    let index = safe_index_status(store)?;
+    let (history_freshness, history_freshness_error) = status_history_freshness(store, &index)?;
+    if store
+        .data_version()
+        .map_err(|error| HandlerError::internal("status_snapshot_recheck", error))?
+        != expected_data_version
+    {
+        return Err(HandlerError::SnapshotChanged);
+    }
+    serde_json::to_value(StatusPayload {
+        index,
+        history_freshness,
+        history_freshness_error,
+    })
+    .map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
 fn handle_scratchpad_append(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
@@ -6502,6 +6565,50 @@ mod checks {
             unwrap_content(&fresh_status)["concept_contract_current"],
             true
         );
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn status_reports_live_history_freshness_independently() {
+        let (root, mut store) = impact_fixture("status-history-freshness");
+
+        let initial = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({ "name": "mmcg_status", "arguments": {} }),
+        )
+        .unwrap();
+        assert_eq!(unwrap_content(&initial)["history_freshness"], "fresh");
+
+        std::fs::write(
+            root.join("CONTEXT.md"),
+            "# Current decision\nThe indexed decision changed.\n",
+        )
+        .unwrap();
+        let stale = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({ "name": "mmcg_status", "arguments": {} }),
+        )
+        .unwrap();
+        let stale_payload = unwrap_content(&stale);
+        assert_eq!(stale_payload["stale_files"], 0);
+        assert_eq!(stale_payload["extractor_contract_current"], true);
+        assert_eq!(stale_payload["concept_contract_current"], true);
+        assert_eq!(stale_payload["history_freshness"], "stale");
+        assert!(stale_payload.get("history_freshness_error").is_none());
+
+        crate::indexer::Indexer::new(&root)
+            .index_project_history(&mut store)
+            .unwrap();
+        let refreshed = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({ "name": "mmcg_status", "arguments": {} }),
+        )
+        .unwrap();
+        assert_eq!(unwrap_content(&refreshed)["history_freshness"], "fresh");
 
         std::fs::remove_dir_all(root).ok();
     }

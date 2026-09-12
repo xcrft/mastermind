@@ -555,6 +555,35 @@ fn extract_attribute_name(attr_item: &Node, source: &[u8]) -> Option<String> {
     }
 }
 
+/// Parse Rust attributes structurally so comments and string literals that
+/// mention `#[test]` cannot masquerade as executable tests.
+pub(crate) fn source_has_test_attribute(source: &[u8]) -> Option<bool> {
+    std::str::from_utf8(source).ok()?;
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_rust::LANGUAGE.into())
+        .ok()?;
+    let tree = parser.parse(source, None)?;
+    if tree.root_node().has_error() {
+        return None;
+    }
+    let mut pending = vec![tree.root_node()];
+    while let Some(node) = pending.pop() {
+        if node.kind() == "attribute_item"
+            && extract_attribute_name(&node, source).is_some_and(|name| {
+                matches!(name.as_str(), "test" | "rstest") || name.ends_with("::test")
+            })
+        {
+            return Some(true);
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            pending.push(child);
+        }
+    }
+    Some(false)
+}
+
 fn name_field<'a>(node: &Node, source: &'a [u8]) -> Option<&'a str> {
     node.child_by_field_name("name")
         .and_then(|n| node_text(&n, source))

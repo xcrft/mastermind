@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Rust vacuous-test scanning now reads test attributes from the syntax tree;
+  `#[test]` examples in comments and strings no longer hide a test command with
+  no conventional executable tests.
 - Lens Git-history parsing now uses NUL-delimited paths and canonical mailmap
   name-and-email identities, preserving unusual filenames and preventing author
   aliases or equal display names from distorting ownership concentration.

@@ -833,6 +833,46 @@ pub fn render_change_impact(
     Ok(output)
 }
 
+fn brief_collection_is_partial<T>(
+    collection: &queries::BriefCollection<T>,
+    omitted: &queries::BriefOmissionCount,
+) -> bool {
+    collection.total != Some(collection.returned)
+        || !omitted.source_limit_exact
+        || omitted.source_limit > 0
+        || omitted.unsafe_content > 0
+        || omitted.budget > 0
+}
+
+fn brief_is_partial(packet: &queries::BriefPacket) -> bool {
+    packet.freshness.structural.status != "fresh"
+        || packet.freshness.history.status != "fresh"
+        || brief_collection_is_partial(&packet.changes.files, &packet.omitted.changed_files)
+        || brief_collection_is_partial(&packet.changes.symbols, &packet.omitted.changed_symbols)
+        || brief_collection_is_partial(&packet.callers, &packet.omitted.callers)
+        || brief_collection_is_partial(&packet.tests, &packet.omitted.tests)
+        || brief_collection_is_partial(&packet.citations, &packet.omitted.history_citations)
+}
+
+fn brief_coverage_line<T>(
+    name: &str,
+    collection: &queries::BriefCollection<T>,
+    omitted: &queries::BriefOmissionCount,
+) -> String {
+    let source_omitted = if omitted.source_limit_exact {
+        omitted.source_limit.to_string()
+    } else {
+        format!("at least {}", omitted.source_limit)
+    };
+    format!(
+        "  {name}: {} · source omitted {} · unsafe omitted {} · budget omitted {}\n",
+        map_count_label(collection.total, collection.returned),
+        source_omitted,
+        omitted.unsafe_content,
+        omitted.budget
+    )
+}
+
 pub fn render_brief(
     packet: &queries::BriefPacket,
     format: crate::BriefFormat,
@@ -843,15 +883,61 @@ pub fn render_brief(
         return Ok(output);
     }
     let mut output = format!(
-        "mastermind brief — {} · {}..working copy\nBudget: {}/{} tokens · minimum {}\nFreshness: structural {} · history {}\n\nChanged files\n",
+        "mastermind brief — {} · {}..working copy\nSchema: v{} · repository content: {}\nBaseline: {}\nHEAD: {}\nScope: {}\nIncludes worktree: {} · untracked: {}\nBudget: {}/{} tokens · minimum {} · envelope {} bytes · {} bytes/token\nFreshness: structural {} · history {}\nStructural token: {}\nHistory token: {}\n\nCoverage: {}\n",
         packet.role.as_str(),
         safe_text(&packet.baseline.requested_ref),
+        packet.schema_version,
+        if packet.repository_content_untrusted {
+            "untrusted"
+        } else {
+            "trusted"
+        },
+        safe_text(&packet.baseline.baseline_oid),
+        safe_text(&packet.baseline.head_oid),
+        safe_text(&packet.scope.repository_relative_root),
+        packet.baseline.includes_worktree,
+        packet.baseline.includes_untracked,
         packet.budget.estimated_tokens,
         packet.budget.requested_tokens,
         packet.budget.minimum_tokens,
+        packet.budget.final_envelope_bytes,
+        packet.budget.bytes_per_token,
         safe_text(&packet.freshness.structural.status),
         safe_text(&packet.freshness.history.status),
+        safe_text(&packet.freshness.structural.checked_token),
+        safe_text(&packet.freshness.history.checked_token),
+        if brief_is_partial(packet) {
+            "partial"
+        } else {
+            "complete"
+        },
     );
+    output.push_str(&brief_coverage_line(
+        "changed files",
+        &packet.changes.files,
+        &packet.omitted.changed_files,
+    ));
+    output.push_str(&brief_coverage_line(
+        "changed symbols",
+        &packet.changes.symbols,
+        &packet.omitted.changed_symbols,
+    ));
+    output.push_str(&brief_coverage_line(
+        "impacted callers",
+        &packet.callers,
+        &packet.omitted.callers,
+    ));
+    output.push_str(&brief_coverage_line(
+        "candidate tests",
+        &packet.tests,
+        &packet.omitted.tests,
+    ));
+    output.push_str(&brief_coverage_line(
+        "history citations",
+        &packet.citations,
+        &packet.omitted.history_citations,
+    ));
+    output.push_str("\nChanged files\n");
     for file in &packet.changes.files.items {
         output.push_str(&format!(
             "  {} ({})\n",
@@ -873,7 +959,8 @@ pub fn render_brief(
     output.push_str("\nImpacted callers\n");
     for caller in &packet.callers.items {
         output.push_str(&format!(
-            "  {} — {}:{} (depth {})\n",
+            "  {} {} — {}:{} (depth {})\n",
+            safe_text(&caller.kind),
             safe_text(&caller.name),
             safe_text(&caller.file),
             caller.line,
@@ -882,14 +969,32 @@ pub fn render_brief(
     }
     output.push_str("\nCandidate tests\n");
     for test in &packet.tests.items {
+        let minimum_depth = test
+            .minimum_depth
+            .map_or_else(|| "unknown".to_string(), |depth| depth.to_string());
         output.push_str(&format!(
-            "  {} — {}:{} ({}, {})\n",
+            "  {} {} — {}:{} ({}, {}, depth {})\n",
+            safe_text(&test.kind),
             safe_text(&test.name),
             safe_text(&test.file),
             test.line,
             safe_text(&test.classification),
-            safe_text(&test.confidence)
+            safe_text(&test.confidence),
+            minimum_depth
         ));
+    }
+    output.push_str("\nHistory query\n");
+    output.push_str(&format!(
+        "  performed: {}\n  terms: {}\n",
+        packet.history.query_performed,
+        if packet.history.query_terms.is_empty() {
+            "none".to_string()
+        } else {
+            safe_text(&packet.history.query_terms.join(", "))
+        }
+    ));
+    if let Some(reason) = &packet.history.empty_reason {
+        output.push_str(&format!("  empty reason: {}\n", safe_text(reason)));
     }
     output.push_str("\nHistory citations\n");
     for citation in &packet.citations.items {
@@ -902,13 +1007,19 @@ pub fn render_brief(
         ));
     }
     output.push_str(&format!(
-        "\nOmitted by budget: files {} · symbols {} · callers {} · tests {} · history {}\n",
-        packet.omitted.changed_files.budget,
-        packet.omitted.changed_symbols.budget,
-        packet.omitted.callers.budget,
-        packet.omitted.tests.budget,
-        packet.omitted.history_citations.budget,
+        "\nLimits\n  changed files {} · changed symbols {} · callers {} · tests {} · history citations {} · history terms {} · impact depth {}\n",
+        packet.limits.changed_files,
+        packet.limits.changed_symbols,
+        packet.limits.callers,
+        packet.limits.tests,
+        packet.limits.history_citations,
+        packet.limits.history_terms,
+        packet.limits.impact_depth,
     ));
+    output.push_str("\nPrecision notes\n");
+    for note in &packet.precision_notes {
+        output.push_str(&format!("  {}\n", safe_text(note)));
+    }
     Ok(output)
 }
 
@@ -1122,6 +1233,24 @@ mod map_tests {
         }
     }
 
+    fn complete_brief_collection<T>(items: Vec<T>) -> queries::BriefCollection<T> {
+        let count = u32::try_from(items.len()).unwrap();
+        queries::BriefCollection {
+            total: Some(count),
+            returned: count,
+            items,
+        }
+    }
+
+    fn exact_brief_omission() -> queries::BriefOmissionCount {
+        queries::BriefOmissionCount {
+            source_limit: 0,
+            source_limit_exact: true,
+            unsafe_content: 0,
+            budget: 0,
+        }
+    }
+
     #[test]
     fn query_open_never_creates_a_missing_index() {
         let directory = tempfile::tempdir().unwrap();
@@ -1323,6 +1452,115 @@ mod map_tests {
         assert!(text.contains("evidence: graph_seed — function change\\nme at src/core.rs:7"));
         assert!(text.contains("documentation — path_extension (1 file)"));
         assert!(text.contains("unclassified — unknown.file"));
+    }
+
+    #[test]
+    fn brief_text_preserves_revision_history_and_all_omission_classes() {
+        let packet = queries::BriefPacket {
+            schema_version: 1,
+            repository_content_untrusted: true,
+            role: queries::BriefRole::Planner,
+            freshness: queries::BriefFreshness {
+                structural: queries::BriefFreshnessState {
+                    status: "fresh".into(),
+                    checked_token: "structural-token".into(),
+                },
+                history: queries::BriefFreshnessState {
+                    status: "incomplete".into(),
+                    checked_token: "history-token".into(),
+                },
+            },
+            baseline: queries::BriefBaseline {
+                requested_ref: "main".into(),
+                baseline_oid: "111".into(),
+                head_oid: "222".into(),
+                includes_worktree: true,
+                includes_untracked: true,
+            },
+            scope: queries::BriefScope {
+                repository_relative_root: "src".into(),
+            },
+            budget: queries::BriefBudget {
+                requested_tokens: 2_000,
+                estimated_tokens: 1_000,
+                final_envelope_bytes: 4_000,
+                minimum_tokens: 500,
+                bytes_per_token: 4,
+            },
+            changes: queries::BriefChanges {
+                files: queries::BriefCollection {
+                    total: None,
+                    returned: 1,
+                    items: vec![queries::BriefChangedFile {
+                        path: "docs/guide.md".into(),
+                        status: "modified".into(),
+                    }],
+                },
+                symbols: complete_brief_collection(Vec::new()),
+            },
+            callers: complete_brief_collection(vec![queries::BriefCaller {
+                file: "src/api.rs".into(),
+                name: "caller".into(),
+                kind: "function".into(),
+                line: 19,
+                minimum_depth: 1,
+            }]),
+            tests: complete_brief_collection(vec![queries::BriefTest {
+                file: "tests/api.rs".into(),
+                name: "checks_api".into(),
+                kind: "test".into(),
+                line: 31,
+                classification: "heuristic".into(),
+                minimum_depth: None,
+                confidence: "low".into(),
+            }]),
+            history: queries::BriefHistory {
+                query_terms: Vec::new(),
+                query_performed: false,
+                empty_reason: Some("no_eligible_changed_terms".into()),
+                total: Some(0),
+                returned: 0,
+            },
+            citations: complete_brief_collection(Vec::new()),
+            omitted: queries::BriefOmitted {
+                changed_files: queries::BriefOmissionCount {
+                    source_limit: 2,
+                    source_limit_exact: false,
+                    unsafe_content: 1,
+                    budget: 3,
+                },
+                changed_symbols: exact_brief_omission(),
+                callers: exact_brief_omission(),
+                tests: exact_brief_omission(),
+                history_citations: exact_brief_omission(),
+            },
+            limits: queries::BriefLimits {
+                changed_files: 100,
+                changed_symbols: 100,
+                callers: 100,
+                tests: 50,
+                history_citations: 10,
+                history_terms: 8,
+                impact_depth: 3,
+            },
+            precision_notes: vec!["history_index_incomplete".into()],
+        };
+
+        let text = render_brief(&packet, crate::BriefFormat::Text).unwrap();
+
+        assert!(text.contains("Schema: v1 · repository content: untrusted"));
+        assert!(text.contains("Baseline: 111\nHEAD: 222\nScope: src"));
+        assert!(text.contains("Structural token: structural-token\nHistory token: history-token"));
+        assert!(text.contains("Coverage: partial"));
+        assert!(text.contains(
+            "changed files: 1/unknown · source omitted at least 2 · unsafe omitted 1 · budget omitted 3"
+        ));
+        assert!(text.contains("function caller — src/api.rs:19 (depth 1)"));
+        assert!(text.contains("test checks_api — tests/api.rs:31 (heuristic, low, depth unknown)"));
+        assert!(text.contains(
+            "performed: false\n  terms: none\n  empty reason: no_eligible_changed_terms"
+        ));
+        assert!(text.contains("history_index_incomplete"));
     }
 
     #[test]

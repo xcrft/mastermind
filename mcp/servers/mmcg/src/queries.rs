@@ -62,8 +62,31 @@ impl From<Symbol> for SymbolHit {
 #[derive(Debug, Serialize)]
 pub struct SearchResponse {
     pub query: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    pub collapse_partials: bool,
+    /// Effective result total after partial-type grouping. Null when the raw
+    /// candidate work cap prevents complete grouping.
+    pub total: Option<u32>,
+    pub count: u32,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation_reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_limit: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_work_limit: Option<u32>,
+    pub raw_candidate_total: u32,
+    pub raw_candidates_examined: u32,
     pub results: Vec<SymbolHit>,
+    pub precision_notes: Vec<String>,
 }
+
+pub const SEARCH_DEFAULT_TOP: u32 = 100;
+pub const SEARCH_MAX_TOP: u32 = 200;
+pub const SEARCH_RAW_WORK_LIMIT: u32 = 500;
 
 #[derive(Debug, Serialize)]
 pub struct CallersResponse {
@@ -428,7 +451,60 @@ pub fn search(
     language: Option<&str>,
     collapse_partials: bool,
 ) -> rusqlite::Result<SearchResponse> {
-    let raw = store.search_symbols(name, kind, language)?;
+    search_with_limit(store, name, kind, language, collapse_partials, None)
+}
+
+pub fn search_bounded(
+    store: &Store,
+    name: &str,
+    kind: Option<&str>,
+    language: Option<&str>,
+    collapse_partials: bool,
+    top: u32,
+) -> rusqlite::Result<SearchResponse> {
+    search_with_limit(
+        store,
+        name,
+        kind,
+        language,
+        collapse_partials,
+        Some(top.max(1)),
+    )
+}
+
+fn search_with_limit(
+    store: &Store,
+    name: &str,
+    kind: Option<&str>,
+    language: Option<&str>,
+    collapse_partials: bool,
+    row_limit: Option<u32>,
+) -> rusqlite::Result<SearchResponse> {
+    let (raw_candidate_total, raw, raw_work_limit) = match row_limit {
+        Some(_) if collapse_partials => {
+            let (total, raw) = store.search_symbols_bounded(
+                name,
+                kind,
+                language,
+                None,
+                None,
+                SEARCH_RAW_WORK_LIMIT as usize,
+            )?;
+            (total, raw, Some(SEARCH_RAW_WORK_LIMIT))
+        }
+        Some(top) => {
+            let (total, raw) =
+                store.search_symbols_bounded(name, kind, language, None, None, top as usize)?;
+            (total, raw, None)
+        }
+        None => {
+            let raw = store.search_symbols(name, kind, language)?;
+            let total = u32::try_from(raw.len()).unwrap_or(u32::MAX);
+            (total, raw, None)
+        }
+    };
+    let raw_candidates_examined = u32::try_from(raw.len()).unwrap_or(u32::MAX);
+    let grouping_incomplete = collapse_partials && raw_candidate_total > raw_candidates_examined;
     let mut results: Vec<SymbolHit> = if collapse_partials {
         let mut namespaces = HashMap::new();
         for symbol in &raw {
@@ -445,9 +521,58 @@ pub fn search(
     for hit in &mut results {
         hit.precision = Some(lang_precision(&hit.file));
     }
+    let result_limit = row_limit.map(|value| usize::try_from(value).unwrap_or(usize::MAX));
+    let effective_total = if grouping_incomplete {
+        None
+    } else if collapse_partials {
+        Some(u32::try_from(results.len()).unwrap_or(u32::MAX))
+    } else {
+        Some(raw_candidate_total)
+    };
+    let top_truncated = result_limit.is_some_and(|limit| {
+        if collapse_partials {
+            results.len() > limit
+        } else {
+            raw_candidate_total > raw_candidates_examined
+        }
+    });
+    if let Some(limit) = result_limit {
+        results.truncate(limit);
+    }
+    let count = u32::try_from(results.len()).unwrap_or(u32::MAX);
+    let truncated = grouping_incomplete || top_truncated;
+    let truncation_reason = if grouping_incomplete {
+        Some("raw_work_limit")
+    } else if top_truncated {
+        Some("top")
+    } else {
+        None
+    };
+    let mut precision_notes = vec![
+        "exact_name_matching_over_a_syntactic_index".to_string(),
+        "results_are_not_compiler_resolved_symbol_identity".to_string(),
+    ];
+    if grouping_incomplete {
+        precision_notes.push(
+            "partial_type_groups_and_location_lists_may_be_incomplete_after_raw_work_limit"
+                .to_string(),
+        );
+    }
     Ok(SearchResponse {
         query: name.to_string(),
+        kind: kind.map(String::from),
+        language: language.map(String::from),
+        collapse_partials,
+        total: effective_total,
+        count,
+        truncated,
+        truncation_reason,
+        row_limit,
+        raw_work_limit,
+        raw_candidate_total,
+        raw_candidates_examined,
         results,
+        precision_notes,
     })
 }
 
@@ -6560,6 +6685,60 @@ mod tests {
 
         let service = hits.iter().find(|h| h.name == "Service").unwrap();
         assert!(service.locations.is_none());
+    }
+
+    #[test]
+    fn bounded_search_reports_exact_raw_total_without_partial_grouping() {
+        let path = tmp_db("bounded_search_raw_total");
+        let store = Store::open(&path).unwrap();
+        for file in ["src/a.rs", "src/b.rs", "src/c.rs"] {
+            store
+                .insert_symbol("shared", "function", file, 1, 2, None, None)
+                .unwrap();
+        }
+
+        let response = search_bounded(&store, "shared", None, None, false, 2).unwrap();
+        assert_eq!(response.total, Some(3));
+        assert_eq!(response.count, 2);
+        assert!(response.truncated);
+        assert_eq!(response.truncation_reason, Some("top"));
+        assert_eq!(response.row_limit, Some(2));
+        assert_eq!(response.raw_work_limit, None);
+        assert_eq!(response.raw_candidate_total, 3);
+        assert_eq!(response.raw_candidates_examined, 2);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn bounded_partial_search_marks_group_total_unknown_at_work_cap() {
+        let path = tmp_db("bounded_search_work_limit");
+        let store = Store::open(&path).unwrap();
+        for index in 0..=SEARCH_RAW_WORK_LIMIT {
+            store
+                .insert_symbol(
+                    "shared",
+                    "function",
+                    &format!("src/{index:04}.rs"),
+                    1,
+                    2,
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+
+        let response = search_bounded(&store, "shared", None, None, true, 10).unwrap();
+        assert_eq!(response.total, None);
+        assert_eq!(response.count, 10);
+        assert!(response.truncated);
+        assert_eq!(response.truncation_reason, Some("raw_work_limit"));
+        assert_eq!(response.raw_work_limit, Some(SEARCH_RAW_WORK_LIMIT));
+        assert_eq!(response.raw_candidate_total, SEARCH_RAW_WORK_LIMIT + 1);
+        assert_eq!(response.raw_candidates_examined, SEARCH_RAW_WORK_LIMIT);
+        assert!(response.precision_notes.iter().any(|note| {
+            note == "partial_type_groups_and_location_lists_may_be_incomplete_after_raw_work_limit"
+        }));
+        std::fs::remove_file(path).ok();
     }
 
     #[test]

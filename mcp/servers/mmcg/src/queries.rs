@@ -372,8 +372,14 @@ pub struct ImpactResponse {
 pub struct FilesResponse {
     pub prefix: Option<String>,
     pub count: u32,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_limit: Option<u32>,
     pub files: Vec<FileEntry>,
 }
+
+pub const FILES_DEFAULT_TOP: u32 = 200;
+pub const FILES_MAX_TOP: u32 = 500;
 
 #[derive(Debug, Serialize)]
 pub struct StatusResponse {
@@ -3373,11 +3379,22 @@ pub fn files(
     store: &Store,
     prefix: Option<&str>,
     language: Option<&str>,
+    row_limit: Option<u32>,
 ) -> rusqlite::Result<FilesResponse> {
-    let files = store.files_under(prefix, language)?;
+    let row_limit_usize = row_limit.map(|limit| usize::try_from(limit).unwrap_or(usize::MAX));
+    let mut files = match row_limit_usize {
+        Some(limit) => store.files_under_limit(prefix, language, limit.saturating_add(1))?,
+        None => store.files_under(prefix, language)?,
+    };
+    let truncated = row_limit_usize.is_some_and(|limit| files.len() > limit);
+    if let Some(limit) = row_limit_usize {
+        files.truncate(limit);
+    }
     Ok(FilesResponse {
         prefix: prefix.map(String::from),
         count: files.len() as u32,
+        truncated,
+        row_limit,
         files,
     })
 }
@@ -5798,6 +5815,34 @@ mod tests {
         assert!(parse_duration("💥").is_err());
         assert!(parse_duration("9223372036854776s").is_err());
         assert!(parse_duration("18446744073709551615d").is_err());
+    }
+
+    #[test]
+    fn files_response_reports_bounded_inventory() {
+        let path = tmp_db("files_response_limit");
+        let store = Store::open(&path).unwrap();
+        for file in ["src/a.rs", "src/b.rs", "src/c.rs"] {
+            store.upsert_file(file, 1, 1).unwrap();
+        }
+
+        let bounded = files(&store, Some("src/"), None, Some(2)).unwrap();
+        assert_eq!(bounded.count, 2);
+        assert_eq!(bounded.row_limit, Some(2));
+        assert!(bounded.truncated);
+        assert_eq!(
+            bounded
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["src/a.rs", "src/b.rs"]
+        );
+
+        let complete = files(&store, None, None, None).unwrap();
+        assert_eq!(complete.count, 3);
+        assert_eq!(complete.row_limit, None);
+        assert!(!complete.truncated);
+        std::fs::remove_file(path).ok();
     }
 
     #[test]

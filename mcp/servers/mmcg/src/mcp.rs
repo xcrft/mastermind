@@ -1870,7 +1870,8 @@ fn schema_files() -> Value {
             "type": "object",
             "properties": {
                 "prefix": { "type": "string", "description": "Optional literal path prefix; percent and underscore are ordinary path characters" },
-                "language": { "type": "string", "enum": LANGUAGES, "description": "Optional language filter" }
+                "language": { "type": "string", "enum": LANGUAGES, "description": "Optional language filter" },
+                "top": { "type": "integer", "minimum": 1, "maximum": queries::FILES_MAX_TOP, "default": queries::FILES_DEFAULT_TOP, "description": "Maximum files to return; use prefix or language to narrow a truncated result" }
             }
         }
     })
@@ -2376,8 +2377,15 @@ fn handle_outline(store: &mut Store, args: &Value) -> Result<Value, HandlerError
 fn handle_files(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let prefix = opt_str_arg(args, "prefix")?;
     let language = opt_enum_arg(args, "language", &LANGUAGES)?;
+    let top = bounded_u64_arg(
+        args,
+        "top",
+        u64::from(queries::FILES_DEFAULT_TOP),
+        1,
+        u64::from(queries::FILES_MAX_TOP),
+    )? as u32;
     ensure_fresh_index(store)?;
-    let r = queries::files(store, prefix, language)
+    let r = queries::files(store, prefix, language, Some(top))
         .map_err(|error| HandlerError::internal("files_query", error))?;
     serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
@@ -4178,6 +4186,7 @@ mod tests {
                 json!({ "query": "decision", "top": 0 }),
                 "Invalid argument: top",
             ),
+            (handle_files, json!({ "top": 0 }), "Invalid argument: top"),
             (
                 handle_history,
                 json!({ "query": "decision", "kind": false }),

@@ -715,6 +715,7 @@ fn execute(store: &Store, q: QueryCmd) -> Result<Value, Box<dyn std::error::Erro
             store,
             prefix.as_deref(),
             language.as_deref(),
+            None,
         )?)?,
         QueryCmd::SymbolsInFile { file } => {
             serde_json::to_value(queries::symbols_in_file(store, &file)?)?

@@ -674,6 +674,10 @@ trace. Lens renders bounded identities for component,
 boundary/API, cycle, hotspot, ownership, and history events. It isolates a
 bounded temporal-unavailable result so ordinary impact evidence remains usable,
 but a repository, Git, or SQLite snapshot race still fails the refresh.
+The default CLI text format keeps the resolved revisions, per-collection
+returned/total coverage and reasons, every returned drift category, provenance,
+limits, and diagnostics. A count in its summary is therefore traceable to the
+same bounded identities available in JSON.
 
 ## Mastermind Lens (`mmcg ui`)
 

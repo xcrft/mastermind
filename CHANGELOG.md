@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Default text output from `mmcg temporal` now exposes revision binding,
+  per-collection coverage and truncation reasons, and returned component,
+  boundary, resolved-cycle, hotspot, ownership, history, provenance, and limit
+  evidence instead of reducing most drift categories to counts.
 - Default text output from `mastermind concept` now exposes exact indexed-match
   coverage, bounded-page and unsafe-candidate omissions, the truncation reason,
   freshness contracts, and query limits instead of showing only the returned

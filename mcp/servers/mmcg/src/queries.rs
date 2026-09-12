@@ -3420,16 +3420,20 @@ pub fn parse_duration(s: &str) -> Result<u64, String> {
 pub struct RecentChangesResponse {
     pub since: String,
     pub window_secs: u64,
+    pub window_start_unix_ms: i64,
+    pub as_of_unix_ms: i64,
+    pub timestamp_basis: &'static str,
     pub count: u32,
     pub files: Vec<FileEntry>,
+    pub precision_notes: Vec<&'static str>,
 }
 
-/// Files re-indexed within the last `since` window (e.g. "2h"). Useful for
-/// incident-response Phase 3 ("what's been touched recently?") and debugging
-/// stale-index symptoms.
+/// Indexed file snapshots whose stored source mtime falls within the last
+/// `since` window (e.g. "2h"). This is a filesystem recency signal, not Git
+/// history or indexing-time evidence.
 ///
-/// `indexed_at` is stored in **milliseconds** by the indexer (see `indexer.rs` —
-/// `as_millis() as i64`), so the threshold is computed in ms too.
+/// The legacy `indexed_at` column stores source metadata mtime in milliseconds,
+/// so both interval bounds use that unit.
 pub fn recent_changes(store: &Store, since: &str) -> Result<RecentChangesResponse, String> {
     let window_secs = parse_duration(since)?;
     let now_ms = i64::try_from(
@@ -3447,13 +3451,22 @@ pub fn recent_changes(store: &Store, since: &str) -> Result<RecentChangesRespons
         .checked_sub(window_ms)
         .ok_or_else(|| format!("duration too large: {since:?}"))?;
     let files = store
-        .files_indexed_since(threshold_ms)
+        .files_with_mtime_between(threshold_ms, now_ms)
         .map_err(|e| e.to_string())?;
     Ok(RecentChangesResponse {
         since: since.to_string(),
         window_secs,
+        window_start_unix_ms: threshold_ms,
+        as_of_unix_ms: now_ms,
+        timestamp_basis: "stored_source_mtime",
         count: files.len() as u32,
         files,
+        precision_notes: vec![
+            "indexed_at_is_stored_source_mtime_not_indexing_time",
+            "source_mtime_is_not_git_history_or_proof_of_content_change",
+            "stale_index_may_omit_unindexed_worktree_changes",
+            "future_source_mtimes_are_excluded",
+        ],
     })
 }
 
@@ -5801,15 +5814,22 @@ mod tests {
         store
             .upsert_file("file_b.py", now_ms - 7_200_000, 3)
             .unwrap();
+        store
+            .upsert_file("future.py", now_ms + 3_600_000, 1)
+            .unwrap();
 
         // "1h" window catches only file_a
         let recent = recent_changes(&store, "1h").unwrap();
         assert_eq!(recent.count, 1);
         assert_eq!(recent.files[0].path, "file_a.py");
+        assert_eq!(recent.timestamp_basis, "stored_source_mtime");
+        assert!(recent.window_start_unix_ms >= now_ms - 3_600_000);
+        assert!(recent.as_of_unix_ms >= now_ms);
 
         // "3h" catches both
         let wider = recent_changes(&store, "3h").unwrap();
         assert_eq!(wider.count, 2);
+        assert!(wider.files.iter().all(|file| file.path != "future.py"));
 
         std::fs::remove_file(&path).ok();
     }

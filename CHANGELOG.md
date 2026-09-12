@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Recent-change results now expose their source-mtime basis and exact interval,
+  exclude future timestamps, and stop describing source mtimes as index times.
 - Markdown workflow parsing now advances across backticked Unicode by byte
   position and preserves source offsets during case-insensitive signature
   matching, retaining later paths, planned tests, and signature claims.

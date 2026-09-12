@@ -2221,7 +2221,7 @@ fn schema_test_impact() -> Value {
 fn schema_recent_changes() -> Value {
     json!({
         "name": "mmcg_recent_changes",
-        "description": "Files re-indexed within a recent time window (per the watcher's `indexed_at` mtime). Useful when investigating a recent incident or asking 'what changed in the last hour?'. Pass `since` as a short duration string: 30s / 10m / 2h / 1d.",
+        "description": "Indexed file snapshots whose stored source mtime falls within a recent time window. This is a bounded filesystem recency signal, not indexing time, Git history, or proof of a content change. Future mtimes are excluded and stale indexes can omit unindexed worktree changes. Pass `since` as 30s / 10m / 2h / 1d.",
         "inputSchema": {
             "type": "object",
             "properties": {

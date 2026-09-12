@@ -507,9 +507,7 @@ fn extract_snapshot(body: &str) -> Vec<SymbolClaim> {
     out
 }
 
-/// Extract the bullet's `signature \`<sig>\`` claim, or None. Tolerates the
-/// word "signature" followed by either a backticked code span (preferred) or
-/// bare text up to a trailing parenthetical / comma.
+/// Extract the bullet's canonical `signature \`<sig>\`` claim, or None.
 fn extract_signature(text: &str) -> Option<String> {
     // The match offset is reused against `text`, so normalization must preserve
     // byte positions. Full Unicode lowercasing can expand characters before the

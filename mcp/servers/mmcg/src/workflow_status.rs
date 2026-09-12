@@ -4546,9 +4546,9 @@ pub(crate) fn stale_paths_controlled(
         }
         let relative = path
             .strip_prefix(root_capability.canonical_root())
-            .map_err(|_| crate::indexer::IndexError::SnapshotChanged)?
-            .to_string_lossy()
-            .replace('\\', "/");
+            .map_err(|_| crate::indexer::IndexError::SnapshotChanged)?;
+        let relative = crate::bounded_fs::normalize_repository_relative_path(relative)
+            .map_err(crate::indexer::index_error_from_read)?;
         let admitted = match crate::indexer::source_admission_with_capability(
             &root_capability,
             &path,

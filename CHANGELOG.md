@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Source indexing, freshness checks, and watcher removals now share one exact
+  repository-path encoding. Non-UTF-8 and ambiguous Unix backslash source paths
+  fail closed instead of colliding with another graph row; working-tree reports
+  preserve literal backslashes as distinct paths.
 - Git history evidence now rejects non-canonical backslash paths instead of
   rewriting them to slash paths and potentially assigning churn to another
   Unix file.

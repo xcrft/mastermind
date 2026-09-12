@@ -151,6 +151,27 @@ pub(crate) enum BoundedPathKind {
     Other,
 }
 
+pub(crate) fn normalize_repository_relative_path(path: &Path) -> Result<String, BoundedReadError> {
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return Err(BoundedReadError::InvalidPath);
+    }
+    let mut parts = Vec::new();
+    for component in path.components() {
+        let Component::Normal(component) = component else {
+            return Err(BoundedReadError::InvalidPath);
+        };
+        let component = component.to_str().ok_or(BoundedReadError::InvalidPath)?;
+        if component.is_empty() || component.contains(['\\', '\0']) {
+            return Err(BoundedReadError::InvalidPath);
+        }
+        parts.push(component);
+    }
+    if parts.is_empty() {
+        return Err(BoundedReadError::InvalidPath);
+    }
+    Ok(parts.join("/"))
+}
+
 #[cfg(unix)]
 fn stable_file_identity(file: &std::fs::File) -> std::io::Result<StableFileIdentity> {
     use std::os::unix::fs::MetadataExt;
@@ -1368,6 +1389,25 @@ mod tests {
         }
         assert!(matches!(
             read(&root.path().join("file.txt")),
+            Err(BoundedReadError::InvalidPath)
+        ));
+    }
+
+    #[test]
+    fn repository_paths_preserve_nul_safe_names_and_reject_aliases() {
+        assert_eq!(
+            normalize_repository_relative_path(Path::new("src/line\nbreak.rs")).unwrap(),
+            "src/line\nbreak.rs"
+        );
+        for path in ["", ".", "../src/lib.rs", "/src/lib.rs"] {
+            assert!(matches!(
+                normalize_repository_relative_path(Path::new(path)),
+                Err(BoundedReadError::InvalidPath)
+            ));
+        }
+        #[cfg(unix)]
+        assert!(matches!(
+            normalize_repository_relative_path(Path::new("src\\lib.rs")),
             Err(BoundedReadError::InvalidPath)
         ));
     }

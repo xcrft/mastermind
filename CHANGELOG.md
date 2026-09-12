@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Offline review HTML now omits the document graph's canonical local filesystem
+  root from its published projection, preventing shared artifacts from
+  disclosing a checkout path while final validation retains the exact root-bound
+  check.
 - Review summaries now format dynamic refs and evidence paths with safe
   variable-length Markdown code spans, preventing admitted backticks from
   breaking or reshaping the reviewer-facing evidence.

@@ -1948,6 +1948,8 @@ mod tests {
         assert!(summary.contains("AI audit narrative: `absent`"));
         let html = std::fs::read_to_string(output.join("index.html")).unwrap();
         assert!(html.contains("mastermind_native_document_evidence_check"));
+        assert!(html.contains("\"root_label\":\".\""));
+        assert!(!html.contains(repository.path().to_string_lossy().as_ref()));
     }
 
     #[test]

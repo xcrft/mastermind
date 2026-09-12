@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Default text output from `mastermind concept` now exposes exact indexed-match
+  coverage, bounded-page and unsafe-candidate omissions, the truncation reason,
+  freshness contracts, and query limits instead of showing only the returned
+  count.
 - Default text output from `mastermind brief` now reports revision binding,
   overall and per-section coverage, source/unsafe/budget omissions, history query
   state, limits, and precision notes instead of reducing incompleteness to budget

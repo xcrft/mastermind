@@ -385,7 +385,9 @@ candidate contains `name`, `kind`, `language`, `path`, `line`, a declaration
 `result_truncated`, observed `unsafe_candidates_omitted`, overall `truncated`
 and `truncation_reason`, plus normalized `query_terms`, requested top,
 freshness, limits, and precision notes. The count and ranked page are read from
-one SQLite snapshot.
+one SQLite snapshot. The default text format reports the same coverage,
+omissions, reason, freshness contracts, and limits before listing candidates;
+it does not reduce a bounded or safety-filtered page to its returned count.
 
 The corpus is an additive schema-v7 concept table, per-file count table, and
 external-content FTS5 index. Documentation rows and their count-only metadata

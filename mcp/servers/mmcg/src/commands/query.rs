@@ -1046,7 +1046,13 @@ pub fn render_concept(
     }
 
     let mut output = format!(
-        "mastermind concept\nquery terms: {}\ncount: {}\ntop: {}\nfreshness: {}\n\n",
+        "mastermind concept\nschema: v{}\nrepository content: {}\nquery terms: {}\ncoverage: {}/{} ({})\nresult truncated: {}\nunsafe candidates omitted: {}\ntruncation reason: {}\ntop: {}\nfreshness: {}\nextractor contract: {}\nnormalization contract: {}\nlimits: query bytes {} · query terms {} · term bytes {} · top {} · signature shape bytes {}\n\n",
+        response.schema_version,
+        if response.repository_content_untrusted {
+            "untrusted"
+        } else {
+            "trusted"
+        },
         response
             .query_terms
             .iter()
@@ -1054,8 +1060,27 @@ pub fn render_concept(
             .collect::<Vec<_>>()
             .join(" "),
         response.count,
+        response.indexed_total,
+        if response.truncated {
+            "partial"
+        } else {
+            "complete"
+        },
+        response.result_truncated,
+        response.unsafe_candidates_omitted,
+        response
+            .truncation_reason
+            .map(concept_text_field)
+            .unwrap_or_else(|| "none".to_string()),
         response.top,
         concept_text_field(&response.freshness.status),
+        concept_text_field(&response.freshness.extractor_contract),
+        concept_text_field(&response.freshness.normalization_contract),
+        response.limits.query_bytes,
+        response.limits.query_terms,
+        response.limits.term_bytes,
+        response.limits.top,
+        response.limits.signature_shape_bytes,
     );
     output.push_str("candidates\n");
     for candidate in &response.candidates {
@@ -1623,6 +1648,23 @@ mod map_tests {
         let json = render_concept(&response, crate::ConceptFormat::Json).unwrap();
         assert!(json.contains("https://evil.example"));
         assert!(json.contains("file://"));
+
+        let mut partial = response;
+        partial.indexed_total = 7;
+        partial.result_truncated = true;
+        partial.unsafe_candidates_omitted = 2;
+        partial.truncated = true;
+        partial.truncation_reason = Some("top_and_unsafe_candidates");
+        let text = render_concept(&partial, crate::ConceptFormat::Text).unwrap();
+        assert!(text.contains("schema: v2\nrepository content: untrusted"));
+        assert!(text.contains("coverage: 1/7 (partial)"));
+        assert!(text.contains("result truncated: true\nunsafe candidates omitted: 2"));
+        assert!(text.contains("truncation reason: top\\u00005fand\\u00005funsafe"));
+        assert!(text.contains("extractor contract: extractor"));
+        assert!(text.contains("normalization contract: normalization"));
+        assert!(text.contains(
+            "limits: query bytes 256 · query terms 16 · term bytes 64 · top 50 · signature shape bytes 256"
+        ));
     }
 
     #[test]

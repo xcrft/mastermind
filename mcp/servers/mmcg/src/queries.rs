@@ -3374,15 +3374,7 @@ pub fn files(
     prefix: Option<&str>,
     language: Option<&str>,
 ) -> rusqlite::Result<FilesResponse> {
-    // SQL LIKE pattern — match anything starting with prefix
-    let pattern = prefix.map(|p| {
-        if p.ends_with('%') {
-            p.to_string()
-        } else {
-            format!("{p}%")
-        }
-    });
-    let files = store.files_under(pattern.as_deref(), language)?;
+    let files = store.files_under(prefix, language)?;
     Ok(FilesResponse {
         prefix: prefix.map(String::from),
         count: files.len() as u32,

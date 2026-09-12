@@ -5981,32 +5981,27 @@ impl Store {
     /// OUTSIDE the prefix. "Empirical API surface" — independent of declared
     /// visibility (which mmcg doesn't extract).
     ///
-    /// `path_prefix` matched via SQL `LIKE` — pass without `%`; we append it.
-    /// Optional `language` filter.
+    /// `path_prefix` is a literal string prefix. SQL wildcard characters have
+    /// no special meaning. Optional `language` filter.
     pub fn api_surface(&self, path_prefix: &str, language: Option<&str>) -> SqlResult<Vec<Symbol>> {
-        let pattern = if path_prefix.ends_with('%') {
-            path_prefix.to_string()
-        } else {
-            format!("{path_prefix}%")
-        };
         let references = reference_groups_ctes();
         let sql = format!(
             "WITH {references}, external_refs AS (
                  SELECT DISTINCT r.nm, r.target_kind
                  FROM target_refs r
                  JOIN symbols caller ON caller.id = r.from_id
-                 WHERE caller.file_path NOT LIKE ?1
+                 WHERE substr(caller.file_path, 1, length(?1)) != ?1
              )
              SELECT DISTINCT {SYMBOL_COLS_S}
              FROM symbols s
              JOIN external_refs r ON r.nm = s.name AND r.target_kind = s.kind
-             WHERE s.file_path LIKE ?1
+             WHERE substr(s.file_path, 1, length(?1)) = ?1
                AND (?2 IS NULL OR s.language = ?2)
                AND s.kind != 'module'
              ORDER BY s.file_path, s.line_start"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![pattern, language], Self::row_to_symbol)?;
+        let rows = stmt.query_map(params![path_prefix, language], Self::row_to_symbol)?;
         rows.collect()
     }
 
@@ -6018,8 +6013,8 @@ impl Store {
     /// Planner pre-flight on an unfamiliar codebase or path prefix: "the 20
     /// most-referenced symbols in `src/auth/`?" cheaply answers "read first".
     ///
-    /// - `path_prefix`: limit to `file_path` starting with this prefix. `None` =
-    ///   whole index. Trailing `%` accepted, otherwise appended.
+    /// - `path_prefix`: literal prefix for `file_path`. `None` = whole index;
+    ///   SQL wildcard characters have no special meaning.
     /// - `language`, `kind`: standard filters.
     /// - `top`: result count (caller decides — no hard cap).
     ///
@@ -6032,13 +6027,6 @@ impl Store {
         kind: Option<&str>,
         top: u32,
     ) -> SqlResult<Vec<(Symbol, u32, u32)>> {
-        let pattern = path_prefix.map(|p| {
-            if p.ends_with('%') {
-                p.to_string()
-            } else {
-                format!("{p}%")
-            }
-        });
         // In-degree = distinct CALLER symbols, not call sites. Mirrors
         // `mmcg_callers` — 5 calls to `foo` from the same caller count once.
         let references = reference_groups_ctes();
@@ -6056,14 +6044,14 @@ impl Store {
              JOIN deg ON deg.nm = s.name AND deg.target_kind = s.kind
              JOIN defs ON defs.name = s.name
              WHERE s.kind != 'module'
-               AND (?1 IS NULL OR s.file_path LIKE ?1)
+               AND (?1 IS NULL OR substr(s.file_path, 1, length(?1)) = ?1)
                AND (?2 IS NULL OR s.language = ?2)
                AND (?3 IS NULL OR s.kind = ?3)
              ORDER BY in_degree DESC, s.file_path, s.line_start
              LIMIT ?4"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![pattern, language, kind, top], |r| {
+        let rows = stmt.query_map(params![path_prefix, language, kind, top], |r| {
             let sym = Self::row_to_symbol(r)?;
             // in_degree / name_collision follow the 9 SYMBOL_COLS_S columns.
             let in_degree: u32 = r.get(9)?;
@@ -6931,10 +6919,11 @@ impl Store {
         rows.collect()
     }
 
-    /// Files indexed under a path prefix (None = everything). Optional `language`
-    /// filter via EXISTS on symbols (language lives there, not on files). When
-    /// set, zero-symbol files are excluded — a no-op in practice, since every
-    /// indexed file has at least the synthetic `<module>` symbol.
+    /// Files indexed under a literal path prefix (None = everything). SQL
+    /// wildcard characters have no special meaning. Optional `language` filter
+    /// uses EXISTS on symbols (language lives there, not on files). When set,
+    /// zero-symbol files are excluded — a no-op in practice, since every indexed
+    /// file has at least the synthetic `<module>` symbol.
     pub fn files_under(
         &self,
         prefix: Option<&str>,
@@ -6949,7 +6938,7 @@ impl Store {
         };
         let mut stmt = self.conn.prepare(
             "SELECT f.path, f.indexed_at, f.symbol_count FROM files f
-             WHERE (?1 IS NULL OR f.path LIKE ?1)
+             WHERE (?1 IS NULL OR substr(f.path, 1, length(?1)) = ?1)
                AND (?2 IS NULL OR EXISTS (
                        SELECT 1 FROM symbols s
                        WHERE s.file_path = f.path AND s.language = ?2 LIMIT 1
@@ -8657,6 +8646,120 @@ mod tests {
         let class_names: Vec<&str> = classes.iter().map(|(s, _, _)| s.name.as_str()).collect();
         assert!(class_names.contains(&"CoreClass"));
         assert!(!class_names.contains(&"api_target"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn prefix_queries_treat_sql_wildcards_as_path_characters() {
+        let path = tmp_db("literal_prefix_queries");
+        let store = Store::open(&path).unwrap();
+        for file in [
+            "src/%dir/lib.rs",
+            "src/xdir/caller.rs",
+            "src/_dir/lib.rs",
+            "src/ydir/caller.rs",
+            "src/Case/lib.rs",
+            "src/case/lib.rs",
+        ] {
+            store.upsert_file(file, 1, 1).unwrap();
+        }
+
+        let percent_target = store
+            .insert_symbol(
+                "percent_target",
+                "function",
+                "src/%dir/lib.rs",
+                1,
+                2,
+                None,
+                None,
+            )
+            .unwrap();
+        let underscore_target = store
+            .insert_symbol(
+                "underscore_target",
+                "function",
+                "src/_dir/lib.rs",
+                1,
+                2,
+                None,
+                None,
+            )
+            .unwrap();
+        let percent_caller = store
+            .insert_symbol(
+                "percent_caller",
+                "function",
+                "src/xdir/caller.rs",
+                1,
+                2,
+                None,
+                None,
+            )
+            .unwrap();
+        let underscore_caller = store
+            .insert_symbol(
+                "underscore_caller",
+                "function",
+                "src/ydir/caller.rs",
+                1,
+                2,
+                None,
+                None,
+            )
+            .unwrap();
+        store
+            .insert_edge(
+                percent_caller,
+                Some(percent_target),
+                "percent_target",
+                "calls",
+                1,
+            )
+            .unwrap();
+        store
+            .insert_edge(
+                underscore_caller,
+                Some(underscore_target),
+                "underscore_target",
+                "calls",
+                1,
+            )
+            .unwrap();
+
+        let files = |prefix| {
+            store
+                .files_under(Some(prefix), None)
+                .unwrap()
+                .into_iter()
+                .map(|file| file.path)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(files("src/%dir"), vec![String::from("src/%dir/lib.rs")]);
+        assert_eq!(files("src/_dir"), vec![String::from("src/_dir/lib.rs")]);
+        assert_eq!(files("src/Case"), vec![String::from("src/Case/lib.rs")]);
+
+        let surface = |prefix| {
+            store
+                .api_surface(prefix, None)
+                .unwrap()
+                .into_iter()
+                .map(|symbol| symbol.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(surface("src/%dir"), vec![String::from("percent_target")]);
+        assert_eq!(surface("src/_dir"), vec![String::from("underscore_target")]);
+
+        let central = |prefix| {
+            store
+                .centrality(Some(prefix), None, None, 10)
+                .unwrap()
+                .into_iter()
+                .map(|(symbol, _, _)| symbol.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(central("src/%dir"), vec![String::from("percent_target")]);
+        assert_eq!(central("src/_dir"), vec![String::from("underscore_target")]);
         std::fs::remove_file(&path).ok();
     }
 

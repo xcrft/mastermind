@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- File listing, API-surface, and centrality scopes now treat percent and
+  underscore as literal path-prefix characters instead of SQL wildcards.
 - Symbol, file, history, and task research calls now reject blank selectors
   instead of returning a plausible empty result. Scratchpad writes also reject
   blank labels and multi-line bodies. Revision tools reject blank explicit roots

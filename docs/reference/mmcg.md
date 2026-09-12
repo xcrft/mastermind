@@ -171,7 +171,9 @@ mmcg map src --format json --depth 2 --top 20
 mmcg map . --format mermaid
 mmcg map . --format sarif > mastermind-map.sarif
 
-# Analyze baseline vs staged, unstaged, and untracked changes.
+# Analyze baseline vs staged, unstaged, and untracked changes. Text preserves
+# file-only changes, components, crossings, test evidence, evidence disciplines,
+# per-section returned/total coverage, and any partial reasons.
 mmcg impact --since main --format text --depth 3 --top 100
 mmcg impact --since HEAD~1 --format json
 mmcg impact --since main --format sarif > mastermind-impact.sarif

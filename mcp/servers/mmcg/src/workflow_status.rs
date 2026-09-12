@@ -3549,6 +3549,16 @@ pub struct IndexInfo {
     pub root_error: Option<String>,
 }
 
+pub(crate) struct IndexFreshnessScan {
+    pub(crate) stale_count: usize,
+    pub(crate) stale_count_truncated: bool,
+    pub(crate) freshness_error: Option<String>,
+    pub(crate) extractor_contract_current: bool,
+    pub(crate) concept_contract_current: bool,
+    pub(crate) history_freshness: &'static str,
+    pub(crate) history_freshness_error: Option<String>,
+}
+
 pub struct InstallInfo {
     pub claude_md_present: bool,
     pub agents_count: usize,
@@ -4238,60 +4248,18 @@ fn scan_index(root: &Path, db: &Path) -> IndexInfo {
     ) = if root_error.is_some() {
         (false, false, 0, false, None, "unknown", None)
     } else {
-        let extractor_contract_current = match store.extractor_contract_current() {
-            Ok(current) => current,
-            Err(error) => return unavailable(format!("cannot query extractor contract: {error}")),
-        };
-        let concept_contract_current = match store.concept_contract_current() {
-            Ok(current) => current,
-            Err(error) => return unavailable(format!("cannot query concept contract: {error}")),
-        };
-        let (stale_count, stale_count_truncated, freshness_error) = match stale_paths_controlled(
-            &store,
-            root,
-            STATUS_STALE_FILE_PROBE_LIMIT,
-            crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
-            crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
-            crate::bounded_fs::ReadControl {
-                deadline: Some(deadline),
-                interrupted: None,
-            },
-        ) {
-            Ok(paths) => (
-                paths.len().min(STATUS_STALE_FILE_LIMIT),
-                paths.len() > STATUS_STALE_FILE_LIMIT,
-                None,
-            ),
-            Err(error) => (0, false, Some(error.to_string())),
-        };
-        let (history_freshness, history_freshness_error) = match crate::indexer::Indexer::new(root)
-            .project_history_freshness_controlled(
-                &store,
-                crate::bounded_fs::ReadControl {
-                    deadline: Some(deadline),
-                    interrupted: None,
-                },
-            ) {
-            Ok(freshness) => (freshness.as_str(), None),
-            Err(crate::indexer::IndexError::LimitExceeded { .. }) => (
-                "incomplete",
-                Some("durable-history scan exceeded its work limit".into()),
-            ),
-            Err(crate::indexer::IndexError::Cancelled)
-            | Err(crate::indexer::IndexError::DeadlineExceeded) => (
-                "unknown",
-                Some("durable-history freshness deadline exceeded".into()),
-            ),
-            Err(error) => ("unknown", Some(error.to_string())),
+        let freshness = match scan_index_freshness(root, &store, deadline) {
+            Ok(freshness) => freshness,
+            Err(error) => return unavailable(error),
         };
         (
-            extractor_contract_current,
-            concept_contract_current,
-            stale_count,
-            stale_count_truncated,
-            freshness_error,
-            history_freshness,
-            history_freshness_error,
+            freshness.extractor_contract_current,
+            freshness.concept_contract_current,
+            freshness.stale_count,
+            freshness.stale_count_truncated,
+            freshness.freshness_error,
+            freshness.history_freshness,
+            freshness.history_freshness_error,
         )
     };
     match store.source_snapshot_unchanged() {
@@ -4315,6 +4283,66 @@ fn scan_index(root: &Path, db: &Path) -> IndexInfo {
         database_error: None,
         root_error,
     }
+}
+
+pub(crate) fn scan_index_freshness(
+    root: &Path,
+    store: &crate::store::Store,
+    deadline: std::time::Instant,
+) -> Result<IndexFreshnessScan, String> {
+    let extractor_contract_current = store
+        .extractor_contract_current()
+        .map_err(|error| format!("cannot query extractor contract: {error}"))?;
+    let concept_contract_current = store
+        .concept_contract_current()
+        .map_err(|error| format!("cannot query concept contract: {error}"))?;
+    let (stale_count, stale_count_truncated, freshness_error) = match stale_paths_controlled(
+        store,
+        root,
+        STATUS_STALE_FILE_PROBE_LIMIT,
+        crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
+        crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
+        crate::bounded_fs::ReadControl {
+            deadline: Some(deadline),
+            interrupted: None,
+        },
+    ) {
+        Ok(paths) => (
+            paths.len().min(STATUS_STALE_FILE_LIMIT),
+            paths.len() > STATUS_STALE_FILE_LIMIT,
+            None,
+        ),
+        Err(error) => (0, false, Some(error.to_string())),
+    };
+    let (history_freshness, history_freshness_error) = match crate::indexer::Indexer::new(root)
+        .project_history_freshness_controlled(
+            store,
+            crate::bounded_fs::ReadControl {
+                deadline: Some(deadline),
+                interrupted: None,
+            },
+        ) {
+        Ok(freshness) => (freshness.as_str(), None),
+        Err(crate::indexer::IndexError::LimitExceeded { .. }) => (
+            "incomplete",
+            Some("durable-history scan exceeded its work limit".into()),
+        ),
+        Err(crate::indexer::IndexError::Cancelled)
+        | Err(crate::indexer::IndexError::DeadlineExceeded) => (
+            "unknown",
+            Some("durable-history freshness deadline exceeded".into()),
+        ),
+        Err(error) => ("unknown", Some(error.to_string())),
+    };
+    Ok(IndexFreshnessScan {
+        stale_count,
+        stale_count_truncated,
+        freshness_error,
+        extractor_contract_current,
+        concept_contract_current,
+        history_freshness,
+        history_freshness_error,
+    })
 }
 
 pub(crate) fn stale_paths_controlled(

@@ -9,17 +9,18 @@
 //! | # | Name                  | Catches                                                |
 //! |---|-----------------------|--------------------------------------------------------|
 //! | 1 | `mmcg binary`          | sanity — we're running, report our version             |
-//! | 2 | `index database`       | selected index is a valid current-schema database       |
-//! | 3 | `index repository`     | selected index belongs to the requested repository     |
-//! | 4 | `symbols indexed`      | non-empty index (catches "I ran init but not index")   |
-//! | 5 | `index freshness`      | source paths and mtimes match the index                |
-//! | 6 | `gitignore`            | `.mastermind/` is excluded from VCS                    |
-//! | 7 | `CLAUDE.md`            | exists and references the workflow                     |
-//! | 8 | `MCP config`           | mmcg registered in `~/.claude.json` (user) or `./.mcp.json` (project) |
-//! | 9 | `MCP serve handshake`  | spawning `mastermind serve` responds to `initialize` + `tools/list` |
-//! | 10 | `subagent MCP scoping` | every subagent `mcpServers:` entry names a registered server |
-//! | 11 | `subagent runtime contract` | Mastermind agents pin model, tools, turns, effort, and exact mmcg access |
-//! | 12 | `style profile`        | author's `~/.mastermind/style.md` has fallen behind their commits |
+//! | 2 | `PATH entries`         | client setup cannot route through relative executables |
+//! | 3 | `index database`       | selected index is a valid current-schema database       |
+//! | 4 | `index repository`     | selected index belongs to the requested repository     |
+//! | 5 | `symbols indexed`      | non-empty index (catches "I ran init but not index")   |
+//! | 6 | `index freshness`      | structural, concept, and durable-history data is current |
+//! | 7 | `gitignore`            | `.mastermind/` is excluded from VCS                    |
+//! | 8 | `CLAUDE.md`            | exists and references the workflow                     |
+//! | 9 | `MCP config`           | mmcg registered in `~/.claude.json` (user) or `./.mcp.json` (project) |
+//! | 10 | `MCP serve handshake` | spawning `mastermind serve` responds to `initialize` + `tools/list` |
+//! | 11 | `subagent MCP scoping` | every subagent `mcpServers:` entry names a registered server |
+//! | 12 | `subagent runtime contract` | Mastermind agents pin model, tools, turns, effort, and exact mmcg access |
+//! | 13 | `style profile`       | author's `~/.mastermind/style.md` has fallen behind their commits |
 //!
 //! Human-readable by default; `--json` switches to a machine-parseable format.
 
@@ -80,10 +81,12 @@ impl DoctorIndex {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Self::Missing,
             Err(error) => return Self::Invalid(format!("can't inspect db: {error}")),
         };
-        let store = match crate::store::Store::open_read_only(index_path) {
-            Ok(store) => store,
-            Err(error) => return Self::Invalid(format!("can't open db read-only: {error}")),
-        };
+        let deadline = std::time::Instant::now() + DOCTOR_FRESHNESS_TIMEOUT;
+        let store =
+            match crate::store::Store::open_read_only_with_deadline(index_path, Some(deadline)) {
+                Ok(store) => store,
+                Err(error) => return Self::Invalid(format!("can't open db read-only: {error}")),
+            };
         match store.schema_current() {
             Ok(true) => Self::Ready {
                 size: store
@@ -487,8 +490,7 @@ fn check_symbols_indexed(index: &DoctorIndex) -> Check {
     }
 }
 
-/// Compare each indexable path and source mtime with the stored snapshot.
-/// Stops at 10 hits to keep the doctor fast on large repos.
+/// Check the structural graph and both derived corpora against live inputs.
 fn check_index_freshness(root: &Path, index: &DoctorIndex) -> Check {
     let store = match index {
         DoctorIndex::Ready { store, .. } => store,
@@ -509,44 +511,23 @@ fn check_index_freshness(root: &Path, index: &DoctorIndex) -> Check {
             };
         }
     };
-    match store.extractor_contract_current() {
-        Ok(true) => {}
-        Ok(false) => {
-            return Check {
-                name: "index freshness",
-                status: Status::Warn,
-                message: "extractor contract changed since this index was built".into(),
-                hint: Some("run `mastermind index .` to rebuild structural data".into()),
-            };
-        }
+    if crate::indexer::validate_index_root(store, root).is_err() {
+        return Check {
+            name: "index freshness",
+            status: Status::Warn,
+            message: "skipped — index repository does not match the requested root".into(),
+            hint: None,
+        };
+    }
+    let deadline = std::time::Instant::now() + DOCTOR_FRESHNESS_TIMEOUT;
+    let freshness = match crate::workflow_status::scan_index_freshness(root, store, deadline) {
+        Ok(freshness) => freshness,
         Err(error) => {
             return Check {
                 name: "index freshness",
                 status: Status::Fail,
-                message: format!("can't read extractor contract: {error}"),
+                message: error,
                 hint: Some("rebuild the index with `mastermind index .`".into()),
-            };
-        }
-    }
-    let limit = 10usize;
-    let stale = match crate::workflow_status::stale_paths_controlled(
-        store,
-        root,
-        limit,
-        crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
-        crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
-        crate::bounded_fs::ReadControl {
-            deadline: Some(std::time::Instant::now() + DOCTOR_FRESHNESS_TIMEOUT),
-            interrupted: None,
-        },
-    ) {
-        Ok(stale) => stale,
-        Err(error) => {
-            return Check {
-                name: "index freshness",
-                status: Status::Warn,
-                message: format!("cannot inspect index freshness safely: {error}"),
-                hint: Some("inspect the repository limits, then rerun `mastermind doctor`".into()),
             };
         }
     };
@@ -569,28 +550,57 @@ fn check_index_freshness(root: &Path, index: &DoctorIndex) -> Check {
             };
         }
     }
-    if stale.is_empty() {
+    let mut issues = Vec::new();
+    if !freshness.extractor_contract_current {
+        issues.push("extractor contract changed".to_string());
+    }
+    if !freshness.concept_contract_current {
+        issues.push("concept corpus contract changed or is incomplete".to_string());
+    }
+    if let Some(error) = freshness.freshness_error {
+        issues.push(format!("source freshness unavailable: {error}"));
+    } else if freshness.stale_count > 0 {
+        let suffix = if freshness.stale_count_truncated {
+            " or more"
+        } else {
+            ""
+        };
+        issues.push(format!(
+            "{}{} stale source file(s)",
+            freshness.stale_count, suffix
+        ));
+    }
+    match (
+        freshness.history_freshness,
+        freshness.history_freshness_error.as_deref(),
+    ) {
+        ("stale", _) => issues.push("durable history changed".into()),
+        ("incomplete", Some(error)) => {
+            issues.push(format!("durable-history corpus is incomplete: {error}"));
+        }
+        ("incomplete", None) => issues.push("durable-history corpus is incomplete".into()),
+        ("snapshot_changed", _) => issues.push("durable history changed during the scan".into()),
+        ("fresh", None) => {}
+        (_, Some(error)) => {
+            issues.push(format!("durable-history freshness unavailable: {error}"));
+        }
+        _ => issues.push("durable-history freshness is unknown".into()),
+    }
+    if issues.is_empty() {
         Check {
             name: "index freshness",
             status: Status::Ok,
-            message: "indexable source paths match stored mtimes".into(),
+            message: "structural, concept, and durable-history data is current".into(),
             hint: None,
         }
     } else {
-        // Show up to 3 by name. At the scan limit we report ≥N — the exact
-        // total is unknown without finishing the walk.
-        let preview = stale.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
-        let count_label = if stale.len() >= limit {
-            format!("≥{} stale source files", stale.len())
-        } else {
-            format!("{} stale source file(s)", stale.len())
-        };
         Check {
             name: "index freshness",
             status: Status::Warn,
-            message: format!("{count_label} (e.g. {preview})"),
+            message: issues.join("; "),
             hint: Some(
-                "run `mastermind index .` or start `mastermind watch` for live updates".into(),
+                "resolve reported limits or changed files, run `mastermind index .`, then rerun `mastermind doctor`"
+                    .into(),
             ),
         }
     }
@@ -1373,6 +1383,72 @@ mod tests {
         for suffix in ["-wal", "-shm", "-journal"] {
             assert!(!sidecar_path(suffix).exists());
         }
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn index_freshness_reports_concept_and_history_drift() {
+        let root = tmp().canonicalize().unwrap();
+        fs::create_dir_all(root.join(".mastermind")).unwrap();
+        fs::write(root.join("lib.rs"), "pub fn current() {}\n").unwrap();
+        fs::write(root.join("CONTEXT.md"), "# Current decision\nInitial.\n").unwrap();
+        let db = root.join(".mastermind/mmcg.db");
+        {
+            let mut store = crate::store::Store::open(&db).unwrap();
+            crate::indexer::Indexer::new(&root)
+                .index_all(&mut store, false)
+                .unwrap();
+        }
+
+        let current = DoctorIndex::inspect(&db);
+        let current_check = check_index_freshness(&root, &current);
+        assert_eq!(current_check.status, Status::Ok);
+        assert!(current_check
+            .message
+            .contains("durable-history data is current"));
+        drop(current);
+
+        {
+            let store = crate::store::Store::open(&db).unwrap();
+            store
+                .set_meta(
+                    crate::store::CONCEPT_NORMALIZATION_META_KEY,
+                    "obsolete-concept-contract",
+                )
+                .unwrap();
+        }
+        let concept_drift = DoctorIndex::inspect(&db);
+        let concept_check = check_index_freshness(&root, &concept_drift);
+        assert_eq!(concept_check.status, Status::Warn);
+        assert!(concept_check
+            .message
+            .contains("concept corpus contract changed"));
+        assert!(!concept_check.message.contains("durable history changed"));
+        drop(concept_drift);
+
+        {
+            let store = crate::store::Store::open(&db).unwrap();
+            store
+                .set_meta(
+                    crate::store::CONCEPT_NORMALIZATION_META_KEY,
+                    crate::store::CONCEPT_NORMALIZATION_VERSION,
+                )
+                .unwrap();
+        }
+        fs::write(
+            root.join("CONTEXT.md"),
+            "# Current decision\nChanged after indexing.\n",
+        )
+        .unwrap();
+        let history_drift = DoctorIndex::inspect(&db);
+        let history_check = check_index_freshness(&root, &history_drift);
+        assert_eq!(history_check.status, Status::Warn);
+        assert!(history_check.message.contains("durable history changed"));
+        assert!(!history_check
+            .message
+            .contains("concept corpus contract changed"));
+        drop(history_drift);
+
         fs::remove_dir_all(root).ok();
     }
 

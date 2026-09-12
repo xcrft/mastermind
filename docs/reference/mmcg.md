@@ -467,6 +467,9 @@ are unchanged. `status`, `doctor`, and `mmcg_status` expose contract drift so
 agents do not trust stale derived data. `mastermind status` also checks the live
 durable-history inventory under the same ten-second deadline as source
 freshness. It reports the index as up to date only when all four checks pass.
+`mastermind doctor` uses that same scan for its `index freshness` check and
+returns a warning if any structural, concept, or durable-history input is stale,
+incomplete, changing, or cannot be checked within the bound.
 
 Output example:
 

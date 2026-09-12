@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- `mastermind doctor` now uses the same bounded index-health scan as workflow
+  status, including concept-contract and live durable-history drift. Its database
+  snapshot open is deadline-bound, and stale source counts no longer expose raw
+  repository paths or label an exact count as a lower bound.
 - `mastermind status` now requires structural sources, extractor and concept
   contracts, and live durable history to be current before it reports the index
   as up to date. Its shared bounded scan also distinguishes exactly ten stale

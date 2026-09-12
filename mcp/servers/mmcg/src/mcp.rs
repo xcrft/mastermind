@@ -1869,7 +1869,7 @@ fn schema_files() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "prefix": { "type": "string", "description": "Optional path prefix" },
+                "prefix": { "type": "string", "description": "Optional literal path prefix; percent and underscore are ordinary path characters" },
                 "language": { "type": "string", "enum": LANGUAGES, "description": "Optional language filter" }
             }
         }
@@ -1927,7 +1927,7 @@ fn schema_api_surface() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "prefix": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Path prefix (e.g. 'src/runtime/'). LIKE-matched." },
+                "prefix": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Literal path prefix (e.g. 'src/runtime/'); percent and underscore are ordinary path characters." },
                 "language": { "type": "string", "enum": LANGUAGES }
             },
             "required": ["prefix"]
@@ -2003,7 +2003,7 @@ fn schema_centrality() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "prefix": { "type": "string", "description": "Optional path prefix to limit ranking scope (e.g. 'src/auth/'). LIKE-matched." },
+                "prefix": { "type": "string", "description": "Optional literal path prefix to limit ranking scope (e.g. 'src/auth/'); percent and underscore are ordinary path characters." },
                 "language": { "type": "string", "enum": LANGUAGES },
                 "kind": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Optional kind filter (function, class, method, struct, etc.)" },
                 "top": { "type": "integer", "minimum": 1, "maximum": 200, "default": 20, "description": "How many results to return" }

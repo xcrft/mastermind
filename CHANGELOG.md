@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Lens audit summaries now preserve unknown and lower-bound map counts for
+  files, components, languages, entry points, hotspots, and cycles instead of
+  replacing missing totals with returned-array lengths.
 - Lens audit collections now expose exact or explicitly unknown totals with
   truncation reasons. Audit limits appear in the method ledger, and a bounded
   empty change-hotspot ranking no longer renders as a clean zero.

@@ -1285,14 +1285,17 @@
     var entryPoints = collection(map.entry_points);
     var languages = collection(map.languages);
     var files = collection(map.files);
-    var fileTotal = totalOrReturned(files);
+    var componentMetric = metricPresentation(components);
+    var entryPointMetric = metricPresentation(entryPoints);
+    var languageMetric = metricPresentation(languages);
+    var fileMetric = metricPresentation(files);
 
     var stats = createElement("div", "audit-stats");
     [
-      { value: displayNumber(components.total === null ? components.items.length : components.total), label: "Components" },
-      { value: displayNumber(entryPoints.total === null ? entryPoints.items.length : entryPoints.total), label: "Entry points" },
-      { value: displayNumber(languages.items.length), label: "Languages" },
-      { value: displayNumber(fileTotal), label: "Files (mapped)" },
+      { value: componentMetric.value, label: "Components" },
+      { value: entryPointMetric.value, label: "Entry points" },
+      { value: languageMetric.value, label: "Languages" },
+      { value: fileMetric.value, label: "Files (mapped)" },
     ].forEach(function (stat) {
       var cell = createElement("div", "audit-stat");
       cell.appendChild(createElement("strong", "", stat.value));
@@ -1305,7 +1308,13 @@
       return (finiteNumber(right.file_count) || 0) - (finiteNumber(left.file_count) || 0);
     });
     if (ranked.length === 0) {
-      node.appendChild(createElement("p", "audit-empty", "No components were indexed in this scope."));
+      node.appendChild(createElement(
+        "p",
+        "audit-empty",
+        componentMetric.partial
+          ? "No component was returned, but the component inventory is partial."
+          : "No components were indexed in this scope."
+      ));
       return;
     }
     var maxFiles = Math.max.apply(null, ranked.map(function (item) { return finiteNumber(item.file_count) || 0; }).concat([1]));
@@ -1326,11 +1335,12 @@
     var cycles = collection(map.cycles);
     var hotspots = collection(map.hotspots);
     var cycleIncomplete = cycles.truncated || cycles.totalUnknown;
+    var cycleMetric = metricPresentation(cycles);
 
     var cycleHead = createElement("p", "audit-subhead");
     cycleHead.appendChild(document.createTextNode("Dependency cycles"));
-    var cycleCount = cycles.total === null ? cycles.items.length : cycles.total;
-    var cycleBadge = createElement("span", "audit-count" + (cycleCount > 0 ? " audit-count--serious" : cycleIncomplete ? "" : " audit-count--clean"), String(cycleCount));
+    var cycleCount = totalOrReturned(cycles);
+    var cycleBadge = createElement("span", "audit-count" + (cycleCount > 0 ? " audit-count--serious" : cycleIncomplete ? "" : " audit-count--clean"), cycleMetric.value);
     cycleHead.appendChild(cycleBadge);
     node.appendChild(cycleHead);
     if (cycleCount === 0) {
@@ -1501,9 +1511,10 @@
     }
 
     var entryPoints = collection(record(model.map).entry_points);
+    var entryPointMetric = metricPresentation(entryPoints);
     var entryHead = createElement("p", "audit-subhead");
     entryHead.appendChild(document.createTextNode("Attack surface — entry points"));
-    entryHead.appendChild(createElement("span", "audit-count", displayNumber(entryPoints.total === null ? entryPoints.items.length : entryPoints.total)));
+    entryHead.appendChild(createElement("span", "audit-count", entryPointMetric.value));
     node.appendChild(entryHead);
     if (entryPoints.items.length === 0) {
       node.appendChild(createElement("p", "audit-empty", entryPoints.truncated || entryPoints.totalUnknown
@@ -1589,12 +1600,16 @@
     var components = collection(map.components);
     var languages = collection(map.languages);
     var cycles = collection(map.cycles);
+    var files = collection(map.files);
     var audit = record(model.audit);
     var changeSource = record(audit.change_hotspots);
     var change = collection(changeSource);
-    var fileTotal = totalOrReturned(collection(map.files));
-    var compCount = components.total === null ? components.items.length : components.total;
-    var cycleCount = cycles.total === null ? cycles.items.length : cycles.total;
+    var languageCount = totalOrReturned(languages);
+    var cycleCount = totalOrReturned(cycles);
+    var fileMetric = metricPresentation(files);
+    var componentMetric = metricPresentation(components);
+    var languageMetric = metricPresentation(languages);
+    var cycleMetric = metricPresentation(cycles);
     var cycleIncomplete = cycles.truncated || cycles.totalUnknown;
     var changeCount = totalOrReturned(change);
     var changeMetric = metricPresentation(change);
@@ -1615,8 +1630,8 @@
       var narrative = text(record(record(model.audit).narrative).summary, "");
       elements.auditLede.className = narrative ? "audit-exec__lede audit-lede--ai" : "audit-exec__lede";
       elements.auditLede.textContent = narrative || (
-        displayNumber(compCount) + " components · " + displayNumber(fileTotal) + " mapped files · " +
-        languages.items.length + " language" + (languages.items.length === 1 ? "" : "s") + ". " +
+        componentMetric.value + " components · " + fileMetric.value + " mapped files · " +
+        languageMetric.value + " language" + (languageCount === 1 ? "" : "s") + ". " +
         (cycleIncomplete
           ? "Cycle analysis is partial. "
           : cycleCount === 0 ? "No dependency cycles — the selected module graph is acyclic. " : cycleCount + " dependency cycles — refactors carry structural risk. ") +
@@ -1628,8 +1643,8 @@
     if (elements.auditPillars) {
       elements.auditPillars.replaceChildren();
       [
-        { lab: "Scale", big: displayNumber(fileTotal), sub: compCount + " components · " + languages.items.length + " languages", sev: "attention" },
-        { lab: "Structure", big: cycleIncomplete ? "≥" + String(cycleCount) : String(cycleCount), sub: cycleIncomplete ? "dependency-cycle window is partial" : cycleCount === 0 ? "dependency cycles — acyclic" : "dependency cycles", sev: cycleIncomplete ? "attention" : cycleCount === 0 ? "healthy" : "risk" },
+        { lab: "Scale", big: fileMetric.value, sub: componentMetric.value + " components · " + languageMetric.value + " languages", sev: "attention" },
+        { lab: "Structure", big: cycleMetric.value, sub: cycleIncomplete ? "dependency-cycle window is partial" : cycleCount === 0 ? "dependency cycles — acyclic" : "dependency cycles", sev: cycleIncomplete ? "attention" : cycleCount === 0 ? "healthy" : "risk" },
         { lab: "Change safety", big: text(changeSource.status, "") === "available" ? changeMetric.value : "—", sub: text(changeSource.status, "") === "available" ? "change-hotspots — churn × dependence" : "history unavailable", sev: text(changeSource.status, "") === "available" && changeKnownZero ? "healthy" : "attention" }
       ].forEach(function (p) {
         var el = createElement("article", "audit-pillar audit-pillar--" + p.sev);
@@ -2018,7 +2033,7 @@
   function auditCardSeverities(model) {
     var map = record(model.map);
     var cycles = collection(map.cycles);
-    var cycleCount = cycles.total === null ? cycles.items.length : cycles.total;
+    var cycleCount = totalOrReturned(cycles);
     var changeSource = record(record(model.audit).change_hotspots);
     var change = collection(changeSource);
     var changeCount = totalOrReturned(change);
@@ -2106,15 +2121,21 @@
     var hotspots = collection(map.hotspots);
     var languages = collection(map.languages);
     var dead = collection(record(model.audit).dead_code);
-    var cycleCount = cycles.total === null ? cycles.items.length : cycles.total;
-    var deadCount = dead.total === null ? dead.items.length : dead.total;
+    var componentMetric = metricPresentation(components);
+    var languageMetric = metricPresentation(languages);
+    var hotspotMetric = metricPresentation(hotspots);
+    var cycleMetric = metricPresentation(cycles);
+    var deadMetric = metricPresentation(dead);
+    var languageCount = totalOrReturned(languages);
+    var cycleCount = totalOrReturned(cycles);
+    var deadCount = totalOrReturned(dead);
     if (elements.auditSummary) {
       elements.auditSummary.textContent =
-        displayNumber(components.total === null ? components.items.length : components.total) + " components across " +
-        languages.items.length + " language" + (languages.items.length === 1 ? "" : "s") + " · " +
-        (hotspots.total === null ? hotspots.items.length : hotspots.total) + " hotspots · " +
-        cycleCount + " cycle" + (cycleCount === 1 ? "" : "s") + " · " +
-        displayNumber(deadCount) + " dead-code candidate" + (deadCount === 1 ? "" : "s") + "." +
+        componentMetric.value + " components across " +
+        languageMetric.value + " language" + (languageCount === 1 ? "" : "s") + " · " +
+        hotspotMetric.value + " hotspots · " +
+        cycleMetric.value + " cycle" + (cycleCount === 1 ? "" : "s") + " · " +
+        deadMetric.value + " dead-code candidate" + (deadCount === 1 ? "" : "s") + "." +
         (auditIsIncomplete(model) ? " Some audit sections are partial or unavailable." : "");
     }
   }

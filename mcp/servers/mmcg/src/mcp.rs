@@ -1134,6 +1134,11 @@ fn tools_list(version: ProtocolVersion) -> Value {
         .iter()
         .map(|tool| {
             let mut schema = (tool.schema)();
+            schema
+                .pointer_mut("/inputSchema")
+                .and_then(Value::as_object_mut)
+                .expect("tool input schema object")
+                .insert("additionalProperties".into(), json!(false));
             if version.is_current() {
                 let annotations = match tool.behavior {
                     ToolBehavior::ReadOnly => json!({ "readOnlyHint": true }),
@@ -1191,6 +1196,34 @@ fn invoke_tool(
     }
 }
 
+fn validate_known_arguments(
+    tool: &ToolDef,
+    tool_name: &str,
+    arguments: &Value,
+) -> Result<(), HandlerError> {
+    let schema = (tool.schema)();
+    let properties = schema
+        .pointer("/inputSchema/properties")
+        .and_then(Value::as_object)
+        .ok_or_else(|| HandlerError::internal("tool_schema", "missing input properties"))?;
+    let arguments = arguments
+        .as_object()
+        .expect("tools/call arguments were validated as an object");
+
+    for name in arguments.keys() {
+        // `name` predates the public `query` spelling for imported_by. Keep
+        // accepting that one compatibility alias while rejecting every other
+        // unadvertised field.
+        let legacy_imported_by_name = tool_name == "mmcg_imported_by" && name == "name";
+        if !properties.contains_key(name) && !legacy_imported_by_name {
+            return Err(HandlerError::InvalidArguments(format!(
+                "Invalid argument: {name}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn handle_tools_call_inner(
     version: ProtocolVersion,
     store: &mut Store,
@@ -1227,14 +1260,11 @@ fn handle_tools_call_inner(
     let mut handled = if already_expired {
         None
     } else {
-        Some(invoke_tool(
-            version,
-            tool,
-            tool_name,
-            store,
-            &arguments,
-            impact_engine,
-        ))
+        Some(
+            validate_known_arguments(tool, tool_name, &arguments).and_then(|()| {
+                invoke_tool(version, tool, tool_name, store, &arguments, impact_engine)
+            }),
+        )
     };
 
     // Argument parsing happens before each structural handler checks
@@ -1636,6 +1666,20 @@ fn opt_str_arg<'a>(args: &'a Value, name: &str) -> Result<Option<&'a str>, Handl
     }
 }
 
+fn opt_enum_arg<'a>(
+    args: &'a Value,
+    name: &str,
+    allowed: &[&str],
+) -> Result<Option<&'a str>, HandlerError> {
+    let value = opt_str_arg(args, name)?;
+    if value.is_some_and(|value| !allowed.contains(&value)) {
+        return Err(HandlerError::InvalidArguments(format!(
+            "Invalid argument: {name}"
+        )));
+    }
+    Ok(value)
+}
+
 fn opt_bool_arg(args: &Value, name: &str) -> Result<Option<bool>, HandlerError> {
     match args.get(name) {
         None => Ok(None),
@@ -1686,6 +1730,18 @@ const LANGUAGES: [&str; 11] = [
     "java",
     "php",
     "cpp",
+];
+
+const EDGE_KINDS: [&str; 4] = ["calls", "imports", "inherits", "references"];
+const IMPORT_MATCH_KINDS: [&str; 2] = ["name", "path"];
+const HISTORY_KINDS: [&str; 7] = [
+    "context",
+    "lesson",
+    "task_spec",
+    "executor_report",
+    "audit",
+    "release_notes",
+    "architecture_decision",
 ];
 
 fn schema_search() -> Value {
@@ -2209,7 +2265,7 @@ fn schema_change_class() -> Value {
 fn handle_search(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let name = str_arg(args, "name")?;
     let kind = opt_str_arg(args, "kind")?;
-    let language = opt_str_arg(args, "language")?;
+    let language = opt_enum_arg(args, "language", &LANGUAGES)?;
     let collapse = opt_bool_arg(args, "collapse_partials")?.unwrap_or(true);
     ensure_fresh_index(store)?;
     let r = queries::search(store, name, kind, language, collapse)
@@ -2219,8 +2275,8 @@ fn handle_search(store: &mut Store, args: &Value) -> Result<Value, HandlerError>
 
 fn handle_callers(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let name = str_arg(args, "name")?;
-    let language = opt_str_arg(args, "language")?;
-    let edge_kind = opt_str_arg(args, "edge_kind")?;
+    let language = opt_enum_arg(args, "language", &LANGUAGES)?;
+    let edge_kind = opt_enum_arg(args, "edge_kind", &EDGE_KINDS)?;
     ensure_fresh_index(store)?;
     let r = queries::callers(store, name, language, edge_kind)
         .map_err(|error| HandlerError::internal("callers_query", error))?;
@@ -2229,8 +2285,8 @@ fn handle_callers(store: &mut Store, args: &Value) -> Result<Value, HandlerError
 
 fn handle_callees(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let name = str_arg(args, "name")?;
-    let language = opt_str_arg(args, "language")?;
-    let edge_kind = opt_str_arg(args, "edge_kind")?;
+    let language = opt_enum_arg(args, "language", &LANGUAGES)?;
+    let edge_kind = opt_enum_arg(args, "edge_kind", &EDGE_KINDS)?;
     let file = args
         .get("file")
         .map(|value| {
@@ -2264,7 +2320,7 @@ fn handle_callees(store: &mut Store, args: &Value) -> Result<Value, HandlerError
 fn handle_impact(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let name = str_arg(args, "name")?;
     let max_depth = bounded_u64_arg(args, "max_depth", 2, 1, 10)? as u32;
-    let language = opt_str_arg(args, "language")?;
+    let language = opt_enum_arg(args, "language", &LANGUAGES)?;
     ensure_fresh_index(store)?;
     let r = queries::impact(store, name, max_depth, language)
         .map_err(|error| HandlerError::internal("impact_query", error))?;
@@ -2289,7 +2345,7 @@ fn handle_outline(store: &mut Store, args: &Value) -> Result<Value, HandlerError
 
 fn handle_files(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let prefix = opt_str_arg(args, "prefix")?;
-    let language = opt_str_arg(args, "language")?;
+    let language = opt_enum_arg(args, "language", &LANGUAGES)?;
     ensure_fresh_index(store)?;
     let r = queries::files(store, prefix, language)
         .map_err(|error| HandlerError::internal("files_query", error))?;
@@ -2310,8 +2366,8 @@ fn handle_imported_by(store: &mut Store, args: &Value) -> Result<Value, HandlerE
     } else {
         str_arg(args, "name")?
     };
-    let match_kind = opt_str_arg(args, "match")?.unwrap_or("name");
-    let language = opt_str_arg(args, "language")?;
+    let match_kind = opt_enum_arg(args, "match", &IMPORT_MATCH_KINDS)?.unwrap_or("name");
+    let language = opt_enum_arg(args, "language", &LANGUAGES)?;
     ensure_fresh_index(store)?;
     let r = queries::imported_by(store, query, match_kind, language)
         .map_err(|error| HandlerError::internal("imported_by_query", error))?;
@@ -2320,7 +2376,7 @@ fn handle_imported_by(store: &mut Store, args: &Value) -> Result<Value, HandlerE
 
 fn handle_unreferenced(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let kind = opt_str_arg(args, "kind")?;
-    let language = opt_str_arg(args, "language")?;
+    let language = opt_enum_arg(args, "language", &LANGUAGES)?;
     ensure_fresh_index(store)?;
     let r = queries::unreferenced(store, kind, language)
         .map_err(|error| HandlerError::internal("unreferenced_query", error))?;
@@ -2329,7 +2385,7 @@ fn handle_unreferenced(store: &mut Store, args: &Value) -> Result<Value, Handler
 
 fn handle_api_surface(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let prefix = str_arg(args, "prefix")?;
-    let language = opt_str_arg(args, "language")?;
+    let language = opt_enum_arg(args, "language", &LANGUAGES)?;
     ensure_fresh_index(store)?;
     let r = queries::api_surface(store, prefix, language)
         .map_err(|error| HandlerError::internal("api_surface_query", error))?;
@@ -2389,7 +2445,7 @@ fn handle_symbols_changed_since(store: &mut Store, args: &Value) -> Result<Value
 }
 
 fn handle_dependency_cycles(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
-    let language = opt_str_arg(args, "language")?;
+    let language = opt_enum_arg(args, "language", &LANGUAGES)?;
     let min_size = bounded_u64_arg(args, "min_size", 2, 2, 100)? as u32;
     ensure_fresh_index(store)?;
     let r = queries::dependency_cycles(store, language, min_size)
@@ -2408,7 +2464,7 @@ fn handle_tasks(store: &mut Store, args: &Value) -> Result<Value, HandlerError> 
 
 fn handle_history(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let query = str_arg(args, "query")?;
-    let kind = opt_str_arg(args, "kind")?;
+    let kind = opt_enum_arg(args, "kind", &HISTORY_KINDS)?;
     let document_graph = match args.get("document_graph") {
         None => None,
         Some(Value::String(path)) if !path.is_empty() => Some(PathBuf::from(path)),
@@ -2458,7 +2514,7 @@ fn handle_history(store: &mut Store, args: &Value) -> Result<Value, HandlerError
 
 fn handle_centrality(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let prefix = opt_str_arg(args, "prefix")?;
-    let language = opt_str_arg(args, "language")?;
+    let language = opt_enum_arg(args, "language", &LANGUAGES)?;
     let kind = opt_str_arg(args, "kind")?;
     let top = bounded_u64_arg(args, "top", 20, 1, 200)? as u32;
     ensure_fresh_index(store)?;
@@ -3835,6 +3891,18 @@ mod tests {
 
     #[test]
     fn tool_annotations_match_behavior_table() {
+        for version in [
+            ProtocolVersion::Legacy,
+            ProtocolVersion::Current,
+            ProtocolVersion::Stateless,
+        ] {
+            assert!(tools_list(version)["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|tool| tool["inputSchema"]["additionalProperties"] == false));
+        }
+
         let legacy = tools_list(ProtocolVersion::Legacy);
         assert_eq!(legacy["tools"].as_array().unwrap().len(), 30);
         assert!(legacy["tools"]
@@ -3880,6 +3948,36 @@ mod tests {
     }
 
     #[test]
+    fn tools_call_rejects_unknown_arguments_before_dispatch() {
+        let (_root, mut store) = fresh_test_store();
+        let result = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({
+                "name": "mmcg_search",
+                "arguments": { "name": "target", "langauge": "rust" }
+            }),
+        )
+        .unwrap();
+        assert_eq!(result["isError"], true);
+        assert_eq!(
+            unwrap_content(&result)["error"],
+            "Invalid argument: langauge"
+        );
+
+        let imported_by = TOOLS
+            .iter()
+            .find(|tool| tool.name == "mmcg_imported_by")
+            .unwrap();
+        assert!(validate_known_arguments(
+            imported_by,
+            "mmcg_imported_by",
+            &json!({ "name": "legacy" })
+        )
+        .is_ok());
+    }
+
+    #[test]
     fn research_tools_reject_explicit_invalid_optional_arguments() {
         type TestHandler = fn(&mut Store, &Value) -> Result<Value, HandlerError>;
 
@@ -3890,6 +3988,16 @@ mod tests {
                 handle_search,
                 json!({ "name": "target", "language": false }),
                 "Invalid argument: language",
+            ),
+            (
+                handle_search,
+                json!({ "name": "target", "language": "brainfuck" }),
+                "Invalid argument: language",
+            ),
+            (
+                handle_callers,
+                json!({ "name": "target", "edge_kind": "runtime" }),
+                "Invalid argument: edge_kind",
             ),
             (
                 handle_search,
@@ -3914,6 +4022,11 @@ mod tests {
             (
                 handle_history,
                 json!({ "query": "decision", "kind": false }),
+                "Invalid argument: kind",
+            ),
+            (
+                handle_history,
+                json!({ "query": "decision", "kind": "memo" }),
                 "Invalid argument: kind",
             ),
             (
@@ -3945,6 +4058,11 @@ mod tests {
                 handle_imported_by,
                 json!({ "query": false, "name": "legacy" }),
                 "Invalid argument: query",
+            ),
+            (
+                handle_imported_by,
+                json!({ "query": "app", "match": "substring" }),
+                "Invalid argument: match",
             ),
         ];
 

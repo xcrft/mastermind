@@ -864,10 +864,15 @@ mod map_tests {
             "\\u00005d\\u000028https\\u00003a\\u00002f\\u00002fevil\\u00002eexample\\u000029\\u00003ca\\u00003e\\u000060file\\u00003a\\u00002f\\u00002f\\u00001b\\u000007\\u00202e\\u00000d\\u00000a"
         );
         let response = queries::ConceptResponse {
-            schema_version: 1,
+            schema_version: 2,
             repository_content_untrusted: true,
             query_terms: vec!["handler".to_string()],
+            indexed_total: 1,
             count: 1,
+            result_truncated: false,
+            unsafe_candidates_omitted: 0,
+            truncated: false,
+            truncation_reason: None,
             top: 10,
             freshness: queries::ConceptFreshness {
                 status: "fresh".to_string(),

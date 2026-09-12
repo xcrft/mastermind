@@ -4925,23 +4925,6 @@ fn read_task_state(
     };
     let state: crate::run_task::RunState = serde_json::from_slice(&file.bytes)
         .map_err(|error| format!("cannot parse task state {}: {error}", path.display()))?;
-    if !matches!(
-        state.status.as_str(),
-        "history_review_required"
-            | "learned"
-            | "audit_required"
-            | "approved"
-            | "executing"
-            | "held"
-            | "drift"
-            | "broken"
-    ) {
-        return Err(format!(
-            "task state {} has unsupported status {:?}",
-            path.display(),
-            state.status
-        ));
-    }
     Ok(Some(TaskState {
         status: state.status,
         history_snapshot_sha256: state.history_snapshot_sha256,
@@ -6090,7 +6073,7 @@ mod tests {
                 "malformed" => (b"{broken".to_vec(), "cannot parse task state"),
                 "future_status" => (
                     serde_json::to_vec(&controller_state(&spec, "future_state")).unwrap(),
-                    "unsupported status",
+                    "unsupported controller status",
                 ),
                 "unknown_field" => {
                     let mut state =

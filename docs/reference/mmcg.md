@@ -852,7 +852,9 @@ evidence:
 - CODEOWNERS from `.github/CODEOWNERS`, repository-root `CODEOWNERS`, or
   `docs/CODEOWNERS` in that order, with `--codeowners PATH` as an override;
 - bounded Git churn and contributor names from the last 200 commits by default,
-  configurable with `--git-commits 0..1000` (`0` disables Git history).
+  configurable with `--git-commits 0..1000` (`0` disables Git history). Text
+  line totals, binary-change counts, and line-count completeness are separate;
+  binary or invalid `numstat` data cannot appear as exact zero-line churn.
 - the repository's persisted SCIP overlay, when present and fresh. It is not a
   UI flag or report path; import it first with `mmcg enrich --scip index.scip`.
 - current normalized declarative facts, when present. Import them first with
@@ -874,8 +876,11 @@ diagnostics at 100. Automatic CODEOWNERS discovery has a shared 16,384-entry
 directory budget, preserves exact case and does not follow links. An unreadable,
 changing, over-budget, or invalid priority location makes Lens evidence partial
 and temporal ownership totals unknown instead of looking like an absent file.
-Churn totals stay complete when contributor names are truncated. Git output is
-capped at 8 MiB.
+Commit counts and available line totals are unaffected when contributor names
+are truncated. Binary changes make their per-file line-count completeness
+false and are counted separately because Git does not return added/deleted line
+counts for them. Invalid Git history records make the source partial. Git
+output is capped at 8 MiB.
 
 Lens preserves this coverage in the source cards, summary, accessibility
 announcement, and method ledger. Exact totals are shown when known, non-empty

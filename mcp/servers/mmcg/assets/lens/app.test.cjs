@@ -392,7 +392,7 @@ function fixture() {
             ],
             coverage: { source_ids: ["coverage:0"], lines_found: 2, lines_hit: 1 },
             ownership: { codeowners_source_id: "codeowners", codeowners: ["@security"], contributors: [{ name: "Alice", commits: 2 }] },
-            churn: { commits: 2, lines_added: 7, lines_deleted: 3 },
+            churn: { commits: 2, lines_added: 7, lines_deleted: 3, binary_changes: 0, line_counts_complete: true },
             test_results: {
               source_ids: ["junit:0"], total: 1, passed: 0, failed: 1, errors: 0, skipped: 0,
               duration_ms: 11, failures_truncated: false,
@@ -418,7 +418,7 @@ function fixture() {
             production: false,
             findings: [],
             ownership: { codeowners_source_id: "codeowners", codeowners: [], contributors: [{ name: "Bob", commits: 1 }] },
-            churn: { commits: 1, lines_added: 4, lines_deleted: 0 },
+            churn: { commits: 1, lines_added: 4, lines_deleted: 0, binary_changes: 0, line_counts_complete: true },
             knowledge: [],
           },
         ],
@@ -1785,6 +1785,7 @@ async function main() {
   assert.match(changedInspector, /50% reported lines covered \(1\/2\)/i);
   assert.match(changedInspector, /CODEOWNERS · @security/i);
   assert.match(changedInspector, /Git contributor · Alice · 2 commits/i);
+  assert.match(changedInspector, /2 commits · \+7 \/ −3 lines in the configured history window/i);
   assert.match(changedInspector, /JUnit · file-level/i);
   assert.match(changedInspector, /authorization rejects · failed · AuthTest · expected denial/i);
   assert.match(changedInspector, /Runtime spans · file-level/i);
@@ -1794,6 +1795,16 @@ async function main() {
   assert.match(
     harness.nodes.get("evidence-source-list").textContent,
     /manifest sha256 a{12}… · 1,?024 bytes/i
+  );
+  const binaryChurnPayload = fixture();
+  binaryChurnPayload.evidence.files.items[0].churn.line_counts_complete = false;
+  binaryChurnPayload.evidence.files.items[0].churn.binary_changes = 1;
+  const binaryChurnHarness = await renderFixture(binaryChurnPayload, { width: 390 });
+  binaryChurnHarness.nodes.get("mobile-trace-list").querySelectorAll(".mobile-candidate")[0].dispatch("click");
+  assert.match(
+    binaryChurnHarness.nodes.get("inspector-body").textContent,
+    /2 commits · \+7 \/ −3 known text lines[\s\S]*1 binary change without line counts/i,
+    "Binary history must not look like exact zero-line churn"
   );
   const nodeCountBeforeToggle = harness.nodes.get("trace-graph").querySelectorAll("[data-node-id]").length;
   const edgeCountBeforeToggle = harness.nodes.get("trace-graph").querySelectorAll("[data-edge-id]").length;

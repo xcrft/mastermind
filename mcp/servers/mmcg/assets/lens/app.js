@@ -660,6 +660,13 @@
         message: "The selected packet declares document relations. Content freshness does not verify their meaning or activate a decision.",
         source: "Document graph",
       });
+      if (text(record(documentGraph.corpus).status, "not_tracked") === "not_tracked") {
+        precisionNotes.push({
+          code: "document_corpus_not_tracked",
+          message: "Only named endpoints are freshness-checked. New or unlisted documents remain outside this packet.",
+          source: "Document graph",
+        });
+      }
       const graphRevision = record(documentGraph.snapshot_revision);
       const graphHead = text(graphRevision.head, "");
       const reviewHead = text(record(impact.baseline).head_oid, "");
@@ -2338,6 +2345,14 @@
             + ". Re-read affected documents before accepting any declared relation."
         );
       }
+      if (state.model.documentGraph
+          && text(record(state.model.documentGraph.corpus).status, "not_tracked") === "not_tracked") {
+        appendNotice(
+          "warning",
+          "Document evidence · endpoint only",
+          "The packet checks named files only. New or unlisted documents are outside its freshness scope."
+        );
+      }
       if (state.model.documentGraph) {
         const graphHead = text(record(state.model.documentGraph.snapshot_revision).head, "");
         const reviewHead = text(state.model.baseline.head_oid, "");
@@ -2615,12 +2630,13 @@
     }
     if (documentGraph) {
       const graphStatus = text(documentGraph.status, "needs_review");
+      const corpusStatus = text(record(documentGraph.corpus).status, "not_tracked");
       const packet = record(documentGraph.packet);
       const card = createElement("article", "evidence-source evidence-source--" + (graphStatus === "current" ? "loaded" : "partial"));
       card.appendChild(createElement("span", "evidence-source__kind", "document graph · " + graphStatus.replace("_", " ")));
       card.appendChild(createElement("span", "evidence-source__label", text(packet.path, "Selected packet")));
       const relations = array(documentGraph.edges).length;
-      card.appendChild(createElement("span", "evidence-source__facts", relations + " declared relation" + (relations === 1 ? "" : "s") + " · all unverified"));
+      card.appendChild(createElement("span", "evidence-source__facts", relations + " declared relation" + (relations === 1 ? "" : "s") + " · all unverified · corpus " + corpusStatus.replace(/_/g, " ")));
       const graphHead = text(record(documentGraph.snapshot_revision).head, "");
       const reviewHead = text(state.model.baseline.head_oid, "");
       if (graphHead && reviewHead) {
@@ -2714,10 +2730,13 @@
     const revision = record(graph.snapshot_revision);
     const edges = array(graph.edges).map(record);
     const endpointChanges = array(graph.changed_files).map(record);
-    const corpusChanges = array(record(graph.corpus).changed_files).map(record);
+    const corpus = record(graph.corpus);
+    const corpusStatus = text(corpus.status, "not_tracked");
+    const corpusChanges = array(corpus.changed_files).map(record);
     elements.documentGraphSummary.textContent = edges.length + " declared relation" + (edges.length === 1 ? "" : "s")
       + " · snapshot " + shortOid(revision.head)
       + " · content " + status.replace("_", " ")
+      + " · corpus " + corpusStatus.replace(/_/g, " ")
       + " · semantics unverified.";
 
     const rows = [];
@@ -4597,6 +4616,8 @@
     const model = state.model;
     const semanticSourceCount = isRecord(record(model.semantic).source) ? 1 : 0;
     const temporalUnavailable = text(model.temporalEnvelope.status, "unavailable") !== "available";
+    const documentCorpusNotTracked = model.documentGraph
+      && text(record(model.documentGraph.corpus).status, "not_tracked") === "not_tracked";
     const evidenceSourceMetric = additiveMetricPresentation(
       model.evidenceSources,
       semanticSourceCount + (model.documentGraph ? 1 : 0)
@@ -4608,7 +4629,9 @@
       + evidenceSourceMetric.value + " evidence sources were evaluated. "
       + (model.documentGraph && text(model.documentGraph.status, "needs_review") === "needs_review"
         ? "Document evidence needs review."
-        : temporalUnavailable
+        : documentCorpusNotTracked
+          ? "The document corpus is not tracked; only named endpoints were checked."
+          : temporalUnavailable
           ? "Temporal comparison is unavailable."
           : snapshotIsPartial()
             ? "The result is partial."

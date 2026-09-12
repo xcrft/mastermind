@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Lens now exposes endpoint-only document packets as `corpus not tracked`
+  across visible, precision, notice, and accessibility surfaces instead of
+  hiding their unobserved-document boundary behind a current endpoint status.
 - Lens now labels its widest-reach headline as a ranking over the returned
   impact trace, so bounded evidence cannot imply a repository-wide maximum.
 - Lens zero-change headlines and accessibility announcements now preserve

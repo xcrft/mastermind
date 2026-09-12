@@ -883,6 +883,11 @@ revision is shown separately from live content freshness: matching named bytes
 do not cover unrelated changes. Relation labels and unchanged hashes do not
 establish semantic correctness.
 
+Endpoint-only v1 packets expose `corpus: not_tracked` in Lens's document
+summary, evidence card, notice stack, precision ledger, and accessible snapshot
+announcement. A current endpoint check therefore cannot hide that new or
+unlisted documents remain outside the packet's freshness scope.
+
 ### PR evidence package (`mmcg review export`)
 
 `mmcg review export --since REF --out DIR` captures the same fail-closed Lens

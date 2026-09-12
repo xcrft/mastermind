@@ -739,6 +739,9 @@ This applies to mapped files, components, languages, entry points, centrality
 hotspots, dependency cycles, and the audit-specific rankings. The main change
 summary and accessibility announcement use the same rule for files, changed and
 impacted symbols, API crossings, and candidate tests.
+The `Widest returned reach` callout ranks only changed symbols and downstream
+links present in the returned trace; it does not claim that a partial trace
+contains the repository-wide maximum.
 
 SQLite or Git failures stay explicit. A failed audit query is reported as
 unavailable and cannot produce a `Healthy` or `Clear` presentation. Component

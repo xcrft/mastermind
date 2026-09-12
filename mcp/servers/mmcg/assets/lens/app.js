@@ -2246,7 +2246,7 @@
         return node.type === "changed" && node.blast && node.blast.symbols > 0;
       }).sort(function (left, right) { return right.blast.symbols - left.blast.symbols; })[0];
       if (widest) {
-        summary += " Widest: " + text(widest.symbol.name, "unnamed") + " → " + widest.blast.symbols + " symbol" + (widest.blast.symbols === 1 ? "" : "s") + " / " + widest.blast.components + " component" + (widest.blast.components === 1 ? "" : "s") + ".";
+        summary += " Widest returned reach: " + text(widest.symbol.name, "unnamed") + " → " + widest.blast.symbols + " symbol" + (widest.blast.symbols === 1 ? "" : "s") + " / " + widest.blast.components + " component" + (widest.blast.components === 1 ? "" : "s") + ".";
       }
       const untested = model.nodes.filter(function (node) {
         return node.type === "changed" && node.blast && node.blast.symbols > 0 && node.blast.testPaths === 0;

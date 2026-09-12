@@ -930,8 +930,8 @@ async function main() {
   assert.match(harness.nodes.get("status-region").textContent, /9 evidence sources were evaluated/i);
   assert.match(
     harness.nodes.get("instrument-summary").textContent,
-    /Widest: authorize → 1 symbol \/ 1 component/i,
-    "The headline must name the widest-blast changed symbol"
+    /Widest returned reach: authorize → 1 symbol \/ 1 component/i,
+    "The headline must name the widest changed symbol within the returned trace"
   );
   assert.match(
     harness.nodes.get("instrument-summary").textContent,

@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Index freshness checks now retain missing and non-regular Git-tracked source
+  paths for admission and reject non-UTF-8 tracked inventory, preventing Lens
+  from treating a filtered source set as a complete fresh index.
 - Spec frontmatter now preserves YAML scalar types before deserialization, so
   numbers and booleans cannot be coerced into file, symbol, command, label, or
   metadata strings; legacy integer task IDs remain accepted explicitly.

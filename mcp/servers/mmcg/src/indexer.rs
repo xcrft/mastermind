@@ -1481,18 +1481,29 @@ fn tracked_relative_paths_controlled(
     if !output.success {
         return Err(crate::diff::WorkingTreeDiffError::GitUnavailable);
     }
-    Ok(output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-        .filter_map(|path| std::str::from_utf8(path).ok())
-        .map(PathBuf::from)
-        .filter(|path| !path.is_absolute() && !has_skipped_component(path))
-        .filter(|path| {
-            std::fs::symlink_metadata(root.join(path))
-                .is_ok_and(|metadata| metadata.file_type().is_file())
-        })
-        .collect())
+    let mut paths = Vec::new();
+    for raw in output.stdout.split(|byte| *byte == 0) {
+        if raw.is_empty() {
+            continue;
+        }
+        let path = PathBuf::from(
+            std::str::from_utf8(raw).map_err(|_| crate::diff::WorkingTreeDiffError::IndexStale)?,
+        );
+        if path.is_absolute()
+            || path
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(crate::diff::WorkingTreeDiffError::IndexStale);
+        }
+        if !has_skipped_component(&path) {
+            // Retain missing and non-regular tracked entries. Admission and
+            // freshness checks must see them and fail closed instead of
+            // mistaking a filtered Git inventory for a complete one.
+            paths.push(path);
+        }
+    }
+    Ok(paths)
 }
 
 fn source_walk_builder(root: &Path) -> WalkBuilder {
@@ -1587,6 +1598,9 @@ fn source_candidates_controlled(
     control.check().map_err(index_error_from_read)?;
     let tracked = match tracked_relative_paths_controlled(root, control) {
         Ok(paths) => paths,
+        Err(crate::diff::WorkingTreeDiffError::IndexStale) => {
+            return Err(IndexError::SnapshotChanged)
+        }
         Err(_) if limit.is_none() => Vec::new(),
         Err(crate::diff::WorkingTreeDiffError::GitTimeout)
             if control.interrupted.is_some_and(|check| check()) =>
@@ -3285,6 +3299,43 @@ def candidate(value: ImportantType) -> ResultType"#
         let mut matcher = SourceMatcher::new(&dir);
         assert!(!matcher.is_ignored(&dir.join("tracked.rs"), false));
         assert!(matcher.is_ignored(&dir.join("untracked.rs"), false));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tracked_inventory_retains_a_missing_source_path() {
+        let (dir, _db) = setup("tracked_missing_source");
+        fs::write(dir.join("missing.rs"), "pub fn missing() {}\n").unwrap();
+        git(&dir, &["init", "-q", "--initial-branch=main"]);
+        git(&dir, &["add", "missing.rs"]);
+        fs::remove_file(dir.join("missing.rs")).unwrap();
+
+        assert_eq!(
+            tracked_relative_paths(&dir).unwrap(),
+            [PathBuf::from("missing.rs")]
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tracked_inventory_rejects_non_utf8_source_paths() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let (dir, _db) = setup("tracked_non_utf8_source");
+        git(&dir, &["init", "-q", "--initial-branch=main"]);
+        let path = dir.join(std::ffi::OsString::from_vec(b"invalid-\xff.rs".to_vec()));
+        fs::write(path, "pub fn hidden() {}\n").unwrap();
+        git(&dir, &["add", "-A"]);
+
+        assert!(matches!(
+            tracked_relative_paths(&dir),
+            Err(crate::diff::WorkingTreeDiffError::IndexStale)
+        ));
+        assert!(matches!(
+            source_candidates_controlled(&dir, None, ReadControl::default()),
+            Err(IndexError::SnapshotChanged)
+        ));
         fs::remove_dir_all(&dir).ok();
     }
 

@@ -1235,8 +1235,10 @@ is opened read-only by `serve`: it remains query-compatible when fresh, requires
 an explicit `mmcg index` when stale, and is never created, migrated, truncated,
 or given a WAL by the server. Reading an existing active WAL may create or
 update its SHM coordination file. Incompatible custom schemas return
-`schema_incompatible`. Other failed or unavailable refreshes return
-`index_stale`.
+`schema_incompatible`. Reverse freshness checks retain missing and non-regular
+Git-tracked source paths so they cannot disappear from index coverage. A
+non-UTF-8 tracked path makes that inventory incomplete. These and other failed
+or unavailable refreshes return `index_stale`.
 
 ## MCP tools
 

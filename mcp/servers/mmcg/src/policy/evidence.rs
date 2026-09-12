@@ -1136,11 +1136,10 @@ mod tests {
         ] {
             let (repo, evidence, baseline) = external_workflow_fixture(2);
             let audit = evidence.path().join("001-critical/audit.md");
+            let task = evidence.path().join("001-critical");
             let extra = evidence.path().join("pending");
             if mutation == "missing_appears" {
                 fs::create_dir(&extra).unwrap();
-            } else if mutation == "kind_changes" {
-                fs::write(&extra, "not a task").unwrap();
             }
             let (files, gaps, receipt) = external_workflow(repo.path(), evidence.path(), &baseline);
             assert!(files.contains_key("critical.txt"));
@@ -1156,8 +1155,8 @@ mod tests {
                 }
                 "missing_appears" => fs::write(extra.join("spec.md"), "# New task\n").unwrap(),
                 "kind_changes" => {
-                    fs::remove_file(&extra).unwrap();
-                    fs::create_dir(&extra).unwrap();
+                    fs::remove_dir_all(&task).unwrap();
+                    fs::write(&task, "not a task").unwrap();
                 }
                 _ => unreachable!(),
             }

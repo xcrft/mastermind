@@ -4536,6 +4536,7 @@ pub(crate) fn stale_paths_controlled(
     let mut declared_bytes = 0_u64;
     let mut seen = HashSet::new();
     let mut stale = Vec::new();
+    let mut absent_candidates = Vec::new();
     for path in candidates {
         control
             .check()
@@ -4555,6 +4556,21 @@ pub(crate) fn stale_paths_controlled(
         ) {
             Ok(file) => file,
             Err(crate::indexer::IndexError::Skipped(_)) => continue,
+            Err(crate::indexer::IndexError::Missing) => {
+                let absence =
+                    crate::bounded_fs::inspect_absent_path(&root_capability, &path, control)
+                        .map_err(crate::indexer::index_error_from_read)?
+                        .ok_or(crate::indexer::IndexError::SnapshotChanged)?;
+                absent_candidates.push((path, absence));
+                seen.insert(relative.clone());
+                if indexed.contains_key(&relative) {
+                    stale.push(relative);
+                    if stale.len() >= cap {
+                        break;
+                    }
+                }
+                continue;
+            }
             Err(crate::indexer::IndexError::Cancelled) => {
                 return Err(crate::indexer::IndexError::Cancelled)
             }
@@ -4623,6 +4639,16 @@ pub(crate) fn stale_paths_controlled(
     root_capability
         .verify()
         .map_err(crate::indexer::index_error_from_read)?;
+    for (path, expected) in absent_candidates {
+        let observed = crate::bounded_fs::inspect_absent_path(&root_capability, &path, control)
+            .map_err(crate::indexer::index_error_from_read)?;
+        if observed
+            .as_ref()
+            .is_none_or(|observed| !expected.matches(observed))
+        {
+            return Err(crate::indexer::IndexError::SnapshotChanged);
+        }
+    }
     stale.sort();
     Ok(stale)
 }
@@ -6493,6 +6519,39 @@ mod tests {
         assert!(snapshot.source_snapshot_unchanged().unwrap());
         drop(snapshot);
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn stale_paths_treat_a_stably_deleted_tracked_source_as_current_after_purge() {
+        let root = tempfile::tempdir().unwrap();
+        init_git_repository(root.path());
+        let source = root.path().join("src/lib.rs");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"fn removed() {}\n").unwrap();
+        let output = Command::new("git")
+            .args(["add", "src/lib.rs"])
+            .current_dir(root.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        fs::remove_file(&source).unwrap();
+
+        let db = root.path().join("mmcg.db");
+        let store = crate::store::Store::open(&db).unwrap();
+        let scan = || {
+            stale_paths_controlled(
+                &store,
+                root.path(),
+                10,
+                crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
+                crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
+                crate::bounded_fs::ReadControl::default(),
+            )
+            .unwrap()
+        };
+        assert!(scan().is_empty());
+        store.upsert_file("src/lib.rs", 1, 1).unwrap();
+        assert_eq!(scan(), vec!["src/lib.rs".to_string()]);
     }
 
     #[test]

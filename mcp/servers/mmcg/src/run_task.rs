@@ -3626,6 +3626,7 @@ verify:
             run(&spec_path, &dir, &index_path, RunOpts::default()),
             Outcome::PostHeld
         );
+        let review = fs::read_to_string(&review_path).unwrap();
 
         fs::write(
             dir.join("CONTEXT.md"),
@@ -4034,12 +4035,27 @@ verify:
     }
 
     #[test]
-    fn failed_revalidation_revokes_approval_and_preserves_strict_options() {
+    fn failed_revalidation_revokes_approval_and_preserves_effective_strict_options() {
         let (root, spec, db) = preflight_fixture();
-        let body = fs::read_to_string(&spec).unwrap();
-        fs::write(&spec, format!(
-            "---\ntouches:\n  - file: src.txt\n    symbols:\n      - name: target\nverify:\n  - cmd: git status --short\n---\n{body}"
-        )).unwrap();
+        fs::remove_file(root.path().join("src.txt")).unwrap();
+        fs::write(root.path().join("src.py"), "def target(): pass\n").unwrap();
+        git(root.path(), &["add", "-A"]);
+        git(root.path(), &["commit", "-qm", "use indexed fixture"]);
+        let body = fs::read_to_string(&spec)
+            .unwrap()
+            .replace("src.txt", "src.py");
+        fs::write(
+            &spec,
+            format!(
+                "---\ntouches:\n  - file: src.py\n    symbols:\n      - name: target\nverify:\n  - cmd: git status --short\n---\n{body}"
+            ),
+        )
+        .unwrap();
+        let mut store = Store::open(&db).unwrap();
+        Indexer::new(root.path())
+            .index_all(&mut store, false)
+            .unwrap();
+        drop(store);
         assert_eq!(
             run(
                 &spec,
@@ -4076,7 +4092,7 @@ verify:
         let failed = load_state(&state_path).unwrap().unwrap();
         assert_eq!(failed.baseline_ref, approved.baseline_ref);
         assert_eq!(failed.iteration, 2);
-        assert!(failed.strict && failed.allow_no_index);
+        assert!(failed.strict && !failed.allow_no_index);
         assert_eq!(failed.status, "held");
         assert_eq!(failed.next_step.as_deref(), Some("run_preflight"));
         assert!(failed.held_snapshot_sha256.is_none() && failed.history_snapshot_sha256.is_none());

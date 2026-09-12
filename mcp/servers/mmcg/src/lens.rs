@@ -1029,6 +1029,7 @@ fn validated_index_paths(
             }
             _ => LensError::IndexStale,
         })?;
+    let mut absent_tracked_paths = Vec::new();
     for relative in tracked_paths {
         if deadline.is_some_and(|value| Instant::now() >= value) {
             return Err(LensError::AnalysisTimeout);
@@ -1050,7 +1051,46 @@ fn validated_index_paths(
         ) {
             Ok(_) => return Err(LensError::IndexStale),
             Err(crate::indexer::IndexError::Skipped(_)) => {}
+            Err(crate::indexer::IndexError::Missing) => {
+                let path = root.join(&relative);
+                let absence = crate::bounded_fs::inspect_absent_path(
+                    &root_capability,
+                    &path,
+                    crate::bounded_fs::ReadControl {
+                        deadline,
+                        interrupted: None,
+                    },
+                )
+                .map_err(|error| match error {
+                    crate::bounded_fs::BoundedReadError::DeadlineExceeded => {
+                        LensError::AnalysisTimeout
+                    }
+                    _ => LensError::IndexStale,
+                })?
+                .ok_or(LensError::IndexStale)?;
+                absent_tracked_paths.push((path, absence));
+            }
             Err(_) => return Err(LensError::IndexStale),
+        }
+    }
+    for (path, expected) in absent_tracked_paths {
+        let observed = crate::bounded_fs::inspect_absent_path(
+            &root_capability,
+            &path,
+            crate::bounded_fs::ReadControl {
+                deadline,
+                interrupted: None,
+            },
+        )
+        .map_err(|error| match error {
+            crate::bounded_fs::BoundedReadError::DeadlineExceeded => LensError::AnalysisTimeout,
+            _ => LensError::IndexStale,
+        })?;
+        if observed
+            .as_ref()
+            .is_none_or(|observed| !expected.matches(observed))
+        {
+            return Err(LensError::IndexStale);
         }
     }
     Ok(indexed_paths)

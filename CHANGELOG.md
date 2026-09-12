@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Git history evidence now rejects non-canonical backslash paths instead of
+  rewriting them to slash paths and potentially assigning churn to another
+  Unix file.
 - Impact text renderer tests now exercise a public-field view, so binary test
   targets compile without exposing or constructing private snapshot state.
 - Git history evidence now distinguishes binary changes and malformed `numstat`
@@ -65,8 +68,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `run-task` now rejects unknown fields in controller `state.json`, preventing
   misspelled or newer lifecycle data from silently inheriting weaker defaults.
 - Index freshness checks now retain missing and non-regular Git-tracked source
-  paths for admission and reject non-UTF-8 tracked inventory, preventing Lens
-  from treating a filtered source set as a complete fresh index.
+  paths for admission, reverify stable tracked deletions as intentional absence,
+  and reject non-UTF-8 inventory. Deleted code can remain visible in temporal
+  analysis without making a freshly purged index permanently stale.
 - Spec frontmatter now preserves YAML scalar types before deserialization, so
   numbers and booleans cannot be coerced into file, symbol, command, label, or
   metadata strings; legacy integer task IDs remain accepted explicitly.

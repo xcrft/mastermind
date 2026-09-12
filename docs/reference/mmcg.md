@@ -880,7 +880,9 @@ Commit counts and available line totals are unaffected when contributor names
 are truncated. Binary changes make their per-file line-count completeness
 false and are counted separately because Git does not return added/deleted line
 counts for them. Invalid Git history records make the source partial. Git
-output is capped at 8 MiB.
+output is capped at 8 MiB. Its NUL-delimited paths must already be canonical
+repository-relative slash paths; an ambiguous backslash path is rejected
+instead of being reassigned to a different file.
 
 Lens preserves this coverage in the source cards, summary, accessibility
 announcement, and method ledger. Exact totals are shown when known, non-empty
@@ -1267,8 +1269,10 @@ or given a WAL by the server. Reading an existing active WAL may create or
 update its SHM coordination file. Incompatible custom schemas return
 `schema_incompatible`. Reverse freshness checks retain missing and non-regular
 Git-tracked source paths so they cannot disappear from index coverage. A
-non-UTF-8 tracked path makes that inventory incomplete. These and other failed
-or unavailable refreshes return `index_stale`.
+tracked deletion is fresh only when the path is absent from both the worktree
+and the index and remains absent through the check. Non-regular and non-UTF-8
+tracked paths make the inventory incomplete. These and other failed or
+unavailable refreshes return `index_stale`.
 
 ## MCP tools
 

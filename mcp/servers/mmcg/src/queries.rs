@@ -442,9 +442,12 @@ pub struct StatusResponse {
     pub db_path: String,
     pub symbol_count: u32,
     pub file_count: u32,
-    /// Indexable source paths that are added, deleted, or newer than the indexed
-    /// snapshot. A non-zero count means structural answers must not be trusted
-    /// before re-indexing.
+    /// Structural freshness compares the indexed path set and exact filesystem
+    /// mtimes. Use a forced rebuild when a writer preserves both.
+    pub freshness_basis: &'static str,
+    /// Indexable source paths that are added, deleted, or have an mtime different
+    /// from the indexed snapshot. A non-zero count means structural answers must
+    /// not be trusted before re-indexing.
     pub stale_files: usize,
     /// True when more stale paths exist than `stale_files` reports.
     pub stale_files_truncated: bool,
@@ -4270,6 +4273,7 @@ pub fn status(store: &Store) -> rusqlite::Result<StatusResponse> {
         db_path: db_path.to_string_lossy().to_string(),
         symbol_count: store.symbol_count()?,
         file_count: store.file_count()?,
+        freshness_basis: "path_and_mtime",
         stale_files,
         stale_files_truncated,
         freshness_error,

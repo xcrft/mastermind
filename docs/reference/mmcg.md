@@ -454,7 +454,7 @@ no field represents a guaranteed runtime total.
 When you run `mmcg index`, mmcg compares each file's filesystem mtime against the mtime stored in the index:
 
 - **untracked and ignored by Git or `.ignore` rules** → do not scan; tracked files remain candidates even when a broad ignore rule matches them
-- **mtime newer than stored** → re-parse and commit (counted as `indexed`)
+- **mtime differs from stored in either direction** → re-parse and commit (counted as `indexed`)
 - **mtime equals stored** → skip without parsing (counted as `unchanged`)
 - **file in index but not on disk** → purge from index (counted as `purged`)
 - **binary-looking or larger than 5 MiB** → skip safely and report the count plus a bounded path sample
@@ -473,12 +473,14 @@ indexed 3 (unchanged 124, purged 1, skipped binary 2, skipped large 1, failed 0)
 
 When to use `--force`:
 - After a schema version change (schema and extractor-contract mismatches already rebuild automatically, but `--force` lets you request a cold rebuild explicitly)
-- If you suspect the index is stale for reasons mtime can't see (e.g., a file was restored from backup with old mtime)
+- If you suspect a writer changed content while preserving the exact stored mtime
 - For benchmarking — to see how long a cold index takes
 
-**Orphan purge caveat.** mmcg purges any indexed path that was not seen during this run's walk. This is the right behavior when you run `mmcg index <same-root>` every time. But if you switch roots between runs (e.g. `mmcg index .` then `mmcg index src/`), the second run will see different paths and wrongly purge the rest.
-
-**Best practice:** pick one project root (usually `.` from your project's top directory) and stick with it. `mmcg watch` always uses the root you pass at startup. If you accidentally indexed a different root, run `mmcg index --force <correct-root>` to rebuild from scratch.
+**Index-root binding.** The database records the canonical project root on its
+first index. A later attempt to reuse that database with a different root is
+rejected before mutation, so orphan cleanup cannot purge files merely because
+the caller switched scope. Use a separate `--index` path for another root.
+`mmcg watch` keeps the root supplied at startup.
 
 The index lives at `.mastermind/mmcg.db` in the current directory by default. Override with `--index <path>` or env var `MMCG_INDEX_PATH`.
 
@@ -1157,7 +1159,7 @@ update its SHM coordination file. Incompatible custom schemas return
 | `mmcg_history` | `query`, optional `kind`, `top` (default 10, max 50), `document_graph` | Searches `CONTEXT.md`, `CONTEXT-archive-*.md`, canonical task specs, executor reports, audits, `.mastermind/releases/*.md`, legacy task-local release notes, lessons, and Markdown architecture decisions under conventional ADR directories. `architecture_decision` is an exact `kind` filter. `candidate` lessons are unresolved signals, not active guidance. Returns `indexed_total`, `count`, `result_truncated`, `row_limit`, observed matches, `skipped_artifacts`, `corpus_truncated`, overall `truncated`, `freshness` (`fresh`, `stale`, `incomplete`, or `snapshot_changed`), and an explicit retrieval-only epistemic contract. `indexed_total` is exact only for the admitted FTS corpus; skipped or corpus-truncated Markdown stays outside it. Markdown remains authoritative. The deterministic inventory binds path, kind, length, content digest, skipped state, and truncation state. Limits are 1 MiB per artifact, 5,000 artifacts, and 32 MiB of admitted text. When `document_graph` names a root-contained packet under `.mastermind/research`, the response also includes a separate live, no-follow `document_graph` check. It writes nothing to SQLite and never upgrades `verification: unverified`; its content status is independent of history-index freshness. The CLI equivalents are `mastermind history <query> --document-graph <path>` and `mastermind query history ...`. |
 | `mmcg_dependency_cycles` | optional `language`, `min_size` (default 2), `top` (default 50, max 200) | Detect circular imports as strongly-connected components in the file-level import graph. MCP responses return at most 500 file memberships across complete SCC lists; a cycle that cannot fit is omitted rather than returned partially, with `truncation_reason: member_limit`. `total` and `total_members` remain exact when cycle detection ran. The CLI retains every cycle. Work is capped at 50,000 file-pair edges; above that, Tarjan is skipped, totals are null, and `graph_work_limit` marks the result incomplete. Name-based import resolution can over-approximate, so verify before refactoring. |
 | `mmcg_symbols_changed_since` | `git_ref`, optional `root`, `top` (default 100, max 500) | Symbol-level diff between a git ref and the current index. The existing flat arrays remain available, while `coverage` reports exact observed totals, returned counts, and per-collection truncation. MCP returns at most `top` items from each of `files_in_diff`, `added`, `removed`, `signature_changed`, and `errors`; the CLI stays complete. Re-parses old blobs using the same extractor. Git subprocesses are time-bounded and the file loop stops at 10,000; when that source cap is reached, complete totals are null and `source_truncated` prevents treating the observed prefix as the full change set. |
-| `mmcg_status` | — | Index path, file/symbol counts, extractor-contract compatibility, and source freshness from one checked SQLite snapshot. `stale_files` reports up to 100 paths, while `stale_files_truncated` marks a larger set. `freshness_error` is present when the scan could not establish the count; the compatibility value `stale_files: 1` keeps older clients fail-closed. A non-zero value means the next structural query will refresh a managed index, or that a custom external index needs an explicit `mmcg index`. |
+| `mmcg_status` | — | Index path, file/symbol counts, extractor-contract compatibility, and source freshness from one checked SQLite snapshot. `freshness_basis: path_and_mtime` makes the metadata contract explicit: added, deleted, older, and newer mtimes are stale; content changed while preserving the exact mtime requires `mmcg index --force`. `stale_files` reports up to 100 paths, while `stale_files_truncated` marks a larger set. `freshness_error` is present when the scan could not establish the count; the compatibility value `stale_files: 1` keeps older clients fail-closed. A non-zero value means the next structural query will refresh a managed index, or that a custom external index needs an explicit `mmcg index`. |
 | `mmcg_concept` | `query`, optional `top` (default 10, max 50) | Deterministic schema-v2 symbol candidates from normalized names, repository paths, declaration shapes, and owned Rust/Python/JavaScript/TypeScript documentation tokens. Plain terms are escaped and fixed-AND joined; no raw FTS syntax, embeddings, model calls, network, source bodies, raw comments/docstrings, literals, or defaults. The response reports exact indexed-match coverage, bounded-page truncation, and observed safety omissions from one SQLite snapshot. BM25 score is query-local and lower-is-better, not confidence. Managed drift gets at most one refresh/retry; custom indexes remain read-only and fail closed. |
 
 Tool responses are bounded JSON. Collection responses expose their own count or

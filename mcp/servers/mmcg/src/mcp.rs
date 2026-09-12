@@ -1399,6 +1399,7 @@ fn index_stale_payload(
     };
     json!({
         "code": "index_stale",
+        "freshness_basis": "path_and_mtime",
         "stale_files": stale_files,
         "stale_files_truncated": stale_files_truncated,
         "freshness_error": freshness_error,
@@ -1538,6 +1539,7 @@ fn safe_index_status(store: &Store) -> Result<queries::StatusResponse, HandlerEr
         db_path: store.db_path().to_string_lossy().to_string(),
         symbol_count,
         file_count,
+        freshness_basis: "path_and_mtime",
         stale_files,
         stale_files_truncated,
         freshness_error,
@@ -2329,7 +2331,7 @@ fn schema_recent_changes() -> Value {
 fn schema_status() -> Value {
     json!({
         "name": "mmcg_status",
-        "description": "Show index health — file count, symbol count, db path, extractor-contract compatibility, and bounded source freshness. `stale_files` counts up to 100 added, deleted, or newer indexable paths; `stale_files_truncated` discloses a larger set, and `freshness_error` explains when the scan could not establish a count. Structural tools automatically refresh a stale managed `.mastermind/mmcg.db` before querying. Custom external indexes remain manual-refresh-only; unavailable or failed refreshes return `index_stale` with the same coverage fields.",
+        "description": "Show index health — file count, symbol count, db path, extractor-contract compatibility, and bounded source freshness. `freshness_basis: path_and_mtime` states the metadata contract. `stale_files` counts up to 100 added, deleted, or mtime-changed indexable paths; `stale_files_truncated` discloses a larger set, and `freshness_error` explains when the scan could not establish a count. Structural tools automatically refresh a stale managed `.mastermind/mmcg.db` before querying. Custom external indexes remain manual-refresh-only; unavailable or failed refreshes return `index_stale` with the same coverage fields.",
         "inputSchema": { "type": "object", "properties": {} }
     })
 }
@@ -3089,6 +3091,7 @@ pub fn build_brief_current(
         db_path: store.db_path().to_string_lossy().to_string(),
         symbol_count: 0,
         file_count: 0,
+        freshness_basis: "path_and_mtime",
         stale_files: 1,
         stale_files_truncated: false,
         freshness_error: Some("freshness_check_failed"),
@@ -3325,6 +3328,7 @@ fn map_concept_error(store: &Store, error: queries::ConceptError) -> HandlerErro
                 db_path: store.db_path().to_string_lossy().to_string(),
                 symbol_count: 0,
                 file_count: 0,
+                freshness_basis: "path_and_mtime",
                 stale_files: 1,
                 stale_files_truncated: false,
                 freshness_error: Some("freshness_check_failed"),
@@ -6363,6 +6367,7 @@ mod checks {
         )
         .unwrap();
         let fresh_payload = unwrap_content(&fresh_status);
+        assert_eq!(fresh_payload["freshness_basis"], "path_and_mtime");
         assert_eq!(fresh_payload["stale_files"], 0);
         assert_eq!(fresh_payload["stale_files_truncated"], false);
         assert!(fresh_payload.get("freshness_error").is_none());

@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Offline review export now selects automatic CODEOWNERS evidence once and
+  rechecks that path before publication, preventing Lens analysis and manifest
+  bindings from using different priority candidates during a concurrent change.
 - Spec frontmatter now rejects explicit YAML nulls recursively, preventing a
   written scope, signature, caller count, or workflow field from silently
   deserializing as an absent declaration.

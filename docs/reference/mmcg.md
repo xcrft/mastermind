@@ -882,6 +882,10 @@ file counts as observations when parsing was partial.
 Explicit evidence paths are resolved once and then read through a retained
 parent capability with no-follow handles. Only bounded regular files are
 accepted; path substitutions and special files fail closed.
+Review export also fixes the automatically discovered CODEOWNERS path before
+Lens analysis and rechecks that priority selection before publication. A file
+appearing, disappearing, or moving between `.github`, the repository root, and
+`docs` aborts the package instead of binding different ownership evidence.
 
 When the changed-file inventory is already truncated, evidence selects symbol,
 impact, and candidate-test paths first, then admits at most 200 file-only paths.

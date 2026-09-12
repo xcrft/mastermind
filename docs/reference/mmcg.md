@@ -336,7 +336,7 @@ of producing a successful JSON response with a zero count.
 
 ### Local symbol concept search
 
-`mmcg_concept` and `mastermind concept` use one schema-v1 query builder over a
+`mmcg_concept` and `mastermind concept` use one schema-v2 query builder over a
 private derived corpus. Searchable fields are normalized symbol names,
 repository-relative paths, bounded declaration shapes, and owned documentation
 for an explicit first language set. Source bodies and raw comments/docstrings
@@ -379,8 +379,11 @@ lowercase repository path, line, kind, name, then symbol ID. Scores are local
 to one query, lower is better, and they are not confidence values. Each
 candidate contains `name`, `kind`, `language`, `path`, `line`, a declaration
 `signature_shape` capped at 256 bytes, `matched_fields`, `citation`, and
-`score`; the envelope also reports normalized `query_terms`, count, requested
-top, freshness, limits, and precision notes.
+`score`. The envelope reports exact `indexed_total`, returned `count`,
+`result_truncated`, observed `unsafe_candidates_omitted`, overall `truncated`
+and `truncation_reason`, plus normalized `query_terms`, requested top,
+freshness, limits, and precision notes. The count and ranked page are read from
+one SQLite snapshot.
 
 The corpus is an additive schema-v7 concept table, per-file count table, and
 external-content FTS5 index. Documentation rows and their count-only metadata
@@ -1155,7 +1158,7 @@ update its SHM coordination file. Incompatible custom schemas return
 | `mmcg_dependency_cycles` | optional `language`, `min_size` (default 2), `top` (default 50, max 200) | Detect circular imports as strongly-connected components in the file-level import graph. MCP responses return at most 500 file memberships across complete SCC lists; a cycle that cannot fit is omitted rather than returned partially, with `truncation_reason: member_limit`. `total` and `total_members` remain exact when cycle detection ran. The CLI retains every cycle. Work is capped at 50,000 file-pair edges; above that, Tarjan is skipped, totals are null, and `graph_work_limit` marks the result incomplete. Name-based import resolution can over-approximate, so verify before refactoring. |
 | `mmcg_symbols_changed_since` | `git_ref`, optional `root`, `top` (default 100, max 500) | Symbol-level diff between a git ref and the current index. The existing flat arrays remain available, while `coverage` reports exact observed totals, returned counts, and per-collection truncation. MCP returns at most `top` items from each of `files_in_diff`, `added`, `removed`, `signature_changed`, and `errors`; the CLI stays complete. Re-parses old blobs using the same extractor. Git subprocesses are time-bounded and the file loop stops at 10,000; when that source cap is reached, complete totals are null and `source_truncated` prevents treating the observed prefix as the full change set. |
 | `mmcg_status` | — | Index path, file/symbol counts, and bounded `stale_files`. A non-zero value means the next structural query will refresh a managed index, or that a custom external index needs an explicit `mmcg index`. |
-| `mmcg_concept` | `query`, optional `top` (default 10, max 50) | Deterministic schema-v1 symbol candidates from normalized names, repository paths, declaration shapes, and owned Rust/Python/JavaScript/TypeScript documentation tokens. Plain terms are escaped and fixed-AND joined; no raw FTS syntax, embeddings, model calls, network, source bodies, raw comments/docstrings, literals, or defaults. BM25 score is query-local and lower-is-better, not confidence. Managed drift gets at most one refresh/retry; custom indexes remain read-only and fail closed. |
+| `mmcg_concept` | `query`, optional `top` (default 10, max 50) | Deterministic schema-v2 symbol candidates from normalized names, repository paths, declaration shapes, and owned Rust/Python/JavaScript/TypeScript documentation tokens. Plain terms are escaped and fixed-AND joined; no raw FTS syntax, embeddings, model calls, network, source bodies, raw comments/docstrings, literals, or defaults. The response reports exact indexed-match coverage, bounded-page truncation, and observed safety omissions from one SQLite snapshot. BM25 score is query-local and lower-is-better, not confidence. Managed drift gets at most one refresh/retry; custom indexes remain read-only and fail closed. |
 
 Tool responses are bounded JSON. Collection responses expose their own count or
 collection metadata; status and workflow responses use named fields.

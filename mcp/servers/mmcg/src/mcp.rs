@@ -2200,7 +2200,7 @@ fn schema_brief() -> Value {
 fn schema_concept() -> Value {
     json!({
         "name": "mmcg_concept",
-        "description": "Deterministic local concept retrieval over bounded normalized symbol names, repository paths, declaration shapes, and owned Rust/Python/JavaScript/TypeScript documentation tokens. Uses SQLite FTS5 only: no embeddings, model calls, network access, source bodies, raw comments/docstrings, literals, or defaults. Results are retrieval candidates, not confidence-ranked answers.",
+        "description": "Deterministic local concept retrieval over bounded normalized symbol names, repository paths, declaration shapes, and owned Rust/Python/JavaScript/TypeScript documentation tokens. Uses SQLite FTS5 only: no embeddings, model calls, network access, source bodies, raw comments/docstrings, literals, or defaults. Responses report exact indexed-match coverage, page truncation, and safety omissions. Results are retrieval candidates, not confidence-ranked answers.",
         "inputSchema": {
             "type": "object",
             "properties": {

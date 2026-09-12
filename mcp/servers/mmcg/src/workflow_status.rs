@@ -2215,16 +2215,21 @@ fn digest_artifact(
     }
     let mut hasher = Sha256::new();
     if metadata.file_type().is_file() {
-        let relative = path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .ok_or_else(|| FileReadFailure {
-                code: "manifest_invalid",
-                message: format!("installed artifact name is not UTF-8: {}", path.display()),
-            })?;
+        let relative = path.file_name().ok_or_else(|| FileReadFailure {
+            code: "manifest_invalid",
+            message: format!("installed artifact has no file name: {}", path.display()),
+        })?;
+        let relative = crate::bounded_fs::normalize_repository_relative_path(Path::new(relative))
+            .map_err(|_| FileReadFailure {
+            code: "manifest_invalid",
+            message: format!(
+                "installed artifact name is not a canonical UTF-8 path: {}",
+                path.display()
+            ),
+        })?;
         hash_artifact_file(
             path,
-            relative,
+            &relative,
             canonical_root,
             budget,
             text_cache,
@@ -2290,10 +2295,18 @@ fn hash_artifact_directory(
             });
         }
         let child_relative = relative.join(file_name);
+        let relative_text = crate::bounded_fs::normalize_repository_relative_path(&child_relative)
+            .map_err(|_| FileReadFailure {
+                code: "manifest_invalid",
+                message: format!(
+                    "installed workflow artifact has an ambiguous path: {}",
+                    path.display()
+                ),
+            })?;
         if metadata.file_type().is_dir() {
             hash_artifact_directory(
                 &path,
-                &child_relative,
+                Path::new(&relative_text),
                 depth + 1,
                 canonical_root,
                 budget,
@@ -2301,7 +2314,6 @@ fn hash_artifact_directory(
                 hasher,
             )?;
         } else if metadata.file_type().is_file() {
-            let relative_text = child_relative.to_string_lossy().replace('\\', "/");
             hash_artifact_file(
                 &path,
                 &relative_text,
@@ -5399,6 +5411,31 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(entry_failure.code, "workflow_inventory_limit_exceeded");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_artifact_digest_rejects_backslash_path_aliases() {
+        let installed = tempfile::tempdir().unwrap();
+        let artifact = installed.path().join("artifact");
+        fs::create_dir_all(artifact.join("skill")).unwrap();
+        fs::write(artifact.join("skill/file.md"), "canonical").unwrap();
+        fs::write(artifact.join("skill\\file.md"), "alias").unwrap();
+        let mut budget = DigestBudget {
+            files: 0,
+            bytes: 0,
+            directories: DirectoryBudget::default(),
+        };
+
+        let failure = digest_artifact(
+            &artifact,
+            &installed.path().canonicalize().unwrap(),
+            &mut budget,
+            &mut BTreeMap::new(),
+        )
+        .unwrap_err();
+
+        assert_eq!(failure.code, "manifest_invalid");
     }
 
     #[test]

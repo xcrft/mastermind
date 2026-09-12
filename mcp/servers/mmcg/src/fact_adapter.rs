@@ -118,8 +118,9 @@ fn contained_artifact(root: &Path, input: &Path) -> Result<(PathBuf, String), Ad
     let relative = absolute
         .strip_prefix(root)
         .map_err(|_| contract_error("input artifact must be inside the indexed repository"))?;
-    let relative = facts::normalize_fact_path(&relative.to_string_lossy().replace('\\', "/"))
-        .map_err(contract_error)?;
+    let relative =
+        crate::bounded_fs::normalize_repository_relative_path(relative).map_err(contract_error)?;
+    let relative = facts::normalize_fact_path(&relative).map_err(contract_error)?;
     let mut cursor = root.to_path_buf();
     for component in Path::new(&relative).components() {
         let Component::Normal(part) = component else {
@@ -496,4 +497,30 @@ pub fn adapt(store: &Store, options: &AdaptOptions<'_>) -> Result<AdaptSummary, 
         annotations: u32::try_from(annotations).unwrap_or(u32::MAX),
         relationships: u32::try_from(relationships).unwrap_or(u32::MAX),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn contained_artifact_rejects_a_backslash_path_alias() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::fs::write(root.join("src/report.sarif"), b"canonical").unwrap();
+        std::fs::write(root.join("src\\report.sarif"), b"alias").unwrap();
+
+        assert_eq!(
+            contained_artifact(&root, Path::new("src/report.sarif"))
+                .unwrap()
+                .1,
+            "src/report.sarif"
+        );
+        assert!(matches!(
+            contained_artifact(&root, Path::new("src\\report.sarif")),
+            Err(AdapterError::Contract(_))
+        ));
+    }
 }

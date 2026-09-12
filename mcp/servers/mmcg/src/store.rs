@@ -7134,6 +7134,49 @@ impl Store {
         rows.collect()
     }
 
+    pub(crate) fn files_with_mtime_between_bounded(
+        &self,
+        start_unix_ms: i64,
+        end_unix_ms: i64,
+        limit: usize,
+    ) -> SqlResult<(u32, Vec<FileEntry>)> {
+        let mut stmt = self.conn.prepare(
+            "WITH matching AS (
+                 SELECT path, indexed_at, symbol_count FROM files
+                 WHERE indexed_at >= ?1 AND indexed_at <= ?2
+             )
+             SELECT path, indexed_at, symbol_count, COUNT(*) OVER() AS total
+             FROM matching
+             ORDER BY indexed_at DESC, path
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                start_unix_ms,
+                end_unix_ms,
+                i64::try_from(limit.max(1)).unwrap_or(i64::MAX)
+            ],
+            |row| {
+                Ok((
+                    FileEntry {
+                        path: row.get(0)?,
+                        indexed_at: row.get(1)?,
+                        symbol_count: row.get(2)?,
+                    },
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )?;
+        let mut total = 0;
+        let mut files = Vec::with_capacity(limit);
+        for row in rows {
+            let (file, row_total) = row?;
+            total = row_total;
+            files.push(file);
+        }
+        Ok((total.clamp(0, i64::from(u32::MAX)) as u32, files))
+    }
+
     /// Files indexed under a literal path prefix (None = everything). SQL
     /// wildcard characters have no special meaning. Optional `language` filter
     /// uses EXISTS on symbols (language lives there, not on files). When set,

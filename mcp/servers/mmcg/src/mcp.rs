@@ -1984,7 +1984,7 @@ fn schema_tasks() -> Value {
             "type": "object",
             "properties": {
                 "query": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "FTS5 MATCH query (e.g. 'rate limit', 'auth OR session', '\\\"token bucket\\\"')" },
-                "top": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10, "description": "Maximum results to return; the response reports exact indexed coverage and page truncation" }
+                "top": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10, "description": "Maximum results to return; the response reports exact indexed coverage, page and corpus truncation, skipped artifacts, and freshness" }
             },
             "required": ["query"]
         }
@@ -4530,6 +4530,54 @@ mod tests {
         assert!(result.get("truncation_reason").is_none());
         assert_eq!(result["freshness"], "stale");
         assert!(result.get("document_graph").is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn task_tool_uses_history_inventory_and_reports_coverage() {
+        let path = std::env::temp_dir().join("mmcg_mcp_tasks.db");
+        let _ = std::fs::remove_file(&path);
+        let mut store = crate::store::Store::open(&path).unwrap();
+        store
+            .replace_project_history(&[
+                crate::store::ProjectHistoryEntry {
+                    path: ".mastermind/tasks/001-first/spec.md".into(),
+                    kind: "task_spec".into(),
+                    title: "First shared boundary".into(),
+                    body: "Shared decision evidence".into(),
+                },
+                crate::store::ProjectHistoryEntry {
+                    path: ".mastermind/tasks/002-second/spec.md".into(),
+                    kind: "task_spec".into(),
+                    title: "Second shared boundary".into(),
+                    body: "Shared implementation evidence".into(),
+                },
+            ])
+            .unwrap();
+
+        let envelope = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({
+                "name": "mmcg_tasks",
+                "arguments": { "query": "shared", "top": 1 }
+            }),
+        )
+        .unwrap();
+        let result = unwrap_content(&envelope);
+        assert_eq!(result["indexed_total"], 2);
+        assert_eq!(result["count"], 1);
+        assert_eq!(result["result_truncated"], true);
+        assert_eq!(result["truncated"], true);
+        assert_eq!(result["truncation_reason"], "top");
+        assert_eq!(result["skipped_artifacts"], 0);
+        assert_eq!(result["corpus_truncated"], false);
+        assert_eq!(result["freshness"], "stale");
+        assert!(result["source_of_truth"]
+            .as_str()
+            .unwrap()
+            .contains("Markdown"));
+        assert!(result["inference"].as_str().unwrap().contains("none"));
         let _ = std::fs::remove_file(&path);
     }
 

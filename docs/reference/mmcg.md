@@ -792,6 +792,14 @@ binding is rejected and Lens falls back to facts-only output. The default
 sidecar path is treated as Mastermind runtime state, so writing it does not
 invalidate the snapshot it describes.
 
+`audit.narrative_state` distinguishes `absent`, `available`, `partial`,
+`rejected`, and `unavailable`. Its stable `reason` explains stale bindings,
+invalid schema or JSON, unsafe paths, read limits, and filtered or truncated
+content. Lens shows rejected and partial states next to the factual audit lede;
+an unusable sidecar no longer looks the same as one that was never supplied.
+Review exports also retain non-ready narrative states in their bounded/partial
+state list.
+
 Validate producers against
 [`schemas/mastermind-audit-narrative-v1.schema.json`](../../schemas/mastermind-audit-narrative-v1.schema.json).
 Domain component lists and red-team routes must contain only exact component

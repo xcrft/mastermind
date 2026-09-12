@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- The bounded Lens audit card now orders errors and warnings before
+  informational findings, so an early run of notes cannot hide a severe result
+  beyond the six displayed rows.
 - Lens now preserves SARIF finding severity in trace ranking, cluster counts,
   evidence marks, audit badges, and inspector markers; note/none results no
   longer become serious claims.

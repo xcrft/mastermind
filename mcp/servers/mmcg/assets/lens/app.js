@@ -379,6 +379,10 @@
     return counts;
   }
 
+  function findingSeverityRank(level) {
+    return level === "error" ? 2 : level === "warning" ? 1 : 0;
+  }
+
   function findingCountLabel(count, severity) {
     return count + " " + severity + " finding" + (count === 1 ? "" : "s");
   }
@@ -1520,7 +1524,9 @@
         });
       });
     });
-    return findings;
+    return findings.sort(function (left, right) {
+      return findingSeverityRank(right.level) - findingSeverityRank(left.level);
+    });
   }
 
   function renderAuditSecurity(model) {

@@ -1295,6 +1295,21 @@ async function main() {
   assert.match(auditHarness.nodes.get("audit-security").textContent, /Attack surface/i);
   assert.match(auditHarness.nodes.get("audit-security").textContent, /src\/main\.rs/i, "Security must list entry points as attack surface");
 
+  const findingOrderPayload = fixture();
+  findingOrderPayload.evidence.files.items.forEach((file) => { file.findings = []; });
+  findingOrderPayload.evidence.files.items[0].findings = Array.from({ length: 7 }, (_value, index) => ({
+    source_id: "sarif:0", tool: "Semgrep", rule_id: "note." + index, level: "note",
+    message: "Informational result " + index, line: 42, column: 3,
+  })).concat([{
+    source_id: "sarif:0", tool: "Semgrep", rule_id: "critical.last", level: "error",
+    message: "Critical result after notes", line: 42, column: 3,
+  }]);
+  const findingOrderHarness = await renderFixture(findingOrderPayload);
+  const findingList = findingOrderHarness.nodes.get("audit-security").querySelectorAll(".audit-list")[0];
+  const findingRows = findingList.querySelectorAll(".audit-item");
+  assert.equal(findingRows.length, 6, "The audit card keeps its bounded six-row projection");
+  assert.match(findingRows[0].textContent, /critical\.last/i, "The bounded audit card must show severe findings before informational results");
+
   assert.equal(auditHarness.nodes.get("audit-board").hidden, true, "Audit board starts hidden in review mode");
   assert.equal(auditHarness.nodes.get("mode-review").getAttribute("aria-pressed"), "true");
   auditHarness.nodes.get("mode-audit").dispatch("click");

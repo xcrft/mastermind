@@ -511,9 +511,11 @@ fn extract_snapshot(body: &str) -> Vec<SymbolClaim> {
 /// word "signature" followed by either a backticked code span (preferred) or
 /// bare text up to a trailing parenthetical / comma.
 fn extract_signature(text: &str) -> Option<String> {
-    let lower = text.to_lowercase();
+    // The match offset is reused against `text`, so normalization must preserve
+    // byte positions. Full Unicode lowercasing can expand characters before the
+    // ASCII keyword (for example `İ`) and shift the slice into later content.
+    let lower = text.to_ascii_lowercase();
     let key = lower.find("signature")?;
-    // Same offset in the original (single-byte word).
     let after = text[key + "signature".len()..].trim_start_matches(['*', ' ', ':', '=']);
     // Preferred: backticked.
     if let Some(stripped) = after.strip_prefix('`') {
@@ -931,6 +933,18 @@ fn old_test() {}
         );
         // `new_helper` bullet has no signature clause.
         assert_eq!(by_name["new_helper"].signature, None);
+    }
+
+    #[test]
+    fn signature_offset_survives_unicode_before_keyword() {
+        let parsed = parse_str(
+            "test.md",
+            "## Pre-edit symbol snapshot\n- `target` — İİİ SIGNATURE: `fn target()`\n",
+        );
+        assert_eq!(
+            parsed.pre_edit_snapshot[0].signature.as_deref(),
+            Some("fn target()")
+        );
     }
 
     #[test]

@@ -15,7 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Markdown workflow parsing now advances across backticked Unicode by byte
-  position, preserving later declared paths and planned-test tokens.
+  position and preserves source offsets during case-insensitive signature
+  matching, retaining later paths, planned tests, and signature claims.
 - Recent-change duration parsing now rejects unsupported Unicode suffixes,
   numeric overflow, and millisecond-range overflow instead of panicking or
   wrapping into an incorrect research window.

@@ -27,6 +27,8 @@
 use serde::Serialize;
 use std::path::Path;
 
+use crate::terminal::escape as escape_terminal;
+
 const DOCTOR_FRESHNESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const DOCTOR_PROJECT_FILE_LIMIT: u64 = 1024 * 1024;
 
@@ -118,7 +120,7 @@ impl Report {
         let mut out = String::new();
         out.push_str(&format!(
             "mastermind doctor — checking environment at {}\n\n",
-            self.root
+            escape_terminal(&self.root)
         ));
         let name_width = self
             .checks
@@ -137,10 +139,10 @@ impl Report {
                 marker = marker,
                 name = c.name,
                 width = name_width,
-                msg = c.message,
+                msg = escape_terminal(&c.message),
             ));
             if let Some(hint) = &c.hint {
-                out.push_str(&format!("       → {hint}\n"));
+                out.push_str(&format!("       → {}\n", escape_terminal(hint)));
             }
         }
         out.push_str(&format!(
@@ -158,12 +160,18 @@ impl Report {
         let mut out = String::new();
         out.push_str(&format!(
             "mastermind doctor --explain — environment at {}\n\n",
-            self.root
+            escape_terminal(&self.root)
         ));
 
         out.push_str("Paths:\n");
-        out.push_str(&format!("  binary        {}\n", binary.display()));
-        out.push_str(&format!("  index         {}\n", index_path.display()));
+        out.push_str(&format!(
+            "  binary        {}\n",
+            escape_terminal(&binary.display().to_string())
+        ));
+        out.push_str(&format!(
+            "  index         {}\n",
+            escape_terminal(&index_path.display().to_string())
+        ));
 
         let home = std::env::home_dir();
         let user_cfg = home
@@ -171,7 +179,10 @@ impl Report {
             .map(|h| h.join(".claude.json"))
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "(home dir unknown)".into());
-        out.push_str(&format!("  ~/.claude.json  {user_cfg}\n"));
+        out.push_str(&format!(
+            "  ~/.claude.json  {}\n",
+            escape_terminal(&user_cfg)
+        ));
         out.push('\n');
 
         let name_width = self
@@ -191,10 +202,10 @@ impl Report {
                 marker = marker,
                 name = c.name,
                 width = name_width,
-                msg = c.message,
+                msg = escape_terminal(&c.message),
             ));
             if let Some(hint) = &c.hint {
-                out.push_str(&format!("       → {hint}\n"));
+                out.push_str(&format!("       → {}\n", escape_terminal(hint)));
             } else if c.status == Status::Ok {
                 out.push_str("       → OK\n");
             }
@@ -1865,6 +1876,34 @@ mod tests {
         assert!(txt.contains("v0.14.0"));
         assert!(txt.contains("1 ok, 0 warn, 0 fail"));
         assert!(!report.has_failures());
+    }
+
+    #[test]
+    fn report_text_and_explain_escape_terminal_controls() {
+        let report = Report::from_checks(
+            Path::new("/tmp/project\u{202e}"),
+            vec![Check {
+                name: "index database",
+                status: Status::Warn,
+                message: "bad\u{1b}message".into(),
+                hint: Some("first\nsecond".into()),
+            }],
+        );
+
+        for text in [
+            report.render_text(),
+            report.render_explain(
+                Path::new("/tmp/mmcg\u{7}"),
+                Path::new("/tmp/index\u{2066}.db"),
+            ),
+        ] {
+            assert!(text.contains("\\u{202e}"));
+            assert!(text.contains("bad\\u{1b}message"));
+            assert!(text.contains("first\\u{a}second"));
+            assert!(text.chars().all(
+                |character| character == '\n' || !crate::terminal::unsafe_character(character)
+            ));
+        }
     }
 
     #[test]

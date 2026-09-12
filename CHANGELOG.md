@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Lens change headlines now retain unknown and lower-bound impact, API-crossing,
+  and candidate-test counts instead of restating partial zeroes as exact.
 - Lens evidence cards and accessibility announcements now preserve unknown and
   lower-bound source, fact, and matched-file counts, and source collection caps
   appear in the method ledger.

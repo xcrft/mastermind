@@ -938,6 +938,28 @@ async function main() {
     /1 changed symbol lacks a returned test path/i,
     "The headline must count changed symbols with no test path"
   );
+
+  const partialHeadlinePayload = fixture();
+  partialHeadlinePayload.impact.api_crossings = {
+    total: 1,
+    returned: 1,
+    truncated: false,
+    items: [{
+      seed: partialHeadlinePayload.impact.changes.symbols.items[0],
+      changed_component: "src",
+      impacted: partialHeadlinePayload.impact.impact.items[0].symbol,
+      impacted_component: "src/target",
+      minimum_depth: 1,
+    }],
+  };
+  partialHeadlinePayload.impact.tests = { total: null, returned: 0, truncated: true, truncation_reason: "work_limit", items: [] };
+  const partialHeadlineHarness = await renderFixture(partialHeadlinePayload);
+  assert.match(partialHeadlineHarness.nodes.get("instrument-summary").textContent, /1 API crossing · \? test candidates/i);
+
+  const unknownImpactPayload = fixture();
+  unknownImpactPayload.impact.impact = { total: null, returned: 0, truncated: true, truncation_reason: "work_limit", items: [] };
+  const unknownImpactHarness = await renderFixture(unknownImpactPayload);
+  assert.match(unknownImpactHarness.nodes.get("instrument-summary").textContent, /No returned downstream symbol impact\. Impact count is incomplete\./i);
   assert.match(harness.nodes.get("evidence-summary").textContent, /9 sources · 3 matched trace files/i);
   assert.equal(harness.nodes.get("evidence-source-list").querySelectorAll(".evidence-source").length, 9);
   assert.equal(harness.nodes.get("document-graph-panel").hidden, true, "Legacy snapshots must not invent document evidence");

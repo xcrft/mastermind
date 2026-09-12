@@ -59,7 +59,9 @@ rules and skips build/vendor directories. The first run parses supported files;
 later runs skip unchanged files.
 
 You are ready when `mastermind status` reports the repository and indexed file
-counts without stale-file warnings.
+counts and says the structural graph, concept corpus, and durable history are
+current. Resolve any contract, freshness, or stale-file warning before relying
+on the index for research.
 
 ```bash
 mastermind index .          # incremental refresh

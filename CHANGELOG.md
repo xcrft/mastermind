@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Review summary text now escapes backslashes and every other Markdown
+  punctuation mark, so a repository or diagnostic label cannot neutralize a
+  later escape and reshape the rendered evidence.
 - Offline review HTML now omits the document graph's canonical local filesystem
   root from its published projection, preventing shared artifacts from
   disclosing a checkout path while final validation retains the exact root-bound

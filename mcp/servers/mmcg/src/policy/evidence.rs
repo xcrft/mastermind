@@ -737,8 +737,19 @@ fn collect_workflow_evidence(
         else {
             continue;
         };
-        let Ok(state) = crate::run_task::parse_run_state(state_body.as_bytes()) else {
-            continue;
+        let state = match crate::run_task::parse_run_state(state_body.as_bytes()) {
+            Ok(state) => state,
+            Err(error) => {
+                gaps.push(gap(
+                    FAMILY_WORKFLOW,
+                    "workflow_state_invalid",
+                    format!(
+                        "Workflow state `{}` is invalid: {error}",
+                        state_path.display()
+                    ),
+                ));
+                continue;
+            }
         };
         if state.baseline_ref != baseline_oid
             || !matches!(state.status.as_str(), "history_review_required" | "learned")
@@ -1052,8 +1063,13 @@ mod tests {
     }
 
     #[test]
-    fn external_workflow_does_not_fall_back_or_drop_invalid_touches() {
-        for mutation in ["unknown_version", "wrong_version", "invalid_touch"] {
+    fn external_workflow_does_not_fall_back_or_drop_invalid_contracts() {
+        for mutation in [
+            "unknown_version",
+            "wrong_version",
+            "invalid_touch",
+            "incompatible_state",
+        ] {
             let (repo, evidence, baseline) = external_workflow_fixture(2);
             let task = evidence.path().join("001-critical");
             let state_path = task.join("state.json");
@@ -1073,8 +1089,10 @@ mod tests {
                     )
                     .unwrap()
                     .into();
-            } else {
+            } else if mutation == "unknown_version" {
                 state["held_snapshot_version"] = 999.into();
+            } else {
+                state["next_step"] = "run_executor".into();
             }
             fs::write(state_path, serde_json::to_vec(&state).unwrap()).unwrap();
             let (files, gaps, _) = external_workflow(repo.path(), evidence.path(), &baseline);

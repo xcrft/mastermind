@@ -1870,7 +1870,7 @@ fn schema_outline() -> Value {
 fn schema_files() -> Value {
     json!({
         "name": "mmcg_files",
-        "description": "List indexed files. Optionally filter by path prefix and/or language.",
+        "description": "List indexed files with exact filtered coverage. Optionally filter by literal path prefix and/or language; responses echo both effective filters and report bounded-page truncation.",
         "inputSchema": {
             "type": "object",
             "properties": {

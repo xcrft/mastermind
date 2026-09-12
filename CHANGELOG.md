@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- File inventory responses now report the exact filtered total and echo the
+  effective language alongside the path prefix, so bounded pages retain scope.
 - Schema v9 removes the duplicate task-spec FTS table and its second filesystem
   scan. Canonical task specs are indexed once with durable project history.
 - Task search now uses the freshness-checked durable-history inventory instead

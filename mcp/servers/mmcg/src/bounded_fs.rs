@@ -1278,16 +1278,6 @@ pub(crate) fn copy_regular_file_with_capability(
 /// Enumerate one repository-owned directory without following any path
 /// component. The caller supplies the aggregate entry cap so a walk can share
 /// one deterministic work limit across directories.
-pub(crate) fn read_directory_names(
-    root: &Path,
-    path: &Path,
-    remaining_entries: usize,
-    control: ReadControl<'_>,
-) -> Result<Vec<std::ffi::OsString>, BoundedReadError> {
-    let root = RootCapability::open(root)?;
-    read_directory_names_with_capability(&root, path, remaining_entries, control)
-}
-
 pub(crate) fn read_directory_names_with_capability(
     root: &RootCapability,
     path: &Path,

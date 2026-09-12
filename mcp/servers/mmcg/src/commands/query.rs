@@ -285,8 +285,13 @@ pub fn dispatch_why(
 
 fn history_snapshot_notice(response: &queries::HistorySearchResponse) -> String {
     let mut notice = format!(
-        "History snapshot: {} (skipped artifacts: {}, truncated: {})\n",
-        response.freshness, response.skipped_artifacts, response.truncated
+        "History snapshot: {} (indexed matches: {}, returned: {}, result truncated: {}, skipped artifacts: {}, corpus truncated: {})\n",
+        response.freshness,
+        response.indexed_total,
+        response.count,
+        response.result_truncated,
+        response.skipped_artifacts,
+        response.corpus_truncated
     );
     if response.freshness != "fresh" || response.skipped_artifacts > 0 || response.truncated {
         notice.push_str(
@@ -960,12 +965,17 @@ mod map_tests {
             let response = queries::HistorySearchResponse {
                 query: "storage".into(),
                 kind: None,
+                indexed_total: 0,
                 count: 0,
+                result_truncated: false,
+                row_limit: 10,
                 observed: Vec::new(),
                 inference: "retrieval only",
                 source_of_truth: "Markdown",
                 skipped_artifacts,
+                corpus_truncated: truncated,
                 truncated,
+                truncation_reason: truncated.then_some("corpus_limit"),
                 freshness,
             };
             let text = history_snapshot_notice(&response);

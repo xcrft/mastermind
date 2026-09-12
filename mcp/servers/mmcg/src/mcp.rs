@@ -1984,7 +1984,7 @@ fn schema_tasks() -> Value {
             "type": "object",
             "properties": {
                 "query": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "FTS5 MATCH query (e.g. 'rate limit', 'auth OR session', '\\\"token bucket\\\"')" },
-                "top": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10, "description": "How many results to return" }
+                "top": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10, "description": "Maximum results to return; the response reports exact indexed coverage and page truncation" }
             },
             "required": ["query"]
         }
@@ -2000,7 +2000,7 @@ fn schema_history() -> Value {
             "properties": {
                 "query": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "FTS5 MATCH query (e.g. 'rate limit', 'auth OR session', '\"token bucket\"')" },
                 "kind": { "type": "string", "enum": ["context", "lesson", "task_spec", "executor_report", "audit", "release_notes", "architecture_decision"], "description": "Optional exact artifact-kind filter" },
-                "top": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10, "description": "How many observed matches to return" },
+                "top": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10, "description": "Maximum observed matches to return; indexed-result and corpus truncation are reported separately" },
                 "document_graph": { "type": "string", "minLength": 1, "description": "Repository-relative or root-contained absolute path to a root-bound graph packet below .mastermind/research. The packet is read live without persistence; freshness never verifies a relation." }
             },
             "required": ["query"]
@@ -4514,7 +4514,10 @@ mod tests {
         )
         .unwrap();
         let result = unwrap_content(&envelope);
+        assert_eq!(result["indexed_total"], 1);
         assert_eq!(result["count"], 1);
+        assert_eq!(result["result_truncated"], false);
+        assert_eq!(result["row_limit"], 10);
         assert_eq!(result["observed"][0]["path"], "CONTEXT.md");
         assert!(result["inference"].as_str().unwrap().contains("none"));
         assert!(result["source_of_truth"]
@@ -4522,7 +4525,9 @@ mod tests {
             .unwrap()
             .contains("Markdown"));
         assert_eq!(result["skipped_artifacts"], 0);
+        assert_eq!(result["corpus_truncated"], false);
         assert_eq!(result["truncated"], false);
+        assert!(result.get("truncation_reason").is_none());
         assert_eq!(result["freshness"], "stale");
         assert!(result.get("document_graph").is_none());
         let _ = std::fs::remove_file(&path);

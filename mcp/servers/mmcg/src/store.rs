@@ -651,6 +651,9 @@ pub struct FileEntry {
     pub symbol_count: u32,
 }
 
+pub(crate) type ImportRow = (String, Option<String>, u32);
+pub(crate) type CountedImportRows = (u32, Vec<ImportRow>);
+
 /// One task-spec file ready to be inserted into the FTS5 corpus.
 #[derive(Debug, Clone)]
 pub struct TaskSpecEntry {
@@ -7170,7 +7173,7 @@ impl Store {
         &self,
         file_path: &str,
         limit: usize,
-    ) -> SqlResult<(u32, Vec<(String, Option<String>, u32)>)> {
+    ) -> SqlResult<CountedImportRows> {
         self.imports_of_rows(file_path, Some(limit))
     }
 
@@ -7178,7 +7181,7 @@ impl Store {
         &self,
         file_path: &str,
         limit: Option<usize>,
-    ) -> SqlResult<(u32, Vec<(String, Option<String>, u32)>)> {
+    ) -> SqlResult<CountedImportRows> {
         let matching_sql = "WITH matching AS (
                  SELECT e.id AS edge_id, e.to_name, e.to_path, e.line
                  FROM edges e

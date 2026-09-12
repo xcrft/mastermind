@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- `run-task` now reports every failed fallback state write and escalates a
+  failed Drift/Broken-state persistence instead of claiming the task state was
+  kept when the write did not succeed.
 - Rust vacuous-test scanning now reads test attributes from the syntax tree;
   `#[test]` examples in comments and strings no longer hide a test command with
   no conventional executable tests.

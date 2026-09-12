@@ -1774,7 +1774,9 @@ fn run_post(
             auditing.next_step = Some("planner_review".into());
             auditing.blocking_reason = Some(format!("audit inputs unavailable: {error}"));
             auditing.last_artifact = Some("spec.md".into());
-            let _ = save_state_in_repository(repo_root, state_path, &auditing);
+            if let Err(state_error) = save_state_in_repository(repo_root, state_path, &auditing) {
+                eprintln!("error: persisting blocked audit-input state: {state_error}");
+            }
             return Outcome::PostBroken;
         }
     };
@@ -1863,7 +1865,9 @@ fn run_post(
             failed.next_step = Some("planner_review".into());
             failed.blocking_reason = Some(format!("executor report rejected: {error}"));
             failed.last_artifact = Some("executor-report.md".into());
-            let _ = save_state_in_repository(repo_root, state_path, &failed);
+            if let Err(state_error) = save_state_in_repository(repo_root, state_path, &failed) {
+                eprintln!("error: persisting rejected-report state: {state_error}");
+            }
             return Outcome::PostBroken;
         }
     };
@@ -1901,7 +1905,9 @@ fn run_post(
         failed.next_step = Some("planner_review".into());
         failed.blocking_reason = Some("failed to persist audit.md".into());
         failed.last_artifact = Some("executor-report.md".into());
-        let _ = save_state_in_repository(repo_root, state_path, &failed);
+        if let Err(state_error) = save_state_in_repository(repo_root, state_path, &failed) {
+            eprintln!("error: persisting failed-audit-artifact state: {state_error}");
+        }
         return Outcome::PostBroken;
     }
 
@@ -2066,9 +2072,10 @@ fn run_post(
         failed.last_artifact = Some("audit.md".into());
         if let Err(error) = save_state_in_repository(repo_root, state_path, &failed) {
             eprintln!(
-                "warning: persisting failed state `{}`: {error}",
+                "error: persisting failed state `{}`: {error}",
                 state_path.display()
             );
+            return Outcome::PostBroken;
         }
         println!(
             "\nVerdict is {verdict_label} — release notes deferred. State kept at `{}` for re-run after fixes.",

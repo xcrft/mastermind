@@ -691,6 +691,7 @@ fn execute(store: &Store, q: QueryCmd) -> Result<Value, Box<dyn std::error::Erro
             &name,
             language.as_deref(),
             edge_kind.as_deref(),
+            None,
         )?)?,
         QueryCmd::Callees {
             name,

@@ -69,13 +69,22 @@ pub struct SearchResponse {
 pub struct CallersResponse {
     pub target: String,
     pub edge_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    pub total: u32,
     pub count: u32,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_limit: Option<u32>,
     /// How many definitions share `target`'s name. Edges resolve by name, so
     /// > 1 means these callers pool across several same-named symbols.
     pub name_collision: u32,
     pub callers: Vec<SymbolHit>,
     pub precision_notes: Vec<String>,
 }
+
+pub const CALLERS_DEFAULT_TOP: u32 = 100;
+pub const CALLERS_MAX_TOP: u32 = 500;
 
 /// Confidence and resolution metadata for a set of graph edges.
 ///
@@ -3195,17 +3204,32 @@ pub fn callers(
     name: &str,
     language: Option<&str>,
     edge_kind: Option<&str>,
+    row_limit: Option<u32>,
 ) -> rusqlite::Result<CallersResponse> {
     let selected_edge_kind = edge_kind.unwrap_or("calls");
-    let callers: Vec<SymbolHit> = store
-        .callers_of(name, language, edge_kind)?
-        .into_iter()
-        .map(symbol_hit_with_precision)
-        .collect();
+    let (total, symbols) = match row_limit {
+        Some(limit) => store.callers_of_bounded(
+            name,
+            language,
+            edge_kind,
+            usize::try_from(limit).unwrap_or(usize::MAX),
+        )?,
+        None => {
+            let symbols = store.callers_of(name, language, edge_kind)?;
+            let total = u32::try_from(symbols.len()).unwrap_or(u32::MAX);
+            (total, symbols)
+        }
+    };
+    let callers: Vec<SymbolHit> = symbols.into_iter().map(symbol_hit_with_precision).collect();
+    let count = u32::try_from(callers.len()).unwrap_or(u32::MAX);
     Ok(CallersResponse {
         target: name.to_string(),
         edge_kind: selected_edge_kind.to_string(),
-        count: callers.len() as u32,
+        language: language.map(String::from),
+        total,
+        count,
+        truncated: row_limit.is_some() && total > count,
+        row_limit,
         name_collision: store.definition_count(name)?,
         callers,
         precision_notes: edge_query_precision_notes(selected_edge_kind),
@@ -4641,7 +4665,7 @@ mod tests {
     fn dependency_queries_preserve_limitations_when_no_edges_are_found() {
         let path = tmp_db("empty_dependency_precision");
         let store = Store::open(&path).unwrap();
-        let incoming = callers(&store, "missing", None, None).unwrap();
+        let incoming = callers(&store, "missing", None, None, None).unwrap();
         let outgoing = callees(&store, "missing", None, None, None, None).unwrap();
         let affected = impact(&store, "missing", 2, None).unwrap();
         let candidates = unreferenced(&store, Some("function"), None, None).unwrap();
@@ -4687,13 +4711,13 @@ mod tests {
         store
             .insert_edge(registration, Some(target), "callback", "references", 4)
             .unwrap();
-        let calls = callers(&store, "callback", None, None).unwrap();
+        let calls = callers(&store, "callback", None, None, None).unwrap();
         assert_eq!(calls.edge_kind, "calls");
         assert_eq!(calls.count, 0);
         assert!(calls.precision_notes.iter().any(
             |note| note == "function_value_and_macro_body_usages_require_edge_kind_references"
         ));
-        let references = callers(&store, "callback", None, Some("references")).unwrap();
+        let references = callers(&store, "callback", None, Some("references"), None).unwrap();
         assert_eq!(references.edge_kind, "references");
         assert_eq!(references.count, 1);
         assert_eq!(
@@ -6048,6 +6072,50 @@ mod tests {
 
         let normalized = imported_by(&store, "core", "unsupported", None, Some(2)).unwrap();
         assert_eq!(normalized.match_kind, "name");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn callers_response_reports_exact_total_and_bounded_rows() {
+        let path = tmp_db("callers_response_limit");
+        let store = Store::open(&path).unwrap();
+        let target = store
+            .insert_symbol("target", "function", "src/target.rs", 1, 2, None, None)
+            .unwrap();
+        for (name, file) in [
+            ("alpha", "src/a.rs"),
+            ("beta", "src/b.rs"),
+            ("gamma", "src/c.rs"),
+        ] {
+            let caller = store
+                .insert_symbol(name, "function", file, 1, 2, None, None)
+                .unwrap();
+            store
+                .insert_edge(caller, Some(target), "target", "calls", 2)
+                .unwrap();
+        }
+
+        let bounded = callers(&store, "target", None, None, Some(2)).unwrap();
+        assert_eq!(bounded.edge_kind, "calls");
+        assert_eq!(bounded.language, None);
+        assert_eq!(bounded.total, 3);
+        assert_eq!(bounded.count, 2);
+        assert_eq!(bounded.row_limit, Some(2));
+        assert!(bounded.truncated);
+        assert_eq!(
+            bounded
+                .callers
+                .iter()
+                .map(|symbol| symbol.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "beta"]
+        );
+
+        let complete = callers(&store, "target", None, None, None).unwrap();
+        assert_eq!(complete.total, 3);
+        assert_eq!(complete.count, 3);
+        assert_eq!(complete.row_limit, None);
+        assert!(!complete.truncated);
         std::fs::remove_file(path).ok();
     }
 

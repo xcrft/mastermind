@@ -885,7 +885,7 @@ enum QueryCmd {
         #[arg(long)]
         language: Option<String>,
         /// Edge kind filter — 'calls' (default), 'imports', 'inherits', or 'references'.
-        #[arg(long)]
+        #[arg(long, value_parser = ["calls", "imports", "inherits", "references"])]
         edge_kind: Option<String>,
     },
     /// List callees of one definition; ambiguous names return candidates to select.
@@ -900,7 +900,7 @@ enum QueryCmd {
         #[arg(long)]
         language: Option<String>,
         /// Edge kind filter — 'calls' (default), 'imports', 'inherits', or 'references'.
-        #[arg(long)]
+        #[arg(long, value_parser = ["calls", "imports", "inherits", "references"])]
         edge_kind: Option<String>,
     },
     /// Transitive dependency candidates through calls and syntactic references.

@@ -2216,17 +2216,22 @@
     const impacts = totalOrReturned(model.impactedSymbols);
     const crossings = totalOrReturned(model.apiCrossings);
     const tests = totalOrReturned(model.tests);
+    const impactMetric = metricPresentation(model.impactedSymbols);
+    const crossingMetric = metricPresentation(model.apiCrossings);
+    const testMetric = metricPresentation(model.tests);
     let summary;
     if (files === 0 && symbols === 0) {
       summary = model.truncations.length > 0
         ? "No returned change evidence. The snapshot is partial; inspect its limits."
         : "No changes were captured against the requested baseline.";
     } else if (crossings > 0) {
-      summary = crossings + " API crossing" + (crossings === 1 ? "" : "s") + " · " + tests + " test candidate" + (tests === 1 ? "" : "s") + ".";
+      summary = crossingMetric.value + " API crossing" + (crossings === 1 ? "" : "s") + " · " + testMetric.value + " test candidate" + (tests === 1 ? "" : "s") + ".";
     } else if (impacts > 0) {
-      summary = impacts + " impacted symbol" + (impacts === 1 ? "" : "s") + " · no returned API crossing.";
+      summary = impactMetric.value + " impacted symbol" + (impacts === 1 ? "" : "s") + " · no returned API crossing."
+        + (crossingMetric.partial ? " API-crossing count is incomplete." : "");
     } else {
-      summary = "No returned downstream symbol impact.";
+      summary = "No returned downstream symbol impact."
+        + (impactMetric.partial ? " Impact count is incomplete." : "");
     }
     if (files > 0 || symbols > 0) {
       const widest = model.nodes.filter(function (node) {

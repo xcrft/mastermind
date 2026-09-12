@@ -736,7 +736,9 @@ clean zero.
 Audit overview counts use exact totals when known, lower bounds for non-empty
 partial collections, and `?` for an empty collection whose total is unknown.
 This applies to mapped files, components, languages, entry points, centrality
-hotspots, dependency cycles, and the audit-specific rankings.
+hotspots, dependency cycles, and the audit-specific rankings. The main change
+summary and accessibility announcement use the same rule for files, changed and
+impacted symbols, API crossings, and candidate tests.
 
 SQLite or Git failures stay explicit. A failed audit query is reported as
 unavailable and cannot produce a `Healthy` or `Clear` presentation. Component

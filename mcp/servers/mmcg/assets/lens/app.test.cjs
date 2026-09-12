@@ -1002,13 +1002,24 @@ async function main() {
   assert.match(currentGraphHarness.nodes.get("evidence-summary").textContent, /10 sources/i);
   assert.equal(currentGraphHarness.nodes.get("evidence-source-list").querySelectorAll(".evidence-source").length, 10);
   assert.match(currentGraphHarness.nodes.get("evidence-source-list").textContent, /document graph · current/i);
-  assert.match(currentGraphHarness.nodes.get("evidence-source-list").textContent, /all unverified/i);
-  assert.match(currentGraphHarness.nodes.get("document-graph-summary").textContent, /content current · semantics unverified/i);
+  assert.match(currentGraphHarness.nodes.get("evidence-source-list").textContent, /all unverified · corpus current/i);
+  assert.match(currentGraphHarness.nodes.get("document-graph-summary").textContent, /content current · corpus current · semantics unverified/i);
   assert.match(currentGraphHarness.nodes.get("document-graph-list").textContent, /supports · unverified/i);
   assert.match(currentGraphHarness.nodes.get("document-graph-list").textContent, /verified_by · unverified/i);
   assert.match(currentGraphHarness.nodes.get("precision-list").textContent, /does not verify their meaning/i);
   assert.match(currentGraphHarness.nodes.get("evidence-source-list").textContent, /review head matches/i);
   assert.match(currentGraphHarness.nodes.get("completeness-status").textContent, /No truncation reported/i);
+
+  const endpointOnlyGraph = withDocumentGraph(fixture(), "current");
+  endpointOnlyGraph.document_graph.packet.snapshot_schema_version = 1;
+  endpointOnlyGraph.document_graph.corpus = { status: "not_tracked", directories: [], changed_files: [] };
+  const endpointOnlyGraphHarness = await renderFixture(endpointOnlyGraph);
+  assert.match(endpointOnlyGraphHarness.nodes.get("notice-stack").textContent, /Document evidence · endpoint only/i);
+  assert.match(endpointOnlyGraphHarness.nodes.get("notice-stack").textContent, /New or unlisted documents are outside/i);
+  assert.match(endpointOnlyGraphHarness.nodes.get("evidence-source-list").textContent, /corpus not tracked/i);
+  assert.match(endpointOnlyGraphHarness.nodes.get("document-graph-summary").textContent, /corpus not tracked/i);
+  assert.match(endpointOnlyGraphHarness.nodes.get("precision-list").textContent, /Only named endpoints are freshness-checked/i);
+  assert.match(endpointOnlyGraphHarness.nodes.get("status-region").textContent, /document corpus is not tracked/i);
 
   const reviewGraphHarness = await renderFixture(withDocumentGraph(fixture(), "needs_review"));
   assert.match(reviewGraphHarness.nodes.get("notice-stack").textContent, /Document evidence · needs review/i);

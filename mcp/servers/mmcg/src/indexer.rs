@@ -5,9 +5,9 @@
 //! in parallel via rayon, and serializes writes through one SQLite connection.
 
 use crate::bounded_fs::{
-    inspect_path_kind_with_capability, read_directory_names, read_directory_names_with_capability,
-    read_regular_file, read_regular_file_expected, read_regular_file_with_capability,
-    BoundedPathKind, BoundedReadError, ReadControl, RootCapability, StableFileIdentity,
+    inspect_path_kind_with_capability, read_directory_names_with_capability, read_regular_file,
+    read_regular_file_expected, read_regular_file_with_capability, BoundedPathKind,
+    BoundedReadError, ReadControl, RootCapability, StableFileIdentity,
 };
 use crate::store::{
     normalize_concept_documentation, PendingConceptCorpus, PendingConceptDocumentation,
@@ -495,8 +495,7 @@ pub struct IndexStats {
     pub symbols_total: u32,
     pub edges_total: u32,
     pub by_language: std::collections::BTreeMap<String, u32>,
-    /// Count of `.mastermind/tasks/<NNN>-<name>/spec.md` files added to the FTS5
-    /// corpus. Zero when the directory doesn't exist (no `mastermind init`).
+    /// Canonical task specs admitted into the unified project-history corpus.
     pub task_specs_indexed: u32,
     /// Durable Markdown artifacts in the rebuildable project-history corpus.
     pub history_entries_indexed: u32,
@@ -528,6 +527,7 @@ pub struct IndexStats {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ProjectHistoryIndexStats {
     pub indexed: u32,
+    pub task_specs_indexed: u32,
     pub skipped: u32,
     pub truncated: bool,
 }
@@ -600,10 +600,6 @@ impl Indexer {
             .file_count()
             .map_err(|error| IndexError::Other(error.to_string()))?
             > 0
-            || store
-                .task_specs_count()
-                .map_err(|error| IndexError::Other(error.to_string()))?
-                > 0
             || store
                 .project_history_count()
                 .map_err(|error| IndexError::Other(error.to_string()))?
@@ -892,19 +888,13 @@ impl Indexer {
             }
         }
 
-        // Phase 6: refresh the task-spec FTS5 corpus. Scan
-        // `.mastermind/tasks/<NNN>-<name>/spec.md` (each task its own folder;
-        // top-level `_*.md` are shared assets and bare `*.md` is legacy 0.6.x
-        // layout, both excluded). Whole-corpus replace — spec sets are small
-        // (<100 files), so atomic replace beats delta tracking and avoids stale
-        // entries on rename/delete.
-        ensure_indexing_active(store)?;
-        if let Ok(count) = self.index_task_specs(store) {
-            stats.task_specs_indexed = count;
-        }
+        // Phase 6: refresh the one durable Markdown search corpus. Task specs
+        // are indexed as `task_spec` rows and queried through the same bounded
+        // inventory and freshness contract as the rest of project history.
         ensure_indexing_active(store)?;
         let history = self.index_project_history(store)?;
         stats.history_entries_indexed = history.indexed;
+        stats.task_specs_indexed = history.task_specs_indexed;
         stats.history_entries_skipped = history.skipped;
         stats.history_entries_truncated = history.truncated;
         if stats.files_failed == 0 && contracts_need_finalization {
@@ -937,84 +927,6 @@ impl Indexer {
 
         stats.duration_ms = start.elapsed().map(|d| d.as_millis()).unwrap_or(0);
         Ok(stats)
-    }
-
-    /// Scan `.mastermind/tasks/<NNN>-<name>/spec.md` and replace the FTS5 corpus.
-    /// Silent no-op when the directory is absent (no `mastermind init`). Returns
-    /// the count of indexed specs.
-    ///
-    /// Layout (since 0.7.0): each task is a folder holding `spec.md` plus related
-    /// artifacts (audit notes, screenshots, prior versions). Top-level
-    /// `_`-prefixed files (e.g. `_lessons.md`) are shared assets, excluded from
-    /// search.
-    pub fn index_task_specs(&self, store: &mut Store) -> Result<u32, IndexError> {
-        ensure_indexing_active(store)?;
-        let tasks_dir = self.root.join(".mastermind").join("tasks");
-        if !std::fs::symlink_metadata(&tasks_dir).is_ok_and(|metadata| {
-            metadata.file_type().is_dir() && !metadata.file_type().is_symlink()
-        }) {
-            // No `.mastermind/tasks/` — clear any stale entries from a prior run too.
-            store
-                .replace_task_specs(&[])
-                .map_err(|e| IndexError::Other(e.to_string()))?;
-            return Ok(0);
-        }
-
-        let mut entries: Vec<crate::store::TaskSpecEntry> = Vec::new();
-        let interrupted = || store.work_interrupted();
-        let control = ReadControl {
-            deadline: store.request_deadline(),
-            interrupted: Some(&interrupted),
-        };
-        let names = read_directory_names(&self.root, &tasks_dir, MAX_HISTORY_ENTRIES, control)
-            .map_err(index_error_from_read)?;
-        for name in names {
-            ensure_indexing_active(store)?;
-            let Some(name) = name.to_str() else {
-                continue;
-            };
-            let path = tasks_dir.join(name);
-            // Per-task folders only. Bare top-level `.md` (legacy 0.6.x) and
-            // `_`-prefixed names (shared assets, private scratch) are excluded.
-            if name.starts_with('_')
-                || name.starts_with('.')
-                || !std::fs::symlink_metadata(&path).is_ok_and(|metadata| {
-                    metadata.file_type().is_dir() && !metadata.file_type().is_symlink()
-                })
-            {
-                continue;
-            }
-            let spec_path = path.join("spec.md");
-            let Ok(read) = read_regular_file(
-                &self.root,
-                &spec_path,
-                MAX_HISTORY_ARTIFACT_SIZE,
-                MAX_HISTORY_ARTIFACT_SIZE,
-                control,
-            ) else {
-                continue;
-            };
-            let Ok(body) = String::from_utf8(read.bytes) else {
-                continue;
-            };
-            let title = extract_spec_title(&body, name);
-            let rel = spec_path
-                .strip_prefix(&self.root)
-                .unwrap_or(&spec_path)
-                .to_string_lossy()
-                .replace('\\', "/");
-            entries.push(crate::store::TaskSpecEntry {
-                path: rel,
-                title,
-                body,
-            });
-        }
-        let count = entries.len() as u32;
-        ensure_indexing_active(store)?;
-        store
-            .replace_task_specs(&entries)
-            .map_err(|e| IndexError::Other(e.to_string()))?;
-        Ok(count)
     }
 
     /// Rebuild the derived search corpus for durable project-history artifacts.
@@ -1092,6 +1004,7 @@ impl Indexer {
         if first.inventory_token != second.inventory_token
             || first.stats.indexed != second.stats.indexed
             || first.stats.skipped != second.stats.skipped
+            || first.stats.task_specs_indexed != second.stats.task_specs_indexed
             || first.stats.truncated != second.stats.truncated
         {
             return Err(IndexError::SnapshotChanged);
@@ -1212,6 +1125,10 @@ impl Indexer {
         digest.update(aggregate_bytes.to_le_bytes());
         let stats = ProjectHistoryIndexStats {
             indexed: entries.len() as u32,
+            task_specs_indexed: entries
+                .iter()
+                .filter(|entry| entry.kind == "task_spec")
+                .count() as u32,
             skipped,
             truncated,
         };
@@ -2725,73 +2642,6 @@ def placeholder():
     }
 
     #[test]
-    fn task_specs_indexed_from_mastermind_dir() {
-        let (dir, db) = setup("task_specs");
-        // No `.mastermind/tasks/` yet — first run reports 0 specs.
-        let indexer = Indexer::new(&dir);
-        let mut store = Store::open(&db).unwrap();
-        let stats1 = indexer.index_all(&mut store, false).unwrap();
-        assert_eq!(stats1.task_specs_indexed, 0);
-
-        // Two task folders + one shared template (underscore prefix excluded).
-        // Layout: .mastermind/tasks/<NNN>-<name>/spec.md
-        let tasks_dir = dir.join(".mastermind").join("tasks");
-        let spec_a = tasks_dir.join("001-rate-limiter");
-        let spec_b = tasks_dir.join("002-cache-eviction");
-        fs::create_dir_all(&spec_a).unwrap();
-        fs::create_dir_all(&spec_b).unwrap();
-        fs::write(
-            spec_a.join("spec.md"),
-            "# Add per-tenant rate limiting\n\nUse token bucket with Redis.\n",
-        )
-        .unwrap();
-        fs::write(
-            spec_b.join("spec.md"),
-            "# Cache eviction strategy\n\nLRU with TTL on user records.\n",
-        )
-        .unwrap();
-        fs::write(
-            tasks_dir.join("_lessons.md"),
-            "# Lessons — should not appear in search\n\nGeneric scaffold.\n",
-        )
-        .unwrap();
-        // A bare top-level `.md` (legacy 0.6.x layout) must be ignored.
-        fs::write(
-            tasks_dir.join("099-legacy-flat.md"),
-            "# Legacy flat spec\n\nShould be skipped — needs migration.\n",
-        )
-        .unwrap();
-
-        let stats2 = indexer.index_all(&mut store, false).unwrap();
-        assert_eq!(
-            stats2.task_specs_indexed, 2,
-            "underscore + legacy flat excluded"
-        );
-
-        // FTS5 query proves body content is searchable.
-        let hits = store.search_task_specs("token bucket", 10).unwrap();
-        assert_eq!(hits.len(), 1);
-        assert!(hits[0].path.contains("001-rate-limiter/spec.md"));
-
-        // Lessons file excluded — its unique phrase finds nothing.
-        let empty = store.search_task_specs("scaffold", 10).unwrap();
-        assert!(empty.is_empty());
-
-        // Legacy flat file is also excluded.
-        let legacy = store.search_task_specs("legacy flat", 10).unwrap();
-        assert!(legacy.is_empty());
-
-        // Remove one spec folder — next index pass wipes it from the corpus.
-        fs::remove_dir_all(&spec_b).unwrap();
-        let stats3 = indexer.index_all(&mut store, false).unwrap();
-        assert_eq!(stats3.task_specs_indexed, 1);
-        let gone = store.search_task_specs("LRU TTL", 10).unwrap();
-        assert!(gone.is_empty());
-
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
     fn project_history_indexes_only_durable_workflow_artifacts() {
         let (dir, db) = setup("project_history");
         let task_dir = dir.join(".mastermind/tasks/001-auth-boundary");
@@ -2809,6 +2659,11 @@ def placeholder():
         fs::write(
             dir.join(".mastermind/tasks/_lessons.md"),
             "# Lessons\n\nA middleware-only guard was bypassed.\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join(".mastermind/tasks/099-legacy-flat.md"),
+            "# Legacy flat spec\n\nDeprecated routing experiment.\n",
         )
         .unwrap();
         fs::write(
@@ -2852,9 +2707,21 @@ def placeholder():
         let indexer = Indexer::new(&dir);
         let stats = indexer.index_all(&mut store, false).unwrap();
         assert_eq!(stats.history_entries_indexed, 8);
+        assert_eq!(stats.task_specs_indexed, 1);
         assert_eq!(stats.history_entries_skipped, 1);
         assert!(!stats.history_entries_truncated);
         assert_eq!(store.project_history_count().unwrap(), 8);
+        assert_eq!(
+            store
+                .search_project_history("authorization before reads", Some("task_spec"), 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(store
+            .search_project_history("deprecated routing experiment", Some("task_spec"), 10)
+            .unwrap()
+            .is_empty());
         let lesson = store
             .search_project_history("middleware bypassed", Some("lesson"), 10)
             .unwrap();

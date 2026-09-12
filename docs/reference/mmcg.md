@@ -568,8 +568,9 @@ and SHA-256 digest.
 `mmcg facts adapt` creates that manifest directly from one bounded SARIF,
 LCOV/Cobertura, JUnit, or OTLP JSON artifact. It uses the same parsers as Lens,
 requires every parsed fact to map to the current index, and publishes nothing
-when parsing is partial or truncated. Exact duplicate findings are collapsed by
-their content-derived IDs. `mmcg facts keygen` creates a non-overwriting local
+when parsing is partial or truncated. Its input artifact must also have an exact
+UTF-8 repository-relative path; ambiguous Unix backslash aliases are rejected.
+Exact duplicate findings are collapsed by their content-derived IDs. `mmcg facts keygen` creates a non-overwriting local
 Ed25519 keypair from the operating system CSPRNG; `mmcg facts sign` and
 `mmcg facts verify` add a domain-separated Ed25519 proof defined by
 [`mastermind-fact-signature-v1`](../../schemas/mastermind-fact-signature-v1.schema.json).

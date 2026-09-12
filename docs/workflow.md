@@ -253,7 +253,8 @@ The source layout is exactly `agents/subagents` plus nested `skills`. An
 installed layout is selected only by `.mastermind-workflow.json`; its client,
 profile, artifact list, and digests define the ownership boundary. If both or
 neither layout is present, audit fails instead of guessing or scanning unrelated
-user agents.
+user agents. Digest input names must be exact UTF-8 paths; ambiguous Unix
+backslash aliases are rejected before an ownership digest is accepted.
 
 Managed agents declare `workflow.schema_version: 1`, `activation`
 (`always`, `conditional`, or `manual`), `mutability` (`read-only` or `writer`),

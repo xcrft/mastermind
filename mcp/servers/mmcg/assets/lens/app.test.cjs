@@ -1012,6 +1012,7 @@ async function main() {
   assert.match(currentGraphHarness.nodes.get("evidence-source-list").textContent, /document graph · current/i);
   assert.match(currentGraphHarness.nodes.get("evidence-source-list").textContent, /all unverified · corpus current/i);
   assert.match(currentGraphHarness.nodes.get("document-graph-summary").textContent, /content current · corpus current · semantics unverified/i);
+  assert.match(currentGraphHarness.nodes.get("document-graph-list").textContent, /Tracked corpus roots[\s\S]*docs\/adr/i);
   assert.match(currentGraphHarness.nodes.get("document-graph-list").textContent, /supports · unverified/i);
   assert.match(currentGraphHarness.nodes.get("document-graph-list").textContent, /verified_by · unverified/i);
   assert.match(currentGraphHarness.nodes.get("precision-list").textContent, /does not verify their meaning/i);
@@ -1026,6 +1027,7 @@ async function main() {
   assert.match(endpointOnlyGraphHarness.nodes.get("notice-stack").textContent, /New or unlisted documents are outside/i);
   assert.match(endpointOnlyGraphHarness.nodes.get("evidence-source-list").textContent, /corpus not tracked/i);
   assert.match(endpointOnlyGraphHarness.nodes.get("document-graph-summary").textContent, /corpus not tracked/i);
+  assert.doesNotMatch(endpointOnlyGraphHarness.nodes.get("document-graph-list").textContent, /Tracked corpus roots/i);
   assert.match(endpointOnlyGraphHarness.nodes.get("precision-list").textContent, /Only named endpoints are freshness-checked/i);
   assert.match(endpointOnlyGraphHarness.nodes.get("status-region").textContent, /document corpus is not tracked/i);
 

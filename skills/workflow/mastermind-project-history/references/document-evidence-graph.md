@@ -179,10 +179,13 @@ new graph check.
 Lens uses the same native projection only when `--document-graph` is explicit.
 It displays endpoint/corpus drift before the unverified relations and reports a
 packet revision that differs from the review head without treating live byte
-freshness as revision-wide coverage. Review export records both packet and live
-observation digests, rechecks the exact projection before atomic publication,
-and marks `needs_review` as a partial analysis state. It rejects output beneath
-a tracked corpus root so its own Markdown summary cannot invalidate the packet.
+freshness as revision-wide coverage. Tracked corpus roots remain visible beside
+their status so `current` cannot imply a wider document scope. Review export
+records both packet and live observation digests, the corpus roots, and every
+bounded changed path with its reason. It rechecks the exact projection before
+atomic publication and marks `needs_review` as a partial analysis state. It
+rejects output beneath a tracked corpus root so its own Markdown summary cannot
+invalidate the packet.
 
 ## Scope and limits
 

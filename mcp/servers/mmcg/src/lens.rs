@@ -320,10 +320,14 @@ pub struct LensBusFactor {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub partial_reason: Option<&'static str>,
     pub window_commits: u32,
+    /// Minimum component touches required for a concentration judgment.
+    pub minimum_touches: u32,
     /// Components from the returned map set checked against the Git window.
     pub components_evaluated: Option<u32>,
     pub components_with_history: Option<u32>,
     pub components_without_history: Option<u32>,
+    pub components_meeting_minimum: Option<u32>,
+    pub components_below_minimum: Option<u32>,
     pub total: Option<u32>,
     pub returned: u32,
     pub truncated: bool,
@@ -1821,6 +1825,7 @@ fn build_snapshot_until(
 
     const BUS_FACTOR_WINDOW_COMMITS: u32 = 2000;
     const BUS_FACTOR_CAP: usize = 20;
+    const BUS_FACTOR_MINIMUM_TOUCHES: u32 = 5;
     let bus_factor = match authors_by_component(
         &root,
         BUS_FACTOR_WINDOW_COMMITS,
@@ -1834,9 +1839,12 @@ fn build_snapshot_until(
             partial: false,
             partial_reason: None,
             window_commits: 0,
+            minimum_touches: BUS_FACTOR_MINIMUM_TOUCHES,
             components_evaluated: None,
             components_with_history: None,
             components_without_history: None,
+            components_meeting_minimum: None,
+            components_below_minimum: None,
             total: None,
             returned: 0,
             truncated: true,
@@ -1847,7 +1855,12 @@ fn build_snapshot_until(
             let components_evaluated = rows.len() as u32;
             let components_with_history = rows.iter().filter(|row| row.touches > 0).count() as u32;
             let components_without_history = components_evaluated - components_with_history;
-            let partial = components_without_history > 0;
+            let components_meeting_minimum = rows
+                .iter()
+                .filter(|row| row.touches >= BUS_FACTOR_MINIMUM_TOUCHES)
+                .count() as u32;
+            let components_below_minimum = components_evaluated - components_meeting_minimum;
+            let partial = components_below_minimum > 0;
             let output_truncated = rows.len() > BUS_FACTOR_CAP;
             let truncated = map.components.truncated || output_truncated;
             let truncation_reason = match (map.components.truncated, output_truncated) {
@@ -1863,11 +1876,14 @@ fn build_snapshot_until(
             LensBusFactor {
                 status: "available",
                 partial,
-                partial_reason: partial.then_some("components_without_history"),
+                partial_reason: partial.then_some("components_below_minimum_history"),
                 window_commits: BUS_FACTOR_WINDOW_COMMITS,
+                minimum_touches: BUS_FACTOR_MINIMUM_TOUCHES,
                 components_evaluated: Some(components_evaluated),
                 components_with_history: Some(components_with_history),
                 components_without_history: Some(components_without_history),
+                components_meeting_minimum: Some(components_meeting_minimum),
+                components_below_minimum: Some(components_below_minimum),
                 total: map.components.total,
                 returned: rows.len() as u32,
                 truncated,
@@ -3123,10 +3139,14 @@ mod tests {
         assert_eq!(bus["returned"], bus_items.len() as u64);
         assert_eq!(bus["total"], bus_items.len() as u64);
         assert_eq!(bus["truncated"], false);
-        assert_eq!(bus["partial"], false);
+        assert_eq!(bus["partial"], true);
+        assert_eq!(bus["partial_reason"], "components_below_minimum_history");
+        assert_eq!(bus["minimum_touches"], 5);
         assert_eq!(bus["components_evaluated"], bus_items.len() as u64);
         assert_eq!(bus["components_with_history"], bus_items.len() as u64);
         assert_eq!(bus["components_without_history"], 0);
+        assert_eq!(bus["components_meeting_minimum"], 0);
+        assert_eq!(bus["components_below_minimum"], bus_items.len() as u64);
         let src = bus_items
             .iter()
             .find(|row| row["component"] == "src")
@@ -3158,10 +3178,13 @@ mod tests {
 
         assert_eq!(bus["status"], "available");
         assert_eq!(bus["partial"], true);
-        assert_eq!(bus["partial_reason"], "components_without_history");
+        assert_eq!(bus["partial_reason"], "components_below_minimum_history");
+        assert_eq!(bus["minimum_touches"], 5);
         assert_eq!(bus["components_evaluated"], 2);
         assert_eq!(bus["components_with_history"], 1);
         assert_eq!(bus["components_without_history"], 1);
+        assert_eq!(bus["components_meeting_minimum"], 0);
+        assert_eq!(bus["components_below_minimum"], 2);
         assert_eq!(bus["total"], json["map"]["components"]["total"]);
         assert_eq!(bus["returned"], bus_items.len() as u64);
         let first_seen = bus_items

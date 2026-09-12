@@ -585,9 +585,12 @@ function fixture() {
         status: "available",
         partial: false,
         window_commits: 2000,
+        minimum_touches: 5,
         components_evaluated: 3,
         components_with_history: 3,
         components_without_history: 0,
+        components_meeting_minimum: 3,
+        components_below_minimum: 0,
         total: 3,
         returned: 3,
         truncated: false,
@@ -1091,16 +1094,32 @@ async function main() {
   missingBusHistoryPayload.audit.change_hotspots.total = 0;
   missingBusHistoryPayload.audit.change_hotspots.returned = 0;
   missingBusHistoryPayload.audit.bus_factor.partial = true;
-  missingBusHistoryPayload.audit.bus_factor.partial_reason = "components_without_history";
+  missingBusHistoryPayload.audit.bus_factor.partial_reason = "components_below_minimum_history";
   missingBusHistoryPayload.audit.bus_factor.components_evaluated = 4;
   missingBusHistoryPayload.audit.bus_factor.components_without_history = 1;
+  missingBusHistoryPayload.audit.bus_factor.components_below_minimum = 1;
+  missingBusHistoryPayload.audit.bus_factor.components_meeting_minimum = 3;
   missingBusHistoryPayload.audit.bus_factor.items.push({ component: "src/new", authors: 0, touches: 0, top_author_pct: 0 });
   missingBusHistoryPayload.audit.bus_factor.returned = 4;
   missingBusHistoryPayload.audit.bus_factor.total = 4;
   var missingBusHistoryHarness = await renderFixture(missingBusHistoryPayload, { width: 1200 });
   assert.equal(missingBusHistoryHarness.nodes.get("audit-verdict-word").textContent, "Incomplete", "A component without Git history keeps the audit incomplete");
   assert.equal(missingBusHistoryHarness.nodes.get("audit-bus-sev").textContent, "Concentrated", "Known concentration still keeps the stronger risk signal");
-  assert.match(missingBusHistoryHarness.nodes.get("audit-bus").textContent, /1 of 4 evaluated components[\s\S]*no commits[\s\S]*unknown[\s\S]*src\/new/i, "The bus card exposes the missing-history denominator and component");
+  assert.match(missingBusHistoryHarness.nodes.get("audit-bus").textContent, /1 of 4 evaluated components[\s\S]*5-touch minimum[\s\S]*no commits[\s\S]*not judged[\s\S]*src\/new/i, "The bus card exposes the history threshold, denominator, and component");
+
+  var thinBusHistoryPayload = fixture();
+  thinBusHistoryPayload.evidence.files.items.forEach((file) => { file.findings = []; });
+  thinBusHistoryPayload.audit.change_hotspots.items = [];
+  thinBusHistoryPayload.audit.change_hotspots.total = 0;
+  thinBusHistoryPayload.audit.change_hotspots.returned = 0;
+  thinBusHistoryPayload.audit.bus_factor.partial = true;
+  thinBusHistoryPayload.audit.bus_factor.partial_reason = "components_below_minimum_history";
+  thinBusHistoryPayload.audit.bus_factor.components_meeting_minimum = 2;
+  thinBusHistoryPayload.audit.bus_factor.components_below_minimum = 1;
+  thinBusHistoryPayload.audit.bus_factor.items[1].touches = 4;
+  var thinBusHistoryHarness = await renderFixture(thinBusHistoryPayload, { width: 1200 });
+  assert.equal(thinBusHistoryHarness.nodes.get("audit-verdict-word").textContent, "Incomplete", "Thin ownership history cannot produce a complete audit");
+  assert.match(thinBusHistoryHarness.nodes.get("audit-bus").textContent, /1 of 3 evaluated components[\s\S]*5-touch minimum[\s\S]*src/i, "The backend threshold controls the rendered ownership assessment");
 
   var auditUnavailablePayload = fixture();
   auditUnavailablePayload.evidence.files.items.forEach((file) => { file.findings = []; });

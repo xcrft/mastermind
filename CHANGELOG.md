@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Symbol, file, history, and task research calls now reject blank selectors
+  instead of returning a plausible empty result. Scratchpad writes also reject
+  blank labels and multi-line bodies.
 - `mmcg_change_class` now resolves normalized repository-relative files against
   the root bound into the index, independent of the MCP process directory, and
   rejects comparisons spanning an index update.

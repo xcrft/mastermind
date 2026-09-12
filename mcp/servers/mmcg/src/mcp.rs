@@ -1656,6 +1656,18 @@ fn str_arg<'a>(args: &'a Value, name: &str) -> Result<&'a str, HandlerError> {
         .ok_or_else(|| HandlerError::InvalidArguments(format!("Invalid argument: {name}")))
 }
 
+fn non_blank_str_arg<'a>(args: &'a Value, name: &str) -> Result<&'a str, HandlerError> {
+    str_arg(args, name).and_then(|value| {
+        if value.trim().is_empty() {
+            Err(HandlerError::InvalidArguments(format!(
+                "Invalid argument: {name}"
+            )))
+        } else {
+            Ok(value)
+        }
+    })
+}
+
 fn opt_str_arg<'a>(args: &'a Value, name: &str) -> Result<Option<&'a str>, HandlerError> {
     match args.get(name) {
         None => Ok(None),
@@ -1664,6 +1676,15 @@ fn opt_str_arg<'a>(args: &'a Value, name: &str) -> Result<Option<&'a str>, Handl
             "Invalid argument: {name}"
         ))),
     }
+}
+
+fn opt_non_blank_str_arg<'a>(args: &'a Value, name: &str) -> Result<Option<&'a str>, HandlerError> {
+    opt_str_arg(args, name).and_then(|value| match value {
+        Some(value) if value.trim().is_empty() => Err(HandlerError::InvalidArguments(format!(
+            "Invalid argument: {name}"
+        ))),
+        value => Ok(value),
+    })
 }
 
 fn opt_enum_arg<'a>(
@@ -1743,6 +1764,7 @@ const HISTORY_KINDS: [&str; 7] = [
     "release_notes",
     "architecture_decision",
 ];
+const NON_BLANK_PATTERN: &str = r"\S";
 
 fn schema_search() -> Value {
     json!({
@@ -1751,8 +1773,8 @@ fn schema_search() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "name": { "type": "string", "description": "Symbol name (exact match)" },
-                "kind": { "type": "string", "description": "Optional kind filter (function, class, method, struct, enum, trait, interface, record, property, etc.)" },
+                "name": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Symbol name (exact match)" },
+                "kind": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Optional kind filter (function, class, method, struct, enum, trait, interface, record, property, etc.)" },
                 "language": { "type": "string", "enum": LANGUAGES, "description": "Optional language filter" },
                 "collapse_partials": { "type": "boolean", "default": true, "description": "When true (default), C# `partial class Foo` declarations across N files return one hit with a `locations` array of all N declarations. Set false to see each declaration as a separate row." }
             },
@@ -1768,7 +1790,7 @@ fn schema_callers() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "name": { "type": "string", "description": "Name or type to look up" },
+                "name": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Name or type to look up" },
                 "language": { "type": "string", "enum": LANGUAGES },
                 "edge_kind": { "type": "string", "enum": ["calls", "imports", "inherits", "references"], "default": "calls", "description": "Which kind of incoming edge to consider; references include function values and macro bodies" }
             },
@@ -1784,8 +1806,8 @@ fn schema_callees() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "name": { "type": "string", "description": "Symbol whose outgoing edges you want to inspect" },
-                "file": { "type": "string", "minLength": 1, "description": "Exact relative file path from a candidate, as stored in the index" },
+                "name": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Symbol whose outgoing edges you want to inspect" },
+                "file": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Exact relative file path from a candidate, as stored in the index" },
                 "line": { "type": "integer", "minimum": 1, "maximum": 4294967295_u64, "description": "Exact declaration start line from a candidate; requires file" },
                 "language": { "type": "string", "enum": LANGUAGES },
                 "edge_kind": { "type": "string", "enum": ["calls", "imports", "inherits", "references"], "default": "calls" }
@@ -1803,7 +1825,7 @@ fn schema_impact() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "name": { "type": "string" },
+                "name": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN },
                 "max_depth": { "type": "integer", "minimum": 1, "maximum": 10, "default": 2 },
                 "language": { "type": "string", "enum": LANGUAGES }
             },
@@ -1819,7 +1841,7 @@ fn schema_symbols_in_file() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "file": { "type": "string", "description": "Relative file path (as it appears in the index)" }
+                "file": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Relative file path (as it appears in the index)" }
             },
             "required": ["file"]
         }
@@ -1833,7 +1855,7 @@ fn schema_outline() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "file": { "type": "string", "description": "Relative file path (as it appears in the index)" }
+                "file": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Relative file path (as it appears in the index)" }
             },
             "required": ["file"]
         }
@@ -1861,7 +1883,7 @@ fn schema_imports() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "file": { "type": "string", "description": "Relative file path (as it appears in the index)" }
+                "file": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Relative file path (as it appears in the index)" }
             },
             "required": ["file"]
         }
@@ -1875,7 +1897,7 @@ fn schema_imported_by() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query": { "type": "string", "description": "Name or path to look up" },
+                "query": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Name or path to look up" },
                 "match": { "type": "string", "enum": ["name", "path"], "default": "name", "description": "How to match the query — by leaf binding name or fully-qualified path" },
                 "language": { "type": "string", "enum": LANGUAGES, "description": "Optional language filter" }
             },
@@ -1891,7 +1913,7 @@ fn schema_unreferenced() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "kind": { "type": "string", "description": "Filter by symbol kind (function / class / method / struct / etc.)" },
+                "kind": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Filter by symbol kind (function / class / method / struct / etc.)" },
                 "language": { "type": "string", "enum": LANGUAGES }
             }
         }
@@ -1905,7 +1927,7 @@ fn schema_api_surface() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "prefix": { "type": "string", "description": "Path prefix (e.g. 'src/runtime/'). LIKE-matched." },
+                "prefix": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Path prefix (e.g. 'src/runtime/'). LIKE-matched." },
                 "language": { "type": "string", "enum": LANGUAGES }
             },
             "required": ["prefix"]
@@ -1949,7 +1971,7 @@ fn schema_tasks() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query": { "type": "string", "description": "FTS5 MATCH query (e.g. 'rate limit', 'auth OR session', '\\\"token bucket\\\"')" },
+                "query": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "FTS5 MATCH query (e.g. 'rate limit', 'auth OR session', '\\\"token bucket\\\"')" },
                 "top": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10, "description": "How many results to return" }
             },
             "required": ["query"]
@@ -1964,7 +1986,7 @@ fn schema_history() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query": { "type": "string", "description": "FTS5 MATCH query (e.g. 'rate limit', 'auth OR session', '\"token bucket\"')" },
+                "query": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "FTS5 MATCH query (e.g. 'rate limit', 'auth OR session', '\"token bucket\"')" },
                 "kind": { "type": "string", "enum": ["context", "lesson", "task_spec", "executor_report", "audit", "release_notes", "architecture_decision"], "description": "Optional exact artifact-kind filter" },
                 "top": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10, "description": "How many observed matches to return" },
                 "document_graph": { "type": "string", "minLength": 1, "description": "Repository-relative or root-contained absolute path to a root-bound graph packet below .mastermind/research. The packet is read live without persistence; freshness never verifies a relation." }
@@ -1983,7 +2005,7 @@ fn schema_centrality() -> Value {
             "properties": {
                 "prefix": { "type": "string", "description": "Optional path prefix to limit ranking scope (e.g. 'src/auth/'). LIKE-matched." },
                 "language": { "type": "string", "enum": LANGUAGES },
-                "kind": { "type": "string", "description": "Optional kind filter (function, class, method, struct, etc.)" },
+                "kind": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Optional kind filter (function, class, method, struct, etc.)" },
                 "top": { "type": "integer", "minimum": 1, "maximum": 200, "default": 20, "description": "How many results to return" }
             }
         }
@@ -2223,9 +2245,9 @@ fn schema_scratchpad_append() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "agent": { "type": "string", "description": "Agent identifier — conventionally `planner` / `executor` / `auditor` / `critic`, but freeform." },
-                "kind": { "type": "string", "description": "Entry kind — conventionally `intent` / `note` / `handoff` / `risk`, but freeform." },
-                "body": { "type": "string", "description": "The one-line content. ≤ 8 KiB." }
+                "agent": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Agent identifier — conventionally `planner` / `executor` / `auditor` / `critic`, but freeform." },
+                "kind": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Entry kind — conventionally `intent` / `note` / `handoff` / `risk`, but freeform." },
+                "body": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "The one-line content. ≤ 8 KiB of UTF-8." }
             },
             "required": ["agent", "kind", "body"]
         }
@@ -2240,8 +2262,8 @@ fn schema_scratchpad_read() -> Value {
             "type": "object",
             "properties": {
                 "since": { "type": "integer", "description": "Unix timestamp (seconds). Only entries with `ts >= since` are returned." },
-                "agent": { "type": "string", "description": "Filter by agent identifier." },
-                "kind": { "type": "string", "description": "Filter by entry kind." },
+                "agent": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Filter by agent identifier." },
+                "kind": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Filter by entry kind." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 20, "description": "Max entries returned." }
             }
         }
@@ -2255,7 +2277,7 @@ fn schema_change_class() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "file": { "type": "string", "minLength": 1, "description": "Path relative to the indexed project root (e.g. `src/auth/login.ts`)." }
+                "file": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Path relative to the indexed project root (e.g. `src/auth/login.ts`)." }
             },
             "required": ["file"]
         }
@@ -2263,8 +2285,8 @@ fn schema_change_class() -> Value {
 }
 
 fn handle_search(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
-    let name = str_arg(args, "name")?;
-    let kind = opt_str_arg(args, "kind")?;
+    let name = non_blank_str_arg(args, "name")?;
+    let kind = opt_non_blank_str_arg(args, "kind")?;
     let language = opt_enum_arg(args, "language", &LANGUAGES)?;
     let collapse = opt_bool_arg(args, "collapse_partials")?.unwrap_or(true);
     ensure_fresh_index(store)?;
@@ -2274,7 +2296,7 @@ fn handle_search(store: &mut Store, args: &Value) -> Result<Value, HandlerError>
 }
 
 fn handle_callers(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
-    let name = str_arg(args, "name")?;
+    let name = non_blank_str_arg(args, "name")?;
     let language = opt_enum_arg(args, "language", &LANGUAGES)?;
     let edge_kind = opt_enum_arg(args, "edge_kind", &EDGE_KINDS)?;
     ensure_fresh_index(store)?;
@@ -2284,7 +2306,7 @@ fn handle_callers(store: &mut Store, args: &Value) -> Result<Value, HandlerError
 }
 
 fn handle_callees(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
-    let name = str_arg(args, "name")?;
+    let name = non_blank_str_arg(args, "name")?;
     let language = opt_enum_arg(args, "language", &LANGUAGES)?;
     let edge_kind = opt_enum_arg(args, "edge_kind", &EDGE_KINDS)?;
     let file = args
@@ -2292,7 +2314,7 @@ fn handle_callees(store: &mut Store, args: &Value) -> Result<Value, HandlerError
         .map(|value| {
             value
                 .as_str()
-                .filter(|file| !file.is_empty())
+                .filter(|file| !file.trim().is_empty())
                 .ok_or_else(|| HandlerError::InvalidArguments("Invalid argument: file".into()))
         })
         .transpose()?;
@@ -2318,7 +2340,7 @@ fn handle_callees(store: &mut Store, args: &Value) -> Result<Value, HandlerError
 }
 
 fn handle_impact(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
-    let name = str_arg(args, "name")?;
+    let name = non_blank_str_arg(args, "name")?;
     let max_depth = bounded_u64_arg(args, "max_depth", 2, 1, 10)? as u32;
     let language = opt_enum_arg(args, "language", &LANGUAGES)?;
     ensure_fresh_index(store)?;
@@ -2328,7 +2350,7 @@ fn handle_impact(store: &mut Store, args: &Value) -> Result<Value, HandlerError>
 }
 
 fn handle_symbols_in_file(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
-    let file = str_arg(args, "file")?;
+    let file = non_blank_str_arg(args, "file")?;
     ensure_fresh_index(store)?;
     let r = queries::symbols_in_file(store, file)
         .map_err(|error| HandlerError::internal("symbols_in_file_query", error))?;
@@ -2336,7 +2358,7 @@ fn handle_symbols_in_file(store: &mut Store, args: &Value) -> Result<Value, Hand
 }
 
 fn handle_outline(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
-    let file = str_arg(args, "file")?;
+    let file = non_blank_str_arg(args, "file")?;
     ensure_fresh_index(store)?;
     let r = queries::outline(store, file)
         .map_err(|error| HandlerError::internal("outline_query", error))?;
@@ -2353,7 +2375,7 @@ fn handle_files(store: &mut Store, args: &Value) -> Result<Value, HandlerError> 
 }
 
 fn handle_imports(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
-    let file = str_arg(args, "file")?;
+    let file = non_blank_str_arg(args, "file")?;
     ensure_fresh_index(store)?;
     let r = queries::imports(store, file)
         .map_err(|error| HandlerError::internal("imports_query", error))?;
@@ -2362,9 +2384,9 @@ fn handle_imports(store: &mut Store, args: &Value) -> Result<Value, HandlerError
 
 fn handle_imported_by(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let query = if args.get("query").is_some() {
-        str_arg(args, "query")?
+        non_blank_str_arg(args, "query")?
     } else {
-        str_arg(args, "name")?
+        non_blank_str_arg(args, "name")?
     };
     let match_kind = opt_enum_arg(args, "match", &IMPORT_MATCH_KINDS)?.unwrap_or("name");
     let language = opt_enum_arg(args, "language", &LANGUAGES)?;
@@ -2375,7 +2397,7 @@ fn handle_imported_by(store: &mut Store, args: &Value) -> Result<Value, HandlerE
 }
 
 fn handle_unreferenced(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
-    let kind = opt_str_arg(args, "kind")?;
+    let kind = opt_non_blank_str_arg(args, "kind")?;
     let language = opt_enum_arg(args, "language", &LANGUAGES)?;
     ensure_fresh_index(store)?;
     let r = queries::unreferenced(store, kind, language)
@@ -2384,7 +2406,7 @@ fn handle_unreferenced(store: &mut Store, args: &Value) -> Result<Value, Handler
 }
 
 fn handle_api_surface(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
-    let prefix = str_arg(args, "prefix")?;
+    let prefix = non_blank_str_arg(args, "prefix")?;
     let language = opt_enum_arg(args, "language", &LANGUAGES)?;
     ensure_fresh_index(store)?;
     let r = queries::api_surface(store, prefix, language)
@@ -2454,7 +2476,7 @@ fn handle_dependency_cycles(store: &mut Store, args: &Value) -> Result<Value, Ha
 }
 
 fn handle_tasks(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
-    let query = str_arg(args, "query")?;
+    let query = non_blank_str_arg(args, "query")?;
     let top = bounded_u64_arg(args, "top", 10, 1, 50)? as u32;
     ensure_schema_compatible(store)?;
     let r = queries::tasks(store, query, top)
@@ -2463,7 +2485,7 @@ fn handle_tasks(store: &mut Store, args: &Value) -> Result<Value, HandlerError> 
 }
 
 fn handle_history(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
-    let query = str_arg(args, "query")?;
+    let query = non_blank_str_arg(args, "query")?;
     let kind = opt_enum_arg(args, "kind", &HISTORY_KINDS)?;
     let document_graph = match args.get("document_graph") {
         None => None,
@@ -2515,7 +2537,7 @@ fn handle_history(store: &mut Store, args: &Value) -> Result<Value, HandlerError
 fn handle_centrality(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let prefix = opt_str_arg(args, "prefix")?;
     let language = opt_enum_arg(args, "language", &LANGUAGES)?;
-    let kind = opt_str_arg(args, "kind")?;
+    let kind = opt_non_blank_str_arg(args, "kind")?;
     let top = bounded_u64_arg(args, "top", 20, 1, 200)? as u32;
     ensure_fresh_index(store)?;
     let r = queries::centrality(store, prefix, language, kind, top)
@@ -3210,9 +3232,27 @@ fn handle_status(store: &mut Store, _args: &Value) -> Result<Value, HandlerError
 }
 
 fn handle_scratchpad_append(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
-    let agent = str_arg(args, "agent")?;
-    let kind = str_arg(args, "kind")?;
-    let body = str_arg(args, "body")?;
+    let agent = non_blank_str_arg(args, "agent")?;
+    let kind = non_blank_str_arg(args, "kind")?;
+    let body = non_blank_str_arg(args, "body")?;
+    if agent.chars().any(char::is_control) {
+        return Err(HandlerError::InvalidArguments(
+            "Invalid argument: agent".into(),
+        ));
+    }
+    if kind.chars().any(char::is_control) {
+        return Err(HandlerError::InvalidArguments(
+            "Invalid argument: kind".into(),
+        ));
+    }
+    if body
+        .chars()
+        .any(|character| matches!(character, '\r' | '\n'))
+    {
+        return Err(HandlerError::InvalidArguments(
+            "Invalid argument: body".into(),
+        ));
+    }
     if body.len() > SCRATCHPAD_BODY_MAX {
         return Err(HandlerError::InvalidArguments(
             "Scratchpad body exceeds 8 KiB".into(),
@@ -3227,8 +3267,8 @@ fn handle_scratchpad_append(store: &mut Store, args: &Value) -> Result<Value, Ha
 
 fn handle_scratchpad_read(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let since = opt_i64_arg(args, "since")?;
-    let agent = opt_str_arg(args, "agent")?;
-    let kind = opt_str_arg(args, "kind")?;
+    let agent = opt_non_blank_str_arg(args, "agent")?;
+    let kind = opt_non_blank_str_arg(args, "kind")?;
     let limit = bounded_u64_arg(args, "limit", 20, 1, 200)? as u32;
     ensure_schema_compatible(store)?;
     let r = store
@@ -3238,7 +3278,7 @@ fn handle_scratchpad_read(store: &mut Store, args: &Value) -> Result<Value, Hand
 }
 
 fn handle_change_class(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
-    let file = queries::normalize_map_path(str_arg(args, "file")?)
+    let file = queries::normalize_map_path(non_blank_str_arg(args, "file")?)
         .ok()
         .filter(|file| !file.is_empty())
         .ok_or_else(|| HandlerError::InvalidArguments("Invalid argument: file".into()))?;
@@ -3985,12 +4025,105 @@ mod tests {
     }
 
     #[test]
+    fn research_schemas_advertise_non_blank_selectors() {
+        let expected: &[(&str, &[&str])] = &[
+            ("mmcg_search", &["name", "kind"]),
+            ("mmcg_callers", &["name"]),
+            ("mmcg_callees", &["name", "file"]),
+            ("mmcg_impact", &["name"]),
+            ("mmcg_symbols_in_file", &["file"]),
+            ("mmcg_outline", &["file"]),
+            ("mmcg_imports", &["file"]),
+            ("mmcg_imported_by", &["query"]),
+            ("mmcg_unreferenced", &["kind"]),
+            ("mmcg_api_surface", &["prefix"]),
+            ("mmcg_tasks", &["query"]),
+            ("mmcg_history", &["query"]),
+            ("mmcg_centrality", &["kind"]),
+            ("mmcg_scratchpad_append", &["agent", "kind", "body"]),
+            ("mmcg_scratchpad_read", &["agent", "kind"]),
+            ("mmcg_change_class", &["file"]),
+        ];
+        let listed = tools_list(ProtocolVersion::Current);
+        let tools = listed["tools"].as_array().unwrap();
+        for (tool_name, fields) in expected {
+            let tool = tools
+                .iter()
+                .find(|tool| tool["name"] == *tool_name)
+                .unwrap_or_else(|| panic!("missing schema for {tool_name}"));
+            for field in *fields {
+                let property = &tool["inputSchema"]["properties"][*field];
+                assert_eq!(property["minLength"], 1, "{tool_name}.{field}");
+                assert_eq!(
+                    property["pattern"], NON_BLANK_PATTERN,
+                    "{tool_name}.{field}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn research_tools_reject_explicit_invalid_optional_arguments() {
         type TestHandler = fn(&mut Store, &Value) -> Result<Value, HandlerError>;
 
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("mmcg.db")).unwrap();
         let cases: Vec<(TestHandler, Value, &str)> = vec![
+            (
+                handle_search,
+                json!({ "name": "   " }),
+                "Invalid argument: name",
+            ),
+            (
+                handle_search,
+                json!({ "name": "target", "kind": "" }),
+                "Invalid argument: kind",
+            ),
+            (
+                handle_symbols_in_file,
+                json!({ "file": "\t" }),
+                "Invalid argument: file",
+            ),
+            (
+                handle_outline,
+                json!({ "file": "" }),
+                "Invalid argument: file",
+            ),
+            (
+                handle_imports,
+                json!({ "file": " " }),
+                "Invalid argument: file",
+            ),
+            (
+                handle_api_surface,
+                json!({ "prefix": "" }),
+                "Invalid argument: prefix",
+            ),
+            (
+                handle_tasks,
+                json!({ "query": "\n" }),
+                "Invalid argument: query",
+            ),
+            (
+                handle_history,
+                json!({ "query": "   " }),
+                "Invalid argument: query",
+            ),
+            (
+                handle_unreferenced,
+                json!({ "kind": "" }),
+                "Invalid argument: kind",
+            ),
+            (
+                handle_centrality,
+                json!({ "kind": "\r\n" }),
+                "Invalid argument: kind",
+            ),
+            (
+                handle_scratchpad_read,
+                json!({ "agent": "" }),
+                "Invalid argument: agent",
+            ),
             (
                 handle_search,
                 json!({ "name": "target", "language": false }),
@@ -4064,6 +4197,11 @@ mod tests {
             (
                 handle_imported_by,
                 json!({ "query": false, "name": "legacy" }),
+                "Invalid argument: query",
+            ),
+            (
+                handle_imported_by,
+                json!({ "query": " " }),
                 "Invalid argument: query",
             ),
             (
@@ -5633,6 +5771,30 @@ mod checks {
         .unwrap();
         assert_eq!(too_big_env["isError"], true);
 
+        for arguments in [
+            json!({ "agent": "", "kind": "note", "body": "body" }),
+            json!({ "agent": "planner", "kind": " ", "body": "body" }),
+            json!({ "agent": "planner\nother", "kind": "note", "body": "body" }),
+            json!({ "agent": "planner", "kind": "note\r", "body": "body" }),
+            json!({ "agent": "planner", "kind": "note", "body": "" }),
+            json!({ "agent": "planner", "kind": "note", "body": "line 1\nline 2" }),
+        ] {
+            let invalid = handle_tools_call(
+                ProtocolVersion::Current,
+                &mut store,
+                &json!({
+                    "name": "mmcg_scratchpad_append",
+                    "arguments": arguments
+                }),
+            )
+            .unwrap();
+            assert_eq!(invalid["isError"], true);
+        }
+        assert_eq!(
+            store.scratchpad_read(None, None, None, 10).unwrap().len(),
+            1
+        );
+
         let _ = std::fs::remove_file(&path);
     }
 
@@ -5751,7 +5913,14 @@ mod checks {
                 root.path().canonicalize().unwrap().to_str().unwrap(),
             )
             .unwrap();
-        for file in ["", ".", "../outside.rs", "/absolute.rs", "src/\0bad.rs"] {
+        for file in [
+            "",
+            " ",
+            ".",
+            "../outside.rs",
+            "/absolute.rs",
+            "src/\0bad.rs",
+        ] {
             assert!(matches!(
                 handle_change_class(&mut store, &json!({ "file": file })),
                 Err(HandlerError::InvalidArguments(message))

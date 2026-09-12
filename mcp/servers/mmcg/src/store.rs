@@ -7176,49 +7176,62 @@ impl Store {
         prefix: Option<&str>,
         language: Option<&str>,
     ) -> SqlResult<Vec<FileEntry>> {
-        self.files_under_with_limit(prefix, language, None)
+        self.files_under_rows(prefix, language, None)
+            .map(|(_, files)| files)
     }
 
-    /// Bounded variant of [`Store::files_under`]. Fetching one row beyond the
-    /// caller's response cap lets it report truncation without materializing the
-    /// whole repository inventory.
-    pub fn files_under_limit(
+    /// Bounded variant of [`Store::files_under`] with an exact filtered total.
+    pub(crate) fn files_under_bounded(
         &self,
         prefix: Option<&str>,
         language: Option<&str>,
         limit: usize,
-    ) -> SqlResult<Vec<FileEntry>> {
-        self.files_under_with_limit(prefix, language, Some(limit))
+    ) -> SqlResult<(u32, Vec<FileEntry>)> {
+        self.files_under_rows(prefix, language, Some(limit))
     }
 
-    fn files_under_with_limit(
+    fn files_under_rows(
         &self,
         prefix: Option<&str>,
         language: Option<&str>,
         limit: Option<usize>,
-    ) -> SqlResult<Vec<FileEntry>> {
-        let row_to_file = |r: &rusqlite::Row| {
-            Ok(FileEntry {
-                path: r.get(0)?,
-                indexed_at: r.get(1)?,
-                symbol_count: r.get(2)?,
-            })
-        };
+    ) -> SqlResult<(u32, Vec<FileEntry>)> {
         let mut stmt = self.conn.prepare(
-            "SELECT f.path, f.indexed_at, f.symbol_count FROM files f
-             WHERE (?1 IS NULL OR substr(f.path, 1, length(?1)) = ?1)
-               AND (?2 IS NULL OR EXISTS (
-                       SELECT 1 FROM symbols s
-                       WHERE s.file_path = f.path AND s.language = ?2 LIMIT 1
-                   ))
-             ORDER BY f.path
+            "WITH matching AS (
+                 SELECT f.path, f.indexed_at, f.symbol_count FROM files f
+                 WHERE (?1 IS NULL OR substr(f.path, 1, length(?1)) = ?1)
+                   AND (?2 IS NULL OR EXISTS (
+                           SELECT 1 FROM symbols s
+                           WHERE s.file_path = f.path AND s.language = ?2 LIMIT 1
+                       ))
+             )
+             SELECT path, indexed_at, symbol_count, COUNT(*) OVER() AS total
+             FROM matching ORDER BY path
              LIMIT ?3",
         )?;
         let sql_limit = limit
-            .map(|value| i64::try_from(value).unwrap_or(i64::MAX))
+            .map(|value| i64::try_from(value.max(1)).unwrap_or(i64::MAX))
             .unwrap_or(-1);
-        let rows = stmt.query_map(params![prefix, language, sql_limit], row_to_file)?;
-        rows.collect()
+        let rows = stmt.query_map(params![prefix, language, sql_limit], |row| {
+            Ok((
+                FileEntry {
+                    path: row.get(0)?,
+                    indexed_at: row.get(1)?,
+                    symbol_count: row.get(2)?,
+                },
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        let mut total = 0_i64;
+        let mut files = Vec::with_capacity(limit.unwrap_or(0));
+        for row in rows {
+            let (file, row_total) = row?;
+            total = row_total;
+            if limit.is_none_or(|limit| files.len() < limit) {
+                files.push(file);
+            }
+        }
+        Ok((total.clamp(0, i64::from(u32::MAX)) as u32, files))
     }
 
     /// All symbols defined in a given file, ordered by line.

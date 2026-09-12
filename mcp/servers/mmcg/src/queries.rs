@@ -420,7 +420,9 @@ pub struct ImpactResponse {
 
 #[derive(Debug, Serialize)]
 pub struct FilesResponse {
+    pub total: u32,
     pub prefix: Option<String>,
+    pub language: Option<String>,
     pub count: u32,
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3925,18 +3927,20 @@ pub fn files(
     row_limit: Option<u32>,
 ) -> rusqlite::Result<FilesResponse> {
     let row_limit_usize = row_limit.map(|limit| usize::try_from(limit).unwrap_or(usize::MAX));
-    let mut files = match row_limit_usize {
-        Some(limit) => store.files_under_limit(prefix, language, limit.saturating_add(1))?,
-        None => store.files_under(prefix, language)?,
+    let (total, files) = match row_limit_usize {
+        Some(limit) => store.files_under_bounded(prefix, language, limit)?,
+        None => {
+            let files = store.files_under(prefix, language)?;
+            (files.len() as u32, files)
+        }
     };
-    let truncated = row_limit_usize.is_some_and(|limit| files.len() > limit);
-    if let Some(limit) = row_limit_usize {
-        files.truncate(limit);
-    }
+    let count = files.len() as u32;
     Ok(FilesResponse {
+        total,
         prefix: prefix.map(String::from),
-        count: files.len() as u32,
-        truncated,
+        language: language.map(String::from),
+        count,
+        truncated: count < total,
         row_limit,
         files,
     })
@@ -6780,13 +6784,37 @@ mod tests {
     #[test]
     fn files_response_reports_bounded_inventory() {
         let path = tmp_db("files_response_limit");
-        let store = Store::open(&path).unwrap();
-        for file in ["src/a.rs", "src/b.rs", "src/c.rs"] {
-            store.upsert_file(file, 1, 1).unwrap();
+        let mut store = Store::open(&path).unwrap();
+        for (file, language) in [
+            ("src/a.rs", "rust"),
+            ("src/b.rs", "rust"),
+            ("src/c.py", "python"),
+        ] {
+            store
+                .commit_file(crate::store::PendingFile {
+                    path: file.to_string(),
+                    mtime: 1,
+                    content_sha256: format!("hash-{file}"),
+                    language: language.to_string(),
+                    symbols: vec![crate::store::PendingSymbol {
+                        name: "<module>".to_string(),
+                        kind: "module".to_string(),
+                        line_start: 1,
+                        line_end: 1,
+                        signature: None,
+                        parent_index: None,
+                        decorators: None,
+                    }],
+                    edges: Vec::new(),
+                })
+                .unwrap();
         }
 
         let bounded = files(&store, Some("src/"), None, Some(2)).unwrap();
+        assert_eq!(bounded.total, 3);
         assert_eq!(bounded.count, 2);
+        assert_eq!(bounded.prefix.as_deref(), Some("src/"));
+        assert_eq!(bounded.language, None);
         assert_eq!(bounded.row_limit, Some(2));
         assert!(bounded.truncated);
         assert_eq!(
@@ -6798,7 +6826,14 @@ mod tests {
             vec!["src/a.rs", "src/b.rs"]
         );
 
+        let rust = files(&store, Some("src/"), Some("rust"), Some(1)).unwrap();
+        assert_eq!(rust.total, 2);
+        assert_eq!(rust.count, 1);
+        assert_eq!(rust.language.as_deref(), Some("rust"));
+        assert!(rust.truncated);
+
         let complete = files(&store, None, None, None).unwrap();
+        assert_eq!(complete.total, 3);
         assert_eq!(complete.count, 3);
         assert_eq!(complete.row_limit, None);
         assert!(!complete.truncated);

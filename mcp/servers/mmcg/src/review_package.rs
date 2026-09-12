@@ -341,7 +341,8 @@ pub fn export(options: &ReviewExportOptions) -> Result<ReviewExportResult, Revie
         .canonicalize()
         .map_err(|_| ReviewPackageError::Lens(LensError::RootUnavailable))?;
     let output_dir = output_target(&options.out)?;
-    let requests = evidence_requests(&root, &options.evidence, &options.extensions);
+    let (evidence, discovered_codeowners) = bound_evidence_options(&root, &options.evidence);
+    let requests = evidence_requests(&evidence, &options.extensions);
     let before_sources = read_sources(&root, &requests)?;
     let before_attestation = options
         .evidence_attestation
@@ -364,10 +365,11 @@ pub fn export(options: &ReviewExportOptions) -> Result<ReviewExportResult, Revie
         &root,
         &options.index_path,
         &options.lens,
-        &options.evidence,
+        &evidence,
         &options.extensions,
         options.document_graph.as_deref(),
     )?;
+    ensure_codeowners_discovery_unchanged(&root, discovered_codeowners.as_ref())?;
     ensure_output_outside_document_corpus(&root, &output_dir, snapshot.document_graph.as_ref())?;
 
     let after_sources = read_sources(&root, &requests)?;
@@ -532,6 +534,7 @@ pub fn export(options: &ReviewExportOptions) -> Result<ReviewExportResult, Revie
     write_package(&output_dir, documents, &manifest_body, |staging_dir| {
         #[cfg(test)]
         run_review_finalize_test_hook();
+        ensure_codeowners_discovery_unchanged(&root, discovered_codeowners.as_ref())?;
         let final_sources = read_sources(&root, &requests)?;
         ensure_sources_unchanged(&after_sources, &final_sources)?;
         let final_attestation = options
@@ -569,8 +572,39 @@ pub fn export(options: &ReviewExportOptions) -> Result<ReviewExportResult, Revie
     })
 }
 
-fn evidence_requests(
+/// Resolve automatic CODEOWNERS discovery once so the source read for the
+/// manifest and the source analyzed by Lens cannot diverge. The nested option
+/// distinguishes disabled/explicit selection from an observed absence.
+fn bound_evidence_options(
     root: &Path,
+    evidence: &EvidenceOptions,
+) -> (EvidenceOptions, Option<Option<PathBuf>>) {
+    let mut bound = evidence.clone();
+    let discovered = (evidence.codeowners.is_none() && evidence.discover_codeowners)
+        .then(|| crate::evidence::discover_codeowners(root));
+    if let Some(path) = &discovered {
+        bound.codeowners = path.clone();
+        bound.discover_codeowners = false;
+    }
+    (bound, discovered)
+}
+
+fn ensure_codeowners_discovery_unchanged(
+    root: &Path,
+    expected: Option<&Option<PathBuf>>,
+) -> Result<(), ReviewPackageError> {
+    if let Some(expected) = expected {
+        let observed = crate::evidence::discover_codeowners(root);
+        if &observed != expected {
+            return Err(ReviewPackageError::EvidenceChanged(
+                "CODEOWNERS auto-discovery".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn evidence_requests(
     evidence: &EvidenceOptions,
     extensions: &EvidenceExtensionOptions,
 ) -> Vec<SourceRequest> {
@@ -596,13 +630,7 @@ fn evidence_requests(
             artifact_count += 1;
         }
     }
-    let codeowners = evidence.codeowners.clone().or_else(|| {
-        evidence
-            .discover_codeowners
-            .then(|| crate::evidence::discover_codeowners(root))
-            .flatten()
-    });
-    if let Some(path) = codeowners {
+    if let Some(path) = evidence.codeowners.clone() {
         requests.push(SourceRequest {
             id: "codeowners".into(),
             kind: "codeowners",
@@ -818,7 +846,7 @@ fn evidence_binding(
                 .iter()
                 .find(|candidate| candidate.id == source.id)
                 .ok_or_else(|| ReviewPackageError::EvidenceBinding(source.id.clone()))?;
-            if observed.kind != source.kind {
+            if observed.kind != source.kind || observed.label != source.label {
                 return Err(ReviewPackageError::EvidenceBinding(source.id.clone()));
             }
             match observed.artifact_sha256.as_deref() {
@@ -1887,6 +1915,50 @@ mod tests {
         assert!(matches!(
             export(&options),
             Err(ReviewPackageError::EvidenceChanged(ref label)) if label == "late-change.sarif"
+        ));
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn export_binds_one_automatic_codeowners_selection() {
+        let (repository, _state, index_path) = fixture();
+        std::fs::write(repository.path().join("CODEOWNERS"), "* @root-team\n").unwrap();
+        let output = repository.path().join("codeowners-review");
+        let mut options = export_options(repository.path(), index_path, output.clone());
+        options.evidence.discover_codeowners = true;
+
+        export(&options).unwrap();
+
+        let manifest: Value =
+            serde_json::from_slice(&std::fs::read(output.join("manifest.json")).unwrap()).unwrap();
+        let source = manifest["evidence_binding"]["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|source| source["id"] == "codeowners")
+            .unwrap();
+        assert_eq!(source["label"], "CODEOWNERS");
+        assert_eq!(source["analysis_status"], "loaded");
+        assert_eq!(source["sha256"], sha256_hex(b"* @root-team\n"));
+    }
+
+    #[test]
+    fn export_rechecks_automatic_codeowners_priority_before_publication() {
+        let (repository, _state, index_path) = fixture();
+        std::fs::write(repository.path().join("CODEOWNERS"), "* @root-team\n").unwrap();
+        let output = repository.path().join("codeowners-raced-review");
+        let mut options = export_options(repository.path(), index_path, output.clone());
+        options.evidence.discover_codeowners = true;
+        let higher_priority = repository.path().join(".github/CODEOWNERS");
+        let _hook = install_review_finalize_test_hook(move || {
+            std::fs::create_dir_all(higher_priority.parent().unwrap()).unwrap();
+            std::fs::write(higher_priority, "* @github-team\n").unwrap();
+        });
+
+        assert!(matches!(
+            export(&options),
+            Err(ReviewPackageError::EvidenceChanged(ref label))
+                if label == "CODEOWNERS auto-discovery"
         ));
         assert!(!output.exists());
     }

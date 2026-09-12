@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- `mmcg_map` now supplies a stable reason whenever language, entry-point, or
+  complete-cycle output is truncated, including separate cycle-count and
+  cycle-membership caps.
 - `mmcg_status` now checks the live durable-history inventory and reports its
   freshness independently from structural and concept health, so edited context,
   task, release, lesson, and ADR Markdown cannot hide behind a green graph.

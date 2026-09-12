@@ -2128,7 +2128,7 @@ fn schema_centrality() -> Value {
 fn schema_map() -> Value {
     json!({
         "name": "mmcg_map",
-        "description": "Build a bounded deterministic architecture briefing for an indexed repository scope. Entry points are heuristic; graph precision and truncation are explicit in the result.",
+        "description": "Build a bounded deterministic architecture briefing for an indexed repository scope. Entry points are heuristic; every truncated result section includes a stable reason, and graph precision is explicit.",
         "inputSchema": {
             "type": "object",
             "properties": {

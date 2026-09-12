@@ -891,20 +891,23 @@ fn severity_rank(severity: &str) -> u8 {
     }
 }
 
+fn unsafe_terminal_character(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{0080}'..='\u{009f}'
+                | '\u{061c}'
+                | '\u{200e}'
+                | '\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+        )
+}
+
 fn escape_terminal(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
-        let unsafe_control = character.is_control()
-            || matches!(
-                character,
-                '\u{0080}'..='\u{009f}'
-                    | '\u{061c}'
-                    | '\u{200e}'
-                    | '\u{200f}'
-                    | '\u{202a}'..='\u{202e}'
-                    | '\u{2066}'..='\u{2069}'
-            );
-        if unsafe_control {
+        if unsafe_terminal_character(character) {
             escaped.extend(character.escape_unicode());
         } else {
             escaped.push(character);
@@ -3658,6 +3661,30 @@ pub struct NextAction {
     pub claude_prompt: Option<String>,
 }
 
+fn path_text(path: &Path) -> String {
+    escape_terminal(&path.display().to_string())
+}
+
+fn shell_path_argument(path: &Path) -> Option<String> {
+    let value = path.to_str()?;
+    if value.chars().any(unsafe_terminal_character) {
+        return None;
+    }
+    #[cfg(windows)]
+    let quoted = format!("'{}'", value.replace('\'', "''"));
+    #[cfg(not(windows))]
+    let quoted = format!("'{}'", value.replace('\'', "'\"'\"'"));
+    Some(quoted)
+}
+
+fn command_with_path(prefix: &str, path: &Path, suffix: &str) -> Option<String> {
+    shell_path_argument(path).map(|path| format!("{prefix} {path}{suffix}"))
+}
+
+fn command_or_placeholder(command: &Option<String>, placeholder: &str) -> String {
+    command.clone().unwrap_or_else(|| placeholder.to_string())
+}
+
 impl WorkflowStatus {
     pub fn scan(root: &Path) -> Self {
         Self::scan_with_index(root, &root.join(".mastermind/mmcg.db"))
@@ -3676,49 +3703,67 @@ impl WorkflowStatus {
 
     pub fn next_action(&self) -> Option<NextAction> {
         if let Some(error) = &self.index.database_error {
+            let command = command_with_path("mastermind index", &self.root, "");
             return Some(NextAction {
-                description: format!("Selected index cannot be used safely: {error}"),
-                command: Some(format!("mastermind index {}", self.root.display())),
+                description: format!(
+                    "Selected index cannot be used safely: {}",
+                    escape_terminal(error)
+                ),
+                command,
                 claude_prompt: Some(format!(
                     "Rebuild the unavailable Mastermind index at {} before relying on graph-backed research. \
-                     The status reader reported: {error}",
-                    self.index.index_path.display()
+                     The status reader reported: {}",
+                    path_text(&self.index.index_path),
+                    escape_terminal(error)
                 )),
             });
         }
         if let Some(error) = &self.index.root_error {
+            let rebuild = command_with_path("mastermind index", &self.root, "");
             return Some(NextAction {
-                description: format!("Selected index belongs to another repository: {error}"),
+                description: format!(
+                    "Selected index belongs to another repository: {}",
+                    escape_terminal(error)
+                ),
                 command: None,
                 claude_prompt: Some(format!(
                     "Repair the Mastermind index selection for {}. Pass the index that belongs to this repository, \
-                     or build its default index with `mastermind index {}`. Do not resume a graph-backed task \
+                     or build its default index with `{}`. Do not resume a graph-backed task \
                      against the mismatched database at {}.",
-                    self.root.display(),
-                    self.root.display(),
-                    self.index.index_path.display()
+                    path_text(&self.root),
+                    command_or_placeholder(&rebuild, "mastermind index <repository-path>"),
+                    path_text(&self.index.index_path)
                 )),
             });
         }
         if let Some(error) = &self.index.freshness_error {
+            let command = command_with_path("mastermind index", &self.root, "");
             return Some(NextAction {
-                description: format!("Index freshness cannot be verified: {error}"),
-                command: Some(format!("mastermind index {}", self.root.display())),
+                description: format!(
+                    "Index freshness cannot be verified: {}",
+                    escape_terminal(error)
+                ),
+                command,
                 claude_prompt: Some(format!(
-                    "Inspect why Mastermind could not verify index freshness for {}: {error}. \
+                    "Inspect why Mastermind could not verify index freshness for {}: {}. \
                      Rebuild the index before relying on graph-backed research.",
-                    self.root.display()
+                    path_text(&self.root),
+                    escape_terminal(error)
                 )),
             });
         }
         if let Some(error) = &self.task_scan_error {
             return Some(NextAction {
-                description: format!("Task workflow state cannot be trusted: {error}"),
+                description: format!(
+                    "Task workflow state cannot be trusted: {}",
+                    escape_terminal(error)
+                ),
                 command: None,
                 claude_prompt: Some(format!(
                     "Repair the Mastermind task inventory under {}/.mastermind/tasks before continuing. \
-                     The status reader rejected the current filesystem snapshot: {error}",
-                    self.root.display()
+                     The status reader rejected the current filesystem snapshot: {}",
+                    path_text(&self.root),
+                    escape_terminal(error)
                 )),
             });
         }
@@ -3727,20 +3772,23 @@ impl WorkflowStatus {
             .iter()
             .find(|t| t.phase == TaskPhase::AwaitingAudit)
         {
-            let spec = task.spec_path.display().to_string();
+            let spec = path_text(&task.spec_path);
             let task_dir = task.spec_path.parent().unwrap_or(task.spec_path.as_path());
+            let command = command_with_path("mastermind run-task", &task.spec_path, " --post-only");
+            let prompt_command =
+                command_or_placeholder(&command, "mastermind run-task <spec-path> --post-only");
             return Some(NextAction {
                 description: format!(
                     "Task {} — executor done, run post-flight audit",
-                    task.folder
+                    escape_terminal(&task.folder)
                 ),
-                command: Some(format!("mastermind run-task {} --post-only", spec)),
+                command,
                 claude_prompt: Some(format!(
                     "Run the deterministic Mastermind post-flight for:\n\
                      {spec}\n\n\
                      The canonical executor report is in {}. \
-                     Run `mastermind run-task {spec} --post-only`, then perform semantic review.",
-                    task_dir.display()
+                     Run `{prompt_command}`, then perform semantic review.",
+                    path_text(&task_dir.join("executor-report.md"))
                 )),
             });
         }
@@ -3751,22 +3799,24 @@ impl WorkflowStatus {
         {
             let task_dir = task.spec_path.parent().unwrap_or(task.spec_path.as_path());
             let review = task_dir.join("history-review.md");
+            let command = command_with_path("mastermind run-task", &task.spec_path, "");
+            let prompt_command =
+                command_or_placeholder(&command, "mastermind run-task <spec-path>");
             return Some(NextAction {
                 description: format!(
                     "Task {} — deterministic audit passed; complete semantic history review",
-                    task.folder
+                    escape_terminal(&task.folder)
                 ),
-                command: Some(format!("mastermind run-task {}", task.spec_path.display())),
+                command,
                 claude_prompt: Some(format!(
                     "Review the completed Mastermind task at {}.\n\n\
                      Read audit.md and history-review.md. Decide whether CONTEXT.md and a durable lesson need updates. \
                      In {}, replace Context and Lesson `pending` with `updated` or `not applicable`, \
                      and replace the generated Reason with the concrete rationale. Retain the Audit snapshot marker; \
                      changed audit inputs require re-audit. Then run \
-                     `mastermind run-task {}` to persist completion.",
-                    task_dir.display(),
-                    review.display(),
-                    task.spec_path.display()
+                     `{prompt_command}` to persist completion.",
+                    path_text(task_dir),
+                    path_text(&review)
                 )),
             });
         }
@@ -3775,43 +3825,55 @@ impl WorkflowStatus {
             .iter()
             .find(|t| t.phase == TaskPhase::AwaitingExecutor)
         {
-            let spec = task.spec_path.display().to_string();
+            let spec = path_text(&task.spec_path);
             let task_dir = task.spec_path.parent().unwrap_or(task.spec_path.as_path());
             return Some(NextAction {
                 description: format!(
                     "Task {} — pre-flight passed, invoke the executor",
-                    task.folder
+                    escape_terminal(&task.folder)
                 ),
                 command: None,
                 claude_prompt: Some(format!(
                     "Run the Mastermind executor for:\n\
                      {spec}\n\n\
                      Read the spec, implement each step in the Scope section, run the VERIFY \
-                     commands, and write an executor report to {}/executor-report.md.",
-                    task_dir.display()
+                     commands, and write an executor report to {}.",
+                    path_text(&task_dir.join("executor-report.md"))
                 )),
             });
         }
         if let Some(task) = self.tasks.iter().find(|t| t.phase == TaskPhase::Held) {
-            let spec = task.spec_path.display().to_string();
+            let spec = path_text(&task.spec_path);
             let blocking = task
                 .state
                 .as_ref()
                 .and_then(|s| s.blocking_reason.as_deref())
                 .unwrap_or("see state.json for details");
+            let blocking = escape_terminal(blocking);
             if task.state.as_ref().and_then(|s| s.next_step.as_deref()) == Some("run_preflight") {
+                let command =
+                    command_with_path("mastermind run-task", &task.spec_path, " --pre-only");
+                let prompt_command =
+                    command_or_placeholder(&command, "mastermind run-task <spec-path> --pre-only");
                 return Some(NextAction {
-                    description: format!("Task {} — review the spec and repeat pre-flight: {blocking}", task.folder),
-                    command: Some(format!("mastermind run-task {spec} --pre-only")),
+                    description: format!(
+                        "Task {} — review the spec and repeat pre-flight: {blocking}",
+                        escape_terminal(&task.folder)
+                    ),
+                    command,
                     claude_prompt: Some(format!(
                         "Review the revised Mastermind contract at {spec}.\n\nBlocking reason: {blocking}\n\n\
-                         Once the scope and acceptance criteria are approved, run `mastermind run-task {spec} --pre-only`. \
+                         Once the scope and acceptance criteria are approved, run `{prompt_command}`. \
                          This retains the original baseline and iteration budget. Then update the implementation and executor report before auditing."
                     )),
                 });
             }
             return Some(NextAction {
-                description: format!("Task {} — HELD: {}", task.folder, blocking),
+                description: format!(
+                    "Task {} — HELD: {}",
+                    escape_terminal(&task.folder),
+                    blocking
+                ),
                 command: None,
                 claude_prompt: Some(format!(
                     "Resume blocked Mastermind task:\n{spec}\n\n\
@@ -3822,10 +3884,20 @@ impl WorkflowStatus {
             });
         }
         if let Some(task) = self.tasks.iter().find(|t| t.phase == TaskPhase::Ready) {
+            let command = command_with_path("mastermind run-task", &task.spec_path, "");
+            let claude_prompt = command.is_none().then(|| {
+                format!(
+                    "Run the Mastermind pre-flight for the spec at {}. Pass the path as one literal argument.",
+                    path_text(&task.spec_path)
+                )
+            });
             return Some(NextAction {
-                description: format!("Task {} — spec ready for pre-flight", task.folder),
-                command: Some(format!("mastermind run-task {}", task.spec_path.display())),
-                claude_prompt: None,
+                description: format!(
+                    "Task {} — spec ready for pre-flight",
+                    escape_terminal(&task.folder)
+                ),
+                command,
+                claude_prompt,
             });
         }
         if !self.tasks.is_empty() && self.tasks.iter().all(|t| t.phase == TaskPhase::Complete) {
@@ -3846,22 +3918,26 @@ impl WorkflowStatus {
         if !self.index.db_exists {
             out.push_str(&format!(
                 "  ✗ no index at {} — run `mastermind index .` or `mastermind init`\n",
-                self.index.index_path.display()
+                path_text(&self.index.index_path)
             ));
         } else if let Some(error) = &self.index.database_error {
             out.push_str(&format!(
-                "  ✗ unavailable index at {} — {error}\n",
-                self.index.index_path.display()
+                "  ✗ unavailable index at {} — {}\n",
+                path_text(&self.index.index_path),
+                escape_terminal(error)
             ));
         } else {
             out.push_str(&format!(
                 "  ✓ {} — {} symbols, {} files\n",
-                self.index.index_path.display(),
+                path_text(&self.index.index_path),
                 self.index.symbol_count,
                 self.index.file_count
             ));
             if let Some(error) = &self.index.root_error {
-                out.push_str(&format!("  ✗ index repository mismatch — {error}\n"));
+                out.push_str(&format!(
+                    "  ✗ index repository mismatch — {}\n",
+                    escape_terminal(error)
+                ));
             } else if self.index.freshness_error.is_none()
                 && self.index.stale_count == 0
                 && self.index.extractor_contract_current
@@ -3891,7 +3967,8 @@ impl WorkflowStatus {
                         "  ⚠ durable history changed since last index — run `mastermind index .`\n",
                     ),
                     ("incomplete", Some(error)) => out.push_str(&format!(
-                        "  ⚠ durable-history corpus is incomplete — {error}\n"
+                        "  ⚠ durable-history corpus is incomplete — {}\n",
+                        escape_terminal(error)
                     )),
                     ("incomplete", None) => out.push_str(
                         "  ⚠ durable-history corpus is incomplete — inspect skipped or over-limit Markdown, then re-index\n",
@@ -3901,13 +3978,17 @@ impl WorkflowStatus {
                     ),
                     ("fresh", None) => {}
                     (_, Some(error)) => out.push_str(&format!(
-                        "  ⚠ durable-history freshness unavailable — {error}\n"
+                        "  ⚠ durable-history freshness unavailable — {}\n",
+                        escape_terminal(error)
                     )),
                     _ => out.push_str("  ⚠ durable-history freshness is unknown\n"),
                 }
             }
             if let Some(error) = &self.index.freshness_error {
-                out.push_str(&format!("  ⚠ index freshness unavailable — {error}\n"));
+                out.push_str(&format!(
+                    "  ⚠ index freshness unavailable — {}\n",
+                    escape_terminal(error)
+                ));
             } else if self.index.stale_count > 0 {
                 let suffix = if self.index.stale_count_truncated {
                     " or more"
@@ -3946,7 +4027,10 @@ impl WorkflowStatus {
         out.push('\n');
 
         if let Some(error) = &self.task_scan_error {
-            out.push_str(&format!("Tasks\n  ⛔ inventory unavailable — {error}\n\n"));
+            out.push_str(&format!(
+                "Tasks\n  ⛔ inventory unavailable — {}\n\n",
+                escape_terminal(error)
+            ));
         } else if self.tasks.is_empty() {
             out.push_str(
                 "Tasks\n  (none — Direct mode needs no task; use `mastermind new-spec 'description'` for Verified/Strict work)\n\n",
@@ -3956,10 +4040,11 @@ impl WorkflowStatus {
             let name_w = self
                 .tasks
                 .iter()
-                .map(|t| t.folder.len())
+                .map(|task| escape_terminal(&task.folder).chars().count())
                 .max()
                 .unwrap_or(20);
             for task in &self.tasks {
+                let folder = escape_terminal(&task.folder);
                 let marker = match task.phase {
                     TaskPhase::Complete => "✓",
                     TaskPhase::Ready => "○",
@@ -3970,7 +4055,7 @@ impl WorkflowStatus {
                 };
                 let mut line = format!(
                     "  {marker} {:<width$}  {}",
-                    task.folder,
+                    folder,
                     task.phase.label(),
                     width = name_w
                 );
@@ -3979,13 +4064,13 @@ impl WorkflowStatus {
                         .state
                         .as_ref()
                         .and_then(|s| s.risk.as_deref())
-                        .map(|r| format!("  risk:{r}"))
+                        .map(|risk| format!("  risk:{}", escape_terminal(risk)))
                         .unwrap_or_default();
                     let blocking_str = task
                         .state
                         .as_ref()
                         .and_then(|s| s.blocking_reason.as_deref())
-                        .map(|b| format!("  — {b}"))
+                        .map(|blocking| format!("  — {}", escape_terminal(blocking)))
                         .unwrap_or_default();
                     line.push_str(&risk_str);
                     line.push_str(&blocking_str);
@@ -4038,31 +4123,38 @@ impl WorkflowStatus {
 
     pub fn render_resume_text(&self, task_name: Option<&str>) -> String {
         if let Some(error) = &self.index.database_error {
+            let rebuild = command_with_path("mastermind index", &self.root, "");
             return format!(
-                "Cannot resume safely: selected index is unavailable — {error}\n\n\
-                 Rebuild with `mastermind index {}` before relying on graph-backed task state.\n",
-                self.root.display()
+                "Cannot resume safely: selected index is unavailable — {}\n\n\
+                 Rebuild with `{}` before relying on graph-backed task state.\n",
+                escape_terminal(error),
+                command_or_placeholder(&rebuild, "mastermind index <repository-path>")
             );
         }
         if let Some(error) = &self.index.root_error {
+            let rebuild = command_with_path("mastermind index", &self.root, "");
             return format!(
-                "Cannot resume safely: selected index repository mismatch — {error}\n\n\
-                 Pass the correct `--index` or run `mastermind index {}` to build this repository's default index.\n",
-                self.root.display()
+                "Cannot resume safely: selected index repository mismatch — {}\n\n\
+                 Pass the correct `--index` or run `{}` to build this repository's default index.\n",
+                escape_terminal(error),
+                command_or_placeholder(&rebuild, "mastermind index <repository-path>")
             );
         }
         if let Some(error) = &self.index.freshness_error {
+            let rebuild = command_with_path("mastermind index", &self.root, "");
             return format!(
-                "Cannot resume safely: index freshness is unavailable — {error}\n\n\
-                 Rebuild with `mastermind index {}` before relying on graph-backed task state.\n",
-                self.root.display()
+                "Cannot resume safely: index freshness is unavailable — {}\n\n\
+                 Rebuild with `{}` before relying on graph-backed task state.\n",
+                escape_terminal(error),
+                command_or_placeholder(&rebuild, "mastermind index <repository-path>")
             );
         }
         if let Some(error) = &self.task_scan_error {
             return format!(
-                "Cannot resume safely: task workflow state cannot be trusted — {error}\n\n\
+                "Cannot resume safely: task workflow state cannot be trusted — {}\n\n\
                  Repair the task inventory under {}/.mastermind/tasks and run `mastermind status` again.\n",
-                self.root.display()
+                escape_terminal(error),
+                path_text(&self.root)
             );
         }
         let task = match task_name {
@@ -4091,7 +4183,7 @@ impl WorkflowStatus {
             } else if task_name.is_some() {
                 format!(
                     "Task '{}' not found. Run `mastermind status` to list tasks.\n",
-                    task_name.unwrap()
+                    escape_terminal(task_name.unwrap())
                 )
             } else {
                 "All tasks complete. Nothing to resume.\n".into()
@@ -4099,19 +4191,19 @@ impl WorkflowStatus {
         };
 
         let mut out = String::new();
-        out.push_str(&format!("Resume: {}\n", task.folder));
+        out.push_str(&format!("Resume: {}\n", escape_terminal(&task.folder)));
         out.push_str(&format!("Phase:  {}\n", task.phase.label()));
 
         if let Some(ref s) = task.state {
-            out.push_str(&format!("Status: {}\n", s.status));
+            out.push_str(&format!("Status: {}\n", escape_terminal(&s.status)));
             if let Some(ref r) = s.risk {
-                out.push_str(&format!("Risk:   {r}\n"));
+                out.push_str(&format!("Risk:   {}\n", escape_terminal(r)));
             }
             if let Some(ref b) = s.blocking_reason {
-                out.push_str(&format!("Held:   {b}\n"));
+                out.push_str(&format!("Held:   {}\n", escape_terminal(b)));
             }
             if let Some(ref a) = s.last_artifact {
-                out.push_str(&format!("Last artifact: {a}\n"));
+                out.push_str(&format!("Last artifact: {}\n", escape_terminal(a)));
             }
         }
 
@@ -4130,7 +4222,7 @@ impl WorkflowStatus {
                     if !goal_snippet.is_empty() {
                         out.push_str("Goal\n");
                         for line in goal_snippet.lines().take(8) {
-                            out.push_str(&format!("  {line}\n"));
+                            out.push_str(&format!("  {}\n", escape_terminal(line)));
                         }
                         out.push('\n');
                     }
@@ -4139,7 +4231,8 @@ impl WorkflowStatus {
             },
             Err(error) => {
                 out.push_str(&format!(
-                    "Goal\n  unavailable: spec read failed: {error}\n\n"
+                    "Goal\n  unavailable: spec read failed: {}\n\n",
+                    escape_terminal(&error.to_string())
                 ));
             }
         }
@@ -4148,82 +4241,95 @@ impl WorkflowStatus {
         out.push_str("Files\n");
         out.push_str(&format!(
             "  spec:            {}\n",
-            task.spec_path.display()
+            path_text(&task.spec_path)
         ));
         if task_dir.join("state.json").is_file() {
             out.push_str(&format!(
-                "  state.json:      {}/state.json\n",
-                task_dir.display()
+                "  state.json:      {}\n",
+                path_text(&task_dir.join("state.json"))
             ));
         }
         if task_dir.join("executor-report.md").is_file() {
             out.push_str(&format!(
-                "  executor-report: {}/executor-report.md\n",
-                task_dir.display()
+                "  executor-report: {}\n",
+                path_text(&task_dir.join("executor-report.md"))
             ));
         }
         if task_dir.join("audit.md").is_file() {
             out.push_str(&format!(
-                "  audit:           {}/audit.md\n",
-                task_dir.display()
+                "  audit:           {}\n",
+                path_text(&task_dir.join("audit.md"))
             ));
         }
         out.push('\n');
 
+        let spec_text = path_text(&task.spec_path);
+        let task_dir_text = path_text(task_dir);
         let prompt = match task.phase {
-            TaskPhase::AwaitingAudit => format!(
-                "Run the deterministic Mastermind post-flight for:\n{spec}\n\n\
-                 The executor report is in {dir}/executor-report.md.\n\
-                 mastermind run-task {spec} --post-only",
-                spec = task.spec_path.display(),
-                dir = task_dir.display()
-            ),
+            TaskPhase::AwaitingAudit => {
+                let command =
+                    command_with_path("mastermind run-task", &task.spec_path, " --post-only");
+                format!(
+                    "Run the deterministic Mastermind post-flight for:\n{spec_text}\n\n\
+                     The executor report is in {task_dir_text}/executor-report.md.\n\
+                     {}",
+                    command_or_placeholder(&command, "mastermind run-task <spec-path> --post-only")
+                )
+            }
             TaskPhase::AwaitingExecutor => format!(
-                "Run the Mastermind executor for:\n{spec}\n\n\
+                "Run the Mastermind executor for:\n{spec_text}\n\n\
                  Read the spec, implement each step in the Scope section, run all VERIFY \
-                 commands, and write an executor report to {dir}/executor-report.md.",
-                spec = task.spec_path.display(),
-                dir = task_dir.display()
+                 commands, and write an executor report to {task_dir_text}/executor-report.md."
             ),
-            TaskPhase::AwaitingHistoryReview => format!(
-                "Complete semantic history review for:\n{spec}\n\n\
-                 Read {dir}/audit.md and {dir}/history-review.md. Replace both pending dispositions \
-                 with `updated` or `not applicable`, replace the generated Reason with the concrete rationale, \
-                 retain the Audit snapshot marker, then run `mastermind run-task {spec}` to persist completion. \
-                 Changed audit inputs require re-audit.",
-                spec = task.spec_path.display(),
-                dir = task_dir.display()
-            ),
+            TaskPhase::AwaitingHistoryReview => {
+                let command = command_with_path("mastermind run-task", &task.spec_path, "");
+                format!(
+                    "Complete semantic history review for:\n{spec_text}\n\n\
+                     Read {task_dir_text}/audit.md and {task_dir_text}/history-review.md. Replace both pending dispositions \
+                     with `updated` or `not applicable`, replace the generated Reason with the concrete rationale, \
+                     retain the Audit snapshot marker, then run `{}` to persist completion. \
+                     Changed audit inputs require re-audit.",
+                    command_or_placeholder(&command, "mastermind run-task <spec-path>")
+                )
+            }
             TaskPhase::Held => {
                 let blocking = task
                     .state
                     .as_ref()
                     .and_then(|s| s.blocking_reason.as_deref())
                     .unwrap_or("reason unknown");
-                if task.state.as_ref().and_then(|s| s.next_step.as_deref()) == Some("run_preflight") {
+                let blocking = escape_terminal(blocking);
+                if task.state.as_ref().and_then(|s| s.next_step.as_deref()) == Some("run_preflight")
+                {
+                    let command =
+                        command_with_path("mastermind run-task", &task.spec_path, " --pre-only");
                     format!(
-                        "Review the revised Mastermind contract at {spec}.\n\nBlocking reason: {blocking}\n\n\
-                         Once the scope and acceptance criteria are approved, run `mastermind run-task {spec} --pre-only`. \
+                        "Review the revised Mastermind contract at {spec_text}.\n\nBlocking reason: {blocking}\n\n\
+                         Once the scope and acceptance criteria are approved, run `{}`. \
                          This retains the original baseline and iteration budget. Then update the implementation and executor report before auditing.",
-                        spec = task.spec_path.display()
+                        command_or_placeholder(
+                            &command,
+                            "mastermind run-task <spec-path> --pre-only"
+                        )
                     )
                 } else {
                     format!(
-                    "This Mastermind task is held:\n{spec}\n\n\
+                    "This Mastermind task is held:\n{spec_text}\n\n\
                      Blocking reason: {blocking}\n\n\
-                     Review the spec and state.json. Decide: modify the spec to unblock, close the task, or escalate.",
-                    spec = task.spec_path.display()
+                     Review the spec and state.json. Decide: modify the spec to unblock, close the task, or escalate."
                     )
                 }
             }
-            TaskPhase::Ready => format!(
-                "Run the Mastermind pre-flight gate for:\n{spec}\n\n  mastermind run-task {spec}",
-                spec = task.spec_path.display()
-            ),
+            TaskPhase::Ready => {
+                let command = command_with_path("mastermind run-task", &task.spec_path, "");
+                format!(
+                    "Run the Mastermind pre-flight gate for:\n{spec_text}\n\n  {}",
+                    command_or_placeholder(&command, "mastermind run-task <spec-path>")
+                )
+            }
             TaskPhase::Complete => format!(
-                "Task {} is already complete. Audit report: {dir}/audit.md",
-                task.folder,
-                dir = task_dir.display()
+                "Task {} is already complete. Audit report: {task_dir_text}/audit.md",
+                escape_terminal(&task.folder)
             ),
         };
 
@@ -6160,10 +6266,25 @@ mod tests {
         let status = WorkflowStatus::scan(root.path());
         assert_eq!(status.tasks[0].phase, TaskPhase::Held);
         let action = status.next_action().unwrap();
-        let command = format!("mastermind run-task {} --pre-only", spec.display());
+        let command = command_with_path("mastermind run-task", &spec, " --pre-only").unwrap();
         assert_eq!(action.command.as_deref(), Some(command.as_str()));
         assert!(status.render_resume_text(None).contains(&command));
         assert!(action.claude_prompt.unwrap().contains("original baseline"));
+    }
+
+    #[test]
+    fn generated_commands_quote_paths_and_reject_terminal_control_text() {
+        let path = Path::new("/tmp/project name/task;echo-owned/spec.md");
+        let argument = shell_path_argument(path).unwrap();
+        assert!(argument.starts_with('\''));
+        assert!(argument.ends_with('\''));
+        assert!(argument.contains("task;echo-owned"));
+        let expected = format!("mastermind run-task {argument} --post-only");
+        assert_eq!(
+            command_with_path("mastermind run-task", path, " --post-only").as_deref(),
+            Some(expected.as_str())
+        );
+        assert!(shell_path_argument(Path::new("task\nowned/spec.md")).is_none());
     }
 
     #[test]

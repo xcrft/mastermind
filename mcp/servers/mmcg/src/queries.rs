@@ -671,11 +671,30 @@ pub fn history(
         let observed = store.search_project_history(query, kind, top)?;
         let skipped_artifacts = store
             .meta_value("project_history_skipped")?
-            .and_then(|value| value.parse().ok())
+            .map(|value| {
+                value.parse::<u32>().map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            })
+            .transpose()?
             .unwrap_or(0);
         let truncated = store
             .meta_value("project_history_truncated")?
-            .is_some_and(|value| value == "true");
+            .map(|value| {
+                value.parse::<bool>().map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            })
+            .transpose()?
+            .unwrap_or(false);
         let freshness = store
             .meta_value("index_root")?
             .map(PathBuf::from)
@@ -4426,6 +4445,24 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, HistoryDocumentGraphError::SnapshotChanged));
+    }
+
+    #[test]
+    fn history_rejects_malformed_coverage_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("mmcg.db")).unwrap();
+        store.replace_project_history(&[]).unwrap();
+
+        store
+            .set_meta("project_history_skipped", "not-a-count")
+            .unwrap();
+        assert!(history(&store, "decision", None, 10).is_err());
+
+        store.set_meta("project_history_skipped", "0").unwrap();
+        store
+            .set_meta("project_history_truncated", "not-a-boolean")
+            .unwrap();
+        assert!(history(&store, "decision", None, 10).is_err());
     }
 
     #[test]

@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- `status`, `next`, and `resume` now validate task state with the complete
+  controller schema before projecting display fields, so a state rejected by
+  `run-task` cannot still appear ready or complete in workflow navigation.
 - `run-task` now rejects unknown fields in controller `state.json`, preventing
   misspelled or newer lifecycle data from silently inheriting weaker defaults.
 - Index freshness checks now retain missing and non-regular Git-tracked source

@@ -931,6 +931,134 @@ pub(crate) fn symbols_changed_since_controlled(
     crate::diff::symbols_changed_since_controlled(store, repo_root, git_ref, deadline, interrupted)
 }
 
+#[derive(Debug, Serialize)]
+pub struct SymbolDiffCollectionCoverage {
+    /// Exact total for the complete Git file scope, or null when that scope hit
+    /// its upstream file cap.
+    pub total: Option<u32>,
+    /// Exact count observed inside the processed file scope before MCP output
+    /// truncation.
+    pub observed_total: u32,
+    pub returned: u32,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation_reason: Option<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SymbolDiffCoverage {
+    pub files_in_diff: SymbolDiffCollectionCoverage,
+    pub added: SymbolDiffCollectionCoverage,
+    pub removed: SymbolDiffCollectionCoverage,
+    pub signature_changed: SymbolDiffCollectionCoverage,
+    pub errors: SymbolDiffCollectionCoverage,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BoundedSymbolDiffResponse {
+    pub schema_version: u32,
+    pub git_ref: String,
+    pub files_in_diff: Vec<String>,
+    pub added: Vec<crate::diff::SymbolRef>,
+    pub removed: Vec<crate::diff::SymbolRef>,
+    pub signature_changed: Vec<crate::diff::SignatureChange>,
+    pub errors: Vec<String>,
+    pub source_truncated: bool,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation_reason: Option<&'static str>,
+    pub row_limit: u32,
+    pub source_file_limit: u32,
+    pub coverage: SymbolDiffCoverage,
+    pub precision_notes: Vec<String>,
+}
+
+pub const SYMBOL_DIFF_DEFAULT_TOP: u32 = 100;
+pub const SYMBOL_DIFF_MAX_TOP: u32 = 500;
+
+fn truncate_symbol_diff_collection<T>(
+    values: &mut Vec<T>,
+    source_truncated: bool,
+    row_limit: usize,
+) -> SymbolDiffCollectionCoverage {
+    let observed_total = u32::try_from(values.len()).unwrap_or(u32::MAX);
+    values.truncate(row_limit);
+    let returned = u32::try_from(values.len()).unwrap_or(u32::MAX);
+    let output_truncated = returned < observed_total;
+    let truncation_reason = match (source_truncated, output_truncated) {
+        (true, true) => Some("source_file_limit_and_top"),
+        (true, false) => Some("source_file_limit"),
+        (false, true) => Some("top"),
+        (false, false) => None,
+    };
+    SymbolDiffCollectionCoverage {
+        total: (!source_truncated).then_some(observed_total),
+        observed_total,
+        returned,
+        truncated: source_truncated || output_truncated,
+        truncation_reason,
+    }
+}
+
+pub fn bounded_symbol_diff_response(
+    mut diff: crate::diff::SymbolDiff,
+    top: u32,
+) -> BoundedSymbolDiffResponse {
+    let top = top.max(1);
+    let row_limit = usize::try_from(top).unwrap_or(usize::MAX);
+    let source_truncated = diff.truncated;
+    let files_in_diff =
+        truncate_symbol_diff_collection(&mut diff.files_in_diff, source_truncated, row_limit);
+    let added = truncate_symbol_diff_collection(&mut diff.added, source_truncated, row_limit);
+    let removed = truncate_symbol_diff_collection(&mut diff.removed, source_truncated, row_limit);
+    let signature_changed =
+        truncate_symbol_diff_collection(&mut diff.signature_changed, source_truncated, row_limit);
+    let errors = truncate_symbol_diff_collection(&mut diff.errors, source_truncated, row_limit);
+    let coverage = SymbolDiffCoverage {
+        files_in_diff,
+        added,
+        removed,
+        signature_changed,
+        errors,
+    };
+    let output_truncated = [
+        &coverage.files_in_diff,
+        &coverage.added,
+        &coverage.removed,
+        &coverage.signature_changed,
+        &coverage.errors,
+    ]
+    .into_iter()
+    .any(|collection| collection.returned < collection.observed_total);
+    let truncated = source_truncated || output_truncated;
+    let truncation_reason = match (source_truncated, output_truncated) {
+        (true, true) => Some("source_file_limit_and_top"),
+        (true, false) => Some("source_file_limit"),
+        (false, true) => Some("top"),
+        (false, false) => None,
+    };
+    BoundedSymbolDiffResponse {
+        schema_version: 1,
+        git_ref: diff.git_ref,
+        files_in_diff: diff.files_in_diff,
+        added: diff.added,
+        removed: diff.removed,
+        signature_changed: diff.signature_changed,
+        errors: diff.errors,
+        source_truncated,
+        truncated,
+        truncation_reason,
+        row_limit: top,
+        source_file_limit: crate::diff::CHANGE_FILE_LIMIT as u32,
+        coverage,
+        precision_notes: vec![
+            "symbol_changes_compare_syntactically_extracted_declarations".to_string(),
+            "signature_changes_use_exact_extracted_signature_strings".to_string(),
+            "null_coverage_totals_mean_the_git_file_scope_hit_its_work_limit".to_string(),
+        ],
+    }
+}
+
 pub const CHANGE_SEED_LIMIT: usize = 200;
 pub const IMPACT_WORK_LIMIT: usize = 5_001;
 
@@ -6862,6 +6990,50 @@ mod tests {
         assert_eq!(graph_limited.count, 0);
         assert!(graph_limited.graph_truncated);
         assert_eq!(graph_limited.truncation_reason, Some("graph_work_limit"));
+    }
+
+    #[test]
+    fn mcp_symbol_diff_preserves_arrays_and_reports_collection_coverage() {
+        let symbol = |index: u32| crate::diff::SymbolRef {
+            file: format!("src/{index}.rs"),
+            name: format!("symbol_{index}"),
+            kind: "function".to_string(),
+            line: index + 1,
+            signature: None,
+        };
+        let mut diff = crate::diff::SymbolDiff {
+            git_ref: "main".to_string(),
+            files_in_diff: vec!["src/0.rs".into(), "src/1.rs".into(), "src/2.rs".into()],
+            added: vec![symbol(0), symbol(1), symbol(2)],
+            removed: vec![symbol(3)],
+            signature_changed: Vec::new(),
+            errors: vec!["a".into(), "b".into(), "c".into()],
+            truncated: false,
+        };
+
+        let bounded = bounded_symbol_diff_response(diff.clone(), 2);
+        assert_eq!(bounded.files_in_diff.len(), 2);
+        assert_eq!(bounded.added.len(), 2);
+        assert_eq!(bounded.removed.len(), 1);
+        assert_eq!(bounded.errors.len(), 2);
+        assert!(bounded.truncated);
+        assert_eq!(bounded.truncation_reason, Some("top"));
+        assert_eq!(bounded.coverage.added.total, Some(3));
+        assert_eq!(bounded.coverage.added.observed_total, 3);
+        assert_eq!(bounded.coverage.added.returned, 2);
+        assert_eq!(bounded.coverage.removed.total, Some(1));
+        assert!(!bounded.coverage.removed.truncated);
+
+        diff.truncated = true;
+        let source_limited = bounded_symbol_diff_response(diff, SYMBOL_DIFF_MAX_TOP);
+        assert_eq!(source_limited.coverage.added.total, None);
+        assert_eq!(source_limited.coverage.added.observed_total, 3);
+        assert!(source_limited.coverage.added.truncated);
+        assert_eq!(
+            source_limited.coverage.added.truncation_reason,
+            Some("source_file_limit")
+        );
+        assert_eq!(source_limited.truncation_reason, Some("source_file_limit"));
     }
 
     #[test]

@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- MCP symbol diffs now bound every returned collection while preserving their
+  flat arrays, expose per-collection coverage, and keep totals unknown when the
+  upstream Git file scope is partial; CLI and audit consumers stay complete.
 - MCP dependency-cycle results now bound both SCC count and total file
   memberships, omit rather than mislabel partial SCCs, and distinguish response
   truncation from an import-graph work cutoff; CLI output stays complete.

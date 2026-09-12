@@ -461,7 +461,10 @@ fn strict_frontmatter_value(
         return Err(());
     }
     Ok(match value {
-        Value::Null => serde_json::Value::Null,
+        // Optional contract fields are omitted when they are not declared.
+        // Accepting an explicit null would silently erase a supplied scope,
+        // signature, caller count, or workflow mode during deserialization.
+        Value::Null => return Err(()),
         Value::Bool(value) => serde_json::Value::Bool(value),
         Value::Number(value) => {
             let value = serde_json::to_value(value).map_err(|_| ())?;
@@ -1181,6 +1184,9 @@ touches:
         for field in [
             "mode: strcit",
             "risk: urgent",
+            "id: null",
+            "title: null",
+            "mode: null",
             "title: 42",
             "id: true",
             "id: 4.2",
@@ -1189,7 +1195,9 @@ touches:
             "touchess: []",
             "touches:\n  - file: 7",
             "touches:\n  - file: src/x.rs\n    language: false",
+            "touches:\n  - file: src/x.rs\n    language: null",
             "touches:\n  - file: src/x.rs\n    symbols:\n      - name: false",
+            "touches:\n  - file: src/x.rs\n    symbols:\n      - name: target\n        signature: null",
             "touches:\n  - file: src/x.rs\n    symbols:\n      - name: target\n        callers: '4'",
             "touches:\n  - file: src/x.rs\n    symbolz: []",
             "touches:\n  - file: src/x.rs\n    symbols:\n      - name: target\n        callerz: 1",
@@ -1198,6 +1206,7 @@ touches:
             "verify:\n  - cmd: echo checked\n    result: pass",
             "expected_docs: [true]",
             "breaking_changes:\n  removed_symbols: [7]",
+            "breaking_changes:\n  removed_symbols:\n    - name: old_api\n      reason: null",
             "breaking_changes:\n  removed_symbolz: []",
         ] {
             let parsed = parse_str(

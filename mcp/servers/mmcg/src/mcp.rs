@@ -1943,7 +1943,7 @@ fn schema_symbols_changed_since() -> Value {
             "type": "object",
             "properties": {
                 "git_ref": { "type": "string", "description": "Git ref to diff against (tag, branch, commit, HEAD~3, main, etc.). Must resolve via `git rev-parse`." },
-                "root": { "type": "string", "description": "Project root — symbol paths are relative to this. Defaults to the index's working directory." }
+                "root": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Project root — symbol paths are relative to this. Defaults to the index's working directory." }
             },
             "required": ["git_ref"]
         }
@@ -2036,7 +2036,7 @@ fn schema_temporal() -> Value {
             "type": "object",
             "properties": {
                 "since": { "type": "string", "description": "Git ref used as the baseline" },
-                "root": { "type": "string", "description": "Repository root; defaults to the index binding" },
+                "root": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Repository root; defaults to the index binding" },
                 "path": { "type": "string", "default": ".", "description": "Repository-relative architecture scope" },
                 "depth": { "type": "integer", "minimum": 1, "maximum": 5, "default": 2 },
                 "top": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
@@ -2133,7 +2133,7 @@ fn impact_input_schema(name: &str, description: &str) -> Value {
             "type": "object",
             "properties": {
                 "since": { "type": "string", "description": "Git ref used as the baseline" },
-                "root": { "type": "string", "description": "Repository root or a subdirectory within the indexed repository" },
+                "root": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Repository root or a subdirectory within the indexed repository" },
                 "depth": { "type": "integer", "minimum": 1, "maximum": 5, "default": 3 },
                 "top": { "type": "integer", "minimum": 1, "maximum": 500, "default": 100 }
             },
@@ -2168,6 +2168,8 @@ fn schema_brief() -> Value {
                 },
                 "root": {
                     "type": "string",
+                    "minLength": 1,
+                    "pattern": NON_BLANK_PATTERN,
                     "description": "Indexed repository root; defaults to the index identity"
                 },
                 "budget_tokens": {
@@ -2425,11 +2427,17 @@ fn changed_since_root(
         .ok_or_else(|| HandlerError::InvalidArguments("index_stale".into()))?
         .canonicalize()
         .map_err(|_| HandlerError::InvalidArguments("root_mismatch".into()))?;
-    let requested = root_arg
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| stored.clone())
-        .canonicalize()
-        .map_err(|_| HandlerError::InvalidArguments("root_mismatch".into()))?;
+    let requested = match root_arg {
+        None => stored.clone(),
+        Some(value) if value.trim().is_empty() => {
+            return Err(HandlerError::InvalidArguments(
+                "Invalid argument: root".into(),
+            ))
+        }
+        Some(value) => std::path::PathBuf::from(value)
+            .canonicalize()
+            .map_err(|_| HandlerError::InvalidArguments("root_mismatch".into()))?,
+    };
     if requested != stored {
         return Err(HandlerError::InvalidArguments("root_mismatch".into()));
     }
@@ -2597,7 +2605,7 @@ fn handle_temporal(store: &mut Store, args: &Value) -> Result<Value, HandlerErro
             .ok_or_else(|| HandlerError::InvalidArguments("index_stale".to_string()))?
             .canonicalize()
             .map_err(|_| HandlerError::InvalidArguments("root_mismatch".to_string()))?,
-        Some(Value::String(value)) => std::path::PathBuf::from(value)
+        Some(Value::String(value)) if !value.trim().is_empty() => std::path::PathBuf::from(value)
             .canonicalize()
             .map_err(|_| HandlerError::InvalidArguments("root_mismatch".to_string()))?,
         Some(_) => {
@@ -2752,7 +2760,7 @@ fn impact_arguments(
     let since = str_arg(args, "since")?.to_string();
     let root = match args.get("root") {
         None => changed_since_root(store, None)?,
-        Some(Value::String(value)) => std::path::PathBuf::from(value)
+        Some(Value::String(value)) if !value.trim().is_empty() => std::path::PathBuf::from(value)
             .canonicalize()
             .map_err(|_| HandlerError::InvalidArguments("root_mismatch".to_string()))?,
         Some(_) => {
@@ -3053,7 +3061,7 @@ fn brief_arguments(
         .map_err(|error| map_brief_error(store, error))?;
     let root_arg = match args.get("root") {
         None => None,
-        Some(Value::String(value)) => Some(value.as_str()),
+        Some(Value::String(value)) if !value.trim().is_empty() => Some(value.as_str()),
         Some(_) => {
             return Err(HandlerError::StructuredInvalid {
                 code: "invalid_arguments",
@@ -4040,6 +4048,11 @@ mod tests {
             ("mmcg_tasks", &["query"]),
             ("mmcg_history", &["query"]),
             ("mmcg_centrality", &["kind"]),
+            ("mmcg_symbols_changed_since", &["root"]),
+            ("mmcg_temporal", &["root"]),
+            ("mmcg_change_impact", &["root"]),
+            ("mmcg_test_impact", &["root"]),
+            ("mmcg_brief", &["root"]),
             ("mmcg_scratchpad_append", &["agent", "kind", "body"]),
             ("mmcg_scratchpad_read", &["agent", "kind"]),
             ("mmcg_change_class", &["file"]),
@@ -4192,6 +4205,21 @@ mod tests {
             (
                 handle_symbols_changed_since,
                 json!({ "git_ref": "HEAD", "root": false }),
+                "Invalid argument: root",
+            ),
+            (
+                handle_symbols_changed_since,
+                json!({ "git_ref": "HEAD", "root": " " }),
+                "Invalid argument: root",
+            ),
+            (
+                handle_temporal,
+                json!({ "since": "HEAD", "root": "" }),
+                "Invalid argument: root",
+            ),
+            (
+                handle_change_impact,
+                json!({ "since": "HEAD", "root": "\t" }),
                 "Invalid argument: root",
             ),
             (
@@ -5078,6 +5106,7 @@ mod tests {
             json!({ "role": "planner", "since": "-HEAD", "budget_tokens": 2000 }),
             json!({ "role": "planner", "since": "definitely-missing-ref", "budget_tokens": 2000 }),
             json!({ "role": "planner", "since": "HEAD", "root": false }),
+            json!({ "role": "planner", "since": "HEAD", "root": " " }),
         ] {
             let result = handle_tools_call(
                 ProtocolVersion::Current,
@@ -5713,6 +5742,10 @@ mod checks {
 
         let explicit = changed_since_root(&store, Some(tmp.path().to_str().unwrap())).unwrap();
         assert_eq!(explicit, tmp.path().canonicalize().unwrap());
+        assert!(matches!(
+            changed_since_root(&store, Some("")),
+            Err(HandlerError::InvalidArguments(message)) if message == "Invalid argument: root"
+        ));
         let unrelated = tempfile::tempdir().unwrap();
         assert!(matches!(
             changed_since_root(&store, Some(unrelated.path().to_str().unwrap())),

@@ -4923,7 +4923,7 @@ fn read_task_state(
             ));
         }
     };
-    let state: TaskState = serde_json::from_slice(&file.bytes)
+    let state: crate::run_task::RunState = serde_json::from_slice(&file.bytes)
         .map_err(|error| format!("cannot parse task state {}: {error}", path.display()))?;
     if !matches!(
         state.status.as_str(),
@@ -4942,7 +4942,14 @@ fn read_task_state(
             state.status
         ));
     }
-    Ok(Some(state))
+    Ok(Some(TaskState {
+        status: state.status,
+        history_snapshot_sha256: state.history_snapshot_sha256,
+        risk: state.risk,
+        next_step: state.next_step,
+        blocking_reason: state.blocking_reason,
+        last_artifact: state.last_artifact,
+    }))
 }
 
 fn detect_phase(
@@ -4999,6 +5006,26 @@ mod tests {
     use super::*;
     use std::fs;
     use std::process::Command;
+
+    fn controller_state(spec: &Path, status: &str) -> crate::run_task::RunState {
+        crate::run_task::RunState {
+            status: status.into(),
+            risk: Some("low".into()),
+            next_step: Some("run_executor".into()),
+            blocking_reason: None,
+            last_artifact: Some("spec.md".into()),
+            spec_path: spec.display().to_string(),
+            spec_hash: "0".repeat(64),
+            baseline_ref: "0".repeat(40),
+            held_snapshot_sha256: None,
+            held_snapshot_version: crate::run_task::STRICT_SNAPSHOT_VERSION,
+            history_snapshot_sha256: None,
+            started_at: 1,
+            iteration: 1,
+            allow_no_index: false,
+            strict: false,
+        }
+    }
 
     fn init_git_repository(root: &Path) {
         let output = Command::new("git")
@@ -6053,14 +6080,29 @@ mod tests {
 
     #[test]
     fn malformed_or_unknown_task_state_is_held() {
-        for (state, expected) in [
-            ("{broken", "cannot parse task state"),
-            (r#"{"status":"future_state"}"#, "unsupported status"),
-        ] {
+        for case in ["malformed", "future_status", "unknown_field"] {
             let root = tempfile::tempdir().unwrap();
             let task = root.path().join(".mastermind/tasks/001-ambiguous");
             fs::create_dir_all(&task).unwrap();
-            fs::write(task.join("spec.md"), "# Ambiguous\n").unwrap();
+            let spec = task.join("spec.md");
+            fs::write(&spec, "# Ambiguous\n").unwrap();
+            let (state, expected) = match case {
+                "malformed" => (b"{broken".to_vec(), "cannot parse task state"),
+                "future_status" => (
+                    serde_json::to_vec(&controller_state(&spec, "future_state")).unwrap(),
+                    "unsupported status",
+                ),
+                "unknown_field" => {
+                    let mut state =
+                        serde_json::to_value(controller_state(&spec, "learned")).unwrap();
+                    state
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("stats".into(), serde_json::json!({"status": "complete"}));
+                    (serde_json::to_vec(&state).unwrap(), "unknown field `stats`")
+                }
+                _ => unreachable!(),
+            };
             fs::write(task.join("state.json"), state).unwrap();
 
             let status = WorkflowStatus::scan(root.path());
@@ -6232,14 +6274,10 @@ mod tests {
         let spec = task.join("spec.md");
         fs::write(&spec, "# Revised\n").unwrap();
         fs::write(task.join("executor-report.md"), "old report\n").unwrap();
-        fs::write(
-            task.join("state.json"),
-            r#"{
-            "status":"held", "next_step":"run_preflight",
-            "blocking_reason":"spec changed since approval"
-        }"#,
-        )
-        .unwrap();
+        let mut state = controller_state(&spec, "held");
+        state.next_step = Some("run_preflight".into());
+        state.blocking_reason = Some("spec changed since approval".into());
+        fs::write(task.join("state.json"), serde_json::to_vec(&state).unwrap()).unwrap();
         let status = WorkflowStatus::scan(root.path());
         assert_eq!(status.tasks[0].phase, TaskPhase::Held);
         let action = status.next_action().unwrap();

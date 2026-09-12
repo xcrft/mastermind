@@ -1380,6 +1380,9 @@ scope, symbol, verification, and breaking-change keys cannot disappear silently.
 String contract fields also require YAML strings; unquoted numbers and booleans
 cannot be coerced into file paths, symbol names, commands, or labels. Integer
 task IDs remain accepted for compatibility and are normalized to strings.
+Explicit YAML nulls are rejected recursively: optional fields must be omitted,
+so a written scope, signature, caller count, or workflow setting cannot silently
+turn into an absent declaration.
 `mode` accepts `verified` and `strict` plus legacy `lite` and `standard`; `risk`
 accepts only `low`, `medium`, or `high`.
 

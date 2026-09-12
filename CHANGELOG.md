@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Spec frontmatter now rejects explicit YAML nulls recursively, preventing a
+  written scope, signature, caller count, or workflow field from silently
+  deserializing as an absent declaration.
 - Review summary text now escapes backslashes and every other Markdown
   punctuation mark, so a repository or diagnostic label cannot neutralize a
   later escape and reshape the rendered evidence.

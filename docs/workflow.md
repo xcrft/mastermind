@@ -99,6 +99,11 @@ design criticism, and independent review. A security review is required when
 the change crosses authentication, authorization, secrets, tool permissions,
 agent delegation, or the supply chain.
 
+A held strict code task must persist an exact architecture-policy snapshot of
+every declared touch file. If that bounded snapshot cannot be created,
+post-flight is broken and semantic review, release notes, and task completion
+remain blocked.
+
 Strict is not a larger template for ordinary work. If no material failure mode
 or difficult rollback exists, Verified is the clearer contract.
 

@@ -3743,25 +3743,50 @@ pub fn imports(
     })
 }
 
-/// `match_kind`: "name" (default) matches the leaf binding;
-/// "path" matches the fully-qualified import path exactly.
+/// Symbols syntactically extracted from one indexed file.
 #[derive(Debug, Serialize)]
 pub struct SymbolsInFileResponse {
     pub file: String,
+    pub total: u32,
     pub count: u32,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_limit: Option<u32>,
     pub symbols: Vec<SymbolHit>,
+    pub precision_notes: Vec<String>,
 }
 
-pub fn symbols_in_file(store: &Store, file: &str) -> rusqlite::Result<SymbolsInFileResponse> {
-    let syms: Vec<SymbolHit> = store
-        .symbols_in_file(file)?
-        .into_iter()
-        .map(SymbolHit::from)
-        .collect();
+pub const SYMBOLS_IN_FILE_DEFAULT_TOP: u32 = 200;
+pub const SYMBOLS_IN_FILE_MAX_TOP: u32 = 500;
+
+pub fn symbols_in_file(
+    store: &Store,
+    file: &str,
+    row_limit: Option<u32>,
+) -> rusqlite::Result<SymbolsInFileResponse> {
+    let (total, symbols) = match row_limit {
+        Some(limit) => {
+            store.symbols_in_file_bounded(file, usize::try_from(limit).unwrap_or(usize::MAX))?
+        }
+        None => {
+            let symbols = store.symbols_in_file(file)?;
+            let total = u32::try_from(symbols.len()).unwrap_or(u32::MAX);
+            (total, symbols)
+        }
+    };
+    let syms: Vec<SymbolHit> = symbols.into_iter().map(SymbolHit::from).collect();
+    let count = u32::try_from(syms.len()).unwrap_or(u32::MAX);
     Ok(SymbolsInFileResponse {
         file: file.to_string(),
-        count: syms.len() as u32,
+        total,
+        count,
+        truncated: row_limit.is_some() && total > count,
+        row_limit,
         symbols: syms,
+        precision_notes: vec![
+            "symbols_are_syntactically_extracted_not_compiler_resolved".to_string(),
+            "generated_or_dynamic_declarations_may_be_missing".to_string(),
+        ],
     })
 }
 
@@ -6180,6 +6205,42 @@ mod tests {
             .any(|note| note == "dynamic_imports_and_runtime_loading_may_be_missing"));
 
         let complete = imports(&store, "src/app.rs", None).unwrap();
+        assert_eq!(complete.total, 3);
+        assert_eq!(complete.count, 3);
+        assert_eq!(complete.row_limit, None);
+        assert!(!complete.truncated);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn symbols_in_file_response_reports_exact_total_and_bounded_rows() {
+        let path = tmp_db("symbols_in_file_response_limit");
+        let store = Store::open(&path).unwrap();
+        for (name, line) in [("alpha", 1), ("beta", 2), ("gamma", 3)] {
+            store
+                .insert_symbol(name, "function", "src/app.rs", line, line, None, None)
+                .unwrap();
+        }
+
+        let bounded = symbols_in_file(&store, "src/app.rs", Some(2)).unwrap();
+        assert_eq!(bounded.total, 3);
+        assert_eq!(bounded.count, 2);
+        assert_eq!(bounded.row_limit, Some(2));
+        assert!(bounded.truncated);
+        assert_eq!(
+            bounded
+                .symbols
+                .iter()
+                .map(|symbol| symbol.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "beta"]
+        );
+        assert!(bounded
+            .precision_notes
+            .iter()
+            .any(|note| note == "symbols_are_syntactically_extracted_not_compiler_resolved"));
+
+        let complete = symbols_in_file(&store, "src/app.rs", None).unwrap();
         assert_eq!(complete.total, 3);
         assert_eq!(complete.count, 3);
         assert_eq!(complete.row_limit, None);

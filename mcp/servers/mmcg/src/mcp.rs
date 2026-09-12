@@ -1842,7 +1842,8 @@ fn schema_symbols_in_file() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "file": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Relative file path (as it appears in the index)" }
+                "file": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Relative file path (as it appears in the index)" },
+                "top": { "type": "integer", "minimum": 1, "maximum": queries::SYMBOLS_IN_FILE_MAX_TOP, "default": queries::SYMBOLS_IN_FILE_DEFAULT_TOP, "description": "Maximum syntactically extracted symbols to return" }
             },
             "required": ["file"]
         }
@@ -2372,8 +2373,15 @@ fn handle_impact(store: &mut Store, args: &Value) -> Result<Value, HandlerError>
 
 fn handle_symbols_in_file(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let file = non_blank_str_arg(args, "file")?;
+    let top = bounded_u64_arg(
+        args,
+        "top",
+        u64::from(queries::SYMBOLS_IN_FILE_DEFAULT_TOP),
+        1,
+        u64::from(queries::SYMBOLS_IN_FILE_MAX_TOP),
+    )? as u32;
     ensure_fresh_index(store)?;
-    let r = queries::symbols_in_file(store, file)
+    let r = queries::symbols_in_file(store, file, Some(top))
         .map_err(|error| HandlerError::internal("symbols_in_file_query", error))?;
     serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
@@ -4227,6 +4235,11 @@ mod tests {
                 "Invalid argument: top",
             ),
             (handle_files, json!({ "top": 0 }), "Invalid argument: top"),
+            (
+                handle_symbols_in_file,
+                json!({ "file": "src/app.py", "top": 501 }),
+                "Invalid argument: top",
+            ),
             (
                 handle_imports,
                 json!({ "file": "src/app.py", "top": 501 }),

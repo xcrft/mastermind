@@ -719,7 +719,7 @@ fn execute(store: &Store, q: QueryCmd) -> Result<Value, Box<dyn std::error::Erro
             None,
         )?)?,
         QueryCmd::SymbolsInFile { file } => {
-            serde_json::to_value(queries::symbols_in_file(store, &file)?)?
+            serde_json::to_value(queries::symbols_in_file(store, &file, None)?)?
         }
         QueryCmd::Outline { file } => serde_json::to_value(queries::outline(store, &file)?)?,
         QueryCmd::Imports { file } => serde_json::to_value(queries::imports(store, &file, None)?)?,

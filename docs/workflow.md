@@ -138,10 +138,12 @@ directory after syncing the private temporary file. A process interruption
 therefore leaves either the previous complete state or the next complete state.
 The controller rejects unknown state fields and unsupported lifecycle statuses
 instead of applying legacy defaults or continuing from a misspelled or newer
-contract. It applies the same validation before writing state. `status`, `next`,
-and `resume` project their display fields only after that complete controller
-schema has been validated. Context health checks use the full state contract too,
-so partial completion records cannot enter the semantic review queue.
+contract. It also rejects unsupported risk values and incompatible
+`status`/`next_step` pairs. The same validation runs before writing state and in
+every workflow evidence reader. `status`, `next`, and `resume` project display
+fields only after that complete controller contract has been validated. Context
+health checks use the full state contract too, so partial completion records
+cannot enter the semantic review queue.
 Task-like inventory entries must be no-follow directories containing `spec.md`;
 malformed entries are surfaced as blocked workflow state instead of disappearing.
 The same repository-bound replacement protects controller-written `audit.md`,

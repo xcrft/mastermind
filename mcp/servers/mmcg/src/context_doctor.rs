@@ -748,7 +748,7 @@ fn read_task_state_with_capability(
         MAX_TASK_STATE_SIZE,
         crate::bounded_fs::ReadControl::default(),
     ) {
-        Ok(file) => serde_json::from_slice(&file.bytes)
+        Ok(file) => crate::run_task::parse_run_state(&file.bytes)
             .map(Some)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
         Err(crate::bounded_fs::BoundedReadError::Io(error))

@@ -11,6 +11,7 @@ use crate::diff::{run_bounded_git_with_limit, WorkingTreeDiffError};
 use crate::evidence::{EvidenceExtensionOptions, EvidenceOptions};
 use crate::indexer::{extractor_for_path, parse_blob, MAX_INDEXABLE_FILE_SIZE};
 use crate::queries::{ChangeImpactResponse, ImpactEngine};
+#[cfg(test)]
 use crate::run_task::RunState;
 use crate::store::{PendingFile, Store};
 use std::collections::{BTreeMap, BTreeSet};
@@ -736,7 +737,7 @@ fn collect_workflow_evidence(
         else {
             continue;
         };
-        let Ok(state) = serde_json::from_str::<RunState>(&state_body) else {
+        let Ok(state) = crate::run_task::parse_run_state(state_body.as_bytes()) else {
             continue;
         };
         if state.baseline_ref != baseline_oid

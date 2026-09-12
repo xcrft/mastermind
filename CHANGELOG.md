@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- All workflow state readers now share one semantic decoder that rejects invalid
+  risk values and incompatible `status`/`next_step` pairs, preventing divergent
+  readiness decisions from the same state file.
 - Workflow status now blocks on malformed task-like inventory entries and holds
   canonical task directories that lack `spec.md`, instead of silently omitting
   them from readiness and completion decisions.

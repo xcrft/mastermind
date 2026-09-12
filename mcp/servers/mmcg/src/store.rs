@@ -7684,7 +7684,31 @@ impl Store {
         kind: Option<&str>,
         limit: u32,
     ) -> SqlResult<Vec<ScratchpadEntry>> {
-        let mut sql = String::from("SELECT id, ts, agent, kind, body FROM scratchpad WHERE 1=1");
+        self.scratchpad_read_rows(since_ts, agent, kind, limit)
+            .map(|(_, entries)| entries)
+    }
+
+    pub(crate) fn scratchpad_read_bounded(
+        &self,
+        since_ts: Option<i64>,
+        agent: Option<&str>,
+        kind: Option<&str>,
+        limit: u32,
+    ) -> SqlResult<(u32, Vec<ScratchpadEntry>)> {
+        self.scratchpad_read_rows(since_ts, agent, kind, limit)
+    }
+
+    fn scratchpad_read_rows(
+        &self,
+        since_ts: Option<i64>,
+        agent: Option<&str>,
+        kind: Option<&str>,
+        limit: u32,
+    ) -> SqlResult<(u32, Vec<ScratchpadEntry>)> {
+        let mut sql = String::from(
+            "SELECT id, ts, agent, kind, body, COUNT(*) OVER() AS total
+             FROM scratchpad WHERE 1=1",
+        );
         let mut params_dyn: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(ts) = since_ts {
             sql.push_str(" AND ts >= ?");
@@ -7699,22 +7723,33 @@ impl Store {
             params_dyn.push(Box::new(k.to_string()));
         }
         sql.push_str(" ORDER BY ts DESC, id DESC LIMIT ?");
-        params_dyn.push(Box::new(limit as i64));
+        params_dyn.push(Box::new(i64::from(limit.max(1))));
 
         let bound: Vec<&dyn rusqlite::ToSql> = params_dyn.iter().map(|p| p.as_ref()).collect();
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt
-            .query_map(rusqlite::params_from_iter(bound), |r| {
-                Ok(ScratchpadEntry {
-                    id: r.get(0)?,
-                    ts: r.get(1)?,
-                    agent: r.get(2)?,
-                    kind: r.get(3)?,
-                    body: r.get(4)?,
-                })
-            })?
-            .collect::<SqlResult<Vec<_>>>()?;
-        Ok(rows)
+        let rows = stmt.query_map(rusqlite::params_from_iter(bound), |row| {
+            Ok((
+                ScratchpadEntry {
+                    id: row.get(0)?,
+                    ts: row.get(1)?,
+                    agent: row.get(2)?,
+                    kind: row.get(3)?,
+                    body: row.get(4)?,
+                },
+                row.get::<_, i64>(5)?,
+            ))
+        })?;
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        let mut total = 0_i64;
+        let mut entries = Vec::new();
+        for row in rows {
+            let (entry, row_total) = row?;
+            total = row_total;
+            if entries.len() < limit {
+                entries.push(entry);
+            }
+        }
+        Ok((total.clamp(0, i64::from(u32::MAX)) as u32, entries))
     }
 }
 
@@ -9922,9 +9957,16 @@ mod tests {
         assert_eq!(since_second[0].agent, "executor");
 
         // Limit.
-        let only_one = store.scratchpad_read(None, None, None, 1).unwrap();
+        let (total, only_one) = store.scratchpad_read_bounded(None, None, None, 1).unwrap();
+        assert_eq!(total, 2);
         assert_eq!(only_one.len(), 1);
         assert_eq!(only_one[0].agent, "executor");
+
+        let (filtered_total, filtered) = store
+            .scratchpad_read_bounded(None, Some("planner"), Some("intent"), 1)
+            .unwrap();
+        assert_eq!(filtered_total, 1);
+        assert_eq!(filtered.len(), 1);
     }
 
     #[test]

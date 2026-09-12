@@ -2278,14 +2278,14 @@ fn schema_scratchpad_append() -> Value {
 fn schema_scratchpad_read() -> Value {
     json!({
         "name": "mmcg_scratchpad_read",
-        "description": "Read recent scratchpad entries, newest first. All filters optional — call with no args to get the last 20 entries. Use `since` (unix seconds) to grab everything since you last checked.",
+        "description": "Read recent scratchpad entries, newest first. All filters optional — call with no args to get the last 20 entries. Use `since` (unix seconds) to grab entries since you last checked. The response echoes the effective filters and reports exact filtered coverage and truncation.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "since": { "type": "integer", "description": "Unix timestamp (seconds). Only entries with `ts >= since` are returned." },
                 "agent": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Filter by agent identifier." },
                 "kind": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Filter by entry kind." },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 20, "description": "Max entries returned." }
+                "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 20, "description": "Maximum entries returned; exact filtered total and truncation are reported." }
             }
         }
     })
@@ -3396,8 +3396,7 @@ fn handle_scratchpad_read(store: &mut Store, args: &Value) -> Result<Value, Hand
     let kind = opt_non_blank_str_arg(args, "kind")?;
     let limit = bounded_u64_arg(args, "limit", 20, 1, 200)? as u32;
     ensure_schema_compatible(store)?;
-    let r = store
-        .scratchpad_read(since, agent, kind, limit)
+    let r = queries::scratchpad_read(store, since, agent, kind, limit)
         .map_err(|error| HandlerError::internal("scratchpad_read", error))?;
     serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
@@ -6032,7 +6031,14 @@ mod checks {
         )
         .unwrap();
         let read = unwrap_content(&read_env);
-        let arr = read.as_array().unwrap();
+        assert_eq!(read["since"], Value::Null);
+        assert_eq!(read["agent"], Value::Null);
+        assert_eq!(read["kind"], Value::Null);
+        assert_eq!(read["total"], 1);
+        assert_eq!(read["count"], 1);
+        assert_eq!(read["truncated"], false);
+        assert_eq!(read["limit"], 10);
+        let arr = read["entries"].as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["agent"], "planner");
         assert_eq!(arr[0]["kind"], "intent");

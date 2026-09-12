@@ -4,8 +4,8 @@
 //! and JSON serialization for the MCP layer.
 
 use crate::store::{
-    FileEntry, InterruptSource, MapBoundaryMatch, MapBoundaryScope, ProjectHistoryHit, Store,
-    Symbol, TaskSpecHit,
+    FileEntry, InterruptSource, MapBoundaryMatch, MapBoundaryScope, ProjectHistoryHit,
+    ScratchpadEntry, Store, Symbol, TaskSpecHit,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -680,6 +680,39 @@ pub struct CentralityResponse {
 
 pub const CENTRALITY_DEFAULT_TOP: u32 = 20;
 pub const CENTRALITY_MAX_TOP: u32 = 200;
+
+#[derive(Debug, Serialize)]
+pub struct ScratchpadReadResponse {
+    pub since: Option<i64>,
+    pub agent: Option<String>,
+    pub kind: Option<String>,
+    pub total: u32,
+    pub count: u32,
+    pub truncated: bool,
+    pub limit: u32,
+    pub entries: Vec<ScratchpadEntry>,
+}
+
+pub fn scratchpad_read(
+    store: &Store,
+    since: Option<i64>,
+    agent: Option<&str>,
+    kind: Option<&str>,
+    limit: u32,
+) -> rusqlite::Result<ScratchpadReadResponse> {
+    let (total, entries) = store.scratchpad_read_bounded(since, agent, kind, limit)?;
+    let count = u32::try_from(entries.len()).unwrap_or(u32::MAX);
+    Ok(ScratchpadReadResponse {
+        since,
+        agent: agent.map(String::from),
+        kind: kind.map(String::from),
+        total,
+        count,
+        truncated: count < total,
+        limit,
+        entries,
+    })
+}
 
 #[derive(Debug, Serialize)]
 pub struct TaskSearchResponse {

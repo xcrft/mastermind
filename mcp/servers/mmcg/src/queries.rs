@@ -3725,15 +3725,41 @@ pub fn classify_change(
     root: &std::path::Path,
     rel_path: &str,
 ) -> Result<ChangeClassReport, String> {
+    classify_change_using(store, root, rel_path, || {})
+}
+
+fn classify_change_using(
+    store: &crate::store::Store,
+    root: &std::path::Path,
+    rel_path: &str,
+    after_read: impl FnOnce(),
+) -> Result<ChangeClassReport, String> {
+    let data_version_before = store
+        .data_version()
+        .map_err(|error| format!("read index revision: {error}"))?;
+    let read_snapshot = StoreReadSnapshot::begin(store)
+        .map_err(|error| format!("begin index snapshot: {error}"))?;
+    let stored = store
+        .file_fingerprint(rel_path)
+        .map_err(|error| format!("read fingerprint for {rel_path}: {error}"))?;
     let full_path = root.join(rel_path);
     let extractor = crate::indexer::extractor_for_path(&full_path)
         .ok_or_else(|| format!("no extractor for {rel_path}"))?;
     let pending = crate::indexer::parse_one(&full_path, root, extractor.as_ref())
         .map_err(|e| format!("parse {rel_path}: {e:?}"))?;
     let current = crate::fingerprint::compute_structural_fingerprint(&pending);
-    let stored = store
-        .file_fingerprint(rel_path)
-        .map_err(|e| format!("read fingerprint for {rel_path}: {e}"))?;
+    after_read();
+    read_snapshot
+        .finish()
+        .map_err(|_| "snapshot_changed".to_string())?;
+    if store
+        .data_version()
+        .map_err(|_| "snapshot_changed".to_string())?
+        != data_version_before
+        || store.ensure_source_snapshot_current().is_err()
+    {
+        return Err("snapshot_changed".into());
+    }
     let class = match stored.as_deref() {
         None => ChangeClass::FirstSeen,
         Some("") => ChangeClass::FirstSeen,
@@ -4420,6 +4446,24 @@ mod tests {
         p.push(format!("mmcg-queries-{}-{}.db", std::process::id(), name));
         let _ = std::fs::remove_file(&p);
         p
+    }
+
+    #[test]
+    fn change_class_rejects_an_index_update_during_comparison() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("sample.rs");
+        std::fs::write(&source, "fn sample() {}\n").unwrap();
+        let database = root.path().join("mmcg.db");
+        let mut store = Store::open(&database).unwrap();
+        crate::indexer::Indexer::new(root.path())
+            .index_all(&mut store, true)
+            .unwrap();
+        let second = Store::open(&database).unwrap();
+
+        let result = classify_change_using(&store, root.path(), "sample.rs", || {
+            second.set_meta("concurrent_update", "observed").unwrap();
+        });
+        assert_eq!(result.unwrap_err(), "snapshot_changed");
     }
 
     #[test]

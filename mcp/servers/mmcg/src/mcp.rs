@@ -3244,8 +3244,13 @@ fn handle_change_class(store: &mut Store, args: &Value) -> Result<Value, Handler
         .ok_or_else(|| HandlerError::InvalidArguments("Invalid argument: file".into()))?;
     ensure_schema_compatible(store)?;
     let root = changed_since_root(store, None)?;
-    let r = queries::classify_change(store, &root, &file)
-        .map_err(|error| HandlerError::internal("change_class_query", error))?;
+    let r = queries::classify_change(store, &root, &file).map_err(|error| {
+        if error == "snapshot_changed" {
+            HandlerError::SnapshotChanged
+        } else {
+            HandlerError::internal("change_class_query", error)
+        }
+    })?;
     serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
 

@@ -15,7 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - `mmcg_change_class` now resolves normalized repository-relative files against
-  the root bound into the index, independent of the MCP process directory.
+  the root bound into the index, independent of the MCP process directory, and
+  rejects comparisons spanning an index update.
 - MCP research tools now reject unknown fields, unsupported enumerated values,
   explicit optional arguments with the wrong type, and out-of-schema ranges
   instead of silently dropping, clamping, wrapping, or changing the query.

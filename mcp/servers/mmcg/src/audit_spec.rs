@@ -34,6 +34,9 @@ use crate::spec::{ParsedSpec, SymbolClaim};
 use crate::spec_removals;
 use crate::spec_symbols::{self, Resolved, Scope, Unresolved};
 use crate::store::Store;
+use crate::terminal::{
+    escape as escape_terminal, escape_json_line as escape_json_terminal_controls,
+};
 use crate::test_scan::TestScanner;
 use crate::verification::{pass_contradiction, PassContradiction};
 use serde::Serialize;
@@ -179,43 +182,6 @@ struct TextEvidence<'a> {
     symbol_diff: &'a Option<SymbolDiff>,
     claim_checks: &'a Option<Vec<ClaimCheck>>,
     executor_report: &'a Option<ExecutorReport>,
-}
-
-fn unsafe_terminal_character(character: char) -> bool {
-    character.is_control()
-        || matches!(
-            character,
-            '\u{0080}'..='\u{009f}'
-                | '\u{061c}'
-                | '\u{200e}'
-                | '\u{200f}'
-                | '\u{202a}'..='\u{202e}'
-                | '\u{2066}'..='\u{2069}'
-        )
-}
-
-fn escape_terminal(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        if unsafe_terminal_character(character) {
-            escaped.extend(character.escape_unicode());
-        } else {
-            escaped.push(character);
-        }
-    }
-    escaped
-}
-
-fn escape_json_terminal_controls(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        if unsafe_terminal_character(character) {
-            escaped.push_str(&format!("\\u{:04x}", character as u32));
-        } else {
-            escaped.push(character);
-        }
-    }
-    escaped
 }
 
 fn append_indented_json<T: Serialize>(out: &mut String, value: &T) {
@@ -1896,7 +1862,7 @@ mod tests {
         assert!(text.contains("parse\\u202efailed"));
         assert!(text
             .chars()
-            .all(|character| character == '\n' || !unsafe_terminal_character(character)));
+            .all(|character| character == '\n' || !crate::terminal::unsafe_character(character)));
         let structured = text
             .split_once("Structured audit evidence (JSON; null means not evaluated):\n")
             .unwrap()

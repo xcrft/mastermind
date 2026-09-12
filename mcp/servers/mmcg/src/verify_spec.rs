@@ -17,6 +17,7 @@ use crate::spec::{self, ParsedSpec, SymbolClaim, TouchEntry};
 use crate::spec_removals;
 use crate::spec_symbols::{self, Resolved, Scope, Unresolved};
 use crate::store::Store;
+use crate::terminal::escape as escape_terminal;
 use serde::Serialize;
 use std::path::Path;
 use std::time::Instant;
@@ -64,6 +65,13 @@ pub enum Verdict {
     Pass,
     Warn,
     Fail,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexCheckStatus {
+    Evaluated,
+    NotEvaluated,
 }
 
 /// Tagged finding: `kind` is the machine-readable category, fields are the
@@ -148,6 +156,8 @@ pub enum Finding {
 pub struct Report {
     pub spec: String,
     pub verdict: Verdict,
+    /// Whether live symbol existence, snapshot, and blast-radius checks ran.
+    pub index_checks: IndexCheckStatus,
     pub errors: Vec<Finding>,
     pub warnings: Vec<Finding>,
 }
@@ -161,17 +171,25 @@ impl Report {
             Verdict::Fail => "❌",
         };
         out.push_str(&format!(
-            "{marker} {:?} — {}\n  errors: {}, warnings: {}\n\n",
+            "{marker} {:?} — {}\n  errors: {}, warnings: {}\n",
             self.verdict,
-            self.spec,
+            escape_terminal(&self.spec),
             self.errors.len(),
             self.warnings.len(),
         ));
+        match self.index_checks {
+            IndexCheckStatus::Evaluated => {
+                out.push_str("  index-backed checks: evaluated\n\n");
+            }
+            IndexCheckStatus::NotEvaluated => out.push_str(
+                "  index-backed checks: not evaluated (no populated index; symbol existence, snapshots, and blast radius were skipped)\n\n",
+            ),
+        }
         for e in &self.errors {
-            out.push_str(&format!("  ❌ {}\n", render_finding(e)));
+            out.push_str(&format!("  ❌ {}\n", escape_terminal(&render_finding(e))));
         }
         for w in &self.warnings {
-            out.push_str(&format!("  ⚠️  {}\n", render_finding(w)));
+            out.push_str(&format!("  ⚠️  {}\n", escape_terminal(&render_finding(w))));
         }
         out
     }
@@ -417,6 +435,11 @@ fn run_internal(
     Report {
         spec: spec.path.clone(),
         verdict,
+        index_checks: if store.is_some() {
+            IndexCheckStatus::Evaluated
+        } else {
+            IndexCheckStatus::NotEvaluated
+        },
         errors,
         warnings,
     }
@@ -906,6 +929,7 @@ touches:
         let s = spec::parse_str("t.md", body);
         let store = Store::open(&db).unwrap();
         let r = run(&s, Some(&store), &root);
+        assert_eq!(r.index_checks, IndexCheckStatus::Evaluated);
         // Heuristic would PASS (exists somewhere); scoped check must fail.
         assert!(
             r.errors.iter().any(|e| matches!(
@@ -1070,6 +1094,10 @@ expected_docs:
         let s = spec::parse_str("t.md", body);
         let r = run(&s, None, &root);
         assert_eq!(r.verdict, Verdict::Pass);
+        assert_eq!(r.index_checks, IndexCheckStatus::NotEvaluated);
+        assert!(r.render_text().contains(
+            "index-backed checks: not evaluated (no populated index; symbol existence, snapshots, and blast radius were skipped)"
+        ));
         fs::remove_dir_all(&root).ok();
     }
 

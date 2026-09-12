@@ -214,6 +214,10 @@ mmcg verify-spec .mastermind/tasks/042-feature/spec.md
 mmcg verify-spec .mastermind/tasks/042-feature/spec.md --strict         # contract mode: require frontmatter scoping + a verify cmd + index
 mmcg verify-spec .mastermind/tasks/042-feature/spec.md --require-index  # fail (don't skip live checks) when no index
 
+# Both text and JSON reports state whether index-backed symbol, snapshot, and
+# blast-radius checks ran. A default no-index pass marks them `not_evaluated`;
+# use --require-index when those checks are required evidence.
+
 # Post-execution audit — compare spec contract against actual repo state.
 # Diffs <git-ref> (typically `main` or merge-base) against the WORKING TREE, so
 # uncommitted and untracked work counts — the audit runs before the commit step.

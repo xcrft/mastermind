@@ -5,6 +5,8 @@ use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
+use crate::terminal::{escape as escape_terminal, unsafe_character as unsafe_terminal_character};
+
 pub const WORKFLOW_AUDIT_SCHEMA_VERSION: u32 = 1;
 const MAX_WORKFLOW_AGENTS: usize = 128;
 const MAX_WORKFLOW_SKILLS: usize = 512;
@@ -889,31 +891,6 @@ fn severity_rank(severity: &str) -> u8 {
         "warning" => 1,
         _ => 2,
     }
-}
-
-fn unsafe_terminal_character(character: char) -> bool {
-    character.is_control()
-        || matches!(
-            character,
-            '\u{0080}'..='\u{009f}'
-                | '\u{061c}'
-                | '\u{200e}'
-                | '\u{200f}'
-                | '\u{202a}'..='\u{202e}'
-                | '\u{2066}'..='\u{2069}'
-        )
-}
-
-fn escape_terminal(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        if unsafe_terminal_character(character) {
-            escaped.extend(character.escape_unicode());
-        } else {
-            escaped.push(character);
-        }
-    }
-    escaped
 }
 
 fn is_plain_directory(path: &Path) -> bool {

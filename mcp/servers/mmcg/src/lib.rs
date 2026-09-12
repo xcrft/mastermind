@@ -45,6 +45,7 @@ pub mod store;
 pub mod task_scaffold;
 pub mod team;
 pub mod temporal;
+mod terminal;
 mod test_scan;
 mod verification;
 pub mod verify_spec;

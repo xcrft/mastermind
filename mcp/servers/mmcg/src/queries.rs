@@ -3383,7 +3383,8 @@ pub fn files(
 }
 
 /// Parse a duration like "30s" / "10m" / "2h" / "1d" into seconds.
-/// Errors on missing suffix, unknown suffix, or non-numeric prefix.
+/// Errors on missing suffix, unknown suffix, a non-numeric prefix, or a value
+/// that cannot be represented safely as an `i64` millisecond timestamp delta.
 pub fn parse_duration(s: &str) -> Result<u64, String> {
     if s.len() < 2 {
         return Err(format!("duration too short: {s:?}"));
@@ -3403,7 +3404,13 @@ pub fn parse_duration(s: &str) -> Result<u64, String> {
             ))
         }
     };
-    Ok(n * multiplier)
+    let seconds = n
+        .checked_mul(multiplier)
+        .ok_or_else(|| format!("duration too large: {s:?}"))?;
+    if seconds > (i64::MAX as u64) / 1000 {
+        return Err(format!("duration too large: {s:?}"));
+    }
+    Ok(seconds)
 }
 
 #[derive(Debug, Serialize)]
@@ -3422,11 +3429,20 @@ pub struct RecentChangesResponse {
 /// `as_millis() as i64`), so the threshold is computed in ms too.
 pub fn recent_changes(store: &Store, since: &str) -> Result<RecentChangesResponse, String> {
     let window_secs = parse_duration(since)?;
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_millis() as i64;
-    let threshold_ms = now_ms - (window_secs as i64) * 1000;
+    let now_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_millis(),
+    )
+    .map_err(|_| "current time exceeds the supported millisecond range".to_string())?;
+    let window_ms = i64::try_from(window_secs)
+        .ok()
+        .and_then(|seconds| seconds.checked_mul(1000))
+        .ok_or_else(|| format!("duration too large: {since:?}"))?;
+    let threshold_ms = now_ms
+        .checked_sub(window_ms)
+        .ok_or_else(|| format!("duration too large: {since:?}"))?;
     let files = store
         .files_indexed_since(threshold_ms)
         .map_err(|e| e.to_string())?;
@@ -5753,10 +5769,16 @@ mod tests {
         assert_eq!(parse_duration("2h").unwrap(), 7200);
         assert_eq!(parse_duration("1d").unwrap(), 86400);
         assert_eq!(parse_duration("0s").unwrap(), 0);
+        assert_eq!(
+            parse_duration("9223372036854775s").unwrap(),
+            9_223_372_036_854_775
+        );
         assert!(parse_duration("").is_err());
         assert!(parse_duration("h").is_err()); // too short to have a number
         assert!(parse_duration("5y").is_err()); // unknown suffix
         assert!(parse_duration("abc").is_err());
+        assert!(parse_duration("9223372036854776s").is_err());
+        assert!(parse_duration("18446744073709551615d").is_err());
     }
 
     #[test]

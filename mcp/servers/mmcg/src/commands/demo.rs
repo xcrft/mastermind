@@ -440,7 +440,7 @@ fn signature_drift() -> Result<(), Box<dyn std::error::Error>> {
     println!("Auditor running mmcg_search fetchUser ...\n");
 
     let search = queries::search(&store, "fetchUser", None, None, true)?;
-    let callers = queries::callers(&store, "fetchUser", None, None)?;
+    let callers = queries::callers(&store, "fetchUser", None, None, None)?;
     let _ = fs::remove_dir_all(&tmp);
 
     let sig = search

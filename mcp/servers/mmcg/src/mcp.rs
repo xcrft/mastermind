@@ -1792,7 +1792,8 @@ fn schema_callers() -> Value {
             "properties": {
                 "name": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Name or type to look up" },
                 "language": { "type": "string", "enum": LANGUAGES },
-                "edge_kind": { "type": "string", "enum": ["calls", "imports", "inherits", "references"], "default": "calls", "description": "Which kind of incoming edge to consider; references include function values and macro bodies" }
+                "edge_kind": { "type": "string", "enum": ["calls", "imports", "inherits", "references"], "default": "calls", "description": "Which kind of incoming edge to consider; references include function values and macro bodies" },
+                "top": { "type": "integer", "minimum": 1, "maximum": queries::CALLERS_MAX_TOP, "default": queries::CALLERS_DEFAULT_TOP, "description": "Maximum containing symbols to return; add language when truncated" }
             },
             "required": ["name"]
         }
@@ -2311,8 +2312,15 @@ fn handle_callers(store: &mut Store, args: &Value) -> Result<Value, HandlerError
     let name = non_blank_str_arg(args, "name")?;
     let language = opt_enum_arg(args, "language", &LANGUAGES)?;
     let edge_kind = opt_enum_arg(args, "edge_kind", &EDGE_KINDS)?;
+    let top = bounded_u64_arg(
+        args,
+        "top",
+        u64::from(queries::CALLERS_DEFAULT_TOP),
+        1,
+        u64::from(queries::CALLERS_MAX_TOP),
+    )? as u32;
     ensure_fresh_index(store)?;
-    let r = queries::callers(store, name, language, edge_kind)
+    let r = queries::callers(store, name, language, edge_kind, Some(top))
         .map_err(|error| HandlerError::internal("callers_query", error))?;
     serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
@@ -4211,6 +4219,11 @@ mod tests {
                 "Invalid argument: top",
             ),
             (handle_files, json!({ "top": 0 }), "Invalid argument: top"),
+            (
+                handle_callers,
+                json!({ "name": "target", "top": 501 }),
+                "Invalid argument: top",
+            ),
             (
                 handle_imported_by,
                 json!({ "query": "core", "top": 501 }),

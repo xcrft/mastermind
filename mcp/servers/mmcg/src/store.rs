@@ -5344,29 +5344,90 @@ impl Store {
         language: Option<&str>,
         edge_kind: Option<&str>,
     ) -> SqlResult<Vec<Symbol>> {
-        let sql = format!(
+        self.callers_of_rows(name, language, edge_kind, None)
+            .map(|(_, callers)| callers)
+    }
+
+    pub(crate) fn callers_of_bounded(
+        &self,
+        name: &str,
+        language: Option<&str>,
+        edge_kind: Option<&str>,
+        limit: usize,
+    ) -> SqlResult<(u32, Vec<Symbol>)> {
+        self.callers_of_rows(name, language, edge_kind, Some(limit))
+    }
+
+    fn callers_of_rows(
+        &self,
+        name: &str,
+        language: Option<&str>,
+        edge_kind: Option<&str>,
+        limit: Option<usize>,
+    ) -> SqlResult<(u32, Vec<Symbol>)> {
+        let matching_sql = format!(
             "WITH targets AS MATERIALIZED (
                  SELECT DISTINCT kind FROM symbols WHERE name = ?1
-             )
-             SELECT DISTINCT {SYMBOL_COLS_S}
-             FROM symbols s
-             JOIN edges e ON e.from_id = s.id
-             WHERE e.kind = COALESCE(?3, 'calls')
-               AND (e.to_name = ?1 OR e.to_type = ?1)
-               AND (
-                   NOT EXISTS (SELECT 1 FROM targets)
-                   OR EXISTS (
-                       SELECT 1 FROM targets target
-                       WHERE (e.to_name = ?1 AND ({EDGE_NAME_MATCH_SQL}))
-                          OR (e.to_type = ?1 AND ({EDGE_TYPE_MATCH_SQL}))
+             ), matching AS (
+                 SELECT DISTINCT {SYMBOL_COLS_S}
+                 FROM symbols s
+                 JOIN edges e ON e.from_id = s.id
+                 WHERE e.kind = COALESCE(?3, 'calls')
+                   AND (e.to_name = ?1 OR e.to_type = ?1)
+                   AND (
+                       NOT EXISTS (SELECT 1 FROM targets)
+                       OR EXISTS (
+                           SELECT 1 FROM targets target
+                           WHERE (e.to_name = ?1 AND ({EDGE_NAME_MATCH_SQL}))
+                              OR (e.to_type = ?1 AND ({EDGE_TYPE_MATCH_SQL}))
+                       )
                    )
-               )
-               AND (?2 IS NULL OR s.language = ?2)
-             ORDER BY s.file_path, s.line_start"
+                   AND (?2 IS NULL OR s.language = ?2)
+             )"
         );
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![name, language, edge_kind], Self::row_to_symbol)?;
-        rows.collect()
+        match limit {
+            None => {
+                let sql = format!(
+                    "{matching_sql}
+                     SELECT {SYMBOL_COLS} FROM matching
+                     ORDER BY file_path, line_start, name, kind, id"
+                );
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows =
+                    stmt.query_map(params![name, language, edge_kind], Self::row_to_symbol)?;
+                let callers: Vec<_> = rows.collect::<SqlResult<_>>()?;
+                let total = u32::try_from(callers.len()).unwrap_or(u32::MAX);
+                Ok((total, callers))
+            }
+            Some(limit) => {
+                let sql = format!(
+                    "{matching_sql}
+                     SELECT {SYMBOL_COLS}, COUNT(*) OVER() AS total FROM matching
+                     ORDER BY file_path, line_start, name, kind, id
+                     LIMIT ?4"
+                );
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows = stmt.query_map(
+                    params![
+                        name,
+                        language,
+                        edge_kind,
+                        i64::try_from(limit.max(1)).unwrap_or(i64::MAX)
+                    ],
+                    |row| Ok((Self::row_to_symbol(row)?, row.get::<_, i64>(9)?)),
+                )?;
+                let mut total = 0;
+                let mut callers = Vec::with_capacity(limit);
+                for row in rows {
+                    let (caller, row_total) = row?;
+                    total = row_total;
+                    if callers.len() < limit {
+                        callers.push(caller);
+                    }
+                }
+                Ok((total.clamp(0, i64::from(u32::MAX)) as u32, callers))
+            }
+        }
     }
 
     /// Callees of a symbol-id — names it references via the given edge kind.

@@ -3997,50 +3997,130 @@ pub struct OutlineNode {
 #[derive(Debug, Serialize)]
 pub struct OutlineResponse {
     pub file: String,
+    pub total: u32,
     pub count: u32,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation_reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_limit: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tree_depth_limit: Option<u32>,
+    pub depth_limited: bool,
     pub nodes: Vec<OutlineNode>,
+    pub precision_notes: Vec<String>,
 }
+
+pub const OUTLINE_DEFAULT_TOP: u32 = 200;
+pub const OUTLINE_MAX_TOP: u32 = 500;
+pub const OUTLINE_MAX_DEPTH: u32 = 64;
 
 /// Build a tree of a file's symbols via `parent_id` chains. Returns top-level
 /// nodes (parent_id IS NULL); each node holds its children sorted by line.
-/// Single SELECT, in-memory tree construction.
+/// The CLI path materializes the complete file before in-memory tree construction.
 pub fn outline(store: &Store, file: &str) -> rusqlite::Result<OutlineResponse> {
-    use std::collections::HashMap;
     let flat = store.symbols_in_file(file)?;
-    let total = flat.len() as u32;
+    let total = u32::try_from(flat.len()).unwrap_or(u32::MAX);
+    Ok(build_outline_response(file, total, flat, None, None, false))
+}
+
+pub fn outline_bounded(store: &Store, file: &str, top: u32) -> rusqlite::Result<OutlineResponse> {
+    let top = top.max(1);
+    let (total, flat, depth_limited) = store.outline_symbols_bounded(
+        file,
+        usize::try_from(top).unwrap_or(usize::MAX),
+        OUTLINE_MAX_DEPTH,
+    )?;
+    Ok(build_outline_response(
+        file,
+        total,
+        flat,
+        Some(top),
+        Some(OUTLINE_MAX_DEPTH),
+        depth_limited,
+    ))
+}
+
+fn build_outline_response(
+    file: &str,
+    total: u32,
+    flat: Vec<Symbol>,
+    row_limit: Option<u32>,
+    tree_depth_limit: Option<u32>,
+    depth_limited: bool,
+) -> OutlineResponse {
+    let fetched = u32::try_from(flat.len()).unwrap_or(u32::MAX);
 
     // Child lists keyed by parent id (None = root).
-    let mut children_of: HashMap<Option<i64>, Vec<crate::store::Symbol>> = HashMap::new();
+    let mut children_of: HashMap<Option<i64>, Vec<Symbol>> = HashMap::new();
     for sym in flat {
         children_of.entry(sym.parent_id).or_default().push(sym);
     }
 
     fn build(
         parent_id: Option<i64>,
-        children_of: &mut HashMap<Option<i64>, Vec<crate::store::Symbol>>,
+        children_of: &mut HashMap<Option<i64>, Vec<Symbol>>,
+        count: &mut u32,
     ) -> Vec<OutlineNode> {
         let mut nodes = children_of.remove(&parent_id).unwrap_or_default();
-        nodes.sort_by_key(|s| s.line_start);
+        nodes.sort_by(|left, right| {
+            left.line_start
+                .cmp(&right.line_start)
+                .then(left.id.cmp(&right.id))
+        });
         nodes
             .into_iter()
-            .map(|s| OutlineNode {
-                id: s.id,
-                name: s.name,
-                kind: s.kind,
-                line_start: s.line_start,
-                line_end: s.line_end,
-                signature: s.signature,
-                children: build(Some(s.id), children_of),
+            .map(|symbol| {
+                *count = count.saturating_add(1);
+                OutlineNode {
+                    id: symbol.id,
+                    name: symbol.name,
+                    kind: symbol.kind,
+                    line_start: symbol.line_start,
+                    line_end: symbol.line_end,
+                    signature: symbol.signature,
+                    children: build(Some(symbol.id), children_of, count),
+                }
             })
             .collect()
     }
 
-    let nodes = build(None, &mut children_of);
-    Ok(OutlineResponse {
+    let mut count = 0;
+    let nodes = build(None, &mut children_of, &mut count);
+    let hierarchy_incomplete = count < fetched
+        || (count < total && row_limit.is_some_and(|limit| count < limit) && !depth_limited);
+    let truncated = count < total;
+    let truncation_reason = if depth_limited {
+        Some("depth_limit")
+    } else if hierarchy_incomplete {
+        Some("hierarchy_incomplete")
+    } else if truncated {
+        Some("top")
+    } else {
+        None
+    };
+    let mut precision_notes = vec![
+        "tree_uses_syntactically_extracted_parent_relationships".to_string(),
+        "generated_or_dynamic_declarations_may_be_missing".to_string(),
+    ];
+    if depth_limited {
+        precision_notes.push("descendants_beyond_tree_depth_limit_are_omitted".to_string());
+    }
+    if hierarchy_incomplete {
+        precision_notes.push("some_indexed_parent_chains_could_not_be_attached".to_string());
+    }
+    OutlineResponse {
         file: file.to_string(),
-        count: total,
+        total,
+        count,
+        truncated,
+        truncation_reason,
+        row_limit,
+        tree_depth_limit,
+        depth_limited,
         nodes,
-    })
+        precision_notes,
+    }
 }
 
 /// `match_kind`: "name" (default) matches the leaf binding;
@@ -6637,7 +6717,54 @@ mod tests {
         assert_eq!(out.nodes[1].name, "helper");
         assert!(out.nodes[1].children.is_empty());
 
+        let bounded = outline_bounded(&store, "x.py", 3).unwrap();
+        assert_eq!(bounded.total, 4);
+        assert_eq!(bounded.count, 3);
+        assert!(bounded.truncated);
+        assert_eq!(bounded.truncation_reason, Some("top"));
+        assert_eq!(bounded.row_limit, Some(3));
+        assert_eq!(bounded.nodes.len(), 1);
+        assert_eq!(bounded.nodes[0].name, "Foo");
+        assert_eq!(bounded.nodes[0].children.len(), 2);
+        assert!(!bounded.depth_limited);
+
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn bounded_outline_discloses_depth_cutoff() {
+        let path = tmp_db("bounded_outline_depth");
+        let store = Store::open(&path).unwrap();
+        let mut parent = None;
+        for depth in 0..=OUTLINE_MAX_DEPTH + 1 {
+            parent = Some(
+                store
+                    .insert_symbol(
+                        &format!("level_{depth}"),
+                        "module",
+                        "deep.rs",
+                        depth + 1,
+                        OUTLINE_MAX_DEPTH + 2,
+                        None,
+                        parent,
+                    )
+                    .unwrap(),
+            );
+        }
+
+        let response = outline_bounded(&store, "deep.rs", OUTLINE_MAX_TOP).unwrap();
+        assert_eq!(response.total, OUTLINE_MAX_DEPTH + 2);
+        assert_eq!(response.count, OUTLINE_MAX_DEPTH + 1);
+        assert!(response.truncated);
+        assert!(response.depth_limited);
+        assert_eq!(response.truncation_reason, Some("depth_limit"));
+        assert_eq!(response.tree_depth_limit, Some(OUTLINE_MAX_DEPTH));
+        assert!(response
+            .precision_notes
+            .iter()
+            .any(|note| note == "descendants_beyond_tree_depth_limit_are_omitted"));
+
+        std::fs::remove_file(path).ok();
     }
 
     fn mk_sym(name: &str, kind: &str, file: &str, line: u32, decorators: Option<&str>) -> Symbol {

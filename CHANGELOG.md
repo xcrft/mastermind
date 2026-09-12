@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- MCP file outlines now use a bounded parent-before-child traversal, report
+  exact node coverage, and disclose depth or hierarchy gaps instead of silently
+  dropping nested symbols; CLI output stays complete.
 - MCP exact-name search now bounds returned hits and partial-type grouping work,
   reports raw candidate coverage, and leaves the grouped total unknown when the
   work cap prevents complete partial locations; CLI output stays complete and

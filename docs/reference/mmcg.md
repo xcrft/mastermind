@@ -977,7 +977,12 @@ changed symbol and linking the impacted symbol as a related location. Both are
 SARIF 2.1.0 documents with repository-relative, percent-encoded artifact URIs,
 Mastermind's semantic version, and run properties that expose query scope,
 baseline/head identity, and partial-result state. The exporter never converts a
-truncated query into a completeness claim.
+truncated query into a completeness claim. Change-impact SARIF derives that
+state from changed files, changed symbols, affected components, impacted
+symbols, API crossings, and candidate tests; every incomplete collection also
+contributes its reason. The run properties retain returned and total counts for
+all six collections, including null totals when upstream work limits prevent an
+exact count.
 
 Use GitHub's `github/codeql-action/upload-sarif` action when uploading these
 files so GitHub can populate missing fingerprints. Stable `ruleId` values and

@@ -75,18 +75,7 @@ pub fn project_map(map: &ProjectMapResponse) -> Value {
 }
 
 pub fn change_impact(response: &ChangeImpactResponse) -> Value {
-    let mut partial_reasons = [
-        response.changes.files.truncation_reason.as_deref(),
-        response.changes.symbols.truncation_reason.as_deref(),
-        response.affected_components.truncation_reason.as_deref(),
-        response.impact.truncation_reason.as_deref(),
-        response.api_crossings.truncation_reason.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>();
-    partial_reasons.sort_unstable();
-    partial_reasons.dedup();
+    let partial_reasons = response.truncation_reasons();
     let results = response
         .api_crossings
         .items
@@ -145,13 +134,19 @@ pub fn change_impact(response: &ChangeImpactResponse) -> Value {
             "requestedRef": response.baseline.requested_ref,
             "baselineOid": response.baseline.baseline_oid,
             "headOid": response.baseline.head_oid,
-            "partial": response.api_crossings.truncated
-                || response.impact.truncated
-                || response.changes.symbols.truncated
-                || response.changes.files.truncated
-                || response.affected_components.truncated,
+            "partial": response.is_partial(),
+            "changedFilesReturned": response.changes.files.returned,
+            "changedFilesTotal": response.changes.files.total,
+            "changedSymbolsReturned": response.changes.symbols.returned,
+            "changedSymbolsTotal": response.changes.symbols.total,
+            "affectedComponentsReturned": response.affected_components.returned,
+            "affectedComponentsTotal": response.affected_components.total,
+            "impactedSymbolsReturned": response.impact.returned,
+            "impactedSymbolsTotal": response.impact.total,
             "crossingsReturned": response.api_crossings.returned,
             "crossingsTotal": response.api_crossings.total,
+            "candidateTestsReturned": response.tests.returned,
+            "candidateTestsTotal": response.tests.total,
             "partialReasons": partial_reasons
         }),
     )
@@ -465,7 +460,7 @@ mod tests {
             impacted_component: "api".into(),
             minimum_depth: 2,
         };
-        let response = ChangeImpactResponse {
+        let mut response = ChangeImpactResponse {
             schema_version: 1,
             worktree_files_truncated: false,
             skipped_non_utf8_paths: 0,
@@ -529,6 +524,24 @@ mod tests {
         assert_eq!(
             sarif["runs"][0]["automationDetails"]["id"],
             "mastermind/change-impact/"
+        );
+
+        response.tests.total = None;
+        response.tests.truncated = true;
+        response.tests.truncation_reason = Some("work_limit".into());
+        let partial = change_impact(&response);
+        assert_eq!(partial["runs"][0]["properties"]["partial"], true);
+        assert_eq!(
+            partial["runs"][0]["properties"]["candidateTestsReturned"],
+            0
+        );
+        assert_eq!(
+            partial["runs"][0]["properties"]["candidateTestsTotal"],
+            Value::Null
+        );
+        assert_eq!(
+            partial["runs"][0]["properties"]["partialReasons"],
+            json!(["work_limit"])
         );
     }
 

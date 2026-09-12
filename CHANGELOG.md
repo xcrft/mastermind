@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- MCP API-surface responses now stop at an explicit 100-row default, expose the
+  exact filtered total and truncation, and apply the cap inside SQLite; the
+  local CLI retains its complete listing.
 - MCP unreferenced-symbol responses now stop at an explicit 100-row default,
   expose the exact filtered total and truncation, and avoid materializing every
   candidate; the local CLI retains its complete listing.

@@ -730,9 +730,12 @@ fn execute(store: &Store, q: QueryCmd) -> Result<Value, Box<dyn std::error::Erro
             language.as_deref(),
             None,
         )?)?,
-        QueryCmd::ApiSurface { prefix, language } => {
-            serde_json::to_value(queries::api_surface(store, &prefix, language.as_deref())?)?
-        }
+        QueryCmd::ApiSurface { prefix, language } => serde_json::to_value(queries::api_surface(
+            store,
+            &prefix,
+            language.as_deref(),
+            None,
+        )?)?,
         QueryCmd::DependencyCycles { language, min_size } => serde_json::to_value(
             queries::dependency_cycles(store, language.as_deref(), min_size)?,
         )?,

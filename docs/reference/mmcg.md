@@ -1808,7 +1808,9 @@ run. It does not change the exact command matching used for coverage.
 `vacuous_test_claim` remains an advisory filesystem warning for recognized test
 commands when no positive count is reported. Finding no conventional test files
 does not prove zero execution, and finding files does not override an explicit
-zero count. Non-test and unknown command forms skip this heuristic.
+zero count. Rust attributes are parsed structurally; `#[test]` text inside a
+comment or string does not suppress the warning, and malformed Rust makes the
+scan unknown. Non-test and unknown command forms skip this heuristic.
 
 Only a completed scan with rechecked directory entries, path kinds and Rust
 source receipts can emit this warning. External paths, parent traversal,

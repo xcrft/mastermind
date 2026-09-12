@@ -40,6 +40,7 @@ pub use java::JavaExtractor;
 pub use javascript::JavascriptExtractor;
 pub use php::PhpExtractor;
 pub use python::PythonExtractor;
+pub(crate) use rust_lang::source_has_test_attribute as rust_source_has_test_attribute;
 pub use rust_lang::RustExtractor;
 pub use typescript::TypescriptExtractor;
 pub use vue::VueExtractor;

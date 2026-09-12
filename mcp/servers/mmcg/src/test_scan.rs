@@ -298,8 +298,7 @@ impl<'a> TestScanner<'a> {
                     BoundedPathKind::RegularFile if plan.runner == TestRunner::Cargo => {
                         if path.extension().is_some_and(|extension| extension == "rs") {
                             let source = self.source(&path, None)?;
-                            let text = std::str::from_utf8(&source.bytes).ok()?;
-                            if file_has_test_attr(text) {
+                            if crate::indexer::rust_source_has_test_attribute(&source.bytes)? {
                                 return Some(Collected::Present);
                             }
                             snapshot.files.push((
@@ -358,8 +357,9 @@ impl<'a> TestScanner<'a> {
     }
 }
 
+#[cfg(test)]
 fn file_has_test_attr(text: &str) -> bool {
-    text.contains("#[test]") || text.contains("::test]") || text.contains("#[rstest")
+    crate::indexer::rust_source_has_test_attribute(text.as_bytes()).unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -394,7 +394,19 @@ mod tests {
         ] {
             assert!(file_has_test_attr(text));
         }
-        assert!(!file_has_test_attr("fn helper() {}\n// no tests here"));
+        for text in [
+            "fn helper() {}\n// no tests here",
+            "// #[test]\nfn helper() {}",
+            "/*\n#[rstest]\n*/\nfn helper() {}",
+            "const EXAMPLE: &str = \"#[tokio::test]\";\nfn helper() {}",
+            "#[rstest_reuse]\nfn helper() {}",
+        ] {
+            assert!(!file_has_test_attr(text), "{text}");
+        }
+        assert_eq!(
+            crate::indexer::rust_source_has_test_attribute(b"fn broken( {"),
+            None
+        );
     }
 
     #[test]

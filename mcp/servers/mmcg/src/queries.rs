@@ -6395,7 +6395,7 @@ mod tests {
                 .unwrap();
         }
 
-        let map = project_map(&store, "src", 2, MAP_ENTRY_LIMIT + 1).unwrap();
+        let map = project_map(&store, "src", 2, (MAP_ENTRY_LIMIT + 1).try_into().unwrap()).unwrap();
         assert!(map.is_partial());
         assert_eq!(map.truncation_reasons(), vec!["entry_point_limit"]);
         let value = serde_json::to_value(map).unwrap();

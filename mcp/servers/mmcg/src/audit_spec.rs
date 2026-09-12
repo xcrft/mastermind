@@ -173,6 +173,65 @@ pub struct Report {
     pub executor_report: Option<ExecutorReport>,
 }
 
+#[derive(Serialize)]
+struct TextEvidence<'a> {
+    schema_version: u32,
+    symbol_diff: &'a Option<SymbolDiff>,
+    claim_checks: &'a Option<Vec<ClaimCheck>>,
+    executor_report: &'a Option<ExecutorReport>,
+}
+
+fn unsafe_terminal_character(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{0080}'..='\u{009f}'
+                | '\u{061c}'
+                | '\u{200e}'
+                | '\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+        )
+}
+
+fn escape_terminal(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if unsafe_terminal_character(character) {
+            escaped.extend(character.escape_unicode());
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
+}
+
+fn escape_json_terminal_controls(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if unsafe_terminal_character(character) {
+            escaped.push_str(&format!("\\u{:04x}", character as u32));
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
+}
+
+fn append_indented_json<T: Serialize>(out: &mut String, value: &T) {
+    let json = serde_json::to_string_pretty(value).unwrap_or_else(|error| {
+        format!(
+            "{{\n  \"render_error\": {:?}\n}}",
+            escape_terminal(&error.to_string())
+        )
+    });
+    for line in json.lines() {
+        out.push_str("    ");
+        out.push_str(&escape_json_terminal_controls(line));
+        out.push('\n');
+    }
+}
+
 impl Report {
     pub fn render_text(&self) -> String {
         let mut out = String::new();
@@ -184,8 +243,8 @@ impl Report {
         out.push_str(&format!(
             "{marker} {:?} — {} (vs git ref `{}`)\n  findings: {}\n\n",
             self.verdict,
-            self.spec,
-            self.git_ref,
+            escape_terminal(&self.spec),
+            escape_terminal(&self.git_ref),
             self.findings.len(),
         ));
         for f in &self.findings {
@@ -212,7 +271,10 @@ impl Report {
                 | Finding::ObservedExitCodeNonZero { .. }
                 | Finding::ObservedZeroTests { .. } => "❌",
             };
-            out.push_str(&format!("  {icon} {}\n", render_finding(f)));
+            out.push_str(&format!(
+                "  {icon} {}\n",
+                escape_terminal(&render_finding(f))
+            ));
         }
         if let Some(d) = &self.symbol_diff {
             out.push_str(&format!(
@@ -222,6 +284,16 @@ impl Report {
                 d.signature_changed.len(),
             ));
         }
+        out.push_str("\nStructured audit evidence (JSON; null means not evaluated):\n");
+        append_indented_json(
+            &mut out,
+            &TextEvidence {
+                schema_version: 1,
+                symbol_diff: &self.symbol_diff,
+                claim_checks: &self.claim_checks,
+                executor_report: &self.executor_report,
+            },
+        );
         out
     }
 
@@ -1729,6 +1801,117 @@ mod tests {
         let value = serde_json::to_value(Bundle::from_report(&report, None)).unwrap();
         assert_eq!(value["git_ref"], value["baseline"]);
         assert_eq!(value["files_diff"], value["changed_files"]);
+    }
+
+    #[test]
+    fn text_report_preserves_checked_evidence_and_escapes_terminal_controls() {
+        let claim = Claim::FunctionAdded {
+            symbol: "checkout".into(),
+            file: Some("src/checkout.rs".into()),
+            signature: Some("fn checkout()".into()),
+        };
+        let report = Report {
+            spec: "spec\u{1b}.md".into(),
+            git_ref: "main\u{202e}".into(),
+            verdict: Verdict::Drift,
+            findings: vec![Finding::UnexpectedFile {
+                file: "src/unexpected\u{7}.rs".into(),
+            }],
+            symbol_diff: Some(SymbolDiff {
+                git_ref: "main".into(),
+                files_in_diff: vec!["src/checkout.rs".into()],
+                added: vec![crate::diff::SymbolRef {
+                    file: "src/checkout.rs".into(),
+                    name: "checkout".into(),
+                    kind: "function".into(),
+                    line: 12,
+                    signature: Some("fn checkout()".into()),
+                }],
+                removed: vec![crate::diff::SymbolRef {
+                    file: "src/legacy.rs".into(),
+                    name: "legacy_checkout".into(),
+                    kind: "function".into(),
+                    line: 4,
+                    signature: Some("fn legacy_checkout()".into()),
+                }],
+                signature_changed: vec![crate::diff::SignatureChange {
+                    file: "src/api.rs".into(),
+                    name: "submit".into(),
+                    kind: "function".into(),
+                    old_signature: Some("fn submit()".into()),
+                    new_signature: Some("fn submit(force: bool)".into()),
+                    new_line: 28,
+                }],
+                errors: vec!["parse\u{202e}failed".into()],
+                truncated: true,
+            }),
+            claim_checks: Some(vec![ClaimCheck {
+                claim_index: 0,
+                claim: claim.clone(),
+                status: ClaimStatus::Verified,
+                evidence: Some(ClaimEvidence::AddedDeclaration {
+                    file: "src/checkout.rs".into(),
+                    line: 12,
+                    baseline_oid: "0123456789abcdef".into(),
+                }),
+                finding: None,
+            }]),
+            executor_report: Some(ExecutorReport {
+                canonical: Some(crate::executor_report::CanonicalMetadata {
+                    schema_version: 1,
+                    spec: "spec.md".into(),
+                    status: crate::executor_report::ReportStatus::Complete,
+                    phases: vec![crate::executor_report::Phase {
+                        id: "implementation".into(),
+                        status: crate::executor_report::PhaseStatus::Done,
+                    }],
+                    files_modified: vec!["src/checkout.rs".into()],
+                    defects: Vec::new(),
+                }),
+                claims: vec![claim],
+                verify: vec![crate::executor_report::VerifyResult {
+                    cmd: "cargo test".into(),
+                    claimed: Some("passed".into()),
+                    observed: Some(crate::executor_report::ObservedOutcome {
+                        exit_code: Some(0),
+                        tests_run: Some(3),
+                    }),
+                    output_excerpt: Some("3 passed\u{1b}".into()),
+                }],
+            }),
+        };
+
+        let text = report.render_text();
+
+        assert!(text.contains("Structured audit evidence"));
+        assert!(text.contains("\"files_in_diff\": ["));
+        assert!(text.contains("\"old_signature\": \"fn submit()\""));
+        assert!(text.contains("\"claim_index\": 0"));
+        assert!(text.contains("\"status\": \"verified\""));
+        assert!(text.contains("\"kind\": \"added_declaration\""));
+        assert!(text.contains("\"tests_run\": 3"));
+        assert!(text.contains("\"output_excerpt\": \"3 passed\\u001b\""));
+        assert!(text.contains("\\u{1b}"));
+        assert!(text.contains("\\u{202e}"));
+        assert!(text.contains("parse\\u202efailed"));
+        assert!(text
+            .chars()
+            .all(|character| character == '\n' || !unsafe_terminal_character(character)));
+        let structured = text
+            .split_once("Structured audit evidence (JSON; null means not evaluated):\n")
+            .unwrap()
+            .1
+            .lines()
+            .map(|line| line.strip_prefix("    ").unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let value: serde_json::Value = serde_json::from_str(&structured).unwrap();
+        assert_eq!(value["symbol_diff"]["added"][0]["name"], "checkout");
+        assert_eq!(value["claim_checks"][0]["status"], "verified");
+        assert_eq!(
+            value["executor_report"]["verify"][0]["observed"]["tests_run"],
+            3
+        );
     }
 
     #[test]

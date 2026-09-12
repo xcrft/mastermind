@@ -108,7 +108,7 @@ Each canonical task lives under `.mastermind/tasks/<NNN>-<slug>/`.
 |---|---|---|
 | `spec.md` | Planner | Goal, scope, acceptance criteria, verification, mode-specific risk evidence |
 | `executor-report.md` | Executor | Changed files, observed checks, claims, defects, and gaps |
-| `audit.md` | Controller | Mechanical comparison of spec, report, index, and diff |
+| `audit.md` | Controller | Mechanical verdict plus complete bounded symbol-diff, claim-check, and checked-report evidence |
 | `state.json` | Controller | One task-local lifecycle record |
 | `history-review.md` | Controller, then planner | Explicit Context and Lesson disposition after semantic review |
 

@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Schema v9 removes the duplicate task-spec FTS table and its second filesystem
+  scan. Canonical task specs are indexed once with durable project history.
 - Task search now uses the freshness-checked durable-history inventory instead
   of a second cache whose refresh failures were hidden, and reports skipped or
   corpus-limited Markdown alongside bounded result coverage.

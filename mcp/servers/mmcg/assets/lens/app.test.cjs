@@ -547,6 +547,7 @@ function fixture() {
       precision_notes: [],
     },
     audit: {
+      narrative_state: { status: "absent" },
       dead_code: {
         total: 3,
         returned: 3,
@@ -1238,6 +1239,7 @@ async function main() {
   assert.equal(truncatedMapHarness.nodes.get("audit-treemap").querySelectorAll(".tm-rect--traced").length, 1, "A known collapsed component traces to its returned-components tile");
 
   var nf = fixture();
+  nf.audit.narrative_state = { status: "available" };
   nf.audit.narrative = {
     summary: "AI executive summary of the codebase.",
     lenses: { bugs: "Review the largest indexed files.", security: "Guard the assistant's DB tools." },
@@ -1281,6 +1283,17 @@ async function main() {
   assert.equal(auditHarness.nodes.get("audit-domain-card").hidden, true, "Domain card is hidden without a narrative");
   assert.equal(auditHarness.nodes.get("audit-redteam").hidden, true, "Red-team panel is hidden without a narrative");
   assert.doesNotMatch(auditHarness.nodes.get("audit-lede").textContent, /AI executive/i, "Facts-only lede when no narrative");
+
+  var rejectedNarrative = fixture();
+  rejectedNarrative.audit.narrative_state = { status: "rejected", reason: "binding_mismatch" };
+  var rejectedNarrativeHarness = await renderFixture(rejectedNarrative, { width: 1200 });
+  assert.match(rejectedNarrativeHarness.nodes.get("audit-lede").textContent, /narrative was rejected[\s\S]*another repository snapshot[\s\S]*current narrative binding/i, "A stale sidecar is visible and actionable");
+
+  var partialNarrative = fixture();
+  partialNarrative.audit.narrative_state = { status: "partial", reason: "content_filtered_or_truncated" };
+  partialNarrative.audit.narrative = { summary: "Bound AI summary." };
+  var partialNarrativeHarness = await renderFixture(partialNarrative, { width: 1200 });
+  assert.match(partialNarrativeHarness.nodes.get("audit-lede").textContent, /Bound AI summary[\s\S]*filtered or truncated/i, "A partial narrative cannot look complete");
 
   assert.match(HTML_SOURCE, /id="audit-redteam"/i, "Red-team section must exist");
   assert.match(HTML_SOURCE, /to verify/i, "Red-team panel is labelled as hypotheses to verify");

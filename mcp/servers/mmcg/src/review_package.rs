@@ -1029,6 +1029,16 @@ fn analysis_binding(snapshot: &LensSnapshot, value: &Value) -> AnalysisBinding {
                 .map(|diagnostic| diagnostic.code.into()),
         });
     }
+    if !matches!(
+        snapshot.audit.narrative_state.status,
+        "absent" | "available"
+    ) {
+        states.insert(AnalysisState {
+            path: "$.audit.narrative_state".into(),
+            state: snapshot.audit.narrative_state.status,
+            reason: snapshot.audit.narrative_state.reason.map(str::to_string),
+        });
+    }
     let document_graph_status = snapshot.document_graph.as_ref().map(|graph| graph.status);
     if let Some(graph) = snapshot
         .document_graph
@@ -1072,6 +1082,7 @@ fn collect_analysis_states(value: &Value, path: &str, states: &mut BTreeSet<Anal
                         .and_then(Value::as_object)
                         .and_then(|diagnostic| diagnostic.get("code"))
                         .and_then(Value::as_str)
+                        .or_else(|| object.get("reason").and_then(Value::as_str))
                         .map(str::to_string),
                 });
             }
@@ -1189,10 +1200,17 @@ fn summary_markdown(
         ));
     }
     output.push_str(&format!(
-        "\n## Evidence and limits\n\n- External evidence inputs: {}\n- Lens evidence status: {}\n- Temporal status: `{}`\n- Bounded/partial states: {}\n",
+        "\n## Evidence and limits\n\n- External evidence inputs: {}\n- Lens evidence status: {}\n- Temporal status: `{}`\n- AI audit narrative: `{}`{}\n- Bounded/partial states: {}\n",
         evidence.sources.len(),
         if snapshot.evidence.partial { "partial" } else { "complete" },
         snapshot.temporal.status,
+        snapshot.audit.narrative_state.status,
+        snapshot
+            .audit
+            .narrative_state
+            .reason
+            .map(|reason| format!(" (`{}`)", markdown_text(reason)))
+            .unwrap_or_default(),
         analysis.states.len(),
     ));
     for state in analysis.states.iter().take(8) {
@@ -1787,6 +1805,7 @@ mod tests {
         let summary = std::fs::read_to_string(output.join("summary.md")).unwrap();
         assert!(summary.contains("## Declared document evidence"));
         assert!(summary.contains("all `unverified`"));
+        assert!(summary.contains("AI audit narrative: `absent`"));
         let html = std::fs::read_to_string(output.join("index.html")).unwrap();
         assert!(html.contains("mastermind_native_document_evidence_check"));
     }

@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Lens now distinguishes absent, available, partial, rejected, and unavailable
+  AI audit narratives, reports stable failure reasons, and shows stale or
+  filtered sidecars in the audit UI instead of silently dropping them.
 - Environment and context doctor text now escapes repository paths, diagnostic
   messages, hints, and explain-mode paths before writing them to a terminal.
 - `verify-spec` text and JSON reports now say whether index-backed symbol,

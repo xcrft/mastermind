@@ -191,6 +191,7 @@ pub struct LensAudit {
     pub largest_files: LensLargestFiles,
     pub bus_factor: LensBusFactor,
     pub narrative_binding: AuditNarrativeBinding,
+    pub narrative_state: AuditNarrativeState,
     /// Optional bounded sidecar interpretation; mmcg never calls a model.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub narrative: Option<AuditNarrative>,
@@ -217,6 +218,63 @@ pub struct AuditNarrative {
     pub domains: Vec<AuditDomain>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub red_team: Vec<AuditRedTeam>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuditNarrativeState {
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+}
+
+enum AuditNarrativeLoad {
+    Absent,
+    Available(AuditNarrative),
+    Partial(AuditNarrative),
+    Rejected(&'static str),
+    Unavailable(&'static str),
+}
+
+impl AuditNarrativeLoad {
+    fn into_parts(self) -> (AuditNarrativeState, Option<AuditNarrative>) {
+        match self {
+            Self::Absent => (
+                AuditNarrativeState {
+                    status: "absent",
+                    reason: None,
+                },
+                None,
+            ),
+            Self::Available(narrative) => (
+                AuditNarrativeState {
+                    status: "available",
+                    reason: None,
+                },
+                Some(narrative),
+            ),
+            Self::Partial(narrative) => (
+                AuditNarrativeState {
+                    status: "partial",
+                    reason: Some("content_filtered_or_truncated"),
+                },
+                Some(narrative),
+            ),
+            Self::Rejected(reason) => (
+                AuditNarrativeState {
+                    status: "rejected",
+                    reason: Some(reason),
+                },
+                None,
+            ),
+            Self::Unavailable(reason) => (
+                AuditNarrativeState {
+                    status: "unavailable",
+                    reason: Some(reason),
+                },
+                None,
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -976,13 +1034,40 @@ fn validated_index_paths(
     Ok(indexed_paths)
 }
 
-/// Invalid, unsupported, or oversized sidecars degrade to facts-only output.
+fn narrative_read_failure(
+    error: crate::bounded_fs::BoundedReadError,
+    explicitly_configured: bool,
+) -> AuditNarrativeLoad {
+    use crate::bounded_fs::BoundedReadError;
+    match error {
+        BoundedReadError::Io(error)
+            if error.kind() == std::io::ErrorKind::NotFound && !explicitly_configured =>
+        {
+            AuditNarrativeLoad::Absent
+        }
+        BoundedReadError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            AuditNarrativeLoad::Unavailable("not_found")
+        }
+        BoundedReadError::InvalidPath | BoundedReadError::OutsideRoot => {
+            AuditNarrativeLoad::Rejected("unsafe_path")
+        }
+        BoundedReadError::NotRegular => AuditNarrativeLoad::Rejected("not_regular_file"),
+        BoundedReadError::TooLarge { .. } => AuditNarrativeLoad::Rejected("size_limit"),
+        BoundedReadError::SnapshotChanged => AuditNarrativeLoad::Unavailable("snapshot_changed"),
+        BoundedReadError::Interrupted => AuditNarrativeLoad::Unavailable("cancelled"),
+        BoundedReadError::DeadlineExceeded => AuditNarrativeLoad::Unavailable("deadline"),
+        BoundedReadError::Io(_) => AuditNarrativeLoad::Unavailable("read_failed"),
+    }
+}
+
+/// Load optional bounded interpretation without hiding rejected or unavailable
+/// sidecars behind the ordinary absent state.
 fn read_audit_narrative(
     root: &Path,
     expected_binding: &AuditNarrativeBinding,
     valid_components: &HashSet<String>,
     deadline: Option<Instant>,
-) -> Option<AuditNarrative> {
+) -> AuditNarrativeLoad {
     const MAX_BYTES: u64 = 256 * 1024;
     const CAP_SUMMARY: usize = 2000;
     const CAP_LENS: usize = 600;
@@ -997,17 +1082,25 @@ fn read_audit_narrative(
     const CAP_SCENARIO: usize = 600;
     const CAP_EVIDENCE: usize = 500;
 
-    let configured = std::env::var("MMCG_AUDIT_NARRATIVE")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
+    let configured = match std::env::var("MMCG_AUDIT_NARRATIVE") {
+        Ok(value) if value.is_empty() => None,
+        Ok(value) => Some(PathBuf::from(value)),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return AuditNarrativeLoad::Rejected("invalid_override")
+        }
+    };
+    let explicitly_configured = configured.is_some();
     let path = match configured {
         Some(path) if path.is_absolute() => path,
         Some(path) => root.join(path),
         None => root.join(".mastermind").join("audit-narrative.json"),
     };
-    let capability = crate::bounded_fs::RootCapability::open(root).ok()?;
-    let bytes = crate::bounded_fs::read_regular_file_with_capability(
+    let capability = match crate::bounded_fs::RootCapability::open(root) {
+        Ok(capability) => capability,
+        Err(_) => return AuditNarrativeLoad::Unavailable("repository_unavailable"),
+    };
+    let bytes = match crate::bounded_fs::read_regular_file_with_capability(
         &capability,
         &path,
         MAX_BYTES,
@@ -1016,25 +1109,52 @@ fn read_audit_narrative(
             deadline,
             interrupted: None,
         },
-    )
-    .ok()?
-    .bytes;
-    let raw: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    ) {
+        Ok(file) => file.bytes,
+        Err(error) => return narrative_read_failure(error, explicitly_configured),
+    };
+    let raw: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(raw) => raw,
+        Err(_) => return AuditNarrativeLoad::Rejected("invalid_json"),
+    };
+    let Some(object) = raw.as_object() else {
+        return AuditNarrativeLoad::Rejected("invalid_shape");
+    };
     if raw
         .get("schema_version")
         .and_then(serde_json::Value::as_u64)
         != Some(1)
     {
-        return None;
+        return AuditNarrativeLoad::Rejected("unsupported_schema");
     }
-    let binding: AuditNarrativeBinding =
-        serde_json::from_value(raw.get("binding")?.clone()).ok()?;
+    let Some(binding) = raw.get("binding") else {
+        return AuditNarrativeLoad::Rejected("missing_binding");
+    };
+    let binding: AuditNarrativeBinding = match serde_json::from_value(binding.clone()) {
+        Ok(binding) => binding,
+        Err(_) => return AuditNarrativeLoad::Rejected("invalid_binding"),
+    };
     if &binding != expected_binding {
-        return None;
+        return AuditNarrativeLoad::Rejected("binding_mismatch");
     }
+
+    let filtered = std::cell::Cell::new(object.keys().any(|key| {
+        ![
+            "schema_version",
+            "binding",
+            "summary",
+            "lenses",
+            "domains",
+            "red_team",
+        ]
+        .contains(&key.as_str())
+    }));
 
     // Truncate on a char boundary so a byte cap never splits a multibyte glyph.
     let clip = |value: &str, cap: usize| -> String {
+        if value.trim() != value || value.chars().count() > cap {
+            filtered.set(true);
+        }
         if value.chars().count() <= cap {
             value.trim().to_string()
         } else {
@@ -1046,38 +1166,65 @@ fn read_audit_narrative(
                 .to_string()
         }
     };
-    let sev = |value: Option<&str>| -> String {
-        let value = value.unwrap_or("info");
+    let sev = |value: Option<&serde_json::Value>| -> String {
         match value {
-            "healthy" | "attention" | "risk" | "info" => value.to_string(),
-            _ => "info".to_string(),
+            None => "info".to_string(),
+            Some(value) => match value.as_str() {
+                Some(value @ ("healthy" | "attention" | "risk" | "info")) => value.to_string(),
+                _ => {
+                    filtered.set(true);
+                    "info".to_string()
+                }
+            },
         }
     };
     let opt_str = |value: Option<&serde_json::Value>, cap: usize| -> Option<String> {
-        value
-            .and_then(serde_json::Value::as_str)
-            .map(|text| clip(text, cap))
-            .filter(|text| !text.is_empty())
+        let value = value?;
+        let Some(text) = value.as_str() else {
+            filtered.set(true);
+            return None;
+        };
+        let text = clip(text, cap);
+        if text.is_empty() {
+            filtered.set(true);
+            None
+        } else {
+            Some(text)
+        }
     };
     let component_vector = |value: Option<&serde_json::Value>| -> Option<Vec<String>> {
-        let values = value?.as_array()?;
+        let Some(value) = value else {
+            filtered.set(true);
+            return None;
+        };
+        let Some(values) = value.as_array() else {
+            filtered.set(true);
+            return None;
+        };
         if values.is_empty() || values.len() > CAP_DOMAIN_COMPONENTS {
+            filtered.set(true);
             return None;
         }
         let mut seen = HashSet::new();
         let mut components = Vec::with_capacity(values.len());
         for value in values {
-            let raw_component = value.as_str()?;
+            let Some(raw_component) = value.as_str() else {
+                filtered.set(true);
+                return None;
+            };
             if raw_component.is_empty()
                 || raw_component.trim() != raw_component
                 || raw_component.chars().count() > CAP_COMPONENT
                 || !valid_components.contains(raw_component)
             {
+                filtered.set(true);
                 return None;
             }
             let component = raw_component.to_string();
             if seen.insert(component.clone()) {
                 components.push(component);
+            } else {
+                filtered.set(true);
             }
         }
         (!components.is_empty()).then_some(components)
@@ -1085,76 +1232,119 @@ fn read_audit_narrative(
 
     let summary = opt_str(raw.get("summary"), CAP_SUMMARY);
 
+    const KNOWN_LENSES: &[&str] = &[
+        "bugs",
+        "bus",
+        "structural",
+        "change",
+        "health",
+        "security",
+        "domain",
+        "explain",
+    ];
     let mut lenses = std::collections::BTreeMap::new();
-    if let Some(map) = raw.get("lenses").and_then(serde_json::Value::as_object) {
-        const KNOWN: &[&str] = &[
-            "bugs",
-            "bus",
-            "structural",
-            "change",
-            "health",
-            "security",
-            "domain",
-            "explain",
-        ];
-        for (key, value) in map.iter().take(CAP_LENSES) {
-            if KNOWN.contains(&key.as_str()) {
-                if let Some(text) = value
-                    .as_str()
-                    .map(|t| clip(t, CAP_LENS))
-                    .filter(|t| !t.is_empty())
-                {
+    if let Some(value) = raw.get("lenses") {
+        if let Some(map) = value.as_object() {
+            if map.len() > CAP_LENSES {
+                filtered.set(true);
+            }
+            for (key, value) in map.iter().take(CAP_LENSES) {
+                if !KNOWN_LENSES.contains(&key.as_str()) {
+                    filtered.set(true);
+                    continue;
+                }
+                if let Some(text) = opt_str(Some(value), CAP_LENS) {
                     lenses.insert(key.clone(), text);
                 }
             }
+        } else {
+            filtered.set(true);
         }
     }
 
     let mut domains = Vec::new();
-    if let Some(list) = raw.get("domains").and_then(serde_json::Value::as_array) {
-        for item in list.iter().take(CAP_DOMAINS) {
-            let name = opt_str(item.get("name"), CAP_DOMAIN_NAME);
-            let Some(name) = name else { continue };
-            let Some(components) = component_vector(item.get("components")) else {
-                continue;
-            };
-            domains.push(AuditDomain {
-                name,
-                severity: sev(item.get("severity").and_then(serde_json::Value::as_str)),
-                note: opt_str(item.get("note"), CAP_DOMAIN_NOTE),
-                components,
-            });
+    if let Some(value) = raw.get("domains") {
+        if let Some(list) = value.as_array() {
+            if list.len() > CAP_DOMAINS {
+                filtered.set(true);
+            }
+            for item in list.iter().take(CAP_DOMAINS) {
+                let Some(item_object) = item.as_object() else {
+                    filtered.set(true);
+                    continue;
+                };
+                if item_object
+                    .keys()
+                    .any(|key| !["name", "severity", "note", "components"].contains(&key.as_str()))
+                {
+                    filtered.set(true);
+                }
+                let name = opt_str(item.get("name"), CAP_DOMAIN_NAME);
+                let Some(name) = name else { continue };
+                let Some(components) = component_vector(item.get("components")) else {
+                    continue;
+                };
+                domains.push(AuditDomain {
+                    name,
+                    severity: sev(item.get("severity")),
+                    note: opt_str(item.get("note"), CAP_DOMAIN_NOTE),
+                    components,
+                });
+            }
+        } else {
+            filtered.set(true);
         }
     }
 
     let mut red_team = Vec::new();
-    if let Some(list) = raw.get("red_team").and_then(serde_json::Value::as_array) {
-        for item in list.iter().take(CAP_RED_TEAM) {
-            let Some(title) = opt_str(item.get("title"), CAP_TITLE) else {
-                continue;
-            };
-            let Some(vector) = component_vector(item.get("vector")) else {
-                continue;
-            };
-            red_team.push(AuditRedTeam {
-                title,
-                severity: sev(item.get("severity").and_then(serde_json::Value::as_str)),
-                scenario: opt_str(item.get("scenario"), CAP_SCENARIO),
-                evidence: opt_str(item.get("evidence"), CAP_EVIDENCE),
-                vector,
-            });
+    if let Some(value) = raw.get("red_team") {
+        if let Some(list) = value.as_array() {
+            if list.len() > CAP_RED_TEAM {
+                filtered.set(true);
+            }
+            for item in list.iter().take(CAP_RED_TEAM) {
+                let Some(item_object) = item.as_object() else {
+                    filtered.set(true);
+                    continue;
+                };
+                if item_object.keys().any(|key| {
+                    !["title", "severity", "scenario", "evidence", "vector"].contains(&key.as_str())
+                }) {
+                    filtered.set(true);
+                }
+                let Some(title) = opt_str(item.get("title"), CAP_TITLE) else {
+                    continue;
+                };
+                let Some(vector) = component_vector(item.get("vector")) else {
+                    continue;
+                };
+                red_team.push(AuditRedTeam {
+                    title,
+                    severity: sev(item.get("severity")),
+                    scenario: opt_str(item.get("scenario"), CAP_SCENARIO),
+                    evidence: opt_str(item.get("evidence"), CAP_EVIDENCE),
+                    vector,
+                });
+            }
+        } else {
+            filtered.set(true);
         }
     }
 
     if summary.is_none() && lenses.is_empty() && domains.is_empty() && red_team.is_empty() {
-        return None;
+        return AuditNarrativeLoad::Rejected("no_usable_content");
     }
-    Some(AuditNarrative {
+    let narrative = AuditNarrative {
         summary,
         lenses,
         domains,
         red_team,
-    })
+    };
+    if filtered.get() {
+        AuditNarrativeLoad::Partial(narrative)
+    } else {
+        AuditNarrativeLoad::Available(narrative)
+    }
 }
 
 fn audit_narrative_binding(
@@ -1647,7 +1837,8 @@ fn build_snapshot_until(
         .iter()
         .map(|component| component.path.clone())
         .collect::<HashSet<_>>();
-    let narrative = read_audit_narrative(&root, &narrative_binding, &valid_components, deadline);
+    let (narrative_state, narrative) =
+        read_audit_narrative(&root, &narrative_binding, &valid_components, deadline).into_parts();
 
     let audit = LensAudit {
         dead_code: LensDeadCode {
@@ -1661,6 +1852,7 @@ fn build_snapshot_until(
         largest_files,
         bus_factor,
         narrative_binding,
+        narrative_state,
         narrative,
     };
 
@@ -2662,6 +2854,7 @@ mod tests {
         let initial =
             serde_json::to_value(build_snapshot(&store, repo.path(), &options()).unwrap()).unwrap();
         let binding = initial["audit"]["narrative_binding"].clone();
+        assert_eq!(initial["audit"]["narrative_state"]["status"], "absent");
         let component = initial["map"]["components"]["items"][0]["path"]
             .as_str()
             .unwrap()
@@ -2696,6 +2889,11 @@ mod tests {
             serde_json::to_value(build_snapshot(&store, repo.path(), &options()).unwrap()).unwrap();
         let n = &json["audit"]["narrative"];
         assert!(!n.is_null(), "a valid sidecar must be ingested");
+        assert_eq!(json["audit"]["narrative_state"]["status"], "partial");
+        assert_eq!(
+            json["audit"]["narrative_state"]["reason"],
+            "content_filtered_or_truncated"
+        );
         assert_eq!(
             n["summary"].as_str().unwrap().chars().count(),
             2000,
@@ -2725,6 +2923,23 @@ mod tests {
             "only an exact returned component path is traceable"
         );
 
+        fs::write(
+            mastermind.join("audit-narrative.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "binding": initial["audit"]["narrative_binding"],
+                "summary": "Bound, grounded narrative"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let available =
+            serde_json::to_value(build_snapshot(&store, repo.path(), &options()).unwrap()).unwrap();
+        assert_eq!(available["audit"]["narrative_state"]["status"], "available");
+        assert!(available["audit"]["narrative_state"]
+            .get("reason")
+            .is_none());
+
         let mut stale_binding = initial["audit"]["narrative_binding"].clone();
         stale_binding["head_oid"] = serde_json::Value::String("0".repeat(40));
         fs::write(
@@ -2743,6 +2958,11 @@ mod tests {
             stale["audit"].get("narrative").is_none(),
             "a sidecar for another snapshot must be rejected"
         );
+        assert_eq!(stale["audit"]["narrative_state"]["status"], "rejected");
+        assert_eq!(
+            stale["audit"]["narrative_state"]["reason"],
+            "binding_mismatch"
+        );
 
         fs::write(
             mastermind.join("audit-narrative.json"),
@@ -2759,6 +2979,20 @@ mod tests {
         assert!(
             json2["audit"].get("narrative").is_none(),
             "unknown schema yields no narrative"
+        );
+        assert_eq!(json2["audit"]["narrative_state"]["status"], "rejected");
+        assert_eq!(
+            json2["audit"]["narrative_state"]["reason"],
+            "unsupported_schema"
+        );
+
+        fs::write(mastermind.join("audit-narrative.json"), b"{broken").unwrap();
+        let malformed =
+            serde_json::to_value(build_snapshot(&store, repo.path(), &options()).unwrap()).unwrap();
+        assert_eq!(malformed["audit"]["narrative_state"]["status"], "rejected");
+        assert_eq!(
+            malformed["audit"]["narrative_state"]["reason"],
+            "invalid_json"
         );
     }
 
@@ -2807,6 +3041,11 @@ mod tests {
 
         let snapshot = build_snapshot(&store, repo.path(), &options()).unwrap();
         assert!(snapshot.audit.narrative.is_none());
+        assert_eq!(snapshot.audit.narrative_state.status, "rejected");
+        assert_eq!(
+            snapshot.audit.narrative_state.reason,
+            Some("not_regular_file")
+        );
     }
 
     #[test]

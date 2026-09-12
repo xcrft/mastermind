@@ -1697,8 +1697,7 @@
     if (elements.auditVerdictWord) { elements.auditVerdictWord.textContent = word; }
     if (elements.auditLede) {
       var narrative = text(record(record(model.audit).narrative).summary, "");
-      elements.auditLede.className = narrative ? "audit-exec__lede audit-lede--ai" : "audit-exec__lede";
-      elements.auditLede.textContent = narrative || (
+      var factualLede =
         componentMetric.value + " components · " + fileMetric.value + " mapped files · " +
         languageMetric.value + " language" + (languageCount === 1 ? "" : "s") + ". " +
         (cycleIncomplete
@@ -1706,8 +1705,10 @@
           : cycleCount === 0 ? "No dependency cycles — the selected module graph is acyclic. " : cycleCount + " dependency cycles — refactors carry structural risk. ") +
         (text(changeSource.status, "") === "available"
           ? changeMetric.value + " change-hotspot" + (changeCount === 1 ? "" : "s") + " concentrate the regression risk."
-          : "Change-hotspot history is unavailable.")
-      );
+          : "Change-hotspot history is unavailable.");
+      var narrativeNotice = auditNarrativeNotice(model);
+      elements.auditLede.className = narrative ? "audit-exec__lede audit-lede--ai" : "audit-exec__lede";
+      elements.auditLede.textContent = (narrative || factualLede) + (narrativeNotice ? " " + narrativeNotice : "");
     }
     if (elements.auditPillars) {
       elements.auditPillars.replaceChildren();
@@ -1981,6 +1982,37 @@
   }
 
   function auditNarrative(model) { return record(record(model.audit).narrative); }
+
+  function auditNarrativeNotice(model) {
+    var state = record(record(model.audit).narrative_state);
+    var status = text(state.status, "absent");
+    var reason = text(state.reason, "");
+    if (status === "partial") {
+      return "Some AI narrative content was filtered or truncated; review the sidecar before relying on it.";
+    }
+    if (status !== "rejected" && status !== "unavailable") { return ""; }
+    var messages = {
+      binding_mismatch: "it targets another repository snapshot. Regenerate it from the current narrative binding.",
+      invalid_json: "its JSON is invalid.",
+      invalid_shape: "its top-level shape is invalid.",
+      unsupported_schema: "its schema version is unsupported.",
+      missing_binding: "its snapshot binding is missing.",
+      invalid_binding: "its snapshot binding is invalid.",
+      no_usable_content: "it contains no usable grounded content.",
+      size_limit: "it exceeds the 256 KiB limit.",
+      unsafe_path: "its path is outside the safe repository scope.",
+      not_regular_file: "its path is not a regular no-follow file.",
+      invalid_override: "the MMCG_AUDIT_NARRATIVE path is invalid.",
+      not_found: "the configured file was not found.",
+      snapshot_changed: "the file changed while it was being read.",
+      cancelled: "its bounded read was cancelled.",
+      deadline: "its bounded read exceeded the deadline.",
+      repository_unavailable: "the repository could not be opened safely.",
+      read_failed: "the file could not be read safely.",
+    };
+    var prefix = status === "rejected" ? "Optional AI narrative was rejected: " : "Optional AI narrative is unavailable: ";
+    return prefix + (messages[reason] || "the sidecar could not be used.");
+  }
 
   function auditGroundedComponents(model, values) {
     var known = {};

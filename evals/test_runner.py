@@ -1345,6 +1345,57 @@ class PromptIsolationTests(unittest.TestCase):
         self.assertIn("do not prepend `cd`", auditor)
         self.assertIn("do not append pipes", auditor)
 
+    def test_fixture_setup_failure_removes_its_temporary_repository(self):
+        with tempfile.TemporaryDirectory() as target:
+            root = Path(target)
+            fixtures = root / "fixtures"
+            baseline = fixtures / "sample" / "baseline"
+            after = fixtures / "sample" / "changes" / "after"
+            baseline.mkdir(parents=True)
+            after.mkdir(parents=True)
+            (baseline / "source.py").write_text("before = True\n")
+            (after / "source.py").write_text("after = True\n")
+            temporary_repo = root / "temporary-repo"
+
+            def make_temporary_repo(*_args, **_kwargs):
+                temporary_repo.mkdir()
+                return str(temporary_repo)
+
+            with (
+                patch.object(runner, "FIXTURES_DIR", fixtures),
+                patch.object(runner.tempfile, "mkdtemp", side_effect=make_temporary_repo),
+                patch.object(runner, "_run_git", side_effect=RuntimeError("git failed")),
+                self.assertRaisesRegex(RuntimeError, "git failed"),
+            ):
+                runner.setup_fixture("sample", "baseline", "after")
+
+            self.assertFalse(temporary_repo.exists())
+
+    def test_fixture_index_timeout_is_a_nonfatal_missing_index(self):
+        with tempfile.TemporaryDirectory() as target:
+            root = Path(target)
+            fixtures = root / "fixtures"
+            baseline = fixtures / "sample" / "baseline"
+            after = fixtures / "sample" / "changes" / "after"
+            baseline.mkdir(parents=True)
+            after.mkdir(parents=True)
+            (baseline / "source.py").write_text("before = True\n")
+            (after / "source.py").write_text("after = True\n")
+            with (
+                patch.object(runner, "FIXTURES_DIR", fixtures),
+                patch.object(runner, "_run_git"),
+                patch.object(
+                    runner,
+                    "_build_mmcg_index",
+                    side_effect=subprocess.TimeoutExpired("mmcg", 60),
+                ),
+                patch.object(runner.sys, "stderr", io.StringIO()),
+            ):
+                fixture = runner.setup_fixture("sample", "baseline", "after")
+            self.addCleanup(runner.teardown_fixture, fixture)
+            self.assertTrue(fixture.is_dir())
+            self.assertFalse((fixture / ".mastermind" / "mmcg.db").exists())
+
     def test_auditor_file_inventory_covers_staged_unstaged_and_untracked_changes(self):
         case = next(
             case for case in map(json.loads, runner.SUITES["auditor"]["cases"].read_text().splitlines())

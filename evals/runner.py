@@ -1908,46 +1908,61 @@ def setup_fixture(
         raise ValueError("staged_paths must be a list of repository-relative paths")
 
     tmp = Path(tempfile.mkdtemp(prefix=f"mmcg-eval-{fixture_name}-"))
-
-    # Phase 1: baseline tree.
-    _copy_tree_into(baseline_src, tmp)
-    _run_git(["init", "-q", "--initial-branch=main"], tmp, git_binary=git_binary)
-    _run_git(["add", "-A"], tmp, git_binary=git_binary)
-    _run_git(["commit", "-q", "-m", "baseline"], tmp, git_binary=git_binary)
-    _run_git(["tag", baseline_ref], tmp, git_binary=git_binary)
-
-    # Phase 2: replace working tree with `after` variant content.
-    # We wipe everything except `.git/` then re-overlay so deletions are
-    # reflected too (e.g. a variant that removes a file present in baseline).
-    for entry in tmp.iterdir():
-        if entry.name == ".git":
-            continue
-        if entry.is_dir():
-            shutil.rmtree(entry)
-        else:
-            entry.unlink()
-    _copy_tree_into(after_src, tmp)
-    if staged_paths is None:
-        _run_git(["add", "-A"], tmp, git_binary=git_binary)
+    complete = False
+    try:
+        # Phase 1: baseline tree.
+        _copy_tree_into(baseline_src, tmp)
         _run_git(
-            ["commit", "-q", "-m", f"executor change ({after_ref})", "--allow-empty"],
+            ["init", "-q", "--initial-branch=main"],
             tmp,
             git_binary=git_binary,
         )
-        _run_git(["tag", after_ref], tmp, git_binary=git_binary)
-    elif staged_paths:
-        _run_git(["add", "--", *staged_paths], tmp, git_binary=git_binary)
+        _run_git(["add", "-A"], tmp, git_binary=git_binary)
+        _run_git(["commit", "-q", "-m", "baseline"], tmp, git_binary=git_binary)
+        _run_git(["tag", baseline_ref], tmp, git_binary=git_binary)
 
-    # Phase 3: build an mmcg index of the after-tree so the auditor can run
-    # real `mmcg_callers` / `mmcg_search` against the working state and
-    # compare against the spec's pre-edit snapshot. Failure here is non-fatal
-    # — the auditor can still operate on `git diff` alone.
-    try:
-        _build_mmcg_index(tmp, mmcg_binary=mmcg_binary)
-    except (RuntimeError, FileNotFoundError) as e:
-        sys.stderr.write(f"  [fixture] mmcg index skipped: {e}\n")
+        # Phase 2: replace working tree with `after` variant content.
+        # We wipe everything except `.git/` then re-overlay so deletions are
+        # reflected too (e.g. a variant that removes a file present in baseline).
+        for entry in tmp.iterdir():
+            if entry.name == ".git":
+                continue
+            if entry.is_dir():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+        _copy_tree_into(after_src, tmp)
+        if staged_paths is None:
+            _run_git(["add", "-A"], tmp, git_binary=git_binary)
+            _run_git(
+                [
+                    "commit",
+                    "-q",
+                    "-m",
+                    f"executor change ({after_ref})",
+                    "--allow-empty",
+                ],
+                tmp,
+                git_binary=git_binary,
+            )
+            _run_git(["tag", after_ref], tmp, git_binary=git_binary)
+        elif staged_paths:
+            _run_git(["add", "--", *staged_paths], tmp, git_binary=git_binary)
 
-    return tmp
+        # Phase 3: build an mmcg index of the after-tree so the auditor can run
+        # real `mmcg_callers` / `mmcg_search` against the working state and
+        # compare against the spec's pre-edit snapshot. Failure here is non-fatal
+        # — the auditor can still operate on `git diff` alone.
+        try:
+            _build_mmcg_index(tmp, mmcg_binary=mmcg_binary)
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+            sys.stderr.write(f"  [fixture] mmcg index skipped: {error}\n")
+
+        complete = True
+        return tmp
+    finally:
+        if not complete:
+            teardown_fixture(tmp)
 
 
 def _build_mmcg_index(

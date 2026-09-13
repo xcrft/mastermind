@@ -141,7 +141,9 @@ files separately, covering audits before commit. The researcher queries the
 same graph and reads source before reporting a fact. JSONL cases do not provide
 synthetic diffs or structural answers. The runner prefers the in-tree release
 binary at `mcp/servers/mmcg/target/release/mmcg`, then falls back to `mmcg` on
-`PATH`.
+`PATH`. A failed copy or Git setup removes the partial temporary repository.
+An mmcg error or timeout leaves the index unavailable; cases that require mmcg
+then fail through the normal result contract instead of leaking setup state.
 
 Build the matching binary before a model-backed researcher or auditor run:
 

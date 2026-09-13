@@ -155,7 +155,8 @@ class CitationEvidenceTests(unittest.TestCase):
         }
         for line, passed in ((3, True), (5, False)):
             payload = {
-                "type": "result", "result": f"load returns 7. `src/store.py:{line}`",
+                "type": "result", "subtype": "success", "is_error": False,
+                "result": f"load returns 7. `src/store.py:{line}`",
                 "duration_ms": 1, "duration_api_ms": 1, "num_turns": 1,
                 "total_cost_usd": 0, "modelUsage": {"test-model": {}},
                 "usage": {

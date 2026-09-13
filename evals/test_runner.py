@@ -2080,9 +2080,10 @@ class CriticGraderTests(unittest.TestCase):
             ],
         )
         self.assertFalse(result.passed)
-        reasons = " ".join(result.reasons)
-        self.assertIn("permission denied for tools", reasons)
-        self.assertNotIn("/private/secret", reasons)
+        self.assertEqual(result.reasons, ["permission denied for tools: ['Read']"])
+        self.assertEqual(result.output_excerpt, "")
+        self.assertTrue(result.telemetry_complete)
+        self.assertNotIn("/private/secret", " ".join(result.reasons))
 
     def test_invalid_stream_does_not_copy_tool_input_into_diagnostics(self):
         events = [
@@ -2137,6 +2138,9 @@ class CriticGraderTests(unittest.TestCase):
             )
         self.assertFalse(result.passed)
         self.assertEqual(result.output_excerpt, "")
+        self.assertEqual(len(result.reasons), 1)
+        self.assertTrue(result.reasons[0].startswith("invalid Claude stream:"))
+        self.assertEqual(result.telemetry_issues, ["Claude stream was invalid"])
         self.assertNotIn("/private/secret", " ".join(result.reasons))
 
     def test_nonzero_cli_exit_does_not_copy_process_output_into_diagnostics(self):
@@ -2158,6 +2162,9 @@ class CriticGraderTests(unittest.TestCase):
         self.assertFalse(result.passed)
         self.assertEqual(result.reasons, ["claude exit 1"])
         self.assertEqual(result.output_excerpt, "")
+        self.assertEqual(
+            result.telemetry_issues, ["Claude exited before valid telemetry"]
+        )
 
     def test_transport_failures_do_not_copy_process_output_into_diagnostics(self):
         expected_reasons = {
@@ -2191,6 +2198,7 @@ class CriticGraderTests(unittest.TestCase):
             self.assertFalse(result.passed)
             self.assertEqual(result.reasons, [expected])
             self.assertEqual(result.output_excerpt, "")
+            self.assertEqual(result.telemetry_issues, [expected])
             report = json.dumps(runner.result_report(result))
             self.assertNotIn("stdout-secret", report)
             self.assertNotIn("stderr-secret", report)
@@ -2213,6 +2221,80 @@ class CriticGraderTests(unittest.TestCase):
             )
         self.assertFalse(result.passed)
         self.assertEqual(result.reasons, ["invalid Claude stream encoding"])
+        self.assertEqual(result.output_excerpt, "")
+        self.assertEqual(
+            result.telemetry_issues, ["Claude stream encoding was invalid"]
+        )
+
+    def test_pre_runtime_failure_produces_a_structurally_valid_report(self):
+        case = json.loads(
+            runner.SUITES["critic"]["cases"].read_text().splitlines()[0]
+        )
+        result = runner.failed_evaluation_result(
+            case["id"],
+            "critic",
+            "cannot start Claude CLI",
+            fixture_path=None,
+            telemetry_issue="cannot start Claude CLI",
+        )
+        with patch.object(runner, "git_revision", return_value="1" * 40):
+            report = runner.build_report(
+                [result],
+                model="opus",
+                suite_filter="critic",
+                case_filter=case["id"],
+                claude_version="test-cli",
+            )
+
+        self.assertEqual(report["resolved_models"], [])
+        self.assertEqual(
+            runner.report_comparison_issues(report, "failure"), []
+        )
+
+    def test_incomplete_telemetry_skips_secondary_grading(self):
+        events = [
+            {"type": "system", "subtype": "init", "model": RESOLVED_MODEL},
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": "fabricated slop\n\n## Verdict\nrethink — unsafe.",
+                "duration_ms": 1,
+                "duration_api_ms": 1,
+                "num_turns": 1,
+                "total_cost_usd": 0,
+                "modelUsage": {RESOLVED_MODEL: {}},
+                "usage": {
+                    "input_tokens": 1,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                },
+            },
+        ]
+        process = ProcessResult(
+            stdout="\n".join(json.dumps(event) for event in events).encode(),
+            stderr=b"",
+            returncode=0,
+        )
+        with patch.object(runner, "run_bounded", return_value=process):
+            result = runner.evaluate_case(
+                "opus",
+                "critic",
+                runner.SUITES["critic"],
+                json.loads(
+                    runner.SUITES["critic"]["cases"].read_text().splitlines()[0]
+                ),
+                keep_fixtures=False,
+            )
+
+        self.assertFalse(result.passed)
+        self.assertEqual(len(result.reasons), 1)
+        self.assertTrue(result.reasons[0].startswith("incomplete Claude telemetry:"))
+        self.assertEqual(
+            result.telemetry_issues,
+            ["usage.output_tokens must be a non-negative integer"],
+        )
+        self.assertEqual(result.resolved_models, [RESOLVED_MODEL])
         self.assertEqual(result.output_excerpt, "")
 
     def test_critic_rejects_missing_quoted_or_conflicting_verdicts(self):

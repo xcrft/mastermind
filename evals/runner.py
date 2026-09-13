@@ -2135,7 +2135,7 @@ def report_comparison_issues(
         issues.append(f"{label} report has invalid baseline gate metadata")
     report_models = report.get("resolved_models")
     if (
-        not _string_list(report_models, allow_empty=False)
+        not _string_list(report_models, allow_empty=True)
         or report_models != sorted(report_models)
     ):
         issues.append(f"{label} report has invalid resolved model ids")
@@ -2373,7 +2373,12 @@ def report_comparison_issues(
             issues.append(f"{label} case {case_id!r} has inconsistent telemetry status")
 
         case_models = case.get("resolved_models")
-        if not _string_list(case_models, allow_empty=False):
+        telemetry_complete = (
+            isinstance(telemetry, dict) and telemetry.get("complete") is True
+        )
+        if not _string_list(
+            case_models, allow_empty=not telemetry_complete
+        ):
             issues.append(f"{label} case {case_id!r} has invalid resolved model ids")
         else:
             raw_models.update(case_models)
@@ -2434,7 +2439,7 @@ def report_comparison_issues(
                 f"{label} case {case_id!r} total tokens do not match raw usage"
             )
 
-    if _string_list(report_models, allow_empty=False) and sorted(raw_models) != report_models:
+    if _string_list(report_models, allow_empty=True) and sorted(raw_models) != report_models:
         issues.append(f"{label} resolved model ids do not match raw cases")
 
     required_suite_fields = {
@@ -3771,6 +3776,54 @@ def code_comment_policy_reasons(output: str, policy: dict) -> list[str]:
 # ----- per-case evaluator ---------------------------------------------------
 
 
+def failed_evaluation_result(
+    case_id: str,
+    suite_name: str,
+    reason: str,
+    *,
+    fixture_path: Path | None,
+    telemetry_issue: str | None = None,
+    telemetry: dict[str, object] | None = None,
+    tool_calls: list[str] | None = None,
+) -> Result:
+    """Create a structurally valid failure without persisting model output."""
+    if telemetry is None:
+        telemetry = {
+            "duration_ms": 0,
+            "duration_api_ms": 0,
+            "num_turns": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cost_usd": 0.0,
+            "resolved_models": [],
+            "complete": False,
+            "issues": [telemetry_issue or "evaluation ended before telemetry"],
+        }
+    return Result(
+        case_id=case_id,
+        suite=suite_name,
+        passed=False,
+        reasons=[reason],
+        duration_ms=int(telemetry["duration_ms"]),
+        fixture_path=fixture_path,
+        duration_api_ms=int(telemetry["duration_api_ms"]),
+        num_turns=int(telemetry["num_turns"]),
+        input_tokens=int(telemetry["input_tokens"]),
+        output_tokens=int(telemetry["output_tokens"]),
+        cache_creation_input_tokens=int(
+            telemetry["cache_creation_input_tokens"]
+        ),
+        cache_read_input_tokens=int(telemetry["cache_read_input_tokens"]),
+        cost_usd=float(telemetry["cost_usd"]),
+        telemetry_complete=bool(telemetry["complete"]),
+        telemetry_issues=list(telemetry["issues"]),
+        resolved_models=list(telemetry["resolved_models"]),
+        tool_calls=[] if tool_calls is None else tool_calls,
+    )
+
+
 def evaluate_case(
     model: str,
     suite_name: str,
@@ -3816,15 +3869,13 @@ def evaluate_case(
             db_path = fixture_path / ".mastermind" / "mmcg.db"
             has_mmcg = mmcg_binary is not None and db_path.is_file()
             if suite_name in {"auditor", "researcher"} and not has_mmcg and not case.get("allow_no_mmcg"):
-                return Result(
-                    case_id=case_id,
-                    suite=suite_name,
-                    passed=False,
-                    reasons=[
-                        "mmcg index unavailable — build the mmcg binary first "
-                        "(`cargo build --release`)"
-                    ],
+                return failed_evaluation_result(
+                    case_id,
+                    suite_name,
+                    "mmcg index unavailable — build the mmcg binary first "
+                    "(`cargo build --release`)",
                     fixture_path=fixture_path,
+                    telemetry_issue="evaluation did not start because mmcg was unavailable",
                 )
             if suite_name == "auditor":
                 user_message = render_auditor_input(
@@ -3964,39 +4015,39 @@ def evaluate_case(
                     "bounded Claude process transport requires POSIX"
                 ),
             }.get(proc.stop_reason, "Claude process stopped by transport")
-            return Result(
-                case_id=case_id,
-                suite=suite_name,
-                passed=False,
-                reasons=[reason],
+            return failed_evaluation_result(
+                case_id,
+                suite_name,
+                reason,
                 fixture_path=fixture_path,
+                telemetry_issue=reason,
             )
 
         if proc.returncode != 0:
-            return Result(
-                case_id=case_id,
-                suite=suite_name,
-                passed=False,
-                reasons=[f"claude exit {proc.returncode}"],
+            reason = f"claude exit {proc.returncode}"
+            return failed_evaluation_result(
+                case_id,
+                suite_name,
+                reason,
                 fixture_path=fixture_path,
+                telemetry_issue="Claude exited before valid telemetry",
             )
 
         try:
             stdout = proc.stdout.decode("utf-8")
         except UnicodeDecodeError:
-            return Result(
-                case_id=case_id,
-                suite=suite_name,
-                passed=False,
-                reasons=["invalid Claude stream encoding"],
+            return failed_evaluation_result(
+                case_id,
+                suite_name,
+                "invalid Claude stream encoding",
                 fixture_path=fixture_path,
+                telemetry_issue="Claude stream encoding was invalid",
             )
 
         permission_denials: list[dict] = []
         tool_calls: list[str] = []
         tool_executions: list[ToolExecution] = []
         telemetry: dict[str, object] = telemetry_from_payload({})
-        parse_error: str | None = None
         try:
             payload, tool_calls, tool_executions = parse_claude_output(
                 stdout,
@@ -4014,24 +4065,24 @@ def evaluate_case(
                     denial for denial in raw_denials if isinstance(denial, dict)
                 ]
         except (json.JSONDecodeError, TypeError, ValueError) as error:
-            output = ""
-            duration_ms = 0
-            parse_error = str(error)
+            return failed_evaluation_result(
+                case_id,
+                suite_name,
+                f"invalid Claude stream: {error}",
+                fixture_path=fixture_path,
+                telemetry_issue="Claude stream was invalid",
+            )
 
-        expect = case.get("expect", {})
-        reasons: list[str] = []
-        passed = True
-
-        if parse_error is not None:
-            passed = False
-            reasons.append(f"invalid Claude stream: {parse_error}")
         if telemetry["complete"] is not True:
-            passed = False
-            reasons.append(
-                "incomplete Claude telemetry: " + "; ".join(telemetry["issues"])
+            return failed_evaluation_result(
+                case_id,
+                suite_name,
+                "incomplete Claude telemetry: " + "; ".join(telemetry["issues"]),
+                fixture_path=fixture_path,
+                telemetry=telemetry,
+                tool_calls=tool_calls,
             )
         if permission_denials:
-            passed = False
             denied_tools = sorted(
                 {
                     denial.get("tool_name", "unknown")
@@ -4040,9 +4091,18 @@ def evaluate_case(
                     for denial in permission_denials
                 }
             )
-            reasons.append(
-                f"permission denied for tools: {denied_tools!r}"
+            return failed_evaluation_result(
+                case_id,
+                suite_name,
+                f"permission denied for tools: {denied_tools!r}",
+                fixture_path=fixture_path,
+                telemetry=telemetry,
+                tool_calls=tool_calls,
             )
+
+        expect = case.get("expect", {})
+        reasons: list[str] = []
+        passed = True
 
         usage_reasons = usage_budget_reasons(expect, telemetry)
         if usage_reasons:

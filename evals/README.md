@@ -50,6 +50,11 @@ The runner passes each role's shipped effort explicitly, enforces a physical
 `--max-turns` cap, and sets the CLI output-token ceiling from the case or suite
 default before inference. The same limits remain post-run grading assertions
 when a case declares them.
+Transport, stream, telemetry, and permission failures stop semantic grading for
+that case, so the report keeps the primary infrastructure reason instead of
+adding unrelated missing-verdict, phrase, citation, or tool failures. A run that
+fails before model identity is observed records an empty resolved-model list and
+remains a structurally valid failed report.
 
 Each model-backed case also runs under bounded POSIX process supervision: 480
 seconds of wall time, 8 MiB of stdout, and 64 KiB of stderr. Crossing a limit

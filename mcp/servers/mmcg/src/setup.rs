@@ -55,10 +55,15 @@ pub struct Request {
 }
 
 pub fn run(request: &Request, mmcg_binary: &Path) -> Outcome {
-    let entry = mmcg_entry(mmcg_binary);
     if let Err(class) = validate_request(request) {
-        return finish_error(request, "unresolved", operation(request), &entry, class);
+        return finish_error(request, "unresolved", operation(request), &json!({}), class);
     }
+    let entry = match mmcg_entry(mmcg_binary) {
+        Ok(entry) => entry,
+        Err(class) => {
+            return finish_error(request, "unresolved", operation(request), &json!({}), class)
+        }
+    };
     match (request.client, request.scope) {
         (Client::Claude | Client::Codex, Scope::User) => run_native(request, &entry),
         (Client::Continue, _) => match target_for(request) {
@@ -128,7 +133,10 @@ pub fn run_claude(target: &Target, mmcg_binary: &Path, opts: Opts) -> Outcome {
         remove: false,
         force: opts.force,
     };
-    run_json(&request, target, &mmcg_entry(mmcg_binary))
+    match mmcg_entry(mmcg_binary) {
+        Ok(entry) => run_json(&request, target, &entry),
+        Err(class) => finish_error(&request, &target.label, "install", &json!({}), class),
+    }
 }
 
 /// Decide `command` + `args` for the MCP config from how this binary was
@@ -147,10 +155,10 @@ pub fn run_claude(target: &Target, mmcg_binary: &Path, opts: Opts) -> Outcome {
 ///
 /// Two-mode design keeps `cargo install mmcg` unchanged while giving npm users a
 /// config that travels with their install method.
-fn mmcg_entry(mmcg_binary: &Path) -> Value {
+fn mmcg_entry(mmcg_binary: &Path) -> Result<Value, &'static str> {
     #[cfg(test)]
     if let Some(entry) = TEST_CANONICAL_ENTRY.with(|slot| slot.borrow().clone()) {
-        return entry;
+        return Ok(entry);
     }
     mmcg_entry_for_platform(mmcg_binary, NpmLauncherPlatform::current())
 }
@@ -191,7 +199,10 @@ fn npm_launcher_entry(platform: NpmLauncherPlatform, command: &str, args: Vec<St
     }
 }
 
-fn mmcg_entry_for_platform(mmcg_binary: &Path, platform: NpmLauncherPlatform) -> Value {
+fn mmcg_entry_for_platform(
+    mmcg_binary: &Path,
+    platform: NpmLauncherPlatform,
+) -> Result<Value, &'static str> {
     let install_mode = std::env::var("MASTERMIND_INSTALL_MODE").ok();
     let version = std::env::var("MASTERMIND_VERSION").ok();
     let package = std::env::var("MASTERMIND_PACKAGE")
@@ -211,7 +222,11 @@ fn mmcg_entry_for_platform(mmcg_binary: &Path, platform: NpmLauncherPlatform) ->
                 NpmLauncherPlatform::Other => "npx",
                 NpmLauncherPlatform::Windows => "npx.cmd",
             };
-            npm_launcher_entry(platform, command, vec!["-y".into(), pinned, "serve".into()])
+            Ok(npm_launcher_entry(
+                platform,
+                command,
+                vec!["-y".into(), pinned, "serve".into()],
+            ))
         }
         Some("project") => {
             // Project-local install. Path relative to the project root (where
@@ -220,7 +235,7 @@ fn mmcg_entry_for_platform(mmcg_binary: &Path, platform: NpmLauncherPlatform) ->
                 NpmLauncherPlatform::Other => "./node_modules/.bin/mastermind",
                 NpmLauncherPlatform::Windows => r".\node_modules\.bin\mastermind.cmd",
             };
-            npm_launcher_entry(platform, bin, vec!["serve".into()])
+            Ok(npm_launcher_entry(platform, bin, vec!["serve".into()]))
         }
         Some("global") | Some("unknown") => {
             // `mastermind` is on PATH via npm's global bin directory.
@@ -228,16 +243,20 @@ fn mmcg_entry_for_platform(mmcg_binary: &Path, platform: NpmLauncherPlatform) ->
                 NpmLauncherPlatform::Other => "mastermind",
                 NpmLauncherPlatform::Windows => "mastermind.cmd",
             };
-            npm_launcher_entry(platform, command, vec!["serve".into()])
+            Ok(npm_launcher_entry(platform, command, vec!["serve".into()]))
         }
         _ => {
             // No env var → invoked directly (cargo install, manual build, etc.).
             // Absolute path of the running binary guarantees the MCP client
             // launches the exact binary the user just ran.
-            json!({
-                "command": mmcg_binary.display().to_string(),
+            if !mmcg_binary.is_absolute() {
+                return Err("mmcg_binary_path_not_absolute");
+            }
+            let command = mmcg_binary.to_str().ok_or("mmcg_binary_path_not_utf8")?;
+            Ok(json!({
+                "command": command,
                 "args": ["serve"],
-            })
+            }))
         }
     }
 }
@@ -271,7 +290,7 @@ impl Drop for TestCanonicalEntryGuard {
     }
 }
 
-pub(crate) fn canonical_entry(mmcg_binary: &Path) -> Value {
+pub(crate) fn canonical_entry(mmcg_binary: &Path) -> Result<Value, &'static str> {
     mmcg_entry(mmcg_binary)
 }
 
@@ -338,18 +357,19 @@ pub fn remove_claude(target: &Target, write: bool) -> Outcome {
 /// which Claude Code ignores, so global registration silently never took
 /// effect.) Safe by default: prints the command and exits unless `opts.write`.
 pub fn add_claude_user(mmcg_binary: &Path, opts: Opts) -> Outcome {
-    run_native(
-        &Request {
-            client: Client::Claude,
-            scope: Scope::User,
-            root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            config: None,
-            write: opts.write,
-            remove: false,
-            force: opts.force,
-        },
-        &mmcg_entry(mmcg_binary),
-    )
+    let request = Request {
+        client: Client::Claude,
+        scope: Scope::User,
+        root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        config: None,
+        write: opts.write,
+        remove: false,
+        force: opts.force,
+    };
+    match mmcg_entry(mmcg_binary) {
+        Ok(entry) => run_native(&request, &entry),
+        Err(class) => finish_error(&request, "native", "install", &json!({}), class),
+    }
 }
 
 /// Remove mmcg from Claude Code's user scope via `claude mcp remove`. Safe by
@@ -1925,7 +1945,7 @@ mod tests {
                 "other-server": {"command": "other", "args": ["run"]}
             }
         });
-        let entry = mmcg_entry(Path::new("/usr/local/bin/mmcg"));
+        let entry = mmcg_entry(Path::new("/usr/local/bin/mmcg")).unwrap();
         let merged = merge_mmcg_entry(&existing, &entry).unwrap();
         let servers = merged
             .get("mcpServers")
@@ -1945,7 +1965,7 @@ mod tests {
     #[test]
     fn merge_creates_mcp_servers_object_when_absent() {
         let existing = json!({});
-        let entry = mmcg_entry(Path::new("/usr/bin/mmcg"));
+        let entry = mmcg_entry(Path::new("/usr/bin/mmcg")).unwrap();
         let merged = merge_mmcg_entry(&existing, &entry).unwrap();
         assert!(merged.get("mcpServers").is_some());
     }
@@ -1953,7 +1973,7 @@ mod tests {
     #[test]
     fn merge_rejects_non_object_mcp_servers() {
         let existing = json!({"mcpServers": "bogus-string"});
-        let entry = mmcg_entry(Path::new("/usr/bin/mmcg"));
+        let entry = mmcg_entry(Path::new("/usr/bin/mmcg")).unwrap();
         assert!(merge_mmcg_entry(&existing, &entry).is_err());
     }
 
@@ -2103,12 +2123,48 @@ mod tests {
             "MASTERMIND_VERSION",
             "MASTERMIND_PACKAGE",
         ]);
-        let entry = mmcg_entry(Path::new("/opt/cargo/bin/mmcg"));
+        let entry = mmcg_entry(Path::new("/opt/cargo/bin/mmcg")).unwrap();
         assert_eq!(
             entry.get("command").and_then(|v| v.as_str()),
             Some("/opt/cargo/bin/mmcg")
         );
         assert_eq!(entry.get("args"), Some(&serde_json::json!(["serve"])));
+        assert_eq!(
+            mmcg_entry(Path::new("relative/mmcg")).unwrap_err(),
+            "mmcg_binary_path_not_absolute"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_setup_rejects_a_non_utf8_binary_path_before_writing() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let _guard = EnvGuard::clear(&[
+            "MASTERMIND_INSTALL_MODE",
+            "MASTERMIND_VERSION",
+            "MASTERMIND_PACKAGE",
+        ]);
+        let root = tmp("non_utf8_binary");
+        let binary = PathBuf::from(std::ffi::OsString::from_vec(
+            b"/tmp/mastermind-\xff".to_vec(),
+        ));
+        assert_eq!(
+            mmcg_entry(&binary).unwrap_err(),
+            "mmcg_binary_path_not_utf8"
+        );
+        let request = Request {
+            client: Client::Claude,
+            scope: Scope::Project,
+            root: root.clone(),
+            config: None,
+            write: true,
+            remove: false,
+            force: false,
+        };
+        assert_eq!(run(&request, &binary), Outcome::Error);
+        assert!(!root.join(".mcp.json").exists());
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -2119,7 +2175,8 @@ mod tests {
             ("MASTERMIND_PACKAGE", "@xcraftmind/mastermind"),
         ]);
         let entry =
-            mmcg_entry_for_platform(Path::new("/ignored/path/mmcg"), NpmLauncherPlatform::Other);
+            mmcg_entry_for_platform(Path::new("/ignored/path/mmcg"), NpmLauncherPlatform::Other)
+                .unwrap();
         assert_eq!(
             entry.get("command").and_then(|v| v.as_str()),
             Some("mastermind"),
@@ -2130,7 +2187,7 @@ mod tests {
     #[test]
     fn mmcg_entry_project_mode_writes_node_modules_bin() {
         let _guard = EnvGuard::set(&[("MASTERMIND_INSTALL_MODE", "project")]);
-        let entry = mmcg_entry(Path::new("/ignored"));
+        let entry = mmcg_entry(Path::new("/ignored")).unwrap();
         let cmd = entry.get("command").and_then(|v| v.as_str()).unwrap();
         if cfg!(windows) {
             assert_eq!(cmd, "cmd.exe");
@@ -2157,7 +2214,7 @@ mod tests {
             ("MASTERMIND_VERSION", "0.22.0"),
             ("MASTERMIND_PACKAGE", "@xcraftmind/mastermind"),
         ]);
-        let entry = mmcg_entry(Path::new("/ignored"));
+        let entry = mmcg_entry(Path::new("/ignored")).unwrap();
         assert_eq!(
             entry.get("command").and_then(|v| v.as_str()),
             Some(if cfg!(windows) { "cmd.exe" } else { "npx" })
@@ -2178,7 +2235,7 @@ mod tests {
         // Still valid MCP config, just not pinned.
         let _guard = EnvGuard::set(&[("MASTERMIND_INSTALL_MODE", "npx")]);
         std::env::remove_var("MASTERMIND_VERSION");
-        let entry = mmcg_entry(Path::new("/ignored"));
+        let entry = mmcg_entry(Path::new("/ignored")).unwrap();
         let args = entry.get("args").and_then(|v| v.as_array()).unwrap();
         assert!(
             args.iter()
@@ -2196,7 +2253,7 @@ mod tests {
         ]);
 
         assert_eq!(
-            mmcg_entry_for_platform(Path::new("/ignored"), NpmLauncherPlatform::Windows),
+            mmcg_entry_for_platform(Path::new("/ignored"), NpmLauncherPlatform::Windows).unwrap(),
             json!({
                 "command": "cmd.exe",
                 "args": [
@@ -2217,7 +2274,7 @@ mod tests {
         let _guard = EnvGuard::set(&[("MASTERMIND_INSTALL_MODE", "project")]);
 
         assert_eq!(
-            mmcg_entry_for_platform(Path::new("/ignored"), NpmLauncherPlatform::Windows),
+            mmcg_entry_for_platform(Path::new("/ignored"), NpmLauncherPlatform::Windows).unwrap(),
             json!({
                 "command": "cmd.exe",
                 "args": [
@@ -2236,7 +2293,8 @@ mod tests {
         for mode in ["global", "unknown"] {
             let _guard = EnvGuard::set(&[("MASTERMIND_INSTALL_MODE", mode)]);
             assert_eq!(
-                mmcg_entry_for_platform(Path::new("/ignored"), NpmLauncherPlatform::Windows),
+                mmcg_entry_for_platform(Path::new("/ignored"), NpmLauncherPlatform::Windows)
+                    .unwrap(),
                 json!({
                     "command": "cmd.exe",
                     "args": ["/d", "/s", "/c", "mastermind.cmd", "serve"],
@@ -2255,7 +2313,7 @@ mod tests {
                 ("MASTERMIND_PACKAGE", "@xcraftmind/mastermind"),
             ]);
             assert_eq!(
-                mmcg_entry_for_platform(Path::new("/ignored"), NpmLauncherPlatform::Other),
+                mmcg_entry_for_platform(Path::new("/ignored"), NpmLauncherPlatform::Other).unwrap(),
                 json!({
                     "command": "npx",
                     "args": ["-y", "@xcraftmind/mastermind@0.22.0", "serve"],
@@ -2265,7 +2323,7 @@ mod tests {
         {
             let _guard = EnvGuard::set(&[("MASTERMIND_INSTALL_MODE", "project")]);
             assert_eq!(
-                mmcg_entry_for_platform(Path::new("/ignored"), NpmLauncherPlatform::Other),
+                mmcg_entry_for_platform(Path::new("/ignored"), NpmLauncherPlatform::Other).unwrap(),
                 json!({
                     "command": "./node_modules/.bin/mastermind",
                     "args": ["serve"],

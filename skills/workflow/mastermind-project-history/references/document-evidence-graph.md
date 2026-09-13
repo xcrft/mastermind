@@ -166,7 +166,11 @@ run Git. It therefore does not return a current revision or `revision_changed`;
 use the portable `check` command or an explicit Git inspection when that fact is
 needed.
 
-History `freshness` describes the derived Markdown FTS inventory.
+History `freshness` describes the derived Markdown FTS inventory. A
+`freshness_error` means the live inventory could not be established; `unknown`
+must not be interpreted as an empty or merely incomplete corpus. Resolve the
+reported root binding or scan failure before relying on absence from the FTS
+results.
 `document_graph.status` describes the packet's named endpoint and optional
 corpus bytes. Either can be stale while the other is current. Re-indexing can
 refresh history, but it cannot clear document graph drift; capture a new packet

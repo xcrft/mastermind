@@ -2,7 +2,7 @@
 name: mastermind-project-history
 description: Retrieve and reason from durable project decisions, failed approaches, audits, reports, and lessons without treating provenance, search rank, or user approval as technical proof. Use when asking why a design exists, whether an approach was tried, what supersedes an older decision, what prior evidence should constrain a new plan, or how to record and check explicit document-to-code evidence links.
 metadata:
-  version: 0.4.0
+  version: 0.4.1
   authors: [mastermind]
   tags: [workflow, history, decisions, provenance, evidence]
 ---
@@ -37,7 +37,11 @@ load-bearing.
 1. Query `mmcg_history` with the narrowest useful terms and optional `kind`. If
    the caller supplies a saved document graph, pass its path as
    `document_graph` so the history retrieval and live graph check share one
-   response without importing the graph into SQLite.
+   response without importing the graph into SQLite. Read `freshness_error`
+   before interpreting an empty result: `unknown` means the live corpus was not
+   checked, while `incomplete` means a known admission or work limit omitted
+   evidence. Resolve the reported root or scan error before treating absence as
+   evidence.
 2. Read the returned Markdown around each relevant match. Search rank is not
    confidence, and co-occurrence is not causality.
 3. Resolve explicit status and supersession links. An accepted or active record

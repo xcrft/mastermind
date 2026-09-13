@@ -509,7 +509,7 @@ pub fn dispatch_why(
     println!("{}", history_snapshot_notice(&response));
     println!("Observed (indexed matches)");
     if response.observed.is_empty() {
-        println!("  No matching durable history was found.");
+        println!("  No matching durable history was found in the indexed corpus.");
     } else {
         for hit in &response.observed {
             println!(
@@ -556,7 +556,13 @@ fn history_snapshot_notice(response: &queries::HistorySearchResponse) -> String 
         response.skipped_artifacts,
         response.corpus_truncated
     );
-    if response.freshness != "fresh" || response.skipped_artifacts > 0 || response.truncated {
+    if let Some(error) = response.freshness_error {
+        notice.push_str(&format!("History freshness error: {error}\n"));
+        notice.push_str(
+            "Current history is not fully verified. Resolve the freshness error and read the current Markdown before relying on these matches.\n",
+        );
+    } else if response.freshness != "fresh" || response.skipped_artifacts > 0 || response.truncated
+    {
         notice.push_str(
             "Current history is not fully verified. Resolve skipped artifacts, re-index, and read the current Markdown before relying on these matches.\n",
         );
@@ -2057,12 +2063,13 @@ mod map_tests {
 
     #[test]
     fn why_discloses_history_freshness_and_incomplete_admission() {
-        for (freshness, skipped_artifacts, truncated) in [
-            ("fresh", 0, false),
-            ("stale", 0, false),
-            ("incomplete", 2, false),
-            ("snapshot_changed", 0, false),
-            ("fresh", 0, true),
+        for (freshness, freshness_error, skipped_artifacts, truncated) in [
+            ("fresh", None, 0, false),
+            ("stale", None, 0, false),
+            ("incomplete", None, 2, false),
+            ("snapshot_changed", None, 0, false),
+            ("fresh", None, 0, true),
+            ("unknown", Some("history_scan_failed"), 0, false),
         ] {
             let response = queries::HistorySearchResponse {
                 query: "storage".into(),
@@ -2079,11 +2086,16 @@ mod map_tests {
                 truncated,
                 truncation_reason: truncated.then_some("corpus_limit"),
                 freshness,
+                freshness_error,
             };
             let text = history_snapshot_notice(&response);
             assert!(text.contains(&format!("History snapshot: {freshness}")));
             assert!(text.contains(&format!("skipped artifacts: {skipped_artifacts}")));
             assert!(text.contains(&format!("truncated: {truncated}")));
+            assert_eq!(
+                text.contains("History freshness error:"),
+                freshness_error.is_some()
+            );
             assert_eq!(
                 text.contains("Current history is not fully verified"),
                 freshness != "fresh" || skipped_artifacts > 0 || truncated

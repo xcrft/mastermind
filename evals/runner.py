@@ -123,6 +123,12 @@ METADATA_OUTPUT_LIMIT_BYTES = 64 * 1024
 FIXTURE_GIT_TIMEOUT_SECONDS = 30
 FIXTURE_PROCESS_OUTPUT_LIMIT_BYTES = 1024 * 1024
 MMCG_INDEX_TIMEOUT_SECONDS = 60
+CARGO_VERIFICATION_ENV = {
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_NET_OFFLINE": "true",
+    "CARGO_TERM_COLOR": "never",
+    "RUST_BACKTRACE": "0",
+}
 EVALUATION_RUNTIME_ENV_KEYS = (
     "API_TIMEOUT_MS",
     "BASH_DEFAULT_TIMEOUT_MS",
@@ -551,10 +557,12 @@ def evaluation_environment(
             (name.startswith("ANTHROPIC_") and name not in _CLAUDE_AUTH_ENV)
             or (name.startswith("CLAUDE_") and name not in _CLAUDE_AUTH_ENV)
             or name == "CLAUDECODE"
+            or name.startswith("CARGO_")
             or name.startswith("DISABLE_")
             or name.startswith("GIT_")
             or name.startswith("MCP_")
             or name.startswith("OTEL_")
+            or name.startswith("RUST")
             or name in _CLAUDE_GENERIC_RUNTIME_ENV
         )
     }
@@ -618,6 +626,35 @@ def evaluation_environment(
         environment["PATH"] = os.pathsep.join(
             (*pinned_directories, environment.get("PATH", os.defpath))
         )
+    return environment
+
+
+def cargo_verification_environment(
+    max_output_tokens: int,
+    *,
+    sandbox: Path,
+    rustc_binary: str | Path,
+    pinned_executables: tuple[str | Path, ...],
+) -> dict[str, str]:
+    rustc = Path(rustc_binary)
+    if not sandbox.is_absolute() or not rustc.is_absolute() or rustc.name != "rustc":
+        raise ValueError("Cargo verification sandbox and rustc must be absolute")
+    cargo_home = sandbox / "cargo-home"
+    target_dir = sandbox / "target"
+    cargo_home.mkdir(mode=0o700)
+    target_dir.mkdir(mode=0o700)
+    environment = evaluation_environment(
+        max_output_tokens,
+        pinned_executables=pinned_executables,
+    )
+    environment.update(
+        {
+            **CARGO_VERIFICATION_ENV,
+            "CARGO_HOME": str(cargo_home),
+            "CARGO_TARGET_DIR": str(target_dir),
+            "RUSTC": str(rustc),
+        }
+    )
     return environment
 
 
@@ -2028,14 +2065,198 @@ def fixture_runtime_definition(
     }
 
 
-def verification_runtime_definition(cargo_binary: Path) -> dict[str, object]:
-    if cargo_binary.name != "cargo":
-        raise ValueError("verification runtime launcher must be named `cargo`")
-    return {
-        "cargo": _stable_regular_file_definition(
-            cargo_binary.resolve(strict=True)
-        )
+def _bounded_runtime_path(
+    command: list[str],
+    *,
+    expected_name: str,
+    environment: dict[str, str],
+) -> Path:
+    process = run_bounded(
+        command,
+        cwd=REPO_ROOT,
+        env=environment,
+        timeout=METADATA_PROCESS_TIMEOUT_SECONDS,
+        stdout_limit=METADATA_OUTPUT_LIMIT_BYTES,
+        stderr_limit=METADATA_OUTPUT_LIMIT_BYTES,
+    )
+    if process.stop_reason is not None or process.returncode != 0:
+        raise ValueError(f"cannot resolve pinned {expected_name} runtime")
+    try:
+        raw_path = process.stdout.decode("utf-8").strip()
+    except UnicodeDecodeError as error:
+        raise ValueError(
+            f"cannot read pinned {expected_name} runtime path"
+        ) from error
+    if not raw_path or any(character in raw_path for character in "\r\n\0"):
+        raise ValueError(f"cannot read pinned {expected_name} runtime path")
+    path = Path(raw_path)
+    if not path.is_absolute() or path.name != expected_name:
+        raise ValueError(f"resolved {expected_name} runtime is not canonical")
+    executable = path.resolve(strict=True)
+    if executable.name != expected_name:
+        raise ValueError(f"resolved {expected_name} runtime is still a proxy")
+    definition = _stable_regular_file_definition(executable)
+    if definition["git_mode"] != "100755":
+        raise ValueError(f"resolved {expected_name} runtime is not executable")
+    return executable
+
+
+def _verification_metadata_environment(
+    *,
+    pinned_executables: tuple[Path, ...] = (),
+    include_rustup_home: bool = False,
+) -> dict[str, str]:
+    source = {
+        name: _PROC_ENV[name]
+        for name in ("HOME", "TMPDIR")
+        if name in _PROC_ENV
     }
+    environment = evaluation_environment(
+        1,
+        source=source,
+        pinned_executables=pinned_executables,
+    )
+    if include_rustup_home and "RUSTUP_HOME" in _PROC_ENV:
+        environment["RUSTUP_HOME"] = _PROC_ENV["RUSTUP_HOME"]
+    environment.update(CARGO_VERIFICATION_ENV)
+    return environment
+
+
+def resolve_verification_binaries(
+    cargo_launcher: Path, rustc_launcher: Path
+) -> tuple[Path, Path]:
+    launchers = ((cargo_launcher, "cargo"), (rustc_launcher, "rustc"))
+    for launcher, expected_name in launchers:
+        if not launcher.is_absolute() or launcher.name != expected_name:
+            raise ValueError(
+                f"verification runtime launcher must be an absolute "
+                f"{expected_name!r} path"
+            )
+
+    cargo_target = cargo_launcher.resolve(strict=True)
+    rustc_target = rustc_launcher.resolve(strict=True)
+    if not os.path.samefile(cargo_target, rustc_target):
+        if cargo_target.name != "cargo" or rustc_target.name != "rustc":
+            raise ValueError("verification runtime launchers resolve to wrappers")
+        return cargo_target, rustc_target
+
+    rustup_candidates = (
+        cargo_launcher.parent / "rustup",
+        rustc_launcher.parent / "rustup",
+        cargo_target,
+    )
+    rustup_binary: Path | None = None
+    for candidate in rustup_candidates:
+        try:
+            if candidate.name == "rustup" and os.path.samefile(
+                candidate, cargo_target
+            ):
+                rustup_binary = candidate.resolve(strict=True)
+                break
+        except OSError:
+            continue
+    if rustup_binary is None:
+        raise ValueError("shared Cargo/Rust proxy is not a recognized rustup runtime")
+
+    rustup_definition = _stable_regular_file_definition(rustup_binary)
+    if rustup_definition["git_mode"] != "100755":
+        raise ValueError("rustup runtime is not executable")
+    environment = _verification_metadata_environment(include_rustup_home=True)
+    cargo_binary = _bounded_runtime_path(
+        [str(rustup_binary), "which", "cargo"],
+        expected_name="cargo",
+        environment=environment,
+    )
+    rustc_binary = _bounded_runtime_path(
+        [str(rustup_binary), "which", "rustc"],
+        expected_name="rustc",
+        environment=environment,
+    )
+    if (
+        os.path.samefile(cargo_binary, rustc_binary)
+        or _stable_regular_file_definition(rustup_binary) != rustup_definition
+    ):
+        raise ValueError("rustup runtime changed while resolving toolchain binaries")
+    return cargo_binary, rustc_binary
+
+
+def _verification_executable_definition(
+    launcher: Path,
+    *,
+    expected_name: str,
+    pinned_executables: tuple[Path, ...],
+) -> dict[str, str]:
+    if launcher.name != expected_name:
+        raise ValueError(
+            f"verification runtime launcher must be named {expected_name!r}"
+        )
+    executable = launcher.resolve(strict=True)
+    if executable.name != expected_name:
+        raise ValueError(f"pinned {expected_name} runtime is still a proxy")
+    definition = _stable_regular_file_definition(executable)
+    if definition["git_mode"] != "100755":
+        raise ValueError(f"pinned {expected_name} runtime is not executable")
+    environment = _verification_metadata_environment(
+        pinned_executables=pinned_executables,
+    )
+    process = run_bounded(
+        [str(launcher), "-Vv"],
+        cwd=REPO_ROOT,
+        env=environment,
+        timeout=METADATA_PROCESS_TIMEOUT_SECONDS,
+        stdout_limit=METADATA_OUTPUT_LIMIT_BYTES,
+        stderr_limit=METADATA_OUTPUT_LIMIT_BYTES,
+    )
+    if process.stop_reason is not None or process.returncode != 0:
+        raise ValueError(f"cannot execute pinned {expected_name} runtime")
+    try:
+        version = process.stdout.decode("utf-8").strip()
+    except UnicodeDecodeError as error:
+        raise ValueError(
+            f"cannot read pinned {expected_name} runtime version"
+        ) from error
+    if not version:
+        raise ValueError(f"cannot read pinned {expected_name} runtime version")
+    if (
+        launcher.resolve(strict=True) != executable
+        or _stable_regular_file_definition(executable) != definition
+    ):
+        raise ValueError(f"pinned {expected_name} runtime changed during probe")
+    return {**definition, "version": version}
+
+
+def verification_runtime_definition(
+    cargo_binary: Path, rustc_binary: Path
+) -> dict[str, object]:
+    pinned = (cargo_binary, rustc_binary)
+    return {
+        "cargo": _verification_executable_definition(
+            cargo_binary,
+            expected_name="cargo",
+            pinned_executables=pinned,
+        ),
+        "rustc": _verification_executable_definition(
+            rustc_binary,
+            expected_name="rustc",
+            pinned_executables=pinned,
+        ),
+    }
+
+
+def _valid_verification_binary(binary: str | Path, expected_name: str) -> bool:
+    path = Path(binary)
+    try:
+        executable = path.resolve(strict=True)
+        definition = _stable_regular_file_definition(executable)
+    except (OSError, ValueError):
+        return False
+    return (
+        path.is_absolute()
+        and path == executable
+        and path.name == expected_name
+        and definition["git_mode"] == "100755"
+        and os.access(path, os.X_OK)
+    )
 
 
 def build_report(
@@ -2182,6 +2403,7 @@ def _valid_evaluation_runtime_controls(value: object) -> bool:
         "transport",
         "isolation",
         "tool_policy",
+        "verification",
         "environment",
     }:
         return False
@@ -2246,6 +2468,7 @@ def _valid_evaluation_runtime_controls(value: object) -> bool:
         )
     ):
         return False
+    cargo_permissions = []
     for permission in tool_policy["allowed"]:
         if not permission.startswith("Bash(cargo"):
             continue
@@ -2254,6 +2477,39 @@ def _valid_evaluation_runtime_controls(value: object) -> bool:
         try:
             verification_rerun_command(permission[5:-1])
         except ValueError:
+            return False
+        cargo_permissions.append(permission)
+
+    verification = value["verification"]
+    if verification is None:
+        if cargo_permissions:
+            return False
+    elif (
+        not isinstance(verification, dict)
+        or set(verification)
+        != {
+            "commands",
+            "cargo_home_isolated",
+            "target_dir_isolated",
+            "rustc_pinned",
+            "environment",
+        }
+        or not _string_list(verification["commands"], allow_empty=False)
+        or verification["cargo_home_isolated"] is not True
+        or verification["target_dir_isolated"] is not True
+        or verification["rustc_pinned"] is not True
+        or verification["environment"] != CARGO_VERIFICATION_ENV
+    ):
+        return False
+    else:
+        try:
+            expected_permissions = [
+                f"Bash({verification_rerun_command(command)})"
+                for command in verification["commands"]
+            ]
+        except ValueError:
+            return False
+        if cargo_permissions != expected_permissions:
             return False
 
     environment = value["environment"]
@@ -2457,16 +2713,24 @@ def report_comparison_issues(
             issues.append(f"{label} report has no verification runtime identity")
     elif not isinstance(verification_runtime, dict) or set(
         verification_runtime
-    ) != {"cargo", "stable"}:
+    ) != {"cargo", "rustc", "stable"}:
         issues.append(f"{label} report has invalid verification runtime identity")
     else:
-        cargo_runtime = verification_runtime["cargo"]
+        runtime_definitions = (
+            verification_runtime["cargo"],
+            verification_runtime["rustc"],
+        )
         if (
-            not isinstance(cargo_runtime, dict)
-            or set(cargo_runtime) != {"sha256", "git_mode"}
-            or not isinstance(cargo_runtime["sha256"], str)
-            or re.fullmatch(r"[0-9a-f]{64}", cargo_runtime["sha256"]) is None
-            or cargo_runtime["git_mode"] not in {"100644", "100755"}
+            any(
+                not isinstance(runtime, dict)
+                or set(runtime) != {"sha256", "git_mode", "version"}
+                or not isinstance(runtime["sha256"], str)
+                or re.fullmatch(r"[0-9a-f]{64}", runtime["sha256"]) is None
+                or runtime["git_mode"] not in {"100644", "100755"}
+                or not isinstance(runtime["version"], str)
+                or not runtime["version"]
+                for runtime in runtime_definitions
+            )
             or not isinstance(verification_runtime["stable"], bool)
         ):
             issues.append(
@@ -3802,19 +4066,20 @@ def evaluation_runtime_controls(
     subagent = (
         prompt_path if suite_name in {"auditor", "researcher"} else None
     )
+    effective_verification_commands = (
+        verification_commands
+        if verification_commands
+        else (
+            (verification_rerun_command(expect["verification_rerun"]),)
+            if expect.get("verification_rerun") is not None
+            else ()
+        )
+    )
     safety_arguments = isolated_cli_args(
         suite_name,
         subagent=subagent,
         include_mmcg=include_mmcg,
-        verification_commands=(
-            verification_commands
-            if verification_commands
-            else (
-                (verification_rerun_command(expect["verification_rerun"]),)
-                if expect.get("verification_rerun") is not None
-                else ()
-            )
-        ),
+        verification_commands=effective_verification_commands,
     )
     environment = evaluation_environment(
         limits["max_output_tokens"], source={}
@@ -3852,6 +4117,17 @@ def evaluation_runtime_controls(
             ),
             "mcp_servers": ["mmcg"] if include_mmcg else [],
         },
+        "verification": (
+            None
+            if not effective_verification_commands
+            else {
+                "commands": list(effective_verification_commands),
+                "cargo_home_isolated": True,
+                "target_dir_isolated": True,
+                "rustc_pinned": True,
+                "environment": dict(CARGO_VERIFICATION_ENV),
+            }
+        ),
         "environment": {
             name: environment[name] for name in EVALUATION_RUNTIME_ENV_KEYS
         },
@@ -4286,6 +4562,7 @@ def evaluate_case(
     git_binary: str | Path = "git",
     mmcg_binary: str | Path | None = MMCG_BIN,
     cargo_binary: str | Path | None = None,
+    rustc_binary: str | Path | None = None,
 ) -> Result:
     case_id = case["id"]
     verification_commands = reported_cargo_verification_commands(case)
@@ -4298,6 +4575,7 @@ def evaluate_case(
 
     fixture_path: Path | None = None
     prompt_sandbox: tempfile.TemporaryDirectory[str] | None = None
+    verification_sandbox: tempfile.TemporaryDirectory[str] | None = None
     extra_cmd: list[str] = []
     has_mmcg = False
     runtime_controls: dict[str, object] | None = None
@@ -4380,15 +4658,18 @@ def evaluate_case(
                 verification_commands=verification_commands,
             )
         if verification_commands and (
-            cargo_binary is None or not Path(cargo_binary).is_absolute()
+            cargo_binary is None
+            or rustc_binary is None
+            or not _valid_verification_binary(cargo_binary, "cargo")
+            or not _valid_verification_binary(rustc_binary, "rustc")
         ):
             return failed_evaluation_result(
                 case_id,
                 suite_name,
-                "pinned Cargo runtime unavailable for required verification",
+                "pinned Cargo/Rust runtime unavailable for required verification",
                 fixture_path=fixture_path,
                 telemetry_issue=(
-                    "evaluation did not start because pinned Cargo was unavailable"
+                    "evaluation did not start because pinned Cargo/Rust was unavailable"
                 ),
                 runtime_controls=runtime_controls,
             )
@@ -4478,13 +4759,27 @@ def evaluate_case(
             pinned_executables += (git_binary,)
         if verification_commands and cargo_binary is not None:
             pinned_executables += (cargo_binary,)
+        if verification_commands and rustc_binary is not None:
+            pinned_executables += (rustc_binary,)
+        if verification_commands:
+            verification_sandbox = tempfile.TemporaryDirectory(
+                prefix="mastermind-eval-cargo-"
+            )
+            process_environment = cargo_verification_environment(
+                runtime_limits["max_output_tokens"],
+                sandbox=Path(verification_sandbox.name),
+                rustc_binary=rustc_binary,
+                pinned_executables=pinned_executables,
+            )
+        else:
+            process_environment = evaluation_environment(
+                runtime_limits["max_output_tokens"],
+                pinned_executables=pinned_executables,
+            )
         proc = run_bounded(
             cmd,
             cwd=case_cwd,
-            env=evaluation_environment(
-                runtime_limits["max_output_tokens"],
-                pinned_executables=pinned_executables,
-            ),
+            env=process_environment,
             stdin=user_message.encode("utf-8"),
             timeout=CLAUDE_CASE_TIMEOUT_SECONDS,
             stdout_limit=CLAUDE_STDOUT_LIMIT_BYTES,
@@ -4736,6 +5031,8 @@ def evaluate_case(
             runtime_controls=runtime_controls,
         )
     finally:
+        if verification_sandbox is not None:
+            verification_sandbox.cleanup()
         if prompt_sandbox is not None:
             prompt_sandbox.cleanup()
         if fixture_path is not None and not keep_fixtures:
@@ -4811,6 +5108,7 @@ def main() -> int:
     git_binary: Path | None = None
     mmcg_binary: Path | None = None
     cargo_binary: Path | None = None
+    rustc_binary: Path | None = None
     frozen_fixture_runtime: dict[str, object] | None = None
     frozen_verification_runtime: dict[str, object] | None = None
 
@@ -4865,23 +5163,32 @@ def main() -> int:
         )
         if suite_uses_verification and frozen_verification_runtime is None:
             cargo_location = shutil.which("cargo")
-            if not cargo_location:
+            rustc_location = shutil.which("rustc")
+            if not cargo_location or not rustc_location:
                 print(
-                    "error: `cargo` not on PATH (required for auditor verification).",
+                    "error: `cargo` and `rustc` must be on PATH "
+                    "for auditor verification.",
                     file=sys.stderr,
                 )
                 return 2
             try:
-                cargo_binary = Path(cargo_location).absolute()
+                cargo_binary, rustc_binary = resolve_verification_binaries(
+                    Path(cargo_location).absolute(),
+                    Path(rustc_location).absolute(),
+                )
                 frozen_verification_runtime = verification_runtime_definition(
-                    cargo_binary
+                    cargo_binary, rustc_binary
                 )
                 if git_binary is None:
                     raise ValueError("pinned Git runtime unavailable")
                 evaluation_environment(
                     1,
                     source={},
-                    pinned_executables=(git_binary, cargo_binary),
+                    pinned_executables=(
+                        git_binary,
+                        cargo_binary,
+                        rustc_binary,
+                    ),
                 )
             except (OSError, RuntimeError, ValueError) as error:
                 print(
@@ -5002,6 +5309,7 @@ def main() -> int:
                     git_binary=git_binary or "git",
                     mmcg_binary=mmcg_binary,
                     cargo_binary=cargo_binary,
+                    rustc_binary=rustc_binary,
                 )
                 _SENTINEL_MISSING = "no structured audit verdict block found"
                 if (
@@ -5021,6 +5329,7 @@ def main() -> int:
                         git_binary=git_binary or "git",
                         mmcg_binary=mmcg_binary,
                         cargo_binary=cargo_binary,
+                        rustc_binary=rustc_binary,
                     )
                     r2.retry_attempted = True
                     r2.add_attempt(r)
@@ -5165,16 +5474,22 @@ def main() -> int:
         try:
             verification_runtime_after_run = (
                 None
-                if cargo_binary is None
-                else verification_runtime_definition(cargo_binary)
+                if cargo_binary is None or rustc_binary is None
+                else verification_runtime_definition(
+                    cargo_binary, rustc_binary
+                )
             )
-            if cargo_binary is not None:
+            if cargo_binary is not None and rustc_binary is not None:
                 if git_binary is None:
                     raise ValueError("pinned Git runtime unavailable")
                 evaluation_environment(
                     1,
                     source={},
-                    pinned_executables=(git_binary, cargo_binary),
+                    pinned_executables=(
+                        git_binary,
+                        cargo_binary,
+                        rustc_binary,
+                    ),
                 )
         except (OSError, RuntimeError, ValueError):
             verification_runtime_after_run = None

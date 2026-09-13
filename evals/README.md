@@ -115,7 +115,10 @@ existing Claude subscription rather than per-token API billing. New reports
 also bind the grader to `runner.py`, `evidence.py`, Python, the platform, and
 PyYAML with `evaluation_harness.sha256`. That harness must remain stable within
 a run and match any non-legacy baseline, so a grader change cannot masquerade as
-agent quality improvement.
+agent quality improvement. Researcher and auditor runs also pin the exact Git
+and mmcg executables used to construct and index fixtures. Their hashes, Git
+version, and stability are recorded as `fixture_runtime`; future baselines must
+match them. Prompt-only suites do not require Git or mmcg.
 
 ## Researcher and auditor fixture lifecycle
 

@@ -138,6 +138,10 @@ summaries that do not recompute from the raw case records are rejected before
 comparison. Report files must also be bounded stable regular files; symlinks and
 special files are rejected. An unfiltered report must contain every suite.
 
+Evaluation JSONL and evaluated agent/workflow definitions are read as bounded,
+stable regular UTF-8 files. Symlinks, special files, files above the 4 MiB
+per-file cap, and definitions replaced while being read fail before execution.
+
 `--baseline-report` is intentionally strict. Current and baseline evidence must
 have the same requested model, resolved model IDs, Claude CLI version,
 suite/case filters, selected suites, case order, and SHA-256 digest of the

@@ -271,6 +271,8 @@ def execution_integrity(batch, slots):
 def collect_batch(root):
     batch = root.json("batch.json")
     check_batch(batch, root.names())
+    if batch["schema_version"] == 2:
+        root.read("execution.lock", limit=0)
     context = None
     common = None
     indexed_subsets = []

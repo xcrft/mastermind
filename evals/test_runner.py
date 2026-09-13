@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from evals import ablation, runner
+from evals.benchmark_process import ProcessResult
 
 
 RESOLVED_MODEL = "claude-opus-test"
@@ -268,8 +269,10 @@ verifications_rerun:
                     "modelUsage": {RESOLVED_MODEL: {}},
                 },
             ]
-            return subprocess.CompletedProcess(
-                [], 0, "\n".join(json.dumps(event) for event in events), ""
+            return ProcessResult(
+                stdout="\n".join(json.dumps(event) for event in events).encode(),
+                stderr=b"",
+                returncode=0,
             )
 
         with tempfile.TemporaryDirectory() as target:
@@ -289,8 +292,8 @@ verifications_rerun:
                     patch.object(runner, "setup_fixture", return_value=fixture),
                     patch.object(runner, "teardown_fixture"),
                     patch.object(
-                        runner.subprocess,
-                        "run",
+                        runner,
+                        "run_bounded",
                         side_effect=invoke,
                     ),
                 ):
@@ -316,6 +319,17 @@ verifications_rerun:
                     invocation["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"],
                     "8192",
                 )
+                self.assertIsInstance(invocation["stdin"], bytes)
+                self.assertEqual(
+                    invocation["timeout"], runner.CLAUDE_CASE_TIMEOUT_SECONDS
+                )
+                self.assertEqual(
+                    invocation["stdout_limit"], runner.CLAUDE_STDOUT_LIMIT_BYTES
+                )
+                self.assertEqual(
+                    invocation["stderr_limit"], runner.CLAUDE_STDERR_LIMIT_BYTES
+                )
+                self.assertTrue(invocation["start_new_session"])
 
     def test_intake_action_requires_valid_sentinel_yaml(self):
         valid = """\
@@ -489,6 +503,37 @@ action: passthrough
         self.assertEqual(environment["CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY"], "1")
         self.assertEqual(environment["MCP_TOOL_TIMEOUT"], "120000")
         self.assertEqual(environment["ENABLE_TOOL_SEARCH"], "false")
+
+    def test_harness_identity_includes_bounded_process_transport(self):
+        definitions = {
+            "runner.py": {"sha256": "1" * 64, "git_mode": "100755"},
+            "benchmark_process.py": {
+                "sha256": "2" * 64,
+                "git_mode": "100644",
+            },
+            "evidence.py": {"sha256": "3" * 64, "git_mode": "100644"},
+        }
+        seen = []
+
+        def definition(path):
+            seen.append(Path(path).name)
+            return definitions[Path(path).name]
+
+        with patch.object(
+            runner, "_stable_regular_file_definition", side_effect=definition
+        ):
+            before = runner.evaluation_harness_definition()["sha256"]
+            first_sources = list(seen)
+            definitions["benchmark_process.py"] = {
+                "sha256": "4" * 64,
+                "git_mode": "100644",
+            }
+            after = runner.evaluation_harness_definition()["sha256"]
+
+        self.assertEqual(
+            first_sources, ["runner.py", "benchmark_process.py", "evidence.py"]
+        )
+        self.assertNotEqual(before, after)
 
     def test_stream_parser_records_tool_identities_and_final_payload(self):
         events = [
@@ -1973,10 +2018,12 @@ class CriticGraderTests(unittest.TestCase):
                 "permission_denials": permission_denials or [],
             },
         ]
-        process = subprocess.CompletedProcess(
-            [], 0, "\n".join(json.dumps(event) for event in events), ""
+        process = ProcessResult(
+            stdout="\n".join(json.dumps(event) for event in events).encode(),
+            stderr=b"",
+            returncode=0,
         )
-        with patch.object(runner.subprocess, "run", return_value=process):
+        with patch.object(runner, "run_bounded", return_value=process):
             return runner.evaluate_case(
                 "opus", "critic", runner.SUITES["critic"], case, keep_fixtures=False
             )
@@ -2040,10 +2087,12 @@ class CriticGraderTests(unittest.TestCase):
                 "modelUsage": {RESOLVED_MODEL: {}},
             },
         ]
-        process = subprocess.CompletedProcess(
-            [], 0, "\n".join(json.dumps(event) for event in events), ""
+        process = ProcessResult(
+            stdout="\n".join(json.dumps(event) for event in events).encode(),
+            stderr=b"",
+            returncode=0,
         )
-        with patch.object(runner.subprocess, "run", return_value=process):
+        with patch.object(runner, "run_bounded", return_value=process):
             result = runner.evaluate_case(
                 "opus",
                 "critic",
@@ -2058,13 +2107,12 @@ class CriticGraderTests(unittest.TestCase):
         self.assertNotIn("/private/secret", " ".join(result.reasons))
 
     def test_nonzero_cli_exit_does_not_copy_process_output_into_diagnostics(self):
-        process = subprocess.CompletedProcess(
-            [],
-            1,
-            '{"tool_input":{"file_path":"/private/stdout-secret"}}',
-            "failed near /private/stderr-secret",
+        process = ProcessResult(
+            stdout=b'{"tool_input":{"file_path":"/private/stdout-secret"}}',
+            stderr=b"failed near /private/stderr-secret",
+            returncode=1,
         )
-        with patch.object(runner.subprocess, "run", return_value=process):
+        with patch.object(runner, "run_bounded", return_value=process):
             result = runner.evaluate_case(
                 "opus",
                 "critic",
@@ -2076,6 +2124,62 @@ class CriticGraderTests(unittest.TestCase):
             )
         self.assertFalse(result.passed)
         self.assertEqual(result.reasons, ["claude exit 1"])
+        self.assertEqual(result.output_excerpt, "")
+
+    def test_transport_failures_do_not_copy_process_output_into_diagnostics(self):
+        expected_reasons = {
+            "timeout": f"timeout after {runner.CLAUDE_CASE_TIMEOUT_SECONDS}s",
+            "output_limit": "Claude process output exceeded transport limits",
+            "spawn_error": "cannot start Claude CLI",
+            "unsupported_platform": (
+                "bounded Claude process transport requires POSIX"
+            ),
+        }
+        case = json.loads(
+            runner.SUITES["critic"]["cases"].read_text().splitlines()[0]
+        )
+        for stop_reason, expected in expected_reasons.items():
+            process = ProcessResult(
+                stdout=b"/private/stdout-secret",
+                stderr=b"/private/stderr-secret",
+                returncode=-9,
+                stop_reason=stop_reason,
+            )
+            with self.subTest(stop_reason=stop_reason), patch.object(
+                runner, "run_bounded", return_value=process
+            ):
+                result = runner.evaluate_case(
+                    "opus",
+                    "critic",
+                    runner.SUITES["critic"],
+                    case,
+                    keep_fixtures=False,
+                )
+            self.assertFalse(result.passed)
+            self.assertEqual(result.reasons, [expected])
+            self.assertEqual(result.output_excerpt, "")
+            report = json.dumps(runner.result_report(result))
+            self.assertNotIn("stdout-secret", report)
+            self.assertNotIn("stderr-secret", report)
+
+    def test_non_utf8_process_output_fails_without_copying_bytes(self):
+        process = ProcessResult(
+            stdout=b"\xff/private/stream-secret",
+            stderr=b"",
+            returncode=0,
+        )
+        with patch.object(runner, "run_bounded", return_value=process):
+            result = runner.evaluate_case(
+                "opus",
+                "critic",
+                runner.SUITES["critic"],
+                json.loads(
+                    runner.SUITES["critic"]["cases"].read_text().splitlines()[0]
+                ),
+                keep_fixtures=False,
+            )
+        self.assertFalse(result.passed)
+        self.assertEqual(result.reasons, ["invalid Claude stream encoding"])
         self.assertEqual(result.output_excerpt, "")
 
     def test_critic_rejects_missing_quoted_or_conflicting_verdicts(self):
@@ -2165,10 +2269,14 @@ class CriticGraderTests(unittest.TestCase):
                     },
                 },
             ]
-            process = subprocess.CompletedProcess(
-                [], 0, "\n".join(json.dumps(event) for event in events), ""
+            process = ProcessResult(
+                stdout="\n".join(json.dumps(event) for event in events).encode(),
+                stderr=b"",
+                returncode=0,
             )
-            with self.subTest(verdict=verdict), patch.object(runner.subprocess, "run", return_value=process):
+            with self.subTest(verdict=verdict), patch.object(
+                runner, "run_bounded", return_value=process
+            ):
                 result = runner.evaluate_case("opus", "workflow", suite, case, keep_fixtures=False)
                 self.assertEqual(result.passed, passed, result.reasons)
 

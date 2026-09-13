@@ -51,6 +51,13 @@ The runner passes each role's shipped effort explicitly, enforces a physical
 default before inference. The same limits remain post-run grading assertions
 when a case declares them.
 
+Each model-backed case also runs under bounded POSIX process supervision: 480
+seconds of wall time, 8 MiB of stdout, and 64 KiB of stderr. Crossing a limit
+fails the case without copying process output into the report. The runner kills
+the case process group after every outcome so MCP descendants cannot leak into
+the next case. Model-backed cases fail closed on platforms without this POSIX
+supervision.
+
 Model-backed subprocesses retain the normal login location and an explicit
 `CLAUDE_CODE_OAUTH_TOKEN`, when present. They remove inherited provider, model,
 effort, thinking, MCP, tool-search, and telemetry overrides; in particular,

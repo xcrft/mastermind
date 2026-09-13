@@ -125,6 +125,9 @@ METADATA_PROCESS_TIMEOUT_SECONDS = 10
 METADATA_OUTPUT_LIMIT_BYTES = 64 * 1024
 FIXTURE_GIT_TIMEOUT_SECONDS = 30
 FIXTURE_PROCESS_OUTPUT_LIMIT_BYTES = 1024 * 1024
+FIXTURE_FILE_LIMIT_BYTES = 4 * 1024 * 1024
+FIXTURE_TREE_LIMIT_BYTES = 64 * 1024 * 1024
+FIXTURE_TREE_ENTRY_LIMIT = 4096
 MMCG_INDEX_TIMEOUT_SECONDS = 60
 CARGO_VERIFICATION_ENV = {
     "CARGO_INCREMENTAL": "0",
@@ -1709,7 +1712,13 @@ def _fixture_tree_paths(root: Path) -> list[Path]:
     if not root.is_dir():
         raise FileNotFoundError(f"fixture tree missing: {root}")
     paths: list[Path] = []
-    for path in sorted(root.rglob("*")):
+    entry_count = 0
+    for path in root.rglob("*"):
+        entry_count += 1
+        if entry_count > FIXTURE_TREE_ENTRY_LIMIT:
+            raise ValueError(
+                f"fixture tree exceeds its {FIXTURE_TREE_ENTRY_LIMIT}-entry cap: {root}"
+            )
         relative = path.relative_to(root)
         if any(_is_git_metadata_component(part) for part in relative.parts):
             raise ValueError(f"fixture tree contains Git metadata: {path}")
@@ -1720,7 +1729,31 @@ def _fixture_tree_paths(root: Path) -> list[Path]:
         if not path.is_file():
             raise ValueError(f"fixture tree contains an unsupported artifact: {path}")
         paths.append(path)
-    return paths
+    return sorted(paths, key=lambda path: path.relative_to(root).as_posix())
+
+
+def _read_fixture_file(path: Path) -> tuple[bytes, os.stat_result]:
+    try:
+        return _read_stable_regular_file(
+            path,
+            FIXTURE_FILE_LIMIT_BYTES,
+            label="fixture file",
+        )
+    except OSError as error:
+        raise ValueError(f"cannot read fixture file {path}: {error}") from error
+
+
+def _fixture_file_definition(
+    path: Path,
+) -> tuple[dict[str, str], int]:
+    body, identity = _read_fixture_file(path)
+    return (
+        {
+            "sha256": hashlib.sha256(body).hexdigest(),
+            "git_mode": "100755" if identity.st_mode & 0o111 else "100644",
+        },
+        len(body),
+    )
 
 
 def _stable_regular_file_definition(path: Path) -> dict[str, str]:
@@ -1752,13 +1785,21 @@ def _stable_regular_file_definition(path: Path) -> dict[str, str]:
 
 def fixture_tree_definition(root: Path) -> list[dict[str, str]]:
     paths = _fixture_tree_paths(root)
-    records = [
-        {
-            "path": path.relative_to(root).as_posix(),
-            **_stable_regular_file_definition(path),
-        }
-        for path in paths
-    ]
+    records: list[dict[str, str]] = []
+    total_bytes = 0
+    for path in paths:
+        definition, size = _fixture_file_definition(path)
+        total_bytes += size
+        if total_bytes > FIXTURE_TREE_LIMIT_BYTES:
+            raise ValueError(
+                f"fixture tree exceeds its {FIXTURE_TREE_LIMIT_BYTES}-byte cap: {root}"
+            )
+        records.append(
+            {
+                "path": path.relative_to(root).as_posix(),
+                **definition,
+            }
+        )
     if [path.relative_to(root) for path in _fixture_tree_paths(root)] != [
         path.relative_to(root) for path in paths
     ]:
@@ -1792,7 +1833,13 @@ def _validate_case_citation_sources(record: dict, after_root: Path) -> None:
                 f"citation source is not a regular fixture file: "
                 f"{expectation['path']!r}"
             )
-        lines = source.read_text(encoding="utf-8").splitlines()
+        body, _ = _read_fixture_file(source)
+        try:
+            lines = body.decode("utf-8").splitlines()
+        except UnicodeDecodeError as error:
+            raise ValueError(
+                f"citation source is not valid UTF-8: {expectation['path']!r}"
+            ) from error
         matches = [
             line_number
             for line_number, line in enumerate(lines, start=1)
@@ -4049,10 +4096,81 @@ def _build_mmcg_index(
         )
 
 
+def _fixture_copy_target(dst: Path, relative: Path, destination_root: Path) -> Path:
+    current = dst
+    for part in relative.parts[:-1]:
+        current /= part
+        if current.is_symlink():
+            raise ValueError(
+                f"fixture destination contains a symbolic link: {current}"
+            )
+        current.mkdir(exist_ok=True)
+        if not current.is_dir():
+            raise ValueError(
+                f"fixture destination contains a non-directory: {current}"
+            )
+        try:
+            current.resolve(strict=True).relative_to(destination_root)
+        except (FileNotFoundError, ValueError) as error:
+            raise ValueError(
+                f"fixture destination path escaped its root: {current}"
+            ) from error
+
+    target = current / relative.name
+    if target.is_symlink():
+        raise ValueError(f"fixture destination contains a symbolic link: {target}")
+    if target.exists() and not target.is_file():
+        raise ValueError(f"fixture destination contains a non-file: {target}")
+    return target
+
+
+def _copy_fixture_file(
+    source: Path,
+    target: Path,
+    expected: dict[str, str],
+) -> None:
+    body, identity = _read_fixture_file(source)
+    observed = {
+        "sha256": hashlib.sha256(body).hexdigest(),
+        "git_mode": "100755" if identity.st_mode & 0o111 else "100644",
+    }
+    if observed != expected:
+        raise ValueError(f"fixture file changed before it was copied: {source}")
+
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(body)
+        os.chmod(temporary, 0o755 if observed["git_mode"] == "100755" else 0o644)
+        temporary.replace(target)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+    copied, _ = _fixture_file_definition(target)
+    if copied != expected:
+        raise ValueError(f"copied fixture content does not match its source: {target}")
+
+
 def _copy_tree_into(src: Path, dst: Path) -> None:
-    """Copy content and modes, leaving fresh mtimes for Git change detection."""
+    """Copy bounded verified content, leaving fresh mtimes for Git detection."""
     source_definition = fixture_tree_definition(src)
-    source_entries = [(entry, entry.is_dir()) for entry in sorted(src.iterdir())]
+    source_entries: list[tuple[Path, bool]] = []
+    for entry in src.iterdir():
+        if len(source_entries) >= FIXTURE_TREE_ENTRY_LIMIT:
+            raise ValueError(
+                f"fixture tree exceeds its {FIXTURE_TREE_ENTRY_LIMIT}-entry cap: {src}"
+            )
+        source_entries.append((entry, entry.is_dir()))
+    source_entries.sort(key=lambda item: item[0].name)
     if dst.is_symlink():
         raise ValueError(f"fixture destination is a symbolic link: {dst}")
     dst.mkdir(parents=True, exist_ok=True)
@@ -4066,14 +4184,18 @@ def _copy_tree_into(src: Path, dst: Path) -> None:
         if target.is_dir():
             fixture_tree_definition(target)
         if entry_is_directory:
-            shutil.copytree(
-                entry,
-                target,
-                dirs_exist_ok=True,
-                copy_function=shutil.copy,
-            )
-        else:
-            shutil.copy(entry, target)
+            target.mkdir(exist_ok=True)
+    for record in source_definition:
+        relative = Path(record["path"])
+        target = _fixture_copy_target(dst, relative, destination_root)
+        _copy_fixture_file(
+            src / relative,
+            target,
+            {
+                "sha256": record["sha256"],
+                "git_mode": record["git_mode"],
+            },
+        )
     if fixture_tree_definition(src) != source_definition:
         raise ValueError(f"fixture tree changed while it was copied: {src}")
     for entry, entry_is_directory in source_entries:
@@ -4107,7 +4229,7 @@ def _copy_tree_into(src: Path, dst: Path) -> None:
                 "sha256": record["sha256"],
                 "git_mode": record["git_mode"],
             }
-            observed = _stable_regular_file_definition(target)
+            observed, _ = _fixture_file_definition(target)
         if observed != expected:
             raise ValueError(
                 f"copied fixture content does not match its source: {target}"

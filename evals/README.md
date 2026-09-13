@@ -147,12 +147,15 @@ have the same requested model, resolved model IDs, Claude CLI version,
 suite/case filters, selected suites, case order, and SHA-256 digest of the
 selected JSONL definitions plus referenced fixture trees and their file modes.
 The runner loads each selected JSONL case before the suite starts and copies
-fixture inputs into a private snapshot; disposable repositories are created
-from that snapshot rather than the live fixture tree. If a selected definition
-changes before the suite finishes, every result in that suite fails and the
-report is marked non-comparable. The evaluated agent or workflow skill is frozen
-the same way and recorded as `target_definition_digest`; target changes are
-allowed between baseline and current because that is the product under test,
+fixture inputs into a private snapshot. Fixture inventory is capped at 4096
+entries, 4 MiB per file, and 64 MiB per tree; citation sources must also be
+valid UTF-8. The copier rereads each source through the same bounded stable-file
+contract and writes only those verified bytes. Disposable repositories are
+created from that snapshot rather than the live fixture tree. If a selected
+definition changes before the suite finishes, every result in that suite fails
+and the report is marked non-comparable. The evaluated agent or workflow skill
+is frozen the same way and recorded as `target_definition_digest`; target
+changes are allowed between baseline and current because that is the product under test,
 but a target change within either run makes its report non-comparable. For every
 suite, the pass rate cannot fall, every baseline-passing case must still pass,
 and both p50 and p95 context tokens must be strictly lower. Malformed or

@@ -2236,6 +2236,94 @@ action: passthrough
                     fixtures_dir=fixtures,
                 )
 
+    def test_fixture_definition_enforces_file_tree_and_entry_caps(self):
+        with tempfile.TemporaryDirectory() as target:
+            root = Path(target)
+            oversized = root / "oversized.bin"
+            oversized.write_bytes(b"x" * 33)
+            with (
+                patch.object(runner, "FIXTURE_FILE_LIMIT_BYTES", 32),
+                self.assertRaisesRegex(ValueError, "cannot read fixture file"),
+            ):
+                runner.fixture_tree_definition(root)
+
+        with tempfile.TemporaryDirectory() as target:
+            root = Path(target)
+            (root / "first.txt").write_bytes(b"x" * 17)
+            (root / "second.txt").write_bytes(b"y" * 17)
+            with (
+                patch.object(runner, "FIXTURE_FILE_LIMIT_BYTES", 32),
+                patch.object(runner, "FIXTURE_TREE_LIMIT_BYTES", 32),
+                self.assertRaisesRegex(ValueError, "fixture tree exceeds"),
+            ):
+                runner.fixture_tree_definition(root)
+
+            with (
+                patch.object(runner, "FIXTURE_TREE_ENTRY_LIMIT", 1),
+                self.assertRaisesRegex(ValueError, "entry cap"),
+            ):
+                runner.fixture_tree_definition(root)
+
+        if os.name == "posix" and hasattr(os, "mkfifo"):
+            with tempfile.TemporaryDirectory() as target:
+                root = Path(target)
+                os.mkfifo(root / "source.fifo")
+                with self.assertRaisesRegex(ValueError, "unsupported artifact"):
+                    runner.fixture_tree_definition(root)
+
+    def test_citation_source_must_be_bounded_utf8(self):
+        record = {
+            "expect": {
+                "citations": [{"path": "source.py", "anchor": "answer"}]
+            }
+        }
+        with tempfile.TemporaryDirectory() as target:
+            root = Path(target)
+            source = root / "source.py"
+            source.write_bytes(b"\xff")
+            with self.assertRaisesRegex(ValueError, "not valid UTF-8"):
+                runner._validate_case_citation_sources(record, root)
+
+            source.write_bytes(b"answer\n" + b"x" * 32)
+            with (
+                patch.object(runner, "FIXTURE_FILE_LIMIT_BYTES", 32),
+                self.assertRaisesRegex(ValueError, "cannot read fixture file"),
+            ):
+                runner._validate_case_citation_sources(record, root)
+
+    def test_fixture_copy_rechecks_the_bounded_source_before_writing(self):
+        with tempfile.TemporaryDirectory() as target:
+            root = Path(target)
+            source = root / "source"
+            source.mkdir()
+            source_file = source / "source.txt"
+            source_file.write_bytes(b"safe\n")
+            destination = root / "destination"
+            original_definition = runner.fixture_tree_definition
+            source_reads = 0
+
+            def mutate_after_inventory(path):
+                nonlocal source_reads
+                definition = original_definition(path)
+                if path == source:
+                    source_reads += 1
+                    if source_reads == 1:
+                        source_file.write_bytes(b"x" * 33)
+                return definition
+
+            with (
+                patch.object(
+                    runner,
+                    "fixture_tree_definition",
+                    side_effect=mutate_after_inventory,
+                ),
+                patch.object(runner, "FIXTURE_FILE_LIMIT_BYTES", 32),
+                self.assertRaisesRegex(ValueError, "cannot read fixture file"),
+            ):
+                runner._copy_tree_into(source, destination)
+
+            self.assertFalse((destination / "source.txt").exists())
+
     def test_fixture_refs_and_staged_paths_are_canonical(self):
         for baseline_ref, after_ref in (
             ("--force", "after"),

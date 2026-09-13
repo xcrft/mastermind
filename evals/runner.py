@@ -622,9 +622,64 @@ def _fixture_relative_path(value: object, label: str) -> Path:
         or relative == Path(".")
         or ".." in relative.parts
         or relative.as_posix() != value
+        or any(_is_git_metadata_component(part) for part in relative.parts)
     ):
         raise ValueError(f"{label} must be a canonical relative path")
     return relative
+
+
+def _is_git_metadata_component(value: str) -> bool:
+    normalized = value.rstrip(" .").casefold()
+    return normalized in {".git", "git~1"}
+
+
+def _fixture_tag_name(value: object, label: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(
+        r"[A-Za-z0-9_][A-Za-z0-9._/-]*", value
+    ) is None:
+        raise ValueError(f"{label} must be a canonical fixture tag name")
+    parts = value.split("/")
+    if (
+        ".." in value
+        or "@{" in value
+        or any(
+            not part
+            or part.startswith(".")
+            or part.endswith(".")
+            or part.casefold().endswith(".lock")
+            or _is_git_metadata_component(part)
+            for part in parts
+        )
+    ):
+        raise ValueError(f"{label} must be a canonical fixture tag name")
+    return value
+
+
+def fixture_tag_ref(value: object, label: str = "fixture tag") -> str:
+    return f"refs/tags/{_fixture_tag_name(value, label)}"
+
+
+def _validate_fixture_refs(baseline_ref: object, after_ref: object) -> tuple[str, str]:
+    baseline = _fixture_tag_name(baseline_ref, "baseline_ref")
+    after = _fixture_tag_name(after_ref, "after_ref")
+    if (
+        baseline == after
+        or baseline.startswith(f"{after}/")
+        or after.startswith(f"{baseline}/")
+    ):
+        raise ValueError("baseline_ref and after_ref must be distinct fixture tags")
+    return baseline, after
+
+
+def _fixture_descendant_without_symlinks(
+    root: Path, relative: Path, label: str
+) -> Path:
+    current = root
+    for part in relative.parts:
+        current /= part
+        if current.is_symlink():
+            raise ValueError(f"{label} contains a symbolic link: {current}")
+    return current
 
 
 def fixture_case_roots(
@@ -633,10 +688,23 @@ def fixture_case_roots(
     fixtures_root = (FIXTURES_DIR if fixtures_dir is None else fixtures_dir).resolve()
     fixture_relative = _fixture_relative_path(record.get("fixture"), "fixture")
     after_relative = _fixture_relative_path(record.get("after_ref"), "after_ref")
-    fixture_root = (fixtures_root / fixture_relative).resolve()
-    changes_root = (fixture_root / "changes").resolve()
-    baseline_root = (fixture_root / "baseline").resolve()
-    after_root = (changes_root / after_relative).resolve()
+    _validate_fixture_refs(record.get("baseline_ref"), record.get("after_ref"))
+    fixture_path = _fixture_descendant_without_symlinks(
+        fixtures_root, fixture_relative, "fixture path"
+    )
+    changes_path = _fixture_descendant_without_symlinks(
+        fixture_path, Path("changes"), "fixture changes path"
+    )
+    baseline_path = _fixture_descendant_without_symlinks(
+        fixture_path, Path("baseline"), "fixture baseline path"
+    )
+    after_path = _fixture_descendant_without_symlinks(
+        changes_path, after_relative, "fixture after path"
+    )
+    fixture_root = fixture_path.resolve()
+    changes_root = changes_path.resolve()
+    baseline_root = baseline_path.resolve()
+    after_root = after_path.resolve()
     try:
         fixture_root.relative_to(fixtures_root)
         changes_root.relative_to(fixture_root)
@@ -654,6 +722,9 @@ def _fixture_tree_paths(root: Path) -> list[Path]:
         raise FileNotFoundError(f"fixture tree missing: {root}")
     paths: list[Path] = []
     for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        if any(_is_git_metadata_component(part) for part in relative.parts):
+            raise ValueError(f"fixture tree contains Git metadata: {path}")
         if path.is_symlink():
             raise ValueError(f"fixture tree contains a symbolic link: {path}")
         if path.is_dir():
@@ -766,9 +837,8 @@ def snapshot_fixture_definitions(
         for source, target in sources:
             if target in copied:
                 continue
-            fixture_tree_definition(source)
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(source, target, copy_function=shutil.copy)
+            _copy_tree_into(source, target)
             copied.add(target)
 
 
@@ -2125,25 +2195,35 @@ def setup_fixture(
     Returns the tmp repo path. Caller is responsible for cleanup via
     `teardown_fixture`.
     """
+    baseline_ref, after_ref = _validate_fixture_refs(baseline_ref, after_ref)
     _, _, baseline_src, after_src = fixture_case_roots(
-        {"fixture": fixture_name, "after_ref": after_ref},
+        {
+            "fixture": fixture_name,
+            "baseline_ref": baseline_ref,
+            "after_ref": after_ref,
+        },
         fixtures_dir=fixtures_dir,
     )
     if not baseline_src.is_dir():
         raise FileNotFoundError(f"fixture baseline missing: {baseline_src}")
     if not after_src.is_dir():
         raise FileNotFoundError(f"fixture variant missing: {after_src}")
-    if staged_paths is not None and (
-        not isinstance(staged_paths, list)
-        or any(
-            not isinstance(path, str)
-            or not path
-            or Path(path).is_absolute()
-            or ".." in Path(path).parts
-            for path in staged_paths
-        )
-    ):
-        raise ValueError("staged_paths must be a list of repository-relative paths")
+    if staged_paths is not None:
+        if not isinstance(staged_paths, list):
+            raise ValueError(
+                "staged_paths must be a list of canonical repository-relative paths"
+            )
+        try:
+            staged_paths = [
+                _fixture_relative_path(path, "staged path").as_posix()
+                for path in staged_paths
+            ]
+        except ValueError as error:
+            raise ValueError(
+                "staged_paths must be a list of canonical repository-relative paths"
+            ) from error
+        if len(staged_paths) != len(set(staged_paths)):
+            raise ValueError("staged_paths must not contain duplicates")
 
     tmp = Path(tempfile.mkdtemp(prefix=f"mmcg-eval-{fixture_name}-"))
     complete = False
@@ -2231,13 +2311,67 @@ def _build_mmcg_index(
 
 def _copy_tree_into(src: Path, dst: Path) -> None:
     """Copy content and modes, leaving fresh mtimes for Git change detection."""
+    source_definition = fixture_tree_definition(src)
+    source_entries = [(entry, entry.is_dir()) for entry in sorted(src.iterdir())]
+    if dst.is_symlink():
+        raise ValueError(f"fixture destination is a symbolic link: {dst}")
     dst.mkdir(parents=True, exist_ok=True)
-    for entry in src.iterdir():
+    destination_root = dst.resolve()
+    for entry, entry_is_directory in source_entries:
         target = dst / entry.name
-        if entry.is_dir():
-            shutil.copytree(entry, target, dirs_exist_ok=True, copy_function=shutil.copy)
+        if target.is_symlink():
+            raise ValueError(
+                f"fixture destination contains a symbolic link: {target}"
+            )
+        if target.is_dir():
+            fixture_tree_definition(target)
+        if entry_is_directory:
+            shutil.copytree(
+                entry,
+                target,
+                dirs_exist_ok=True,
+                copy_function=shutil.copy,
+            )
         else:
             shutil.copy(entry, target)
+    if fixture_tree_definition(src) != source_definition:
+        raise ValueError(f"fixture tree changed while it was copied: {src}")
+    for entry, entry_is_directory in source_entries:
+        target = dst / entry.name
+        try:
+            target.resolve(strict=True).relative_to(destination_root)
+        except (FileNotFoundError, ValueError) as error:
+            raise ValueError(
+                f"copied fixture path escaped its destination: {target}"
+            ) from error
+        if entry_is_directory:
+            prefix = f"{entry.name}/"
+            expected = [
+                {**record, "path": record["path"][len(prefix):]}
+                for record in source_definition
+                if record["path"].startswith(prefix)
+            ]
+            observed = fixture_tree_definition(target)
+        else:
+            record = next(
+                (
+                    record
+                    for record in source_definition
+                    if record["path"] == entry.name
+                ),
+                None,
+            )
+            if record is None:
+                raise ValueError(f"fixture tree changed while it was copied: {src}")
+            expected = {
+                "sha256": record["sha256"],
+                "git_mode": record["git_mode"],
+            }
+            observed = _stable_regular_file_definition(target)
+        if observed != expected:
+            raise ValueError(
+                f"copied fixture content does not match its source: {target}"
+            )
 
 
 def teardown_fixture(path: Path) -> None:
@@ -2462,17 +2596,19 @@ def render_auditor_input(
         "`mmcg_search`, `mmcg_outline` etc. via the MCP tools — use them to "
         "verify the spec's pre-edit symbol snapshot against the current state.\n"
     ) if has_mmcg else "\n"
+    baseline_tag = fixture_tag_ref(baseline_ref, "baseline_ref")
+    after_tag = fixture_tag_ref(after_ref, "after_ref")
     executor_state = (
         "**Executor state:** changes are uncommitted; HEAD remains at the baseline.\n\n"
         if uncommitted
-        else f"**Executor commit tag:** `{after_ref}` (also inspect the current working tree)\n\n"
+        else f"**Executor commit tag:** `{after_tag}` (also inspect the current working tree)\n\n"
     )
     return (
         f"Audit the executor's work against the spec.\n\n"
         f"**Working directory:** `{fixture_path}` — a real git repo.\n"
-        f"**Baseline tag:** `{baseline_ref}` (state before the executor ran)\n"
+        f"**Baseline tag:** `{baseline_tag}` (state before the executor ran)\n"
         f"{executor_state}"
-        f"Use real `git diff {baseline_ref}` for tracked changes, "
+        f"Use real `git diff {baseline_tag} --` for tracked changes, "
         f"`git status --porcelain=v1 --untracked-files=all` for staging state, and "
         f"`git ls-files --others --exclude-standard` for untracked paths. Read "
         f"untracked file contents directly; they are absent from `git diff`. "

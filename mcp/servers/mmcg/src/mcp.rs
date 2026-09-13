@@ -2083,7 +2083,7 @@ fn schema_dependency_cycles() -> Value {
 fn schema_tasks() -> Value {
     json!({
         "name": "mmcg_tasks",
-        "description": "Full-text search past task specs in `.mastermind/tasks/`. Use to recall prior designs and surface 'we already tried this' before drafting a new spec. FTS5 MATCH syntax — bare words AND-joined ('rate limit'), phrases double-quoted ('\\\"rate limit\\\"'), OR/NOT supported. Returns paths, titles, and snippet excerpts with «match» highlights ranked by BM25.",
+        "description": "Full-text search past task specs in `.mastermind/tasks/`. Use to recall prior designs and surface 'we already tried this' before drafting a new spec. FTS5 MATCH syntax — bare words AND-joined ('rate limit'), phrases double-quoted ('\\\"rate limit\\\"'), OR/NOT supported. Returns paths, titles, snippet excerpts with «match» highlights ranked by BM25, exact coverage, and live freshness; `freshness_error` identifies an unavailable scan.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -2098,7 +2098,7 @@ fn schema_tasks() -> Value {
 fn schema_history() -> Value {
     json!({
         "name": "mmcg_history",
-        "description": "Search durable project history across active and archived CONTEXT files, canonical task specs, executor reports, audits, release notes, lessons, and Markdown architecture decisions in conventional ADR directories. Candidate lessons are unresolved audit signals, not active guidance. Returns observed FTS matches plus skipped/truncated signals; ranking and co-occurrence do not establish causality or correctness. The returned Markdown paths remain the source of truth, and callers should re-index after Markdown changes. Optionally live-check one portable document graph; its content freshness is independent of the FTS index and every declared relation remains unverified.",
+        "description": "Search durable project history across active and archived CONTEXT files, canonical task specs, executor reports, audits, release notes, lessons, and Markdown architecture decisions in conventional ADR directories. Candidate lessons are unresolved audit signals, not active guidance. Returns observed FTS matches plus skipped/truncated and live-freshness signals; `freshness_error` identifies an unavailable scan instead of treating it as a known incomplete corpus. Ranking and co-occurrence do not establish causality or correctness. The returned Markdown paths remain the source of truth, and callers should re-index after Markdown changes. Optionally live-check one portable document graph; its content freshness is independent of the FTS index and every declared relation remains unverified.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3488,33 +3488,8 @@ fn status_history_freshness(
     {
         return Ok(("unknown", Some(error)));
     }
-    let root = store
-        .meta_value("index_root")
-        .map_err(|error| HandlerError::internal("history_index_root_query", error))?
-        .map(PathBuf::from)
-        .and_then(|root| root.canonicalize().ok());
-    let Some(root) = root else {
-        return Ok(("unknown", Some("index_root_unavailable")));
-    };
-    if store
-        .serve_root()
-        .is_some_and(|authorized| authorized != root.as_path())
-    {
-        return Ok(("unknown", Some("index_root_mismatch")));
-    }
-    Ok(
-        match crate::indexer::Indexer::new(root).project_history_freshness(store) {
-            Ok(freshness) => (freshness.as_str(), None),
-            Err(crate::indexer::IndexError::Cancelled)
-            | Err(crate::indexer::IndexError::DeadlineExceeded) => {
-                ("unknown", Some("history_scan_interrupted"))
-            }
-            Err(crate::indexer::IndexError::LimitExceeded { .. }) => {
-                ("incomplete", Some("history_work_limit"))
-            }
-            Err(_) => ("unknown", Some("history_scan_failed")),
-        },
-    )
+    queries::project_history_freshness_status(store)
+        .map_err(|error| HandlerError::internal("history_freshness_query", error))
 }
 
 fn handle_status(store: &mut Store, _args: &Value) -> Result<Value, HandlerError> {
@@ -4710,7 +4685,8 @@ mod tests {
         assert_eq!(result["corpus_truncated"], false);
         assert_eq!(result["truncated"], false);
         assert!(result.get("truncation_reason").is_none());
-        assert_eq!(result["freshness"], "stale");
+        assert_eq!(result["freshness"], "unknown");
+        assert_eq!(result["freshness_error"], "index_root_missing");
         assert!(result.get("document_graph").is_none());
         let _ = std::fs::remove_file(&path);
     }
@@ -4754,7 +4730,8 @@ mod tests {
         assert_eq!(result["truncation_reason"], "top");
         assert_eq!(result["skipped_artifacts"], 0);
         assert_eq!(result["corpus_truncated"], false);
-        assert_eq!(result["freshness"], "stale");
+        assert_eq!(result["freshness"], "unknown");
+        assert_eq!(result["freshness_error"], "index_root_missing");
         assert!(result["source_of_truth"]
             .as_str()
             .unwrap()
@@ -6656,6 +6633,11 @@ mod checks {
         assert_eq!(status_payload["stale_files"], 1);
         assert_eq!(status_payload["stale_files_truncated"], false);
         assert_eq!(status_payload["freshness_error"], "index_root_mismatch");
+        assert_eq!(status_payload["history_freshness"], "unknown");
+        assert_eq!(
+            status_payload["history_freshness_error"],
+            "index_root_mismatch"
+        );
 
         let result = handle_tools_call(
             ProtocolVersion::Current,

@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- History and task retrieval now distinguish a known incomplete corpus from an
+  unavailable live freshness scan. Responses expose a stable `freshness_error`,
+  and managed MCP serving refuses to scan an index root outside its authorized
+  repository boundary.
 - Research trials now require the shared tool revision to be an available exact
   commit in every condition, disable Git lazy transport while freezing inputs,
   and report an observed model or adapter mismatch even when that runtime also

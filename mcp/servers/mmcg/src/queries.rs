@@ -749,6 +749,9 @@ pub struct TaskSearchResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncation_reason: Option<&'static str>,
     pub freshness: &'static str,
+    /// Stable reason that live history freshness could not be established.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub freshness_error: Option<&'static str>,
     pub inference: &'static str,
     pub source_of_truth: &'static str,
 }
@@ -777,6 +780,7 @@ pub fn tasks(store: &Store, query: &str, top: u32) -> rusqlite::Result<TaskSearc
         corpus_truncated: history.corpus_truncated,
         truncation_reason: history.truncation_reason,
         freshness: history.freshness,
+        freshness_error: history.freshness_error,
         inference:
             "none; a matching task spec does not prove current behavior or an accepted decision",
         source_of_truth: history.source_of_truth,
@@ -809,6 +813,10 @@ pub struct HistorySearchResponse {
     pub truncation_reason: Option<&'static str>,
     /// History freshness is deliberately not inferred from structural status.
     pub freshness: &'static str,
+    /// Stable reason that live freshness could not be checked. In this case
+    /// `freshness` is `unknown`, except a recoverable work cap is `incomplete`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub freshness_error: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -926,6 +934,37 @@ pub fn history_with_document_graph(
     )
 }
 
+pub(crate) fn project_history_freshness_status(
+    store: &Store,
+) -> rusqlite::Result<(&'static str, Option<&'static str>)> {
+    let Some(stored_root) = store.meta_value("index_root")?.map(PathBuf::from) else {
+        return Ok(("unknown", Some("index_root_missing")));
+    };
+    let root = match stored_root.canonicalize() {
+        Ok(root) => root,
+        Err(_) => return Ok(("unknown", Some("index_root_unavailable"))),
+    };
+    if store
+        .serve_root()
+        .is_some_and(|authorized| authorized != root.as_path())
+    {
+        return Ok(("unknown", Some("index_root_mismatch")));
+    }
+    Ok(
+        match crate::indexer::Indexer::new(root).project_history_freshness(store) {
+            Ok(freshness) => (freshness.as_str(), None),
+            Err(crate::indexer::IndexError::Cancelled)
+            | Err(crate::indexer::IndexError::DeadlineExceeded) => {
+                ("unknown", Some("history_scan_interrupted"))
+            }
+            Err(crate::indexer::IndexError::LimitExceeded { .. }) => {
+                ("incomplete", Some("history_work_limit"))
+            }
+            Err(_) => ("unknown", Some("history_scan_failed")),
+        },
+    )
+}
+
 pub fn history(
     store: &Store,
     query: &str,
@@ -962,25 +1001,29 @@ pub fn history(
             })
             .transpose()?
             .unwrap_or(false);
-        let freshness = store
-            .meta_value("index_root")?
-            .map(PathBuf::from)
-            .map(|root| crate::indexer::Indexer::new(root).project_history_freshness(store))
-            .map(|result| result.map_or("incomplete", |freshness| freshness.as_str()))
-            .unwrap_or("stale");
+        let (freshness, freshness_error) = project_history_freshness_status(store)?;
         Ok::<_, rusqlite::Error>((
             indexed_total,
             observed,
             skipped_artifacts,
             corpus_truncated,
             freshness,
+            freshness_error,
         ))
     })();
     let end_result = store.end_read_snapshot();
-    let (indexed_total, observed, skipped_artifacts, corpus_truncated, mut freshness) = snapshot?;
+    let (
+        indexed_total,
+        observed,
+        skipped_artifacts,
+        corpus_truncated,
+        mut freshness,
+        mut freshness_error,
+    ) = snapshot?;
     end_result?;
     if store.data_version()? != data_version_before {
         freshness = "snapshot_changed";
+        freshness_error = None;
     }
     let count = observed.len() as u32;
     let result_truncated = count < indexed_total;
@@ -1005,6 +1048,7 @@ pub fn history(
         truncated: result_truncated || corpus_truncated,
         truncation_reason,
         freshness,
+        freshness_error,
     })
 }
 
@@ -5607,6 +5651,64 @@ mod tests {
     }
 
     #[test]
+    fn history_reports_an_unavailable_live_inventory_as_unknown() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("mmcg.db")).unwrap();
+        store
+            .replace_project_history(&[crate::store::ProjectHistoryEntry {
+                path: "CONTEXT.md".into(),
+                kind: "context".into(),
+                title: "Stored decision".into(),
+                body: "The durable boundary remains searchable.".into(),
+            }])
+            .unwrap();
+        store
+            .set_meta(
+                "index_root",
+                directory.path().join("missing-root").to_str().unwrap(),
+            )
+            .unwrap();
+
+        let response = history(&store, "durable", None, 10).unwrap();
+
+        assert_eq!(response.count, 1);
+        assert_eq!(response.freshness, "unknown");
+        assert_eq!(response.freshness_error, Some("index_root_unavailable"));
+    }
+
+    #[test]
+    fn history_does_not_scan_an_index_root_outside_the_serve_boundary() {
+        let authorized = tempfile::tempdir().unwrap();
+        let unrelated = tempfile::tempdir().unwrap();
+        let database = tempfile::tempdir().unwrap();
+        let path = database.path().join("custom.db");
+        {
+            let mut writer = Store::open(&path).unwrap();
+            writer
+                .replace_project_history(&[crate::store::ProjectHistoryEntry {
+                    path: "CONTEXT.md".into(),
+                    kind: "context".into(),
+                    title: "Stored decision".into(),
+                    body: "The durable boundary remains searchable.".into(),
+                }])
+                .unwrap();
+            writer
+                .set_meta(
+                    "index_root",
+                    unrelated.path().canonicalize().unwrap().to_str().unwrap(),
+                )
+                .unwrap();
+        }
+        let store = Store::open_for_serve(&path, Some(authorized.path())).unwrap();
+
+        let response = history(&store, "durable", None, 10).unwrap();
+
+        assert_eq!(response.count, 1);
+        assert_eq!(response.freshness, "unknown");
+        assert_eq!(response.freshness_error, Some("index_root_mismatch"));
+    }
+
+    #[test]
     fn task_and_history_searches_report_bounded_page_coverage() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("mmcg.db")).unwrap();
@@ -5633,7 +5735,8 @@ mod tests {
         assert!(task_page.result_truncated);
         assert!(task_page.truncated);
         assert_eq!(task_page.row_limit, 1);
-        assert_eq!(task_page.freshness, "stale");
+        assert_eq!(task_page.freshness, "unknown");
+        assert_eq!(task_page.freshness_error, Some("index_root_missing"));
         assert_eq!(task_page.skipped_artifacts, 0);
         assert!(!task_page.corpus_truncated);
 
@@ -5644,6 +5747,8 @@ mod tests {
         assert!(!history_page.corpus_truncated);
         assert!(history_page.truncated);
         assert_eq!(history_page.truncation_reason, Some("top"));
+        assert_eq!(history_page.freshness, "unknown");
+        assert_eq!(history_page.freshness_error, Some("index_root_missing"));
     }
 
     #[test]

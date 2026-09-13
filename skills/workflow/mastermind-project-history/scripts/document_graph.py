@@ -394,17 +394,20 @@ class Repository:
             temporary = f".document-graph-{uuid.uuid4().hex}.tmp"
             created = False
             published = False
-            owned_identity = None
+            descriptor = None
+            owned_file = None
             try:
-                descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                descriptor = os.open(temporary, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                                      0o600, dir_fd=directory)
                 created = True
-                with os.fdopen(descriptor, "wb") as stream:
+                opened = os.fstat(descriptor)
+                owned_file = (opened.st_dev, opened.st_ino)
+                os.fchmod(descriptor, 0o600)
+                with os.fdopen(os.dup(descriptor), "wb") as stream:
                     stream.write(data)
                     stream.flush()
                     os.fsync(stream.fileno())
-                    owned = os.fstat(stream.fileno())
-                    owned_identity = (owned.st_dev, owned.st_ino)
+                owned = os.fstat(descriptor)
                 try:
                     self.assert_parent_binding(path, directory)
                     # Hard-link publication is atomic and, unlike rename(), cannot
@@ -413,24 +416,55 @@ class Repository:
                             follow_symlinks=False)
                     published = True
                     linked = os.stat(name, dir_fd=directory, follow_symlinks=False)
-                    if (linked.st_dev, linked.st_ino) != owned_identity:
+                    if (linked.st_dev, linked.st_ino) != owned_file:
                         raise GraphError("output_changed_during_operation", path)
                 except FileExistsError as error:
                     raise GraphError("output_exists", path) from error
+                staged = os.stat(temporary, dir_fd=directory, follow_symlinks=False)
+                if (staged.st_dev, staged.st_ino) != owned_file:
+                    raise GraphError("output_changed_during_operation", path)
+                os.unlink(temporary, dir_fd=directory)
+                created = False
                 os.fsync(directory)
+                self.assert_parent_binding(path, directory)
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                remaining = len(data) + 1
+                chunks = []
+                while remaining:
+                    chunk = os.read(descriptor, min(65536, remaining))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                owned = os.fstat(descriptor)
+                linked = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                if (stat_identity(owned) != stat_identity(linked)
+                        or not stat.S_ISREG(owned.st_mode) or stat.S_IMODE(owned.st_mode) != 0o600
+                        or b"".join(chunks) != data):
+                    raise GraphError("output_changed_during_operation", path)
                 self.assert_parent_binding(path, directory)
             except (GraphError, OSError, KeyboardInterrupt):
                 if published:
                     try:
                         owned = os.stat(name, dir_fd=directory, follow_symlinks=False)
-                        if (owned.st_dev, owned.st_ino) == owned_identity:
+                        if (owned.st_dev, owned.st_ino) == owned_file:
                             os.unlink(name, dir_fd=directory)
+                            os.fsync(directory)
                     except FileNotFoundError:
                         pass
                 raise
             finally:
-                if created:
-                    os.unlink(temporary, dir_fd=directory)
+                try:
+                    if created:
+                        try:
+                            staged = os.stat(temporary, dir_fd=directory, follow_symlinks=False)
+                            if (staged.st_dev, staged.st_ino) == owned_file:
+                                os.unlink(temporary, dir_fd=directory)
+                        except FileNotFoundError:
+                            pass
+                finally:
+                    if descriptor is not None:
+                        os.close(descriptor)
 
     def git(self, arguments):
         self.assert_root_binding()

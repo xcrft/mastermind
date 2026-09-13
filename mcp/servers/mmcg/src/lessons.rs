@@ -36,15 +36,17 @@ pub fn append_audit_candidate(
     if matches!(report.verdict, Verdict::Held) {
         return Ok(false);
     }
+    let spec_identity = repository_relative_identity(repo_root, spec_path)?;
     let task_id = derive_task_id(spec_path);
     let verdict = verdict_label(report.verdict);
     let observation = summarize_findings(&report.findings);
-    // Keyed on task + kind alone. Keying on the findings themselves gave every
+    // Keyed on exact spec identity and kind. Keying on the findings gave every
     // audit round its own entry, because an iterate-until-green loop shifts the
     // finding set by an item or two each pass — one task could accumulate a
     // dozen near-identical candidates, none of them reviewed.
-    let id = stable_id(&task_id, "audit_contract_failure", "");
-    let spec = relative_display(repo_root, spec_path);
+    let id = stable_id(&spec_identity, "audit_contract_failure", "");
+    let legacy_id = stable_id(&task_id, "audit_contract_failure", "");
+    let spec = markdown_path(&spec_identity);
     let audit = spec_path
         .parent()
         .map(|parent| parent.join("audit.md"))
@@ -64,14 +66,17 @@ pub fn append_audit_candidate(
         })
         .is_ok_and(|kind| kind == crate::bounded_fs::BoundedPathKind::RegularFile);
     let evidence = if audit_persisted {
-        format!("`{}`; `{}`", spec, relative_display(repo_root, &audit))
+        let audit = repository_relative_identity(repo_root, &audit)?;
+        format!("{spec}; {}", markdown_path(&audit))
     } else {
-        format!("`{spec}`; standalone audit output observed in this invocation but not persisted")
+        format!("{spec}; standalone audit output observed in this invocation but not persisted")
     };
     append_candidate(
         repo_root,
         Candidate {
             id,
+            legacy_id,
+            spec_identity,
             task_id,
             kind: "audit_contract_failure",
             observed: format!("{verdict}; {observation}"),
@@ -86,13 +91,17 @@ pub fn append_iteration_budget_candidate(
     spec_path: &Path,
     iteration: u32,
 ) -> std::io::Result<bool> {
+    let spec_identity = repository_relative_identity(repo_root, spec_path)?;
     let task_id = derive_task_id(spec_path);
-    let id = stable_id(&task_id, "iteration_budget_exhausted", "preflight");
-    let evidence = format!("`{}`", relative_display(repo_root, spec_path));
+    let id = stable_id(&spec_identity, "iteration_budget_exhausted", "preflight");
+    let legacy_id = stable_id(&task_id, "iteration_budget_exhausted", "preflight");
+    let evidence = markdown_path(&spec_identity);
     append_candidate(
         repo_root,
         Candidate {
             id,
+            legacy_id,
+            spec_identity,
             task_id,
             kind: "iteration_budget_exhausted",
             observed: format!("pre-flight iteration {iteration} exceeded the configured budget"),
@@ -103,6 +112,8 @@ pub fn append_iteration_budget_candidate(
 
 struct Candidate {
     id: String,
+    legacy_id: String,
+    spec_identity: String,
     task_id: String,
     kind: &'static str,
     observed: String,
@@ -212,11 +223,35 @@ fn merge_candidate(body: &str, candidate: &Candidate) -> Option<String> {
     let heading = format!("## {}", candidate.id);
     let lines: Vec<&str> = body.split_inclusive('\n').collect();
     let visible = crate::context_doctor::prose_lines(body);
-    let Some(start) = visible
+    let exact_start = visible
         .iter()
         .find(|line| line.text.trim_end() == heading)
-        .map(|line| line.index)
-    else {
+        .map(|line| line.index);
+    let legacy_start = if exact_start.is_none() {
+        (|| {
+            let legacy_heading = format!("## {}", candidate.legacy_id);
+            let start = visible
+                .iter()
+                .find(|line| line.text.trim_end() == legacy_heading)?
+                .index;
+            let end = visible
+                .iter()
+                .find(|line| line.index > start && line.text.starts_with("## "))
+                .map_or(lines.len(), |line| line.index);
+            let metadata = visible
+                .iter()
+                .filter(|line| line.index >= start && line.index < end)
+                .take_while(|line| !line.text.starts_with("### "))
+                .map(|line| line.text)
+                .collect::<Vec<_>>();
+            field(&metadata, "Evidence")
+                .filter(|value| evidence_matches_identity(value, &candidate.spec_identity))
+                .map(|_| start)
+        })()
+    } else {
+        None
+    };
+    let Some(start) = exact_start.or(legacy_start) else {
         let mut merged = if body.is_empty() {
             HEADER.to_string()
         } else {
@@ -229,6 +264,7 @@ fn merge_candidate(body: &str, candidate: &Candidate) -> Option<String> {
         merged.push_str(&render_entry(candidate, &today_ymd(), 1));
         return Some(merged);
     };
+    let migrate_legacy_heading = exact_start.is_none();
 
     let end = visible
         .iter()
@@ -275,6 +311,18 @@ fn merge_candidate(body: &str, candidate: &Candidate) -> Option<String> {
     };
     let mut merged = lines[..start].concat();
     for (index, line) in section.iter().enumerate() {
+        if index == 0 && migrate_legacy_heading {
+            let ending = if line.ends_with("\r\n") {
+                "\r\n"
+            } else if line.ends_with('\n') {
+                "\n"
+            } else {
+                ""
+            };
+            merged.push_str(&heading);
+            merged.push_str(ending);
+            continue;
+        }
         if index == 1 {
             for ((name, value), position) in updates.iter().zip(&positions) {
                 if position.is_none() {
@@ -374,9 +422,9 @@ fn sanitize_task_id(raw: &str) -> String {
     }
 }
 
-fn stable_id(task_id: &str, kind: &str, observation: &str) -> String {
+fn stable_id(spec_identity: &str, kind: &str, observation: &str) -> String {
     let mut hash = Sha256::new();
-    hash.update(task_id.as_bytes());
+    hash.update(spec_identity.as_bytes());
     hash.update([0]);
     hash.update(kind.as_bytes());
     hash.update([0]);
@@ -385,27 +433,64 @@ fn stable_id(task_id: &str, kind: &str, observation: &str) -> String {
     format!("lesson-{}", &digest[..16])
 }
 
-fn relative_display(repo_root: &Path, path: &Path) -> String {
+fn repository_relative_identity(repo_root: &Path, path: &Path) -> std::io::Result<String> {
     let resolved = if path.is_absolute() {
         path.to_path_buf()
     } else {
         repo_root.join(path)
     };
-    let display = resolved
-        .strip_prefix(repo_root)
-        .unwrap_or(&resolved)
-        .to_string_lossy()
-        .replace('\\', "/");
-    display
-        .chars()
-        .map(|ch| {
-            if ch == '`' || ch.is_control() {
-                '-'
-            } else {
-                ch
+    let relative = resolved.strip_prefix(repo_root).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "lesson evidence must resolve inside the repository",
+        )
+    })?;
+    crate::bounded_fs::normalize_repository_relative_path(relative).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "lesson evidence path must have an exact repository-relative UTF-8 identity",
+        )
+    })
+}
+
+fn evidence_matches_identity(evidence: &str, identity: &str) -> bool {
+    let expected = markdown_path(identity);
+    evidence == expected
+        || evidence
+            .strip_prefix(&expected)
+            .is_some_and(|suffix| suffix.starts_with(';'))
+}
+
+fn markdown_path(path: &str) -> String {
+    let mut escaped = String::with_capacity(path.len());
+    for character in path.chars() {
+        match character {
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\\' => escaped.push_str("\\\\"),
+            character if character.is_control() => {
+                escaped.push_str(&format!("\\u{{{:x}}}", character as u32));
             }
-        })
-        .collect()
+            character => escaped.push(character),
+        }
+    }
+    let mut longest_run = 0;
+    let mut current_run = 0;
+    for character in escaped.chars() {
+        if character == '`' {
+            current_run += 1;
+            longest_run = longest_run.max(current_run);
+        } else {
+            current_run = 0;
+        }
+    }
+    let delimiter = "`".repeat(longest_run + 1);
+    if escaped.starts_with('`') || escaped.ends_with('`') {
+        format!("{delimiter} {escaped} {delimiter}")
+    } else {
+        format!("{delimiter}{escaped}{delimiter}")
+    }
 }
 
 fn summarize_findings(findings: &[Finding]) -> String {
@@ -696,7 +781,14 @@ mod tests {
             "- **Reusable lesson:** pending semantic review",
             "- **Reusable lesson:** Provisional rule awaiting the second audit.",
         );
-        let heading = format!("## {}", stable_id("042-name", "audit_contract_failure", ""));
+        let heading = format!(
+            "## {}",
+            stable_id(
+                ".mastermind/tasks/042-name/spec.md",
+                "audit_contract_failure",
+                ""
+            )
+        );
         let reviewed = live
             .replacen(&heading, "## lesson-reviewed", 1)
             .replace("- **Status:** candidate", "- **Status:** active");
@@ -849,6 +941,87 @@ mod tests {
     fn task_id_is_markdown_safe() {
         let path = PathBuf::from(".mastermind/tasks/042-name`\n- injected/spec.md");
         assert_eq!(derive_task_id(&path), "042-name-injected");
+    }
+
+    #[test]
+    fn distinct_spec_identities_do_not_merge_after_task_name_sanitization() {
+        let root = tempfile::tempdir().unwrap();
+        let first = PathBuf::from(".mastermind/tasks/042-a@b/spec.md");
+        let second = PathBuf::from(".mastermind/tasks/042-a-b/spec.md");
+        assert_eq!(derive_task_id(&first), derive_task_id(&second));
+
+        assert!(append_iteration_budget_candidate(root.path(), &first, 4).unwrap());
+        assert!(append_iteration_budget_candidate(root.path(), &second, 4).unwrap());
+
+        let body = fs::read_to_string(root.path().join(".mastermind/tasks/_lessons.md")).unwrap();
+        assert_eq!(body.matches("## lesson-").count(), 2);
+        assert!(body.contains("042-a@b/spec.md"));
+        assert!(body.contains("042-a-b/spec.md"));
+    }
+
+    #[test]
+    fn legacy_candidate_migration_does_not_capture_a_colliding_task() {
+        let root = tempfile::tempdir().unwrap();
+        let first = PathBuf::from(".mastermind/tasks/042-a@b/spec.md");
+        let second = PathBuf::from(".mastermind/tasks/042-a-b/spec.md");
+        let lessons = root.path().join(".mastermind/tasks/_lessons.md");
+        let legacy_id = stable_id(
+            &derive_task_id(&first),
+            "iteration_budget_exhausted",
+            "preflight",
+        );
+        let first_id = stable_id(
+            ".mastermind/tasks/042-a@b/spec.md",
+            "iteration_budget_exhausted",
+            "preflight",
+        );
+        let second_id = stable_id(
+            ".mastermind/tasks/042-a-b/spec.md",
+            "iteration_budget_exhausted",
+            "preflight",
+        );
+
+        assert!(append_iteration_budget_candidate(root.path(), &first, 4).unwrap());
+        let legacy = fs::read_to_string(&lessons).unwrap().replacen(
+            &format!("## {first_id}"),
+            &format!("## {legacy_id}"),
+            1,
+        );
+        fs::write(&lessons, legacy).unwrap();
+
+        assert!(append_iteration_budget_candidate(root.path(), &second, 4).unwrap());
+        let separate = fs::read_to_string(&lessons).unwrap();
+        assert!(separate.contains(&format!("## {legacy_id}")));
+        assert!(separate.contains(&format!("## {second_id}")));
+        assert_eq!(separate.matches("## lesson-").count(), 2);
+
+        assert!(append_iteration_budget_candidate(root.path(), &first, 5).unwrap());
+        let migrated = fs::read_to_string(&lessons).unwrap();
+        assert!(!migrated.contains(&format!("## {legacy_id}")));
+        assert!(migrated.contains(&format!("## {first_id}")));
+        assert!(migrated.contains(&format!("## {second_id}")));
+        assert_eq!(migrated.matches("**Occurrences:** 2").count(), 1);
+        assert_eq!(migrated.matches("**Occurrences:** 1").count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lesson_identity_rejects_backslash_aliases() {
+        let root = tempfile::tempdir().unwrap();
+        let spec = Path::new(".mastermind/tasks/042-a\\b/spec.md");
+
+        let error = append_iteration_budget_candidate(root.path(), spec, 4).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(!root.path().join(".mastermind/tasks/_lessons.md").exists());
+    }
+
+    #[test]
+    fn lesson_evidence_escapes_control_characters_without_changing_identity() {
+        let rendered = markdown_path(".mastermind/tasks/042-line\nbreak/spec.md");
+
+        assert!(rendered.contains("042-line\\nbreak"));
+        assert!(!rendered.contains("042-line\nbreak"));
     }
 
     #[test]

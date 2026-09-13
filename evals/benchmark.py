@@ -220,6 +220,34 @@ def verify_tool_commit(repo: Path, revision: str, env: dict[str, str]) -> None:
         )
 
 
+def git_regular_blob(repo: Path, revision: str, path: str, env: dict[str, str],
+                     *, role: str, byte_limit: int) -> tuple[bytes, str]:
+    """Read one exact regular blob while preserving its Git path and mode."""
+    tree = git(repo, ["ls-tree", "-z", revision, "--", path], env, CONTROL_BYTE_LIMIT)
+    records = tree.rstrip(b"\0").split(b"\0")
+    if len(records) != 1 or b"\t" not in records[0]:
+        raise BenchmarkError(f"{role}_missing", f"expected one exact {role} file: {path}")
+    try:
+        header, name = records[0].split(b"\t", 1)
+        mode, kind, oid = header.decode("ascii").split()
+        exact_name = name.decode("utf-8")
+    except (UnicodeError, ValueError) as error:
+        raise BenchmarkError(f"{role}_type", f"invalid {role} tree entry: {path}") from error
+    if (exact_name != path or kind != "blob" or mode not in {"100644", "100755"}
+            or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", oid)):
+        raise BenchmarkError(f"{role}_type", f"only regular {role} blobs are allowed: {path}")
+    try:
+        size = int(git(repo, ["cat-file", "-s", oid], env, CONTROL_BYTE_LIMIT).decode("ascii").strip())
+    except (BenchmarkError, UnicodeError, ValueError) as error:
+        raise BenchmarkError(f"{role}_type", f"cannot inspect {role} blob: {path}") from error
+    if not 0 <= size <= byte_limit:
+        raise BenchmarkError(f"{role}_limit", f"{role} blob exceeds its byte limit: {path}")
+    body = git(repo, ["cat-file", "blob", oid], env, byte_limit)
+    if len(body) != size:
+        raise BenchmarkError(f"{role}_changed", f"{role} blob changed while reading: {path}")
+    return body, mode
+
+
 def export_source(repo: Path, revision: str, paths: list[str], destination: Path,
                   env: dict[str, str]) -> tuple[list[dict], str]:
     resolved = git(repo, ["rev-parse", "--verify", f"{revision}^{{commit}}"], env).decode().strip()
@@ -228,15 +256,9 @@ def export_source(repo: Path, revision: str, paths: list[str], destination: Path
     destination.mkdir()
     files, total = [], 0
     for path in sorted(paths):
-        tree = git(repo, ["ls-tree", "-z", revision, "--", path], env)
-        records = tree.rstrip(b"\0").split(b"\0")
-        if len(records) != 1 or b"\t" not in records[0]:
-            raise BenchmarkError("source_missing", f"expected one exact file: {path}")
-        header, name = records[0].split(b"\t", 1)
-        mode, kind, oid = header.decode("ascii").split()
-        if name.decode("utf-8") != path or kind != "blob" or mode not in {"100644", "100755"}:
-            raise BenchmarkError("source_type", f"only regular source blobs are allowed: {path}")
-        body = git(repo, ["cat-file", "blob", oid], env)
+        body, mode = git_regular_blob(
+            repo, revision, path, env, role="source", byte_limit=FILE_BYTE_LIMIT,
+        )
         total += len(body)
         if total > SOURCE_BYTE_LIMIT:
             raise BenchmarkError("source_limit", "source projection exceeds its total byte limit")
@@ -513,8 +535,10 @@ def prepare_trial(
         instruction = ""
         if condition != "source":
             instruction_path = safe_source_path(config.get("instruction_path"))
-            instruction = git(tool_repo.resolve(), ["show", f"{tool_revision}:{instruction_path}"], env,
-                              CONTROL_BYTE_LIMIT).decode("utf-8")
+            instruction = git_regular_blob(
+                tool_repo.resolve(), tool_revision, instruction_path, env,
+                role="instruction", byte_limit=CONTROL_BYTE_LIMIT,
+            )[0].decode("utf-8")
         manifest["instruction_sha256"] = hashlib.sha256(instruction.encode()).hexdigest()
         indexer = None
         if condition == "portable_mmcg":
@@ -662,6 +686,8 @@ def verify_prepared(trial: Path, manifest: dict) -> dict:
                 or not isinstance(item["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"])):
             raise BenchmarkError("invalid_manifest", "invalid source file record")
         safe_source_path(item["path"])
+    if sum(item["bytes"] for item in files) > SOURCE_BYTE_LIMIT:
+        raise BenchmarkError("source_limit", "source manifest exceeds its total byte limit")
     if {item["path"] for item in files} != set(manifest["task"]["source_allowlist"]):
         raise BenchmarkError("invalid_manifest", "source files differ from the task allowlist")
     if (digest({"revision": manifest["task"]["revision"], "files": files}) != manifest["source_sha256"]

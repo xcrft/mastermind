@@ -2946,7 +2946,7 @@ def placeholder():
             .path()
             .join(OsString::from_vec(b"repository-\xff".to_vec()));
         fs::create_dir(&root).unwrap();
-        let store = Store::open(&parent.path().join("index.db")).unwrap();
+        let store = Store::open(parent.path().join("index.db")).unwrap();
 
         let error = Indexer::new(&root)
             .bind_or_validate_index_root(&store)

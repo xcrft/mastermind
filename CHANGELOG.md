@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Index status no longer serializes a lossy database path. Native paths that
+  JSON cannot represent exactly return a null `db_path` with an explicit error
+  while preserving the remaining index-health evidence.
 - History snapshots, spec parser labels, and generated review evidence now use
   exact repository-relative path identities. Non-UTF-8 names and Unix
   backslash aliases fail before the controller creates or archives an artifact.

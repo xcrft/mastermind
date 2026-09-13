@@ -439,7 +439,11 @@ pub const STATUS_STALE_FILE_PROBE_LIMIT: usize = STATUS_STALE_FILE_LIMIT + 1;
 
 #[derive(Debug, Serialize)]
 pub struct StatusResponse {
-    pub db_path: String,
+    /// Exact UTF-8 database identity. Null when the native path cannot be
+    /// represented in JSON without changing it.
+    pub db_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub db_path_error: Option<&'static str>,
     pub symbol_count: u32,
     pub file_count: u32,
     /// Structural freshness compares the indexed path set and exact filesystem
@@ -4307,13 +4311,15 @@ pub fn api_surface(
 }
 
 pub fn status(store: &Store) -> rusqlite::Result<StatusResponse> {
-    let db_path = store.db_path();
+    let db_path = database_path_identity(store);
+    let db_path_error = db_path.is_none().then_some("non_utf8_path");
     let (stale_files, stale_files_truncated, freshness_error) = store
         .meta_value("index_root")?
         .map(|root| stale_count(store, std::path::Path::new(&root)))
         .unwrap_or((1, false, Some("index_root_missing")));
     Ok(StatusResponse {
-        db_path: db_path.to_string_lossy().to_string(),
+        db_path,
+        db_path_error,
         symbol_count: store.symbol_count()?,
         file_count: store.file_count()?,
         freshness_basis: "path_and_mtime",
@@ -4323,6 +4329,10 @@ pub fn status(store: &Store) -> rusqlite::Result<StatusResponse> {
         extractor_contract_current: store.extractor_contract_current()?,
         concept_contract_current: store.concept_contract_current()?,
     })
+}
+
+pub(crate) fn database_path_identity(store: &Store) -> Option<String> {
+    store.db_path().to_str().map(str::to_owned)
 }
 
 /// Best-effort count of source files that differ from their stored index mtime
@@ -8491,6 +8501,8 @@ mod tests {
         assert!(!store.db_path().starts_with(&root));
 
         let response = status(&store).unwrap();
+        assert_eq!(response.db_path.as_deref(), store.db_path().to_str());
+        assert_eq!(response.db_path_error, None);
         assert_eq!(response.stale_files, 0);
         assert!(!response.stale_files_truncated);
         assert_eq!(response.freshness_error, None);
@@ -8509,6 +8521,29 @@ mod tests {
         assert!(!response.stale_files_truncated);
         assert_eq!(response.freshness_error, Some("index_root_missing"));
         assert!(!response.concept_contract_current);
+    }
+
+    // APFS rejects invalid UTF-8 filenames before the status contract can
+    // observe them. Linux accepts the exact native path used by SQLite.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn status_does_not_publish_a_lossy_database_path() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join(std::ffi::OsString::from_vec(b"mmcg-\xff.db".to_vec()));
+        let store = Store::open(&path).unwrap();
+
+        let response = status(&store).unwrap();
+
+        assert_eq!(response.db_path, None);
+        assert_eq!(response.db_path_error, Some("non_utf8_path"));
+        assert_eq!(response.freshness_error, Some("index_root_missing"));
+        let json = serde_json::to_value(&response).unwrap();
+        assert!(json["db_path"].is_null());
+        assert_eq!(json["db_path_error"], "non_utf8_path");
     }
 
     #[test]

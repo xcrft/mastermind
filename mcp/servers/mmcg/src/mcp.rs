@@ -1486,6 +1486,8 @@ fn schema_incompatible_payload() -> Value {
 }
 
 fn safe_index_status(store: &Store) -> Result<queries::StatusResponse, HandlerError> {
+    let db_path = queries::database_path_identity(store);
+    let db_path_error = db_path.is_none().then_some("non_utf8_path");
     let symbol_count = store
         .symbol_count()
         .map_err(|error| HandlerError::internal("symbol_count_query", error))?;
@@ -1556,7 +1558,8 @@ fn safe_index_status(store: &Store) -> Result<queries::StatusResponse, HandlerEr
         None => (1, false, Some("index_root_missing")),
     };
     Ok(queries::StatusResponse {
-        db_path: store.db_path().to_string_lossy().to_string(),
+        db_path,
+        db_path_error,
         symbol_count,
         file_count,
         freshness_basis: "path_and_mtime",
@@ -2355,7 +2358,7 @@ fn schema_recent_changes() -> Value {
 fn schema_status() -> Value {
     json!({
         "name": "mmcg_status",
-        "description": "Show index health — file count, symbol count, db path, structural extractor compatibility, deterministic concept-corpus compatibility, live durable-history freshness, and bounded source freshness. `history_freshness` is `fresh`, `stale`, `incomplete`, `snapshot_changed`, or `unknown`; an unavailable scan includes `history_freshness_error`. `freshness_basis: path_and_mtime` states the structural metadata contract. `stale_files` counts up to 100 added, deleted, or mtime-changed indexable paths; `stale_files_truncated` discloses a larger set, and `freshness_error` explains when the scan could not establish a count. Structural tools automatically refresh a stale managed `.mastermind/mmcg.db` before querying. Custom external indexes remain manual-refresh-only; unavailable or failed refreshes return `index_stale` with the same coverage fields.",
+        "description": "Show index health — file count, symbol count, exact UTF-8 db path when representable, structural extractor compatibility, deterministic concept-corpus compatibility, live durable-history freshness, and bounded source freshness. A native database path that JSON cannot represent exactly returns `db_path: null` with `db_path_error`. `history_freshness` is `fresh`, `stale`, `incomplete`, `snapshot_changed`, or `unknown`; an unavailable scan includes `history_freshness_error`. `freshness_basis: path_and_mtime` states the structural metadata contract. `stale_files` counts up to 100 added, deleted, or mtime-changed indexable paths; `stale_files_truncated` discloses a larger set, and `freshness_error` explains when the scan could not establish a count. Structural tools automatically refresh a stale managed `.mastermind/mmcg.db` before querying. Custom external indexes remain manual-refresh-only; unavailable or failed refreshes return `index_stale` with the same coverage fields.",
         "inputSchema": { "type": "object", "properties": {} }
     })
 }
@@ -3112,7 +3115,12 @@ pub fn build_brief_current(
         result => return result,
     }
     let status = safe_index_status(store).unwrap_or(queries::StatusResponse {
-        db_path: store.db_path().to_string_lossy().to_string(),
+        db_path: queries::database_path_identity(store),
+        db_path_error: store
+            .db_path()
+            .to_str()
+            .is_none()
+            .then_some("non_utf8_path"),
         symbol_count: 0,
         file_count: 0,
         freshness_basis: "path_and_mtime",
@@ -3349,7 +3357,12 @@ fn map_concept_error(store: &Store, error: queries::ConceptError) -> HandlerErro
         },
         queries::ConceptError::IndexStale => {
             let status = safe_index_status(store).unwrap_or(queries::StatusResponse {
-                db_path: store.db_path().to_string_lossy().to_string(),
+                db_path: queries::database_path_identity(store),
+                db_path_error: store
+                    .db_path()
+                    .to_str()
+                    .is_none()
+                    .then_some("non_utf8_path"),
                 symbol_count: 0,
                 file_count: 0,
                 freshness_basis: "path_and_mtime",

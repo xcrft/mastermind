@@ -2656,15 +2656,16 @@ class PromptIsolationTests(unittest.TestCase):
                 patch.object(runner, "teardown_fixture"),
                 patch.object(runner, "run_bounded", return_value=process) as invoke,
             ):
-                self.assertTrue(
-                    ablation.run_vanilla(
-                        "opus",
-                        case,
-                        claude_binary=Path("/runtime/claude"),
-                        claude_version="2.1.236 (Claude Code)",
-                        git_binary=Path("/runtime/bin/git"),
-                    )
+                outcome = ablation.run_vanilla(
+                    "opus",
+                    case,
+                    claude_binary=Path("/runtime/claude"),
+                    claude_version="2.1.236 (Claude Code)",
+                    git_binary=Path("/runtime/bin/git"),
                 )
+                self.assertIsNotNone(outcome)
+                self.assertTrue(outcome)
+                self.assertEqual(outcome.resolved_models, (RESOLVED_MODEL,))
                 setup.assert_called_once_with(
                     "uncommitted-audit",
                     "baseline",
@@ -2705,6 +2706,28 @@ class PromptIsolationTests(unittest.TestCase):
         self.assertIn(
             "git diff refs/tags/baseline..refs/tags/after --", committed
         )
+
+    def test_ablation_requires_one_resolved_model_identity(self):
+        first = ablation.ConditionOutcome(True, (RESOLVED_MODEL,))
+        expected, issue = ablation.merge_model_identity(None, first, "a vanilla")
+        self.assertEqual(expected, (RESOLVED_MODEL,))
+        self.assertIsNone(issue)
+
+        expected, issue = ablation.merge_model_identity(
+            expected,
+            ablation.ConditionOutcome(False, (RESOLVED_MODEL,)),
+            "a mastermind",
+        )
+        self.assertEqual(expected, (RESOLVED_MODEL,))
+        self.assertIsNone(issue)
+
+        expected, issue = ablation.merge_model_identity(
+            expected,
+            ablation.ConditionOutcome(True, ("different-model",)),
+            "b vanilla",
+        )
+        self.assertEqual(expected, (RESOLVED_MODEL,))
+        self.assertIn("b vanilla resolved model ids", issue)
 
     def test_vanilla_requires_a_successful_simple_git_inspection(self):
         valid = runner.ToolExecution(

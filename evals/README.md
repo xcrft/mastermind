@@ -37,8 +37,11 @@ after-tree.
 Every case and suite summary reports turns, input/output tokens, prompt-cache
 creation/read tokens, API time, and Claude CLI reported cost. Retries aggregate
 both attempts, so a recovered flaky case does not hide its token spend. Reports
-also retain the resolved model IDs and tool identities. Tool inputs are not
-persisted.
+also retain the resolved model IDs and tool identities. Streamed runs require
+one init and one successful result event, and every tool-use ID must have one
+matching result. Error results, incomplete model accounting, and permission
+denials fail the case. Tool inputs and tool results are not persisted, including
+in failed-run diagnostics.
 
 ## Run the right layer
 
@@ -155,6 +158,9 @@ metadata are rejected. The runner:
 The auditor compares baseline to the current working tree and reads untracked
 files separately, covering audits before commit. Audit prompts use full
 `refs/tags/...` names so a tag cannot resolve as `HEAD`, a branch, or a path.
+When a case requires a verification rerun, its structured `pass` attestation is
+accepted only when the stream also contains a successful Bash result for that
+exact command. A claimed rerun cannot satisfy the grader by itself.
 The researcher queries the same graph and reads source before reporting a fact.
 JSONL cases do not provide synthetic diffs or structural answers. Fixture
 copies are checked against the source manifest before use. The runner prefers

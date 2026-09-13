@@ -228,6 +228,15 @@ class Result:
         self.tool_calls = [*prior.tool_calls, *self.tool_calls]
 
 
+@dataclass
+class ToolExecution:
+    name: str
+    tool_use_id: str
+    arguments: dict
+    result_seen: bool = False
+    succeeded: bool = False
+
+
 def strip_frontmatter(text: str) -> str:
     if text.startswith("---\n"):
         end = text.find("\n---\n", 4)
@@ -362,18 +371,21 @@ def telemetry_from_payload(payload: dict) -> dict[str, object]:
         issues.append("usage must be an object")
         usage = {}
     model_usage = payload.get("modelUsage")
-    if (
+    valid_model_usage = not (
         not isinstance(model_usage, dict)
         or not model_usage
         or any(not isinstance(name, str) or not name for name in model_usage)
-    ):
+    )
+    if not valid_model_usage:
         issues.append("modelUsage must identify at least one usage model")
     resolved_model = payload.get("_resolved_model")
     if not isinstance(resolved_model, str) or not resolved_model:
         issues.append("stream init must identify the resolved primary model")
         resolved_models: list[str] = []
     else:
-        resolved_models = [resolved_model]
+        resolved_models = sorted(model_usage) if valid_model_usage else []
+        if valid_model_usage and resolved_model not in model_usage:
+            issues.append("stream primary model is absent from modelUsage")
     return {
         "duration_ms": required_int(payload, "duration_ms", "duration_ms"),
         "duration_api_ms": required_int(
@@ -401,7 +413,9 @@ def telemetry_from_payload(payload: dict) -> dict[str, object]:
     }
 
 
-def parse_claude_output(stdout: str, *, streamed: bool) -> tuple[dict, list[str]]:
+def parse_claude_output(
+    stdout: str, *, streamed: bool
+) -> tuple[dict, list[str], list[ToolExecution]]:
     if not streamed:
         payload = json.loads(stdout)
         if not isinstance(payload, dict):
@@ -409,7 +423,7 @@ def parse_claude_output(stdout: str, *, streamed: bool) -> tuple[dict, list[str]
         model_usage = payload.get("modelUsage")
         if isinstance(model_usage, dict) and len(model_usage) == 1:
             payload["_resolved_model"] = next(iter(model_usage))
-        return payload, []
+        return payload, [], []
 
     events: list[dict] = []
     for line_number, line in enumerate(stdout.splitlines(), start=1):
@@ -419,41 +433,111 @@ def parse_claude_output(stdout: str, *, streamed: bool) -> tuple[dict, list[str]
         if not isinstance(event, dict):
             raise ValueError(f"Claude stream event {line_number} is not an object")
         events.append(event)
-    payload = next(
-        (event for event in reversed(events) if event.get("type") == "result"),
-        None,
-    )
-    if payload is None:
-        raise ValueError("Claude stream has no final result event")
-    init_models = {
-        event.get("model")
-        for event in events
-        if event.get("type") == "system"
-        and event.get("subtype") == "init"
-        and isinstance(event.get("model"), str)
-        and event.get("model")
-    }
-    if len(init_models) != 1:
+    init_events = [
+        (index, event)
+        for index, event in enumerate(events)
+        if event.get("type") == "system" and event.get("subtype") == "init"
+    ]
+    result_events = [
+        (index, event)
+        for index, event in enumerate(events)
+        if event.get("type") == "result"
+    ]
+    if len(init_events) != 1:
         raise ValueError(
-            f"Claude stream must identify one primary model, got {sorted(init_models)!r}"
+            f"Claude stream must contain one init event, got {len(init_events)}"
         )
-    payload["_resolved_model"] = next(iter(init_models))
+    if len(result_events) != 1:
+        raise ValueError(
+            f"Claude stream must contain one result event, got {len(result_events)}"
+        )
+    init_index, init_event = init_events[0]
+    result_index, payload = result_events[0]
+    resolved_model = init_event.get("model")
+    if not isinstance(resolved_model, str) or not resolved_model:
+        raise ValueError("Claude stream init has no primary model")
+    if init_index >= result_index:
+        raise ValueError("Claude stream result precedes its init event")
+    if any(
+        event.get("type") in {"assistant", "user", "result"}
+        for event in events[:init_index]
+    ):
+        raise ValueError("Claude stream contains conversation events before its init")
+    if any(
+        event.get("type") in {"assistant", "user", "result"}
+        for event in events[result_index + 1 :]
+    ):
+        raise ValueError("Claude stream contains conversation events after its result")
+    if not isinstance(payload.get("is_error"), bool):
+        raise ValueError("Claude stream result has invalid error state")
+    if payload["is_error"] is True or str(payload.get("subtype", "")).startswith("error"):
+        raise ValueError("Claude stream ended with an error result")
+    if payload.get("subtype") != "success":
+        raise ValueError("Claude stream result has an unsupported subtype")
+    if payload.get("stop_reason") == "max_tokens":
+        raise ValueError("Claude stream final answer reached its token limit")
+    if not _nonblank_case_text(payload.get("result")):
+        raise ValueError("Claude stream result has no final answer")
+    permission_denials = payload.get("permission_denials", [])
+    if not isinstance(permission_denials, list) or any(
+        not isinstance(denial, dict) for denial in permission_denials
+    ):
+        raise ValueError("Claude stream result has invalid permission denials")
+    payload["_resolved_model"] = resolved_model
 
+    tool_executions: list[ToolExecution] = []
+    tools_by_id: dict[str, ToolExecution] = {}
     tool_calls: list[str] = []
-    for event in events:
-        if event.get("type") != "assistant":
-            continue
+    for event in events[init_index + 1 : result_index]:
+        event_type = event.get("type")
         message = event.get("message")
         content = message.get("content") if isinstance(message, dict) else None
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if not isinstance(block, dict) or block.get("type") != "tool_use":
-                continue
-            name = block.get("name")
-            if isinstance(name, str) and name:
+        if event_type == "assistant":
+            message_model = message.get("model") if isinstance(message, dict) else None
+            if message_model is not None and message_model != resolved_model:
+                raise ValueError("Claude stream changed model during evaluation")
+            if not isinstance(content, list):
+                raise ValueError("Claude assistant event has invalid content")
+            for block in content:
+                if not isinstance(block, dict):
+                    raise ValueError("Claude assistant event has invalid content block")
+                if block.get("type") != "tool_use":
+                    continue
+                name = block.get("name")
+                tool_use_id = block.get("id")
+                arguments = block.get("input")
+                if not isinstance(name, str) or not name:
+                    raise ValueError("Claude stream has a tool call without a name")
+                if not isinstance(tool_use_id, str) or not tool_use_id:
+                    raise ValueError("Claude stream has a tool call without an id")
+                if not isinstance(arguments, dict):
+                    raise ValueError("Claude stream has a tool call with invalid input")
+                if tool_use_id in tools_by_id:
+                    raise ValueError("Claude stream repeats a tool call id")
+                execution = ToolExecution(name, tool_use_id, arguments)
+                tools_by_id[tool_use_id] = execution
+                tool_executions.append(execution)
                 tool_calls.append(name)
-    return payload, tool_calls
+        elif event_type == "user":
+            if not isinstance(content, list):
+                raise ValueError("Claude user event has invalid content")
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    raise ValueError("Claude user event has invalid content block")
+                tool_use_id = block.get("tool_use_id")
+                execution = tools_by_id.get(tool_use_id)
+                if execution is None:
+                    raise ValueError("Claude stream has an unmatched tool result")
+                if execution.result_seen:
+                    raise ValueError("Claude stream repeats a tool result")
+                is_error = block.get("is_error", False)
+                if not isinstance(is_error, bool):
+                    raise ValueError("Claude stream tool result has invalid error state")
+                execution.result_seen = True
+                execution.succeeded = not is_error
+    if any(not execution.result_seen for execution in tool_executions):
+        raise ValueError("Claude stream has a tool call without a result")
+    return payload, tool_calls, tool_executions
 
 
 def usage_budget_reasons(expect: dict, telemetry: dict[str, object]) -> list[str]:
@@ -3239,19 +3323,41 @@ def extract_audit_verdict(output: str) -> str | None:
     return None
 
 
-def audit_verification_passed(output: str, expected_command: str) -> bool:
+def audit_verification_passed(
+    output: str,
+    expected_command: str,
+    tool_executions: list[ToolExecution],
+) -> bool:
     data = extract_audit_data(output)
     if not data:
         return False
     reruns = data.get("verifications_rerun")
     if not isinstance(reruns, list):
         return False
-    return any(
-        isinstance(entry, dict)
-        and entry.get("cmd") == expected_command
-        and str(entry.get("result", "")).lower() == "pass"
+    if any(
+        not isinstance(entry, dict)
+        or set(entry) != {"cmd", "result"}
+        or not isinstance(entry["cmd"], str)
+        or str(entry["result"]).lower() not in {"pass", "fail"}
         for entry in reruns
+    ):
+        return False
+    attestations = [entry for entry in reruns if entry["cmd"] == expected_command]
+    attested = (
+        len(attestations) == 1
+        and str(attestations[0]["result"]).lower() == "pass"
     )
+    executions = [
+        execution
+        for execution in tool_executions
+        if (
+            execution.name == "Bash"
+            and execution.arguments.get("command") == expected_command
+            and execution.result_seen
+        )
+    ]
+    executed = bool(executions) and executions[-1].succeeded
+    return attested and executed
 
 
 def extract_intake_action(output: str) -> str | None:
@@ -3493,20 +3599,21 @@ def evaluate_case(
             )
 
         if proc.returncode != 0:
-            err = (proc.stderr or proc.stdout or "").strip()[:300]
             return Result(
                 case_id=case_id,
                 suite=suite_name,
                 passed=False,
-                reasons=[f"claude exit {proc.returncode}: {err}"],
+                reasons=[f"claude exit {proc.returncode}"],
                 fixture_path=fixture_path,
             )
 
         permission_denials: list[dict] = []
         tool_calls: list[str] = []
+        tool_executions: list[ToolExecution] = []
         telemetry: dict[str, object] = telemetry_from_payload({})
+        parse_error: str | None = None
         try:
-            payload, tool_calls = parse_claude_output(
+            payload, tool_calls, tool_executions = parse_claude_output(
                 proc.stdout, streamed=streamed_output
             )
             output = payload.get("result", "")
@@ -3519,18 +3626,35 @@ def evaluate_case(
                 permission_denials = [
                     denial for denial in raw_denials if isinstance(denial, dict)
                 ]
-        except (json.JSONDecodeError, TypeError, ValueError):
-            output = proc.stdout
+        except (json.JSONDecodeError, TypeError, ValueError) as error:
+            output = ""
             duration_ms = 0
+            parse_error = str(error)
 
         expect = case.get("expect", {})
         reasons: list[str] = []
         passed = True
 
+        if parse_error is not None:
+            passed = False
+            reasons.append(f"invalid Claude stream: {parse_error}")
         if telemetry["complete"] is not True:
             passed = False
             reasons.append(
                 "incomplete Claude telemetry: " + "; ".join(telemetry["issues"])
+            )
+        if permission_denials:
+            passed = False
+            denied_tools = sorted(
+                {
+                    denial.get("tool_name", "unknown")
+                    if isinstance(denial.get("tool_name"), str)
+                    else "unknown"
+                    for denial in permission_denials
+                }
+            )
+            reasons.append(
+                f"permission denied for tools: {denied_tools!r}"
             )
 
         usage_reasons = usage_budget_reasons(expect, telemetry)
@@ -3607,7 +3731,9 @@ def evaluate_case(
 
         expected_rerun = expect.get("verification_rerun")
         if expected_rerun and suite_name == "auditor":
-            if not audit_verification_passed(output, expected_rerun):
+            if not audit_verification_passed(
+                output, expected_rerun, tool_executions
+            ):
                 passed = False
                 reasons.append(
                     f"structured audit did not record a passing rerun of {expected_rerun!r}"
@@ -3646,12 +3772,6 @@ def evaluate_case(
             if citation_checks["issues"]:
                 passed = False
                 reasons.extend(citation_checks["issues"])
-
-        if not passed and permission_denials:
-            reasons.append(
-                "permission denials: "
-                + json.dumps(permission_denials, sort_keys=True, ensure_ascii=False)
-            )
 
         return Result(
             case_id=case_id,

@@ -135,14 +135,146 @@ verifications_rerun:
 ```
 <!-- mastermind:audit-end -->
 """
+        execution = runner.ToolExecution(
+            "Bash",
+            "tool-1",
+            {"command": "cargo test --locked exact_test"},
+            result_seen=True,
+            succeeded=True,
+        )
         self.assertTrue(
             runner.audit_verification_passed(
-                output, "cargo test --locked exact_test"
+                output, "cargo test --locked exact_test", [execution]
             )
         )
         self.assertFalse(
-            runner.audit_verification_passed(output, "cargo test --locked other_test")
+            runner.audit_verification_passed(
+                output, "cargo test --locked other_test", [execution]
+            )
         )
+        self.assertFalse(
+            runner.audit_verification_passed(
+                output, "cargo test --locked exact_test", []
+            )
+        )
+        execution.succeeded = False
+        self.assertFalse(
+            runner.audit_verification_passed(
+                output, "cargo test --locked exact_test", [execution]
+            )
+        )
+        execution.succeeded = True
+        failed_later = runner.ToolExecution(
+            "Bash",
+            "tool-2",
+            {"command": "cargo test --locked exact_test"},
+            result_seen=True,
+            succeeded=False,
+        )
+        self.assertFalse(
+            runner.audit_verification_passed(
+                output,
+                "cargo test --locked exact_test",
+                [execution, failed_later],
+            )
+        )
+        duplicate = output.replace(
+            "    result: pass\n",
+            "    result: pass\n"
+            "  - cmd: \"cargo test --locked exact_test\"\n"
+            "    result: pass\n",
+        )
+        self.assertFalse(
+            runner.audit_verification_passed(
+                duplicate, "cargo test --locked exact_test", [execution]
+            )
+        )
+
+    def test_auditor_case_requires_the_attested_bash_execution(self):
+        case = runner.load_case_records(
+            runner.SUITES["auditor"]["cases"], suite_name="auditor"
+        )[2]
+        case = {**case, "allow_no_mmcg": True}
+        expected_command = case["expect"]["verification_rerun"]
+        output = f"""\
+session_count matches the requested implementation.
+<!-- mastermind:audit-begin -->
+```yaml
+verdict: held
+verifications_rerun:
+  - cmd: "{expected_command}"
+    result: pass
+```
+<!-- mastermind:audit-end -->
+"""
+
+        def process(command):
+            events = [
+                {"type": "system", "subtype": "init", "model": RESOLVED_MODEL},
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "tool-1",
+                                "name": "Bash",
+                                "input": {"command": command},
+                            }
+                        ]
+                    },
+                },
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [
+                            {"type": "tool_result", "tool_use_id": "tool-1"}
+                        ]
+                    },
+                },
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": output,
+                    "duration_ms": 1,
+                    "duration_api_ms": 1,
+                    "num_turns": 1,
+                    "total_cost_usd": 0,
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                    },
+                    "modelUsage": {RESOLVED_MODEL: {}},
+                },
+            ]
+            return subprocess.CompletedProcess(
+                [], 0, "\n".join(json.dumps(event) for event in events), ""
+            )
+
+        with tempfile.TemporaryDirectory() as target:
+            fixture = Path(target)
+            for command, passed in (
+                (expected_command, True),
+                ("cargo test --locked another_test", False),
+            ):
+                with (
+                    self.subTest(command=command),
+                    patch.object(runner, "setup_fixture", return_value=fixture),
+                    patch.object(runner, "teardown_fixture"),
+                    patch.object(runner.subprocess, "run", return_value=process(command)),
+                ):
+                    result = runner.evaluate_case(
+                        "opus",
+                        "auditor",
+                        runner.SUITES["auditor"],
+                        case,
+                        keep_fixtures=False,
+                        mmcg_binary=None,
+                    )
+                    self.assertEqual(result.passed, passed, result.reasons)
 
     def test_intake_action_requires_valid_sentinel_yaml(self):
         valid = """\
@@ -206,6 +338,34 @@ action: passthrough
             "usage.output_tokens must be a non-negative integer", telemetry["issues"]
         )
 
+    def test_cli_usage_telemetry_retains_every_observed_model(self):
+        payload = {
+            "duration_ms": 1,
+            "duration_api_ms": 1,
+            "num_turns": 1,
+            "total_cost_usd": 0,
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+            },
+            "modelUsage": {RESOLVED_MODEL: {}, "fallback-model": {}},
+            "_resolved_model": RESOLVED_MODEL,
+        }
+        telemetry = runner.telemetry_from_payload(payload)
+        self.assertTrue(telemetry["complete"])
+        self.assertEqual(
+            telemetry["resolved_models"], [RESOLVED_MODEL, "fallback-model"]
+        )
+
+        payload["modelUsage"] = {"fallback-model": {}}
+        telemetry = runner.telemetry_from_payload(payload)
+        self.assertFalse(telemetry["complete"])
+        self.assertIn(
+            "stream primary model is absent from modelUsage", telemetry["issues"]
+        )
+
     def test_usage_budgets_bound_turns_and_output_without_guessing_context(self):
         telemetry = {"num_turns": 9, "output_tokens": 1801}
         reasons = runner.usage_budget_reasons(
@@ -233,6 +393,7 @@ action: passthrough
                     "content": [
                         {
                             "type": "tool_use",
+                            "id": "tool-1",
                             "name": "mcp__mmcg__mmcg_search",
                             "input": {"query": "secret input is not persisted"},
                         }
@@ -240,15 +401,38 @@ action: passthrough
                 },
             },
             {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "tool-1"}
+                    ]
+                },
+            },
+            {
                 "type": "assistant",
                 "message": {
                     "content": [
-                        {"type": "tool_use", "name": "Read", "input": {}}
+                        {
+                            "type": "tool_use",
+                            "id": "tool-2",
+                            "name": "Read",
+                            "input": {},
+                        }
+                    ]
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "tool-2"}
                     ]
                 },
             },
             {
                 "type": "result",
+                "subtype": "success",
+                "is_error": False,
                 "result": "done",
                 "duration_ms": 1,
                 "duration_api_ms": 1,
@@ -263,7 +447,7 @@ action: passthrough
                 "modelUsage": {RESOLVED_MODEL: {}},
             },
         ]
-        payload, tool_calls = runner.parse_claude_output(
+        payload, tool_calls, tool_executions = runner.parse_claude_output(
             "\n".join(json.dumps(event) for event in events), streamed=True
         )
 
@@ -272,6 +456,74 @@ action: passthrough
         self.assertEqual(
             tool_calls, ["mcp__mmcg__mmcg_search", "Read"]
         )
+        self.assertEqual(
+            [execution.tool_use_id for execution in tool_executions],
+            ["tool-1", "tool-2"],
+        )
+        self.assertTrue(all(execution.succeeded for execution in tool_executions))
+
+    def test_stream_parser_rejects_unverified_tool_protocol(self):
+        base = [
+            {"type": "system", "subtype": "init", "model": RESOLVED_MODEL},
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "tool-1",
+                            "name": "Bash",
+                            "input": {"command": "true"},
+                        }
+                    ]
+                },
+            },
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": "done",
+                "modelUsage": {RESOLVED_MODEL: {}},
+            },
+        ]
+        with self.assertRaisesRegex(ValueError, "without a result"):
+            runner.parse_claude_output(
+                "\n".join(json.dumps(event) for event in base), streamed=True
+            )
+
+        unmatched = deepcopy(base)
+        unmatched.insert(
+            2,
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "other"}
+                    ]
+                },
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "unmatched tool result"):
+            runner.parse_claude_output(
+                "\n".join(json.dumps(event) for event in unmatched), streamed=True
+            )
+
+        before_init = deepcopy(base)
+        before_init.insert(
+            0, {"type": "assistant", "message": {"content": []}}
+        )
+        with self.assertRaisesRegex(ValueError, "before its init"):
+            runner.parse_claude_output(
+                "\n".join(json.dumps(event) for event in before_init), streamed=True
+            )
+
+        missing_error_state = deepcopy(base)
+        del missing_error_state[-1]["is_error"]
+        with self.assertRaisesRegex(ValueError, "invalid error state"):
+            runner.parse_claude_output(
+                "\n".join(json.dumps(event) for event in missing_error_state),
+                streamed=True,
+            )
 
     def test_tool_policy_requires_mmcg_first_and_bounded_source_read(self):
         expect = {
@@ -1480,13 +1732,15 @@ for (let index = 0; index < left.length; index += 1) mismatch |= left[index] ^ r
 
 
 class CriticGraderTests(unittest.TestCase):
-    def evaluate(self, output, case=None):
+    def evaluate(self, output, case=None, permission_denials=None):
         if case is None:
             case = json.loads(runner.SUITES["critic"]["cases"].read_text().splitlines()[0])
         events = [
             {"type": "system", "subtype": "init", "model": RESOLVED_MODEL},
             {
                 "type": "result",
+                "subtype": "success",
+                "is_error": False,
                 "result": output,
                 "duration_ms": 1000,
                 "duration_api_ms": 800,
@@ -1499,6 +1753,7 @@ class CriticGraderTests(unittest.TestCase):
                     "cache_read_input_tokens": 0,
                 },
                 "modelUsage": {RESOLVED_MODEL: {}},
+                "permission_denials": permission_denials or [],
             },
         ]
         process = subprocess.CompletedProcess(
@@ -1516,6 +1771,95 @@ class CriticGraderTests(unittest.TestCase):
         )
         self.assertFalse(result.passed)
         self.assertIn("ship with caveats", " ".join(result.reasons))
+
+    def test_permission_denial_fails_without_persisting_denial_input(self):
+        result = self.evaluate(
+            "The design fabricates a target.\n\n## Verdict\nrethink — unsafe.",
+            permission_denials=[
+                {
+                    "tool_name": "Read",
+                    "tool_input": {"file_path": "/private/secret"},
+                }
+            ],
+        )
+        self.assertFalse(result.passed)
+        reasons = " ".join(result.reasons)
+        self.assertIn("permission denied for tools", reasons)
+        self.assertNotIn("/private/secret", reasons)
+
+    def test_invalid_stream_does_not_copy_tool_input_into_diagnostics(self):
+        events = [
+            {"type": "system", "subtype": "init", "model": RESOLVED_MODEL},
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Read",
+                            "input": {"file_path": "/private/secret"},
+                        }
+                    ]
+                },
+            },
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": (
+                    "The design fabricates a target.\n\n"
+                    "## Verdict\nrethink — unsafe."
+                ),
+                "duration_ms": 1,
+                "duration_api_ms": 1,
+                "num_turns": 1,
+                "total_cost_usd": 0,
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                },
+                "modelUsage": {RESOLVED_MODEL: {}},
+            },
+        ]
+        process = subprocess.CompletedProcess(
+            [], 0, "\n".join(json.dumps(event) for event in events), ""
+        )
+        with patch.object(runner.subprocess, "run", return_value=process):
+            result = runner.evaluate_case(
+                "opus",
+                "critic",
+                runner.SUITES["critic"],
+                json.loads(
+                    runner.SUITES["critic"]["cases"].read_text().splitlines()[0]
+                ),
+                keep_fixtures=False,
+            )
+        self.assertFalse(result.passed)
+        self.assertEqual(result.output_excerpt, "")
+        self.assertNotIn("/private/secret", " ".join(result.reasons))
+
+    def test_nonzero_cli_exit_does_not_copy_process_output_into_diagnostics(self):
+        process = subprocess.CompletedProcess(
+            [],
+            1,
+            '{"tool_input":{"file_path":"/private/stdout-secret"}}',
+            "failed near /private/stderr-secret",
+        )
+        with patch.object(runner.subprocess, "run", return_value=process):
+            result = runner.evaluate_case(
+                "opus",
+                "critic",
+                runner.SUITES["critic"],
+                json.loads(
+                    runner.SUITES["critic"]["cases"].read_text().splitlines()[0]
+                ),
+                keep_fixtures=False,
+            )
+        self.assertFalse(result.passed)
+        self.assertEqual(result.reasons, ["claude exit 1"])
+        self.assertEqual(result.output_excerpt, "")
 
     def test_critic_rejects_missing_quoted_or_conflicting_verdicts(self):
         outputs = [
@@ -1591,7 +1935,8 @@ class CriticGraderTests(unittest.TestCase):
             events = [
                 {"type": "system", "subtype": "init", "model": RESOLVED_MODEL},
                 {
-                    "type": "result", "result": (
+                    "type": "result", "subtype": "success", "is_error": False,
+                    "result": (
                         "I considered insufficient evidence.\n\n"
                         f"## Verdict\n{verdict} — assessment of supplied evidence."
                     ),

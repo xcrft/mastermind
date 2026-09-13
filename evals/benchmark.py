@@ -19,7 +19,7 @@ import stat
 import sys
 import time
 import uuid
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path, PurePosixPath
 
 if __package__:
@@ -155,6 +155,25 @@ def exact_revision(value: object) -> str:
     if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value):
         raise BenchmarkError("invalid_revision", "an exact lowercase Git commit ID is required")
     return value
+
+
+def validate_batch_binding(value: object) -> dict:
+    if (not isinstance(value, dict)
+            or set(value) != {"batch_id", "plan_sha256", "position"}
+            or not isinstance(value.get("batch_id"), str)
+            or not re.fullmatch(r"batch-[0-9a-f]{32}", value["batch_id"])
+            or not isinstance(value.get("plan_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", value["plan_sha256"])
+            or type(value.get("position")) is not int or value["position"] < 0):
+        raise BenchmarkError("invalid_batch_binding", "invalid trial batch binding")
+    return value
+
+
+def batch_plan_identity(batch: dict) -> dict:
+    return {"batch_id": batch["batch_id"], "task_id": batch["task_id"],
+            "repetitions": batch["repetitions"],
+            "trials": [{key: item[key] for key in ("directory", "condition", "repetition")}
+                       for item in batch["trials"]]}
 
 
 def safe_source_path(value: object) -> str:
@@ -411,9 +430,12 @@ def common_identity(manifest: dict) -> dict:
 
 def condition_identity(manifest: dict) -> dict:
     indexer = manifest.get("indexer")
-    return {key: manifest[key] for key in ("common_sha256", "condition", "instruction_sha256")} | {
+    identity = {key: manifest[key] for key in ("common_sha256", "condition", "instruction_sha256")} | {
         "indexer": {key: indexer[key] for key in ("sha256", "version", "source_revision", "origin")} if indexer else None,
         "index_contract": manifest.get("index_contract"), "indexed_files": manifest.get("indexed_files")}
+    if "batch" in manifest:
+        identity["batch"] = manifest["batch"]
+    return identity
 
 
 def adapter_request(trial: Path, manifest: dict, instruction: str) -> dict:
@@ -495,7 +517,8 @@ def validate_index(path: Path, source: Path, files: list[dict], contract: dict,
 
 def prepare_trial(
     *, task: dict, rubric: dict, config: dict, source_repo: Path, tool_repo: Path,
-    output: Path, condition: str, repetition: int = 0,
+    output: Path, condition: str, repetition: int = 0, trial_id: str | None = None,
+    batch_binding: dict | None = None,
 ) -> Path:
     """Create one independent trial; persist setup failure without invoking a model."""
     validate_task(task)
@@ -507,16 +530,23 @@ def prepare_trial(
     if not isinstance(model, str) or not model or model in {"opus", "sonnet", "haiku", "latest"}:
         raise BenchmarkError("invalid_model", "pin an exact model identity, not an alias")
     tool_revision = exact_revision(config.get("tool_revision"))
+    if ((trial_id is None) != (batch_binding is None)
+            or (trial_id is not None and not re.fullmatch(r"trial-[0-9a-f]{32}", trial_id))):
+        raise BenchmarkError("invalid_batch_binding", "batch trials need an exact planned ID and binding")
+    if batch_binding is not None:
+        batch_binding = dict(validate_batch_binding(batch_binding))
     output.mkdir(parents=True, exist_ok=True)
-    trial = output.resolve() / ("trial-" + uuid.uuid4().hex)
+    trial = output.resolve() / (trial_id or ("trial-" + uuid.uuid4().hex))
     trial.mkdir(mode=0o700)
     env = clean_environment(trial)
     prepared = time.monotonic()
-    manifest = {"kind": "mastermind-research-trial", "schema_version": 2,
+    manifest = {"kind": "mastermind-research-trial", "schema_version": 3 if batch_binding else 2,
                 "trial_id": trial.name, "task": task, "condition": condition,
                 "repetition": repetition, "rubric_sha256": digest(rubric),
                 "model": model, "limits": limits, "tool_revision": tool_revision,
                 "status": "setup_failed", "isolation": "host_adapter_unverified"}
+    if batch_binding is not None:
+        manifest["batch"] = batch_binding
     write_new(trial / "rubric.json", rubric)
     try:
         verify_tool_commit(tool_repo.resolve(strict=True), tool_revision, env)
@@ -668,8 +698,12 @@ def telemetry(result: dict | None, limits: dict) -> dict:
 
 
 def verify_prepared(trial: Path, manifest: dict) -> dict:
-    if manifest.get("kind") != "mastermind-research-trial" or manifest.get("schema_version") not in (1, 2):
+    if manifest.get("kind") != "mastermind-research-trial" or manifest.get("schema_version") not in (1, 2, 3):
         raise BenchmarkError("invalid_manifest", "unknown trial manifest")
+    if manifest.get("schema_version") == 3 and "batch" not in manifest:
+        raise BenchmarkError("invalid_manifest", "batch-bound manifest is missing its binding")
+    if "batch" in manifest:
+        validate_batch_binding(manifest["batch"])
     if manifest["trial_id"] != trial.name or manifest["condition"] not in CONDITIONS:
         raise BenchmarkError("invalid_manifest", "trial identity or condition changed")
     validate_task(manifest["task"])
@@ -721,17 +755,224 @@ def verify_prepared(trial: Path, manifest: dict) -> dict:
     return request
 
 
-def run_trial(trial: Path, credentials: dict[str, str] | None = None) -> dict:
-    trial = trial.resolve(strict=True)
-    manifest_bytes = read_file(trial / "manifest.json")
-    manifest = parse_json(manifest_bytes)
-    # No implicit reruns: each planned condition/repetition gets one attempt.
+def validate_batch_summary(batch: dict) -> list[dict]:
+    required = {"kind", "schema_version", "batch_id", "plan_sha256", "task_id",
+                "repetitions", "trials", "quality_uplift", "comparison_accepted"}
+    if (not isinstance(batch, dict) or not required <= set(batch)
+            or set(batch) - required - {"corpus_case"}
+            or batch.get("kind") != "mastermind-research-batch"
+            or batch.get("schema_version") != 2
+            or not isinstance(batch.get("batch_id"), str)
+            or not re.fullmatch(r"batch-[0-9a-f]{32}", batch["batch_id"])
+            or not isinstance(batch.get("task_id"), str) or not batch["task_id"]
+            or type(batch.get("repetitions")) is not int or not 1 <= batch["repetitions"] <= 20
+            or batch.get("quality_uplift") is not None or batch.get("comparison_accepted") is not False
+            or not isinstance(batch.get("trials"), list)
+            or len(batch["trials"]) != 3 * batch["repetitions"]):
+        raise BenchmarkError("batch_changed", "invalid bound batch plan")
+    seen = set()
+    for position, item in enumerate(batch["trials"]):
+        common = item.get("common_sha256") if isinstance(item, dict) else None
+        invalid_common = (common is not None
+                          and (not isinstance(common, str) or not re.fullmatch(r"[0-9a-f]{64}", common)))
+        if (not isinstance(item, dict)
+                or set(item) != {"directory", "condition", "repetition", "common_sha256", "status"}
+                or not isinstance(item.get("directory"), str)
+                or not re.fullmatch(r"trial-[0-9a-f]{32}", item["directory"])
+                or item["directory"] in seen
+                or type(item.get("repetition")) is not int
+                or item.get("status") not in {"prepared", "setup_failed"}
+                or invalid_common):
+            raise BenchmarkError("batch_changed", "invalid bound batch slot")
+        seen.add(item["directory"])
+        repetition, offset = divmod(position, len(CONDITIONS))
+        if (item.get("repetition") != repetition
+                or item.get("condition") != CONDITIONS[(repetition + offset) % len(CONDITIONS)]):
+            raise BenchmarkError("batch_changed", "bound batch order differs from its planned matrix")
+    if (not isinstance(batch.get("plan_sha256"), str)
+            or digest(batch_plan_identity(batch)) != batch["plan_sha256"]):
+        raise BenchmarkError("batch_changed", "bound batch plan identity changed")
+    return batch["trials"]
+
+
+def optional_artifact(path: Path, limit: int) -> tuple[bytes, tuple[int, ...]] | None:
     try:
-        with (trial / "run.lock").open("x"):
-            pass
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    body = read_file(path, limit)
+    return body, file_identity(path.lstat())
+
+
+def load_bound_batch(trial: Path, manifest: dict, manifest_bytes: bytes) -> dict:
+    binding = validate_batch_binding(manifest.get("batch"))
+    batch_root = trial.parent
+    try:
+        root_before = file_identity(batch_root.lstat())
+        if not stat.S_ISDIR(root_before[-1]):
+            raise BenchmarkError("batch_changed", "batch root is not a directory")
+        batch_path = batch_root / "batch.json"
+        batch_bytes = read_file(batch_path)
+        batch_identity = file_identity(batch_path.lstat())
+        batch = parse_json(batch_bytes)
+    except (OSError, ValueError) as error:
+        raise BenchmarkError("batch_changed", "cannot read the bound batch plan") from error
+    items = validate_batch_summary(batch)
+    task = manifest.get("task")
+    if (batch["batch_id"] != binding["batch_id"]
+            or batch["plan_sha256"] != binding["plan_sha256"]
+            or not isinstance(task, dict) or task.get("id") != batch["task_id"]
+            or binding["position"] >= len(items)):
+        raise BenchmarkError("batch_changed", "trial binding differs from its batch plan")
+    manifest_records = []
+    for position, item in enumerate(items):
+        directory = batch_root / item["directory"]
+        try:
+            if directory.is_symlink() or not directory.is_dir() or directory.resolve(strict=True) != directory.absolute():
+                raise BenchmarkError("batch_changed", "batch trial directory changed")
+            body = read_file(directory / "manifest.json")
+            identity = file_identity((directory / "manifest.json").lstat())
+            value = parse_json(body)
+        except (OSError, ValueError) as error:
+            raise BenchmarkError("batch_changed", "batch trial manifest is unavailable") from error
+        expected_binding = {"batch_id": batch["batch_id"], "plan_sha256": batch["plan_sha256"],
+                            "position": position}
+        if (value.get("kind") != "mastermind-research-trial"
+                or value.get("schema_version") not in (1, 2, 3)
+                or value.get("batch") != expected_binding
+                or value.get("trial_id") != item["directory"]
+                or value.get("condition") != item["condition"]
+                or value.get("repetition") != item["repetition"]
+                or value.get("status") != item["status"]
+                or value.get("common_sha256") != item["common_sha256"]):
+            raise BenchmarkError("batch_changed", "trial manifest differs from its batch slot")
+        if position == binding["position"] and (body != manifest_bytes or value != manifest):
+            raise BenchmarkError("batch_changed", "selected trial manifest changed during batch validation")
+        manifest_records.append({"bytes": body, "identity": identity,
+                                 "sha256": hashlib.sha256(body).hexdigest()})
+    if file_identity(batch_root.lstat()) != root_before:
+        raise BenchmarkError("batch_changed", "batch root changed during validation")
+    return {"root": batch_root, "root_identity": root_before, "batch_bytes": batch_bytes,
+            "batch_identity": batch_identity, "batch": batch, "items": items,
+            "manifests": manifest_records, "position": binding["position"]}
+
+
+def batch_attempt_state(snapshot: dict, *, claimed: bool) -> tuple[dict, dict[str, tuple[int, ...] | None]]:
+    previous_hash = None
+    fingerprints = {}
+    current = snapshot["position"]
+    for position, item in enumerate(snapshot["items"]):
+        directory = snapshot["root"] / item["directory"]
+        lock = optional_artifact(directory / "run.lock", 0)
+        result = optional_artifact(directory / "result.json", CONTROL_BYTE_LIMIT)
+        if position < current:
+            if lock is None or result is None:
+                raise BenchmarkError("batch_order", "every earlier batch attempt must finish first")
+            try:
+                value = parse_json(result[0])
+            except ValueError as error:
+                raise BenchmarkError("batch_order", "an earlier batch result is invalid") from error
+            expected = {"batch_id": snapshot["batch"]["batch_id"],
+                        "plan_sha256": snapshot["batch"]["plan_sha256"], "position": position,
+                        "previous_result_sha256": previous_hash}
+            if (value.get("kind") != "mastermind-research-result"
+                    or value.get("schema_version") != 2
+                    or value.get("trial_id") != item["directory"]
+                    or value.get("manifest_sha256") != snapshot["manifests"][position]["sha256"]
+                    or value.get("batch_execution") != expected):
+                raise BenchmarkError("batch_order", "an earlier result breaks the batch execution chain")
+            previous_hash = hashlib.sha256(result[0]).hexdigest()
+        elif position == current:
+            if result is not None or (lock is None) == claimed:
+                raise BenchmarkError("already_run" if not claimed else "batch_changed",
+                                     "trial was already attempted; prepare a new balanced batch")
+        elif lock is not None or result is not None:
+            raise BenchmarkError("batch_order", "a later batch attempt was started out of order")
+        if position != current:
+            fingerprints[f"{item['directory']}/run.lock"] = lock[1] if lock else None
+            fingerprints[f"{item['directory']}/result.json"] = result[1] if result else None
+    receipt = {"batch_id": snapshot["batch"]["batch_id"],
+               "plan_sha256": snapshot["batch"]["plan_sha256"], "position": current,
+               "previous_result_sha256": previous_hash}
+    return receipt, fingerprints
+
+
+@contextmanager
+def batch_execution_guard(trial: Path, manifest: dict, manifest_bytes: bytes):
+    if "batch" not in manifest:
+        yield None
+        return
+    if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
+        raise BenchmarkError("batch_platform", "batch execution requires POSIX no-follow file locking")
+    import fcntl
+    path = trial.parent / "execution.lock"
+    try:
+        descriptor = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as error:
+        raise BenchmarkError("batch_lock", "cannot acquire the batch execution lock") from error
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_size != 0:
+            raise BenchmarkError("batch_lock", "batch execution lock is invalid")
+        current = path.lstat()
+        if file_identity(before) != file_identity(current):
+            raise BenchmarkError("batch_lock", "batch execution lock changed while opening")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise BenchmarkError("batch_busy", "another batch attempt is still running") from error
+    except OSError as error:
+        os.close(descriptor)
+        raise BenchmarkError("batch_lock", "cannot acquire the batch execution lock") from error
+    except Exception:
+        os.close(descriptor)
+        raise
+    try:
+        snapshot = load_bound_batch(trial, manifest, manifest_bytes)
+        receipt, fingerprints = batch_attempt_state(snapshot, claimed=False)
+        snapshot.update(receipt=receipt, fingerprints=fingerprints,
+                        lock_identity=file_identity(before))
+        yield snapshot
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
+def verify_batch_snapshot(trial: Path, manifest: dict, manifest_bytes: bytes,
+                          execution: dict | None) -> None:
+    if execution is None:
+        return
+    current = load_bound_batch(trial, manifest, manifest_bytes)
+    receipt, fingerprints = batch_attempt_state(current, claimed=True)
+    if (receipt != execution["receipt"] or fingerprints != execution["fingerprints"]
+            or current["root_identity"] != execution["root_identity"]
+            or current["batch_bytes"] != execution["batch_bytes"]
+            or current["batch_identity"] != execution["batch_identity"]
+            or current["manifests"] != execution["manifests"]
+            or file_identity((trial.parent / "execution.lock").lstat()) != execution["lock_identity"]):
+        raise BenchmarkError("batch_changed", "batch inputs changed during the attempt")
+
+
+def claim_attempt(trial: Path) -> None:
+    if optional_artifact(trial / "result.json", CONTROL_BYTE_LIMIT) is not None:
+        raise BenchmarkError("already_run", "trial was already attempted; prepare a new balanced batch")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(trial / "run.lock", flags, 0o600)
     except FileExistsError as error:
         raise BenchmarkError("already_run", "trial was already attempted; prepare a new balanced batch") from error
-    envelope = {"kind": "mastermind-research-result", "schema_version": 1,
+    except OSError as error:
+        raise BenchmarkError("attempt_lock", "cannot claim the trial attempt") from error
+    os.close(descriptor)
+
+
+def _run_trial_attempt(trial: Path, manifest_bytes: bytes, manifest: dict,
+                       credentials: dict[str, str] | None, execution: dict | None) -> dict:
+    # No implicit reruns: each planned condition/repetition gets one attempt.
+    claim_attempt(trial)
+    envelope = {"kind": "mastermind-research-result", "schema_version": 2 if execution else 1,
                 "trial_id": trial.name, "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
                 "common_sha256": manifest.get("common_sha256"),
                 "condition_sha256": manifest.get("condition_sha256"),
@@ -740,6 +981,8 @@ def run_trial(trial: Path, credentials: dict[str, str] | None = None) -> dict:
                 "diagnostics": {}, "answer": None,
                 "comparability": {"eligible": False, "isolation": "host_adapter_unverified",
                     "reasons": ["adapter_isolation_unverified", "runtime_provenance_declared"]}}
+    if execution is not None:
+        envelope["batch_execution"] = execution["receipt"]
     try:
         if manifest["status"] != "prepared":
             raise BenchmarkError(manifest.get("setup_error", {}).get("code", "setup_failed"), "trial setup did not complete")
@@ -804,6 +1047,7 @@ def run_trial(trial: Path, credentials: dict[str, str] | None = None) -> dict:
         envelope["quality"]["status"] = "review_pending"
     try:
         verify_prepared(trial, manifest)
+        verify_batch_snapshot(trial, manifest, manifest_bytes, execution)
         if read_file(trial / "manifest.json") != manifest_bytes:
             raise BenchmarkError("manifest_changed", "manifest changed during invocation")
     except (BenchmarkError, ValueError, KeyError, TypeError, OSError) as error:
@@ -823,22 +1067,42 @@ def run_trial(trial: Path, credentials: dict[str, str] | None = None) -> dict:
     return envelope
 
 
+def run_trial(trial: Path, credentials: dict[str, str] | None = None) -> dict:
+    trial = trial.resolve(strict=True)
+    manifest_bytes = read_file(trial / "manifest.json")
+    manifest = parse_json(manifest_bytes)
+    with batch_execution_guard(trial, manifest, manifest_bytes) as execution:
+        return _run_trial_attempt(trial, manifest_bytes, manifest, credentials, execution)
+
+
 def prepare_batch(*, repetitions: int = 3, corpus_case: dict | None = None, **kwargs) -> Path:
     if type(repetitions) is not int or not 1 <= repetitions <= 20:
         raise BenchmarkError("invalid_repetitions", "use 1..20 repetitions")
     output = kwargs.pop("output").resolve()
     output.mkdir(parents=True, exist_ok=True)
-    batch = output / ("batch-" + uuid.uuid4().hex)
+    batch_id = "batch-" + uuid.uuid4().hex
+    batch = output / batch_id
     batch.mkdir(mode=0o700)
-    trials = []
+    with (batch / "execution.lock").open("xb"):
+        pass
+    planned = []
     for repetition in range(repetitions):
         offset = repetition % len(CONDITIONS)
         for condition in CONDITIONS[offset:] + CONDITIONS[:offset]:
-            trial = prepare_trial(output=batch, condition=condition, repetition=repetition, **kwargs)
-            manifest = load_json(trial / "manifest.json")
-            trials.append({"directory": trial.name, "condition": condition, "repetition": repetition,
-                           "common_sha256": manifest.get("common_sha256"), "status": manifest["status"]})
-    summary = {"kind": "mastermind-research-batch", "schema_version": 1,
+            planned.append({"directory": "trial-" + uuid.uuid4().hex, "condition": condition,
+                            "repetition": repetition})
+    plan = {"batch_id": batch_id, "task_id": kwargs["task"]["id"], "repetitions": repetitions,
+            "trials": planned}
+    plan_sha256 = digest(plan)
+    trials = []
+    for position, item in enumerate(planned):
+        binding = {"batch_id": batch_id, "plan_sha256": plan_sha256, "position": position}
+        trial = prepare_trial(output=batch, condition=item["condition"], repetition=item["repetition"],
+                              trial_id=item["directory"], batch_binding=binding, **kwargs)
+        manifest = load_json(trial / "manifest.json")
+        trials.append(dict(item, common_sha256=manifest.get("common_sha256"), status=manifest["status"]))
+    summary = {"kind": "mastermind-research-batch", "schema_version": 2,
+              "batch_id": batch_id, "plan_sha256": plan_sha256,
               "task_id": kwargs["task"]["id"], "repetitions": repetitions, "trials": trials,
               "quality_uplift": None, "comparison_accepted": False}
     if corpus_case is not None:

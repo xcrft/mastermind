@@ -110,6 +110,7 @@ final(model_error=mode == 'partial')
                          "not_run": 0, "unfinished": 0, "missing_artifacts": 0, "with_answer": 3})
         self.assertEqual(status["reviewed_attempts"], 3)
         self.assertEqual(status["reviewers"], [{"reviewer": "alice", "reviewed": 3}])
+        self.assertEqual(status["execution_order_integrity"], "verified")
         self.assertFalse(status["comparison_accepted"])
         self.assertIsNone(status["quality_uplift"])
 
@@ -129,6 +130,7 @@ final(model_error=mode == 'partial')
         status = review.review_status(self.output)
         self.assertEqual(status["attempts"], {"planned": 9, "completed": 1, "failed": 4,
                          "not_run": 1, "unfinished": 1, "missing_artifacts": 2, "with_answer": 2})
+        self.assertEqual(status["execution_order_integrity"], "partial")
         packet = bench.load_json(self.output / "reviewer/packet.json")
         self.assertEqual(len(packet["items"]), 9)
         self.assertEqual(len(bench.load_json(self.output / "reviewer/assessment-template.json")["reviews"]), 2)
@@ -143,6 +145,7 @@ final(model_error=mode == 'partial')
         status = review.review_status(self.output)
         self.assertEqual(status["attempts"]["failed"], 3)
         self.assertEqual(status["attempts"]["with_answer"], 0)
+        self.assertEqual(status["execution_order_integrity"], "not_established")
         self.assertEqual(bench.load_json(self.output / "reviewer/packet.json")["source_files"], [])
 
     def test_partial_answer_uses_intact_pinned_source_from_another_trial(self):
@@ -191,6 +194,17 @@ final(model_error=mode == 'partial')
                 finally:
                     path.write_bytes(original)
 
+    def test_rejects_a_tampered_batch_execution_chain(self):
+        batch, trials = self.batch()
+        path = trials[1] / "result.json"
+        value = bench.load_json(path)
+        value["batch_execution"]["previous_result_sha256"] = "0" * 64
+        path.write_bytes(bench.canonical(value))
+        with self.assertRaises(bench.BenchmarkError) as raised:
+            review.export_review(batch, self.output)
+        self.assertEqual(raised.exception.code, "review_identity")
+        self.assertFalse(self.output.exists())
+
     def test_refuses_incomplete_duplicate_or_reordered_condition_matrix(self):
         batch, _ = self.batch(repetitions=3, run=False)
         path = batch / "batch.json"
@@ -228,6 +242,23 @@ final(model_error=mode == 'partial')
             self.assertEqual(bench.run_trial(trial)["run_status"]["state"], "completed")
         review.export_review(batch, self.output)
         self.assertEqual(review.review_status(self.output)["attempts"]["completed"], 3)
+
+    def test_legacy_unbound_batches_remain_reviewable_without_an_order_claim(self):
+        batch, trials = self.batch(run=False)
+        batch_value = bench.load_json(batch / "batch.json")
+        batch_value["schema_version"] = 1
+        batch_value.pop("batch_id")
+        batch_value.pop("plan_sha256")
+        (batch / "batch.json").write_bytes(bench.canonical(batch_value))
+        for trial in trials:
+            manifest = bench.load_json(trial / "manifest.json")
+            manifest["schema_version"] = 2
+            manifest.pop("batch")
+            manifest["condition_sha256"] = bench.digest(bench.condition_identity(manifest))
+            (trial / "manifest.json").write_bytes(bench.canonical(manifest))
+            self.assertEqual(bench.run_trial(trial)["run_status"]["state"], "completed")
+        review.export_review(batch, self.output)
+        self.assertEqual(review.review_status(self.output)["execution_order_integrity"], "unverified_legacy")
 
     def test_corpus_file_order_and_line_metadata_match_without_changing_source_identity(self):
         case = corpus.select_case(self.case.path, self.case.task["id"], self.fixture.repo)

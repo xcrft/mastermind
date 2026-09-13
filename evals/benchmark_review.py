@@ -77,9 +77,10 @@ def line_count(body):
 
 
 def check_batch(batch, names):
-    fields(batch, ("kind", "schema_version", "task_id", "repetitions", "trials", "quality_uplift", "comparison_accepted"), ("corpus_case",))
+    fields(batch, ("kind", "schema_version", "task_id", "repetitions", "trials", "quality_uplift", "comparison_accepted"),
+           ("corpus_case", "batch_id", "plan_sha256"))
     require(batch["kind"] == "mastermind-research-batch" and type(batch["schema_version"]) is int
-            and batch["schema_version"] == 1, "unsupported benchmark batch")
+            and batch["schema_version"] in (1, 2), "unsupported benchmark batch")
     repetitions = batch["repetitions"]
     require(type(repetitions) is int and 1 <= repetitions <= 20, "invalid repetition count")
     require(batch["quality_uplift"] is None and batch["comparison_accepted"] is False, "batch cannot declare accepted quality")
@@ -100,6 +101,14 @@ def check_batch(batch, names):
             hash_value(item["common_sha256"])
     require(not {name for name in names if name.startswith("trial-")} - seen,
             "batch omits trial artifacts present in its directory", "review_inventory")
+    if batch["schema_version"] == 2:
+        identifier(batch.get("batch_id"), "batch-")
+        hash_value(batch.get("plan_sha256"))
+        require(bench.digest(bench.batch_plan_identity(batch)) == batch["plan_sha256"],
+                "batch plan identity changed", "review_identity")
+    else:
+        require("batch_id" not in batch and "plan_sha256" not in batch,
+                "legacy batch contains an unsupported plan binding", "review_identity")
 
 
 def check_manifest(manifest, item, batch):
@@ -108,7 +117,7 @@ def check_manifest(manifest, item, batch):
                   "rubric_sha256", "model", "tool_revision", "limits", "isolation"):
         require(field in manifest, "incomplete trial manifest")
     require(manifest["kind"] == "mastermind-research-trial" and type(manifest["schema_version"]) is int
-            and manifest["schema_version"] in (1, 2), "unsupported trial manifest")
+            and manifest["schema_version"] in (1, 2, 3), "unsupported trial manifest")
     for key, expected in (("trial_id", item["directory"]), ("condition", item["condition"]),
                           ("repetition", item["repetition"]), ("status", item["status"]),
                           ("common_sha256", item["common_sha256"])):
@@ -116,6 +125,14 @@ def check_manifest(manifest, item, batch):
     require(type(manifest["repetition"]) is int and isinstance(manifest["task"], dict), "invalid trial fields")
     bench.validate_task(manifest["task"])
     require(manifest["task"]["id"] == batch["task_id"], "trial task differs from batch", "review_identity")
+    if batch["schema_version"] == 2:
+        position = next(index for index, candidate in enumerate(batch["trials"])
+                        if candidate["directory"] == item["directory"])
+        require(manifest.get("batch") == {"batch_id": batch["batch_id"],
+                "plan_sha256": batch["plan_sha256"], "position": position},
+                "trial batch binding differs from its planned slot", "review_identity")
+    else:
+        require("batch" not in manifest, "legacy batch contains a bound trial", "review_identity")
     hash_value(manifest["rubric_sha256"])
     text(manifest["model"])
     bench.exact_revision(manifest["tool_revision"])
@@ -174,12 +191,13 @@ def read_result(root, prefix, manifest, manifest_body):
     if body is None:
         lock = root.read(prefix + "run.lock", limit=0, optional=True)
         state = "setup_error" if manifest["status"] == "setup_failed" else "unfinished" if lock is not None else "not_run"
-        return state, None, None
+        return state, None, None, None
     result = bench.parse_json(body)
     fields(result, ("kind", "schema_version", "trial_id", "manifest_sha256", "common_sha256", "condition_sha256",
-                    "run_status", "quality", "diagnostics", "answer", "comparability"))
+                    "run_status", "quality", "diagnostics", "answer", "comparability"), ("batch_execution",))
     require(result["kind"] == "mastermind-research-result" and type(result["schema_version"]) is int
-            and result["schema_version"] == 1, "unsupported result")
+            and result["schema_version"] in (1, 2)
+            and ((result["schema_version"] == 2) == ("batch_execution" in result)), "unsupported result")
     require(result["trial_id"] == manifest["trial_id"] and result["manifest_sha256"] == sha(manifest_body)
             and result["common_sha256"] == manifest.get("common_sha256")
             and result["condition_sha256"] == manifest.get("condition_sha256"), "result identity differs from manifest", "review_identity")
@@ -207,7 +225,46 @@ def read_result(root, prefix, manifest, manifest_body):
         answer_body = root.read(prefix + "answer.md", manifest["limits"]["answer_bytes"])
         require(len(answer_body) == answer["bytes"] and sha(answer_body) == answer["sha256"]
                 and bool(answer_body.decode("utf-8").strip()), "retained answer changed", "review_answer")
-    return state, sha(body), answer_body
+    return state, sha(body), answer_body, result
+
+
+def execution_integrity(batch, slots):
+    if batch["schema_version"] == 1:
+        for slot in slots:
+            require(slot.get("batch_execution") is None and slot.get("execution_order") == "unverified_legacy",
+                    "legacy result contains an execution-order claim", "review_identity")
+        return "unverified_legacy"
+    previous_hash = None
+    chain = True
+    any_verified = False
+    for position, slot in enumerate(slots):
+        receipt = slot.get("batch_execution")
+        result_hash = slot["result_sha256"]
+        if result_hash is None:
+            require(receipt is None and slot.get("execution_order") == "not_recorded",
+                    "attempt without a result cannot claim execution order", "review_identity")
+            chain = False
+            previous_hash = None
+            continue
+        fields(receipt, ("batch_id", "plan_sha256", "position", "previous_result_sha256"))
+        require(receipt["batch_id"] == batch["batch_id"]
+                and receipt["plan_sha256"] == batch["plan_sha256"]
+                and receipt["position"] == position, "result execution receipt differs from the batch", "review_identity")
+        if position == 0:
+            require(receipt["previous_result_sha256"] is None,
+                    "first batch result cannot name a predecessor", "review_identity")
+        else:
+            hash_value(receipt["previous_result_sha256"])
+        if previous_hash is not None:
+            require(receipt["previous_result_sha256"] == previous_hash,
+                    "result execution chain changed", "review_identity")
+        expected = "verified" if chain else "unavailable"
+        require(slot.get("execution_order") == expected, "invalid execution-order status", "review_identity")
+        any_verified |= expected == "verified"
+        previous_hash = result_hash
+    if chain and all(slot["result_sha256"] is not None for slot in slots):
+        return "verified"
+    return "partial" if any_verified else "not_established"
 
 
 def collect_batch(root):
@@ -218,13 +275,15 @@ def collect_batch(root):
     indexed_subsets = []
     source_bodies, sources = {}, []
     slots, answers = [], {}
-    for item in batch["trials"]:
+    for position, item in enumerate(batch["trials"]):
         prefix = item["directory"] + "/"
         body = root.read(prefix + "manifest.json", optional=True)
         slot = {"review_id": "review-" + uuid.uuid4().hex, "trial_id": item["directory"],
                 "condition": item["condition"], "repetition": item["repetition"], "preparation_status": item["status"],
                 "status": "missing_artifacts", "manifest_sha256": None, "result_sha256": None,
-                "answer_sha256": None, "source_integrity": "unavailable"}
+                "answer_sha256": None, "source_integrity": "unavailable",
+                "batch_execution": None,
+                "execution_order": "unverified_legacy" if batch["schema_version"] == 1 else "not_recorded"}
         slots.append(slot)
         if body is None:
             continue
@@ -254,7 +313,14 @@ def collect_batch(root):
                 if getattr(error, "code", None) in ("review_limit", "review_identity"):
                     raise
                 slot["source_integrity"] = "unavailable"
-        state, result_hash, answer = read_result(root, prefix, manifest, body)
+        state, result_hash, answer, result = read_result(root, prefix, manifest, body)
+        if result is not None:
+            slot["batch_execution"] = result.get("batch_execution")
+            slot["execution_order"] = ("unverified_legacy" if batch["schema_version"] == 1
+                                       else "verified" if all(previous["result_sha256"] is not None
+                                                               and previous["execution_order"] == "verified"
+                                                               for previous in slots[:position])
+                                       else "unavailable")
         slot.update(status=state, manifest_sha256=sha(body), result_sha256=result_hash,
                     answer_sha256=sha(answer) if answer is not None else None)
         if answer is not None:
@@ -279,8 +345,9 @@ def collect_batch(root):
                 and len(set(indexed)) == len(indexed), "invalid corpus indexed subset")
         require(all(isinstance(subset, list) and sorted(subset) == sorted(indexed) for subset in indexed_subsets),
                 "corpus indexed subset differs from the graph trials", "review_identity")
+    order_integrity = execution_integrity(batch, slots)
     root.recheck()
-    return context, slots, answers, source_bodies, sources, batch
+    return context, slots, answers, source_bodies, sources, batch, order_integrity
 
 
 def attempt_counts(slots):
@@ -296,7 +363,7 @@ def export_review(batch: Path, output: Path):
     destination = output.parent.resolve(strict=True) / output.name
     with Root(batch) as root:
         require(not destination.is_relative_to(root.path), "review output must be outside the batch", "review_path")
-        context, slots, answers, bodies, sources, batch_value = collect_batch(root)
+        context, slots, answers, bodies, sources, batch_value, order_integrity = collect_batch(root)
         export_id = "export-" + uuid.uuid4().hex
         shuffled = slots.copy()
         secrets.SystemRandom().shuffle(shuffled)
@@ -308,10 +375,14 @@ def export_review(batch: Path, output: Path):
                   "source_files": sources, "items": items, "answer_text_may_reveal_condition": True,
                   "comparison_accepted": False, "quality_uplift": None}
         packet_body = encoded(packet)
-        coordinator = {"kind": "mastermind-research-review-coordinator", "schema_version": 1,
+        batch_contract = {"schema_version": batch_value["schema_version"],
+                          "batch_id": batch_value.get("batch_id"),
+                          "plan_sha256": batch_value.get("plan_sha256")}
+        coordinator = {"kind": "mastermind-research-review-coordinator", "schema_version": 2,
                        "export_id": export_id, "packet_sha256": sha(packet_body), "batch_sha256": root.records["batch.json"]["sha256"],
                        "model": context["model"], "tool_revision": context["tool_revision"],
-                       "corpus_case": batch_value.get("corpus_case"), "slots": slots}
+                       "corpus_case": batch_value.get("corpus_case"), "batch": batch_contract,
+                       "execution_order_integrity": order_integrity, "slots": slots}
         coordinator_body = encoded(coordinator)
         template = {"kind": "mastermind-research-assessment", "schema_version": 1, "export_id": export_id,
                     "packet_sha256": sha(packet_body), "reviewer": None, "reviews": []}
@@ -393,16 +464,36 @@ def load_export(root):
     root.inventory({"reviewer/packet.json", "reviewer/assessment-template.json"}
                    | {"reviewer/source/" + path for path in sources}
                    | {"reviewer/" + item["answer"]["path"] for item in items.values() if item["answer"] is not None})
-    fields(coordinator, ("kind", "schema_version", "export_id", "packet_sha256", "batch_sha256", "model", "tool_revision", "corpus_case", "slots"))
+    coordinator_version = coordinator.get("schema_version") if isinstance(coordinator, dict) else None
+    extra = ("batch", "execution_order_integrity") if coordinator_version == 2 else ()
+    fields(coordinator, ("kind", "schema_version", "export_id", "packet_sha256", "batch_sha256", "model",
+                         "tool_revision", "corpus_case", "slots", *extra))
     require(coordinator["kind"] == "mastermind-research-review-coordinator" and type(coordinator["schema_version"]) is int
-            and coordinator["schema_version"] == 1 and coordinator["export_id"] == seal["export_id"]
+            and coordinator["schema_version"] in (1, 2) and coordinator["export_id"] == seal["export_id"]
             and coordinator["packet_sha256"] == seal["packet_sha256"], "coordinator identity changed", "review_identity")
+    if coordinator_version == 2:
+        batch_contract = coordinator["batch"]
+        fields(batch_contract, ("schema_version", "batch_id", "plan_sha256"))
+        require(type(batch_contract["schema_version"]) is int and batch_contract["schema_version"] in (1, 2),
+                "invalid coordinator batch contract", "review_identity")
+        if batch_contract["schema_version"] == 2:
+            identifier(batch_contract["batch_id"], "batch-")
+            hash_value(batch_contract["plan_sha256"])
+        else:
+            require(batch_contract["batch_id"] is None and batch_contract["plan_sha256"] is None,
+                    "legacy coordinator cannot claim a bound plan", "review_identity")
+        require(coordinator["execution_order_integrity"] in {
+            "verified", "partial", "not_established", "unverified_legacy"},
+            "invalid execution-order integrity", "review_identity")
+    else:
+        batch_contract = {"schema_version": 1, "batch_id": None, "plan_sha256": None}
     require(isinstance(coordinator["slots"], list) and len(coordinator["slots"]) == len(items), "coordinator omitted attempts", "review_inventory")
     require(len(items) % 3 == 0, "coordinator has an incomplete condition matrix", "review_inventory")
     seen = set()
     for slot in coordinator["slots"]:
+        extra = ("batch_execution", "execution_order") if coordinator_version == 2 else ()
         fields(slot, ("review_id", "trial_id", "condition", "repetition", "preparation_status", "status", "manifest_sha256",
-                      "result_sha256", "answer_sha256", "source_integrity"))
+                      "result_sha256", "answer_sha256", "source_integrity", *extra))
         require(isinstance(slot["review_id"], str) and slot["review_id"] in items and slot["review_id"] not in seen
                 and isinstance(slot["status"], str) and slot["status"] in SLOT_STATES
                 and slot["source_integrity"] in ("verified", "unavailable"), "invalid coordinator slot")
@@ -426,10 +517,19 @@ def load_export(root):
             require(slot["status"] in ("setup_error", "missing_artifacts") and answer is None,
                     "failed preparation cannot declare an answer")
         require(slot["status"] != "completed" or answer is not None, "completed attempt lacks an answer")
-    check_batch({"kind": "mastermind-research-batch", "schema_version": 1, "task_id": packet["task"]["id"],
-                 "repetitions": len(items) // 3, "quality_uplift": None, "comparison_accepted": False,
-                 "trials": [{"directory": slot["trial_id"], "condition": slot["condition"], "repetition": slot["repetition"],
-                             "status": slot["preparation_status"], "common_sha256": None} for slot in coordinator["slots"]]}, set())
+    reconstructed = {"kind": "mastermind-research-batch", "schema_version": batch_contract["schema_version"],
+                     "task_id": packet["task"]["id"], "repetitions": len(items) // 3,
+                     "quality_uplift": None, "comparison_accepted": False,
+                     "trials": [{"directory": slot["trial_id"], "condition": slot["condition"],
+                                 "repetition": slot["repetition"], "status": slot["preparation_status"],
+                                 "common_sha256": None} for slot in coordinator["slots"]]}
+    if batch_contract["schema_version"] == 2:
+        reconstructed.update(batch_id=batch_contract["batch_id"], plan_sha256=batch_contract["plan_sha256"])
+    check_batch(reconstructed, set())
+    if coordinator_version == 2:
+        require(execution_integrity(reconstructed, coordinator["slots"])
+                == coordinator["execution_order_integrity"],
+                "coordinator execution-order status changed", "review_identity")
     return seal, packet, coordinator, answers, sources
 
 
@@ -541,10 +641,11 @@ def review_status(export: Path):
             require(name == receipt["assessment"]["reviewer"] + ".json", "reviewer identity differs from its receipt", "review_identity")
             reviewers.append({"reviewer": receipt["assessment"]["reviewer"], "reviewed": len(receipt["assessment"]["reviews"])})
         root.recheck()
-        return {"kind": "mastermind-research-review-status", "schema_version": 1, "export_id": seal["export_id"],
+        return {"kind": "mastermind-research-review-status", "schema_version": 2, "export_id": seal["export_id"],
                 "attempts": attempt_counts(coordinator["slots"]), "reviewers": reviewers,
                 "reviewed_attempts": len(answers) if reviewers else 0,
                 "attempts_without_verified_source": sum(slot["source_integrity"] != "verified" for slot in coordinator["slots"]),
+                "execution_order_integrity": coordinator.get("execution_order_integrity", "unverified_legacy"),
                 "assessment_semantics": "reviewer_declared_not_machine_verified", "comparison_accepted": False, "quality_uplift": None}
 
 

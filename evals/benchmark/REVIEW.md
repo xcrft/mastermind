@@ -165,8 +165,10 @@ these declarations into a quality score.
 
 Reads and writes use directory descriptors and do not follow symlinks. Publication
 is exclusive and files are linked into place only after their bytes are written.
-Known unlinked staging files from an interrupted assessment publication are not
-counted as submitted reviews. No cleanup of other files is performed.
+Each final name is reopened and matched to the owned inode and exact bytes; export
+rechecks every published artifact after writing the seal. Known unlinked staging
+files from an interrupted assessment publication are not counted as submitted
+reviews. No cleanup of other files is performed.
 
 The limits are 60 planned attempts, 128 source files and 8 MiB of common source,
 the producer's answer cap up to 16 MiB per answer, 1 MiB per control/assessment

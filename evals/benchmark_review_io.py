@@ -70,6 +70,16 @@ class Root:
                 or self.path != self.path.resolve(strict=True)):
             raise bench.BenchmarkError("review_changed", "artifact directory changed during access")
 
+    def check_parent(self, path, expected):
+        """Confirm that an opened parent is still reachable from this root."""
+        with self.parent(path) as (current, _):
+            observed = os.fstat(current)
+        if ((observed.st_dev, observed.st_ino)
+                != (expected.st_dev, expected.st_ino)):
+            raise bench.BenchmarkError(
+                "review_changed", "artifact parent changed during access")
+        self.check_root()
+
     @contextmanager
     def parent(self, path, create=False):
         parts = relative(path)
@@ -190,15 +200,93 @@ class Root:
         temporary = ".pending-" + uuid.uuid4().hex
         try:
             with self.parent(path, create=True) as (parent, name):
-                fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400, dir_fd=parent)
+                expected_parent = os.fstat(parent)
+                descriptor = None
+                owned = None
+                staged = False
+                published = False
                 try:
-                    with os.fdopen(fd, "wb") as stream:
+                    descriptor = os.open(
+                        temporary,
+                        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o400,
+                        dir_fd=parent,
+                    )
+                    staged = True
+                    opened = os.fstat(descriptor)
+                    owned = (opened.st_dev, opened.st_ino)
+                    os.fchmod(descriptor, 0o400)
+                    with os.fdopen(os.dup(descriptor), "wb") as stream:
                         stream.write(body)
                         stream.flush()
                         os.fsync(stream.fileno())
+                    written = os.fstat(descriptor)
+                    if (not stat.S_ISREG(written.st_mode)
+                            or stat.S_IMODE(written.st_mode) != 0o400
+                            or written.st_size != len(body)):
+                        raise bench.BenchmarkError(
+                            "review_changed", "staged review artifact changed during publication")
+                    self.check_parent(path, expected_parent)
                     os.link(temporary, name, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
-                finally:
+                    published = True
+                    linked = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                    if (linked.st_dev, linked.st_ino) != owned:
+                        raise bench.BenchmarkError(
+                            "review_changed", "published review artifact changed during publication")
+                    current_staging = os.stat(temporary, dir_fd=parent, follow_symlinks=False)
+                    if (current_staging.st_dev, current_staging.st_ino) != owned:
+                        raise bench.BenchmarkError(
+                            "review_changed", "staged review artifact changed during publication")
                     os.unlink(temporary, dir_fd=parent)
+                    staged = False
+                    os.fsync(parent)
+                    self.check_parent(path, expected_parent)
+
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    retained = bytearray()
+                    remaining = len(body) + 1
+                    while remaining:
+                        chunk = os.read(descriptor, min(1024 * 1024, remaining))
+                        if not chunk:
+                            break
+                        retained.extend(chunk)
+                        remaining -= len(chunk)
+                    written = os.fstat(descriptor)
+                    try:
+                        observed = self.read(path, len(body))
+                    except bench.BenchmarkError as error:
+                        raise bench.BenchmarkError(
+                            "review_changed", "published review artifact changed during verification") from error
+                    current = self.records[path]["identity"]
+                    if (bytes(retained) != body or observed != body
+                            or (written.st_dev, written.st_ino) != owned
+                            or (current[0], current[1]) != owned
+                            or identity(written) != current):
+                        raise bench.BenchmarkError(
+                            "review_changed", "published review artifact changed during verification")
+                    self.check_parent(path, expected_parent)
+                except (bench.BenchmarkError, OSError, KeyboardInterrupt):
+                    if published:
+                        try:
+                            current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                            if (current.st_dev, current.st_ino) == owned:
+                                os.unlink(name, dir_fd=parent)
+                                os.fsync(parent)
+                        except FileNotFoundError:
+                            pass
+                    raise
+                finally:
+                    try:
+                        if staged:
+                            try:
+                                current = os.stat(temporary, dir_fd=parent, follow_symlinks=False)
+                                if (current.st_dev, current.st_ino) == owned:
+                                    os.unlink(temporary, dir_fd=parent)
+                            except FileNotFoundError:
+                                pass
+                    finally:
+                        if descriptor is not None:
+                            os.close(descriptor)
             self.check_root()
         except FileExistsError as error:
             raise bench.BenchmarkError("review_exists", "review artifact already exists; replacement is not allowed") from error

@@ -579,7 +579,6 @@ pub(crate) enum RepositoryIdentityError {
     Git(crate::diff::WorkingTreeDiffError),
     #[cfg(not(windows))]
     InvalidPath,
-    #[cfg(windows)]
     Root(crate::bounded_fs::BoundedReadError),
 }
 
@@ -591,7 +590,6 @@ impl fmt::Display for RepositoryIdentityError {
             Self::InvalidPath => {
                 formatter.write_str("the canonical repository path is not valid UTF-8")
             }
-            #[cfg(windows)]
             Self::Root(error) => write!(formatter, "retain repository identity: {error}"),
         }
     }
@@ -606,7 +604,11 @@ fn worktree_path_identity(root: &Path) -> Result<String, RepositoryIdentityError
     }
     #[cfg(not(windows))]
     {
-        root.to_str()
+        root.to_str().ok_or(RepositoryIdentityError::InvalidPath)?;
+        crate::bounded_fs::RootCapability::open(root)
+            .map_err(RepositoryIdentityError::Root)?
+            .canonical_root()
+            .to_str()
             .map(str::to_string)
             .ok_or(RepositoryIdentityError::InvalidPath)
     }
@@ -1982,11 +1984,18 @@ mod tests {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
 
+        let root = tempfile::tempdir().unwrap();
+        let literal = root.path().join(r"repo\nested");
+        let nested = root.path().join("repo/nested");
+        fs::create_dir(&literal).unwrap();
+        fs::create_dir_all(&nested).unwrap();
         assert_ne!(
-            worktree_path_identity(Path::new(r"/tmp/repo\nested")).unwrap(),
-            worktree_path_identity(Path::new("/tmp/repo/nested")).unwrap()
+            worktree_path_identity(&literal).unwrap(),
+            worktree_path_identity(&nested).unwrap()
         );
-        let non_utf8 = PathBuf::from(OsString::from_vec(b"/tmp/repo-\xff".to_vec()));
+        let non_utf8 = root
+            .path()
+            .join(PathBuf::from(OsString::from_vec(b"repo-\xff".to_vec())));
         assert!(matches!(
             worktree_path_identity(&non_utf8),
             Err(RepositoryIdentityError::InvalidPath)

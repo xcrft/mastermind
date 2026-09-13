@@ -904,6 +904,38 @@ def evaluation_harness_definition() -> dict[str, str]:
     return {"sha256": digest, **environment}
 
 
+def fixture_runtime_definition(
+    git_binary: Path, mmcg_binary: Path | None
+) -> dict[str, object]:
+    try:
+        process = subprocess.run(
+            [str(git_binary), "--version"],
+            env=_PROC_ENV,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError as error:
+        raise ValueError("cannot execute pinned Git runtime") from error
+    git_version = process.stdout.strip()
+    if process.returncode != 0 or not git_version:
+        raise ValueError("cannot read pinned Git runtime version")
+    git_definition = _stable_regular_file_definition(git_binary)
+    mmcg_definition = (
+        None
+        if mmcg_binary is None
+        else _stable_regular_file_definition(mmcg_binary)
+    )
+    return {
+        "git": {
+            "sha256": git_definition["sha256"],
+            "git_mode": git_definition["git_mode"],
+            "version": git_version,
+        },
+        "mmcg": mmcg_definition,
+    }
+
+
 def build_report(
     results: list[Result],
     *,
@@ -919,6 +951,8 @@ def build_report(
     claude_stable: bool = True,
     harness_definition: dict[str, str] | None = None,
     harness_stable: bool = True,
+    fixture_runtime: dict[str, object] | None = None,
+    fixture_runtime_stable: bool = True,
 ) -> dict:
     suites: dict[str, list[Result]] = {}
     for result in results:
@@ -972,6 +1006,11 @@ def build_report(
             **harness_definition,
             "stable": harness_stable,
         }
+    if fixture_runtime is not None:
+        report["fixture_runtime"] = {
+            **fixture_runtime,
+            "stable": fixture_runtime_stable,
+        }
     return report
 
 
@@ -1024,6 +1063,7 @@ def report_comparison_issues(
     require_target_identity: bool = False,
     require_runtime_identity: bool = False,
     require_harness_identity: bool = False,
+    require_fixture_runtime: bool = False,
 ) -> list[str]:
     issues: list[str] = []
     if not isinstance(report, dict):
@@ -1093,6 +1133,43 @@ def report_comparison_issues(
             issues.append(f"{label} report has invalid evaluation harness identity")
         elif not harness["stable"]:
             issues.append(f"{label} report changed evaluation harness during run")
+    fixture_runtime = report.get("fixture_runtime")
+    if fixture_runtime is None:
+        if require_fixture_runtime:
+            issues.append(f"{label} report has no fixture runtime identity")
+    elif not isinstance(fixture_runtime, dict) or set(fixture_runtime) != {
+        "git",
+        "mmcg",
+        "stable",
+    }:
+        issues.append(f"{label} report has invalid fixture runtime identity")
+    else:
+        git_runtime = fixture_runtime["git"]
+        mmcg_runtime = fixture_runtime["mmcg"]
+        valid_git = (
+            isinstance(git_runtime, dict)
+            and set(git_runtime) == {"sha256", "git_mode", "version"}
+            and isinstance(git_runtime["sha256"], str)
+            and re.fullmatch(r"[0-9a-f]{64}", git_runtime["sha256"]) is not None
+            and git_runtime["git_mode"] in {"100644", "100755"}
+            and isinstance(git_runtime["version"], str)
+            and bool(git_runtime["version"])
+        )
+        valid_mmcg = mmcg_runtime is None or (
+            isinstance(mmcg_runtime, dict)
+            and set(mmcg_runtime) == {"sha256", "git_mode"}
+            and isinstance(mmcg_runtime["sha256"], str)
+            and re.fullmatch(r"[0-9a-f]{64}", mmcg_runtime["sha256"]) is not None
+            and mmcg_runtime["git_mode"] in {"100644", "100755"}
+        )
+        if (
+            not valid_git
+            or not valid_mmcg
+            or not isinstance(fixture_runtime["stable"], bool)
+        ):
+            issues.append(f"{label} report has invalid fixture runtime identity")
+        elif not fixture_runtime["stable"]:
+            issues.append(f"{label} report changed fixture runtime during run")
 
     filters = report.get("filters")
     if (
@@ -1368,6 +1445,11 @@ def load_report(path: Path) -> dict:
 
 def compare_to_baseline(current: dict, baseline: dict) -> dict:
     checks: list[dict] = []
+    current_summaries = current.get("suites") if isinstance(current, dict) else None
+    current_uses_fixture = isinstance(current_summaries, dict) and any(
+        SUITES.get(name, {}).get("uses_fixture") is True
+        for name in current_summaries
+    )
     failures = [
         *report_comparison_issues(
             current,
@@ -1375,6 +1457,7 @@ def compare_to_baseline(current: dict, baseline: dict) -> dict:
             require_target_identity=True,
             require_runtime_identity=True,
             require_harness_identity=True,
+            require_fixture_runtime=current_uses_fixture,
         ),
         *report_comparison_issues(baseline, "baseline"),
     ]
@@ -1419,6 +1502,23 @@ def compare_to_baseline(current: dict, baseline: dict) -> dict:
         }
         if current_harness_identity != baseline_harness_identity:
             failures.append("evaluation harness differs from baseline")
+    current_fixture_runtime = current.get("fixture_runtime")
+    baseline_fixture_runtime = baseline.get("fixture_runtime")
+    if isinstance(current_fixture_runtime, dict) and isinstance(
+        baseline_fixture_runtime, dict
+    ):
+        current_fixture_identity = {
+            key: value
+            for key, value in current_fixture_runtime.items()
+            if key != "stable"
+        }
+        baseline_fixture_identity = {
+            key: value
+            for key, value in baseline_fixture_runtime.items()
+            if key != "stable"
+        }
+        if current_fixture_identity != baseline_fixture_identity:
+            failures.append("fixture runtime differs from baseline")
 
     if current.get("filters") != baseline.get("filters"):
         failures.append("current filters differ from baseline filters")
@@ -1746,10 +1846,12 @@ def write_report(path: Path, report: dict) -> None:
 # ----- fixture lifecycle ----------------------------------------------------
 
 
-def _run_git(args: list[str], cwd: Path) -> None:
+def _run_git(
+    args: list[str], cwd: Path, *, git_binary: str | Path = "git"
+) -> None:
     """Run git with our scrubbed environment. Raises on non-zero exit."""
     proc = subprocess.run(
-        ["git", *args],
+        [str(git_binary), *args],
         cwd=cwd,
         env={**_PROC_ENV, **GIT_ENV},
         capture_output=True,
@@ -1769,6 +1871,8 @@ def setup_fixture(
     *,
     staged_paths: list[str] | None = None,
     fixtures_dir: Path | None = None,
+    git_binary: str | Path = "git",
+    mmcg_binary: str | Path | None = MMCG_BIN,
 ) -> Path:
     """Build a real tmp git repo with a tagged baseline and an after-tree.
 
@@ -1807,10 +1911,10 @@ def setup_fixture(
 
     # Phase 1: baseline tree.
     _copy_tree_into(baseline_src, tmp)
-    _run_git(["init", "-q", "--initial-branch=main"], tmp)
-    _run_git(["add", "-A"], tmp)
-    _run_git(["commit", "-q", "-m", "baseline"], tmp)
-    _run_git(["tag", baseline_ref], tmp)
+    _run_git(["init", "-q", "--initial-branch=main"], tmp, git_binary=git_binary)
+    _run_git(["add", "-A"], tmp, git_binary=git_binary)
+    _run_git(["commit", "-q", "-m", "baseline"], tmp, git_binary=git_binary)
+    _run_git(["tag", baseline_ref], tmp, git_binary=git_binary)
 
     # Phase 2: replace working tree with `after` variant content.
     # We wipe everything except `.git/` then re-overlay so deletions are
@@ -1824,34 +1928,42 @@ def setup_fixture(
             entry.unlink()
     _copy_tree_into(after_src, tmp)
     if staged_paths is None:
-        _run_git(["add", "-A"], tmp)
-        _run_git(["commit", "-q", "-m", f"executor change ({after_ref})", "--allow-empty"], tmp)
-        _run_git(["tag", after_ref], tmp)
+        _run_git(["add", "-A"], tmp, git_binary=git_binary)
+        _run_git(
+            ["commit", "-q", "-m", f"executor change ({after_ref})", "--allow-empty"],
+            tmp,
+            git_binary=git_binary,
+        )
+        _run_git(["tag", after_ref], tmp, git_binary=git_binary)
     elif staged_paths:
-        _run_git(["add", "--", *staged_paths], tmp)
+        _run_git(["add", "--", *staged_paths], tmp, git_binary=git_binary)
 
     # Phase 3: build an mmcg index of the after-tree so the auditor can run
     # real `mmcg_callers` / `mmcg_search` against the working state and
     # compare against the spec's pre-edit snapshot. Failure here is non-fatal
     # — the auditor can still operate on `git diff` alone.
     try:
-        _build_mmcg_index(tmp)
+        _build_mmcg_index(tmp, mmcg_binary=mmcg_binary)
     except (RuntimeError, FileNotFoundError) as e:
         sys.stderr.write(f"  [fixture] mmcg index skipped: {e}\n")
 
     return tmp
 
 
-def _build_mmcg_index(repo: Path) -> None:
+def _build_mmcg_index(
+    repo: Path, *, mmcg_binary: str | Path | None = MMCG_BIN
+) -> None:
     """Run `mmcg index .` in `repo`, leaving `.mastermind/mmcg.db` behind.
 
     Uses the in-tree binary when available so the SQL schema matches the MCP
     server's expectations. Quiet on success — index summary is suppressed.
     """
+    if mmcg_binary is None:
+        raise FileNotFoundError("mmcg executable is unavailable")
     db_path = repo / ".mastermind" / "mmcg.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
     proc = subprocess.run(
-        [MMCG_BIN, "--index", str(db_path), "index", str(repo)],
+        [str(mmcg_binary), "--index", str(db_path), "index", str(repo)],
         cwd=repo,
         env=_PROC_ENV,
         capture_output=True,
@@ -2316,6 +2428,8 @@ def evaluate_case(
     fixtures_dir: Path | None = None,
     workflow_root: Path | None = None,
     claude_binary: str | Path = "claude",
+    git_binary: str | Path = "git",
+    mmcg_binary: str | Path | None = MMCG_BIN,
 ) -> Result:
     case_id = case["id"]
     prompt_path = (
@@ -2340,10 +2454,12 @@ def evaluate_case(
                 after_ref,
                 staged_paths=staged_paths,
                 fixtures_dir=fixtures_dir,
+                git_binary=git_binary,
+                mmcg_binary=mmcg_binary,
             )
 
             db_path = fixture_path / ".mastermind" / "mmcg.db"
-            has_mmcg = db_path.is_file()
+            has_mmcg = mmcg_binary is not None and db_path.is_file()
             if suite_name in {"auditor", "researcher"} and not has_mmcg and not case.get("allow_no_mmcg"):
                 return Result(
                     case_id=case_id,
@@ -2377,7 +2493,7 @@ def evaluate_case(
                 mcp_cfg = json.dumps({
                     "mcpServers": {
                         "mmcg": {
-                            "command": MMCG_BIN,
+                            "command": str(mmcg_binary),
                             "args": ["--index", str(db_path), "serve"],
                         }
                     }
@@ -2698,16 +2814,15 @@ def main() -> int:
     if frozen_claude_version is None:
         print("error: cannot read `claude` CLI version", file=sys.stderr)
         return 2
-    if not shutil.which("git"):
-        print("error: `git` not on PATH (required for fixture suites).", file=sys.stderr)
-        return 2
-
     suites_to_run = [args.suite] if args.suite else list(SUITES.keys())
     results: list[Result] = []
     case_definition_digests: dict[str, str] = {}
     case_definition_stability: dict[str, bool] = {}
     target_definition_digests: dict[str, str] = {}
     target_definition_stability: dict[str, bool] = {}
+    git_binary: Path | None = None
+    mmcg_binary: Path | None = None
+    frozen_fixture_runtime: dict[str, object] | None = None
 
     for suite_name in suites_to_run:
         suite_cfg = SUITES[suite_name]
@@ -2725,6 +2840,32 @@ def main() -> int:
             return 2
         if not suite_cases:
             continue
+
+        if suite_cfg["uses_fixture"] and frozen_fixture_runtime is None:
+            git_location = shutil.which("git")
+            if not git_location:
+                print(
+                    "error: `git` not on PATH (required for fixture suites).",
+                    file=sys.stderr,
+                )
+                return 2
+            try:
+                git_binary = Path(git_location).resolve(strict=True)
+                mmcg_location = shutil.which(str(MMCG_BIN))
+                mmcg_binary = (
+                    None
+                    if mmcg_location is None
+                    else Path(mmcg_location).resolve(strict=True)
+                )
+                frozen_fixture_runtime = fixture_runtime_definition(
+                    git_binary, mmcg_binary
+                )
+            except (OSError, RuntimeError, ValueError) as error:
+                print(
+                    f"error: cannot freeze fixture runtime: {error}",
+                    file=sys.stderr,
+                )
+                return 2
 
         print(f"\n=== {suite_name} ===")
         try:
@@ -2834,6 +2975,8 @@ def main() -> int:
                     fixtures_dir=fixtures_dir_for_run,
                     workflow_root=workflow_root_for_run,
                     claude_binary=claude_binary,
+                    git_binary=git_binary or "git",
+                    mmcg_binary=mmcg_binary,
                 )
                 _SENTINEL_MISSING = "no structured audit verdict block found"
                 if (
@@ -2849,6 +2992,8 @@ def main() -> int:
                         fixtures_dir=fixtures_dir_for_run,
                         workflow_root=workflow_root_for_run,
                         claude_binary=claude_binary,
+                        git_binary=git_binary or "git",
+                        mmcg_binary=mmcg_binary,
                     )
                     r2.retry_attempted = True
                     r2.add_attempt(r)
@@ -2967,6 +3112,26 @@ def main() -> int:
             if reason not in result.reasons:
                 result.reasons.append(reason)
         print(f"  ✗ FAIL  {reason}")
+    fixture_runtime_stable = True
+    if frozen_fixture_runtime is not None:
+        try:
+            fixture_runtime_after_run = fixture_runtime_definition(
+                git_binary, mmcg_binary
+            )
+        except (OSError, ValueError):
+            fixture_runtime_after_run = None
+        fixture_runtime_stable = (
+            fixture_runtime_after_run == frozen_fixture_runtime
+        )
+        if not fixture_runtime_stable:
+            reason = "fixture runtime changed during evaluation"
+            for result in results:
+                if not SUITES[result.suite]["uses_fixture"]:
+                    continue
+                result.passed = False
+                if reason not in result.reasons:
+                    result.reasons.append(reason)
+            print(f"  ✗ FAIL  {reason}")
 
     n_pass = sum(r.passed for r in results)
     n_fail = len(results) - n_pass
@@ -3011,6 +3176,8 @@ def main() -> int:
         claude_stable=claude_stable,
         harness_definition=frozen_harness_definition,
         harness_stable=harness_stable,
+        fixture_runtime=frozen_fixture_runtime,
+        fixture_runtime_stable=fixture_runtime_stable,
     )
     for suite_name, summary in report["suites"].items():
         context = summary["usage"]["context_tokens"]

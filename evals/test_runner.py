@@ -56,6 +56,18 @@ def bind_target_identity(report, digest="9" * 64):
         summary["target_definition_stable"] = True
 
 
+def bind_fixture_runtime(report, git_digest="5" * 64, mmcg_digest="4" * 64):
+    report["fixture_runtime"] = {
+        "git": {
+            "sha256": git_digest,
+            "git_mode": "100755",
+            "version": "git version test",
+        },
+        "mmcg": {"sha256": mmcg_digest, "git_mode": "100755"},
+        "stable": True,
+    }
+
+
 class StructuredOutputTests(unittest.TestCase):
     def test_audit_verdict_requires_valid_sentinel_yaml(self):
         valid = """\
@@ -546,6 +558,57 @@ action: passthrough
             any("baseline-passing case regressed: a" in item for item in gate["failures"])
         )
 
+    def test_fixture_gate_requires_and_compares_runtime_identity(self):
+        baseline = runner.build_report(
+            [
+                runner.Result(
+                    "research-case",
+                    "researcher",
+                    True,
+                    input_tokens=100,
+                    telemetry_complete=True,
+                    resolved_models=[RESOLVED_MODEL],
+                )
+            ],
+            model="opus",
+            suite_filter="researcher",
+            case_filter=None,
+        )
+        current = runner.build_report(
+            [
+                runner.Result(
+                    "research-case",
+                    "researcher",
+                    True,
+                    input_tokens=90,
+                    telemetry_complete=True,
+                    resolved_models=[RESOLVED_MODEL],
+                )
+            ],
+            model="opus",
+            suite_filter="researcher",
+            case_filter=None,
+        )
+        for report in (baseline, current):
+            report["claude_cli_version"] = "test-cli"
+            report["suites"]["researcher"]["case_definition_digest"] = "a" * 64
+            bind_target_identity(report)
+
+        gate = runner.compare_to_baseline(current, baseline)
+        self.assertTrue(
+            any("no fixture runtime identity" in item for item in gate["failures"])
+        )
+
+        bind_fixture_runtime(current)
+        self.assertTrue(runner.compare_to_baseline(current, baseline)["passed"])
+
+        bind_fixture_runtime(baseline)
+        current["fixture_runtime"]["mmcg"]["sha256"] = "3" * 64
+        gate = runner.compare_to_baseline(current, baseline)
+        self.assertTrue(
+            any("fixture runtime differs" in item for item in gate["failures"])
+        )
+
     def test_baseline_gate_fails_closed_on_model_or_case_drift(self):
         baseline_results = [
             runner.Result(
@@ -833,7 +896,11 @@ action: passthrough
                 patch.object(runner, "SUITES", suites),
                 patch.object(runner.sys, "argv", argv),
                 patch.object(
-                    runner.shutil, "which", return_value=runner.sys.executable
+                    runner.shutil,
+                    "which",
+                    side_effect=lambda name: (
+                        runner.sys.executable if name == "claude" else None
+                    ),
                 ),
                 patch.object(runner, "evaluate_case", side_effect=evaluate),
                 patch.object(runner, "git_revision", return_value="revision"),

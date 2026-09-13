@@ -749,7 +749,8 @@ fn collect_workflow_evidence(
         let Some(spec_body) = read_workflow_artifact(&mut artifacts, &spec_path, &mut gaps) else {
             continue;
         };
-        let parsed = crate::spec::parse_str(&spec_path.to_string_lossy(), &spec_body);
+        let expected_spec_path = format!(".mastermind/tasks/{task_name_text}/spec.md");
+        let parsed = crate::spec::parse_str(&expected_spec_path, &spec_body);
         let Some(frontmatter) = parsed.frontmatter else {
             continue;
         };
@@ -795,7 +796,6 @@ fn collect_workflow_evidence(
         {
             continue;
         }
-        let expected_spec_path = format!(".mastermind/tasks/{task_name_text}/spec.md");
         if let Err(error) = crate::run_task::validate_bound_state_identity(
             &repository_identity,
             &expected_spec_path,

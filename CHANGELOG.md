@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Policy, SCIP, and document-graph readers now attribute parser and read errors
+  to exact validated logical paths, or an explicit unavailable label, instead
+  of lossy filesystem aliases.
 - Index status no longer serializes a lossy database path. Native paths that
   JSON cannot represent exactly return a null `db_path` with an explicit error
   while preserving the remaining index-health evidence.

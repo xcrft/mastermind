@@ -696,9 +696,13 @@ fn repository_path(
         rooted = root.requested_root().join(path);
         &rooted
     };
+    let requested_label = path
+        .to_str()
+        .filter(|value| !value.chars().any(char::is_control))
+        .unwrap_or("requested_graph_path_unavailable");
     let relative = root
         .repository_relative(candidate)
-        .map_err(|error| map_read_error(error, &path.to_string_lossy()))?;
+        .map_err(|error| map_read_error(error, requested_label))?;
     let mut parts = Vec::new();
     for component in relative.components() {
         let Component::Normal(value) = component else {
@@ -1542,6 +1546,30 @@ mod tests {
             error_code(root.path(), outside.path(), ReadControl::default()),
             "unsafe_path"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn graph_path_errors_do_not_publish_a_lossy_native_path() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let path = outside
+            .path()
+            .join(std::ffi::OsString::from_vec(b"graph-\xff.json".to_vec()));
+        let capability = RootCapability::open(root.path()).unwrap();
+
+        let error = repository_path(&capability, &path).unwrap_err();
+
+        assert_eq!(error.code(), "unsafe_path");
+        assert_eq!(error.path(), Some("requested_graph_path_unavailable"));
+        assert!(!error.to_string().contains('\u{fffd}'));
+
+        let multiline = outside.path().join("graph\nforged.json");
+        let error = repository_path(&capability, &multiline).unwrap_err();
+        assert_eq!(error.path(), Some("requested_graph_path_unavailable"));
+        assert!(!error.to_string().contains("forged.json"));
     }
 
     #[test]

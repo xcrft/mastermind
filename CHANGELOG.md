@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Controller artifacts now recognize only the exact
+  `.mastermind/tasks/<task>/spec.md` layout as canonical. Other nested specs use
+  full exact-path digests in isolated namespaces, so equal basenames cannot
+  share state, release notes, or semantic-review files; legacy flat task paths
+  remain compatible and noncanonical release notes remain searchable.
 - Source workflow audits now reject non-UTF-8 and Unix backslash aliases before
   creating component paths, nodes, or inventory counts.
 - Policy, SCIP, and document-graph readers now attribute parser and read errors

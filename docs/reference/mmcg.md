@@ -264,6 +264,11 @@ mmcg run-task .mastermind/tasks/042-feature/spec.md --force-iteration  # bypass 
 # status, next, resume, doctor, and architecture-policy evidence enforce this
 # same binding. They hold legacy state for pre-flight and reject foreign state
 # instead of projecting it as ready or complete.
+# Canonical `.mastermind/tasks/<task>/spec.md` inputs keep task-local state and
+# review files. Legacy flat task specs keep their basename paths. Other
+# repository-contained specs use a SHA-256 key of the exact relative path under
+# `.mastermind/run-state/.noncanonical/` and `.mastermind/releases/.noncanonical/`,
+# so equal basenames cannot share lifecycle or release artifacts.
 
 # Initialize a project. Stack detection informs drafting, while CONTEXT stays
 # lean and stack-agnostic; commands and layouts belong in CLAUDE.md.

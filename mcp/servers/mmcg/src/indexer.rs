@@ -1425,6 +1425,38 @@ fn collect_project_history_candidates(
             }
             None => truncated = true,
         }
+        let noncanonical_dir = releases_dir.join(".noncanonical");
+        if history_path_kind(root, &noncanonical_dir, control)? == Some(BoundedPathKind::Directory)
+        {
+            match history_directory_names(
+                root,
+                &noncanonical_dir,
+                MAX_HISTORY_DIRECTORY_ENTRIES.saturating_sub(directory_entries),
+                control,
+            )? {
+                Some(names) => {
+                    directory_entries = directory_entries.saturating_add(names.len());
+                    for name in names {
+                        control.check().map_err(index_error_from_read)?;
+                        let path = noncanonical_dir.join(name);
+                        if path
+                            .extension()
+                            .and_then(|value| value.to_str())
+                            .is_some_and(|value| value.eq_ignore_ascii_case("md"))
+                        {
+                            add_history_candidate(
+                                root,
+                                &mut candidates,
+                                path,
+                                "release_notes",
+                                control,
+                            )?;
+                        }
+                    }
+                }
+                None => truncated = true,
+            }
+        }
     }
 
     let mut decision_roots = PROJECT_DECISION_DIRS.map(|relative| root_path.join(relative));
@@ -2818,6 +2850,13 @@ def placeholder():
             "# Release\n\nAdmission authorization is now enforced.\n",
         )
         .unwrap();
+        let noncanonical_releases = releases_dir.join(".noncanonical");
+        fs::create_dir_all(&noncanonical_releases).unwrap();
+        fs::write(
+            noncanonical_releases.join("experiment-deadbeef.md"),
+            "# Release\n\nNested experimental release evidence.\n",
+        )
+        .unwrap();
         fs::write(
             task_dir.join("release-notes.md"),
             vec![b'x'; (MAX_HISTORY_ARTIFACT_SIZE + 1) as usize],
@@ -2828,11 +2867,11 @@ def placeholder():
         let mut store = Store::open(&db).unwrap();
         let indexer = Indexer::new(&dir);
         let stats = indexer.index_all(&mut store, false).unwrap();
-        assert_eq!(stats.history_entries_indexed, 8);
+        assert_eq!(stats.history_entries_indexed, 9);
         assert_eq!(stats.task_specs_indexed, 1);
         assert_eq!(stats.history_entries_skipped, 1);
         assert!(!stats.history_entries_truncated);
-        assert_eq!(store.project_history_count().unwrap(), 8);
+        assert_eq!(store.project_history_count().unwrap(), 9);
         assert_eq!(
             store
                 .search_project_history("authorization before reads", Some("task_spec"), 10)
@@ -2868,6 +2907,13 @@ def placeholder():
         );
         assert_eq!(
             store
+                .search_project_history("experimental release evidence", Some("release_notes"), 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
                 .search_project_history("durable payment state", Some("architecture_decision"), 10,)
                 .unwrap()
                 .len(),
@@ -2876,7 +2922,7 @@ def placeholder():
 
         fs::remove_file(task_dir.join("audit.md")).unwrap();
         let stats = indexer.index_all(&mut store, false).unwrap();
-        assert_eq!(stats.history_entries_indexed, 7);
+        assert_eq!(stats.history_entries_indexed, 8);
         assert!(store
             .search_project_history("runtime boundary", Some("audit"), 10)
             .unwrap()

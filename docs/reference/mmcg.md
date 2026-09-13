@@ -673,7 +673,9 @@ returns at most 500 candidates. Diagnostics are capped at 100
 with an explicit `diagnostics_truncated` flag. Git, CODEOWNERS, history, rewind,
 and SQLite phases cooperatively observe the request budget/cancel signal. The
 head CODEOWNERS file is a bounded regular-file read through a retained,
-no-follow parent capability, so special files and path swaps fail closed.
+no-follow parent capability, so special files and path swaps fail closed. A
+repository-relative override must have an exact canonical path; an ambiguous
+Unix backslash alias cannot be rewritten to select a different baseline file.
 Temporal topology is Tree-sitter syntactic evidence in v1; SCIP, runtime,
 coverage, and test overlays keep their separate provenance in Lens.
 

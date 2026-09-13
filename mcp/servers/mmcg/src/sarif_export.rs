@@ -400,9 +400,8 @@ fn physical_location(path: &str, line: Option<u32>) -> Value {
 }
 
 fn artifact_uri(path: &str) -> String {
-    let normalized = path.replace('\\', "/");
-    let mut encoded = String::with_capacity(normalized.len());
-    for byte in normalized.bytes() {
+    let mut encoded = String::with_capacity(path.len());
+    for byte in path.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
             encoded.push(char::from(byte));
         } else {
@@ -546,9 +545,16 @@ mod tests {
     }
 
     #[test]
-    fn artifact_uris_are_utf8_byte_encoded_and_never_platform_paths() {
+    fn artifact_uris_are_utf8_byte_encoded_without_path_aliasing() {
         assert_eq!(artifact_uri("src/a file.rs"), "src/a%20file.rs");
-        assert_eq!(artifact_uri("src\\nested\\é.rs"), "src/nested/%C3%A9.rs");
+        assert_eq!(
+            artifact_uri("src\\nested\\é.rs"),
+            "src%5Cnested%5C%C3%A9.rs"
+        );
+        assert_ne!(
+            artifact_uri("src\\nested\\é.rs"),
+            artifact_uri("src/nested/é.rs")
+        );
     }
 
     #[test]

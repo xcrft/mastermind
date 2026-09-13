@@ -223,7 +223,9 @@ Before any database write, Mastermind verifies all of the following:
 
 The repository identity is a credential-free digest of the canonical origin
 host/path when a supported Git remote exists, or a digest of the canonical
-local worktree path otherwise. The manifest is capped at 16 MiB, referenced
+local worktree path otherwise. The local fallback requires UTF-8 and preserves
+literal Unix backslashes rather than colliding with a nested slash path. The
+manifest is capped at 16 MiB, referenced
 sources at 10,000 files and 512 MiB total, provenance at 64 artifacts, 32 MiB
 each and 256 MiB total, and facts at 100,000. Query responses expose their own
 smaller limits and explicit partial/truncation states.

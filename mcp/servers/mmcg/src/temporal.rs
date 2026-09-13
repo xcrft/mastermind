@@ -1261,7 +1261,7 @@ fn ownership_delta(
     let head_source = head_path
         .as_deref()
         .and_then(|path| path.strip_prefix(root).ok())
-        .map(|path| path.to_string_lossy().replace('\\', "/"));
+        .and_then(|path| crate::bounded_fs::normalize_repository_relative_path(path).ok());
     if requested_head_path.is_some() && head_source.is_none() {
         let (code, message) = if override_path.is_some() {
             (
@@ -1277,7 +1277,7 @@ fn ownership_delta(
         diagnostics.push(diagnostic(code, message));
         return Ok(TemporalOwnership {
             base_source: None,
-            head_source: requested_head_path.map(|path| path.to_string_lossy().to_string()),
+            head_source: None,
             changes: TemporalCollection {
                 total: None,
                 returned: 0,
@@ -2077,6 +2077,50 @@ mod tests {
                 && change.base_owners == ["@platform"]
                 && change.head_owners == ["@architecture"]
         }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temporal_rejects_a_backslash_codeowners_override_alias() {
+        let root = tempfile::tempdir().unwrap();
+        git(root.path(), &["init", "-q"]);
+        git(
+            root.path(),
+            &["config", "user.email", "temporal@example.com"],
+        );
+        git(root.path(), &["config", "user.name", "Temporal Test"]);
+        write(root.path(), "src/a.py", "def a():\n    return 1\n");
+        write(root.path(), "owners/CODEOWNERS", "* @canonical\n");
+        git(root.path(), &["add", "."]);
+        git(root.path(), &["commit", "-qm", "baseline"]);
+
+        let db = root.path().join(".mastermind/mmcg.db");
+        let mut store = Store::open(&db).unwrap();
+        Indexer::new(root.path())
+            .index_all(&mut store, true)
+            .unwrap();
+        write(root.path(), r"owners\CODEOWNERS", "* @alias\n");
+        let response = analyze(
+            &store,
+            root.path(),
+            &TemporalOptions {
+                since: "HEAD".to_string(),
+                path: ".".to_string(),
+                depth: 1,
+                top: 20,
+                production_only: false,
+                codeowners: Some(PathBuf::from(r"owners\CODEOWNERS")),
+            },
+        )
+        .unwrap();
+
+        assert!(response.partial);
+        assert_eq!(response.ownership.head_source, None);
+        assert!(response.ownership.changes.truncated);
+        assert!(response
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == "external_codeowners_baseline_unavailable" }));
     }
 
     #[test]

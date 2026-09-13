@@ -170,7 +170,9 @@ mastermind enrich --facts mastermind-facts.json \
 
 `facts keygen` uses the operating system CSPRNG, writes the seed with private
 permissions on Unix, prints the derived `sha256:<public-key-digest>`, and
-refuses to replace either key file.
+refuses to replace either key file. Both output paths must have exact UTF-8
+representations; Mastermind validates them before creating either file so the
+reported paths always identify the keys that were written.
 
 The detached format is defined by
 [`mastermind-fact-signature-v1.schema.json`](../schemas/mastermind-fact-signature-v1.schema.json).

@@ -186,6 +186,14 @@ fn output_identity(path: &Path) -> Result<PathBuf, FactSignatureError> {
     Ok(parent.join(name))
 }
 
+fn output_path_string(path: &Path, label: &str) -> Result<String, FactSignatureError> {
+    path.to_str().map(str::to_owned).ok_or_else(|| {
+        FactSignatureError::Contract(format!(
+            "{label} output path must have an exact UTF-8 representation"
+        ))
+    })
+}
+
 fn require_new_output(path: &Path, label: &str) -> Result<(), FactSignatureError> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => Err(FactSignatureError::Contract(format!(
@@ -227,6 +235,8 @@ pub fn generate_keypair(
             "private-key and public-key outputs must be different files".into(),
         ));
     }
+    let private_key_output = output_path_string(&private_key_path, "private-key")?;
+    let public_key_output = output_path_string(&public_key_path, "public-key")?;
     require_new_output(&private_key_path, "private-key")?;
     require_new_output(&public_key_path, "public-key")?;
 
@@ -244,8 +254,8 @@ pub fn generate_keypair(
     Ok(FactKeygenSummary {
         schema_version: 1,
         algorithm: "ed25519",
-        private_key: private_key_path.to_string_lossy().into_owned(),
-        public_key: public_key_path.to_string_lossy().into_owned(),
+        private_key: private_key_output,
+        public_key: public_key_output,
         key_id: format!(
             "sha256:{}",
             crate::audit_bundle::sha256_hex(public.as_slice())
@@ -496,6 +506,14 @@ mod tests {
         assert_eq!(generated.algorithm, "ed25519");
         assert!(generated.key_id.starts_with("sha256:"));
         assert_eq!(
+            generated.private_key,
+            output_identity(&private).unwrap().to_str().unwrap()
+        );
+        assert_eq!(
+            generated.public_key,
+            output_identity(&public).unwrap().to_str().unwrap()
+        );
+        assert_eq!(
             fs::metadata(&private).unwrap().permissions().mode() & 0o777,
             0o600
         );
@@ -517,6 +535,25 @@ mod tests {
         assert!(generate_keypair(&private, &public).is_err());
         assert_eq!(fs::read(&private).unwrap(), private_before);
         assert_eq!(fs::read(&public).unwrap(), public_before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn keygen_rejects_an_inexact_output_path_before_writing_either_key() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let private = root.path().join("producer.seed");
+        let public = root
+            .path()
+            .join(OsString::from_vec(b"producer-\xff.pub".to_vec()));
+
+        let error = generate_keypair(&private, &public).unwrap_err();
+
+        assert!(error.to_string().contains("exact UTF-8"));
+        assert!(!private.exists());
+        assert!(!public.exists());
     }
 
     #[test]

@@ -40,6 +40,12 @@ def sync_gated_summaries(report, suite_name):
     }
 
 
+def bind_target_identity(report, digest="9" * 64):
+    for summary in report["suites"].values():
+        summary["target_definition_digest"] = digest
+        summary["target_definition_stable"] = True
+
+
 class StructuredOutputTests(unittest.TestCase):
     def test_audit_verdict_requires_valid_sentinel_yaml(self):
         valid = """\
@@ -463,6 +469,9 @@ action: passthrough
         for report in (baseline, current):
             report["claude_cli_version"] = "test-cli"
             report["suites"]["critic"]["case_definition_digest"] = digest
+            report["suites"]["critic"]["target_definition_stable"] = True
+        baseline["suites"]["critic"]["target_definition_digest"] = "1" * 64
+        current["suites"]["critic"]["target_definition_digest"] = "2" * 64
         gate = runner.compare_to_baseline(current, baseline)
         self.assertTrue(gate["passed"])
         self.assertEqual(len(gate["checks"]), 8)
@@ -520,6 +529,7 @@ action: passthrough
         for report in (baseline, current):
             report["claude_cli_version"] = "test-cli"
             report["suites"]["critic"]["case_definition_digest"] = "b" * 64
+            bind_target_identity(report)
         gate = runner.compare_to_baseline(current, baseline)
         self.assertFalse(gate["passed"])
         self.assertTrue(
@@ -549,6 +559,8 @@ action: passthrough
         current["claude_cli_version"] = "test-cli"
         baseline["suites"]["critic"]["case_definition_digest"] = "c" * 64
         current["suites"]["critic"]["case_definition_digest"] = "d" * 64
+        bind_target_identity(baseline)
+        bind_target_identity(current)
         gate = runner.compare_to_baseline(current, baseline)
         self.assertFalse(gate["passed"])
         self.assertTrue(any("model mismatch" in item for item in gate["failures"]))
@@ -566,6 +578,7 @@ action: passthrough
         )
         baseline["claude_cli_version"] = "test-cli"
         baseline["suites"]["critic"]["case_definition_digest"] = "e" * 64
+        bind_target_identity(baseline)
 
         current = deepcopy(baseline)
         current["resolved_models"] = ["different-resolved-model"]
@@ -582,6 +595,12 @@ action: passthrough
         current["filters"]["case"] = "c-1"
         gate = runner.compare_to_baseline(current, baseline)
         self.assertTrue(any("filters differ" in item for item in gate["failures"]))
+
+        current = deepcopy(baseline)
+        del current["suites"]["critic"]["target_definition_digest"]
+        del current["suites"]["critic"]["target_definition_stable"]
+        gate = runner.compare_to_baseline(current, baseline)
+        self.assertTrue(any("no target identity" in item for item in gate["failures"]))
 
         current = deepcopy(baseline)
         current["suites"]["critic"]["case_definition_digest"] = "f" * 64
@@ -615,6 +634,7 @@ action: passthrough
         )
         baseline["claude_cli_version"] = "test-cli"
         baseline["suites"]["critic"]["case_definition_digest"] = "f" * 64
+        bind_target_identity(baseline)
         current = deepcopy(baseline)
         current["cases"][0]["usage"]["input_tokens"] = 999_999
         current["suites"]["critic"]["usage"]["context_tokens"] = {
@@ -737,10 +757,12 @@ action: passthrough
             cases.write_text(
                 json.dumps({"id": "case", "input": {}, "expect": {}}) + "\n"
             )
+            subagent = root / "agent.md"
+            subagent.write_text("---\nname: test\ndescription: test\n---\nPrompt.\n")
             report_path = root / "report.json"
             suites = {
                 "critic": {
-                    "subagent": None,
+                    "subagent": subagent,
                     "cases": cases,
                     "renderer": "render_critic_input",
                     "uses_fixture": False,
@@ -791,6 +813,100 @@ action: passthrough
         self.assertFalse(report["suites"]["critic"]["definition_stable"])
         self.assertTrue(runner.report_comparison_issues(report, "test"))
         self.assertIn("definition changed", output.getvalue())
+
+    def test_frozen_evaluation_target_isolated_from_later_source_changes(self):
+        case = {"id": "case"}
+        with tempfile.TemporaryDirectory() as target:
+            root = Path(target)
+            source = root / "agent.md"
+            source.write_text("first prompt\n")
+            suite = {"subagent": source}
+            frozen = root / "frozen"
+            frozen.mkdir()
+
+            source_digest = runner.evaluation_target_digest(
+                "critic", suite, [case]
+            )
+            frozen_suite, workflow_root = runner.snapshot_evaluation_targets(
+                "critic", suite, [case], frozen
+            )
+            frozen_digest = runner.evaluation_target_digest(
+                "critic", frozen_suite, [case], workflow_root=workflow_root
+            )
+            source.write_text("second prompt\n")
+            changed_source_digest = runner.evaluation_target_digest(
+                "critic", suite, [case]
+            )
+            unchanged_frozen_digest = runner.evaluation_target_digest(
+                "critic", frozen_suite, [case], workflow_root=workflow_root
+            )
+
+        self.assertEqual(source_digest, frozen_digest)
+        self.assertNotEqual(source_digest, changed_source_digest)
+        self.assertEqual(frozen_digest, unchanged_frozen_digest)
+
+    def test_main_fails_report_when_evaluation_target_changes_during_run(self):
+        with tempfile.TemporaryDirectory() as target:
+            root = Path(target)
+            cases = root / "critic.jsonl"
+            cases.write_text(
+                json.dumps({"id": "case", "input": {}, "expect": {}}) + "\n"
+            )
+            subagent = root / "agent.md"
+            subagent.write_text("---\nname: test\ndescription: test\n---\nPrompt.\n")
+            report_path = root / "report.json"
+            suites = {
+                "critic": {
+                    "subagent": subagent,
+                    "cases": cases,
+                    "renderer": "render_critic_input",
+                    "uses_fixture": False,
+                }
+            }
+
+            def evaluate(*_args, **_kwargs):
+                subagent.write_text(
+                    "---\nname: test\ndescription: test\n---\nChanged prompt.\n"
+                )
+                return runner.Result(
+                    "case",
+                    "critic",
+                    True,
+                    telemetry_complete=True,
+                    resolved_models=[RESOLVED_MODEL],
+                )
+
+            argv = [
+                "runner.py",
+                "--suite",
+                "critic",
+                "--report",
+                str(report_path),
+            ]
+            output = io.StringIO()
+            with (
+                patch.object(runner, "SUITES", suites),
+                patch.object(runner.sys, "argv", argv),
+                patch.object(runner.shutil, "which", return_value="/usr/bin/tool"),
+                patch.object(runner, "evaluate_case", side_effect=evaluate),
+                patch.object(runner, "git_revision", return_value="revision"),
+                patch.object(runner, "claude_cli_version", return_value="test-cli"),
+                redirect_stdout(output),
+            ):
+                status = runner.main()
+            report = json.loads(report_path.read_text())
+
+        self.assertEqual(status, 1)
+        self.assertFalse(report["cases"][0]["passed"])
+        self.assertIn(
+            "evaluated agent or skill changed during evaluation",
+            report["cases"][0]["reasons"],
+        )
+        self.assertFalse(
+            report["suites"]["critic"]["target_definition_stable"]
+        )
+        self.assertTrue(runner.report_comparison_issues(report, "test"))
+        self.assertIn("agent or skill changed", output.getvalue())
 
     def test_unknown_case_filter_is_a_nonzero_cli_error(self):
         argv = [
@@ -1138,6 +1254,24 @@ class PromptIsolationTests(unittest.TestCase):
         self.assertNotIn("Bash(cargo *)", allowed)
         self.assertNotIn("Bash(cargo test *)", allowed)
         self.assertFalse(runner.requires_prompt_sandbox("auditor"))
+
+    def test_researcher_allowed_tools_come_from_the_frozen_subagent(self):
+        with tempfile.TemporaryDirectory() as target:
+            subagent = Path(target) / "researcher.md"
+            subagent.write_text(
+                "---\n"
+                "name: frozen-researcher\n"
+                "description: Frozen definition\n"
+                "tools:\n"
+                "  - mcp__mmcg__frozen_search\n"
+                "---\n"
+                "Prompt.\n"
+            )
+            arguments = runner.isolated_cli_args(
+                "researcher", subagent=subagent
+            )
+        allowed = arguments[arguments.index("--allowedTools") + 1]
+        self.assertIn("mcp__mmcg__frozen_search", allowed)
 
     def test_auditor_eval_uses_the_shipped_agent_runtime_contract(self):
         path = runner.SUITES["auditor"]["subagent"]

@@ -277,6 +277,7 @@ mmcg miner profile . --deep                    # explicit claude -p compatibilit
 # Git history reads are bounded; an oversized patch sample shrinks by whole commits.
 # --deep caps its prompt/output, rejects malformed sections, and times out after 180s.
 # Subdirectories and linked worktrees share one repository contribution.
+# Git common-directory keys require an exact UTF-8 canonical path.
 # Independent clones remain separate; repeated samples do not prove quality.
 
 # Preview or apply one supported MCP client target.

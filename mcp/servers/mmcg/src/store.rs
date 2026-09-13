@@ -2587,6 +2587,11 @@ fn open_private_index_snapshot(
     Ok((connection, snapshot_dir, source_state))
 }
 
+fn sqlite_vacuum_target(path: &Path) -> SqlResult<&str> {
+    path.to_str()
+        .ok_or_else(|| rusqlite::Error::InvalidPath(path.to_path_buf()))
+}
+
 fn encode_sqlite_uri_path(path: &[u8]) -> Vec<u8> {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut encoded = Vec::with_capacity(path.len());
@@ -3034,6 +3039,7 @@ impl Store {
             .canonicalize()
             .map_err(|error| sqlite_io_error("resolve temporal index snapshot", error))?
             .join("mmcg.db");
+        let vacuum_target = sqlite_vacuum_target(&snapshot_path)?;
         let snapshot_root = crate::bounded_fs::RootCapability::open(
             snapshot_path
                 .parent()
@@ -3047,10 +3053,7 @@ impl Store {
         if query_only {
             self.conn.execute_batch("PRAGMA query_only = OFF;")?;
         }
-        let vacuum = self.conn.execute(
-            "VACUUM INTO ?1",
-            params![snapshot_path.to_string_lossy().as_ref()],
-        );
+        let vacuum = self.conn.execute("VACUUM INTO ?1", params![vacuum_target]);
         let restore = if query_only {
             self.conn.execute_batch("PRAGMA query_only = ON;")
         } else {
@@ -8540,6 +8543,18 @@ mod tests {
         );
         assert!(windows_sqlite_uri_path(r"\\server\share\mmcg.db").is_none());
         assert!(windows_sqlite_uri_path(r"\\?\UNC\server\share\mmcg.db").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sqlite_vacuum_target_rejects_non_utf8_paths() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = PathBuf::from(OsString::from_vec(b"/tmp/snapshot-\xff.db".to_vec()));
+        let error = sqlite_vacuum_target(&path).unwrap_err();
+
+        assert!(matches!(error, rusqlite::Error::InvalidPath(value) if value == path));
     }
 
     #[test]

@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Temporal SQLite snapshots and style-profile repository keys no longer pass
+  canonical paths through lossy UTF-8 conversion. Unrepresentable paths fail
+  before `VACUUM INTO` or profile-store writes can target another location or
+  merge another repository's contribution.
 - Index bindings, Lens narrative bindings, and team lock manifests now reject
   repository paths that cannot be represented exactly in their UTF-8 contracts.
   Identity failures no longer fall back to lossy path hashes or serialized paths

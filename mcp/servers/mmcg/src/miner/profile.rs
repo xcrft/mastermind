@@ -246,10 +246,17 @@ fn repository_key(root: &Path) -> Result<String, Box<dyn std::error::Error>> {
     let output = String::from_utf8(output)?;
     let path = output.strip_suffix('\n').unwrap_or(&output);
     let path = path.strip_suffix('\r').unwrap_or(path);
-    Ok(Path::new(path)
-        .canonicalize()?
-        .to_string_lossy()
-        .into_owned())
+    Ok(canonical_repository_key(Path::new(path))?)
+}
+
+fn canonical_repository_key(path: &Path) -> std::io::Result<String> {
+    let canonical = path.canonicalize()?;
+    canonical.to_str().map(str::to_owned).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "canonical Git common directory is not valid UTF-8",
+        )
+    })
 }
 
 /// Older profiles used checkout paths as keys. Prefer the most recently mined
@@ -2090,6 +2097,27 @@ mod tests {
             db.list_repos().unwrap()[0].0,
             repository_key(&root).unwrap()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_keys_reject_non_utf8_canonical_paths() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        use std::os::unix::fs::symlink;
+
+        let parent = tempfile::tempdir().unwrap();
+        let target = parent
+            .path()
+            .join(OsString::from_vec(b"git-common-\xff".to_vec()));
+        std::fs::create_dir(&target).unwrap();
+        let alias = parent.path().join("git-common-alias");
+        symlink(&target, &alias).unwrap();
+
+        let error = canonical_repository_key(&alias).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("not valid UTF-8"));
     }
 
     #[test]

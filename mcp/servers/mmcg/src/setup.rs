@@ -423,13 +423,14 @@ fn target_for(request: &Request) -> Result<Target, &'static str> {
 }
 
 fn run_json(request: &Request, target: &Target, entry: &Value) -> Outcome {
-    let observed = match read_capped(&target.path) {
+    let observed = match read_config_snapshot(&target.path) {
         Ok(value) => value,
         Err(class) => {
             return finish_error(request, &target.label, operation(request), entry, &class)
         }
     };
-    let mut config = match observed.as_deref() {
+    let observed_bytes = observed.as_ref().map(ConfigSnapshot::bytes);
+    let mut config = match observed_bytes {
         None => json!({}),
         Some([]) => json!({}),
         Some(bytes) => match parse_json_unique(bytes) {
@@ -480,7 +481,7 @@ fn run_json(request: &Request, target: &Target, entry: &Value) -> Outcome {
             return finish_outcome(request, &target.label, "remove", entry, Outcome::DryRun);
         }
         if customized {
-            if let Some(bytes) = observed.as_deref() {
+            if let Some(bytes) = observed_bytes {
                 if backup_private(&target.path, bytes).is_err() {
                     return finish_error(request, &target.label, "remove", entry, "backup_failed");
                 }
@@ -507,7 +508,7 @@ fn run_json(request: &Request, target: &Target, entry: &Value) -> Outcome {
             return finish_outcome(request, &target.label, "install", entry, Outcome::DryRun);
         }
         if customized {
-            if let Some(bytes) = observed.as_deref() {
+            if let Some(bytes) = observed_bytes {
                 if backup_private(&target.path, bytes).is_err() {
                     return finish_error(request, &target.label, "install", entry, "backup_failed");
                 }
@@ -532,7 +533,7 @@ fn run_json(request: &Request, target: &Target, entry: &Value) -> Outcome {
         }
     };
     body.push(b'\n');
-    match safe_replace(&target.path, observed.as_deref(), &body) {
+    match safe_replace(&target.path, observed.as_ref(), &body) {
         Ok(()) => finish_outcome(
             request,
             &target.label,
@@ -558,14 +559,15 @@ pub(crate) fn continue_entry(entry: &Value) -> Value {
 }
 
 fn run_continue(request: &Request, target: &Target, entry: &Value) -> Outcome {
-    let observed = match read_capped(&target.path) {
+    let observed = match read_config_snapshot(&target.path) {
         Ok(value) => value,
         Err(class) => {
             return finish_error(request, &target.label, operation(request), entry, &class)
         }
     };
     let canonical = continue_entry(entry);
-    let existing = match observed.as_deref() {
+    let observed_bytes = observed.as_ref().map(ConfigSnapshot::bytes);
+    let existing = match observed_bytes {
         None => None,
         Some(bytes) => match std::str::from_utf8(bytes)
             .map_err(|_| "invalid_yaml_encoding".to_string())
@@ -597,13 +599,13 @@ fn run_continue(request: &Request, target: &Target, entry: &Value) -> Outcome {
             return finish_outcome(request, &target.label, "remove", entry, Outcome::DryRun);
         }
         if customized {
-            if let Some(bytes) = observed.as_deref() {
+            if let Some(bytes) = observed_bytes {
                 if backup_private(&target.path, bytes).is_err() {
                     return finish_error(request, &target.label, "remove", entry, "backup_failed");
                 }
             }
         }
-        return match safe_remove(&target.path, observed.as_deref()) {
+        return match safe_remove(&target.path, observed.as_ref()) {
             Ok(()) => finish_outcome(request, &target.label, "remove", entry, Outcome::Wrote),
             Err(class) => finish_error(request, &target.label, "remove", entry, &class),
         };
@@ -625,7 +627,7 @@ fn run_continue(request: &Request, target: &Target, entry: &Value) -> Outcome {
         return finish_outcome(request, &target.label, "install", entry, Outcome::DryRun);
     }
     if existing.is_some() {
-        if let Some(bytes) = observed.as_deref() {
+        if let Some(bytes) = observed_bytes {
             if backup_private(&target.path, bytes).is_err() {
                 return finish_error(request, &target.label, "install", entry, "backup_failed");
             }
@@ -643,7 +645,7 @@ fn run_continue(request: &Request, target: &Target, entry: &Value) -> Outcome {
             )
         }
     };
-    match safe_replace(&target.path, observed.as_deref(), body.as_bytes()) {
+    match safe_replace(&target.path, observed.as_ref(), body.as_bytes()) {
         Ok(()) => finish_outcome(request, &target.label, "install", entry, Outcome::Wrote),
         Err(class) => finish_error(request, &target.label, "install", entry, &class),
     }
@@ -1112,7 +1114,20 @@ fn read_capped(path: &Path) -> Result<Option<Vec<u8>>, String> {
     read_config_capped(path)
 }
 
-pub(crate) fn read_config_capped(path: &Path) -> Result<Option<Vec<u8>>, String> {
+struct ConfigSnapshot {
+    root: crate::bounded_fs::RootCapability,
+    target: PathBuf,
+    bytes: Vec<u8>,
+    identity: crate::bounded_fs::StableFileIdentity,
+}
+
+impl ConfigSnapshot {
+    fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+fn read_config_snapshot(path: &Path) -> Result<Option<ConfigSnapshot>, String> {
     ensure_safe_target(path)?;
     let (root, target) = match crate::bounded_fs::open_file_target(path) {
         Ok(target) => target,
@@ -1130,7 +1145,12 @@ pub(crate) fn read_config_capped(path: &Path) -> Result<Option<Vec<u8>>, String>
         CONFIG_MAX_BYTES as u64,
         crate::bounded_fs::ReadControl::default(),
     ) {
-        Ok(file) => Ok(Some(file.bytes)),
+        Ok(file) => Ok(Some(ConfigSnapshot {
+            root,
+            target,
+            bytes: file.bytes,
+            identity: file.identity,
+        })),
         Err(crate::bounded_fs::BoundedReadError::Io(error))
             if error.kind() == std::io::ErrorKind::NotFound =>
         {
@@ -1140,6 +1160,10 @@ pub(crate) fn read_config_capped(path: &Path) -> Result<Option<Vec<u8>>, String>
         Err(crate::bounded_fs::BoundedReadError::TooLarge { .. }) => Err("config_too_large".into()),
         Err(_) => Err("config_read_failed".into()),
     }
+}
+
+pub(crate) fn read_config_capped(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    read_config_snapshot(path).map(|snapshot| snapshot.map(|snapshot| snapshot.bytes))
 }
 
 fn redact_entry(entry: &Value) -> Value {
@@ -1163,71 +1187,16 @@ fn redact_entry(entry: &Value) -> Value {
     Value::Object(redacted)
 }
 
-fn safe_replace(path: &Path, observed: Option<&[u8]>, body: &[u8]) -> Result<(), String> {
-    ensure_safe_target(path)?;
-    let (root, target) = crate::bounded_fs::prepare_file_target(path)
-        .map_err(|_| "parent_create_failed".to_string())?;
-    let (current, expectation, unix_mode) =
-        match crate::bounded_fs::read_regular_file_with_capability(
-            &root,
-            &target,
-            CONFIG_MAX_BYTES as u64,
-            CONFIG_MAX_BYTES as u64,
-            crate::bounded_fs::ReadControl::default(),
-        ) {
-            Ok(file) => {
-                #[cfg(unix)]
-                let unix_mode = file.identity.attributes() as u32 & 0o777;
-                #[cfg(not(unix))]
-                let unix_mode = 0o600;
-                (
-                    Some(file.bytes),
-                    crate::bounded_fs::AtomicWriteExpectation::File(file.identity),
-                    unix_mode,
-                )
-            }
-            Err(crate::bounded_fs::BoundedReadError::Io(error))
-                if error.kind() == std::io::ErrorKind::NotFound =>
-            {
-                let missing = crate::bounded_fs::inspect_absent_path(
-                    &root,
-                    &target,
-                    crate::bounded_fs::ReadControl::default(),
-                )
-                .map_err(|_| "config_recheck_failed".to_string())?
-                .ok_or_else(|| "config_changed_concurrently".to_string())?;
-                (
-                    None,
-                    crate::bounded_fs::AtomicWriteExpectation::Missing(missing),
-                    0o600,
-                )
-            }
-            Err(crate::bounded_fs::BoundedReadError::TooLarge { .. }) => {
-                return Err("config_too_large".into())
-            }
-            Err(_) => return Err("config_recheck_failed".into()),
-        };
-    let unchanged = match (observed, current.as_deref()) {
-        (None, None) => true,
-        (Some(before), Some(now)) => before == now,
-        _ => false,
-    };
-    if !unchanged {
-        return Err("config_changed_concurrently".into());
-    }
-    crate::bounded_fs::write_atomic_regular_file_expected_with_capability_mode(
-        &root,
-        &target,
-        body,
-        unix_mode,
-        expectation,
-    )
-    .map_err(|error| match error {
+fn map_config_write(result: Result<(), crate::bounded_fs::BoundedReadError>) -> Result<(), String> {
+    result.map_err(|error| match error {
         crate::bounded_fs::BoundedReadError::SnapshotChanged => {
             "config_changed_concurrently".to_string()
         }
         crate::bounded_fs::BoundedReadError::Io(error)
-            if error.kind() == std::io::ErrorKind::AlreadyExists =>
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::NotFound
+            ) =>
         {
             "config_changed_concurrently".to_string()
         }
@@ -1235,23 +1204,114 @@ fn safe_replace(path: &Path, observed: Option<&[u8]>, body: &[u8]) -> Result<(),
     })
 }
 
-fn safe_remove(path: &Path, observed: Option<&[u8]>) -> Result<(), String> {
-    ensure_safe_target(path)?;
-    let current = match std::fs::read(path) {
-        Ok(bytes) => Some(bytes),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => return Err("config_recheck_failed".into()),
-    };
-    let unchanged = match (observed, current.as_deref()) {
-        (None, None) => true,
-        (Some(before), Some(now)) => before == now,
-        _ => false,
-    };
-    if !unchanged {
+fn snapshot_read_error(error: crate::bounded_fs::BoundedReadError) -> String {
+    match error {
+        crate::bounded_fs::BoundedReadError::TooLarge { .. } => "config_too_large".into(),
+        crate::bounded_fs::BoundedReadError::SnapshotChanged
+        | crate::bounded_fs::BoundedReadError::NotRegular => "config_changed_concurrently".into(),
+        crate::bounded_fs::BoundedReadError::Io(error)
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            "config_changed_concurrently".into()
+        }
+        _ => "config_recheck_failed".into(),
+    }
+}
+
+fn recheck_config_snapshot(observed: &ConfigSnapshot) -> Result<(), String> {
+    let current = crate::bounded_fs::read_regular_file_expected(
+        &observed.root,
+        &observed.target,
+        CONFIG_MAX_BYTES as u64,
+        CONFIG_MAX_BYTES as u64,
+        crate::bounded_fs::ReadControl::default(),
+        Some(observed.identity),
+    )
+    .map_err(snapshot_read_error)?;
+    if current.bytes.as_slice() != observed.bytes.as_slice() {
         return Err("config_changed_concurrently".into());
     }
-    std::fs::remove_file(path).map_err(|_| "config_remove_failed".to_string())?;
-    sync_parent(path.parent().ok_or_else(|| "invalid_target".to_string())?)
+    Ok(())
+}
+
+fn safe_replace(path: &Path, observed: Option<&ConfigSnapshot>, body: &[u8]) -> Result<(), String> {
+    ensure_safe_target(path)?;
+    if let Some(observed) = observed {
+        recheck_config_snapshot(observed)?;
+        #[cfg(unix)]
+        let unix_mode = observed.identity.attributes() as u32 & 0o777;
+        #[cfg(not(unix))]
+        let unix_mode = 0o600;
+        return map_config_write(
+            crate::bounded_fs::write_atomic_regular_file_expected_with_capability_mode(
+                &observed.root,
+                &observed.target,
+                body,
+                unix_mode,
+                crate::bounded_fs::AtomicWriteExpectation::File(observed.identity),
+            ),
+        );
+    }
+
+    let (root, target) = crate::bounded_fs::prepare_file_target(path)
+        .map_err(|_| "parent_create_failed".to_string())?;
+    match crate::bounded_fs::read_regular_file_with_capability(
+        &root,
+        &target,
+        CONFIG_MAX_BYTES as u64,
+        CONFIG_MAX_BYTES as u64,
+        crate::bounded_fs::ReadControl::default(),
+    ) {
+        Ok(_) => return Err("config_changed_concurrently".into()),
+        Err(crate::bounded_fs::BoundedReadError::Io(error))
+            if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(crate::bounded_fs::BoundedReadError::TooLarge { .. }) => {
+            return Err("config_too_large".into())
+        }
+        Err(crate::bounded_fs::BoundedReadError::NotRegular) => {
+            return Err("config_changed_concurrently".into())
+        }
+        Err(_) => return Err("config_recheck_failed".into()),
+    }
+    let missing = crate::bounded_fs::inspect_absent_path(
+        &root,
+        &target,
+        crate::bounded_fs::ReadControl::default(),
+    )
+    .map_err(|_| "config_recheck_failed".to_string())?
+    .ok_or_else(|| "config_changed_concurrently".to_string())?;
+    map_config_write(
+        crate::bounded_fs::write_atomic_regular_file_expected_with_capability_mode(
+            &root,
+            &target,
+            body,
+            0o600,
+            crate::bounded_fs::AtomicWriteExpectation::Missing(missing),
+        ),
+    )
+}
+
+fn safe_remove(path: &Path, observed: Option<&ConfigSnapshot>) -> Result<(), String> {
+    ensure_safe_target(path)?;
+    let observed = observed.ok_or_else(|| "config_changed_concurrently".to_string())?;
+    recheck_config_snapshot(observed)?;
+    crate::bounded_fs::remove_regular_file_expected_with_capability(
+        &observed.root,
+        &observed.target,
+        observed.identity,
+    )
+    .map_err(|error| match error {
+        crate::bounded_fs::BoundedReadError::SnapshotChanged
+        | crate::bounded_fs::BoundedReadError::NotRegular => {
+            "config_changed_concurrently".to_string()
+        }
+        crate::bounded_fs::BoundedReadError::Io(error)
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            "config_changed_concurrently".to_string()
+        }
+        _ => "config_remove_failed".to_string(),
+    })
 }
 
 fn backup_private(path: &Path, body: &[u8]) -> Result<PathBuf, String> {
@@ -1635,16 +1695,6 @@ fn drain_bounded<R: Read>(mut reader: R) -> Result<(Vec<u8>, bool), String> {
         truncated |= keep < read;
     }
     Ok((retained, truncated))
-}
-
-fn sync_parent(_parent: &Path) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        std::fs::File::open(_parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|_| "parent_sync_failed".to_string())?;
-    }
-    Ok(())
 }
 
 fn render_plan_summary(
@@ -2661,7 +2711,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
         }
-        let observed = fs::read(&target).unwrap();
+        let observed = read_config_snapshot(&target).unwrap().unwrap();
         safe_replace(&target, Some(&observed), b"after").unwrap();
         #[cfg(unix)]
         {
@@ -2671,7 +2721,7 @@ mod tests {
                 0o640
             );
         }
-        let stale = fs::read(&target).unwrap();
+        let stale = read_config_snapshot(&target).unwrap().unwrap();
         fs::write(&target, b"changed").unwrap();
         assert_eq!(
             safe_replace(&target, Some(&stale), b"rejected").unwrap_err(),
@@ -2762,7 +2812,7 @@ mod tests {
         let root = tmp("safe-replace");
         let target = root.join("config.json");
         fs::write(&target, b"before").unwrap();
-        let observed = fs::read(&target).unwrap();
+        let observed = read_config_snapshot(&target).unwrap().unwrap();
         fs::write(&target, b"changed").unwrap();
         assert_eq!(
             safe_replace(&target, Some(&observed), b"after").unwrap_err(),
@@ -2776,10 +2826,48 @@ mod tests {
             let link = root.join("link.json");
             symlink(&target, &link).unwrap();
             assert_eq!(
-                safe_replace(&link, Some(b"changed"), b"after").unwrap_err(),
+                safe_replace(&link, None, b"after").unwrap_err(),
                 "symlink_target_rejected"
             );
         }
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn safe_replace_rejects_a_same_byte_file_replacement() {
+        let root = tmp("safe-replace-replacement");
+        let target = root.join("config.json");
+        let replacement = root.join("replacement.json");
+        fs::write(&target, b"same bytes").unwrap();
+        let observed = read_config_snapshot(&target).unwrap().unwrap();
+        fs::write(&replacement, b"same bytes").unwrap();
+        fs::remove_file(&target).unwrap();
+        fs::rename(&replacement, &target).unwrap();
+
+        assert_eq!(
+            safe_replace(&target, Some(&observed), b"after").unwrap_err(),
+            "config_changed_concurrently"
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"same bytes");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn safe_remove_rejects_a_same_byte_file_replacement() {
+        let root = tmp("safe-remove-replacement");
+        let target = root.join("config.json");
+        let replacement = root.join("replacement.json");
+        fs::write(&target, b"same bytes").unwrap();
+        let observed = read_config_snapshot(&target).unwrap().unwrap();
+        fs::write(&replacement, b"same bytes").unwrap();
+        fs::remove_file(&target).unwrap();
+        fs::rename(&replacement, &target).unwrap();
+
+        assert_eq!(
+            safe_remove(&target, Some(&observed)).unwrap_err(),
+            "config_changed_concurrently"
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"same bytes");
         fs::remove_dir_all(root).ok();
     }
 

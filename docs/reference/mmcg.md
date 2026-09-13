@@ -1276,7 +1276,7 @@ mastermind setup <claude|cursor|codex|continue|generic> \
   --scope <project|user> [--root .] [--config PATH] [--write] [--remove] [--force]
 ```
 
-Claude supports project JSON and user-native registration; Cursor supports project and user JSON; Codex is user-only through its native CLI; Continue owns a standalone `mastermind.yaml`; Generic requires `--config`. `--force` permits customized replacement/removal but never implies `--write`; file-backed customized data is backed up privately under `~/.mastermind/setup-backups/`. Config reads, replacements, and backup publication retain no-follow directory capabilities, preserve existing Unix permission bits, and reject concurrent identity changes. Doctor compares bounded config data to the trusted current binary and never executes configured commands.
+Claude supports project JSON and user-native registration; Cursor supports project and user JSON; Codex is user-only through its native CLI; Continue owns a standalone `mastermind.yaml`; Generic requires `--config`. `--force` permits customized replacement/removal but never implies `--write`; file-backed customized data is backed up privately under `~/.mastermind/setup-backups/`. Replacement and removal of an existing config retain the no-follow snapshot captured by the decision read, preserve existing Unix permission bits, and reject same-byte identity changes; backup publication uses its own retained directory capability. Doctor compares bounded config data to the trusted current binary and never executes configured commands.
 
 The equivalent generic MCP JSON shape is:
 

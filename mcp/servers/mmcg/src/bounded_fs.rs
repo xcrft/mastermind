@@ -445,12 +445,9 @@ impl RootCapability {
         self.verify()?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
+            use cap_std::fs::PermissionsExt;
             self.directory
-                .try_clone()
-                .map_err(BoundedReadError::Io)?
-                .into_std_file()
-                .set_permissions(std::fs::Permissions::from_mode(unix_mode))
+                .set_permissions(".", cap_std::fs::Permissions::from_mode(unix_mode))
                 .map_err(BoundedReadError::Io)?;
         }
         #[cfg(not(unix))]
@@ -814,6 +811,45 @@ pub(crate) fn write_atomic_regular_file_with_capability(
         private,
         AtomicWriteExpectation::Any,
     )
+}
+
+/// Remove the selected regular file through its retained parent capability
+/// after revalidating the identity captured by the caller.
+pub(crate) fn remove_regular_file_expected_with_capability(
+    root: &RootCapability,
+    path: &Path,
+    expected: StableFileIdentity,
+) -> Result<(), BoundedReadError> {
+    root.verify()?;
+    let relative = root.relative(path)?;
+    let name = relative
+        .file_name()
+        .ok_or(BoundedReadError::InvalidPath)?
+        .to_os_string();
+    let parent_relative = relative.parent().unwrap_or_else(|| Path::new(""));
+    let parent = open_relative_directory_nofollow(&root.directory, parent_relative)?;
+    let parent_identity = directory_identity(&parent)?;
+
+    read_regular_file_expected(
+        root,
+        path,
+        u64::MAX,
+        0,
+        ReadControl::default(),
+        Some(expected),
+    )?;
+    root.verify()?;
+    let current_parent = open_relative_directory_nofollow(&root.directory, parent_relative)?;
+    if !directory_identity(&current_parent)?.same_object(parent_identity) {
+        return Err(BoundedReadError::SnapshotChanged);
+    }
+    parent.remove_file(&name).map_err(BoundedReadError::Io)?;
+    sync_directory(&parent)?;
+    root.verify()?;
+    match inspect_absent_path(root, path, ReadControl::default())? {
+        Some(_) => Ok(()),
+        None => Err(BoundedReadError::SnapshotChanged),
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]

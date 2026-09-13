@@ -6654,18 +6654,25 @@ mod tests {
         fs::create_dir_all(&agents).unwrap();
         fs::create_dir_all(&skills).unwrap();
         fs::write(agents.join("mastermind-valid.md"), "valid\n").unwrap();
-        fs::write(
-            agents.join(std::ffi::OsString::from_vec(
-                b"mastermind-invalid-\xff.md".to_vec(),
-            )),
-            "invalid\n",
-        )
-        .unwrap();
+        let invalid_agent = agents.join(std::ffi::OsString::from_vec(
+            b"mastermind-invalid-\xff.md".to_vec(),
+        ));
+        if let Err(error) = fs::write(&invalid_agent, "invalid\n") {
+            if error.raw_os_error() == Some(libc::EILSEQ) {
+                return;
+            }
+            panic!("create non-UTF-8 agent fixture: {error}");
+        }
         fs::create_dir(skills.join("mastermind-valid")).unwrap();
-        fs::create_dir(skills.join(std::ffi::OsString::from_vec(
+        let invalid_skill = skills.join(std::ffi::OsString::from_vec(
             b"mastermind-invalid-\xff".to_vec(),
-        )))
-        .unwrap();
+        ));
+        if let Err(error) = fs::create_dir(&invalid_skill) {
+            if error.raw_os_error() == Some(libc::EILSEQ) {
+                return;
+            }
+            panic!("create non-UTF-8 skill fixture: {error}");
+        }
 
         assert_eq!(count_matching_files(&agents, "mastermind-", ".md"), 1);
         assert_eq!(count_workflow_skill_dirs(&skills), 1);

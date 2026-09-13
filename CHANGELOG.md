@@ -14,15 +14,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
-- Local Windows worktree bindings now use the retained directory object's
-  stable identity, so short, long, and canonical spellings of the same path do
-  not invalidate task state. Architecture-policy configs are resolved through
-  the repository capability instead of string-prefix path comparisons.
-- File-backed setup now reads and replaces configs through retained no-follow
-  directory capabilities instead of reopening checked path strings. Existing
-  Unix permission bits remain intact, concurrent identity changes fail closed,
-  and private backups use safe UTF-8 labels plus atomic no-clobber publication
-  in a capability-bound `0700` directory.
+- Local worktree bindings now resolve Unix filesystem aliases to the canonical
+  directory and use the retained directory object's stable identity on
+  Windows, so equivalent spellings do not invalidate task state.
+  Architecture-policy configs are resolved through the repository capability
+  instead of string-prefix path comparisons.
+- When a file-backed config exists, setup now keeps its no-follow snapshot from
+  the decision read through replacement or removal instead of reopening
+  checked path strings. Existing Unix permission bits remain intact, same-byte
+  file replacements fail the identity check, and private backups use safe
+  UTF-8 labels plus atomic no-clobber publication in a capability-bound `0700`
+  directory.
 - Conditional atomic file creation now uses an operating-system atomic
   no-clobber publication primitive, closing the race between the final absence
   check and publication.

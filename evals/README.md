@@ -62,7 +62,11 @@ Model-backed subprocesses retain the normal login location and an explicit
 `CLAUDE_CODE_OAUTH_TOKEN`, when present. They remove inherited provider, model,
 effort, thinking, MCP, tool-search, and telemetry overrides; in particular,
 `ANTHROPIC_API_KEY` cannot silently replace a logged-in subscription in print
-mode. Managed organization policy can still affect Claude Code. The observed
+mode. Filesystem setting sources and auto memory are disabled. They also remove
+inherited `GIT_*` state, disable global/system Git
+configuration and hooks, use deterministic fixture commit identities, and put
+the hashed fixture Git directory first in `PATH`. Managed organization policy
+can still affect Claude Code. The observed
 init checks catch tool, server, permission, working-directory, and CLI-version
 drift, but reports from different managed-policy environments are not proven
 comparable.
@@ -156,10 +160,11 @@ run finishes fails every case. A legacy baseline may omit this binary identity;
 when both reports contain it, the gate requires an exact match. Claude CLI
 reported cost is retained as telemetry, but these runs use the maintainer's
 existing Claude subscription rather than per-token API billing. New reports
-also bind the grader to `runner.py`, `evidence.py`, Python, the platform, and
-PyYAML with `evaluation_harness.sha256`. That harness must remain stable within
-a run and match any non-legacy baseline, so a grader change cannot masquerade as
-agent quality improvement. Researcher and auditor runs also pin the exact Git
+also bind the grader to `runner.py`, `benchmark_process.py`, `evidence.py`,
+Python, the platform, and PyYAML with `evaluation_harness.sha256`. That harness
+must remain stable within a run and match any non-legacy baseline, so a grader
+change cannot masquerade as agent quality improvement. Researcher and auditor
+runs also pin the exact Git
 and mmcg executables used to construct and index fixtures. Their hashes, Git
 version, and stability are recorded as `fixture_runtime`; future baselines must
 match them. Prompt-only suites do not require Git or mmcg.
@@ -364,6 +369,14 @@ Git fixture trees, preserving staged, unstaged, and untracked changes:
 - `vanilla`: a neutral reviewer with shell access, but no mmcg or Mastermind
   auditor contract;
 - `mastermind`: the shipped auditor with the live codegraph.
+
+Both conditions use the same pinned Claude and Git executables, explicit model,
+effort, turn and output limits, scrubbed environment, bounded process transport,
+and isolated Claude settings. The vanilla condition exposes only built-in
+read/search tools and read-only Git commands, builds no mmcg index, and counts a
+phrase result only after the event stream proves a successful Git inspection.
+Runtime, parse, permission, and transport failures are reported as errors and
+make the command exit non-zero.
 
 Golden `held` cases are excluded because there is no defect to catch.
 

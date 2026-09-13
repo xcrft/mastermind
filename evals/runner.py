@@ -156,12 +156,23 @@ WORKFLOW_ARTIFACTS = frozenset(
 GIT_ENV = {
     "GIT_AUTHOR_NAME": "mmcg-eval",
     "GIT_AUTHOR_EMAIL": "eval@mastermind.local",
+    "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z",
     "GIT_COMMITTER_NAME": "mmcg-eval",
     "GIT_COMMITTER_EMAIL": "eval@mastermind.local",
-    # Avoid GPG signing inside fixtures (some dev machines force it globally).
-    "GIT_CONFIG_COUNT": "1",
+    "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z",
+    "GIT_ATTR_NOSYSTEM": "1",
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_NOSYSTEM": "1",
+    # Avoid hooks and GPG signing inside fixtures even if repository-local
+    # configuration changes while a case is running.
+    "GIT_CONFIG_COUNT": "2",
     "GIT_CONFIG_KEY_0": "commit.gpgsign",
     "GIT_CONFIG_VALUE_0": "false",
+    "GIT_CONFIG_KEY_1": "core.hooksPath",
+    "GIT_CONFIG_VALUE_1": os.devnull,
+    "GIT_OPTIONAL_LOCKS": "0",
+    "GIT_PAGER": "",
+    "GIT_TERMINAL_PROMPT": "0",
 }
 
 # Base env for all subprocesses spawned by the runner.
@@ -455,6 +466,7 @@ def evaluation_environment(
     max_output_tokens: int,
     *,
     source: dict[str, str] | None = None,
+    pinned_executables: tuple[str | Path, ...] = (),
 ) -> dict[str, str]:
     if (
         isinstance(max_output_tokens, bool)
@@ -471,6 +483,7 @@ def evaluation_environment(
             or (name.startswith("CLAUDE_") and name not in _CLAUDE_AUTH_ENV)
             or name == "CLAUDECODE"
             or name.startswith("DISABLE_")
+            or name.startswith("GIT_")
             or name.startswith("MCP_")
             or name.startswith("OTEL_")
             or name in _CLAUDE_GENERIC_RUNTIME_ENV
@@ -483,6 +496,7 @@ def evaluation_environment(
             "BASH_MAX_OUTPUT_LENGTH": "30000",
             "BASH_MAX_TIMEOUT_MS": "120000",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
             "CLAUDE_CODE_ENABLE_TASKS": "0",
             "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0",
             "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(max_output_tokens),
@@ -499,9 +513,30 @@ def evaluation_environment(
             "MCP_DISCOVERY_CACHE": "0",
             "MCP_TIMEOUT": "30000",
             "MCP_TOOL_TIMEOUT": "120000",
+            **GIT_ENV,
         }
     )
+    pinned_directories: list[str] = []
+    for executable in pinned_executables:
+        path = Path(executable)
+        if not path.is_absolute():
+            raise ValueError("pinned evaluation executables must be absolute paths")
+        directory = str(path.parent)
+        if directory not in pinned_directories:
+            pinned_directories.append(directory)
+    if pinned_directories:
+        environment["PATH"] = os.pathsep.join(
+            (*pinned_directories, environment.get("PATH", os.defpath))
+        )
     return environment
+
+
+def _git_environment(source: dict[str, str] | None = None) -> dict[str, str]:
+    inherited = _PROC_ENV if source is None else source
+    return {
+        **{name: value for name, value in inherited.items() if not name.startswith("GIT_")},
+        **GIT_ENV,
+    }
 
 
 def _nonnegative_int(value: object) -> int:
@@ -1791,7 +1826,7 @@ def git_revision() -> str | None:
         proc = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             cwd=REPO_ROOT,
-            env=_PROC_ENV,
+            env=_git_environment(),
             text=True,
             capture_output=True,
             check=False,
@@ -1864,7 +1899,7 @@ def fixture_runtime_definition(
     try:
         process = subprocess.run(
             [str(git_binary), "--version"],
-            env=_PROC_ENV,
+            env=_git_environment(),
             text=True,
             capture_output=True,
             check=False,
@@ -3042,7 +3077,7 @@ def _run_git(
     proc = subprocess.run(
         [str(git_binary), *args],
         cwd=cwd,
-        env={**_PROC_ENV, **GIT_ENV},
+        env=_git_environment(),
         capture_output=True,
         text=True,
     )
@@ -3137,10 +3172,11 @@ def setup_fixture(
         # real `mmcg_callers` / `mmcg_search` against the working state and
         # compare against the spec's pre-edit snapshot. Failure here is non-fatal
         # — the auditor can still operate on `git diff` alone.
-        try:
-            _build_mmcg_index(tmp, mmcg_binary=mmcg_binary)
-        except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
-            sys.stderr.write(f"  [fixture] mmcg index skipped: {error}\n")
+        if mmcg_binary is not None:
+            try:
+                _build_mmcg_index(tmp, mmcg_binary=mmcg_binary)
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+                sys.stderr.write(f"  [fixture] mmcg index skipped: {error}\n")
 
         complete = True
         return tmp
@@ -3901,10 +3937,18 @@ def evaluate_case(
         # absorbs tail latency. Byte caps keep a broken or noisy CLI from
         # retaining an unbounded stream in memory. The process-group supervisor
         # also removes MCP descendants after every outcome.
+        pinned_executables = (
+            (git_binary,)
+            if suite_cfg["uses_fixture"] and Path(git_binary).is_absolute()
+            else ()
+        )
         proc = run_bounded(
             cmd,
             cwd=case_cwd,
-            env=evaluation_environment(runtime_limits["max_output_tokens"]),
+            env=evaluation_environment(
+                runtime_limits["max_output_tokens"],
+                pinned_executables=pinned_executables,
+            ),
             stdin=user_message.encode("utf-8"),
             timeout=CLAUDE_CASE_TIMEOUT_SECONDS,
             stdout_limit=CLAUDE_STDOUT_LIMIT_BYTES,

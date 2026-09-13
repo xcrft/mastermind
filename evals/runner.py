@@ -32,6 +32,7 @@ import hashlib
 import json
 import math
 import os
+import platform
 import re
 import shutil
 import stat
@@ -874,6 +875,35 @@ def claude_cli_version(binary: str | Path = "claude") -> str | None:
     return version if proc.returncode == 0 and version else None
 
 
+def evaluation_harness_definition() -> dict[str, str]:
+    sources = [
+        {
+            "path": path.relative_to(REPO_ROOT).as_posix(),
+            **_stable_regular_file_definition(path),
+        }
+        for path in (Path(__file__).resolve(), EVALS_DIR / "evidence.py")
+    ]
+    environment = {
+        "python_implementation": platform.python_implementation(),
+        "python_version": platform.python_version(),
+        "platform": sys.platform,
+        "pyyaml_version": (
+            str(getattr(_yaml, "__version__", "unknown"))
+            if _YAML_AVAILABLE
+            else "unavailable"
+        ),
+    }
+    digest = hashlib.sha256(
+        json.dumps(
+            {"sources": sources, "environment": environment},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    return {"sha256": digest, **environment}
+
+
 def build_report(
     results: list[Result],
     *,
@@ -887,6 +917,8 @@ def build_report(
     claude_version: str | None = None,
     claude_sha256: str | None = None,
     claude_stable: bool = True,
+    harness_definition: dict[str, str] | None = None,
+    harness_stable: bool = True,
 ) -> dict:
     suites: dict[str, list[Result]] = {}
     for result in results:
@@ -935,6 +967,11 @@ def build_report(
     if claude_sha256 is not None:
         report["claude_cli_sha256"] = claude_sha256
         report["claude_cli_stable"] = claude_stable
+    if harness_definition is not None:
+        report["evaluation_harness"] = {
+            **harness_definition,
+            "stable": harness_stable,
+        }
     return report
 
 
@@ -986,6 +1023,7 @@ def report_comparison_issues(
     *,
     require_target_identity: bool = False,
     require_runtime_identity: bool = False,
+    require_harness_identity: bool = False,
 ) -> list[str]:
     issues: list[str] = []
     if not isinstance(report, dict):
@@ -1025,6 +1063,36 @@ def report_comparison_issues(
             issues.append(f"{label} report has invalid Claude CLI stability")
         elif not cli_stable:
             issues.append(f"{label} report changed Claude CLI during evaluation")
+    harness = report.get("evaluation_harness")
+    if harness is None:
+        if require_harness_identity:
+            issues.append(f"{label} report has no evaluation harness identity")
+    elif not isinstance(harness, dict) or set(harness) != {
+        "sha256",
+        "stable",
+        "python_implementation",
+        "python_version",
+        "platform",
+        "pyyaml_version",
+    }:
+        issues.append(f"{label} report has invalid evaluation harness identity")
+    else:
+        harness_digest = harness["sha256"]
+        harness_strings = (
+            harness["python_implementation"],
+            harness["python_version"],
+            harness["platform"],
+            harness["pyyaml_version"],
+        )
+        if (
+            not isinstance(harness_digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", harness_digest) is None
+            or any(not isinstance(value, str) or not value for value in harness_strings)
+            or not isinstance(harness["stable"], bool)
+        ):
+            issues.append(f"{label} report has invalid evaluation harness identity")
+        elif not harness["stable"]:
+            issues.append(f"{label} report changed evaluation harness during run")
 
     filters = report.get("filters")
     if (
@@ -1306,6 +1374,7 @@ def compare_to_baseline(current: dict, baseline: dict) -> dict:
             "current",
             require_target_identity=True,
             require_runtime_identity=True,
+            require_harness_identity=True,
         ),
         *report_comparison_issues(baseline, "baseline"),
     ]
@@ -1339,6 +1408,17 @@ def compare_to_baseline(current: dict, baseline: dict) -> dict:
             "Claude CLI binary mismatch: "
             f"current {current_cli_digest!r}, baseline {baseline_cli_digest!r}"
         )
+    current_harness = current.get("evaluation_harness")
+    baseline_harness = baseline.get("evaluation_harness")
+    if isinstance(current_harness, dict) and isinstance(baseline_harness, dict):
+        current_harness_identity = {
+            key: value for key, value in current_harness.items() if key != "stable"
+        }
+        baseline_harness_identity = {
+            key: value for key, value in baseline_harness.items() if key != "stable"
+        }
+        if current_harness_identity != baseline_harness_identity:
+            failures.append("evaluation harness differs from baseline")
 
     if current.get("filters") != baseline.get("filters"):
         failures.append("current filters differ from baseline filters")
@@ -2595,6 +2675,12 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    try:
+        frozen_harness_definition = evaluation_harness_definition()
+    except (OSError, ValueError) as error:
+        print(f"error: cannot identify evaluation harness: {error}", file=sys.stderr)
+        return 2
+
     claude_location = shutil.which("claude")
     if not claude_location:
         print(
@@ -2869,6 +2955,18 @@ def main() -> int:
             if reason not in result.reasons:
                 result.reasons.append(reason)
         print(f"  ✗ FAIL  {reason}")
+    try:
+        harness_definition_after_run = evaluation_harness_definition()
+    except (OSError, ValueError):
+        harness_definition_after_run = None
+    harness_stable = harness_definition_after_run == frozen_harness_definition
+    if not harness_stable:
+        reason = "evaluation harness changed during evaluation"
+        for result in results:
+            result.passed = False
+            if reason not in result.reasons:
+                result.reasons.append(reason)
+        print(f"  ✗ FAIL  {reason}")
 
     n_pass = sum(r.passed for r in results)
     n_fail = len(results) - n_pass
@@ -2911,6 +3009,8 @@ def main() -> int:
         claude_version=frozen_claude_version,
         claude_sha256=claude_definition["sha256"],
         claude_stable=claude_stable,
+        harness_definition=frozen_harness_definition,
+        harness_stable=harness_stable,
     )
     for suite_name, summary in report["suites"].items():
         context = summary["usage"]["context_tokens"]

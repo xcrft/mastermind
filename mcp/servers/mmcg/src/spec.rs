@@ -320,9 +320,15 @@ fn spec_read_error(error: crate::bounded_fs::BoundedReadError) -> std::io::Error
 }
 
 fn parse_file_bytes(path: &Path, bytes: Vec<u8>) -> std::io::Result<ParsedSpec> {
+    let source_path = path.to_str().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "spec path must have an exact UTF-8 representation",
+        )
+    })?;
     let body = String::from_utf8(bytes)
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "spec is not UTF-8"))?;
-    Ok(parse_str(&path.display().to_string(), &body))
+    Ok(parse_str(source_path, &body))
 }
 
 /// Parse one explicitly selected spec file from disk.
@@ -808,6 +814,19 @@ mod tests {
         let error = parse_file(&path).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("16777216-byte limit"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parsed_spec_rejects_an_inexact_source_identity() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = PathBuf::from(OsString::from_vec(b"spec-\xff.md".to_vec()));
+        let error = parse_file_bytes(&path, b"# Exact identity\n".to_vec()).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("exact UTF-8"));
     }
 
     #[cfg(unix)]

@@ -1,5 +1,10 @@
 use std::path::{Path, PathBuf};
 
+fn exact_path<'a>(path: &'a Path, label: &str) -> Result<&'a str, Box<dyn std::error::Error>> {
+    path.to_str()
+        .ok_or_else(|| format!("{label} path must have an exact UTF-8 representation").into())
+}
+
 fn open_validated_index(
     index_path: &Path,
     root: &Path,
@@ -93,6 +98,9 @@ pub fn audit(
     let source_path = std::path::absolute(spec)?;
     let parsed = mmcg::spec::parse_file(&source_path)
         .map_err(|e| format!("parse {}: {e}", source_path.display()))?;
+    let executor_report_path_str = executor_report_path
+        .map(|path| exact_path(path, "executor report"))
+        .transpose()?;
     let store = open_validated_index(index_path, &root)?.ok_or_else(|| {
         format!(
             "no populated index at `{}`; run `mastermind index .`",
@@ -116,12 +124,11 @@ pub fn audit(
     }
 
     if let Some(bundle_path) = bundle_path {
-        let er_path_str = executor_report_path.map(|p| p.display().to_string());
         let bundle = mmcg::audit_spec::Bundle::from_report_full(
             &report,
             executor_report.as_ref(),
             Some(&parsed),
-            er_path_str.as_deref(),
+            executor_report_path_str,
             Some(&root),
         );
         let manifest = bundle.into_manifest(&root)?;
@@ -194,5 +201,17 @@ mod tests {
         drop(store);
 
         assert!(open_validated_index(&index_path, &root).unwrap().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_input_identity_rejects_a_lossy_path() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = PathBuf::from(OsString::from_vec(b"executor-\xff.md".to_vec()));
+        let error = exact_path(&path, "executor report").unwrap_err();
+
+        assert!(error.to_string().contains("exact UTF-8"));
     }
 }

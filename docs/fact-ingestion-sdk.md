@@ -31,7 +31,9 @@ Its API identifier is `mastermind-facts/v1`, with two capabilities:
 Built-in adapters convert common reports into the same manifest. An adapter
 reads one bounded local artifact, maps every fact to the current index, records
 the exact digest and size, and emits nothing if parsing is partial or any fact
-cannot be mapped to an indexed repository file.
+cannot be mapped to an indexed repository file. Input artifacts require exact
+UTF-8 repository-relative identities, and output paths require exact UTF-8
+representations so the result always identifies the manifest that was written.
 
 ```bash
 mastermind facts adapt --format sarif \

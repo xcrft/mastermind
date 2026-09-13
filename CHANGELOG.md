@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   commit in every condition, disable Git lazy transport while freezing inputs,
   and report an observed model or adapter mismatch even when that runtime also
   reports a model failure.
+- Research runtime and index pins now use bounded streaming hashes. SQLite
+  validation keeps one file identity across integrity and source-coverage
+  checks, rejects sidecars that appear during validation, and bounds metadata
+  queries before an index can enter a trial.
 - Local worktree bindings now resolve Unix filesystem aliases to the canonical
   directory and use the retained directory object's stable identity on
   Windows, so equivalent spellings do not invalidate task state.

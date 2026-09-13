@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -291,6 +292,28 @@ class BenchmarkTests(unittest.TestCase):
                 trial = self.prepare("portable_mmcg")
                 self.assertTrue((trial / "index/mmcg.db").is_file())
                 self.assert_setup_failure(trial, reason)
+
+    def test_index_validation_rejects_a_same_byte_database_replacement(self):
+        trial = self.prepare("portable_mmcg")
+        manifest = self.manifest(trial)
+        index = trial / "index/mmcg.db"
+        real_connect = sqlite3.connect
+        replaced = False
+
+        def replace_before_open(*args, **kwargs):
+            nonlocal replaced
+            if not replaced:
+                replacement = index.with_name("replacement.db")
+                replacement.write_bytes(index.read_bytes())
+                replacement.replace(index)
+                replaced = True
+            return real_connect(*args, **kwargs)
+
+        with patch.object(bench.sqlite3, "connect", side_effect=replace_before_open):
+            with self.assertRaises(bench.BenchmarkError) as raised:
+                bench.validate_index(index, trial / "source", manifest["source_files"],
+                                     manifest["index_contract"], manifest["indexed_files"])
+        self.assertEqual(raised.exception.code, "index_changed")
 
     def test_unknown_indexed_paths_are_rejected_before_indexing(self):
         for paths in ([], ["omitted.py"], ["src/service.py"] * 2):

@@ -330,6 +330,9 @@ time are recorded separately from the adapter's investigation time.
 Preparation requires the declared tool revision to resolve to that exact commit
 in the selected tool repository for every condition. Git lazy fetching and
 transport protocols are disabled while source and tool objects are frozen.
+Executable and SQLite pins are streamed through bounded hashing. Index
+validation binds one file identity across integrity, contract and exact source
+coverage checks, and rejects SQLite sidecars that appear before or during them.
 
 | Result field | Meaning |
 |---|---|

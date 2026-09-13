@@ -83,6 +83,11 @@ def parse_json(body: bytes) -> dict:
         raise ValueError("JSON nesting or string encoding is invalid") from error
 
 
+def file_identity(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+            info.st_ctime_ns, info.st_mode)
+
+
 def read_file(path: Path, limit: int = CONTROL_BYTE_LIMIT) -> bytes:
     """No-follow regular-file read with a byte cap and post-read identity check."""
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
@@ -94,10 +99,42 @@ def read_file(path: Path, limit: int = CONTROL_BYTE_LIMIT) -> bytes:
             body = handle.read(limit + 1)
             after = os.fstat(handle.fileno())
         current = path.lstat()
-        identity = lambda item: (item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns, item.st_mode)
-        if len(body) > limit or identity(before) != identity(after) or identity(after) != identity(current):
+        if (len(body) > limit or file_identity(before) != file_identity(after)
+                or file_identity(after) != file_identity(current)):
             raise BenchmarkError("file_changed", f"file changed while reading: {path}")
         return body
+    except OSError as error:
+        raise BenchmarkError("file_unavailable", f"cannot read file: {path}") from error
+
+
+def hash_file(path: Path, limit: int, prefix_limit: int = 0) -> dict:
+    """Stream a stable regular-file digest without retaining the whole file."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        with os.fdopen(os.open(path, flags), "rb") as handle:
+            before = os.fstat(handle.fileno())
+            if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
+                raise BenchmarkError("invalid_file", f"not a bounded regular file: {path}")
+            hasher = hashlib.sha256()
+            prefix = bytearray()
+            size = 0
+            while True:
+                chunk = handle.read(min(1024 * 1024, limit - size + 1))
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > limit:
+                    raise BenchmarkError("invalid_file", f"not a bounded regular file: {path}")
+                hasher.update(chunk)
+                if len(prefix) < prefix_limit:
+                    prefix.extend(chunk[:prefix_limit - len(prefix)])
+            after = os.fstat(handle.fileno())
+        current = path.lstat()
+        if (file_identity(before) != file_identity(after)
+                or file_identity(after) != file_identity(current)):
+            raise BenchmarkError("file_changed", f"file changed while reading: {path}")
+        return {"bytes": size, "sha256": hasher.hexdigest(),
+                "identity": file_identity(after), "prefix": bytes(prefix)}
     except OSError as error:
         raise BenchmarkError("file_unavailable", f"cannot read file: {path}") from error
 
@@ -280,8 +317,7 @@ def runtime_pin(spec: object, role: str, revision: str | None = None) -> dict:
         expected = spec["sha256"]
         if not re.fullmatch(r"[0-9a-f]{64}", expected):
             raise ValueError("invalid hash")
-        body = read_file(path, BINARY_BYTE_LIMIT)
-        if hashlib.sha256(body).hexdigest() != expected:
+        if hash_file(path, BINARY_BYTE_LIMIT)["sha256"] != expected:
             raise BenchmarkError(f"{role}_mismatch", f"{role} executable does not match its SHA-256 pin")
         if not os.access(path, os.X_OK):
             raise ValueError("not executable")
@@ -386,40 +422,53 @@ def claude_runtime():
 def validate_index(path: Path, source: Path, files: list[dict], contract: dict,
                    indexed_paths: list[str]) -> str:
     # Read-only SQLite validation, after the supervised indexer has exited.
-    for suffix in ("-wal", "-journal"):
-        sidecar = path.with_name(path.name + suffix)
-        try:
-            if sidecar.is_symlink():
-                raise BenchmarkError("invalid_file", "symbolic SQLite sidecar")
-            if sidecar.exists():
-                read_file(sidecar, 0)
-        except BenchmarkError as error:
-            raise BenchmarkError("index_uncheckpointed", "index has an uncheckpointed SQLite sidecar") from error
-    body = read_file(path, BINARY_BYTE_LIMIT)
-    if not body.startswith(b"SQLite format 3\0"):
+    def verify_sidecars() -> None:
+        for suffix in ("-wal", "-journal", "-shm"):
+            sidecar = path.with_name(path.name + suffix)
+            try:
+                if sidecar.is_symlink():
+                    raise BenchmarkError("invalid_file", "symbolic SQLite sidecar")
+                if sidecar.exists():
+                    read_file(sidecar, 0)
+            except BenchmarkError as error:
+                raise BenchmarkError(
+                    "index_uncheckpointed", "index has an uncheckpointed SQLite sidecar"
+                ) from error
+
+    verify_sidecars()
+    before = hash_file(path, BINARY_BYTE_LIMIT, len(b"SQLite format 3\0"))
+    if before["prefix"] != b"SQLite format 3\0":
         raise BenchmarkError("index_invalid", "indexer did not produce a SQLite database")
     try:
         with closing(sqlite3.connect(path.as_uri() + "?mode=ro&immutable=1", uri=True)) as database:
             database.set_progress_handler(lambda: 1, 1_000_000)
             if database.execute("PRAGMA quick_check").fetchone() != ("ok",):
                 raise BenchmarkError("index_invalid", "SQLite integrity check failed")
-            names = {row[0] for row in database.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if not {"symbols", "edges", "meta", "files"} <= names:
-                raise BenchmarkError("index_invalid", "index is missing mmcg tables")
-            metadata = dict(database.execute("SELECT key,value FROM meta"))
-            if any(metadata.get(key) != value for key, value in contract.items()):
-                raise BenchmarkError("index_contract_mismatch", "index schema/extractor contract differs")
-            if metadata.get("index_root") != str(source.resolve()):
-                raise BenchmarkError("index_root_mismatch", "index belongs to a different source projection")
+            for name in ("symbols", "edges", "meta", "files"):
+                if database.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+                        (name,)).fetchone() != (1,):
+                    raise BenchmarkError("index_invalid", "index is missing mmcg tables")
+            required_metadata = dict(contract, index_root=str(source.resolve()))
+            for key, value in required_metadata.items():
+                rows = database.execute("SELECT value FROM meta WHERE key=? LIMIT 2", (key,)).fetchall()
+                if rows != [(value,)]:
+                    raise BenchmarkError("index_contract_mismatch" if key != "index_root" else
+                                         "index_root_mismatch", "index metadata differs from its trial contract")
             expected = {item["path"]: item["sha256"] for item in files if item["path"] in indexed_paths}
-            actual = list(database.execute("SELECT path,content_sha256 FROM files ORDER BY path"))
+            if database.execute("SELECT COUNT(*) FROM files").fetchone() != (len(expected),):
+                raise BenchmarkError("index_source_mismatch", "index does not cover the exact declared source bytes")
+            actual = list(database.execute(
+                "SELECT path,content_sha256 FROM files ORDER BY path LIMIT ?", (len(expected) + 1,)))
             if actual != sorted(expected.items()):
                 raise BenchmarkError("index_source_mismatch", "index does not cover the exact declared source bytes")
     except sqlite3.Error as error:
         raise BenchmarkError("index_invalid", "cannot validate the produced SQLite index") from error
-    if read_file(path, BINARY_BYTE_LIMIT) != body:
+    after = hash_file(path, BINARY_BYTE_LIMIT, len(b"SQLite format 3\0"))
+    verify_sidecars()
+    if after != before:
         raise BenchmarkError("index_changed", "index changed during validation")
-    return hashlib.sha256(body).hexdigest()
+    return before["sha256"]
 
 
 def prepare_trial(
@@ -688,6 +737,13 @@ def run_trial(trial: Path, credentials: dict[str, str] | None = None) -> dict:
         handle.write(process.stderr)
     init, result, tools, issues = parse_stream(process.stdout, limits["answer_bytes"])
     state, reason = "completed", None
+    reported_failure = result.get("failure") if result else None
+    reported_model_error = result.get("model_error") is True if result else False
+    identity_changed = bool(init) and (
+        init.get("adapter_version") != manifest["adapter"]["version"]
+        or (init.get("model") is not None and init.get("model") != manifest["model"])
+        or (init.get("model") is None and not reported_failure and not reported_model_error)
+    )
     if process.stop_reason:
         state = process.stop_reason if process.stop_reason in {"timeout", "output_limit"} else "invocation_error"
         reason = process.stop_reason
@@ -695,11 +751,11 @@ def run_trial(trial: Path, credentials: dict[str, str] | None = None) -> dict:
         state, reason = "invocation_error", "nonzero_exit"
     elif issues:
         state, reason = "protocol_error", issues[0]
-    elif init and (init.get("model") != manifest["model"] or init.get("adapter_version") != manifest["adapter"]["version"]):
+    elif identity_changed:
         state, reason = "identity_mismatch", "observed_model_or_adapter_version_mismatch"
-    elif result and result.get("failure"):
-        state, reason = result["failure"]["state"], result["failure"]["code"]
-    elif result and result.get("model_error"):
+    elif reported_failure:
+        state, reason = reported_failure["state"], reported_failure["code"]
+    elif reported_model_error:
         state, reason = "model_error", "adapter_reported_model_error"
     measured = telemetry(result, limits)
     unexpected_tools = sorted(set(tools) - set(request["available_tools"]))

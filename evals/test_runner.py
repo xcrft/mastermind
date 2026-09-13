@@ -596,6 +596,128 @@ action: passthrough
         self.assertIsNotNone(before)
         self.assertNotEqual(before, changed)
 
+    def test_fixture_mode_changes_case_definition_digest(self):
+        with tempfile.TemporaryDirectory() as target:
+            fixture_root = Path(target) / "fake-session"
+            baseline = fixture_root / "baseline"
+            after = fixture_root / "changes" / "clean-add"
+            baseline.mkdir(parents=True)
+            after.mkdir(parents=True)
+            (baseline / "source.rs").write_text("fn before() {}\n")
+            changed_file = after / "source.rs"
+            changed_file.write_text("fn after() {}\n")
+            with patch.object(runner, "FIXTURES_DIR", Path(target)):
+                before = runner.case_definition_digest(
+                    "researcher", ["r-001-structural-source-cross-check"]
+                )
+                os.chmod(changed_file, changed_file.stat().st_mode ^ 0o100)
+                changed = runner.case_definition_digest(
+                    "researcher", ["r-001-structural-source-cross-check"]
+                )
+        self.assertIsNotNone(before)
+        self.assertNotEqual(before, changed)
+
+    def test_frozen_fixture_snapshot_isolated_from_later_source_changes(self):
+        case = {"id": "case", "fixture": "sample", "after_ref": "current"}
+        with tempfile.TemporaryDirectory() as target:
+            root = Path(target)
+            source = root / "source"
+            baseline = source / "sample" / "baseline"
+            after = source / "sample" / "changes" / "current"
+            baseline.mkdir(parents=True)
+            after.mkdir(parents=True)
+            (baseline / "source.py").write_text("before = True\n")
+            changed_file = after / "source.py"
+            changed_file.write_text("after = True\n")
+            frozen = root / "frozen"
+            frozen.mkdir()
+            with patch.object(runner, "FIXTURES_DIR", source):
+                source_digest = runner.case_definition_digest_from_records(
+                    "researcher", [case]
+                )
+                runner.snapshot_fixture_definitions([case], frozen)
+                frozen_digest = runner.case_definition_digest_from_records(
+                    "researcher", [case], fixtures_dir=frozen
+                )
+                changed_file.write_text("after = False\n")
+                changed_source_digest = runner.case_definition_digest_from_records(
+                    "researcher", [case]
+                )
+                unchanged_frozen_digest = runner.case_definition_digest_from_records(
+                    "researcher", [case], fixtures_dir=frozen
+                )
+        self.assertEqual(source_digest, frozen_digest)
+        self.assertNotEqual(source_digest, changed_source_digest)
+        self.assertEqual(frozen_digest, unchanged_frozen_digest)
+
+    def test_fixture_definition_rejects_parent_traversal(self):
+        with self.assertRaisesRegex(ValueError, "canonical relative path"):
+            runner.fixture_case_roots(
+                {"fixture": "fake-session", "after_ref": "../outside"}
+            )
+
+    def test_main_fails_report_when_case_definition_changes_during_run(self):
+        with tempfile.TemporaryDirectory() as target:
+            root = Path(target)
+            cases = root / "critic.jsonl"
+            cases.write_text(
+                json.dumps({"id": "case", "input": {}, "expect": {}}) + "\n"
+            )
+            report_path = root / "report.json"
+            suites = {
+                "critic": {
+                    "subagent": None,
+                    "cases": cases,
+                    "renderer": "render_critic_input",
+                    "uses_fixture": False,
+                }
+            }
+
+            def evaluate(*_args, **_kwargs):
+                cases.write_text(
+                    json.dumps(
+                        {"id": "case", "input": {}, "expect": {}, "changed": True}
+                    )
+                    + "\n"
+                )
+                return runner.Result(
+                    "case",
+                    "critic",
+                    True,
+                    telemetry_complete=True,
+                    resolved_models=[RESOLVED_MODEL],
+                )
+
+            argv = [
+                "runner.py",
+                "--suite",
+                "critic",
+                "--report",
+                str(report_path),
+            ]
+            output = io.StringIO()
+            with (
+                patch.object(runner, "SUITES", suites),
+                patch.object(runner.sys, "argv", argv),
+                patch.object(runner.shutil, "which", return_value="/usr/bin/tool"),
+                patch.object(runner, "evaluate_case", side_effect=evaluate),
+                patch.object(runner, "git_revision", return_value="revision"),
+                patch.object(runner, "claude_cli_version", return_value="test-cli"),
+                redirect_stdout(output),
+            ):
+                status = runner.main()
+            report = json.loads(report_path.read_text())
+
+        self.assertEqual(status, 1)
+        self.assertFalse(report["cases"][0]["passed"])
+        self.assertIn(
+            "case or fixture definition changed during evaluation",
+            report["cases"][0]["reasons"],
+        )
+        self.assertFalse(report["suites"]["critic"]["definition_stable"])
+        self.assertTrue(runner.report_comparison_issues(report, "test"))
+        self.assertIn("definition changed", output.getvalue())
+
     def test_unknown_case_filter_is_a_nonzero_cli_error(self):
         argv = [
             "runner.py",

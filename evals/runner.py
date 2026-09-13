@@ -45,8 +45,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 if __package__:
+    from .benchmark_process import run_bounded
     from .evidence import answer_lines, check_citations
 else:
+    from benchmark_process import run_bounded
     from evidence import answer_lines, check_citations
 
 try:
@@ -114,6 +116,9 @@ SUITE_RUNTIME_LIMITS = {
 }
 SUITE_DEFAULT_EFFORT = {"workflow": "medium"}
 CLAUDE_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
+CLAUDE_CASE_TIMEOUT_SECONDS = 480
+CLAUDE_STDOUT_LIMIT_BYTES = 8 * 1024 * 1024
+CLAUDE_STDERR_LIMIT_BYTES = 64 * 1024
 
 WORKFLOW_ARTIFACTS = frozenset(
     {
@@ -1826,7 +1831,11 @@ def evaluation_harness_definition() -> dict[str, str]:
             "path": path.relative_to(REPO_ROOT).as_posix(),
             **_stable_regular_file_definition(path),
         }
-        for path in (Path(__file__).resolve(), EVALS_DIR / "evidence.py")
+        for path in (
+            Path(__file__).resolve(),
+            EVALS_DIR / "benchmark_process.py",
+            EVALS_DIR / "evidence.py",
+        )
     ]
     environment = {
         "python_implementation": platform.python_implementation(),
@@ -3888,21 +3897,34 @@ def evaluate_case(
         ]
 
         # Auditor with real-git fixtures runs many Bash + Read tool calls per
-        # case; observed range is ~120–280s on Sonnet, can blow past 300s. Set
-        # generously at 480s to absorb tail-latency variance.
-        try:
-            proc = subprocess.run(
-                cmd, input=user_message, capture_output=True, text=True,
-                env=evaluation_environment(runtime_limits["max_output_tokens"]),
-                cwd=case_cwd,
-                timeout=480,
-            )
-        except subprocess.TimeoutExpired:
+        # case; observed range is ~120–280s on Sonnet, so the wall-clock cap
+        # absorbs tail latency. Byte caps keep a broken or noisy CLI from
+        # retaining an unbounded stream in memory. The process-group supervisor
+        # also removes MCP descendants after every outcome.
+        proc = run_bounded(
+            cmd,
+            cwd=case_cwd,
+            env=evaluation_environment(runtime_limits["max_output_tokens"]),
+            stdin=user_message.encode("utf-8"),
+            timeout=CLAUDE_CASE_TIMEOUT_SECONDS,
+            stdout_limit=CLAUDE_STDOUT_LIMIT_BYTES,
+            stderr_limit=CLAUDE_STDERR_LIMIT_BYTES,
+            start_new_session=True,
+        )
+        if proc.stop_reason is not None:
+            reason = {
+                "timeout": f"timeout after {CLAUDE_CASE_TIMEOUT_SECONDS}s",
+                "output_limit": "Claude process output exceeded transport limits",
+                "spawn_error": "cannot start Claude CLI",
+                "unsupported_platform": (
+                    "bounded Claude process transport requires POSIX"
+                ),
+            }.get(proc.stop_reason, "Claude process stopped by transport")
             return Result(
                 case_id=case_id,
                 suite=suite_name,
                 passed=False,
-                reasons=["timeout after 480s"],
+                reasons=[reason],
                 fixture_path=fixture_path,
             )
 
@@ -3915,6 +3937,17 @@ def evaluate_case(
                 fixture_path=fixture_path,
             )
 
+        try:
+            stdout = proc.stdout.decode("utf-8")
+        except UnicodeDecodeError:
+            return Result(
+                case_id=case_id,
+                suite=suite_name,
+                passed=False,
+                reasons=["invalid Claude stream encoding"],
+                fixture_path=fixture_path,
+            )
+
         permission_denials: list[dict] = []
         tool_calls: list[str] = []
         tool_executions: list[ToolExecution] = []
@@ -3922,7 +3955,7 @@ def evaluate_case(
         parse_error: str | None = None
         try:
             payload, tool_calls, tool_executions = parse_claude_output(
-                proc.stdout,
+                stdout,
                 streamed=streamed_output,
                 runtime_contract=runtime_contract,
             )

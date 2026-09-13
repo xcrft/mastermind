@@ -1,5 +1,4 @@
 import json
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +6,7 @@ from unittest.mock import patch
 
 from evals.evidence import check_citations
 from evals import runner
+from evals.benchmark_process import ProcessResult
 
 
 class CitationEvidenceTests(unittest.TestCase):
@@ -167,13 +167,15 @@ class CitationEvidenceTests(unittest.TestCase):
             events = [
                 {"type": "system", "subtype": "init", "model": "test-model"}, payload,
             ]
-            process = subprocess.CompletedProcess(
-                [], 0, "\n".join(json.dumps(event) for event in events), ""
+            process = ProcessResult(
+                stdout="\n".join(json.dumps(event) for event in events).encode(),
+                stderr=b"",
+                returncode=0,
             )
             with (
                 self.subTest(line=line),
                 patch.object(runner, "setup_fixture", return_value=self.root),
-                patch.object(runner.subprocess, "run", return_value=process),
+                patch.object(runner, "run_bounded", return_value=process),
             ):
                 result = runner.evaluate_case(
                     "test-model", "researcher", runner.SUITES["researcher"],

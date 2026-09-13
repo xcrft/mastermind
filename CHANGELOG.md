@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Source workflow audits now reject non-UTF-8 and Unix backslash aliases before
+  creating component paths, nodes, or inventory counts.
 - Policy, SCIP, and document-graph readers now attribute parser and read errors
   to exact validated logical paths, or an explicit unavailable label, instead
   of lossy filesystem aliases.

@@ -41,6 +41,8 @@ def sync_gated_summaries(report, suite_name):
 
 
 def bind_target_identity(report, digest="9" * 64):
+    report["claude_cli_sha256"] = "8" * 64
+    report["claude_cli_stable"] = True
     for summary in report["suites"].values():
         summary["target_definition_digest"] = digest
         summary["target_definition_stable"] = True
@@ -469,7 +471,7 @@ action: passthrough
         for report in (baseline, current):
             report["claude_cli_version"] = "test-cli"
             report["suites"]["critic"]["case_definition_digest"] = digest
-            report["suites"]["critic"]["target_definition_stable"] = True
+            bind_target_identity(report)
         baseline["suites"]["critic"]["target_definition_digest"] = "1" * 64
         current["suites"]["critic"]["target_definition_digest"] = "2" * 64
         gate = runner.compare_to_baseline(current, baseline)
@@ -590,6 +592,19 @@ action: passthrough
         current["claude_cli_version"] = "other-cli"
         gate = runner.compare_to_baseline(current, baseline)
         self.assertTrue(any("CLI version mismatch" in item for item in gate["failures"]))
+
+        current = deepcopy(baseline)
+        current["claude_cli_sha256"] = "7" * 64
+        gate = runner.compare_to_baseline(current, baseline)
+        self.assertTrue(any("CLI binary mismatch" in item for item in gate["failures"]))
+
+        current = deepcopy(baseline)
+        del current["claude_cli_sha256"]
+        del current["claude_cli_stable"]
+        gate = runner.compare_to_baseline(current, baseline)
+        self.assertTrue(
+            any("no Claude CLI identity" in item for item in gate["failures"])
+        )
 
         current = deepcopy(baseline)
         current["filters"]["case"] = "c-1"
@@ -795,7 +810,9 @@ action: passthrough
             with (
                 patch.object(runner, "SUITES", suites),
                 patch.object(runner.sys, "argv", argv),
-                patch.object(runner.shutil, "which", return_value="/usr/bin/tool"),
+                patch.object(
+                    runner.shutil, "which", return_value=runner.sys.executable
+                ),
                 patch.object(runner, "evaluate_case", side_effect=evaluate),
                 patch.object(runner, "git_revision", return_value="revision"),
                 patch.object(runner, "claude_cli_version", return_value="test-cli"),
@@ -887,7 +904,9 @@ action: passthrough
             with (
                 patch.object(runner, "SUITES", suites),
                 patch.object(runner.sys, "argv", argv),
-                patch.object(runner.shutil, "which", return_value="/usr/bin/tool"),
+                patch.object(
+                    runner.shutil, "which", return_value=runner.sys.executable
+                ),
                 patch.object(runner, "evaluate_case", side_effect=evaluate),
                 patch.object(runner, "git_revision", return_value="revision"),
                 patch.object(runner, "claude_cli_version", return_value="test-cli"),
@@ -908,6 +927,72 @@ action: passthrough
         self.assertTrue(runner.report_comparison_issues(report, "test"))
         self.assertIn("agent or skill changed", output.getvalue())
 
+    def test_main_fails_report_when_claude_runtime_changes_during_run(self):
+        with tempfile.TemporaryDirectory() as target:
+            root = Path(target)
+            cases = root / "critic.jsonl"
+            cases.write_text(
+                json.dumps({"id": "case", "input": {}, "expect": {}}) + "\n"
+            )
+            subagent = root / "agent.md"
+            subagent.write_text("---\nname: test\ndescription: test\n---\nPrompt.\n")
+            report_path = root / "report.json"
+            suites = {
+                "critic": {
+                    "subagent": subagent,
+                    "cases": cases,
+                    "renderer": "render_critic_input",
+                    "uses_fixture": False,
+                }
+            }
+            invoked_with = []
+
+            def evaluate(*_args, **kwargs):
+                invoked_with.append(kwargs["claude_binary"])
+                return runner.Result(
+                    "case",
+                    "critic",
+                    True,
+                    telemetry_complete=True,
+                    resolved_models=[RESOLVED_MODEL],
+                )
+
+            argv = [
+                "runner.py",
+                "--suite",
+                "critic",
+                "--report",
+                str(report_path),
+            ]
+            output = io.StringIO()
+            with (
+                patch.object(runner, "SUITES", suites),
+                patch.object(runner.sys, "argv", argv),
+                patch.object(
+                    runner.shutil, "which", return_value=runner.sys.executable
+                ),
+                patch.object(runner, "evaluate_case", side_effect=evaluate),
+                patch.object(runner, "git_revision", return_value="revision"),
+                patch.object(
+                    runner,
+                    "claude_cli_version",
+                    side_effect=["test-cli-before", "test-cli-after"],
+                ),
+                redirect_stdout(output),
+            ):
+                status = runner.main()
+            report = json.loads(report_path.read_text())
+
+        self.assertEqual(status, 1)
+        self.assertEqual(invoked_with, [Path(runner.sys.executable).resolve()])
+        self.assertFalse(report["cases"][0]["passed"])
+        self.assertIn(
+            "Claude CLI changed during evaluation", report["cases"][0]["reasons"]
+        )
+        self.assertFalse(report["claude_cli_stable"])
+        self.assertTrue(runner.report_comparison_issues(report, "test"))
+        self.assertIn("Claude CLI changed", output.getvalue())
+
     def test_unknown_case_filter_is_a_nonzero_cli_error(self):
         argv = [
             "runner.py",
@@ -921,7 +1006,10 @@ action: passthrough
         output = io.StringIO()
         with (
             patch.object(runner.sys, "argv", argv),
-            patch.object(runner.shutil, "which", return_value="/usr/bin/tool"),
+            patch.object(
+                runner.shutil, "which", return_value=runner.sys.executable
+            ),
+            patch.object(runner, "claude_cli_version", return_value="test-cli"),
             redirect_stdout(output),
         ):
             status = runner.main()

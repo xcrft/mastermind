@@ -41,7 +41,6 @@ import tempfile
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from functools import lru_cache
 from pathlib import Path
 
 if __package__:
@@ -860,11 +859,10 @@ def git_revision() -> str | None:
     return revision if proc.returncode == 0 and revision else None
 
 
-@lru_cache(maxsize=1)
-def claude_cli_version() -> str | None:
+def claude_cli_version(binary: str | Path = "claude") -> str | None:
     try:
         proc = subprocess.run(
-            ["claude", "--version"],
+            [str(binary), "--version"],
             env=_PROC_ENV,
             text=True,
             capture_output=True,
@@ -886,11 +884,14 @@ def build_report(
     case_definition_stability: dict[str, bool] | None = None,
     target_definition_digests: dict[str, str] | None = None,
     target_definition_stability: dict[str, bool] | None = None,
+    claude_version: str | None = None,
+    claude_sha256: str | None = None,
+    claude_stable: bool = True,
 ) -> dict:
     suites: dict[str, list[Result]] = {}
     for result in results:
         suites.setdefault(result.suite, []).append(result)
-    return {
+    report = {
         "kind": REPORT_KIND,
         "schema_version": REPORT_SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -899,7 +900,9 @@ def build_report(
         "resolved_models": sorted(
             {name for result in results for name in result.resolved_models}
         ),
-        "claude_cli_version": claude_cli_version(),
+        "claude_cli_version": (
+            claude_version if claude_version is not None else claude_cli_version()
+        ),
         "filters": {"suite": suite_filter, "case": case_filter},
         "suites": {
             name: suite_report(
@@ -929,6 +932,10 @@ def build_report(
         },
         "cases": [result_report(result) for result in results],
     }
+    if claude_sha256 is not None:
+        report["claude_cli_sha256"] = claude_sha256
+        report["claude_cli_stable"] = claude_stable
+    return report
 
 
 def _non_negative_integer(value: object) -> bool:
@@ -978,6 +985,7 @@ def report_comparison_issues(
     label: str,
     *,
     require_target_identity: bool = False,
+    require_runtime_identity: bool = False,
 ) -> list[str]:
     issues: list[str] = []
     if not isinstance(report, dict):
@@ -999,6 +1007,24 @@ def report_comparison_issues(
         or not report["claude_cli_version"]
     ):
         issues.append(f"{label} report has no Claude CLI version")
+    has_cli_digest = "claude_cli_sha256" in report
+    has_cli_stability = "claude_cli_stable" in report
+    if require_runtime_identity and not has_cli_digest and not has_cli_stability:
+        issues.append(f"{label} report has no Claude CLI identity")
+    elif has_cli_digest != has_cli_stability:
+        issues.append(f"{label} report has incomplete Claude CLI identity")
+    elif has_cli_digest:
+        cli_digest = report["claude_cli_sha256"]
+        cli_stable = report["claude_cli_stable"]
+        if (
+            not isinstance(cli_digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", cli_digest) is None
+        ):
+            issues.append(f"{label} report has invalid Claude CLI digest")
+        if not isinstance(cli_stable, bool):
+            issues.append(f"{label} report has invalid Claude CLI stability")
+        elif not cli_stable:
+            issues.append(f"{label} report changed Claude CLI during evaluation")
 
     filters = report.get("filters")
     if (
@@ -1276,7 +1302,10 @@ def compare_to_baseline(current: dict, baseline: dict) -> dict:
     checks: list[dict] = []
     failures = [
         *report_comparison_issues(
-            current, "current", require_target_identity=True
+            current,
+            "current",
+            require_target_identity=True,
+            require_runtime_identity=True,
         ),
         *report_comparison_issues(baseline, "baseline"),
     ]
@@ -1298,6 +1327,17 @@ def compare_to_baseline(current: dict, baseline: dict) -> dict:
             "Claude CLI version mismatch: "
             f"current {current.get('claude_cli_version')!r}, "
             f"baseline {baseline.get('claude_cli_version')!r}"
+        )
+    current_cli_digest = current.get("claude_cli_sha256")
+    baseline_cli_digest = baseline.get("claude_cli_sha256")
+    if (
+        isinstance(current_cli_digest, str)
+        and isinstance(baseline_cli_digest, str)
+        and current_cli_digest != baseline_cli_digest
+    ):
+        failures.append(
+            "Claude CLI binary mismatch: "
+            f"current {current_cli_digest!r}, baseline {baseline_cli_digest!r}"
         )
 
     if current.get("filters") != baseline.get("filters"):
@@ -2195,6 +2235,7 @@ def evaluate_case(
     keep_fixtures: bool,
     fixtures_dir: Path | None = None,
     workflow_root: Path | None = None,
+    claude_binary: str | Path = "claude",
 ) -> Result:
     case_id = case["id"]
     prompt_path = (
@@ -2298,7 +2339,7 @@ def evaluate_case(
         )
         streamed_output = True
         cmd = [
-            "claude",
+            str(claude_binary),
             "-p",
             "--model", model,
             *prompt_args,
@@ -2554,11 +2595,22 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if not shutil.which("claude"):
+    claude_location = shutil.which("claude")
+    if not claude_location:
         print(
             "error: `claude` CLI not on PATH. Install Claude Code: https://claude.com/claude-code",
             file=sys.stderr,
         )
+        return 2
+    try:
+        claude_binary = Path(claude_location).resolve(strict=True)
+        claude_definition = _stable_regular_file_definition(claude_binary)
+        frozen_claude_version = claude_cli_version(claude_binary)
+    except (OSError, RuntimeError, ValueError) as error:
+        print(f"error: cannot freeze `claude` CLI: {error}", file=sys.stderr)
+        return 2
+    if frozen_claude_version is None:
+        print("error: cannot read `claude` CLI version", file=sys.stderr)
         return 2
     if not shutil.which("git"):
         print("error: `git` not on PATH (required for fixture suites).", file=sys.stderr)
@@ -2695,6 +2747,7 @@ def main() -> int:
                     keep_fixtures=args.keep_fixtures,
                     fixtures_dir=fixtures_dir_for_run,
                     workflow_root=workflow_root_for_run,
+                    claude_binary=claude_binary,
                 )
                 _SENTINEL_MISSING = "no structured audit verdict block found"
                 if (
@@ -2709,6 +2762,7 @@ def main() -> int:
                         keep_fixtures=args.keep_fixtures,
                         fixtures_dir=fixtures_dir_for_run,
                         workflow_root=workflow_root_for_run,
+                        claude_binary=claude_binary,
                     )
                     r2.retry_attempted = True
                     r2.add_attempt(r)
@@ -2796,6 +2850,26 @@ def main() -> int:
         print("\nno cases matched filter")
         return 2
 
+    try:
+        claude_definition_after_run = _stable_regular_file_definition(
+            claude_binary
+        )
+        claude_version_after_run = claude_cli_version(claude_binary)
+    except (OSError, ValueError):
+        claude_definition_after_run = None
+        claude_version_after_run = None
+    claude_stable = (
+        claude_definition_after_run == claude_definition
+        and claude_version_after_run == frozen_claude_version
+    )
+    if not claude_stable:
+        reason = "Claude CLI changed during evaluation"
+        for result in results:
+            result.passed = False
+            if reason not in result.reasons:
+                result.reasons.append(reason)
+        print(f"  ✗ FAIL  {reason}")
+
     n_pass = sum(r.passed for r in results)
     n_fail = len(results) - n_pass
     n_first_pass = sum(r.passed and not r.retry_used for r in results)
@@ -2834,6 +2908,9 @@ def main() -> int:
         case_definition_stability=case_definition_stability,
         target_definition_digests=target_definition_digests,
         target_definition_stability=target_definition_stability,
+        claude_version=frozen_claude_version,
+        claude_sha256=claude_definition["sha256"],
+        claude_stable=claude_stable,
     )
     for suite_name, summary in report["suites"].items():
         context = summary["usage"]["context_tokens"]

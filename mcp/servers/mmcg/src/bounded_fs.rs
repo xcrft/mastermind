@@ -794,6 +794,100 @@ pub(crate) fn write_atomic_regular_file_with_capability(
     )
 }
 
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn rename_file_noclobber(
+    parent: &Dir,
+    source: &std::ffi::OsStr,
+    target: &std::ffi::OsStr,
+) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    let source = CString::new(source.as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in source name"))?;
+    let target = CString::new(target.as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in target name"))?;
+    // SAFETY: both names are live NUL-terminated buffers relative to the same
+    // retained directory descriptor. RENAME_EXCL makes publication no-clobber.
+    let status = unsafe {
+        libc::renameatx_np(
+            parent.as_raw_fd(),
+            source.as_ptr(),
+            parent.as_raw_fd(),
+            target.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn rename_file_noclobber(
+    parent: &Dir,
+    source: &std::ffi::OsStr,
+    target: &std::ffi::OsStr,
+) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    let source = CString::new(source.as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in source name"))?;
+    let target = CString::new(target.as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in target name"))?;
+    // SAFETY: both names are live NUL-terminated buffers relative to the same
+    // retained directory descriptor. RENAME_NOREPLACE is one atomic check and
+    // rename, so a concurrent creator cannot be overwritten after validation.
+    let status = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            parent.as_raw_fd(),
+            source.as_ptr(),
+            parent.as_raw_fd(),
+            target.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn rename_file_noclobber(
+    parent: &Dir,
+    source: &std::ffi::OsStr,
+    target: &std::ffi::OsStr,
+) -> std::io::Result<()> {
+    // Windows rename without replace already fails when the destination exists.
+    parent.rename(source, parent, target)
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "linux",
+    target_os = "android",
+    windows
+)))]
+fn rename_file_noclobber(
+    _parent: &Dir,
+    _source: &std::ffi::OsStr,
+    _target: &std::ffi::OsStr,
+) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "atomic no-clobber file publication is unavailable on this platform",
+    ))
+}
+
 pub(crate) fn write_atomic_regular_file_expected_with_capability(
     root: &RootCapability,
     path: &Path,
@@ -864,9 +958,13 @@ pub(crate) fn write_atomic_regular_file_expected_with_capability(
         };
         verify_parent()?;
         verify_atomic_write_target(root, path, &expectation)?;
-        parent
-            .rename(&temporary_name, &parent, &name)
-            .map_err(BoundedReadError::Io)?;
+        if matches!(&expectation, AtomicWriteExpectation::Missing(_)) {
+            rename_file_noclobber(&parent, &temporary_name, &name).map_err(BoundedReadError::Io)?;
+        } else {
+            parent
+                .rename(&temporary_name, &parent, &name)
+                .map_err(BoundedReadError::Io)?;
+        }
         sync_directory(&parent)?;
         verify_parent()
     })();
@@ -1604,6 +1702,34 @@ mod tests {
             Err(BoundedReadError::SnapshotChanged)
         ));
         assert_eq!(std::fs::read(path).unwrap(), b"created concurrently");
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "linux",
+        target_os = "android",
+        windows
+    ))]
+    #[test]
+    fn no_clobber_publication_cannot_replace_an_existing_name() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("generated.tmp");
+        let target = root.path().join("concurrent.key");
+        std::fs::write(&source, b"generated").unwrap();
+        std::fs::write(&target, b"concurrent").unwrap();
+        let capability = RootCapability::open(root.path()).unwrap();
+        let parent = capability.directory.try_clone().unwrap();
+
+        rename_file_noclobber(
+            &parent,
+            std::ffi::OsStr::new("generated.tmp"),
+            std::ffi::OsStr::new("concurrent.key"),
+        )
+        .unwrap_err();
+
+        assert_eq!(std::fs::read(target).unwrap(), b"concurrent");
+        assert_eq!(std::fs::read(source).unwrap(), b"generated");
     }
 
     #[cfg(unix)]

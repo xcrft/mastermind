@@ -174,7 +174,10 @@ mastermind enrich --facts mastermind-facts.json \
 permissions on Unix, prints the derived `sha256:<public-key-digest>`, and
 refuses to replace either key file. Both output paths must have exact UTF-8
 representations; Mastermind validates them before creating either file so the
-reported paths always identify the keys that were written.
+reported paths always identify the keys that were written. Complete key bytes
+are published with an atomic no-clobber operation. The public key is published
+first, so a publication failure cannot leave a private seed without its public
+half at the requested paths.
 
 The detached format is defined by
 [`mastermind-fact-signature-v1.schema.json`](../schemas/mastermind-fact-signature-v1.schema.json).

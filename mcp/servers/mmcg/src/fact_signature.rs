@@ -12,8 +12,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fmt;
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub const SIGNATURE_DOMAIN: &str = "mastermind/fact-manifest-signature/v1";
@@ -207,21 +205,36 @@ fn require_new_output(path: &Path, label: &str) -> Result<(), FactSignatureError
 }
 
 fn write_new_key(path: &Path, bytes: &[u8], private: bool) -> Result<(), FactSignatureError> {
-    #[cfg(not(unix))]
-    let _ = private;
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(if private { 0o600 } else { 0o644 });
-    }
-    let mut file = options
-        .open(path)
-        .map_err(|error| FactSignatureError::Input(format!("create key output: {error}")))?;
-    file.write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|error| FactSignatureError::Input(format!("write key output: {error}")))
+    let (root, target) = crate::bounded_fs::open_file_target(path)
+        .map_err(|error| FactSignatureError::Input(format!("open key output: {error}")))?;
+    let missing = crate::bounded_fs::inspect_absent_path(
+        &root,
+        &target,
+        crate::bounded_fs::ReadControl::default(),
+    )
+    .map_err(|error| FactSignatureError::Input(format!("inspect key output: {error}")))?
+    .ok_or_else(|| FactSignatureError::Contract("key output already exists".into()))?;
+    crate::bounded_fs::write_atomic_regular_file_expected_with_capability(
+        &root,
+        &target,
+        bytes,
+        private,
+        crate::bounded_fs::AtomicWriteExpectation::Missing(missing),
+    )
+    .map_err(|error| FactSignatureError::Input(format!("publish key output: {error}")))
+}
+
+fn publish_keypair_outputs(
+    private_key_path: &Path,
+    private_bytes: &[u8],
+    public_key_path: &Path,
+    public_bytes: &[u8],
+) -> Result<(), FactSignatureError> {
+    // Publish the non-secret half first. Each target appears only after its
+    // complete bytes are durable, and any public-key failure happens before the
+    // private seed exists at its requested path.
+    write_new_key(public_key_path, public_bytes, false)?;
+    write_new_key(private_key_path, private_bytes, true)
 }
 
 pub fn generate_keypair(
@@ -249,8 +262,12 @@ pub fn generate_keypair(
     let public = signing.verifying_key().to_bytes();
     let private_bytes = format!("{}\n", BASE64.encode(signing.to_bytes()));
     let public_bytes = format!("{}\n", BASE64.encode(public));
-    write_new_key(&private_key_path, private_bytes.as_bytes(), true)?;
-    write_new_key(&public_key_path, public_bytes.as_bytes(), false)?;
+    publish_keypair_outputs(
+        &private_key_path,
+        private_bytes.as_bytes(),
+        &public_key_path,
+        public_bytes.as_bytes(),
+    )?;
     Ok(FactKeygenSummary {
         schema_version: 1,
         algorithm: "ed25519",
@@ -554,6 +571,26 @@ mod tests {
         assert!(error.to_string().contains("exact UTF-8"));
         assert!(!private.exists());
         assert!(!public.exists());
+    }
+
+    #[test]
+    fn late_private_output_collision_preserves_the_existing_file() {
+        let root = tempfile::tempdir().unwrap();
+        let private = root.path().join("producer.seed");
+        let public = root.path().join("producer.pub");
+        fs::write(&private, b"concurrent private output").unwrap();
+
+        let error = publish_keypair_outputs(
+            &private,
+            b"generated private output",
+            &public,
+            b"generated public output",
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("already exists"));
+        assert_eq!(fs::read(&private).unwrap(), b"concurrent private output");
+        assert_eq!(fs::read(&public).unwrap(), b"generated public output");
     }
 
     #[test]

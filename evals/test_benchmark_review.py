@@ -212,6 +212,14 @@ final(model_error=mode == 'partial')
         self.assertEqual(raised.exception.code, "review_identity")
         self.assertFalse(self.output.exists())
 
+    def test_result_without_its_attempt_lock_is_rejected(self):
+        batch, trials = self.batch()
+        (trials[0] / "run.lock").unlink()
+        with self.assertRaises(bench.BenchmarkError) as raised:
+            review.export_review(batch, self.output)
+        self.assertEqual(raised.exception.code, "review_identity")
+        self.assertFalse(self.output.exists())
+
     def test_refuses_incomplete_duplicate_or_reordered_condition_matrix(self):
         batch, _ = self.batch(repetitions=3, run=False)
         path = batch / "batch.json"

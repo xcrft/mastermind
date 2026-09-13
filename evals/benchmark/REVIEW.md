@@ -100,6 +100,10 @@ Only retained answers appear in the form; failed or missing attempts stay in
 the coordinator's accounting. Partial drafts are not admitted: submit after
 every retained answer has been assessed.
 
+Every retained `result.json` must still have its empty one-shot `run.lock`.
+Missing or changed attempt locks invalidate the export instead of allowing a
+result copied outside the claimed execution lifecycle to count as completed.
+
 For each answer, provide:
 
 - `claims`: exact answer excerpts with `support` set to `supported`,

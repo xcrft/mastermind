@@ -67,10 +67,11 @@ def run_bounded(
         else:
             process.stdin.close()
         while selector.get_map() or process.poll() is None:
-            if not start_new_session and process.poll() is not None:
+            if process.poll() is not None:
                 exited_at = exited_at or time.monotonic()
-                # A nested server may still hold its parent's stderr open.
-                # Drain briefly; the outer trial owns descendant cleanup.
+                # A descendant may still hold the exited process's pipes open.
+                # Drain briefly, then let the finally block kill the owned
+                # process group or direct nested child.
                 if time.monotonic() - exited_at > 0.2:
                     break
             remaining = timeout - (time.monotonic() - started)

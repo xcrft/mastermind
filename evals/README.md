@@ -41,7 +41,9 @@ also retain the resolved model IDs and tool identities. Streamed runs require
 one init and one successful result event, and every tool-use ID must have one
 matching result. Error results, incomplete model accounting, and permission
 denials fail the case. Tool inputs and tool results are not persisted, including
-in failed-run diagnostics.
+in failed-run diagnostics. Each case also checks the init event against the
+pinned CLI version, disposable working directory, `dontAsk` permission mode,
+exact tool inventory, connected MCP servers, and empty skill/plugin inventory.
 
 ## Run the right layer
 
@@ -170,7 +172,9 @@ binary at `mcp/servers/mmcg/target/release/mmcg`, then falls back to `mmcg` on
 An mmcg error or timeout leaves the index unavailable; cases that require mmcg
 then fail through the normal result contract instead of leaking setup state.
 `allow_no_mmcg` is valid only when the case does not require an mmcg tool, so a
-source-only boundary or Read case can still run without an index.
+source-only boundary or Read case can still run without an index. For those
+cases, the generated custom-agent definition and CLI allowlist remove mmcg tools
+and the absent server instead of advertising an unusable capability.
 
 Build the matching binary before a model-backed researcher or auditor run:
 

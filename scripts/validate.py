@@ -1340,12 +1340,19 @@ def validate_workflow_eval_contract() -> list[Issue]:
         for token in (
             "WORKFLOW_ARTIFACTS",
             '"--safe-mode"',
-            '"--tools", ""',
             "TemporaryDirectory",
             "requires_prompt_sandbox",
         ):
             if token not in runner:
                 issues.append(Issue(runner_path, "error", f"workflow eval sandbox missing {token!r}"))
+        if re.search(r'["\']--tools["\']\s*,\s*["\']["\']', runner) is None:
+            issues.append(
+                Issue(
+                    runner_path,
+                    "error",
+                    "workflow eval sandbox does not disable tools",
+                )
+            )
         if '"--permission-mode", "default"' in runner:
             issues.append(Issue(runner_path, "error", "workflow eval runner uses an invalid permission mode"))
     return issues

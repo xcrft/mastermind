@@ -187,11 +187,12 @@ def read_sources(root, prefix, records, check_mode=True):
 
 
 def read_result(root, prefix, manifest, manifest_body):
+    lock = root.read(prefix + "run.lock", limit=0, optional=True)
     body = root.read(prefix + "result.json", optional=True)
     if body is None:
-        lock = root.read(prefix + "run.lock", limit=0, optional=True)
         state = "setup_error" if manifest["status"] == "setup_failed" else "unfinished" if lock is not None else "not_run"
         return state, None, None, None
+    require(lock is not None, "result exists without its one-shot attempt lock", "review_identity")
     result = bench.parse_json(body)
     fields(result, ("kind", "schema_version", "trial_id", "manifest_sha256", "common_sha256", "condition_sha256",
                     "run_status", "quality", "diagnostics", "answer", "comparability"), ("batch_execution",))

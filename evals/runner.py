@@ -34,6 +34,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -585,10 +586,72 @@ def result_report(result: Result) -> dict:
     }
 
 
-def fixture_tree_definition(root: Path) -> list[dict[str, str]]:
+def load_case_records(path: Path) -> list[dict]:
+    records: list[dict] = []
+    seen_ids: set[str] = set()
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        if not line.strip() or line.lstrip().startswith("//"):
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                f"invalid JSON at {path}:{line_number}: {error.msg}"
+            ) from error
+        if not isinstance(record, dict):
+            raise ValueError(f"case at {path}:{line_number} must be an object")
+        case_id = record.get("id")
+        if not isinstance(case_id, str) or not case_id:
+            raise ValueError(f"case at {path}:{line_number} has no id")
+        if case_id in seen_ids:
+            raise ValueError(f"duplicate case id {case_id!r} in {path}")
+        seen_ids.add(case_id)
+        records.append(record)
+    return records
+
+
+def _fixture_relative_path(value: object, label: str) -> Path:
+    if not isinstance(value, str) or not value or "\\" in value:
+        raise ValueError(f"{label} must be a canonical relative path")
+    relative = Path(value)
+    if (
+        relative.is_absolute()
+        or relative == Path(".")
+        or ".." in relative.parts
+        or relative.as_posix() != value
+    ):
+        raise ValueError(f"{label} must be a canonical relative path")
+    return relative
+
+
+def fixture_case_roots(
+    record: dict, *, fixtures_dir: Path | None = None
+) -> tuple[Path, Path, Path, Path]:
+    fixtures_root = (FIXTURES_DIR if fixtures_dir is None else fixtures_dir).resolve()
+    fixture_relative = _fixture_relative_path(record.get("fixture"), "fixture")
+    after_relative = _fixture_relative_path(record.get("after_ref"), "after_ref")
+    fixture_root = (fixtures_root / fixture_relative).resolve()
+    changes_root = (fixture_root / "changes").resolve()
+    baseline_root = (fixture_root / "baseline").resolve()
+    after_root = (changes_root / after_relative).resolve()
+    try:
+        fixture_root.relative_to(fixtures_root)
+        changes_root.relative_to(fixture_root)
+        baseline_root.relative_to(fixture_root)
+        after_root.relative_to(changes_root)
+    except ValueError as error:
+        raise ValueError("fixture paths must stay inside the fixture root") from error
+    return fixture_relative, after_relative, baseline_root, after_root
+
+
+def _fixture_tree_paths(root: Path) -> list[Path]:
+    if root.is_symlink():
+        raise ValueError(f"fixture tree root is a symbolic link: {root}")
     if not root.is_dir():
         raise FileNotFoundError(f"fixture tree missing: {root}")
-    records: list[dict[str, str]] = []
+    paths: list[Path] = []
     for path in sorted(root.rglob("*")):
         if path.is_symlink():
             raise ValueError(f"fixture tree contains a symbolic link: {path}")
@@ -596,31 +659,69 @@ def fixture_tree_definition(root: Path) -> list[dict[str, str]]:
             continue
         if not path.is_file():
             raise ValueError(f"fixture tree contains an unsupported artifact: {path}")
-        records.append(
-            {
-                "path": path.relative_to(root).as_posix(),
-                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-            }
-        )
+        paths.append(path)
+    return paths
+
+
+def _fixture_file_definition(path: Path) -> dict[str, str]:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise ValueError(f"fixture tree contains a non-regular file: {path}")
+        digest = hashlib.sha256()
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+        finished = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    current = path.stat(follow_symlinks=False)
+    identity_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if any(
+        getattr(opened, field) != getattr(finished, field)
+        or getattr(opened, field) != getattr(current, field)
+        for field in identity_fields
+    ):
+        raise ValueError(f"fixture file changed while it was read: {path}")
+    return {
+        "sha256": digest.hexdigest(),
+        "git_mode": "100755" if opened.st_mode & 0o111 else "100644",
+    }
+
+
+def fixture_tree_definition(root: Path) -> list[dict[str, str]]:
+    paths = _fixture_tree_paths(root)
+    records = [
+        {
+            "path": path.relative_to(root).as_posix(),
+            **_fixture_file_definition(path),
+        }
+        for path in paths
+    ]
+    if [path.relative_to(root) for path in _fixture_tree_paths(root)] != [
+        path.relative_to(root) for path in paths
+    ]:
+        raise ValueError(f"fixture tree changed while it was read: {root}")
     return records
 
 
-def case_definition_digest(suite_name: str, case_ids: list[str]) -> str | None:
+def case_definition_digest_from_records(
+    suite_name: str,
+    selected: list[dict],
+    *,
+    fixtures_dir: Path | None = None,
+) -> str:
     suite = SUITES.get(suite_name)
     if not suite:
-        return None
-    try:
-        records = [
-            json.loads(line)
-            for line in suite["cases"].read_text(encoding="utf-8").splitlines()
-            if line.strip() and not line.lstrip().startswith("//")
-        ]
-    except (OSError, json.JSONDecodeError):
-        return None
-    by_id = {record.get("id"): record for record in records if isinstance(record, dict)}
-    if len(by_id) != len(records) or any(case_id not in by_id for case_id in case_ids):
-        return None
-    selected = [by_id[case_id] for case_id in case_ids]
+        raise ValueError(f"unknown suite: {suite_name}")
+    case_ids = [record.get("id") for record in selected]
+    if (
+        not case_ids
+        or any(not isinstance(case_id, str) or not case_id for case_id in case_ids)
+        or len(case_ids) != len(set(case_ids))
+    ):
+        raise ValueError("selected cases must have unique non-empty ids")
     canonical = json.dumps(
         selected,
         sort_keys=True,
@@ -629,25 +730,17 @@ def case_definition_digest(suite_name: str, case_ids: list[str]) -> str | None:
     ).encode("utf-8")
     if suite.get("uses_fixture"):
         fixtures: list[dict[str, object]] = []
-        try:
-            for record in selected:
-                fixture_name = record["fixture"]
-                after_ref = record["after_ref"]
-                if not isinstance(fixture_name, str) or not isinstance(after_ref, str):
-                    raise ValueError("fixture names and refs must be strings")
-                fixture_root = (FIXTURES_DIR / fixture_name).resolve()
-                fixture_root.relative_to(FIXTURES_DIR.resolve())
-                fixtures.append(
-                    {
-                        "case_id": record["id"],
-                        "baseline": fixture_tree_definition(fixture_root / "baseline"),
-                        "after": fixture_tree_definition(
-                            fixture_root / "changes" / after_ref
-                        ),
-                    }
-                )
-        except (KeyError, OSError, ValueError):
-            return None
+        for record in selected:
+            _, _, baseline_root, after_root = fixture_case_roots(
+                record, fixtures_dir=fixtures_dir
+            )
+            fixtures.append(
+                {
+                    "case_id": record["id"],
+                    "baseline": fixture_tree_definition(baseline_root),
+                    "after": fixture_tree_definition(after_root),
+                }
+            )
         canonical += b"\0fixture-trees\0" + json.dumps(
             fixtures,
             sort_keys=True,
@@ -657,7 +750,49 @@ def case_definition_digest(suite_name: str, case_ids: list[str]) -> str | None:
     return hashlib.sha256(canonical).hexdigest()
 
 
-def suite_report(results: list[Result]) -> dict:
+def snapshot_fixture_definitions(
+    selected: list[dict], destination: Path, *, fixtures_dir: Path | None = None
+) -> None:
+    copied: set[Path] = set()
+    for record in selected:
+        fixture_relative, after_relative, baseline_root, after_root = fixture_case_roots(
+            record, fixtures_dir=fixtures_dir
+        )
+        sources = (
+            (baseline_root, destination / fixture_relative / "baseline"),
+            (after_root, destination / fixture_relative / "changes" / after_relative),
+        )
+        for source, target in sources:
+            if target in copied:
+                continue
+            fixture_tree_definition(source)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(source, target, copy_function=shutil.copy)
+            copied.add(target)
+
+
+def case_definition_digest(suite_name: str, case_ids: list[str]) -> str | None:
+    suite = SUITES.get(suite_name)
+    if not suite:
+        return None
+    try:
+        records = load_case_records(suite["cases"])
+        by_id = {record["id"]: record for record in records}
+        if any(case_id not in by_id for case_id in case_ids):
+            return None
+        return case_definition_digest_from_records(
+            suite_name, [by_id[case_id] for case_id in case_ids]
+        )
+    except (KeyError, OSError, ValueError):
+        return None
+
+
+def suite_report(
+    results: list[Result],
+    *,
+    definition_digest: str | None = None,
+    definition_stable: bool = True,
+) -> dict:
     if not results:
         raise ValueError("cannot build a suite report without cases")
     passed = sum(result.passed for result in results)
@@ -673,7 +808,12 @@ def suite_report(results: list[Result]) -> dict:
     case_ids = [result.case_id for result in results]
     return {
         "case_ids": case_ids,
-        "case_definition_digest": case_definition_digest(results[0].suite, case_ids),
+        "case_definition_digest": (
+            definition_digest
+            if definition_digest is not None
+            else case_definition_digest(results[0].suite, case_ids)
+        ),
+        "definition_stable": definition_stable,
         "quality": {
             "passed": passed,
             "total": len(results),
@@ -735,6 +875,8 @@ def build_report(
     model: str,
     suite_filter: str | None,
     case_filter: str | None,
+    case_definition_digests: dict[str, str] | None = None,
+    case_definition_stability: dict[str, bool] | None = None,
 ) -> dict:
     suites: dict[str, list[Result]] = {}
     for result in results:
@@ -751,7 +893,19 @@ def build_report(
         "claude_cli_version": claude_cli_version(),
         "filters": {"suite": suite_filter, "case": case_filter},
         "suites": {
-            name: suite_report(suite_results)
+            name: suite_report(
+                suite_results,
+                definition_digest=(
+                    None
+                    if case_definition_digests is None
+                    else case_definition_digests[name]
+                ),
+                definition_stable=(
+                    True
+                    if case_definition_stability is None
+                    else case_definition_stability[name]
+                ),
+            )
             for name, suite_results in suites.items()
         },
         "cases": [result_report(result) for result in results],
@@ -978,6 +1132,15 @@ def report_comparison_issues(report: object, label: str) -> list[str]:
         if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
             issues.append(
                 f"{label} suite {suite_name!r} has no valid case definition digest"
+            )
+        definition_stable = summary.get("definition_stable", True)
+        if not isinstance(definition_stable, bool):
+            issues.append(
+                f"{label} suite {suite_name!r} has invalid definition stability"
+            )
+        elif not definition_stable:
+            issues.append(
+                f"{label} suite {suite_name!r} changed definition during evaluation"
             )
 
         suite_cases = cases_by_suite.get(suite_name, [])
@@ -1242,6 +1405,7 @@ def setup_fixture(
     after_ref: str,
     *,
     staged_paths: list[str] | None = None,
+    fixtures_dir: Path | None = None,
 ) -> Path:
     """Build a real tmp git repo with a tagged baseline and an after-tree.
 
@@ -1256,11 +1420,10 @@ def setup_fixture(
     Returns the tmp repo path. Caller is responsible for cleanup via
     `teardown_fixture`.
     """
-    src = FIXTURES_DIR / fixture_name
-    if not src.is_dir():
-        raise FileNotFoundError(f"fixture not found: {src}")
-    baseline_src = src / "baseline"
-    after_src = src / "changes" / after_ref
+    _, _, baseline_src, after_src = fixture_case_roots(
+        {"fixture": fixture_name, "after_ref": after_ref},
+        fixtures_dir=fixtures_dir,
+    )
     if not baseline_src.is_dir():
         raise FileNotFoundError(f"fixture baseline missing: {baseline_src}")
     if not after_src.is_dir():
@@ -1714,6 +1877,7 @@ def evaluate_case(
     case: dict,
     *,
     keep_fixtures: bool,
+    fixtures_dir: Path | None = None,
 ) -> Result:
     case_id = case["id"]
     prompt_path = (
@@ -1733,7 +1897,11 @@ def evaluate_case(
             after_ref = case["after_ref"]
             staged_paths = case.get("staged_paths")
             fixture_path = setup_fixture(
-                fixture_name, baseline_ref, after_ref, staged_paths=staged_paths
+                fixture_name,
+                baseline_ref,
+                after_ref,
+                staged_paths=staged_paths,
+                fixtures_dir=fixtures_dir,
             )
 
             db_path = fixture_path / ".mastermind" / "mmcg.db"
@@ -2076,25 +2244,84 @@ def main() -> int:
 
     suites_to_run = [args.suite] if args.suite else list(SUITES.keys())
     results: list[Result] = []
+    case_definition_digests: dict[str, str] = {}
+    case_definition_stability: dict[str, bool] = {}
 
     for suite_name in suites_to_run:
         suite_cfg = SUITES[suite_name]
         if not suite_cfg["cases"].exists():
             print(f"  skip suite {suite_name} — no cases file at {suite_cfg['cases']}")
             continue
+        try:
+            suite_cases = [
+                case
+                for case in load_case_records(suite_cfg["cases"])
+                if not args.case or case["id"] == args.case
+            ]
+        except (OSError, ValueError) as error:
+            print(f"error: loading suite {suite_name}: {error}", file=sys.stderr)
+            return 2
+        if not suite_cases:
+            continue
+
         print(f"\n=== {suite_name} ===")
-        with suite_cfg["cases"].open() as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("//"):
-                    continue
-                case = json.loads(line)
-                if args.case and case["id"] != args.case:
-                    continue
+        try:
+            live_digest = case_definition_digest_from_records(
+                suite_name, suite_cases
+            )
+        except (KeyError, OSError, ValueError) as error:
+            print(
+                f"error: freezing suite {suite_name} definition: {error}",
+                file=sys.stderr,
+            )
+            return 2
+
+        fixture_snapshot: tempfile.TemporaryDirectory[str] | None = None
+        fixtures_dir_for_run: Path | None = None
+        if suite_cfg["uses_fixture"]:
+            fixture_snapshot = tempfile.TemporaryDirectory(
+                prefix=f"mastermind-eval-{suite_name}-definition-"
+            )
+            fixtures_dir_for_run = Path(fixture_snapshot.name)
+            try:
+                snapshot_fixture_definitions(suite_cases, fixtures_dir_for_run)
+                frozen_digest = case_definition_digest_from_records(
+                    suite_name,
+                    suite_cases,
+                    fixtures_dir=fixtures_dir_for_run,
+                )
+                live_digest_after_snapshot = case_definition_digest_from_records(
+                    suite_name, suite_cases
+                )
+            except (KeyError, OSError, ValueError) as error:
+                fixture_snapshot.cleanup()
+                print(
+                    f"error: freezing suite {suite_name} fixtures: {error}",
+                    file=sys.stderr,
+                )
+                return 2
+            if not (
+                live_digest == frozen_digest == live_digest_after_snapshot
+            ):
+                fixture_snapshot.cleanup()
+                print(
+                    f"error: suite {suite_name} fixtures changed while being frozen",
+                    file=sys.stderr,
+                )
+                return 2
+        else:
+            frozen_digest = live_digest
+
+        case_definition_digests[suite_name] = frozen_digest
+        case_definition_stability[suite_name] = True
+        suite_result_start = len(results)
+        try:
+            for case in suite_cases:
                 print(f"  [{case['id']}] running ...", end=" ", flush=True)
                 r = evaluate_case(
                     args.model, suite_name, suite_cfg, case,
                     keep_fixtures=args.keep_fixtures,
+                    fixtures_dir=fixtures_dir_for_run,
                 )
                 _SENTINEL_MISSING = "no structured audit verdict block found"
                 if (
@@ -2107,6 +2334,7 @@ def main() -> int:
                     r2 = evaluate_case(
                         args.model, suite_name, suite_cfg, case,
                         keep_fixtures=args.keep_fixtures,
+                        fixtures_dir=fixtures_dir_for_run,
                     )
                     r2.retry_attempted = True
                     r2.add_attempt(r)
@@ -2130,6 +2358,22 @@ def main() -> int:
                     print("      --- model output ---")
                     for line in r.output_excerpt.splitlines():
                         print(f"      {line}")
+        finally:
+            if fixture_snapshot is not None:
+                fixture_snapshot.cleanup()
+
+        suite_case_ids = [case["id"] for case in suite_cases]
+        definition_stable = (
+            case_definition_digest(suite_name, suite_case_ids) == frozen_digest
+        )
+        case_definition_stability[suite_name] = definition_stable
+        if not definition_stable:
+            reason = "case or fixture definition changed during evaluation"
+            for result in results[suite_result_start:]:
+                result.passed = False
+                if reason not in result.reasons:
+                    result.reasons.append(reason)
+            print(f"  ✗ FAIL  {reason}")
 
     if not results:
         print("\nno cases matched filter")
@@ -2169,6 +2413,8 @@ def main() -> int:
         model=args.model,
         suite_filter=args.suite,
         case_filter=args.case,
+        case_definition_digests=case_definition_digests,
+        case_definition_stability=case_definition_stability,
     )
     for suite_name, summary in report["suites"].items():
         context = summary["usage"]["context_tokens"]

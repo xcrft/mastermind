@@ -84,10 +84,15 @@ improvement.
 `--baseline-report` is intentionally strict. Current and baseline evidence must
 have the same requested model, resolved model IDs, Claude CLI version,
 suite/case filters, selected suites, case order, and SHA-256 digest of the
-selected JSONL definitions plus referenced fixture trees. For every suite, the
-pass rate cannot fall, every baseline-passing case must still pass, and both p50
-and p95 context tokens must be strictly lower. Malformed or incomparable
-evidence exits non-zero. A case filter that matches nothing is also an error.
+selected JSONL definitions plus referenced fixture trees and their file modes.
+The runner loads each selected JSONL case before the suite starts and copies
+fixture inputs into a private snapshot; disposable repositories are created
+from that snapshot rather than the live fixture tree. If a selected definition
+changes before the suite finishes, every result in that suite fails and the
+report is marked non-comparable. For every suite, the pass rate cannot fall,
+every baseline-passing case must still pass, and both p50 and p95 context tokens
+must be strictly lower. Malformed or incomparable evidence exits non-zero. A
+case filter that matches nothing is also an error.
 
 The checked-in critic baseline predates report emission and was transcribed from
 the runner's console output. Its capture metadata records that only aggregate

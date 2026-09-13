@@ -208,12 +208,24 @@ verifications_rerun:
 <!-- mastermind:audit-end -->
 """
 
-        def process(command):
+        def process(command, cwd):
             events = [
-                {"type": "system", "subtype": "init", "model": RESOLVED_MODEL},
+                {
+                    "type": "system",
+                    "subtype": "init",
+                    "model": RESOLVED_MODEL,
+                    "claude_code_version": "2.1.236",
+                    "cwd": str(cwd),
+                    "permissionMode": "dontAsk",
+                    "tools": ["Read", "Grep", "Glob", "Bash"],
+                    "mcp_servers": [],
+                    "skills": [],
+                    "plugins": [],
+                },
                 {
                     "type": "assistant",
                     "message": {
+                        "model": RESOLVED_MODEL,
                         "content": [
                             {
                                 "type": "tool_use",
@@ -264,7 +276,11 @@ verifications_rerun:
                     self.subTest(command=command),
                     patch.object(runner, "setup_fixture", return_value=fixture),
                     patch.object(runner, "teardown_fixture"),
-                    patch.object(runner.subprocess, "run", return_value=process(command)),
+                    patch.object(
+                        runner.subprocess,
+                        "run",
+                        return_value=process(command, fixture),
+                    ),
                 ):
                     result = runner.evaluate_case(
                         "opus",
@@ -273,6 +289,7 @@ verifications_rerun:
                         case,
                         keep_fixtures=False,
                         mmcg_binary=None,
+                        claude_version="2.1.236 (Claude Code)",
                     )
                     self.assertEqual(result.passed, passed, result.reasons)
 
@@ -523,6 +540,108 @@ action: passthrough
             runner.parse_claude_output(
                 "\n".join(json.dumps(event) for event in missing_error_state),
                 streamed=True,
+            )
+
+        unsupported = deepcopy(base)
+        unsupported.insert(1, {"type": "opaque"})
+        with self.assertRaisesRegex(ValueError, "unsupported event type"):
+            runner.parse_claude_output(
+                "\n".join(json.dumps(event) for event in unsupported),
+                streamed=True,
+            )
+
+    def test_stream_parser_validates_the_observed_cli_runtime(self):
+        contract = runner.StreamRuntimeContract(
+            cwd="/tmp/eval-case",
+            tools=("Read", "mcp__mmcg__mmcg_search"),
+            mcp_servers=("mmcg",),
+            claude_code_version="2.1.236",
+        )
+        init = {
+            "type": "system",
+            "subtype": "init",
+            "model": RESOLVED_MODEL,
+            "claude_code_version": "2.1.236",
+            "cwd": "/tmp/eval-case",
+            "permissionMode": "dontAsk",
+            "tools": ["mcp__mmcg__mmcg_search", "Read"],
+            "mcp_servers": [{"name": "mmcg", "status": "connected"}],
+            "skills": [],
+            "plugins": [],
+        }
+        result = {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": "done",
+            "modelUsage": {RESOLVED_MODEL: {}},
+        }
+
+        payload, tool_calls, executions = runner.parse_claude_output(
+            "\n".join(json.dumps(event) for event in (init, result)),
+            streamed=True,
+            runtime_contract=contract,
+        )
+        self.assertEqual(payload["result"], "done")
+        self.assertEqual(tool_calls, [])
+        self.assertEqual(executions, [])
+
+        mutations = (
+            ("claude_code_version", "2.1.235", "CLI version"),
+            ("cwd", "/tmp/other", "working directory"),
+            ("permissionMode", "acceptEdits", "permission mode"),
+            ("tools", ["Read", "Bash"], "tool inventory"),
+            (
+                "mcp_servers",
+                [{"name": "mmcg", "status": "failed"}],
+                "MCP server state",
+            ),
+            ("skills", ["unexpected"], "unexpected skills or plugins"),
+        )
+        for field, value, message in mutations:
+            with self.subTest(field=field):
+                changed = deepcopy(init)
+                changed[field] = value
+                with self.assertRaisesRegex(ValueError, message):
+                    runner.parse_claude_output(
+                        "\n".join(
+                            json.dumps(event) for event in (changed, result)
+                        ),
+                        streamed=True,
+                        runtime_contract=contract,
+                    )
+
+        extra_tool_events = [
+            init,
+            {
+                "type": "assistant",
+                "message": {
+                    "model": RESOLVED_MODEL,
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "tool-1",
+                            "name": "Bash",
+                            "input": {"command": "true"},
+                        }
+                    ],
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "tool-1"}
+                    ]
+                },
+            },
+            result,
+        ]
+        with self.assertRaisesRegex(ValueError, "outside its inventory"):
+            runner.parse_claude_output(
+                "\n".join(json.dumps(event) for event in extra_tool_events),
+                streamed=True,
+                runtime_contract=contract,
             )
 
     def test_tool_policy_requires_mmcg_first_and_bounded_source_read(self):
@@ -1632,7 +1751,9 @@ action: passthrough
             invoked_with = []
 
             def evaluate(*_args, **kwargs):
-                invoked_with.append(kwargs["claude_binary"])
+                invoked_with.append(
+                    (kwargs["claude_binary"], kwargs["claude_version"])
+                )
                 return runner.Result(
                     "case",
                     "critic",
@@ -1668,7 +1789,10 @@ action: passthrough
             report = json.loads(report_path.read_text())
 
         self.assertEqual(status, 1)
-        self.assertEqual(invoked_with, [Path(runner.sys.executable).resolve()])
+        self.assertEqual(
+            invoked_with,
+            [(Path(runner.sys.executable).resolve(), "test-cli-before")],
+        )
         self.assertFalse(report["cases"][0]["passed"])
         self.assertIn(
             "Claude CLI changed during evaluation", report["cases"][0]["reasons"]
@@ -2139,7 +2263,15 @@ class PromptIsolationTests(unittest.TestCase):
 
     def test_synthetic_prompt_suites_cannot_inspect_the_maintainer_checkout(self):
         for suite in ("critic", "intake", "workflow"):
-            self.assertEqual(runner.isolated_cli_args(suite), ["--safe-mode", "--tools", ""])
+            arguments = runner.isolated_cli_args(suite)
+            self.assertEqual(arguments[:3], ["--safe-mode", "--tools", ""])
+            for flag in (
+                "--setting-sources",
+                "--strict-mcp-config",
+                "--disable-slash-commands",
+                "--no-chrome",
+            ):
+                self.assertIn(flag, arguments)
             self.assertTrue(runner.requires_prompt_sandbox(suite))
         researcher_args = runner.isolated_cli_args("researcher")
         self.assertIn("--strict-mcp-config", researcher_args)
@@ -2172,6 +2304,35 @@ class PromptIsolationTests(unittest.TestCase):
         self.assertNotIn("Bash(cargo *)", allowed)
         self.assertNotIn("Bash(cargo test *)", allowed)
         self.assertFalse(runner.requires_prompt_sandbox("auditor"))
+
+    def test_source_only_subagent_runtime_removes_unavailable_mmcg(self):
+        path = runner.SUITES["researcher"]["subagent"]
+        _, definition = runner.subagent_runtime_definition(
+            path, model_override="haiku", include_mmcg=False
+        )
+        self.assertEqual(definition["tools"], ["Read", "Grep", "Glob"])
+        self.assertNotIn("mcpServers", definition)
+
+        arguments = runner.isolated_cli_args(
+            "researcher", subagent=path, include_mmcg=False
+        )
+        allowed = arguments[arguments.index("--allowedTools") + 1]
+        self.assertEqual(allowed, "Read,Glob,Grep")
+        self.assertEqual(
+            runner.expected_stream_tools(
+                "researcher", subagent=path, include_mmcg=False
+            ),
+            ("Read", "Grep", "Glob"),
+        )
+        agent_arguments = runner.subagent_cli_args(
+            path, model_override="haiku", include_mmcg=False
+        )
+        payload = json.loads(agent_arguments[agent_arguments.index("--agents") + 1])
+        self.assertEqual(
+            payload["mastermind-researcher"]["tools"],
+            ["Read", "Grep", "Glob"],
+        )
+        self.assertNotIn("mcpServers", payload["mastermind-researcher"])
 
     def test_researcher_allowed_tools_come_from_the_frozen_subagent(self):
         with tempfile.TemporaryDirectory() as target:

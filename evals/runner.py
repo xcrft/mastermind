@@ -237,6 +237,14 @@ class ToolExecution:
     succeeded: bool = False
 
 
+@dataclass(frozen=True)
+class StreamRuntimeContract:
+    cwd: str
+    tools: tuple[str, ...]
+    mcp_servers: tuple[str, ...]
+    claude_code_version: str
+
+
 def strip_frontmatter(text: str) -> str:
     if text.startswith("---\n"):
         end = text.find("\n---\n", 4)
@@ -246,7 +254,10 @@ def strip_frontmatter(text: str) -> str:
 
 
 def subagent_runtime_definition(
-    path: Path, *, model_override: str | None = None
+    path: Path,
+    *,
+    model_override: str | None = None,
+    include_mmcg: bool = True,
 ) -> tuple[str, dict]:
     """Translate shipped YAML frontmatter into Claude's `--agents` contract."""
     if not _YAML_AVAILABLE:
@@ -289,15 +300,45 @@ def subagent_runtime_definition(
             for tool in definition["tools"].split(",")
             if tool.strip()
         ]
+    if not include_mmcg:
+        tools = definition.get("tools", [])
+        if not isinstance(tools, list):
+            raise ValueError(f"subagent tools are invalid: {path}")
+        definition["tools"] = [
+            tool
+            for tool in tools
+            if not (isinstance(tool, str) and tool.startswith("mcp__mmcg__"))
+        ]
+        servers = definition.get("mcpServers", [])
+        if isinstance(servers, list):
+            remaining_servers: list | dict = [
+                server for server in servers if server != "mmcg"
+            ]
+        elif isinstance(servers, dict):
+            remaining_servers = {
+                server: config
+                for server, config in servers.items()
+                if server != "mmcg"
+            }
+        else:
+            raise ValueError(f"subagent MCP servers are invalid: {path}")
+        if remaining_servers:
+            definition["mcpServers"] = remaining_servers
+        else:
+            definition.pop("mcpServers", None)
     if model_override is not None:
         definition["model"] = model_override
     return name, definition
 
 
-def subagent_cli_args(path: Path, *, model_override: str) -> list[str]:
+def subagent_cli_args(
+    path: Path, *, model_override: str, include_mmcg: bool = True
+) -> list[str]:
     """Run the eval through the same custom-agent boundary as production."""
     name, definition = subagent_runtime_definition(
-        path, model_override=model_override
+        path,
+        model_override=model_override,
+        include_mmcg=include_mmcg,
     )
     return [
         "--agents",
@@ -319,16 +360,30 @@ def subagent_mcp_tools(path: Path) -> tuple[str, ...]:
     )
 
 
-def auditor_allowed_tools(subagent: Path | None = None) -> tuple[str, ...]:
-    return AUDITOR_SAFE_ALLOWED_TOOLS + subagent_mcp_tools(
-        SUITES["auditor"]["subagent"] if subagent is None else subagent
+def auditor_allowed_tools(
+    subagent: Path | None = None, *, include_mmcg: bool = True
+) -> tuple[str, ...]:
+    mcp_tools = (
+        subagent_mcp_tools(
+            SUITES["auditor"]["subagent"] if subagent is None else subagent
+        )
+        if include_mmcg
+        else ()
     )
+    return AUDITOR_SAFE_ALLOWED_TOOLS + mcp_tools
 
 
-def researcher_allowed_tools(subagent: Path | None = None) -> tuple[str, ...]:
-    return ("Read", "Glob", "Grep") + subagent_mcp_tools(
-        SUITES["researcher"]["subagent"] if subagent is None else subagent
+def researcher_allowed_tools(
+    subagent: Path | None = None, *, include_mmcg: bool = True
+) -> tuple[str, ...]:
+    mcp_tools = (
+        subagent_mcp_tools(
+            SUITES["researcher"]["subagent"] if subagent is None else subagent
+        )
+        if include_mmcg
+        else ()
     )
+    return ("Read", "Glob", "Grep") + mcp_tools
 
 
 def _nonnegative_int(value: object) -> int:
@@ -413,8 +468,50 @@ def telemetry_from_payload(payload: dict) -> dict[str, object]:
     }
 
 
+def validate_stream_runtime(
+    init_event: dict, contract: StreamRuntimeContract
+) -> None:
+    if init_event.get("claude_code_version") != contract.claude_code_version:
+        raise ValueError("Claude stream CLI version does not match the pinned runtime")
+    if init_event.get("cwd") != contract.cwd:
+        raise ValueError("Claude stream working directory does not match the case")
+    if init_event.get("permissionMode") != "dontAsk":
+        raise ValueError("Claude stream permission mode is not dontAsk")
+
+    tools = init_event.get("tools")
+    if (
+        not isinstance(tools, list)
+        or any(not isinstance(tool, str) or not tool for tool in tools)
+        or len(tools) != len(set(tools))
+        or sorted(tools) != sorted(contract.tools)
+    ):
+        raise ValueError("Claude stream tool inventory does not match the case")
+
+    raw_servers = init_event.get("mcp_servers", [])
+    if not isinstance(raw_servers, list) or any(
+        not isinstance(server, dict)
+        or not isinstance(server.get("name"), str)
+        or not isinstance(server.get("status"), str)
+        for server in raw_servers
+    ):
+        raise ValueError("Claude stream has invalid MCP server state")
+    server_names = [server["name"] for server in raw_servers]
+    if (
+        len(server_names) != len(set(server_names))
+        or sorted(server_names) != sorted(contract.mcp_servers)
+        or any(server["status"] != "connected" for server in raw_servers)
+    ):
+        raise ValueError("Claude stream MCP server state does not match the case")
+
+    if init_event.get("skills", []) != [] or init_event.get("plugins", []) != []:
+        raise ValueError("Claude stream loaded unexpected skills or plugins")
+
+
 def parse_claude_output(
-    stdout: str, *, streamed: bool
+    stdout: str,
+    *,
+    streamed: bool,
+    runtime_contract: StreamRuntimeContract | None = None,
 ) -> tuple[dict, list[str], list[ToolExecution]]:
     if not streamed:
         payload = json.loads(stdout)
@@ -456,18 +553,18 @@ def parse_claude_output(
     resolved_model = init_event.get("model")
     if not isinstance(resolved_model, str) or not resolved_model:
         raise ValueError("Claude stream init has no primary model")
+    if runtime_contract is not None:
+        validate_stream_runtime(init_event, runtime_contract)
     if init_index >= result_index:
         raise ValueError("Claude stream result precedes its init event")
+    notification_types = {"system", "rate_limit_event"}
+    if any(event.get("type") not in notification_types for event in events[:init_index]):
+        raise ValueError("Claude stream contains unsupported events before its init")
     if any(
-        event.get("type") in {"assistant", "user", "result"}
-        for event in events[:init_index]
-    ):
-        raise ValueError("Claude stream contains conversation events before its init")
-    if any(
-        event.get("type") in {"assistant", "user", "result"}
+        event.get("type") not in notification_types
         for event in events[result_index + 1 :]
     ):
-        raise ValueError("Claude stream contains conversation events after its result")
+        raise ValueError("Claude stream contains unsupported events after its result")
     if not isinstance(payload.get("is_error"), bool):
         raise ValueError("Claude stream result has invalid error state")
     if payload["is_error"] is True or str(payload.get("subtype", "")).startswith("error"):
@@ -494,7 +591,16 @@ def parse_claude_output(
         content = message.get("content") if isinstance(message, dict) else None
         if event_type == "assistant":
             message_model = message.get("model") if isinstance(message, dict) else None
-            if message_model is not None and message_model != resolved_model:
+            if event.get("error") is not None:
+                raise ValueError("Claude stream contains an assistant error")
+            if (
+                runtime_contract is not None
+                and message_model != resolved_model
+            ) or (
+                runtime_contract is None
+                and message_model is not None
+                and message_model != resolved_model
+            ):
                 raise ValueError("Claude stream changed model during evaluation")
             if not isinstance(content, list):
                 raise ValueError("Claude assistant event has invalid content")
@@ -512,6 +618,11 @@ def parse_claude_output(
                     raise ValueError("Claude stream has a tool call without an id")
                 if not isinstance(arguments, dict):
                     raise ValueError("Claude stream has a tool call with invalid input")
+                if (
+                    runtime_contract is not None
+                    and name not in runtime_contract.tools
+                ):
+                    raise ValueError("Claude stream called a tool outside its inventory")
                 if tool_use_id in tools_by_id:
                     raise ValueError("Claude stream repeats a tool call id")
                 execution = ToolExecution(name, tool_use_id, arguments)
@@ -535,6 +646,8 @@ def parse_claude_output(
                     raise ValueError("Claude stream tool result has invalid error state")
                 execution.result_seen = True
                 execution.succeeded = not is_error
+        elif event_type not in notification_types:
+            raise ValueError("Claude stream has an unsupported event type")
     if any(not execution.result_seen for execution in tool_executions):
         raise ValueError("Claude stream has a tool call without a result")
     return payload, tool_calls, tool_executions
@@ -1584,6 +1697,14 @@ def claude_cli_version(binary: str | Path = "claude") -> str | None:
         return None
     version = proc.stdout.strip()
     return version if proc.returncode == 0 and version else None
+
+
+def claude_stream_version(cli_version: str) -> str:
+    """Return the version token emitted by Claude's stream init event."""
+    version = cli_version.strip().split(maxsplit=1)[0] if cli_version.strip() else ""
+    if not version:
+        raise ValueError("Claude CLI version is empty")
+    return version
 
 
 def evaluation_harness_definition() -> dict[str, str]:
@@ -3057,17 +3178,33 @@ def render_researcher_input(
 
 
 def isolated_cli_args(
-    suite_name: str, *, subagent: Path | None = None
+    suite_name: str,
+    *,
+    subagent: Path | None = None,
+    include_mmcg: bool = True,
 ) -> list[str]:
     """Deny repository tools to suites whose fixtures exist only in prompts."""
     if suite_name in {"critic", "intake", "workflow"}:
-        return ["--safe-mode", "--tools", ""]
+        return [
+            "--safe-mode",
+            "--tools",
+            "",
+            "--setting-sources",
+            "",
+            "--strict-mcp-config",
+            "--disable-slash-commands",
+            "--no-chrome",
+        ]
     if suite_name == "researcher":
         return [
             "--tools",
             "Read,Glob,Grep",
             "--allowedTools",
-            ",".join(researcher_allowed_tools(subagent)),
+            ",".join(
+                researcher_allowed_tools(
+                    subagent, include_mmcg=include_mmcg
+                )
+            ),
             "--setting-sources",
             "",
             "--strict-mcp-config",
@@ -3079,7 +3216,9 @@ def isolated_cli_args(
             "--tools",
             "Read,Glob,Grep,Bash",
             "--allowedTools",
-            ",".join(auditor_allowed_tools(subagent)),
+            ",".join(
+                auditor_allowed_tools(subagent, include_mmcg=include_mmcg)
+            ),
             "--setting-sources",
             "",
             "--strict-mcp-config",
@@ -3087,6 +3226,29 @@ def isolated_cli_args(
             "--no-chrome",
         ]
     return []
+
+
+def expected_stream_tools(
+    suite_name: str,
+    *,
+    subagent: Path | None,
+    include_mmcg: bool,
+) -> tuple[str, ...]:
+    if suite_name in {"critic", "intake", "workflow"}:
+        return ()
+    if subagent is None:
+        raise ValueError(f"suite {suite_name!r} has no subagent definition")
+    _, definition = subagent_runtime_definition(
+        subagent, include_mmcg=include_mmcg
+    )
+    tools = definition.get("tools")
+    if (
+        not isinstance(tools, list)
+        or any(not isinstance(tool, str) or not tool for tool in tools)
+        or len(tools) != len(set(tools))
+    ):
+        raise ValueError(f"suite {suite_name!r} has an invalid tool inventory")
+    return tuple(tools)
 
 
 def requires_prompt_sandbox(suite_name: str) -> bool:
@@ -3459,6 +3621,7 @@ def evaluate_case(
     fixtures_dir: Path | None = None,
     workflow_root: Path | None = None,
     claude_binary: str | Path = "claude",
+    claude_version: str | None = None,
     git_binary: str | Path = "git",
     mmcg_binary: str | Path | None = MMCG_BIN,
 ) -> Result:
@@ -3473,6 +3636,7 @@ def evaluate_case(
     fixture_path: Path | None = None
     prompt_sandbox: tempfile.TemporaryDirectory[str] | None = None
     extra_cmd: list[str] = []
+    has_mmcg = False
     try:
         if suite_cfg["uses_fixture"]:
             fixture_name = case["fixture"]
@@ -3542,7 +3706,11 @@ def evaluate_case(
         # swallow the message as another directory.
         if suite_name in {"auditor", "researcher"}:
             prompt_args: list[str] = []
-            agent_args = subagent_cli_args(prompt_path, model_override=model)
+            agent_args = subagent_cli_args(
+                prompt_path,
+                model_override=model,
+                include_mmcg=has_mmcg,
+            )
         else:
             prompt_flag = (
                 "--system-prompt"
@@ -3556,6 +3724,7 @@ def evaluate_case(
             subagent=(
                 prompt_path if suite_name in {"auditor", "researcher"} else None
             ),
+            include_mmcg=has_mmcg,
         )
         if requires_prompt_sandbox(suite_name):
             prompt_sandbox = tempfile.TemporaryDirectory(prefix="mastermind-eval-")
@@ -3563,6 +3732,26 @@ def evaluate_case(
             suite_name,
             fixture_path=fixture_path,
             prompt_sandbox=prompt_sandbox,
+        )
+        if case_cwd is None:
+            raise ValueError(f"suite {suite_name!r} has no evaluation directory")
+        runtime_contract = (
+            None
+            if claude_version is None
+            else StreamRuntimeContract(
+                cwd=str(case_cwd),
+                tools=expected_stream_tools(
+                    suite_name,
+                    subagent=(
+                        prompt_path
+                        if suite_name in {"auditor", "researcher"}
+                        else None
+                    ),
+                    include_mmcg=has_mmcg,
+                ),
+                mcp_servers=("mmcg",) if has_mmcg else (),
+                claude_code_version=claude_stream_version(claude_version),
+            )
         )
         streamed_output = True
         cmd = [
@@ -3614,7 +3803,9 @@ def evaluate_case(
         parse_error: str | None = None
         try:
             payload, tool_calls, tool_executions = parse_claude_output(
-                proc.stdout, streamed=streamed_output
+                proc.stdout,
+                streamed=streamed_output,
+                runtime_contract=runtime_contract,
             )
             output = payload.get("result", "")
             if not isinstance(output, str):
@@ -4022,6 +4213,7 @@ def main() -> int:
                     fixtures_dir=fixtures_dir_for_run,
                     workflow_root=workflow_root_for_run,
                     claude_binary=claude_binary,
+                    claude_version=frozen_claude_version,
                     git_binary=git_binary or "git",
                     mmcg_binary=mmcg_binary,
                 )
@@ -4039,6 +4231,7 @@ def main() -> int:
                         fixtures_dir=fixtures_dir_for_run,
                         workflow_root=workflow_root_for_run,
                         claude_binary=claude_binary,
+                        claude_version=frozen_claude_version,
                         git_binary=git_binary or "git",
                         mmcg_binary=mmcg_binary,
                     )

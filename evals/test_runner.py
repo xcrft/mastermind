@@ -2013,6 +2013,76 @@ action: passthrough
             ):
                 runner.load_case_records(path, suite_name="critic")
 
+    def test_case_loader_rejects_unsafe_or_unbounded_definition_files(self):
+        with tempfile.TemporaryDirectory() as target:
+            root = Path(target)
+            regular = root / "critic.jsonl"
+            regular.write_text(
+                json.dumps(valid_critic_case_definition()) + "\n",
+                encoding="utf-8",
+            )
+            if os.name == "posix":
+                linked = root / "linked.jsonl"
+                linked.symlink_to(regular)
+                with self.assertRaisesRegex(ValueError, "cannot read eval case"):
+                    runner.load_case_records(linked, suite_name="critic")
+
+            oversized = root / "oversized.jsonl"
+            oversized.write_bytes(b"x" * 33)
+            with (
+                patch.object(runner, "EVALUATION_DEFINITION_FILE_LIMIT_BYTES", 32),
+                self.assertRaisesRegex(ValueError, "cannot read eval case"),
+            ):
+                runner.load_case_records(oversized, suite_name="critic")
+
+            invalid_utf8 = root / "invalid.jsonl"
+            invalid_utf8.write_bytes(b"\xff")
+            with self.assertRaisesRegex(ValueError, "cannot read eval case"):
+                runner.load_case_records(invalid_utf8, suite_name="critic")
+
+            if os.name == "posix" and hasattr(os, "mkfifo"):
+                fifo = root / "cases.fifo"
+                os.mkfifo(fifo)
+                with self.assertRaisesRegex(ValueError, "cannot read eval case"):
+                    runner.load_case_records(fifo, suite_name="critic")
+
+    def test_evaluation_target_rejects_unsafe_or_unbounded_definition_files(self):
+        with tempfile.TemporaryDirectory() as target:
+            root = Path(target)
+            regular = root / "agent.md"
+            regular.write_text(
+                "---\nname: test\ndescription: test\n---\nPrompt.\n",
+                encoding="utf-8",
+            )
+            if os.name == "posix":
+                linked = root / "linked.md"
+                linked.symlink_to(regular)
+                with self.assertRaisesRegex(ValueError, "cannot read subagent"):
+                    runner.subagent_runtime_definition(linked)
+
+            oversized = root / "oversized.md"
+            oversized.write_bytes(b"x" * 33)
+            with (
+                patch.object(runner, "EVALUATION_DEFINITION_FILE_LIMIT_BYTES", 32),
+                self.assertRaisesRegex(ValueError, "cannot read subagent"),
+            ):
+                runner.evaluation_target_digest(
+                    "critic", {"subagent": oversized}, [{"id": "case"}]
+                )
+
+            invalid_utf8 = root / "invalid.md"
+            invalid_utf8.write_bytes(b"\xff")
+            with self.assertRaisesRegex(ValueError, "cannot read subagent"):
+                runner.subagent_runtime_definition(invalid_utf8)
+
+            if os.name == "posix" and hasattr(os, "mkfifo"):
+                fifo = root / "agent.fifo"
+                os.mkfifo(fifo)
+                with self.assertRaisesRegex(ValueError, "cannot read subagent"):
+                    runner.evaluation_target_digest(
+                        "critic", {"subagent": fifo}, [{"id": "case"}]
+                    )
+
     def test_fixture_content_changes_case_definition_digest(self):
         with tempfile.TemporaryDirectory() as target:
             fixture_root = Path(target) / "fake-session"

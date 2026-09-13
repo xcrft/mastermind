@@ -63,6 +63,7 @@ LEGACY_CONSOLE_BASELINE = EVALS_DIR / "baselines" / "critic-opus-pre-lean.json"
 REPORT_KIND = "mastermind-eval-report"
 REPORT_SCHEMA_VERSION = 1
 REPORT_FILE_LIMIT_BYTES = 16 * 1024 * 1024
+EVALUATION_DEFINITION_FILE_LIMIT_BYTES = 4 * 1024 * 1024
 CRITIC_VERDICTS = frozenset(
     {"ship it", "ship with caveats", "revise", "rethink", "insufficient evidence"}
 )
@@ -351,7 +352,7 @@ def subagent_runtime_definition(
     """Translate shipped YAML frontmatter into Claude's `--agents` contract."""
     if not _YAML_AVAILABLE:
         raise RuntimeError("PyYAML is required to load subagent frontmatter")
-    text = path.read_text(encoding="utf-8")
+    text = _read_evaluation_definition(path, "subagent definition")
     if not text.startswith("---\n"):
         raise ValueError(f"subagent has no YAML frontmatter: {path}")
     end = text.find("\n---\n", 4)
@@ -1079,8 +1080,9 @@ def load_case_records(
 ) -> list[dict]:
     records: list[dict] = []
     seen_ids: set[str] = set()
+    text = _read_evaluation_definition(path, "eval case definition")
     for line_number, line in enumerate(
-        path.read_text(encoding="utf-8").splitlines(), start=1
+        text.splitlines(), start=1
     ):
         if not line.strip() or line.lstrip().startswith("//"):
             continue
@@ -3527,11 +3529,11 @@ def compare_to_baseline(
     return {"passed": not failures, "checks": checks, "failures": failures}
 
 
-def _same_report_node(left: os.stat_result, right: os.stat_result) -> bool:
+def _same_file_node(left: os.stat_result, right: os.stat_result) -> bool:
     return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
 
 
-def _report_file_identity(value: os.stat_result) -> tuple[int, ...]:
+def _file_identity(value: os.stat_result) -> tuple[int, ...]:
     return (
         value.st_dev,
         value.st_ino,
@@ -3542,28 +3544,53 @@ def _report_file_identity(value: os.stat_result) -> tuple[int, ...]:
     )
 
 
-def _check_report_parent(
+def _check_file_parent(
     requested: Path,
     canonical: Path,
     descriptor: int,
     expected: os.stat_result,
+    *,
+    label: str,
+    operation: str,
 ) -> None:
     try:
         current = canonical.stat(follow_symlinks=False)
         resolved = requested.resolve(strict=True)
         opened = os.fstat(descriptor)
     except (OSError, RuntimeError) as error:
-        raise OSError("eval report parent changed during publication") from error
+        raise OSError(f"{label} parent changed during {operation}") from error
     if (
         resolved != canonical
         or not stat.S_ISDIR(current.st_mode)
-        or not _same_report_node(current, expected)
-        or not _same_report_node(opened, expected)
+        or not _same_file_node(current, expected)
+        or not _same_file_node(opened, expected)
     ):
-        raise OSError("eval report parent changed during publication")
+        raise OSError(f"{label} parent changed during {operation}")
 
 
-def _read_report_file_at(parent_descriptor: int, name: str, limit: int) -> bytes:
+def _check_report_parent(
+    requested: Path,
+    canonical: Path,
+    descriptor: int,
+    expected: os.stat_result,
+) -> None:
+    _check_file_parent(
+        requested,
+        canonical,
+        descriptor,
+        expected,
+        label="eval report",
+        operation="publication",
+    )
+
+
+def _read_stable_file_at(
+    parent_descriptor: int,
+    name: str,
+    limit: int,
+    *,
+    label: str,
+) -> tuple[bytes, os.stat_result]:
     descriptor = os.open(
         name,
         os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
@@ -3572,7 +3599,7 @@ def _read_report_file_at(parent_descriptor: int, name: str, limit: int) -> bytes
     try:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
-            raise OSError("published eval report is not the expected regular file")
+            raise OSError(f"{label} is not a bounded regular file")
         body = bytearray()
         remaining = limit + 1
         while remaining:
@@ -3587,46 +3614,67 @@ def _read_report_file_at(parent_descriptor: int, name: str, limit: int) -> bytes
         os.close(descriptor)
     if (
         len(body) > limit
-        or _report_file_identity(before) != _report_file_identity(after)
-        or _report_file_identity(after) != _report_file_identity(current)
+        or _file_identity(before) != _file_identity(after)
+        or _file_identity(after) != _file_identity(current)
     ):
-        raise OSError("published eval report changed during verification")
-    return bytes(body)
+        raise OSError(f"{label} changed during reading")
+    return bytes(body), after
 
 
-def _read_report_portable(path: Path, limit: int) -> bytes:
+def _read_report_file_at(parent_descriptor: int, name: str, limit: int) -> bytes:
+    body, _ = _read_stable_file_at(
+        parent_descriptor,
+        name,
+        limit,
+        label="published eval report",
+    )
+    return body
+
+
+def _read_stable_regular_file_portable(
+    path: Path, limit: int, *, label: str
+) -> tuple[bytes, os.stat_result]:
     if path.is_symlink():
-        raise OSError("eval report cannot be a symbolic link")
+        raise OSError(f"{label} cannot be a symbolic link")
     canonical = path.resolve(strict=True)
     with canonical.open("rb") as handle:
         before = os.fstat(handle.fileno())
         if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
-            raise OSError("eval report is not a bounded regular file")
+            raise OSError(f"{label} is not a bounded regular file")
         body = handle.read(limit + 1)
         after = os.fstat(handle.fileno())
     try:
         current = canonical.stat(follow_symlinks=False)
         resolved = path.resolve(strict=True)
     except (OSError, RuntimeError) as error:
-        raise OSError("eval report changed during reading") from error
+        raise OSError(f"{label} changed during reading") from error
     if (
         len(body) > limit
         or resolved != canonical
-        or _report_file_identity(before) != _report_file_identity(after)
-        or _report_file_identity(after) != _report_file_identity(current)
+        or _file_identity(before) != _file_identity(after)
+        or _file_identity(after) != _file_identity(current)
     ):
-        raise OSError("eval report changed during reading")
+        raise OSError(f"{label} changed during reading")
+    return body, after
+
+
+def _read_report_portable(path: Path, limit: int) -> bytes:
+    body, _ = _read_stable_regular_file_portable(
+        path, limit, label="eval report"
+    )
     return body
 
 
-def _read_report(path: Path, limit: int) -> bytes:
+def _read_stable_regular_file(
+    path: Path, limit: int, *, label: str
+) -> tuple[bytes, os.stat_result]:
     target = path.absolute()
     if not target.name or target.name in {".", ".."}:
-        raise OSError("invalid eval report path")
+        raise OSError(f"invalid {label} path")
     if limit <= 0:
-        raise ValueError("eval report byte cap must be positive")
+        raise ValueError(f"{label} byte cap must be positive")
     if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
-        return _read_report_portable(target, limit)
+        return _read_stable_regular_file_portable(target, limit, label=label)
 
     requested_parent = target.parent
     try:
@@ -3636,27 +3684,66 @@ def _read_report(path: Path, limit: int) -> bytes:
             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK,
         )
     except (OSError, RuntimeError) as error:
-        raise OSError("cannot open eval report parent safely") from error
+        raise OSError(f"cannot open {label} parent safely") from error
     try:
         expected_parent = os.fstat(parent_descriptor)
         if not stat.S_ISDIR(expected_parent.st_mode):
-            raise OSError("eval report parent is not a directory")
-        _check_report_parent(
+            raise OSError(f"{label} parent is not a directory")
+        _check_file_parent(
             requested_parent,
             canonical_parent,
             parent_descriptor,
             expected_parent,
+            label=label,
+            operation="reading",
         )
-        body = _read_report_file_at(parent_descriptor, target.name, limit)
-        _check_report_parent(
+        body, identity = _read_stable_file_at(
+            parent_descriptor, target.name, limit, label=label
+        )
+        _check_file_parent(
             requested_parent,
             canonical_parent,
             parent_descriptor,
             expected_parent,
+            label=label,
+            operation="reading",
         )
-        return body
+        return body, identity
     finally:
         os.close(parent_descriptor)
+
+
+def _read_report(path: Path, limit: int) -> bytes:
+    body, _ = _read_stable_regular_file(path, limit, label="eval report")
+    return body
+
+
+def _read_evaluation_definition(path: Path, label: str) -> str:
+    body, _ = _read_evaluation_definition_file(path, label)
+    return body.decode("utf-8")
+
+
+def _read_evaluation_definition_file(
+    path: Path, label: str
+) -> tuple[bytes, os.stat_result]:
+    try:
+        body, identity = _read_stable_regular_file(
+            path,
+            EVALUATION_DEFINITION_FILE_LIMIT_BYTES,
+            label=label,
+        )
+        body.decode("utf-8")
+        return body, identity
+    except (OSError, UnicodeDecodeError) as error:
+        raise ValueError(f"cannot read {label} {path}: {error}") from error
+
+
+def _evaluation_definition_file_identity(path: Path, label: str) -> dict[str, str]:
+    body, identity = _read_evaluation_definition_file(path, label)
+    return {
+        "sha256": hashlib.sha256(body).hexdigest(),
+        "git_mode": "100755" if identity.st_mode & 0o111 else "100644",
+    }
 
 
 def _write_report_portable(path: Path, body: bytes) -> None:
@@ -3741,7 +3828,7 @@ def write_report(path: Path, report: dict) -> None:
             not stat.S_ISREG(written.st_mode)
             or stat.S_IMODE(written.st_mode) != 0o600
             or written.st_size != len(body)
-            or not _same_report_node(written, staged_stat)
+            or not _same_file_node(written, staged_stat)
         ):
             raise OSError("staged eval report changed during publication")
         _check_report_parent(
@@ -3756,7 +3843,7 @@ def write_report(path: Path, report: dict) -> None:
         staged = False
         published = True
         named = os.stat(target.name, dir_fd=parent_descriptor, follow_symlinks=False)
-        if not _same_report_node(written, named):
+        if not _same_file_node(written, named):
             raise OSError("published eval report changed during publication")
         os.fsync(parent_descriptor)
         _check_report_parent(
@@ -3779,8 +3866,8 @@ def write_report(path: Path, report: dict) -> None:
             bytes(retained) != body
             or observed != body
             or owned != (written.st_dev, written.st_ino)
-            or not _same_report_node(written, current)
-            or _report_file_identity(written) != _report_file_identity(current)
+            or not _same_file_node(written, current)
+            or _file_identity(written) != _file_identity(current)
         ):
             raise OSError("published eval report changed during verification")
         _check_report_parent(
@@ -4310,8 +4397,9 @@ def evaluation_target_digest(
             {
                 "case_id": case["id"],
                 "artifact": case["artifact"],
-                **_stable_regular_file_definition(
-                    workflow_prompt_path(case, repository_root=workflow_root)
+                **_evaluation_definition_file_identity(
+                    workflow_prompt_path(case, repository_root=workflow_root),
+                    "workflow definition",
                 ),
             }
             for case in selected
@@ -4323,7 +4411,10 @@ def evaluation_target_digest(
         records = [
             {
                 "artifact": "subagent",
-                **_stable_regular_file_definition(Path(subagent)),
+                **_evaluation_definition_file_identity(
+                    Path(subagent),
+                    "subagent definition",
+                ),
             }
         ]
     return hashlib.sha256(
@@ -4349,7 +4440,10 @@ def snapshot_evaluation_targets(
             if artifact in copied:
                 continue
             source = workflow_prompt_path(case)
-            _stable_regular_file_definition(source)
+            _evaluation_definition_file_identity(
+                source,
+                "workflow definition",
+            )
             target = destination / artifact
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(source, target)
@@ -4360,7 +4454,10 @@ def snapshot_evaluation_targets(
     if not isinstance(subagent, (str, os.PathLike)):
         raise ValueError(f"suite {suite_name!r} has no subagent definition")
     source = Path(subagent)
-    _stable_regular_file_definition(source)
+    _evaluation_definition_file_identity(
+        source,
+        "subagent definition",
+    )
     target = destination / "subagent.md"
     shutil.copy(source, target)
     return {**suite_cfg, "subagent": target}, None
@@ -4696,7 +4793,9 @@ def evaluate_case(
         if suite_name == "workflow"
         else suite_cfg["subagent"]
     )
-    system_prompt = strip_frontmatter(prompt_path.read_text())
+    system_prompt = strip_frontmatter(
+        _read_evaluation_definition(prompt_path, "evaluation target")
+    )
 
     fixture_path: Path | None = None
     prompt_sandbox: tempfile.TemporaryDirectory[str] | None = None

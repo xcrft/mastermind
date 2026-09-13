@@ -334,6 +334,43 @@ def main() -> int:
         )
         return 2
 
+    cargo_binary: Path | None = None
+    rustc_binary: Path | None = None
+    frozen_verification_runtime: dict[str, object] | None = None
+    uses_verification = args.with_mastermind and any(
+        runner.reported_cargo_verification_commands(case)
+        for case in defect_cases
+    )
+    if uses_verification:
+        cargo_location = shutil.which("cargo")
+        rustc_location = shutil.which("rustc")
+        if cargo_location is None or rustc_location is None:
+            print(
+                "error: `cargo` and `rustc` must be on PATH for "
+                "auditor verification.",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            cargo_binary, rustc_binary = runner.resolve_verification_binaries(
+                Path(cargo_location).absolute(),
+                Path(rustc_location).absolute(),
+            )
+            frozen_verification_runtime = runner.verification_runtime_definition(
+                cargo_binary, rustc_binary
+            )
+            runner.evaluation_environment(
+                1,
+                source={},
+                pinned_executables=(git_binary, cargo_binary, rustc_binary),
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            print(
+                f"error: cannot freeze auditor verification runtime: {error}",
+                file=sys.stderr,
+            )
+            return 2
+
     case_ids = [case["id"] for case in defect_cases]
     fixture_snapshot = tempfile.TemporaryDirectory(
         prefix="mastermind-ablation-fixtures-"
@@ -412,6 +449,7 @@ def main() -> int:
     target_stable = not args.with_mastermind
     source_stable = False
     repository_stable = False
+    verification_runtime_stable = frozen_verification_runtime is None
     try:
         for case in defect_cases:
             case_id = case["id"]
@@ -450,6 +488,8 @@ def main() -> int:
                     claude_version=claude_version,
                     git_binary=git_binary,
                     mmcg_binary=mmcg_binary,
+                    cargo_binary=cargo_binary,
+                    rustc_binary=rustc_binary,
                 )
                 mastermind = _mastermind_outcome(result)
                 mastermind_label = (
@@ -520,6 +560,27 @@ def main() -> int:
             )
         except (OSError, RuntimeError, ValueError):
             runtime_stable = False
+        if frozen_verification_runtime is not None:
+            try:
+                if cargo_binary is None or rustc_binary is None:
+                    raise ValueError("pinned Cargo/Rust runtime unavailable")
+                runner.evaluation_environment(
+                    1,
+                    source={},
+                    pinned_executables=(
+                        git_binary,
+                        cargo_binary,
+                        rustc_binary,
+                    ),
+                )
+                verification_runtime_stable = (
+                    runner.verification_runtime_definition(
+                        cargo_binary, rustc_binary
+                    )
+                    == frozen_verification_runtime
+                )
+            except (OSError, RuntimeError, ValueError):
+                verification_runtime_stable = False
         try:
             definition_stable = (
                 runner.case_definition_digest("auditor", case_ids)
@@ -564,6 +625,11 @@ def main() -> int:
 
     if not runtime_stable:
         print("error: ablation runtime changed during evaluation", file=sys.stderr)
+    if not verification_runtime_stable:
+        print(
+            "error: auditor verification runtime changed during evaluation",
+            file=sys.stderr,
+        )
     if not definition_stable:
         print("error: ablation case inputs changed during evaluation", file=sys.stderr)
     if not target_stable:
@@ -576,6 +642,7 @@ def main() -> int:
         errors
         or model_issues
         or not runtime_stable
+        or not verification_runtime_stable
         or not definition_stable
         or not target_stable
         or not source_stable

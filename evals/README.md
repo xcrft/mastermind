@@ -181,9 +181,12 @@ the exact Git and mmcg executables used to construct and index fixtures. Their
 hashes, Git version, and stability are recorded as `fixture_runtime`; future
 baselines must match them. An auditor case that reports a supported test command
 grants only its exact `cargo test --locked <test-filter>` command. The runner
-pins the Cargo launcher ahead of
-the inherited PATH, and records its executable identity and stability as
-`verification_runtime`. Prompt-only suites do not require Git, mmcg, or Cargo.
+resolves rustup proxies to the selected Cargo and rustc toolchain binaries, pins
+those binaries ahead of the inherited PATH, removes inherited Cargo/Rust
+overrides, and uses private external `CARGO_HOME` and `CARGO_TARGET_DIR`
+directories so a test cannot dirty the fixture. Their binary hashes, verbose
+versions, and stability are recorded as `verification_runtime`.
+Prompt-only suites do not require Git, mmcg, Cargo, or rustc.
 
 ## Researcher and auditor fixture lifecycle
 

@@ -334,6 +334,15 @@ verifications_rerun:
 
         with tempfile.TemporaryDirectory() as target:
             fixture = Path(target)
+            git_binary = fixture / "runtime" / "git" / "bin" / "git"
+            cargo_binary = fixture / "runtime" / "cargo" / "bin" / "cargo"
+            rustc_binary = fixture / "runtime" / "rust" / "bin" / "rustc"
+            for binary in (git_binary, cargo_binary, rustc_binary):
+                binary.parent.mkdir(parents=True)
+                binary.write_bytes(b"pinned runtime")
+                binary.chmod(0o755)
+            cargo_binary = cargo_binary.resolve()
+            rustc_binary = rustc_binary.resolve()
             for command, passed in (
                 (expected_command, True),
                 ("cargo test --locked another_test", False),
@@ -362,8 +371,9 @@ verifications_rerun:
                         keep_fixtures=False,
                         mmcg_binary=None,
                         claude_version="2.1.236 (Claude Code)",
-                        git_binary=Path("/runtime/git/bin/git"),
-                        cargo_binary=Path("/runtime/cargo/bin/cargo"),
+                        git_binary=git_binary,
+                        cargo_binary=cargo_binary,
+                        rustc_binary=rustc_binary,
                     )
                     self.assertEqual(result.passed, passed, result.reasons)
                 self.assertEqual(len(invocations), 1)
@@ -379,8 +389,20 @@ verifications_rerun:
                     "8192",
                 )
                 self.assertEqual(
-                    invocation["env"]["PATH"].split(os.pathsep)[:2],
-                    ["/runtime/git/bin", "/runtime/cargo/bin"],
+                    invocation["env"]["PATH"].split(os.pathsep)[:3],
+                    [
+                        str(git_binary.parent),
+                        str(cargo_binary.parent),
+                        str(rustc_binary.parent),
+                    ],
+                )
+                self.assertEqual(
+                    invocation["env"]["RUSTC"], str(rustc_binary)
+                )
+                self.assertEqual(invocation["env"]["CARGO_NET_OFFLINE"], "true")
+                self.assertNotEqual(
+                    Path(invocation["env"]["CARGO_TARGET_DIR"]).parent,
+                    fixture,
                 )
                 self.assertIsInstance(invocation["stdin"], bytes)
                 self.assertEqual(
@@ -417,7 +439,7 @@ verifications_rerun:
         self.assertFalse(result.passed)
         self.assertEqual(
             result.reasons,
-            ["pinned Cargo runtime unavailable for required verification"],
+            ["pinned Cargo/Rust runtime unavailable for required verification"],
         )
         invoke.assert_not_called()
 
@@ -576,6 +598,9 @@ action: passthrough
                 "GIT_DIR": "/private/other-repository",
                 "GIT_EXTERNAL_DIFF": "/private/untrusted-diff",
                 "GIT_CONFIG_GLOBAL": "/private/untrusted-gitconfig",
+                "CARGO_HOME": "/private/untrusted-cargo",
+                "RUSTC_WRAPPER": "/private/untrusted-wrapper",
+                "RUSTUP_TOOLCHAIN": "nightly",
             },
             pinned_executables=(Path("/runtime/git/bin/git"),),
         )
@@ -596,6 +621,9 @@ action: passthrough
             "DEBUG",
             "GIT_DIR",
             "GIT_EXTERNAL_DIFF",
+            "CARGO_HOME",
+            "RUSTC_WRAPPER",
+            "RUSTUP_TOOLCHAIN",
         ):
             self.assertNotIn(name, environment)
         self.assertEqual(environment["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "1400")
@@ -675,6 +703,23 @@ action: passthrough
         )
         self.assertFalse(runner._valid_evaluation_runtime_controls(unsafe))
 
+        command = "cargo test --locked exact_test"
+        verified = runner.evaluation_runtime_controls(
+            "auditor",
+            runner.SUITES["auditor"]["subagent"],
+            {"verification_rerun": command},
+            include_mmcg=False,
+        )
+        self.assertEqual(verified["verification"]["commands"], [command])
+        self.assertTrue(verified["verification"]["cargo_home_isolated"])
+        self.assertTrue(verified["verification"]["target_dir_isolated"])
+        self.assertTrue(verified["verification"]["rustc_pinned"])
+        self.assertEqual(
+            verified["verification"]["environment"],
+            runner.CARGO_VERIFICATION_ENV,
+        )
+        self.assertTrue(runner._valid_evaluation_runtime_controls(verified))
+
         prompt_only = runner.evaluation_runtime_controls(
             "workflow", None, {}, include_mmcg=False
         )
@@ -751,6 +796,68 @@ action: passthrough
         with patch.object(runner, "run_bounded", return_value=stopped):
             self.assertIsNone(runner.git_revision())
             self.assertIsNone(runner.claude_cli_version())
+
+    def test_verification_runtime_binds_cargo_and_rustc_versions(self):
+        with tempfile.TemporaryDirectory() as target:
+            root = Path(target)
+            launcher_dir = root / "launchers"
+            launcher_dir.mkdir()
+            proxy = launcher_dir / "rustup"
+            proxy.write_bytes(b"stable proxy")
+            proxy.chmod(0o755)
+            cargo = launcher_dir / "cargo"
+            rustc = launcher_dir / "rustc"
+            cargo.symlink_to(proxy)
+            rustc.symlink_to(proxy)
+
+            toolchain_dir = root / "toolchain" / "bin"
+            toolchain_dir.mkdir(parents=True)
+            selected_cargo = toolchain_dir / "cargo"
+            selected_rustc = toolchain_dir / "rustc"
+            selected_cargo.write_bytes(b"selected cargo")
+            selected_rustc.write_bytes(b"selected rustc")
+            selected_cargo.chmod(0o755)
+            selected_rustc.chmod(0o755)
+
+            def version(command, **_kwargs):
+                name = Path(command[0]).name
+                if command[1:] == ["which", "cargo"]:
+                    output = f"{selected_cargo}\n"
+                elif command[1:] == ["which", "rustc"]:
+                    output = f"{selected_rustc}\n"
+                else:
+                    output = f"{name} 1.0 test\n"
+                return ProcessResult(
+                    stdout=output.encode(),
+                    stderr=b"",
+                    returncode=0,
+                )
+
+            with patch.object(
+                runner, "run_bounded", side_effect=version
+            ) as invoke:
+                resolved = runner.resolve_verification_binaries(cargo, rustc)
+                definition = runner.verification_runtime_definition(
+                    *resolved
+                )
+
+        self.assertEqual(
+            resolved, (selected_cargo.resolve(), selected_rustc.resolve())
+        )
+        self.assertEqual(definition["cargo"]["version"], "cargo 1.0 test")
+        self.assertEqual(definition["rustc"]["version"], "rustc 1.0 test")
+        self.assertNotEqual(
+            definition["cargo"]["sha256"], definition["rustc"]["sha256"]
+        )
+        self.assertEqual(invoke.call_count, 4)
+        for call in invoke.call_args_list:
+            self.assertEqual(
+                call.kwargs["timeout"], runner.METADATA_PROCESS_TIMEOUT_SECONDS
+            )
+            self.assertEqual(
+                call.kwargs["stdout_limit"],
+                runner.METADATA_OUTPUT_LIMIT_BYTES,
+            )
 
     def test_fixture_tools_fail_safely_when_bounded_transport_stops(self):
         stopped = ProcessResult(
@@ -1438,7 +1545,16 @@ action: passthrough
 
         for report in (baseline, current):
             report["verification_runtime"] = {
-                "cargo": {"sha256": "3" * 64, "git_mode": "100755"},
+                "cargo": {
+                    "sha256": "3" * 64,
+                    "git_mode": "100755",
+                    "version": "cargo test version",
+                },
+                "rustc": {
+                    "sha256": "4" * 64,
+                    "git_mode": "100755",
+                    "version": "rustc test version",
+                },
                 "stable": True,
             }
         self.assertTrue(runner.compare_to_baseline(current, baseline)["passed"])

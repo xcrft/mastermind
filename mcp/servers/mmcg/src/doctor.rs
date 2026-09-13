@@ -752,11 +752,22 @@ fn check_mcp_config(root: &Path) -> Check {
             }
         }
     };
+    let canonical_entry = match crate::setup::canonical_entry(&trusted_binary) {
+        Ok(entry) => entry,
+        Err(class) => {
+            return Check {
+                name: "MCP config",
+                status: Status::Warn,
+                message: format!("trusted-binary={class}"),
+                hint: Some("run Mastermind from a UTF-8 executable path before setup".into()),
+            }
+        }
+    };
     let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     check_mcp_config_at(
         &canonical_root,
         std::env::home_dir().as_deref(),
-        &crate::setup::canonical_entry(&trusted_binary),
+        &canonical_entry,
     )
 }
 
@@ -1573,6 +1584,7 @@ mod tests {
             serde_json::to_vec(&serde_json::json!({
                 "mcpServers": {
                     "mmcg": crate::setup::canonical_entry(&std::env::current_exe().unwrap())
+                        .unwrap()
                 }
             }))
             .unwrap(),

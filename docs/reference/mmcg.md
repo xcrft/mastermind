@@ -291,6 +291,9 @@ mmcg setup cursor --scope project --root . --write        # write .cursor/mcp.js
 mmcg setup codex --scope user --write                     # user-only via native `codex mcp`
 mmcg setup continue --scope project --root . --write      # owned mastermind.yaml
 mmcg setup generic --scope project --config ./mcp.json    # explicit JSON target, dry-run
+# Cargo/manual setup records the exact absolute executable path and fails before
+# writing when that path cannot be represented as UTF-8. npm modes keep their
+# portable launcher commands and do not serialize the wrapper cache path.
 
 # Remove a setup. --scope project (default) deletes .mastermind/ + the project
 # .mcp.json mmcg entry; --scope global de-registers via `claude mcp remove`;

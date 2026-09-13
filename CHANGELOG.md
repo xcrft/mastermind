@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Direct-install MCP setup now requires an absolute, exact UTF-8 executable
+  path before it renders or writes client configuration. Setup and doctor no
+  longer serialize a lossy command that can launch a different binary.
 - Controller state now records a canonical repository-relative spec path and a
   stable repository identity. Resume and post-flight reject copied state from
   another repository, while legacy unbound state requires an explicit

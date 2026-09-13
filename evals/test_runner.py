@@ -217,7 +217,13 @@ verifications_rerun:
                     "claude_code_version": "2.1.236",
                     "cwd": str(cwd),
                     "permissionMode": "dontAsk",
-                    "tools": ["Read", "Grep", "Glob", "Bash"],
+                    "tools": [
+                        "Read",
+                        "Grep",
+                        "Glob",
+                        "Bash",
+                        "EndConversation",
+                    ],
                     "mcp_servers": [],
                     "skills": [],
                     "plugins": [],
@@ -272,6 +278,12 @@ verifications_rerun:
                 (expected_command, True),
                 ("cargo test --locked another_test", False),
             ):
+                invocations = []
+
+                def invoke(cli_command, **kwargs):
+                    invocations.append((cli_command, kwargs))
+                    return process(command, fixture)
+
                 with (
                     self.subTest(command=command),
                     patch.object(runner, "setup_fixture", return_value=fixture),
@@ -279,7 +291,7 @@ verifications_rerun:
                     patch.object(
                         runner.subprocess,
                         "run",
-                        return_value=process(command, fixture),
+                        side_effect=invoke,
                     ),
                 ):
                     result = runner.evaluate_case(
@@ -292,6 +304,18 @@ verifications_rerun:
                         claude_version="2.1.236 (Claude Code)",
                     )
                     self.assertEqual(result.passed, passed, result.reasons)
+                self.assertEqual(len(invocations), 1)
+                cli_command, invocation = invocations[0]
+                self.assertEqual(
+                    cli_command[cli_command.index("--max-turns") + 1], "20"
+                )
+                self.assertEqual(
+                    cli_command[cli_command.index("--effort") + 1], "high"
+                )
+                self.assertEqual(
+                    invocation["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"],
+                    "8192",
+                )
 
     def test_intake_action_requires_valid_sentinel_yaml(self):
         valid = """\
@@ -396,6 +420,75 @@ action: passthrough
                 "used 1801 output token(s), expected at most 1800",
             ],
         )
+
+    def test_runtime_limits_enforce_case_caps_and_suite_defaults(self):
+        self.assertEqual(set(runner.SUITE_RUNTIME_LIMITS), set(runner.SUITES))
+        self.assertEqual(
+            runner.case_runtime_limits(
+                "researcher", {"max_turns": 3, "max_output_tokens": 600}
+            ),
+            {"max_turns": 3, "max_output_tokens": 600},
+        )
+        self.assertEqual(
+            runner.case_runtime_limits("auditor", {}),
+            {"max_turns": 20, "max_output_tokens": 8192},
+        )
+        self.assertEqual(
+            runner.case_runtime_limits("intake", {}),
+            {"max_turns": 4, "max_output_tokens": 4096},
+        )
+        with self.assertRaisesRegex(ValueError, "positive integers"):
+            runner.case_runtime_limits("critic", {"max_turns": 0})
+
+        self.assertEqual(
+            runner.evaluation_effort(
+                "critic", runner.SUITES["critic"]["subagent"]
+            ),
+            "high",
+        )
+        self.assertEqual(runner.evaluation_effort("workflow", None), "medium")
+        for suite_name, suite in runner.SUITES.items():
+            prompt_path = None if suite_name == "workflow" else suite["subagent"]
+            with self.subTest(suite=suite_name):
+                self.assertIn(
+                    runner.evaluation_effort(suite_name, prompt_path),
+                    runner.CLAUDE_EFFORT_LEVELS,
+                )
+
+    def test_evaluation_environment_removes_external_runtime_overrides(self):
+        environment = runner.evaluation_environment(
+            1400,
+            source={
+                "PATH": "/usr/bin",
+                "HOME": "/tmp/home",
+                "ANTHROPIC_API_KEY": "paid-key",
+                "ANTHROPIC_MODEL": "external-model",
+                "CLAUDE_CODE_EFFORT_LEVEL": "max",
+                "CLAUDE_CODE_OAUTH_TOKEN": "subscription-token",
+                "DISABLE_COMPACT": "1",
+                "MAX_THINKING_TOKENS": "0",
+                "MCP_TOOL_TIMEOUT": "999999999",
+                "DEBUG": "1",
+            },
+        )
+        self.assertEqual(environment["PATH"], "/usr/bin")
+        self.assertEqual(environment["HOME"], "/tmp/home")
+        self.assertEqual(
+            environment["CLAUDE_CODE_OAUTH_TOKEN"], "subscription-token"
+        )
+        for name in (
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_MODEL",
+            "CLAUDE_CODE_EFFORT_LEVEL",
+            "DISABLE_COMPACT",
+            "MAX_THINKING_TOKENS",
+            "DEBUG",
+        ):
+            self.assertNotIn(name, environment)
+        self.assertEqual(environment["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "1400")
+        self.assertEqual(environment["CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY"], "1")
+        self.assertEqual(environment["MCP_TOOL_TIMEOUT"], "120000")
+        self.assertEqual(environment["ENABLE_TOOL_SEARCH"], "false")
 
     def test_stream_parser_records_tool_identities_and_final_payload(self):
         events = [
@@ -2322,7 +2415,7 @@ class PromptIsolationTests(unittest.TestCase):
             runner.expected_stream_tools(
                 "researcher", subagent=path, include_mmcg=False
             ),
-            ("Read", "Grep", "Glob"),
+            ("Read", "Grep", "Glob", "EndConversation"),
         )
         agent_arguments = runner.subagent_cli_args(
             path, model_override="haiku", include_mmcg=False

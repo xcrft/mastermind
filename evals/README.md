@@ -44,6 +44,21 @@ denials fail the case. Tool inputs and tool results are not persisted, including
 in failed-run diagnostics. Each case also checks the init event against the
 pinned CLI version, disposable working directory, `dontAsk` permission mode,
 exact tool inventory, connected MCP servers, and empty skill/plugin inventory.
+For tool-enabled suites the expected inventory includes Claude Code's implicit
+`EndConversation` entry; it is not treated as research evidence.
+The runner passes each role's shipped effort explicitly, enforces a physical
+`--max-turns` cap, and sets the CLI output-token ceiling from the case or suite
+default before inference. The same limits remain post-run grading assertions
+when a case declares them.
+
+Model-backed subprocesses retain the normal login location and an explicit
+`CLAUDE_CODE_OAUTH_TOKEN`, when present. They remove inherited provider, model,
+effort, thinking, MCP, tool-search, and telemetry overrides; in particular,
+`ANTHROPIC_API_KEY` cannot silently replace a logged-in subscription in print
+mode. Managed organization policy can still affect Claude Code. The observed
+init checks catch tool, server, permission, working-directory, and CLI-version
+drift, but reports from different managed-policy environments are not proven
+comparable.
 
 ## Run the right layer
 
@@ -74,7 +89,10 @@ Model-backed evals are hand-run, not ordinary CI. CI runs the deterministic
 harness contract through:
 
 ```bash
-python3 -m unittest evals/test_runner.py evals/test_evidence.py evals/test_benchmark.py
+python3 -m unittest \
+  evals/test_runner.py evals/test_evidence.py evals/test_benchmark.py \
+  evals/test_claude_adapter.py evals/test_benchmark_corpus.py \
+  evals/test_benchmark_review.py
 ```
 
 ## Reports and token gates

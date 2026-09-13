@@ -848,14 +848,17 @@ def suite_report(
 
 
 def git_revision() -> str | None:
-    proc = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=REPO_ROOT,
-        env=_PROC_ENV,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=REPO_ROOT,
+            env=_PROC_ENV,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
     revision = proc.stdout.strip()
     return revision if proc.returncode == 0 and revision else None
 
@@ -1033,8 +1036,30 @@ def _string_list(
     return (
         isinstance(value, list)
         and (allow_empty or bool(value))
-        and all(isinstance(item, str) and item for item in value)
+        and all(
+            isinstance(item, str) and bool(item) and item.strip() == item
+            for item in value
+        )
         and (not unique or len(value) == len(set(value)))
+    )
+
+
+def _valid_generated_at(value: object) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() is not None
+
+
+def _valid_legacy_console_capture(value: object) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == {"mode", "limitations"}
+        and value["mode"] == "pre-report-console"
+        and _string_list(value["limitations"], allow_empty=False)
     )
 
 
@@ -1064,16 +1089,64 @@ def report_comparison_issues(
     require_runtime_identity: bool = False,
     require_harness_identity: bool = False,
     require_fixture_runtime: bool = False,
+    require_definition_stability: bool = False,
+    allow_legacy_capture: bool = False,
 ) -> list[str]:
     issues: list[str] = []
     if not isinstance(report, dict):
         return [f"{label} report must be a JSON object"]
+    allowed_top_level = {
+        "kind",
+        "schema_version",
+        "generated_at",
+        "git_revision",
+        "model",
+        "resolved_models",
+        "claude_cli_version",
+        "claude_cli_sha256",
+        "claude_cli_stable",
+        "evaluation_harness",
+        "fixture_runtime",
+        "filters",
+        "suites",
+        "cases",
+        "capture",
+        "baseline_gate",
+    }
+    unexpected_top_level = set(report) - allowed_top_level
+    if unexpected_top_level:
+        issues.append(
+            f"{label} report has unexpected fields: {sorted(unexpected_top_level)!r}"
+        )
     if report.get("kind") != REPORT_KIND:
         issues.append(f"{label} report has an unsupported kind")
     if report.get("schema_version") != REPORT_SCHEMA_VERSION:
         issues.append(f"{label} report has an unsupported schema version")
-    if not isinstance(report.get("model"), str) or not report["model"]:
+    if (
+        not isinstance(report.get("model"), str)
+        or not report["model"]
+        or report["model"].strip() != report["model"]
+    ):
         issues.append(f"{label} report has no model")
+    if not _valid_generated_at(report.get("generated_at")):
+        issues.append(f"{label} report has invalid generation time")
+    revision = report.get("git_revision")
+    if revision is not None and (
+        not isinstance(revision, str)
+        or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", revision) is None
+    ):
+        issues.append(f"{label} report has invalid Git revision")
+    valid_legacy_console_capture = _valid_legacy_console_capture(
+        report.get("capture")
+    )
+    legacy_console_capture = allow_legacy_capture and valid_legacy_console_capture
+    if "capture" in report:
+        if not valid_legacy_console_capture:
+            issues.append(f"{label} report has invalid capture metadata")
+        elif not allow_legacy_capture:
+            issues.append(f"{label} report cannot use legacy capture metadata")
+    if "baseline_gate" in report and not isinstance(report["baseline_gate"], dict):
+        issues.append(f"{label} report has invalid baseline gate metadata")
     report_models = report.get("resolved_models")
     if (
         not _string_list(report_models, allow_empty=False)
@@ -1175,7 +1248,20 @@ def report_comparison_issues(
     if (
         not isinstance(filters, dict)
         or set(filters) != {"suite", "case"}
-        or any(value is not None and not isinstance(value, str) for value in filters.values())
+        or any(
+            value is not None
+            and (
+                not isinstance(value, str)
+                or not value
+                or value.strip() != value
+            )
+            for value in filters.values()
+        )
+        or (
+            isinstance(filters, dict)
+            and isinstance(filters.get("suite"), str)
+            and filters["suite"] not in SUITES
+        )
     ):
         issues.append(f"{label} report has invalid filters")
 
@@ -1200,21 +1286,56 @@ def report_comparison_issues(
         "context_tokens",
         "total_tokens",
     )
+    required_case_fields = {
+        "id",
+        "suite",
+        "passed",
+        "reasons",
+        "retry_used",
+        "retry_attempted",
+        "duration_ms",
+        "duration_api_ms",
+        "turns",
+        "telemetry",
+        "usage",
+        "cost_usd",
+        "resolved_models",
+        "tool_calls",
+    }
+    allowed_case_fields = required_case_fields | {"citation_checks"}
     for index, case in enumerate(cases):
         if not isinstance(case, dict):
             issues.append(f"{label} case {index} must be an object")
             continue
+        missing_case_fields = required_case_fields - set(case)
+        unexpected_case_fields = set(case) - allowed_case_fields
+        if missing_case_fields or unexpected_case_fields:
+            issues.append(
+                f"{label} case {index} has invalid fields: "
+                f"missing {sorted(missing_case_fields)!r}, "
+                f"unexpected {sorted(unexpected_case_fields)!r}"
+            )
         case_id = case.get("id")
         suite_name = case.get("suite")
-        if not isinstance(case_id, str) or not case_id:
+        if (
+            not isinstance(case_id, str)
+            or not case_id
+            or case_id.strip() != case_id
+        ):
             issues.append(f"{label} case {index} has no id")
             continue
         if case_id in seen_case_ids:
             issues.append(f"{label} report repeats case id {case_id!r}")
         seen_case_ids.add(case_id)
-        if not isinstance(suite_name, str) or not suite_name:
+        if (
+            not isinstance(suite_name, str)
+            or not suite_name
+            or suite_name.strip() != suite_name
+        ):
             issues.append(f"{label} case {case_id!r} has no suite")
             continue
+        if suite_name not in SUITES:
+            issues.append(f"{label} case {case_id!r} has unknown suite {suite_name!r}")
         case_ids_by_suite.setdefault(suite_name, []).append(case_id)
         cases_by_suite.setdefault(suite_name, []).append(case)
 
@@ -1223,10 +1344,25 @@ def report_comparison_issues(
                 issues.append(
                     f"{label} case {case_id!r} has invalid {field_name}"
                 )
-        if not isinstance(case.get("reasons"), list) or any(
-            not isinstance(reason, str) for reason in case.get("reasons", [])
+        if not _string_list(
+            case.get("reasons"), allow_empty=True, unique=False
         ):
             issues.append(f"{label} case {case_id!r} has invalid reasons")
+        elif (
+            isinstance(case.get("passed"), bool)
+            and bool(case["reasons"]) == case["passed"]
+        ):
+            issues.append(f"{label} case {case_id!r} has inconsistent pass reasons")
+        if all(
+            isinstance(case.get(field), bool)
+            for field in ("passed", "retry_used", "retry_attempted")
+        ):
+            if case["retry_used"] and (
+                not case["retry_attempted"] or not case["passed"]
+            ):
+                issues.append(f"{label} case {case_id!r} has inconsistent retry state")
+            if case["retry_attempted"] and case["passed"] and not case["retry_used"]:
+                issues.append(f"{label} case {case_id!r} has inconsistent retry state")
         for field_name in ("duration_ms", "duration_api_ms", "turns"):
             if not _non_negative_integer(case.get(field_name)):
                 issues.append(
@@ -1238,11 +1374,17 @@ def report_comparison_issues(
         telemetry = case.get("telemetry")
         if (
             not isinstance(telemetry, dict)
+            or set(telemetry) != {"complete", "issues"}
             or not isinstance(telemetry.get("complete"), bool)
             or not isinstance(telemetry.get("issues"), list)
-            or any(not isinstance(issue, str) for issue in telemetry.get("issues", []))
+            or any(
+                not isinstance(issue, str) or not issue
+                for issue in telemetry.get("issues", [])
+            )
         ):
             issues.append(f"{label} case {case_id!r} has invalid telemetry status")
+        elif telemetry["complete"] == bool(telemetry["issues"]):
+            issues.append(f"{label} case {case_id!r} has inconsistent telemetry status")
 
         case_models = case.get("resolved_models")
         if not _string_list(case_models, allow_empty=False):
@@ -1259,8 +1401,11 @@ def report_comparison_issues(
             counters = ("expected", "matched", "total", "valid")
             if (
                 not isinstance(citations, dict)
+                or set(citations) != {*counters, "issues"}
                 or any(not _non_negative_integer(citations.get(key)) for key in counters)
-                or not _string_list(citations.get("issues"), allow_empty=True, unique=False)
+                or not _string_list(
+                    citations.get("issues"), allow_empty=True, unique=False
+                )
             ):
                 issues.append(f"{label} case {case_id!r} has invalid citation checks")
             elif (
@@ -1276,7 +1421,7 @@ def report_comparison_issues(
                 issues.append(f"{label} case {case_id!r} has inconsistent citation checks")
 
         usage = case.get("usage")
-        if not isinstance(usage, dict):
+        if not isinstance(usage, dict) or set(usage) != set(usage_fields):
             issues.append(f"{label} case {case_id!r} has invalid usage")
             continue
         invalid_usage = [
@@ -1306,10 +1451,36 @@ def report_comparison_issues(
     if _string_list(report_models, allow_empty=False) and sorted(raw_models) != report_models:
         issues.append(f"{label} resolved model ids do not match raw cases")
 
+    required_suite_fields = {
+        "case_ids",
+        "case_definition_digest",
+        "quality",
+        "telemetry",
+        "duration_ms",
+        "duration_api_ms",
+        "turns",
+        "usage",
+        "cost_usd",
+    }
+    allowed_suite_fields = required_suite_fields | {
+        "definition_stable",
+        "target_definition_digest",
+        "target_definition_stable",
+    }
     for suite_name, summary in suites.items():
         if not isinstance(suite_name, str) or not isinstance(summary, dict):
             issues.append(f"{label} report has an invalid suite summary")
             continue
+        if suite_name not in SUITES:
+            issues.append(f"{label} report has unknown suite {suite_name!r}")
+        missing_suite_fields = required_suite_fields - set(summary)
+        unexpected_suite_fields = set(summary) - allowed_suite_fields
+        if missing_suite_fields or unexpected_suite_fields:
+            issues.append(
+                f"{label} suite {suite_name!r} has invalid fields: "
+                f"missing {sorted(missing_suite_fields)!r}, "
+                f"unexpected {sorted(unexpected_suite_fields)!r}"
+            )
         case_ids = summary.get("case_ids")
         valid_case_ids = (
             isinstance(case_ids, list)
@@ -1328,8 +1499,13 @@ def report_comparison_issues(
             issues.append(
                 f"{label} suite {suite_name!r} has no valid case definition digest"
             )
+        has_definition_stability = "definition_stable" in summary
         definition_stable = summary.get("definition_stable", True)
-        if not isinstance(definition_stable, bool):
+        if require_definition_stability and not has_definition_stability:
+            issues.append(
+                f"{label} suite {suite_name!r} has no definition stability"
+            )
+        elif not isinstance(definition_stable, bool):
             issues.append(
                 f"{label} suite {suite_name!r} has invalid definition stability"
             )
@@ -1374,6 +1550,7 @@ def report_comparison_issues(
             and all(
                 isinstance(case.get("passed"), bool)
                 and isinstance(case.get("retry_used"), bool)
+                and isinstance(case.get("retry_attempted"), bool)
                 and isinstance(case.get("telemetry"), dict)
                 and isinstance(case["telemetry"].get("complete"), bool)
                 and isinstance(case.get("usage"), dict)
@@ -1381,6 +1558,11 @@ def report_comparison_issues(
                     _non_negative_integer(case["usage"].get(field_name))
                     for field_name in usage_fields
                 )
+                and all(
+                    _non_negative_integer(case.get(field_name))
+                    for field_name in ("duration_ms", "duration_api_ms", "turns")
+                )
+                and _non_negative_number(case.get("cost_usd"))
                 for case in suite_cases
             )
         )
@@ -1401,15 +1583,52 @@ def report_comparison_issues(
             issues.append(
                 f"{label} suite {suite_name!r} quality summary does not match raw cases"
             )
-        usage = summary.get("usage")
-        context_summary = usage.get("context_tokens") if isinstance(usage, dict) else None
-        expected_context_summary = metric_summary(
-            [case["usage"]["context_tokens"] for case in suite_cases]
-        )
-        if context_summary != expected_context_summary:
-            issues.append(
-                f"{label} suite {suite_name!r} context summary does not match raw cases"
+        for field_name in ("duration_ms", "duration_api_ms", "turns", "cost_usd"):
+            expected_summary = metric_summary(
+                [case[field_name] for case in suite_cases]
             )
+            observed_summary = summary.get(field_name)
+            if legacy_console_capture and field_name == "duration_api_ms":
+                continue
+            if legacy_console_capture and field_name == "cost_usd":
+                legacy_cost_matches = (
+                    isinstance(observed_summary, dict)
+                    and set(observed_summary) == {"total", "p50", "p95"}
+                    and observed_summary["p50"] == expected_summary["p50"]
+                    and observed_summary["p95"] == expected_summary["p95"]
+                    and _non_negative_number(observed_summary["total"])
+                    and math.isclose(
+                        float(observed_summary["total"]),
+                        float(expected_summary["total"]),
+                        rel_tol=0,
+                        abs_tol=0.0001,
+                    )
+                )
+                if legacy_cost_matches:
+                    continue
+            if observed_summary != expected_summary:
+                issues.append(
+                    f"{label} suite {suite_name!r} {field_name} summary "
+                    "does not match raw cases"
+                )
+        usage = summary.get("usage")
+        if not isinstance(usage, dict) or set(usage) != set(usage_fields):
+            issues.append(f"{label} suite {suite_name!r} has invalid usage summary")
+        else:
+            for field_name in usage_fields:
+                expected_usage_summary = metric_summary(
+                    [case["usage"][field_name] for case in suite_cases]
+                )
+                if usage.get(field_name) != expected_usage_summary:
+                    metric_label = (
+                        "context summary"
+                        if field_name == "context_tokens"
+                        else f"{field_name} summary"
+                    )
+                    issues.append(
+                        f"{label} suite {suite_name!r} {metric_label} "
+                        "does not match raw cases"
+                    )
         expected_telemetry = {
             "complete": all(
                 case["telemetry"]["complete"] for case in suite_cases
@@ -1429,6 +1648,20 @@ def report_comparison_issues(
         issues.append(
             f"{label} cases reference missing suites: {sorted(extra_case_suites)!r}"
         )
+    extra_summary_suites = set(suites) - set(case_ids_by_suite)
+    if extra_summary_suites:
+        issues.append(
+            f"{label} suite summaries have no cases: {sorted(extra_summary_suites)!r}"
+        )
+    if isinstance(filters, dict) and set(filters) == {"suite", "case"}:
+        suite_filter = filters.get("suite")
+        case_filter = filters.get("case")
+        if isinstance(suite_filter, str) and set(suites) != {suite_filter}:
+            issues.append(f"{label} suite filter does not match report suites")
+        if suite_filter is None and case_filter is None and set(suites) != set(SUITES):
+            issues.append(f"{label} unfiltered report does not contain every suite")
+        if isinstance(case_filter, str) and seen_case_ids != {case_filter}:
+            issues.append(f"{label} case filter does not match report cases")
     return issues
 
 
@@ -1437,7 +1670,9 @@ def load_report(path: Path) -> dict:
         report = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"cannot read eval report {path}: {error}") from error
-    issues = report_comparison_issues(report, f"eval report {path}")
+    issues = report_comparison_issues(
+        report, f"eval report {path}", allow_legacy_capture=True
+    )
     if issues:
         raise ValueError("; ".join(issues))
     return report
@@ -1458,8 +1693,11 @@ def compare_to_baseline(current: dict, baseline: dict) -> dict:
             require_runtime_identity=True,
             require_harness_identity=True,
             require_fixture_runtime=current_uses_fixture,
+            require_definition_stability=True,
         ),
-        *report_comparison_issues(baseline, "baseline"),
+        *report_comparison_issues(
+            baseline, "baseline", allow_legacy_capture=True
+        ),
     ]
     if failures:
         return {"passed": False, "checks": checks, "failures": failures}

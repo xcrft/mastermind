@@ -1238,10 +1238,15 @@ action: passthrough
             for index in range(1, 6)
         ]
         report = runner.build_report(
-            results, model="opus", suite_filter="critic", case_filter=None
+            results,
+            model="opus",
+            suite_filter="critic",
+            case_filter=None,
+            repository_revision="6" * 40,
         )
         report["claude_cli_version"] = "test-cli"
         report["suites"]["critic"]["case_definition_digest"] = "c" * 64
+        bind_target_identity(report)
         context = report["suites"]["critic"]["usage"]["context_tokens"]
         self.assertEqual(context, {"total": 165, "p50": 33, "p95": 55})
         self.assertEqual(report["cases"][0]["usage"]["context_tokens"], 11)
@@ -1495,9 +1500,16 @@ action: passthrough
         )
 
         bind_fixture_runtime(current)
-        self.assertTrue(runner.compare_to_baseline(current, baseline)["passed"])
+        gate = runner.compare_to_baseline(current, baseline)
+        self.assertTrue(
+            any(
+                "baseline report has no fixture runtime identity" in item
+                for item in gate["failures"]
+            )
+        )
 
         bind_fixture_runtime(baseline)
+        self.assertTrue(runner.compare_to_baseline(current, baseline)["passed"])
         current["fixture_runtime"]["mmcg"]["sha256"] = "3" * 64
         gate = runner.compare_to_baseline(current, baseline)
         self.assertTrue(
@@ -1805,8 +1817,19 @@ action: passthrough
 
     def test_legacy_capture_is_limited_to_baseline_evidence(self):
         baseline_path = runner.EVALS_DIR / "baselines" / "critic-opus-pre-lean.json"
-        legacy = runner.load_report(baseline_path)
+        with self.assertRaisesRegex(ValueError, "cannot use legacy capture"):
+            runner.load_report(baseline_path)
+        legacy = runner.load_report(
+            baseline_path, allow_legacy_capture=True
+        )
         self.assertEqual(legacy["capture"]["mode"], "pre-report-console")
+        self.assertTrue(runner._is_shipped_legacy_baseline(baseline_path))
+        with tempfile.TemporaryDirectory() as target:
+            copied = Path(target) / baseline_path.name
+            copied.write_bytes(baseline_path.read_bytes())
+            self.assertFalse(runner._is_shipped_legacy_baseline(copied))
+            with self.assertRaisesRegex(ValueError, "cannot use legacy capture"):
+                runner.load_report(copied)
 
         current = valid_critic_report()
         current["capture"] = deepcopy(legacy["capture"])
@@ -1815,6 +1838,23 @@ action: passthrough
 
         self.assertTrue(any("cannot use legacy capture" in issue for issue in issues))
         self.assertTrue(any("duration_api_ms summary" in issue for issue in issues))
+
+    def test_new_baseline_requires_complete_evidence(self):
+        current = valid_critic_report()
+        baseline = deepcopy(current)
+        for report in (current, baseline):
+            bind_target_identity(report)
+        del baseline["evaluation_harness"]
+
+        gate = runner.compare_to_baseline(current, baseline)
+
+        self.assertFalse(gate["passed"])
+        self.assertTrue(
+            any(
+                "baseline report has no evaluation harness identity" in issue
+                for issue in gate["failures"]
+            )
+        )
 
     def test_shipped_case_definitions_match_the_fail_closed_schema(self):
         for suite_name, suite in runner.SUITES.items():

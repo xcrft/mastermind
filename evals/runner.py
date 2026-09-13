@@ -59,6 +59,7 @@ except ImportError:
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EVALS_DIR = Path(__file__).resolve().parent
 FIXTURES_DIR = EVALS_DIR / "fixtures"
+LEGACY_CONSOLE_BASELINE = EVALS_DIR / "baselines" / "critic-opus-pre-lean.json"
 REPORT_KIND = "mastermind-eval-report"
 REPORT_SCHEMA_VERSION = 1
 CRITIC_VERDICTS = frozenset(
@@ -2550,6 +2551,7 @@ def report_comparison_issues(
     require_harness_identity: bool = False,
     require_fixture_runtime: bool = False,
     require_verification_runtime: bool = False,
+    require_repository_identity: bool = False,
     require_definition_stability: bool = False,
     require_case_runtime_controls: bool = False,
     allow_legacy_capture: bool = False,
@@ -2594,7 +2596,9 @@ def report_comparison_issues(
     if not _valid_generated_at(report.get("generated_at")):
         issues.append(f"{label} report has invalid generation time")
     revision = report.get("git_revision")
-    if revision is not None and (
+    if revision is None and require_repository_identity:
+        issues.append(f"{label} report has no Git revision")
+    elif revision is not None and (
         not isinstance(revision, str)
         or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", revision) is None
     ):
@@ -3180,19 +3184,6 @@ def report_comparison_issues(
     return issues
 
 
-def load_report(path: Path) -> dict:
-    try:
-        report = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"cannot read eval report {path}: {error}") from error
-    issues = report_comparison_issues(
-        report, f"eval report {path}", allow_legacy_capture=True
-    )
-    if issues:
-        raise ValueError("; ".join(issues))
-    return report
-
-
 def _report_uses_cargo_verification(report: object) -> bool:
     if not isinstance(report, dict) or not isinstance(report.get("cases"), list):
         return False
@@ -3210,32 +3201,93 @@ def _report_uses_cargo_verification(report: object) -> bool:
     return False
 
 
-def compare_to_baseline(current: dict, baseline: dict) -> dict:
-    checks: list[dict] = []
-    current_summaries = current.get("suites") if isinstance(current, dict) else None
-    current_uses_fixture = isinstance(current_summaries, dict) and any(
-        SUITES.get(name, {}).get("uses_fixture") is True
-        for name in current_summaries
+def _report_uses_fixture_runtime(report: object) -> bool:
+    summaries = report.get("suites") if isinstance(report, dict) else None
+    return isinstance(summaries, dict) and any(
+        SUITES.get(name, {}).get("uses_fixture") is True for name in summaries
     )
-    current_uses_verification = _report_uses_cargo_verification(current)
+
+
+def _strict_report_issues(
+    report: object,
+    label: str,
+    *,
+    allow_legacy_capture: bool = False,
+    require_verification_runtime: bool | None = None,
+) -> list[str]:
+    legacy_capture = (
+        allow_legacy_capture
+        and isinstance(report, dict)
+        and _valid_legacy_console_capture(report.get("capture"))
+    )
+    verification_required = (
+        _report_uses_cargo_verification(report)
+        if require_verification_runtime is None
+        else require_verification_runtime
+    )
+    return report_comparison_issues(
+        report,
+        label,
+        require_target_identity=not legacy_capture,
+        require_runtime_identity=not legacy_capture,
+        require_harness_identity=not legacy_capture,
+        require_fixture_runtime=(
+            not legacy_capture and _report_uses_fixture_runtime(report)
+        ),
+        require_verification_runtime=(
+            not legacy_capture and verification_required
+        ),
+        require_repository_identity=True,
+        require_definition_stability=not legacy_capture,
+        require_case_runtime_controls=True,
+        allow_legacy_capture=allow_legacy_capture,
+    )
+
+
+def _is_shipped_legacy_baseline(path: Path) -> bool:
+    try:
+        return os.path.samefile(path, LEGACY_CONSOLE_BASELINE)
+    except OSError:
+        return False
+
+
+def load_report(path: Path, *, allow_legacy_capture: bool = False) -> dict:
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"cannot read eval report {path}: {error}") from error
+    issues = _strict_report_issues(
+        report,
+        f"eval report {path}",
+        allow_legacy_capture=allow_legacy_capture,
+    )
+    if issues:
+        raise ValueError("; ".join(issues))
+    return report
+
+
+def compare_to_baseline(
+    current: dict,
+    baseline: dict,
+    *,
+    allow_legacy_baseline: bool = False,
+) -> dict:
+    checks: list[dict] = []
+    verification_required = (
+        _report_uses_cargo_verification(current)
+        or _report_uses_cargo_verification(baseline)
+    )
     failures = [
-        *report_comparison_issues(
+        *_strict_report_issues(
             current,
             "current",
-            require_target_identity=True,
-            require_runtime_identity=True,
-            require_harness_identity=True,
-            require_fixture_runtime=current_uses_fixture,
-            require_verification_runtime=current_uses_verification,
-            require_definition_stability=True,
-            require_case_runtime_controls=True,
+            require_verification_runtime=verification_required,
         ),
-        *report_comparison_issues(
+        *_strict_report_issues(
             baseline,
             "baseline",
-            require_verification_runtime=current_uses_verification,
-            require_case_runtime_controls=True,
-            allow_legacy_capture=True,
+            require_verification_runtime=verification_required,
+            allow_legacy_capture=allow_legacy_baseline,
         ),
     ]
     if failures:
@@ -5574,8 +5626,18 @@ def main() -> int:
     gate_failed = False
     if args.baseline_report is not None:
         try:
-            baseline = load_report(args.baseline_report)
-            gate = compare_to_baseline(report, baseline)
+            allow_legacy_baseline = _is_shipped_legacy_baseline(
+                args.baseline_report
+            )
+            baseline = load_report(
+                args.baseline_report,
+                allow_legacy_capture=allow_legacy_baseline,
+            )
+            gate = compare_to_baseline(
+                report,
+                baseline,
+                allow_legacy_baseline=allow_legacy_baseline,
+            )
         except ValueError as error:
             gate = {"passed": False, "checks": [], "failures": [str(error)]}
         report["baseline_gate"] = {

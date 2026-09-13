@@ -135,7 +135,8 @@ Report loading is fail-closed: unknown fields or suites, malformed or missing
 repository identity, filter/selection mismatches, incomplete runtime, harness,
 target, or fixture evidence, inconsistent retry and telemetry states, and
 summaries that do not recompute from the raw case records are rejected before
-comparison. An unfiltered report must contain every suite.
+comparison. Report files must also be bounded stable regular files; symlinks and
+special files are rejected. An unfiltered report must contain every suite.
 
 `--baseline-report` is intentionally strict. Current and baseline evidence must
 have the same requested model, resolved model IDs, Claude CLI version,

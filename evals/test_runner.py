@@ -1259,6 +1259,40 @@ action: passthrough
         self.assertEqual(loaded["kind"], runner.REPORT_KIND)
         self.assertEqual(loaded["cases"], report["cases"])
 
+    def test_report_loader_rejects_symlinks_special_files_and_oversize(self):
+        with tempfile.TemporaryDirectory() as target:
+            root = Path(target)
+            regular = root / "regular.json"
+            regular.write_text("{}", encoding="utf-8")
+            if os.name == "posix":
+                linked = root / "linked.json"
+                linked.symlink_to(regular)
+                with self.assertRaisesRegex(ValueError, "cannot read eval report"):
+                    runner.load_report(linked)
+
+            oversized = root / "oversized.json"
+            oversized.write_bytes(b"x" * 33)
+            with (
+                patch.object(runner, "REPORT_FILE_LIMIT_BYTES", 32),
+                self.assertRaisesRegex(ValueError, "cannot read eval report"),
+            ):
+                runner.load_report(oversized)
+
+            if os.name == "posix" and hasattr(os, "mkfifo"):
+                fifo = root / "report.fifo"
+                os.mkfifo(fifo)
+                with self.assertRaisesRegex(ValueError, "cannot read eval report"):
+                    runner.load_report(fifo)
+
+    def test_report_writer_rejects_output_above_loader_cap(self):
+        with tempfile.TemporaryDirectory() as target, patch.object(
+            runner, "REPORT_FILE_LIMIT_BYTES", 32
+        ):
+            path = Path(target) / "report.json"
+            with self.assertRaisesRegex(OSError, "exceeds its byte cap"):
+                runner.write_report(path, {"payload": "x" * 64})
+            self.assertFalse(path.exists())
+
     def test_report_writer_replaces_an_existing_report(self):
         report = {"kind": runner.REPORT_KIND, "schema_version": 1}
         with tempfile.TemporaryDirectory() as target:

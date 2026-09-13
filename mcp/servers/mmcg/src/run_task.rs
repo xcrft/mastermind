@@ -14,7 +14,8 @@
 //!
 //! State persists beside a canonical task spec as `<task>/state.json`, so every
 //! task has one controller-owned lifecycle record. Legacy flat specs keep using
-//! `.mastermind/run-state/<basename>.json` to avoid a shared `tasks/state.json`.
+//! `.mastermind/run-state/<basename>.json`; other repository-contained specs use
+//! an exact-path-derived key under `.mastermind/run-state/.noncanonical/`.
 
 use crate::audit_spec;
 use crate::bounded_fs::{self, BoundedReadError, ReadControl, RootCapability};
@@ -288,48 +289,174 @@ impl Default for RunOpts {
     }
 }
 
-/// Canonical specs own `<task>/state.json`. A legacy flat spec retains the old
-/// basename-keyed location; this avoids making every flat spec share
-/// `.mastermind/tasks/state.json` while fixing the old `spec.json` collision
-/// between canonical task folders.
-pub fn state_file_path(repo_root: &Path, spec_path: &Path) -> PathBuf {
-    if spec_path.file_name().and_then(|name| name.to_str()) == Some("spec.md") {
-        let resolved = if spec_path.is_absolute() {
-            spec_path.to_path_buf()
-        } else {
-            repo_root.join(spec_path)
-        };
-        return resolved.parent().unwrap_or(repo_root).join("state.json");
-    }
-    repo_root
-        .join(".mastermind/run-state")
-        .join(format!("{}.json", spec_basename(spec_path)))
+#[derive(Debug, Eq, PartialEq)]
+enum SpecArtifactLayout {
+    Canonical(String),
+    LegacyFlat(String),
+    Noncanonical(String),
 }
 
-/// Release notes path — `<repo_root>/.mastermind/releases/<spec-basename>.md`.
+fn exact_spec_identity(repo_root: &Path, spec_path: &Path) -> Option<String> {
+    let requested_root = std::path::absolute(repo_root).ok()?;
+    let relative = if spec_path.is_absolute() {
+        std::path::absolute(spec_path)
+            .ok()?
+            .strip_prefix(&requested_root)
+            .ok()?
+            .to_path_buf()
+    } else {
+        let absolute = std::path::absolute(spec_path).ok()?;
+        absolute
+            .strip_prefix(&requested_root)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|_| spec_path.to_path_buf())
+    };
+    bounded_fs::normalize_repository_relative_path(&relative).ok()
+}
+
+fn canonical_task_name(identity: &str) -> Option<&str> {
+    let mut parts = identity.split('/');
+    if parts.next() != Some(".mastermind") || parts.next() != Some("tasks") {
+        return None;
+    }
+    let task = parts.next()?;
+    if parts.next() == Some("spec.md") && parts.next().is_none() {
+        Some(task)
+    } else {
+        None
+    }
+}
+
+fn legacy_flat_spec_stem(identity: &str) -> Option<&str> {
+    let mut parts = identity.split('/');
+    if parts.next() != Some(".mastermind") || parts.next() != Some("tasks") {
+        return None;
+    }
+    let file = parts.next()?;
+    if parts.next().is_some() || !file.ends_with(".md") {
+        return None;
+    }
+    Path::new(file).file_stem()?.to_str()
+}
+
+fn update_digest_with_native_path(digest: &mut Sha256, path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let bytes = path.as_os_str().as_bytes();
+        digest.update((bytes.len() as u64).to_le_bytes());
+        digest.update(bytes);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let units = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        digest.update((units.len() as u64).to_le_bytes());
+        for unit in units {
+            digest.update(unit.to_le_bytes());
+        }
+    }
+}
+
+fn noncanonical_artifact_key(identity: Option<&str>, spec_path: &Path) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"mastermind-noncanonical-spec-v1\0");
+    match identity {
+        Some(identity) => {
+            digest.update(b"utf8\0");
+            digest.update(identity.as_bytes());
+        }
+        None => {
+            digest.update(b"native\0");
+            update_digest_with_native_path(&mut digest, spec_path);
+        }
+    }
+    let candidate = identity
+        .and_then(|value| value.rsplit('/').next())
+        .and_then(|value| Path::new(value).file_stem())
+        .and_then(|value| value.to_str())
+        .or_else(|| spec_path.file_stem().and_then(|value| value.to_str()))
+        .unwrap_or("spec");
+    let mut stem = String::new();
+    let mut separator = false;
+    for character in candidate.chars() {
+        if character.is_ascii_alphanumeric() {
+            if separator && !stem.is_empty() {
+                stem.push('-');
+            }
+            stem.push(character);
+            separator = false;
+        } else {
+            separator = true;
+        }
+        if stem.len() >= 48 {
+            break;
+        }
+    }
+    if stem.is_empty() {
+        stem.push_str("spec");
+    }
+    format!("{stem}-{}", crate::hex::encode(&digest.finalize()))
+}
+
+fn spec_artifact_layout(repo_root: &Path, spec_path: &Path) -> SpecArtifactLayout {
+    let identity = exact_spec_identity(repo_root, spec_path);
+    if let Some(task) = identity.as_deref().and_then(canonical_task_name) {
+        return SpecArtifactLayout::Canonical(task.to_string());
+    }
+    if let Some(stem) = identity.as_deref().and_then(legacy_flat_spec_stem) {
+        return SpecArtifactLayout::LegacyFlat(stem.to_string());
+    }
+    SpecArtifactLayout::Noncanonical(noncanonical_artifact_key(identity.as_deref(), spec_path))
+}
+
+/// Canonical specs own `<task>/state.json`. Legacy top-level task specs retain
+/// their basename-keyed location. Every other repository-contained spec uses a
+/// full exact-path digest so equal basenames cannot share controller state.
+pub fn state_file_path(repo_root: &Path, spec_path: &Path) -> PathBuf {
+    match spec_artifact_layout(repo_root, spec_path) {
+        SpecArtifactLayout::Canonical(task) => repo_root
+            .join(".mastermind/tasks")
+            .join(task)
+            .join("state.json"),
+        SpecArtifactLayout::LegacyFlat(stem) => repo_root
+            .join(".mastermind/run-state")
+            .join(format!("{stem}.json")),
+        SpecArtifactLayout::Noncanonical(key) => repo_root
+            .join(".mastermind/run-state/.noncanonical")
+            .join(format!("{key}.json")),
+    }
+}
+
+/// Release notes retain human task names for canonical and legacy flat specs;
+/// other paths use the same collision-resistant artifact key as controller state.
 pub fn release_file_path(repo_root: &Path, spec_path: &Path) -> PathBuf {
-    repo_root
-        .join(".mastermind/releases")
-        .join(format!("{}.md", spec_basename(spec_path)))
+    match spec_artifact_layout(repo_root, spec_path) {
+        SpecArtifactLayout::Canonical(task) | SpecArtifactLayout::LegacyFlat(task) => repo_root
+            .join(".mastermind/releases")
+            .join(format!("{task}.md")),
+        SpecArtifactLayout::Noncanonical(key) => repo_root
+            .join(".mastermind/releases/.noncanonical")
+            .join(format!("{key}.md")),
+    }
 }
 
 /// Semantic-history review path. Canonical tasks keep it beside their spec;
-/// legacy flat specs use the local run-state directory.
+/// legacy flat specs use the local run-state directory, and other specs use
+/// their exact-path-derived noncanonical state namespace.
 pub fn history_review_file_path(repo_root: &Path, spec_path: &Path) -> PathBuf {
-    if spec_path.file_name().and_then(|name| name.to_str()) == Some("spec.md") {
-        let resolved = if spec_path.is_absolute() {
-            spec_path.to_path_buf()
-        } else {
-            repo_root.join(spec_path)
-        };
-        return resolved
-            .parent()
-            .unwrap_or(repo_root)
-            .join("history-review.md");
+    match spec_artifact_layout(repo_root, spec_path) {
+        SpecArtifactLayout::Canonical(task) => repo_root
+            .join(".mastermind/tasks")
+            .join(task)
+            .join("history-review.md"),
+        SpecArtifactLayout::LegacyFlat(stem) => repo_root
+            .join(".mastermind/run-state")
+            .join(format!("{stem}-history-review.md")),
+        SpecArtifactLayout::Noncanonical(key) => repo_root
+            .join(".mastermind/run-state/.noncanonical")
+            .join(format!("{key}-history-review.md")),
     }
-    repo_root
-        .join(".mastermind/run-state")
-        .join(format!("{}-history-review.md", spec_basename(spec_path)))
 }
 
 fn ensure_history_review(
@@ -3126,6 +3253,68 @@ verifications: []\n\
     }
 
     #[test]
+    fn only_the_exact_task_folder_shape_uses_task_local_artifacts() {
+        let root = Path::new("/repo");
+
+        assert!(matches!(
+            spec_artifact_layout(root, Path::new(".mastermind/tasks/001-task/spec.md")),
+            SpecArtifactLayout::Canonical(task) if task == "001-task"
+        ));
+        assert!(matches!(
+            spec_artifact_layout(root, Path::new(".mastermind/tasks/spec.md")),
+            SpecArtifactLayout::LegacyFlat(stem) if stem == "spec"
+        ));
+        assert_eq!(
+            state_file_path(root, Path::new(".mastermind/tasks/spec.md")),
+            root.join(".mastermind/run-state/spec.json")
+        );
+        assert!(matches!(
+            spec_artifact_layout(root, Path::new("arbitrary/spec.md")),
+            SpecArtifactLayout::Noncanonical(_)
+        ));
+    }
+
+    #[test]
+    fn legacy_flat_specs_keep_their_existing_artifact_paths() {
+        let root = Path::new("/repo");
+        let spec = Path::new(".mastermind/tasks/050-clean-add.md");
+
+        assert_eq!(
+            state_file_path(root, spec),
+            root.join(".mastermind/run-state/050-clean-add.json")
+        );
+        assert_eq!(
+            release_file_path(root, spec),
+            root.join(".mastermind/releases/050-clean-add.md")
+        );
+        assert_eq!(
+            history_review_file_path(root, spec),
+            root.join(".mastermind/run-state/050-clean-add-history-review.md")
+        );
+    }
+
+    #[test]
+    fn equal_noncanonical_basenames_get_distinct_exact_path_artifacts() {
+        let root = Path::new("/repo");
+        let first = Path::new("a/same.md");
+        let second = Path::new("b/same.md");
+
+        let selectors: [fn(&Path, &Path) -> PathBuf; 3] =
+            [state_file_path, release_file_path, history_review_file_path];
+        for select in selectors {
+            let first_path = select(root, first);
+            let second_path = select(root, second);
+            assert_ne!(first_path, second_path);
+            assert!(first_path
+                .components()
+                .any(|component| component.as_os_str() == ".noncanonical"));
+            assert!(second_path
+                .components()
+                .any(|component| component.as_os_str() == ".noncanonical"));
+        }
+    }
+
+    #[test]
     fn hash_text_is_stable_for_same_input() {
         let a = hash_text("alpha\nbeta\n");
         let b = hash_text("alpha\nbeta\n");
@@ -4477,8 +4666,10 @@ verify:
             ),
             Outcome::PreReady
         );
-        let legacy_state = state_file_path(root.path(), &first);
-        let before = fs::read(&legacy_state).unwrap();
+        let first_state = state_file_path(root.path(), &first);
+        let second_state = state_file_path(root.path(), &second);
+        assert_ne!(first_state, second_state);
+        let before = fs::read(&first_state).unwrap();
         assert_eq!(
             run(
                 &second,
@@ -4490,9 +4681,10 @@ verify:
                     ..Default::default()
                 }
             ),
-            Outcome::PreFailed
+            Outcome::PreReady
         );
-        assert_eq!(fs::read(&legacy_state).unwrap(), before);
+        assert_eq!(fs::read(&first_state).unwrap(), before);
+        assert!(load_state(&second_state).unwrap().is_some());
     }
 
     #[test]

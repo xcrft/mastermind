@@ -126,6 +126,9 @@ Each canonical task lives under `.mastermind/tasks/<NNN>-<slug>/`.
 A held audit may also write a release-note candidate under
 `.mastermind/releases/`. Markdown remains the durable source of truth;
 `state.json` and the SQLite history index are coordination/retrieval layers.
+Repository-contained specs outside the canonical task layout use exact-path
+keys in `.noncanonical/` subdirectories so equal filenames remain independent;
+their release candidates remain part of the history inventory.
 Status, next-action, and resume read task inventories and lifecycle state
 through bounded, no-follow repository capabilities. An unreadable, malformed,
 oversized, unknown, or special-file state is shown as held, and an ambiguous or

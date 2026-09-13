@@ -146,6 +146,7 @@ def clean_environment(trial: Path, credentials: dict[str, str] | None = None) ->
         "LANG": "C.UTF-8", "LC_ALL": "C", "TERM": "dumb",
         "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "",
         "GIT_AUTHOR_NAME": "Benchmark", "GIT_COMMITTER_NAME": "Benchmark",
         "GIT_AUTHOR_EMAIL": "benchmark@example.invalid", "GIT_COMMITTER_EMAIL": "benchmark@example.invalid",
         "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z", "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z",
@@ -165,6 +166,21 @@ def git(repo: Path, args: list[str], env: dict[str, str], limit: int = FILE_BYTE
     if process.stop_reason or process.returncode != 0:
         raise BenchmarkError("git_failed", f"Git source operation failed: {process.stop_reason or 'exit'}")
     return process.stdout
+
+
+def verify_tool_commit(repo: Path, revision: str, env: dict[str, str]) -> None:
+    try:
+        resolved = git(repo, ["rev-parse", "--verify", f"{revision}^{{commit}}"], env).decode("ascii").strip()
+    except (BenchmarkError, UnicodeError) as error:
+        raise BenchmarkError(
+            "tool_revision_unavailable",
+            "tool revision must be an available exact commit in the selected tool repository",
+        ) from error
+    if resolved != revision:
+        raise BenchmarkError(
+            "tool_revision_mismatch",
+            "tool revision does not resolve to the requested exact commit",
+        )
 
 
 def export_source(repo: Path, revision: str, paths: list[str], destination: Path,
@@ -432,6 +448,7 @@ def prepare_trial(
                 "status": "setup_failed", "isolation": "host_adapter_unverified"}
     write_new(trial / "rubric.json", rubric)
     try:
+        verify_tool_commit(tool_repo.resolve(strict=True), tool_revision, env)
         spec = config.get("adapter")
         if isinstance(spec, dict) and spec.get("kind") == "claude_cli":
             adapter = claude_runtime().prepare_runtime(trial, spec, limits)
@@ -678,12 +695,12 @@ def run_trial(trial: Path, credentials: dict[str, str] | None = None) -> dict:
         state, reason = "invocation_error", "nonzero_exit"
     elif issues:
         state, reason = "protocol_error", issues[0]
+    elif init and (init.get("model") != manifest["model"] or init.get("adapter_version") != manifest["adapter"]["version"]):
+        state, reason = "identity_mismatch", "observed_model_or_adapter_version_mismatch"
     elif result and result.get("failure"):
         state, reason = result["failure"]["state"], result["failure"]["code"]
     elif result and result.get("model_error"):
         state, reason = "model_error", "adapter_reported_model_error"
-    elif init and (init.get("model") != manifest["model"] or init.get("adapter_version") != manifest["adapter"]["version"]):
-        state, reason = "identity_mismatch", "observed_model_or_adapter_version_mismatch"
     measured = telemetry(result, limits)
     unexpected_tools = sorted(set(tools) - set(request["available_tools"]))
     envelope["diagnostics"] = {"protocol_issues": issues, "telemetry": measured, "tools": tools,

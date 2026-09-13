@@ -327,6 +327,9 @@ Each trial retains a frozen `manifest.json`, public `request.json`, private
 `rubric.json`, bounded `trace.jsonl` and `stderr.txt`, complete bounded
 `answer.md` when present, and `result.json`. Indexing output and elapsed setup
 time are recorded separately from the adapter's investigation time.
+Preparation requires the declared tool revision to resolve to that exact commit
+in the selected tool repository for every condition. Git lazy fetching and
+transport protocols are disabled while source and tool objects are frozen.
 
 | Result field | Meaning |
 |---|---|

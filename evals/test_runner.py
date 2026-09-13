@@ -43,6 +43,14 @@ def sync_gated_summaries(report, suite_name):
 def bind_target_identity(report, digest="9" * 64):
     report["claude_cli_sha256"] = "8" * 64
     report["claude_cli_stable"] = True
+    report["evaluation_harness"] = {
+        "sha256": "7" * 64,
+        "stable": True,
+        "python_implementation": "CPython",
+        "python_version": "3.13.0",
+        "platform": "test",
+        "pyyaml_version": "test",
+    }
     for summary in report["suites"].values():
         summary["target_definition_digest"] = digest
         summary["target_definition_stable"] = True
@@ -604,6 +612,20 @@ action: passthrough
         gate = runner.compare_to_baseline(current, baseline)
         self.assertTrue(
             any("no Claude CLI identity" in item for item in gate["failures"])
+        )
+
+        current = deepcopy(baseline)
+        current["evaluation_harness"]["sha256"] = "6" * 64
+        gate = runner.compare_to_baseline(current, baseline)
+        self.assertTrue(
+            any("evaluation harness differs" in item for item in gate["failures"])
+        )
+
+        current = deepcopy(baseline)
+        del current["evaluation_harness"]
+        gate = runner.compare_to_baseline(current, baseline)
+        self.assertTrue(
+            any("no evaluation harness identity" in item for item in gate["failures"])
         )
 
         current = deepcopy(baseline)

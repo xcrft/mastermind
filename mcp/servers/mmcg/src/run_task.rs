@@ -944,6 +944,26 @@ struct ControllerIdentity {
     spec_path: String,
 }
 
+pub(crate) fn validate_bound_state_identity(
+    repository: &str,
+    spec_path: &str,
+    state: &RunState,
+) -> Result<(), String> {
+    let Some(saved_repository) = state.repository_identity.as_deref() else {
+        return Err(
+            "legacy state has no repository binding; run an explicit pre-flight to rebind it"
+                .into(),
+        );
+    };
+    if saved_repository != repository {
+        return Err("saved state belongs to a different repository".into());
+    }
+    if state.spec_path != spec_path {
+        return Err("saved state belongs to a different spec".into());
+    }
+    Ok(())
+}
+
 fn controller_identity(repo_root: &Path, spec_path: &Path) -> Result<ControllerIdentity, String> {
     let root = RootCapability::open(repo_root)
         .map_err(|error| format!("opening repository capability: {error}"))?;
@@ -962,13 +982,13 @@ fn controller_identity(repo_root: &Path, spec_path: &Path) -> Result<ControllerI
     })
 }
 
-fn legacy_state_matches_spec(
+pub(crate) fn legacy_state_matches_spec(
     repo_root: &Path,
     spec_path: &Path,
-    current: &ControllerIdentity,
+    current_spec_path: &str,
     state: &RunState,
 ) -> bool {
-    if state.spec_path == current.spec_path {
+    if state.spec_path == current_spec_path {
         return true;
     }
     let resolved = if spec_path.is_absolute() {
@@ -996,7 +1016,7 @@ fn legacy_state_matches_spec(
     // A full pre-flight can migrate a legacy canonical task after its checkout
     // moved. Match path components exactly; treating a literal backslash as a
     // separator on Unix would alias a different task.
-    let relative = Path::new(&current.spec_path);
+    let relative = Path::new(current_spec_path);
     let Ok(task_spec) = relative.strip_prefix(Path::new(".mastermind/tasks")) else {
         return false;
     };
@@ -1015,16 +1035,10 @@ fn validate_state_binding(
     state: &RunState,
     allow_legacy_rebind: bool,
 ) -> Result<(), String> {
-    if let Some(repository) = state.repository_identity.as_deref() {
-        if repository != current.repository {
-            return Err("saved state belongs to a different repository".into());
-        }
-        if state.spec_path != current.spec_path {
-            return Err("saved state belongs to a different spec".into());
-        }
-        return Ok(());
+    if state.repository_identity.is_some() {
+        return validate_bound_state_identity(&current.repository, &current.spec_path, state);
     }
-    if !legacy_state_matches_spec(repo_root, spec_path, current, state) {
+    if !legacy_state_matches_spec(repo_root, spec_path, &current.spec_path, state) {
         return Err("saved state belongs to a different spec".into());
     }
     if !allow_legacy_rebind {
@@ -2712,25 +2726,38 @@ verifications: []\n\
 
     #[cfg(unix)]
     #[test]
-    fn controller_identity_rejects_ambiguous_spec_paths() {
+    fn controller_identity_rejects_a_literal_backslash_spec_alias() {
+        let root = tmp("backslash_spec_identity");
+        init_repo(&root);
+        let spec = root
+            .join(".mastermind/tasks")
+            .join("001\\alias")
+            .join("spec.md");
+        fs::create_dir_all(spec.parent().unwrap()).unwrap();
+        fs::write(&spec, "# Ambiguous\n").unwrap();
+        assert!(controller_identity(&root, &spec)
+            .unwrap_err()
+            .contains("canonical repository-relative UTF-8"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    // APFS rejects invalid UTF-8 directory names before identity validation.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn controller_identity_rejects_a_non_utf8_spec_path() {
         use std::os::unix::ffi::OsStringExt;
 
-        let root = tmp("ambiguous_spec_identity");
+        let root = tmp("non_utf8_spec_identity");
         init_repo(&root);
-        for task_name in [
-            std::ffi::OsString::from("001\\alias"),
-            std::ffi::OsString::from_vec(b"002-\xff".to_vec()),
-        ] {
-            let spec = root
-                .join(".mastermind/tasks")
-                .join(task_name)
-                .join("spec.md");
-            fs::create_dir_all(spec.parent().unwrap()).unwrap();
-            fs::write(&spec, "# Ambiguous\n").unwrap();
-            assert!(controller_identity(&root, &spec)
-                .unwrap_err()
-                .contains("canonical repository-relative UTF-8"));
-        }
+        let spec = root
+            .join(".mastermind/tasks")
+            .join(std::ffi::OsString::from_vec(b"002-\xff".to_vec()))
+            .join("spec.md");
+        fs::create_dir_all(spec.parent().unwrap()).unwrap();
+        fs::write(&spec, "# Ambiguous\n").unwrap();
+        assert!(controller_identity(&root, &spec)
+            .unwrap_err()
+            .contains("canonical repository-relative UTF-8"));
         fs::remove_dir_all(root).ok();
     }
 

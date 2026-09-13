@@ -261,6 +261,9 @@ mmcg run-task .mastermind/tasks/042-feature/spec.md --force-iteration  # bypass 
 # rejected. State written by an older release without this binding can retain
 # its baseline and iteration only after an explicit --pre-only or --reset run
 # revalidates and binds it to the selected repository.
+# status, next, resume, doctor, and architecture-policy evidence enforce this
+# same binding. They hold legacy state for pre-flight and reject foreign state
+# instead of projecting it as ready or complete.
 
 # Initialize a project. Stack detection informs drafting, while CONTEXT stays
 # lean and stack-agnostic; commands and layouts belong in CLAUDE.md.

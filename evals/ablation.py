@@ -54,21 +54,23 @@ VANILLA_SYSTEM = (
 
 def vanilla_message(case: dict, fixture_path, baseline_ref: str, after_ref: str) -> str:
     inp = case["input"]
+    baseline_tag = runner.fixture_tag_ref(baseline_ref, "baseline_ref")
+    after_tag = runner.fixture_tag_ref(after_ref, "after_ref")
     if case.get("staged_paths") is not None:
         inspection = (
             "The author's changes are not committed. Compare the baseline with "
-            f"the current working tree using `git diff {baseline_ref} --`, then "
+            f"the current working tree using `git diff {baseline_tag} --`, then "
             "inspect `git ls-files --others --exclude-standard --` and "
             "`git status --porcelain=v1 --untracked-files=all`.\n\n"
         )
     else:
         inspection = (
-            f"Author's commit tag: `{after_ref}` (after).\n"
-            f"Inspect it with `git diff {baseline_ref}..{after_ref}`.\n\n"
+            f"Author's commit tag: `{after_tag}` (after).\n"
+            f"Inspect it with `git diff {baseline_tag}..{after_tag} --`.\n\n"
         )
     return (
         f"Working directory: `{fixture_path}` (a git repo).\n"
-        f"Baseline tag: `{baseline_ref}` (before the change).\n"
+        f"Baseline tag: `{baseline_tag}` (before the change).\n"
         f"{inspection}"
         f"Author's summary:\n{inp.get('spec_summary', '')}\n\n"
         f"Author's report:\n```\n{inp.get('executor_report', '')}\n```\n\n"

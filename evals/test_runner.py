@@ -914,7 +914,12 @@ action: passthrough
         self.assertNotEqual(before, changed)
 
     def test_frozen_fixture_snapshot_isolated_from_later_source_changes(self):
-        case = {"id": "case", "fixture": "sample", "after_ref": "current"}
+        case = {
+            "id": "case",
+            "fixture": "sample",
+            "baseline_ref": "baseline",
+            "after_ref": "current",
+        }
         with tempfile.TemporaryDirectory() as target:
             root = Path(target)
             source = root / "source"
@@ -949,8 +954,95 @@ action: passthrough
     def test_fixture_definition_rejects_parent_traversal(self):
         with self.assertRaisesRegex(ValueError, "canonical relative path"):
             runner.fixture_case_roots(
-                {"fixture": "fake-session", "after_ref": "../outside"}
+                {
+                    "fixture": "fake-session",
+                    "baseline_ref": "baseline",
+                    "after_ref": "../outside",
+                }
             )
+
+    def test_fixture_definition_rejects_git_metadata_and_symlinks(self):
+        with tempfile.TemporaryDirectory() as target:
+            root = Path(target)
+            metadata = root / ".GIT"
+            metadata.mkdir()
+            (metadata / "config").write_text("unsafe = true\n")
+            with self.assertRaisesRegex(ValueError, "Git metadata"):
+                runner.fixture_tree_definition(root)
+
+        with tempfile.TemporaryDirectory() as target:
+            root = Path(target)
+            source = root / "source"
+            source.mkdir()
+            outside = root / "outside.txt"
+            outside.write_text("outside\n")
+            try:
+                (source / "linked.txt").symlink_to(outside)
+            except OSError as error:
+                self.skipTest(f"symbolic links unavailable: {error}")
+            destination = root / "destination"
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                runner._copy_tree_into(source, destination)
+            self.assertFalse(destination.exists())
+
+        with tempfile.TemporaryDirectory() as target:
+            fixtures = Path(target)
+            real_baseline = fixtures / "real-baseline"
+            real_baseline.mkdir()
+            sample = fixtures / "sample"
+            (sample / "changes" / "after").mkdir(parents=True)
+            try:
+                (sample / "baseline").symlink_to(
+                    real_baseline, target_is_directory=True
+                )
+            except OSError as error:
+                self.skipTest(f"symbolic links unavailable: {error}")
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                runner.fixture_case_roots(
+                    {
+                        "fixture": "sample",
+                        "baseline_ref": "baseline",
+                        "after_ref": "after",
+                    },
+                    fixtures_dir=fixtures,
+                )
+
+    def test_fixture_refs_and_staged_paths_are_canonical(self):
+        for baseline_ref, after_ref in (
+            ("--force", "after"),
+            ("baseline", "after ref"),
+            ("same", "same"),
+            ("topic", "topic/after"),
+        ):
+            with self.subTest(
+                baseline_ref=baseline_ref, after_ref=after_ref
+            ), self.assertRaisesRegex(ValueError, "fixture tag"):
+                runner._validate_fixture_refs(baseline_ref, after_ref)
+
+        with tempfile.TemporaryDirectory() as target:
+            fixtures = Path(target)
+            baseline = fixtures / "sample" / "baseline"
+            after = fixtures / "sample" / "changes" / "after"
+            baseline.mkdir(parents=True)
+            after.mkdir(parents=True)
+            (baseline / "source.py").write_text("before = True\n")
+            (after / "source.py").write_text("after = True\n")
+            for staged_paths in (
+                ["../outside"],
+                [".git/config"],
+                ["src\\file.py"],
+                ["src/file.py", "src/file.py"],
+            ):
+                with self.subTest(
+                    staged_paths=staged_paths
+                ), self.assertRaisesRegex(ValueError, "staged_paths"):
+                    runner.setup_fixture(
+                        "sample",
+                        "baseline",
+                        "after",
+                        staged_paths=staged_paths,
+                        fixtures_dir=fixtures,
+                    )
 
     def test_main_fails_report_when_case_definition_changes_during_run(self):
         with tempfile.TemporaryDirectory() as target:
@@ -1391,11 +1483,13 @@ class PromptIsolationTests(unittest.TestCase):
                     "uncommitted-audit", "baseline", "executor-added", staged_paths=staged
                 )
                 prompt = invoke.call_args.kwargs["input"]
-                self.assertIn("git diff baseline --", prompt)
+                self.assertIn("git diff refs/tags/baseline --", prompt)
                 self.assertIn("git ls-files --others --exclude-standard --", prompt)
                 self.assertNotIn("baseline..executor-added", prompt)
         committed = ablation.vanilla_message({"input": {}}, fixture, "baseline", "after")
-        self.assertIn("git diff baseline..after", committed)
+        self.assertIn(
+            "git diff refs/tags/baseline..refs/tags/after --", committed
+        )
 
     def test_fixture_copy_exposes_same_size_changes_despite_matching_source_mtimes(self):
         with tempfile.TemporaryDirectory(prefix="mmcg-fixture-stat-cache-") as temporary:
@@ -1813,7 +1907,7 @@ class PromptIsolationTests(unittest.TestCase):
             has_mmcg=False,
         )
         self.assertNotIn("ANSWER LEAK", rendered)
-        self.assertIn("git diff baseline`", rendered)
+        self.assertIn("git diff refs/tags/baseline --", rendered)
         self.assertIn("git ls-files --others --exclude-standard", rendered)
         self.assertIn("Read untracked file contents directly", rendered)
 

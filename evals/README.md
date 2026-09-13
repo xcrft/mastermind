@@ -130,7 +130,9 @@ match them. Prompt-only suites do not require Git or mmcg.
 ## Researcher and auditor fixture lifecycle
 
 Each researcher or auditor case names `fixtures/<name>/`, a baseline tag, and an
-after-tree variant. The runner:
+after-tree variant. Fixture names, tags, and staged paths must be canonical;
+baseline and after tags cannot overlap. Trees containing symlinks or Git
+metadata are rejected. The runner:
 
 1. creates a temporary Git repository;
 2. commits the fixture baseline and tags it;
@@ -144,9 +146,12 @@ after-tree variant. The runner:
    tool-turn signals.
 
 The auditor compares baseline to the current working tree and reads untracked
-files separately, covering audits before commit. The researcher queries the
-same graph and reads source before reporting a fact. JSONL cases do not provide
-synthetic diffs or structural answers. The runner prefers the in-tree release
+files separately, covering audits before commit. Audit prompts use full
+`refs/tags/...` names so a tag cannot resolve as `HEAD`, a branch, or a path.
+The researcher queries the same graph and reads source before reporting a fact.
+JSONL cases do not provide synthetic diffs or structural answers. Fixture
+copies are checked against the source manifest before use. The runner prefers
+the in-tree release
 binary at `mcp/servers/mmcg/target/release/mmcg`, then falls back to `mmcg` on
 `PATH`. A failed copy or Git setup removes the partial temporary repository.
 An mmcg error or timeout leaves the index unavailable; cases that require mmcg

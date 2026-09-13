@@ -1303,7 +1303,18 @@ fn collect_source_agents(
         if path.extension().and_then(|value| value.to_str()) != Some("md") {
             continue;
         }
-        let relative = relative_display(&builder.root, &path);
+        let relative = match relative_identity(&builder.root, &path) {
+            Ok(relative) => relative,
+            Err(()) => {
+                builder.incomplete(
+                    "workflow_inventory_path_invalid",
+                    "workflow agent path must have an exact repository-relative UTF-8 identity",
+                    None,
+                    Some("agents/subagents"),
+                );
+                continue;
+            }
+        };
         let Ok(metadata) = fs::symlink_metadata(&path) else {
             builder.incomplete(
                 "file_read_failed",
@@ -1354,16 +1365,27 @@ fn collect_source_skills(
         if *overflowed {
             return;
         }
+        let relative_directory = match relative_identity(&builder.root, directory) {
+            Ok(relative) => relative,
+            Err(()) => {
+                builder.incomplete(
+                    "workflow_inventory_path_invalid",
+                    "workflow skill directory must have an exact repository-relative UTF-8 identity",
+                    None,
+                    Some("skills"),
+                );
+                return;
+            }
+        };
         if depth > MAX_WORKFLOW_YAML_DEPTH {
             builder.incomplete(
                 "workflow_inventory_limit_exceeded",
                 "workflow skill directory nesting exceeds 16 levels",
                 None,
-                Some(&relative_display(&builder.root, directory)),
+                Some(&relative_directory),
             );
             return;
         }
-        let relative_directory = relative_display(&builder.root, directory);
         let Some(entries) = builder.read_inventory_directory(directory, &relative_directory) else {
             return;
         };
@@ -1372,7 +1394,18 @@ fn collect_source_skills(
                 return;
             }
             let path = directory.join(file_name);
-            let relative = relative_display(&builder.root, &path);
+            let relative = match relative_identity(&builder.root, &path) {
+                Ok(relative) => relative,
+                Err(()) => {
+                    builder.incomplete(
+                        "workflow_inventory_path_invalid",
+                        "workflow skill path must have an exact repository-relative UTF-8 identity",
+                        None,
+                        Some(&relative_directory),
+                    );
+                    continue;
+                }
+            };
             let Ok(metadata) = fs::symlink_metadata(&path) else {
                 builder.incomplete(
                     "file_read_failed",
@@ -1432,11 +1465,9 @@ fn collect_source_skills(
     selected
 }
 
-fn relative_display(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
+fn relative_identity(root: &Path, path: &Path) -> Result<String, ()> {
+    let relative = path.strip_prefix(root).map_err(|_| ())?;
+    crate::bounded_fs::normalize_repository_relative_path(relative).map_err(|_| ())
 }
 
 fn load_installed_manifest(
@@ -5494,6 +5525,68 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(entry_failure.code, "workflow_inventory_limit_exceeded");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_workflow_inventory_rejects_backslash_path_aliases() {
+        let root = source_fixture();
+        fs::write(
+            root.path()
+                .join("agents/subagents")
+                .join("mastermind\\alias.md"),
+            "ignored",
+        )
+        .unwrap();
+        let skill = root.path().join("skills").join("mastermind\\alias");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(skill.join("SKILL.md"), "ignored").unwrap();
+
+        let report = audit_workflow(root.path());
+
+        assert!(!report.complete);
+        let invalid = report
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "workflow_inventory_path_invalid")
+            .collect::<Vec<_>>();
+        assert_eq!(invalid.len(), 2);
+        assert!(invalid.iter().all(|diagnostic| {
+            diagnostic
+                .path
+                .as_deref()
+                .is_some_and(|path| !path.contains('\\'))
+        }));
+    }
+
+    // APFS rejects invalid UTF-8 names before the inventory can observe them.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn source_workflow_inventory_does_not_publish_lossy_paths() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = source_fixture();
+        let agent = std::ffi::OsString::from_vec(b"mastermind-\xff.md".to_vec());
+        fs::write(root.path().join("agents/subagents").join(agent), "ignored").unwrap();
+        let skill = root
+            .path()
+            .join("skills")
+            .join(std::ffi::OsString::from_vec(b"mastermind-\xfe".to_vec()));
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(skill.join("SKILL.md"), "ignored").unwrap();
+
+        let report = audit_workflow(root.path());
+
+        assert!(!report.complete);
+        assert_eq!(
+            report
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "workflow_inventory_path_invalid")
+                .count(),
+            2
+        );
+        assert!(!serde_json::to_string(&report).unwrap().contains('\u{fffd}'));
     }
 
     #[cfg(unix)]

@@ -462,6 +462,7 @@ struct HashedFile {
 fn hash_file(
     root: &crate::bounded_fs::RootCapability,
     path: &Path,
+    logical_path: &str,
     control: crate::bounded_fs::ReadControl<'_>,
 ) -> Result<HashedFile, ScipOverlayError> {
     let mut digest = DigestWriter::new(std::io::sink());
@@ -473,10 +474,10 @@ fn hash_file(
         None,
         &mut digest,
     )
-    .map_err(|error| document_read_error(&path.to_string_lossy(), error))?;
+    .map_err(|error| document_read_error(logical_path, error))?;
     let sha256 = digest
         .finish()
-        .map_err(|error| ScipOverlayError::Io(format!("hash {}: {error}", path.display())))?;
+        .map_err(|error| ScipOverlayError::Io(format!("hash {logical_path:?}: {error}")))?;
     Ok(HashedFile {
         sha256,
         bytes: source.declared_len,
@@ -1285,7 +1286,10 @@ fn build_batch(store: &Store, scip_path: &Path) -> Result<SemanticImportBatch, S
                         ))
                     })?;
                 let (source, source_text_verified) = if document.text.is_empty() {
-                    (hash_file(&repository_root, &resolved, read_control)?, false)
+                    (
+                        hash_file(&repository_root, &resolved, &relative, read_control)?,
+                        false,
+                    )
                 } else {
                     let file = crate::bounded_fs::read_regular_file_with_capability(
                         &repository_root,
@@ -1791,7 +1795,9 @@ fn stale_semantic_paths(
             if !resolved.starts_with(root_capability.canonical_root()) {
                 return None;
             }
-            let sha256 = hash_file(&root_capability, &resolved, control).ok()?.sha256;
+            let sha256 = hash_file(&root_capability, &resolved, &path, control)
+                .ok()?
+                .sha256;
             (requested.canonicalize().ok()? == resolved).then_some(sha256)
         });
         if actual.as_deref() != Some(expected.as_str()) {
@@ -2061,7 +2067,13 @@ mod tests {
         std::fs::write(&path, b"int value = 1;\n").unwrap();
         std::fs::write(&replacement, b"int value = 1;\n").unwrap();
         let root = crate::bounded_fs::RootCapability::open(temp.path()).unwrap();
-        let source = hash_file(&root, &path, crate::bounded_fs::ReadControl::default()).unwrap();
+        let source = hash_file(
+            &root,
+            &path,
+            "source.cpp",
+            crate::bounded_fs::ReadControl::default(),
+        )
+        .unwrap();
         let receipt = DocumentSourceReceipt {
             resolved_relative: None,
             identity: source.identity,
@@ -2104,12 +2116,20 @@ mod tests {
         assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
         let root = crate::bounded_fs::RootCapability::open(temp.path()).unwrap();
 
-        let error = match hash_file(&root, &path, crate::bounded_fs::ReadControl::default()) {
+        let error = match hash_file(
+            &root,
+            &path,
+            "source.cpp",
+            crate::bounded_fs::ReadControl::default(),
+        ) {
             Ok(_) => panic!("a FIFO must not be accepted as a repository document"),
             Err(error) => error,
         };
 
-        assert!(matches!(error, ScipOverlayError::InvalidIndex(_)));
+        assert!(matches!(&error, ScipOverlayError::InvalidIndex(_)));
+        let message = error.to_string();
+        assert!(message.contains("source.cpp"));
+        assert!(!message.contains(temp.path().to_str().unwrap()));
     }
 
     #[test]

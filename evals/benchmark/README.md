@@ -140,6 +140,11 @@ Create a local config using actual values in place of these placeholders:
 }
 ```
 
+The harness caps a trial at 3,600 seconds, 16 MiB per trace/diagnostic stream,
+64 turns and 65,536 declared output tokens. Lower per-experiment limits remain
+part of the frozen common identity; values above the hard caps are rejected
+before any trial directory or model invocation is created.
+
 The task's source revision and the tool/instruction revision are separate. Each
 calibration investigates a fixed repository commit. Pin the instruction and
 mmcg source together without changing the task revision.

@@ -34,6 +34,8 @@ SOURCE_BYTE_LIMIT = 8 * 1024 * 1024
 FILE_BYTE_LIMIT = 2 * 1024 * 1024
 CONTROL_BYTE_LIMIT = 1024 * 1024
 BINARY_BYTE_LIMIT = 512 * 1024 * 1024
+MAX_TURNS_LIMIT = 64
+MAX_OUTPUT_TOKENS_LIMIT = 64 * 1024
 FORBIDDEN_PARTS = {".git", ".claude", ".codex", ".agents", ".mastermind", "evals"}
 FORBIDDEN_NAMES = {"AGENTS.md", "CLAUDE.md", ".mcp.json"}
 CREDENTIAL_NAMES = {"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY"}
@@ -488,6 +490,9 @@ def validate_limits(value: object) -> dict:
             raise BenchmarkError("invalid_limits", f"{name} must be a positive integer")
     if limits["timeout_seconds"] > 3600 or max(limits["trace_bytes"], limits["stderr_bytes"]) > 16 * 1024 * 1024:
         raise BenchmarkError("invalid_limits", "runtime limits exceed benchmark hard caps")
+    if (limits["max_turns"] > MAX_TURNS_LIMIT
+            or limits["max_output_tokens"] > MAX_OUTPUT_TOKENS_LIMIT):
+        raise BenchmarkError("invalid_limits", "model usage limits exceed benchmark hard caps")
     if limits["answer_bytes"] > limits["trace_bytes"]:
         raise BenchmarkError("invalid_limits", "answer cap must fit inside trace cap")
     return limits

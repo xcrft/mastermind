@@ -165,11 +165,15 @@ run finishes fails every case. A legacy baseline may omit this binary identity;
 when both reports contain it, the gate requires an exact match. Claude CLI
 reported cost is retained as telemetry, but these runs use the maintainer's
 existing Claude subscription rather than per-token API billing. New reports
-also bind the grader to `runner.py`, `benchmark_process.py`, `evidence.py`,
-Python, the platform, and PyYAML with `evaluation_harness.sha256`. That harness
-must remain stable within a run and match any non-legacy baseline, so a grader
-change cannot masquerade as agent quality improvement. Researcher and auditor
-runs also pin the exact Git
+freeze the repository HEAD before running cases and retain that revision; a HEAD
+change during the run fails every case instead of relabeling frozen inputs with
+the later commit. Metadata probes, fixture Git operations, and mmcg indexing use
+the same bounded process supervisor as model-backed cases. Reports also bind the
+grader to `runner.py`, `benchmark_process.py`, `evidence.py`, Python, the
+platform, and PyYAML with `evaluation_harness.sha256`. That harness must remain
+stable within a run and match any non-legacy baseline, so a grader change cannot
+masquerade as agent quality improvement. Researcher and auditor runs also pin
+the exact Git
 and mmcg executables used to construct and index fixtures. Their hashes, Git
 version, and stability are recorded as `fixture_runtime`; future baselines must
 match them. Prompt-only suites do not require Git or mmcg.

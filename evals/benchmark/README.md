@@ -344,7 +344,8 @@ or missing success telemetry cannot become `completed`.
 `claude-stream.jsonl` retains bounded raw events as they arrive, including tool
 inputs/results, while `trace.jsonl` records normalized tool calls and the terminal
 envelope. Wall time covers version checking and model invocation; the outer
-supervisor also kills nested CLI/MCP processes when the adapter is interrupted.
+supervisor briefly drains pipes after the adapter exits and then kills nested
+CLI/MCP processes, including descendants that kept those pipes open.
 These are resource and protocol controls over a trusted CLI, not a host sandbox.
 
 ## Results and review

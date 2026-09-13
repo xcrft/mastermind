@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Claude stream validation now binds each tool-call ID to one tool and exactly
   one result, rejecting conflicting partial/final events and successful replies
   with incomplete tool evidence.
+- A normally exited benchmark adapter no longer becomes a false timeout when an
+  abandoned descendant keeps its output pipes open; the supervisor drains
+  briefly and then cleans up the owned process group.
 - History and task retrieval now distinguish a known incomplete corpus from an
   unavailable live freshness scan. Responses expose a stable `freshness_error`,
   and managed MCP serving refuses to scan an index root outside its authorized

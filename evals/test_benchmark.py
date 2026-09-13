@@ -701,6 +701,21 @@ class ProcessTests(unittest.TestCase):
                                    text=True, timeout=5)
             self.assertTrue(check.returncode != 0 or check.stdout.strip().startswith("Z"), check.stdout)
 
+    def test_normal_exit_does_not_wait_for_descendant_held_pipes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            code = ("import subprocess, sys; "
+                    "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(20)']); "
+                    "print(p.pid, flush=True)")
+            result = run_bounded([sys.executable, "-c", code], cwd=root, env={}, timeout=3)
+            pid = int(result.stdout.strip())
+            self.assertEqual(result.returncode, 0)
+            self.assertIsNone(result.stop_reason)
+            self.assertLess(result.elapsed_seconds, 2)
+            check = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True,
+                                   text=True, timeout=5)
+            self.assertTrue(check.returncode != 0 or check.stdout.strip().startswith("Z"), check.stdout)
+
     def test_spawn_failure_has_no_fabricated_return_code(self):
         with tempfile.TemporaryDirectory() as directory:
             result = run_bounded([str(Path(directory) / "absent")], cwd=Path(directory), env={})

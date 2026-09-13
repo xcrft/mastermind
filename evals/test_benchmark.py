@@ -282,6 +282,15 @@ class BenchmarkTests(unittest.TestCase):
                     config["tool_revision"] = revision
                     self.assert_setup_failure(self.prepare(condition, config=config), reason)
 
+    def test_portable_instruction_must_be_a_regular_blob(self):
+        (self.repo / "skills/research/link.md").symlink_to("SKILL.md")
+        self.git("add", "skills/research/link.md")
+        self.git("commit", "-qm", "symlink instruction fixture")
+        config = copy.deepcopy(self.config)
+        config["tool_revision"] = self.git("rev-parse", "HEAD").strip()
+        config["instruction_path"] = "skills/research/link.md"
+        self.assert_setup_failure(self.prepare("portable", config=config), "instruction_type")
+
     def test_failed_partial_stale_or_uncheckpointed_indexes_never_run(self):
         expected = {"exit_failure": "index_setup_failed", "partial": "index_source_mismatch",
                     "wrong_root": "index_root_mismatch", "wrong_hash": "index_source_mismatch",
@@ -382,6 +391,15 @@ class BenchmarkTests(unittest.TestCase):
                 result = bench.run_trial(trial)
                 self.assertEqual(result["run_status"]["state"], "setup_error")
                 self.assertFalse((trial / "adapter-called").exists())
+
+    def test_prepared_manifest_rechecks_the_total_source_limit(self):
+        trial = self.prepare()
+        manifest = self.manifest(trial)
+        prepared_bytes = sum(item["bytes"] for item in manifest["source_files"])
+        with patch.object(bench, "SOURCE_BYTE_LIMIT", prepared_bytes - 1):
+            result = bench.run_trial(trial)
+        self.assertEqual(result["run_status"], {"state": "setup_error", "reason": "source_limit"})
+        self.assertFalse((trial / "adapter-called").exists())
 
     def test_unexpected_empty_or_unreadable_directory_fails_inventory(self):
         for mode in (0o700, 0):

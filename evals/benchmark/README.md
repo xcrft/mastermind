@@ -198,6 +198,12 @@ after claiming an attempt leaves the batch incomplete; it does not permit a
 selective retry. Prepare a new balanced batch when the runtime or experiment
 configuration changes.
 
+One-shot control files, retained answers, transport logs and results use
+exclusive publication. The runner fsyncs each artifact, reopens its final name,
+and verifies the owned file identity and exact bytes before returning success.
+Replacing a parent directory or final file during publication fails the
+attempt without deleting an external replacement.
+
 ## Adapter protocol
 
 For the generic adapter, the pinned executable receives no arguments. Its working directory is the

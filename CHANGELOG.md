@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Conditional atomic file creation now uses an operating-system no-clobber
+  rename, closing the race between the final absence check and publication.
+  Fact key generation uses that primitive for complete files and publishes the
+  public key first, so a later failure cannot leave a private seed by itself.
 - Controller artifacts now recognize only the exact
   `.mastermind/tasks/<task>/spec.md` layout as canonical. Other nested specs use
   full exact-path digests in isolated namespaces, so equal basenames cannot

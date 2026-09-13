@@ -27,6 +27,13 @@ tool scoping is part of the eval instead of a separate handwritten allowlist.
 runtime contract, allowlist, report gate, fixtures, and source citations without
 calling a model.
 
+Case files have a fail-closed schema. The loader rejects unknown case, input,
+expectation, tool-policy, citation, and comment-policy fields; invalid verdicts
+or actions; contradictory phrase checks; impossible budgets; unavailable tool
+names; and cases without a positive output oracle. This happens before a model
+is called. Citation anchors must already identify exactly one line in the named
+after-tree.
+
 Every case and suite summary reports turns, input/output tokens, prompt-cache
 creation/read tokens, API time, and Claude CLI reported cost. Retries aggregate
 both attempts, so a recovered flaky case does not hide its token spend. Reports
@@ -156,6 +163,8 @@ binary at `mcp/servers/mmcg/target/release/mmcg`, then falls back to `mmcg` on
 `PATH`. A failed copy or Git setup removes the partial temporary repository.
 An mmcg error or timeout leaves the index unavailable; cases that require mmcg
 then fail through the normal result contract instead of leaking setup state.
+`allow_no_mmcg` is valid only when the case does not require an mmcg tool, so a
+source-only boundary or Read case can still run without an index.
 
 Build the matching binary before a model-backed researcher or auditor run:
 
@@ -182,7 +191,13 @@ do not establish that dimension scores or their reasoning are correct.
 {
   "id": "c-NNN-short-name",
   "why": "single regression scenario",
-  "input": {},
+  "input": {
+    "problem": "behavior to assess",
+    "design": "proposed implementation",
+    "alternatives": "considered options",
+    "constraints": "known limits",
+    "mmcg_snapshot": "quoted structural evidence or Unavailable"
+  },
   "expect": {
     "verdict": "rethink",
     "contains": ["required phrase"],

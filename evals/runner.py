@@ -60,6 +60,11 @@ EVALS_DIR = Path(__file__).resolve().parent
 FIXTURES_DIR = EVALS_DIR / "fixtures"
 REPORT_KIND = "mastermind-eval-report"
 REPORT_SCHEMA_VERSION = 1
+CRITIC_VERDICTS = frozenset(
+    {"ship it", "ship with caveats", "revise", "rethink", "insufficient evidence"}
+)
+AUDIT_VERDICTS = frozenset({"held", "drift", "broken"})
+INTAKE_ACTIONS = frozenset({"refined", "ask", "passthrough"})
 
 # Prefer the in-tree build (matches the current SCHEMA_VERSION) over whatever
 # version is installed in ~/.cargo/bin — avoids "schema mismatch — rebuilding"
@@ -587,7 +592,9 @@ def result_report(result: Result) -> dict:
     }
 
 
-def load_case_records(path: Path) -> list[dict]:
+def load_case_records(
+    path: Path, *, suite_name: str | None = None
+) -> list[dict]:
     records: list[dict] = []
     seen_ids: set[str] = set()
     for line_number, line in enumerate(
@@ -604,10 +611,21 @@ def load_case_records(path: Path) -> list[dict]:
         if not isinstance(record, dict):
             raise ValueError(f"case at {path}:{line_number} must be an object")
         case_id = record.get("id")
-        if not isinstance(case_id, str) or not case_id:
+        if (
+            not isinstance(case_id, str)
+            or not case_id
+            or case_id.strip() != case_id
+        ):
             raise ValueError(f"case at {path}:{line_number} has no id")
         if case_id in seen_ids:
             raise ValueError(f"duplicate case id {case_id!r} in {path}")
+        if suite_name is not None:
+            try:
+                validate_case_record(suite_name, record)
+            except ValueError as error:
+                raise ValueError(
+                    f"invalid {suite_name} case at {path}:{line_number}: {error}"
+                ) from error
         seen_ids.add(case_id)
         records.append(record)
     return records
@@ -669,6 +687,494 @@ def _validate_fixture_refs(baseline_ref: object, after_ref: object) -> tuple[str
     ):
         raise ValueError("baseline_ref and after_ref must be distinct fixture tags")
     return baseline, after
+
+
+_CASE_INPUT_FIELDS = {
+    "critic": (
+        {"problem", "design", "alternatives", "constraints", "mmcg_snapshot"},
+        set(),
+    ),
+    "researcher": ({"question", "scope"}, {"evidence"}),
+    "auditor": ({"spec_summary", "executor_report"}, set()),
+    "intake": ({"raw_prompt", "target_consumer"}, {"project_context"}),
+    "workflow": ({"prompt"}, set()),
+}
+_COMMON_EXPECTATION_FIELDS = {
+    "min_turns",
+    "max_turns",
+    "max_output_tokens",
+    "tools",
+    "contains",
+    "contains_any",
+    "not_contains",
+}
+
+
+def _nonblank_case_text(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip()) and "\0" not in value
+
+
+def _case_string_list(
+    value: object, label: str, *, allow_empty: bool = False
+) -> list[str]:
+    if (
+        not isinstance(value, list)
+        or (not allow_empty and not value)
+        or any(
+            not isinstance(item, str)
+            or not item
+            or item.strip() != item
+            or "\0" in item
+            for item in value
+        )
+    ):
+        raise ValueError(f"{label} must be a list of canonical non-empty strings")
+    identities = [item.casefold() for item in value]
+    if len(identities) != len(set(identities)):
+        raise ValueError(f"{label} must not contain duplicates")
+    return value
+
+
+def _case_alternative_groups(value: object, label: str) -> list[list[str]]:
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{label} must be a non-empty list of string lists")
+    groups = [
+        _case_string_list(group, f"{label} group")
+        for group in value
+    ]
+    identities = [
+        tuple(sorted(item.casefold() for item in group)) for group in groups
+    ]
+    if len(identities) != len(set(identities)):
+        raise ValueError(f"{label} must not contain duplicate groups")
+    return groups
+
+
+def _case_verdicts(value: object, label: str) -> list[str]:
+    values = [value] if isinstance(value, str) else value
+    result = _case_string_list(values, label)
+    if any(item != item.lower() for item in result):
+        raise ValueError(f"{label} must use lowercase canonical values")
+    return result
+
+
+def _observable_eval_tools(suite_name: str) -> set[str]:
+    if suite_name not in {"researcher", "auditor"}:
+        return set()
+    try:
+        mcp_tools = set(subagent_mcp_tools(SUITES[suite_name]["subagent"]))
+    except (OSError, RuntimeError, ValueError) as error:
+        raise ValueError(
+            f"cannot inspect {suite_name!r} tool contract: {error}"
+        ) from error
+    if suite_name == "researcher":
+        return {"Read", "Glob", "Grep", *mcp_tools}
+    if suite_name == "auditor":
+        return {"Read", "Glob", "Grep", "Bash", *mcp_tools}
+    raise AssertionError(f"unhandled fixture suite {suite_name!r}")
+
+
+def _validate_case_tool_policy(suite_name: str, value: object) -> set[str]:
+    if not isinstance(value, dict) or not value:
+        raise ValueError("expect.tools must be a non-empty object")
+    allowed_fields = {"first", "contains", "contains_any", "max", "max_counts"}
+    unexpected = set(value) - allowed_fields
+    if unexpected:
+        raise ValueError(f"expect.tools has unexpected fields: {sorted(unexpected)!r}")
+
+    first = value.get("first")
+    if first is not None and (
+        not isinstance(first, str)
+        or not first
+        or first.strip() != first
+    ):
+        raise ValueError("expect.tools.first must be a canonical tool name")
+    required = (
+        _case_string_list(value["contains"], "expect.tools.contains")
+        if "contains" in value
+        else []
+    )
+    alternatives = (
+        _case_alternative_groups(
+            value["contains_any"], "expect.tools.contains_any"
+        )
+        if "contains_any" in value
+        else []
+    )
+    maximum = value.get("max")
+    if maximum is not None and (
+        isinstance(maximum, bool)
+        or not isinstance(maximum, int)
+        or maximum < 0
+    ):
+        raise ValueError("expect.tools.max must be a non-negative integer")
+    maximum_counts = value.get("max_counts", {})
+    if (
+        not isinstance(maximum_counts, dict)
+        or any(
+            not isinstance(name, str)
+            or not name
+            or name.strip() != name
+            or isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or limit < 0
+            for name, limit in maximum_counts.items()
+        )
+    ):
+        raise ValueError("expect.tools.max_counts must map tool names to limits")
+    if (
+        first is None
+        and not required
+        and not alternatives
+        and maximum is None
+        and not maximum_counts
+    ):
+        raise ValueError("expect.tools does not constrain tool use")
+
+    named_tools = {
+        *required,
+        *maximum_counts,
+        *(group_item for group in alternatives for group_item in group),
+    }
+    if first is not None:
+        named_tools.add(first)
+    unsupported = named_tools - _observable_eval_tools(suite_name)
+    if unsupported:
+        raise ValueError(
+            f"expect.tools names unavailable tools: {sorted(unsupported)!r}"
+        )
+    mandatory = set(required)
+    if first is not None:
+        mandatory.add(first)
+    if maximum is not None and maximum < len(mandatory):
+        raise ValueError("expect.tools.max is lower than mandatory tool calls")
+    if maximum == 0 and alternatives:
+        raise ValueError("expect.tools.max forbids every tool alternative")
+    if any(maximum_counts.get(name, 1) == 0 for name in mandatory):
+        raise ValueError("expect.tools.max_counts forbids a mandatory tool")
+    if any(
+        all(maximum_counts.get(name, 1) == 0 for name in group)
+        for group in alternatives
+    ):
+        raise ValueError("expect.tools.max_counts forbids every tool alternative")
+    return {
+        *mandatory,
+        *(name for group in alternatives for name in group),
+    }
+
+
+def _validate_code_comment_policy(value: object) -> None:
+    if not isinstance(value, dict):
+        raise ValueError("expect.code_comments must be an object")
+    allowed_fields = {
+        "prefixes",
+        "require_fenced_code",
+        "min",
+        "max",
+        "contains_any",
+        "not_contains",
+    }
+    unexpected = set(value) - allowed_fields
+    if unexpected:
+        raise ValueError(
+            f"expect.code_comments has unexpected fields: {sorted(unexpected)!r}"
+        )
+    if "prefixes" in value:
+        _case_string_list(value["prefixes"], "expect.code_comments.prefixes")
+    if "require_fenced_code" in value and not isinstance(
+        value["require_fenced_code"], bool
+    ):
+        raise ValueError("expect.code_comments.require_fenced_code must be boolean")
+    minimum = value.get("min", 0)
+    maximum = value.get("max")
+    for label, number in (("min", minimum), ("max", maximum)):
+        if number is not None and (
+            isinstance(number, bool)
+            or not isinstance(number, int)
+            or number < 0
+        ):
+            raise ValueError(
+                f"expect.code_comments.{label} must be a non-negative integer"
+            )
+    if maximum is not None and minimum > maximum:
+        raise ValueError("expect.code_comments.min exceeds max")
+    alternatives = (
+        _case_alternative_groups(
+            value["contains_any"], "expect.code_comments.contains_any"
+        )
+        if "contains_any" in value
+        else []
+    )
+    if "not_contains" in value:
+        forbidden = _case_string_list(
+            value["not_contains"],
+            "expect.code_comments.not_contains",
+            allow_empty=True,
+        )
+    else:
+        forbidden = []
+    if maximum == 0 and alternatives:
+        raise ValueError(
+            "expect.code_comments cannot require phrases when max is zero"
+        )
+    if any(
+        all(
+            any(blocked.casefold() in phrase.casefold() for blocked in forbidden)
+            for phrase in group
+        )
+        for group in alternatives
+    ):
+        raise ValueError(
+            "expect.code_comments contains_any contradicts not_contains"
+        )
+    if (
+        value.get("require_fenced_code") is False
+        and minimum == 0
+        and maximum is None
+        and not alternatives
+        and not forbidden
+    ):
+        raise ValueError("expect.code_comments does not constrain the output")
+
+
+def _validate_citation_expectations(value: object) -> None:
+    if not isinstance(value, list) or not value:
+        raise ValueError("expect.citations must be a non-empty list")
+    seen: set[tuple[str, str]] = set()
+    for entry in value:
+        if not isinstance(entry, dict) or set(entry) != {"path", "anchor"}:
+            raise ValueError(
+                "each expect.citations entry must contain only path and anchor"
+            )
+        path = _fixture_relative_path(entry["path"], "citation path").as_posix()
+        anchor = entry["anchor"]
+        if not _nonblank_case_text(anchor) or "\n" in anchor or "\r" in anchor:
+            raise ValueError("citation anchor must be non-empty single-line text")
+        identity = (path, anchor)
+        if identity in seen:
+            raise ValueError("expect.citations contains a duplicate expectation")
+        seen.add(identity)
+
+
+def _canonical_staged_paths(value: object) -> list[str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError(
+            "staged_paths must be a list of canonical repository-relative paths"
+        )
+    try:
+        paths = [
+            _fixture_relative_path(path, "staged path").as_posix()
+            for path in value
+        ]
+    except ValueError as error:
+        raise ValueError(
+            "staged_paths must be a list of canonical repository-relative paths"
+        ) from error
+    if len(paths) != len(set(paths)):
+        raise ValueError("staged_paths must not contain duplicates")
+    return paths
+
+
+def validate_case_record(suite_name: str, record: object) -> None:
+    if suite_name not in SUITES or suite_name not in _CASE_INPUT_FIELDS:
+        raise ValueError(f"unknown suite {suite_name!r}")
+    if not isinstance(record, dict):
+        raise ValueError("case must be an object")
+    case_id = record.get("id")
+    if (
+        not isinstance(case_id, str)
+        or not case_id
+        or case_id.strip() != case_id
+        or "\0" in case_id
+    ):
+        raise ValueError("case id must be canonical non-empty text")
+
+    required_fields = {"id", "why", "input", "expect"}
+    optional_fields: set[str] = set()
+    if SUITES[suite_name].get("uses_fixture"):
+        required_fields |= {"fixture", "baseline_ref", "after_ref"}
+        optional_fields |= {"staged_paths", "allow_no_mmcg"}
+    if suite_name == "workflow":
+        required_fields.add("artifact")
+    missing = required_fields - set(record)
+    unexpected = set(record) - required_fields - optional_fields
+    if missing or unexpected:
+        raise ValueError(
+            f"case {case_id!r} has invalid fields: missing {sorted(missing)!r}, "
+            f"unexpected {sorted(unexpected)!r}"
+        )
+    if not _nonblank_case_text(record["why"]):
+        raise ValueError(f"case {case_id!r} has no rationale")
+
+    if SUITES[suite_name].get("uses_fixture"):
+        _fixture_relative_path(record["fixture"], "fixture")
+        _validate_fixture_refs(record["baseline_ref"], record["after_ref"])
+        if "staged_paths" in record:
+            _canonical_staged_paths(record["staged_paths"])
+        if "allow_no_mmcg" in record and not isinstance(
+            record["allow_no_mmcg"], bool
+        ):
+            raise ValueError("allow_no_mmcg must be boolean")
+    if suite_name == "workflow":
+        artifact = record["artifact"]
+        if not isinstance(artifact, str) or artifact not in WORKFLOW_ARTIFACTS:
+            raise ValueError("workflow artifact is not in the shipped allowlist")
+
+    inp = record["input"]
+    required_input, optional_input = _CASE_INPUT_FIELDS[suite_name]
+    if not isinstance(inp, dict):
+        raise ValueError("case input must be an object")
+    missing_input = required_input - set(inp)
+    unexpected_input = set(inp) - required_input - optional_input
+    if missing_input or unexpected_input:
+        raise ValueError(
+            f"case input has invalid fields: missing {sorted(missing_input)!r}, "
+            f"unexpected {sorted(unexpected_input)!r}"
+        )
+    for field_name, value in inp.items():
+        if suite_name == "critic" and field_name == "alternatives":
+            if isinstance(value, list):
+                _case_string_list(
+                    value, "input.alternatives", allow_empty=True
+                )
+            elif not _nonblank_case_text(value):
+                raise ValueError("input.alternatives must be text or a string list")
+        elif not _nonblank_case_text(value):
+            raise ValueError(f"input.{field_name} must be non-empty text")
+
+    expect = record["expect"]
+    if not isinstance(expect, dict) or not expect:
+        raise ValueError("case expect must be a non-empty object")
+    allowed_expectations = set(_COMMON_EXPECTATION_FIELDS)
+    if suite_name in {"critic", "auditor"}:
+        allowed_expectations.add("verdict")
+    elif suite_name == "intake":
+        allowed_expectations.add("action")
+    elif suite_name == "researcher":
+        allowed_expectations.add("citations")
+    elif (
+        suite_name == "workflow"
+        and record["artifact"]
+        == "skills/workflow/mastermind-critical-review/SKILL.md"
+    ):
+        allowed_expectations.add("verdict")
+    if suite_name == "auditor":
+        allowed_expectations.add("verification_rerun")
+    if suite_name == "workflow":
+        allowed_expectations.add("code_comments")
+    unexpected_expectations = set(expect) - allowed_expectations
+    if unexpected_expectations:
+        raise ValueError(
+            "case expect has unexpected fields: "
+            f"{sorted(unexpected_expectations)!r}"
+        )
+
+    for field_name in ("min_turns", "max_turns", "max_output_tokens"):
+        if field_name in expect and (
+            isinstance(expect[field_name], bool)
+            or not isinstance(expect[field_name], int)
+            or expect[field_name] <= 0
+        ):
+            raise ValueError(f"expect.{field_name} must be a positive integer")
+    if (
+        "min_turns" in expect
+        and "max_turns" in expect
+        and expect["min_turns"] > expect["max_turns"]
+    ):
+        raise ValueError("expect.min_turns exceeds max_turns")
+    expected_tools = (
+        _validate_case_tool_policy(suite_name, expect["tools"])
+        if "tools" in expect
+        else set()
+    )
+    if record.get("allow_no_mmcg") is True and any(
+        tool.startswith("mcp__mmcg__") for tool in expected_tools
+    ):
+        raise ValueError("allow_no_mmcg conflicts with a required mmcg tool")
+
+    phrase_lists: dict[str, list[str]] = {}
+    for field_name in ("contains", "not_contains"):
+        if field_name in expect:
+            phrase_lists[field_name] = _case_string_list(
+                expect[field_name],
+                f"expect.{field_name}",
+                allow_empty=field_name == "not_contains",
+            )
+    alternative_phrases = (
+        _case_alternative_groups(expect["contains_any"], "expect.contains_any")
+        if "contains_any" in expect
+        else []
+    )
+    forbidden = {
+        phrase.casefold() for phrase in phrase_lists.get("not_contains", [])
+    }
+    required_phrases = {
+        phrase.casefold() for phrase in phrase_lists.get("contains", [])
+    }
+    if any(
+        blocked in required
+        for required in required_phrases
+        for blocked in forbidden
+    ):
+        raise ValueError("expect contains and not_contains contradict each other")
+    if any(
+        all(
+            any(blocked in phrase.casefold() for blocked in forbidden)
+            for phrase in group
+        )
+        for group in alternative_phrases
+    ):
+        raise ValueError("expect contains_any and not_contains contradict each other")
+
+    if "action" in expect:
+        action = expect["action"]
+        if not isinstance(action, str) or action not in INTAKE_ACTIONS:
+            raise ValueError(f"expect.action must be one of {sorted(INTAKE_ACTIONS)!r}")
+        action_signal = f"action: {action}"
+        if any(blocked in action_signal for blocked in forbidden):
+            raise ValueError("expect.action contradicts not_contains")
+    if "verdict" in expect:
+        verdicts = _case_verdicts(expect["verdict"], "expect.verdict")
+        allowed_verdicts = (
+            AUDIT_VERDICTS if suite_name == "auditor" else CRITIC_VERDICTS
+        )
+        invalid_verdicts = set(verdicts) - allowed_verdicts
+        if invalid_verdicts:
+            raise ValueError(
+                f"expect.verdict has unsupported values: {sorted(invalid_verdicts)!r}"
+            )
+        if all(
+            any(blocked in verdict for blocked in forbidden)
+            for verdict in verdicts
+        ):
+            raise ValueError("expect.verdict contradicts not_contains")
+    if "verification_rerun" in expect:
+        command = expect["verification_rerun"]
+        if (
+            not _nonblank_case_text(command)
+            or command.strip() != command
+            or "\n" in command
+            or "\r" in command
+        ):
+            raise ValueError("expect.verification_rerun must be one command line")
+    if "citations" in expect:
+        _validate_citation_expectations(expect["citations"])
+    if "code_comments" in expect:
+        _validate_code_comment_policy(expect["code_comments"])
+
+    if suite_name == "critic" and "verdict" not in expect:
+        raise ValueError("critic case must define expect.verdict")
+    if suite_name == "auditor" and "verdict" not in expect:
+        raise ValueError("auditor case must define expect.verdict")
+    if suite_name == "intake" and "action" not in expect:
+        raise ValueError("intake case must define expect.action")
+    positive_oracles = {"contains", "contains_any", "citations", "code_comments"}
+    if suite_name in {"researcher", "workflow"} and not (
+        positive_oracles & set(expect) or "verdict" in expect
+    ):
+        raise ValueError(f"{suite_name} case has no positive output oracle")
 
 
 def _fixture_descendant_without_symlinks(
@@ -778,6 +1284,49 @@ def fixture_tree_definition(root: Path) -> list[dict[str, str]]:
     return records
 
 
+def _validate_case_citation_sources(record: dict, after_root: Path) -> None:
+    citations = record["expect"].get("citations")
+    if citations is None:
+        return
+    seen_locations: set[tuple[Path, int]] = set()
+    for expectation in citations:
+        relative = _fixture_relative_path(
+            expectation["path"], "citation path"
+        )
+        source_path = after_root / relative
+        if source_path.is_symlink():
+            raise ValueError(
+                f"citation source is a symbolic link: {expectation['path']!r}"
+            )
+        source = source_path.resolve()
+        try:
+            source.relative_to(after_root.resolve())
+        except ValueError as error:
+            raise ValueError(
+                f"citation source escapes the after-tree: {expectation['path']!r}"
+            ) from error
+        if not source.is_file():
+            raise ValueError(
+                f"citation source is not a regular fixture file: "
+                f"{expectation['path']!r}"
+            )
+        lines = source.read_text(encoding="utf-8").splitlines()
+        matches = [
+            line_number
+            for line_number, line in enumerate(lines, start=1)
+            if expectation["anchor"] in line
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                f"citation anchor must identify exactly one source line in "
+                f"{expectation['path']!r}"
+            )
+        identity = (source, matches[0])
+        if identity in seen_locations:
+            raise ValueError("citation expectations identify the same source line")
+        seen_locations.add(identity)
+
+
 def case_definition_digest_from_records(
     suite_name: str,
     selected: list[dict],
@@ -787,6 +1336,8 @@ def case_definition_digest_from_records(
     suite = SUITES.get(suite_name)
     if not suite:
         raise ValueError(f"unknown suite: {suite_name}")
+    for record in selected:
+        validate_case_record(suite_name, record)
     case_ids = [record.get("id") for record in selected]
     if (
         not case_ids
@@ -806,11 +1357,14 @@ def case_definition_digest_from_records(
             _, _, baseline_root, after_root = fixture_case_roots(
                 record, fixtures_dir=fixtures_dir
             )
+            baseline_definition = fixture_tree_definition(baseline_root)
+            after_definition = fixture_tree_definition(after_root)
+            _validate_case_citation_sources(record, after_root)
             fixtures.append(
                 {
                     "case_id": record["id"],
-                    "baseline": fixture_tree_definition(baseline_root),
-                    "after": fixture_tree_definition(after_root),
+                    "baseline": baseline_definition,
+                    "after": after_definition,
                 }
             )
         canonical += b"\0fixture-trees\0" + json.dumps(
@@ -847,7 +1401,7 @@ def case_definition_digest(suite_name: str, case_ids: list[str]) -> str | None:
     if not suite:
         return None
     try:
-        records = load_case_records(suite["cases"])
+        records = load_case_records(suite["cases"], suite_name=suite_name)
         by_id = {record["id"]: record for record in records}
         if any(case_id not in by_id for case_id in case_ids):
             return None
@@ -2208,22 +2762,7 @@ def setup_fixture(
         raise FileNotFoundError(f"fixture baseline missing: {baseline_src}")
     if not after_src.is_dir():
         raise FileNotFoundError(f"fixture variant missing: {after_src}")
-    if staged_paths is not None:
-        if not isinstance(staged_paths, list):
-            raise ValueError(
-                "staged_paths must be a list of canonical repository-relative paths"
-            )
-        try:
-            staged_paths = [
-                _fixture_relative_path(path, "staged path").as_posix()
-                for path in staged_paths
-            ]
-        except ValueError as error:
-            raise ValueError(
-                "staged_paths must be a list of canonical repository-relative paths"
-            ) from error
-        if len(staged_paths) != len(set(staged_paths)):
-            raise ValueError("staged_paths must not contain duplicates")
+    staged_paths = _canonical_staged_paths(staged_paths)
 
     tmp = Path(tempfile.mkdtemp(prefix=f"mmcg-eval-{fixture_name}-"))
     complete = False
@@ -2633,9 +3172,6 @@ _INTAKE_BLOCK_RE = re.compile(
 )
 
 
-CRITIC_VERDICTS = frozenset({
-    "ship it", "ship with caveats", "revise", "rethink", "insufficient evidence",
-})
 _CRITIC_VERDICT_PATTERN = "|".join(
     re.escape(verdict) for verdict in sorted(CRITIC_VERDICTS, key=len, reverse=True)
 )
@@ -3221,7 +3757,9 @@ def main() -> int:
         try:
             suite_cases = [
                 case
-                for case in load_case_records(suite_cfg["cases"])
+                for case in load_case_records(
+                    suite_cfg["cases"], suite_name=suite_name
+                )
                 if not args.case or case["id"] == args.case
             ]
         except (OSError, ValueError) as error:

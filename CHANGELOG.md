@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Claude benchmark preparation now stream-hashes the Python executable, and the
   graph broker reuses the index validator's stable digest instead of loading a
   bounded binary or SQLite database wholesale into memory.
+- Claude stream validation now binds each tool-call ID to one tool and exactly
+  one result, rejecting conflicting partial/final events and successful replies
+  with incomplete tool evidence.
 - History and task retrieval now distinguish a known incomplete corpus from an
   unavailable live freshness scan. Responses expose a stable `freshness_error`,
   and managed MCP serving refuses to scan an index root outside its authorized

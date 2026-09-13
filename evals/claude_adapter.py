@@ -112,7 +112,8 @@ class StreamObserver:
         self.request, self.runtime, self.client, self.emit = request, runtime, client, emit
         self.buffer = bytearray()
         self.init = self.result = self.failure = None
-        self.tool_ids = set()
+        self.tool_names = {}
+        self.tool_results = set()
         self.output_by_message = {}
         self.current_message = None
         self.models = set()
@@ -134,11 +135,15 @@ class StreamObserver:
             return self.fail("identity_mismatch", "unavailable_tool_called")
         if not isinstance(tool_id, str) or not tool_id:
             return self.fail("protocol_error", "invalid_tool_call")
-        if tool_id not in self.tool_ids:
-            self.tool_ids.add(tool_id)
-            suffix = name.removeprefix(f"mcp__{SERVER_NAME}__")
-            self.emit({"type": "trace", "tool": "mmcg" if suffix.startswith("mmcg_") else suffix,
-                       "name": name, "tool_use_id": tool_id})
+        previous = self.tool_names.get(tool_id)
+        if previous is not None:
+            if previous != name:
+                return self.fail("protocol_error", "conflicting_tool_call_identity")
+            return None
+        self.tool_names[tool_id] = name
+        suffix = name.removeprefix(f"mcp__{SERVER_NAME}__")
+        self.emit({"type": "trace", "tool": "mmcg" if suffix.startswith("mmcg_") else suffix,
+                   "name": name, "tool_use_id": tool_id})
 
     def event(self, event):
         kind = event.get("type")
@@ -211,8 +216,12 @@ class StreamObserver:
                     return self.fail("budget_exceeded", "observed_output_budget_exceeded")
         elif kind == "user":
             for block in event.get("message", {}).get("content", []):
-                if block.get("type") != "tool_result" or block.get("tool_use_id") not in self.tool_ids:
+                tool_id = block.get("tool_use_id")
+                if block.get("type") != "tool_result" or tool_id not in self.tool_names:
                     return self.fail("protocol_error", "unmatched_tool_result")
+                if tool_id in self.tool_results:
+                    return self.fail("protocol_error", "duplicate_tool_result")
+                self.tool_results.add(tool_id)
         elif kind == "result":
             self.result = event
             if type(event.get("is_error")) is not bool:
@@ -229,6 +238,8 @@ class StreamObserver:
                                  "cli_reported_error" if self.assistant_error else "cli_execution_error")
             if self.assistant_error:
                 return self.fail("protocol_error", "success_after_cli_error")
+            if self.tool_results != set(self.tool_names):
+                return self.fail("protocol_error", "missing_tool_result")
             models = event.get("modelUsage")
             if not isinstance(models, dict) or not models:
                 return self.fail("protocol_error", "missing_model_usage")

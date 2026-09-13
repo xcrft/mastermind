@@ -16,6 +16,7 @@ from evals import benchmark as bench
 from evals.benchmark_mcp import McpClient
 from evals.benchmark_process import run_bounded
 from evals.benchmark_tools import SourceBroker
+from evals.claude_adapter import StreamObserver, observed_cli_tools
 from evals import test_benchmark as fixtures
 
 
@@ -273,6 +274,46 @@ class ClaudeAdapterTests(unittest.TestCase):
         self.assertEqual(result["run_status"], {"state": "budget_exceeded", "reason": "observed_output_budget_exceeded"})
         self.assertEqual(result["diagnostics"]["adapter"]["live_output_tokens"], 13)
         self.assertLess(result["diagnostics"]["elapsed_seconds"], 2)
+
+    def test_stream_observer_binds_tool_names_and_results_to_call_ids(self):
+        request = {"model": "fixed-test-model", "mmcg": None,
+                   "limits": {"max_output_tokens": 100}}
+        runtime = {"cli": {"version": "2.1.236"}}
+        client = self.fixture.root / "observer-client"
+
+        def observer():
+            emitted = []
+            value = StreamObserver(request, runtime, client, emitted.append)
+            self.assertIsNone(value.event({
+                "type": "system", "subtype": "init", "model": request["model"],
+                "claude_code_version": runtime["cli"]["version"], "cwd": str(client),
+                "permissionMode": "dontAsk", "tools": observed_cli_tools(request),
+                "mcp_servers": [{"name": "research", "status": "connected"}],
+                "skills": [], "plugins": [],
+            }))
+            return value, emitted
+
+        read = {"name": "mcp__research__source_read", "id": "tool-1"}
+        search = {"name": "mcp__research__source_search", "id": "tool-1"}
+        value, emitted = observer()
+        self.assertIsNone(value.tool(read))
+        self.assertIsNone(value.tool(read))
+        self.assertEqual(len(emitted), 2)  # init plus one deduplicated tool trace
+        self.assertEqual(value.tool(search), "conflicting_tool_call_identity")
+
+        value, _ = observer()
+        self.assertIsNone(value.tool(read))
+        success = {"type": "result", "subtype": "success", "is_error": False,
+                   "permission_denials": [], "result": "answer", "stop_reason": "end_turn",
+                   "modelUsage": {request["model"]: {}}}
+        self.assertEqual(value.event(success), "missing_tool_result")
+
+        value, _ = observer()
+        self.assertIsNone(value.tool(read))
+        tool_result = {"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "tool-1", "content": "ok"}]}}
+        self.assertIsNone(value.event(tool_result))
+        self.assertEqual(value.event(tool_result), "duplicate_tool_result")
 
     def test_runtime_bundle_and_cli_tampering_stop_before_inference(self):
         for target in ("bundle", "cli", "descriptor", "extra_file"):

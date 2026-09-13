@@ -36,7 +36,6 @@ import platform
 import re
 import shutil
 import stat
-import subprocess
 import sys
 import tempfile
 import uuid
@@ -119,6 +118,11 @@ CLAUDE_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
 CLAUDE_CASE_TIMEOUT_SECONDS = 480
 CLAUDE_STDOUT_LIMIT_BYTES = 8 * 1024 * 1024
 CLAUDE_STDERR_LIMIT_BYTES = 64 * 1024
+METADATA_PROCESS_TIMEOUT_SECONDS = 10
+METADATA_OUTPUT_LIMIT_BYTES = 64 * 1024
+FIXTURE_GIT_TIMEOUT_SECONDS = 30
+FIXTURE_PROCESS_OUTPUT_LIMIT_BYTES = 1024 * 1024
+MMCG_INDEX_TIMEOUT_SECONDS = 60
 
 WORKFLOW_ARTIFACTS = frozenset(
     {
@@ -1821,35 +1825,44 @@ def suite_report(
     return report
 
 
-def git_revision() -> str | None:
-    try:
-        proc = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=REPO_ROOT,
-            env=_git_environment(),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-    except OSError:
+def git_revision(binary: str | Path = "git") -> str | None:
+    process = run_bounded(
+        [str(binary), "rev-parse", "HEAD"],
+        cwd=REPO_ROOT,
+        env=_git_environment(),
+        timeout=METADATA_PROCESS_TIMEOUT_SECONDS,
+        stdout_limit=METADATA_OUTPUT_LIMIT_BYTES,
+        stderr_limit=METADATA_OUTPUT_LIMIT_BYTES,
+    )
+    if process.stop_reason is not None or process.returncode != 0:
         return None
-    revision = proc.stdout.strip()
-    return revision if proc.returncode == 0 and revision else None
+    try:
+        revision = process.stdout.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return None
+    return (
+        revision
+        if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", revision)
+        else None
+    )
 
 
 def claude_cli_version(binary: str | Path = "claude") -> str | None:
-    try:
-        proc = subprocess.run(
-            [str(binary), "--version"],
-            env=_PROC_ENV,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-    except OSError:
+    process = run_bounded(
+        [str(binary), "--version"],
+        cwd=REPO_ROOT,
+        env=_PROC_ENV,
+        timeout=METADATA_PROCESS_TIMEOUT_SECONDS,
+        stdout_limit=METADATA_OUTPUT_LIMIT_BYTES,
+        stderr_limit=METADATA_OUTPUT_LIMIT_BYTES,
+    )
+    if process.stop_reason is not None or process.returncode != 0:
         return None
-    version = proc.stdout.strip()
-    return version if proc.returncode == 0 and version else None
+    try:
+        version = process.stdout.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return None
+    return version or None
 
 
 def claude_stream_version(cli_version: str) -> str:
@@ -1896,18 +1909,21 @@ def evaluation_harness_definition() -> dict[str, str]:
 def fixture_runtime_definition(
     git_binary: Path, mmcg_binary: Path | None
 ) -> dict[str, object]:
+    process = run_bounded(
+        [str(git_binary), "--version"],
+        cwd=REPO_ROOT,
+        env=_git_environment(),
+        timeout=METADATA_PROCESS_TIMEOUT_SECONDS,
+        stdout_limit=METADATA_OUTPUT_LIMIT_BYTES,
+        stderr_limit=METADATA_OUTPUT_LIMIT_BYTES,
+    )
+    if process.stop_reason is not None or process.returncode != 0:
+        raise ValueError("cannot execute pinned Git runtime")
     try:
-        process = subprocess.run(
-            [str(git_binary), "--version"],
-            env=_git_environment(),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-    except OSError as error:
-        raise ValueError("cannot execute pinned Git runtime") from error
-    git_version = process.stdout.strip()
-    if process.returncode != 0 or not git_version:
+        git_version = process.stdout.decode("utf-8").strip()
+    except UnicodeDecodeError as error:
+        raise ValueError("cannot read pinned Git runtime version") from error
+    if not git_version:
         raise ValueError("cannot read pinned Git runtime version")
     git_definition = _stable_regular_file_definition(git_binary)
     mmcg_definition = (
@@ -1931,6 +1947,7 @@ def build_report(
     model: str,
     suite_filter: str | None,
     case_filter: str | None,
+    repository_revision: str | None = None,
     case_definition_digests: dict[str, str] | None = None,
     case_definition_stability: dict[str, bool] | None = None,
     target_definition_digests: dict[str, str] | None = None,
@@ -1950,7 +1967,11 @@ def build_report(
         "kind": REPORT_KIND,
         "schema_version": REPORT_SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "git_revision": git_revision(),
+        "git_revision": (
+            repository_revision
+            if repository_revision is not None
+            else git_revision()
+        ),
         "model": model,
         "resolved_models": sorted(
             {name for result in results for name in result.resolved_models}
@@ -3079,17 +3100,24 @@ def _run_git(
     args: list[str], cwd: Path, *, git_binary: str | Path = "git"
 ) -> None:
     """Run git with our scrubbed environment. Raises on non-zero exit."""
-    proc = subprocess.run(
+    process = run_bounded(
         [str(git_binary), *args],
         cwd=cwd,
         env=_git_environment(),
-        capture_output=True,
-        text=True,
+        timeout=FIXTURE_GIT_TIMEOUT_SECONDS,
+        stdout_limit=FIXTURE_PROCESS_OUTPUT_LIMIT_BYTES,
+        stderr_limit=FIXTURE_PROCESS_OUTPUT_LIMIT_BYTES,
     )
-    if proc.returncode != 0:
+    if process.stop_reason is not None:
+        raise RuntimeError(
+            f"git {' '.join(args)} stopped in {cwd}: {process.stop_reason}"
+        )
+    if process.returncode != 0:
+        stdout = process.stdout.decode("utf-8", errors="replace").strip()
+        stderr = process.stderr.decode("utf-8", errors="replace").strip()
         raise RuntimeError(
             f"git {' '.join(args)} failed in {cwd}:\n"
-            f"  stdout: {proc.stdout.strip()}\n  stderr: {proc.stderr.strip()}"
+            f"  stdout: {stdout}\n  stderr: {stderr}"
         )
 
 
@@ -3180,7 +3208,7 @@ def setup_fixture(
         if mmcg_binary is not None:
             try:
                 _build_mmcg_index(tmp, mmcg_binary=mmcg_binary)
-            except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+            except (OSError, RuntimeError) as error:
                 sys.stderr.write(f"  [fixture] mmcg index skipped: {error}\n")
 
         complete = True
@@ -3202,17 +3230,21 @@ def _build_mmcg_index(
         raise FileNotFoundError("mmcg executable is unavailable")
     db_path = repo / ".mastermind" / "mmcg.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    proc = subprocess.run(
+    process = run_bounded(
         [str(mmcg_binary), "--index", str(db_path), "index", str(repo)],
         cwd=repo,
-        env=_PROC_ENV,
-        capture_output=True,
-        text=True,
-        timeout=60,
+        env=_git_environment(),
+        timeout=MMCG_INDEX_TIMEOUT_SECONDS,
+        stdout_limit=FIXTURE_PROCESS_OUTPUT_LIMIT_BYTES,
+        stderr_limit=FIXTURE_PROCESS_OUTPUT_LIMIT_BYTES,
     )
-    if proc.returncode != 0:
+    if process.stop_reason is not None:
+        raise RuntimeError(f"mmcg index stopped: {process.stop_reason}")
+    if process.returncode != 0:
+        stderr = process.stderr.decode("utf-8", errors="replace").strip()
+        stdout = process.stdout.decode("utf-8", errors="replace").strip()
         raise RuntimeError(
-            f"mmcg index failed: {proc.stderr.strip() or proc.stdout.strip()}"
+            f"mmcg index failed: {stderr or stdout}"
         )
 
 
@@ -4288,6 +4320,10 @@ def main() -> int:
     except (OSError, ValueError) as error:
         print(f"error: cannot identify evaluation harness: {error}", file=sys.stderr)
         return 2
+    frozen_repository_revision = git_revision()
+    if frozen_repository_revision is None:
+        print("error: cannot identify repository HEAD", file=sys.stderr)
+        return 2
 
     claude_location = shutil.which("claude")
     if not claude_location:
@@ -4629,6 +4665,15 @@ def main() -> int:
                     result.reasons.append(reason)
             print(f"  ✗ FAIL  {reason}")
 
+    repository_revision_after_run = git_revision()
+    if repository_revision_after_run != frozen_repository_revision:
+        reason = "repository HEAD changed during evaluation"
+        for result in results:
+            result.passed = False
+            if reason not in result.reasons:
+                result.reasons.append(reason)
+        print(f"  ✗ FAIL  {reason}")
+
     n_pass = sum(r.passed for r in results)
     n_fail = len(results) - n_pass
     n_first_pass = sum(r.passed and not r.retry_used for r in results)
@@ -4663,6 +4708,7 @@ def main() -> int:
         model=args.model,
         suite_filter=args.suite,
         case_filter=args.case,
+        repository_revision=frozen_repository_revision,
         case_definition_digests=case_definition_digests,
         case_definition_stability=case_definition_stability,
         target_definition_digests=target_definition_digests,

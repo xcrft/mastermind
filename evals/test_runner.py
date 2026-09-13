@@ -568,6 +568,67 @@ action: passthrough
         )
         self.assertNotEqual(before, after)
 
+    def test_metadata_probes_use_bounded_process_transport(self):
+        revision = "a" * 40
+        completed = ProcessResult(
+            stdout=(revision + "\n").encode(), stderr=b"", returncode=0
+        )
+        with patch.object(runner, "run_bounded", return_value=completed) as invoke:
+            self.assertEqual(runner.git_revision(Path("/runtime/git")), revision)
+            git_call = invoke.call_args
+            self.assertEqual(git_call.args[0][0], "/runtime/git")
+            self.assertEqual(
+                git_call.kwargs["timeout"], runner.METADATA_PROCESS_TIMEOUT_SECONDS
+            )
+            self.assertEqual(
+                git_call.kwargs["stdout_limit"],
+                runner.METADATA_OUTPUT_LIMIT_BYTES,
+            )
+
+            invoke.return_value = ProcessResult(
+                stdout=b"2.1.236 (Claude Code)\n", stderr=b"", returncode=0
+            )
+            self.assertEqual(
+                runner.claude_cli_version(Path("/runtime/claude")),
+                "2.1.236 (Claude Code)",
+            )
+            self.assertEqual(invoke.call_args.args[0][0], "/runtime/claude")
+
+        invalid_revision = ProcessResult(
+            stdout=b"HEAD\n", stderr=b"", returncode=0
+        )
+        with patch.object(runner, "run_bounded", return_value=invalid_revision):
+            self.assertIsNone(runner.git_revision())
+
+        stopped = ProcessResult(
+            stdout=b"/private/secret", returncode=-9, stop_reason="output_limit"
+        )
+        with patch.object(runner, "run_bounded", return_value=stopped):
+            self.assertIsNone(runner.git_revision())
+            self.assertIsNone(runner.claude_cli_version())
+
+    def test_fixture_tools_fail_safely_when_bounded_transport_stops(self):
+        stopped = ProcessResult(
+            stdout=b"/private/stdout-secret",
+            stderr=b"/private/stderr-secret",
+            returncode=-9,
+            stop_reason="output_limit",
+        )
+        with tempfile.TemporaryDirectory() as target, patch.object(
+            runner, "run_bounded", return_value=stopped
+        ) as invoke:
+            root = Path(target)
+            with self.assertRaisesRegex(RuntimeError, "output_limit") as git_error:
+                runner._run_git(["status"], root)
+            self.assertNotIn("private", str(git_error.exception))
+
+            with self.assertRaisesRegex(RuntimeError, "output_limit") as mmcg_error:
+                runner._build_mmcg_index(root, mmcg_binary=Path("/runtime/mmcg"))
+            self.assertNotIn("private", str(mmcg_error.exception))
+            self.assertEqual(
+                invoke.call_args.kwargs["timeout"], runner.MMCG_INDEX_TIMEOUT_SECONDS
+            )
+
     def test_stream_parser_records_tool_identities_and_final_payload(self):
         events = [
             {
@@ -1972,6 +2033,71 @@ action: passthrough
         self.assertTrue(runner.report_comparison_issues(report, "test"))
         self.assertIn("Claude CLI changed", output.getvalue())
 
+    def test_main_fails_report_when_repository_head_changes_during_run(self):
+        with tempfile.TemporaryDirectory() as target:
+            root = Path(target)
+            cases = root / "critic.jsonl"
+            cases.write_text(json.dumps(valid_critic_case_definition()) + "\n")
+            subagent = root / "agent.md"
+            subagent.write_text(
+                "---\nname: test\ndescription: test\n---\nPrompt.\n"
+            )
+            report_path = root / "report.json"
+            suites = {
+                "critic": {
+                    "subagent": subagent,
+                    "cases": cases,
+                    "renderer": "render_critic_input",
+                    "uses_fixture": False,
+                }
+            }
+            argv = [
+                "runner.py",
+                "--suite",
+                "critic",
+                "--report",
+                str(report_path),
+            ]
+            output = io.StringIO()
+            with (
+                patch.object(runner, "SUITES", suites),
+                patch.object(runner.sys, "argv", argv),
+                patch.object(
+                    runner.shutil, "which", return_value=runner.sys.executable
+                ),
+                patch.object(
+                    runner,
+                    "evaluate_case",
+                    return_value=runner.Result(
+                        "case",
+                        "critic",
+                        True,
+                        telemetry_complete=True,
+                        resolved_models=[RESOLVED_MODEL],
+                    ),
+                ),
+                patch.object(
+                    runner,
+                    "git_revision",
+                    side_effect=["1" * 40, "2" * 40],
+                ),
+                patch.object(
+                    runner, "claude_cli_version", return_value="test-cli"
+                ),
+                redirect_stdout(output),
+            ):
+                status = runner.main()
+            report = json.loads(report_path.read_text())
+
+        self.assertEqual(status, 1)
+        self.assertEqual(report["git_revision"], "1" * 40)
+        self.assertFalse(report["cases"][0]["passed"])
+        self.assertIn(
+            "repository HEAD changed during evaluation",
+            report["cases"][0]["reasons"],
+        )
+        self.assertIn("repository HEAD changed", output.getvalue())
+
     def test_unknown_case_filter_is_a_nonzero_cli_error(self):
         argv = [
             "runner.py",
@@ -2640,7 +2766,7 @@ class PromptIsolationTests(unittest.TestCase):
                 patch.object(
                     runner,
                     "_build_mmcg_index",
-                    side_effect=subprocess.TimeoutExpired("mmcg", 60),
+                    side_effect=RuntimeError("mmcg index stopped: timeout"),
                 ),
                 patch.object(runner.sys, "stderr", io.StringIO()),
             ):

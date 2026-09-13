@@ -171,6 +171,20 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual((trial / "index").exists(), index == 2)
             self.assertEqual(bench.run_trial(trial)["run_status"]["state"], "completed")
 
+    def test_model_usage_limits_have_hard_caps(self):
+        accepted = bench.validate_limits({
+            "max_turns": bench.MAX_TURNS_LIMIT,
+            "max_output_tokens": bench.MAX_OUTPUT_TOKENS_LIMIT,
+        })
+        self.assertEqual(accepted["max_turns"], bench.MAX_TURNS_LIMIT)
+        self.assertEqual(accepted["max_output_tokens"], bench.MAX_OUTPUT_TOKENS_LIMIT)
+        for field, limit in (
+                ("max_turns", bench.MAX_TURNS_LIMIT),
+                ("max_output_tokens", bench.MAX_OUTPUT_TOKENS_LIMIT)):
+            with self.subTest(field=field), self.assertRaises(bench.BenchmarkError) as raised:
+                bench.validate_limits({field: limit + 1})
+            self.assertEqual(raised.exception.code, "invalid_limits")
+
     def test_git_projection_has_no_original_history_or_omitted_objects(self):
         trial = self.prepare()
         source = trial / "source"

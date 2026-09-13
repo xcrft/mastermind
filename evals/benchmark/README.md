@@ -362,7 +362,9 @@ The [offline review workflow](REVIEW.md) exports all planned attempts into a
 blinded reviewer folder, checks source/answer identities and retains independent
 claim-level assessments. It does not invoke runtimes or mutate the original run
 results. Reviewer judgments and runtime status remain separate; importing a
-review does not make the experiment comparable or produce a quality score.
+review does not make the experiment comparable or produce a quality score. Its
+status output summarizes declared evidence coverage and aligned reviewer
+disagreement by condition without averaging those judgments.
 
 The generic adapter runs as the host user. Separate directories, filtered
 environment, read-only file modes and hash checks are **not an OS sandbox**: an

@@ -111,6 +111,11 @@ final(model_error=mode == 'partial')
         self.assertEqual(status["reviewed_attempts"], 3)
         self.assertEqual(status["reviewers"], [{"reviewer": "alice", "reviewed": 3}])
         self.assertEqual(status["execution_order_integrity"], "verified")
+        summary = status["assessment_summary"]
+        self.assertEqual(summary["overall"]["answer_assessments"], 3)
+        self.assertEqual(summary["overall"]["reviewer_selected_claims"]["supported"], 3)
+        self.assertEqual(summary["overall"]["known_coverage"], {"covered": 0, "partial": 3, "missing": 0})
+        self.assertEqual(summary["overall"]["unknown_handling"], {"appropriate": 0, "overclaimed": 0, "omitted": 3})
         self.assertFalse(status["comparison_accepted"])
         self.assertIsNone(status["quality_uplift"])
 
@@ -146,6 +151,7 @@ final(model_error=mode == 'partial')
         self.assertEqual(status["attempts"]["failed"], 3)
         self.assertEqual(status["attempts"]["with_answer"], 0)
         self.assertEqual(status["execution_order_integrity"], "not_established")
+        self.assertEqual(status["assessment_summary"]["reviewers"], 0)
         self.assertEqual(bench.load_json(self.output / "reviewer/packet.json")["source_files"], [])
 
     def test_partial_answer_uses_intact_pinned_source_from_another_trial(self):
@@ -290,6 +296,12 @@ final(model_error=mode == 'partial')
         status = review.review_status(self.output)
         self.assertEqual(status["reviewers"], [{"reviewer": "alice", "reviewed": 3}, {"reviewer": "bob", "reviewed": 3}])
         self.assertEqual(status["reviewed_attempts"], 3)
+        summary = status["assessment_summary"]
+        self.assertEqual(summary["overall"]["answer_assessments"], 6)
+        self.assertEqual(summary["overall"]["known_coverage"], {"covered": 1, "partial": 5, "missing": 0})
+        self.assertEqual(summary["disagreement"], {"answers_compared": 3, "answers_with_disagreement": 1,
+            "material_error_flags_with_disagreement": 0, "known_dimensions_with_disagreement": 1,
+            "unknown_dimensions_with_disagreement": 0})
         self.assertIsNone(status["quality_uplift"])
 
     def test_rejects_stale_incomplete_fabricated_and_invalid_claim_reviews(self):

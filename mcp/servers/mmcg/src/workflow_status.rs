@@ -5053,6 +5053,7 @@ mod tests {
             blocking_reason: None,
             last_artifact: Some("spec.md".into()),
             spec_path: spec.display().to_string(),
+            repository_identity: None,
             spec_hash: "0".repeat(64),
             baseline_ref: "0".repeat(40),
             held_snapshot_sha256: None,

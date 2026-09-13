@@ -256,6 +256,11 @@ mmcg run-task .mastermind/tasks/042-feature/spec.md --force-iteration  # bypass 
 # Retries inherit it only while the current contract remains free of indexed
 # source and symbol evidence. Revising a docs-only task into a code task
 # automatically restores the index requirement.
+# New controller state is bound to the repository identity and an exact UTF-8
+# repository-relative spec path. State copied from another repository is
+# rejected. State written by an older release without this binding can retain
+# its baseline and iteration only after an explicit --pre-only or --reset run
+# revalidates and binds it to the selected repository.
 
 # Initialize a project. Stack detection informs drafting, while CONTEXT stays
 # lean and stack-agnostic; commands and layouts belong in CLAUDE.md.

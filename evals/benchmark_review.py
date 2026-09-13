@@ -470,6 +470,7 @@ def export_review(batch: Path, output: Path):
             target.write_new("seal.json", encoded({"kind": "mastermind-research-review-seal", "schema_version": 1,
                 "export_id": export_id, "packet_sha256": sha(packet_body), "coordinator_sha256": sha(coordinator_body),
                 "template_sha256": sha(template_body)}))
+            target.recheck()
     return destination
 
 

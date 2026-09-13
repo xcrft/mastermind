@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from evals import benchmark as bench
 from evals import benchmark_review as review
+from evals import benchmark_review_io as review_io
 from evals.benchmark_review_io import Root
 from evals import benchmark_corpus as corpus
 from evals import test_benchmark_corpus as fixtures
@@ -488,6 +489,71 @@ final(model_error=mode == 'partial')
                 review.export_review(batch, self.output)
         self.assertEqual(raised.exception.code, "review_changed")
         self.assertFalse(self.output.exists())
+
+    def test_review_artifact_replacement_after_publication_cannot_return_success(self):
+        destination = self.root / "publication-race"
+        destination.mkdir()
+        target = destination / "artifact.json"
+        original_fsync = review_io.os.fsync
+        replaced = False
+
+        def replace_after_publication(descriptor):
+            nonlocal replaced
+            result = original_fsync(descriptor)
+            if not replaced and target.exists():
+                replaced = True
+                target.unlink()
+                target.write_bytes(b"external replacement")
+            return result
+
+        with Root(destination) as root, patch.object(
+                review_io.os, "fsync", side_effect=replace_after_publication):
+            with self.assertRaises(bench.BenchmarkError) as raised:
+                root.write_new("artifact.json", b"trusted artifact")
+        self.assertEqual(raised.exception.code, "review_changed")
+        self.assertTrue(replaced)
+        self.assertEqual(target.read_bytes(), b"external replacement")
+
+    def test_detached_review_parent_cannot_publish_a_successful_artifact(self):
+        destination = self.root / "detached-publication"
+        destination.mkdir()
+        detached = self.root / "detached-review-parent"
+        original_link = review_io.os.link
+        replaced = False
+
+        def detach_parent(*arguments, **keywords):
+            nonlocal replaced
+            if not replaced:
+                replaced = True
+                (destination / "reviews").rename(detached)
+                (destination / "reviews").mkdir()
+            return original_link(*arguments, **keywords)
+
+        with Root(destination) as root, patch.object(
+                review_io.os, "link", side_effect=detach_parent):
+            with self.assertRaises(bench.BenchmarkError) as raised:
+                root.write_new("reviews/alice.json", b"trusted review")
+        self.assertEqual(raised.exception.code, "review_changed")
+        self.assertTrue(replaced)
+        self.assertFalse((destination / "reviews/alice.json").exists())
+        self.assertEqual(list(detached.iterdir()), [])
+
+    def test_export_rechecks_earlier_artifacts_after_seal_publication(self):
+        batch, _ = self.batch()
+        original_write = Root.write_new
+
+        def replace_packet_after_seal(root, path, body):
+            result = original_write(root, path, body)
+            if root.path == self.output and path == "seal.json":
+                packet = self.output / "reviewer/packet.json"
+                packet.chmod(0o600)
+                packet.write_bytes(b"external replacement")
+            return result
+
+        with patch.object(Root, "write_new", replace_packet_after_seal):
+            with self.assertRaises(bench.BenchmarkError) as raised:
+                review.export_review(batch, self.output)
+        self.assertEqual(raised.exception.code, "review_changed")
 
 
 if __name__ == "__main__":

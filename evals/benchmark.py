@@ -146,9 +146,110 @@ def load_json(path: Path) -> dict:
         raise BenchmarkError("invalid_json", f"invalid JSON: {path}") from error
 
 
-def write_new(path: Path, value: object) -> None:
-    with path.open("xb") as handle:
-        handle.write(canonical(value) + b"\n")
+def _same_node(left: os.stat_result, right: os.stat_result) -> bool:
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _check_output_parent(parent: Path, descriptor: int, expected: os.stat_result) -> None:
+    try:
+        observed = parent.stat(follow_symlinks=False)
+        canonical_parent = parent.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise BenchmarkError("artifact_changed", "artifact parent changed during publication") from error
+    if (not stat.S_ISDIR(observed.st_mode) or not _same_node(observed, expected)
+            or not _same_node(os.fstat(descriptor), expected) or canonical_parent != parent):
+        raise BenchmarkError("artifact_changed", "artifact parent changed during publication")
+
+
+def write_new_bytes(path: Path, body: bytes, *, mode: int = 0o600) -> None:
+    """Publish one owned regular file and verify its final name and bytes."""
+    if (os.name != "posix" or not hasattr(os, "O_NOFOLLOW")
+            or not isinstance(body, bytes) or mode not in {0o400, 0o444, 0o555, 0o600}):
+        raise BenchmarkError("artifact_platform", "verified artifact publication requires POSIX")
+    target = path.absolute()
+    parent = target.parent
+    if not target.name or target.name in {".", ".."}:
+        raise BenchmarkError("artifact_path", "invalid artifact path")
+    try:
+        if parent.resolve(strict=True) != parent:
+            raise BenchmarkError("artifact_path", "artifact parent must be canonical without links")
+        parent_descriptor = os.open(
+            parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except BenchmarkError:
+        raise
+    except OSError as error:
+        raise BenchmarkError("artifact_path", "cannot open artifact parent without links") from error
+    descriptor = None
+    owned = None
+    published = False
+    expected_parent = os.fstat(parent_descriptor)
+    try:
+        if not stat.S_ISDIR(expected_parent.st_mode):
+            raise BenchmarkError("artifact_path", "artifact parent is not a directory")
+        try:
+            descriptor = os.open(
+                target.name,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK,
+                mode,
+                dir_fd=parent_descriptor,
+            )
+            published = True
+        except FileExistsError as error:
+            raise BenchmarkError("artifact_exists", f"artifact already exists: {target}") from error
+        opened = os.fstat(descriptor)
+        owned = (opened.st_dev, opened.st_ino)
+        os.fchmod(descriptor, mode)
+        with os.fdopen(os.dup(descriptor), "wb") as handle:
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        written = os.fstat(descriptor)
+        named = os.stat(target.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        if (not stat.S_ISREG(written.st_mode) or stat.S_IMODE(written.st_mode) != mode
+                or written.st_size != len(body) or not _same_node(written, named)):
+            raise BenchmarkError("artifact_changed", "artifact changed during publication")
+        os.fsync(parent_descriptor)
+        _check_output_parent(parent, parent_descriptor, expected_parent)
+
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        retained = bytearray()
+        remaining = len(body) + 1
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            retained.extend(chunk)
+            remaining -= len(chunk)
+        written = os.fstat(descriptor)
+        try:
+            observed = read_file(target, len(body))
+            current = target.lstat()
+        except (BenchmarkError, OSError) as error:
+            raise BenchmarkError("artifact_changed", "artifact changed during verification") from error
+        if (bytes(retained) != body or observed != body
+                or (written.st_dev, written.st_ino) != owned
+                or not _same_node(written, current)
+                or file_identity(written) != file_identity(current)):
+            raise BenchmarkError("artifact_changed", "artifact changed during verification")
+        _check_output_parent(parent, parent_descriptor, expected_parent)
+    except (BenchmarkError, OSError, KeyboardInterrupt):
+        if published:
+            try:
+                current = os.stat(target.name, dir_fd=parent_descriptor, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) == owned:
+                    os.unlink(target.name, dir_fd=parent_descriptor)
+                    os.fsync(parent_descriptor)
+            except FileNotFoundError:
+                pass
+        raise
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(parent_descriptor)
+
+
+def write_new(path: Path, value: object, *, mode: int = 0o600) -> None:
+    write_new_bytes(path, canonical(value) + b"\n", mode=mode)
 
 
 def exact_revision(value: object) -> str:
@@ -591,8 +692,8 @@ def prepare_trial(
                                   cwd=trial / "source", env=env, timeout=60)
             manifest["index_setup_seconds"] = process.elapsed_seconds
             manifest["index_process"] = {"returncode": process.returncode, "stop_reason": process.stop_reason}
-            (trial / "index-stdout.txt").write_bytes(process.stdout)
-            (trial / "index-stderr.txt").write_bytes(process.stderr)
+            write_new_bytes(trial / "index-stdout.txt", process.stdout)
+            write_new_bytes(trial / "index-stderr.txt", process.stderr)
             if process.stop_reason or process.returncode != 0:
                 raise BenchmarkError("index_setup_failed", "indexer failed; any partial database is unusable")
             manifest["index_sha256"] = validate_index(index_path, trial / "source", files, contract, indexed_paths)
@@ -958,14 +1059,12 @@ def verify_batch_snapshot(trial: Path, manifest: dict, manifest_bytes: bytes,
 def claim_attempt(trial: Path) -> None:
     if optional_artifact(trial / "result.json", CONTROL_BYTE_LIMIT) is not None:
         raise BenchmarkError("already_run", "trial was already attempted; prepare a new balanced batch")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(trial / "run.lock", flags, 0o600)
-    except FileExistsError as error:
+        write_new_bytes(trial / "run.lock", b"")
+    except BenchmarkError as error:
+        if error.code != "artifact_exists":
+            raise BenchmarkError("attempt_lock", "cannot claim the trial attempt") from error
         raise BenchmarkError("already_run", "trial was already attempted; prepare a new balanced batch") from error
-    except OSError as error:
-        raise BenchmarkError("attempt_lock", "cannot claim the trial attempt") from error
-    os.close(descriptor)
 
 
 def _run_trial_attempt(trial: Path, manifest_bytes: bytes, manifest: dict,
@@ -1000,10 +1099,8 @@ def _run_trial_attempt(trial: Path, manifest_bytes: bytes, manifest: dict,
     process = run_bounded(command, cwd=trial / "source", env=env,
                           stdin=canonical(request) + b"\n", timeout=limits["timeout_seconds"],
                           stdout_limit=limits["trace_bytes"], stderr_limit=limits["stderr_bytes"])
-    with (trial / "trace.jsonl").open("xb") as handle:
-        handle.write(process.stdout)
-    with (trial / "stderr.txt").open("xb") as handle:
-        handle.write(process.stderr)
+    write_new_bytes(trial / "trace.jsonl", process.stdout)
+    write_new_bytes(trial / "stderr.txt", process.stderr)
     init, result, tools, issues = parse_stream(process.stdout, limits["answer_bytes"])
     state, reason = "completed", None
     reported_failure = result.get("failure") if result else None
@@ -1040,8 +1137,7 @@ def _run_trial_attempt(trial: Path, manifest_bytes: bytes, manifest: dict,
     answer = result.get("answer") if result else None
     if isinstance(answer, str) and answer.strip() and len(answer.encode("utf-8")) <= limits["answer_bytes"]:
         answer_bytes = answer.encode("utf-8")
-        with (trial / "answer.md").open("xb") as handle:
-            handle.write(answer_bytes)
+        write_new_bytes(trial / "answer.md", answer_bytes)
         envelope["answer"] = {"path": "answer.md", "bytes": len(answer_bytes),
                               "sha256": hashlib.sha256(answer_bytes).hexdigest()}
         envelope["quality"]["status"] = "review_pending"
@@ -1083,8 +1179,7 @@ def prepare_batch(*, repetitions: int = 3, corpus_case: dict | None = None, **kw
     batch_id = "batch-" + uuid.uuid4().hex
     batch = output / batch_id
     batch.mkdir(mode=0o700)
-    with (batch / "execution.lock").open("xb"):
-        pass
+    write_new_bytes(batch / "execution.lock", b"")
     planned = []
     for repetition in range(repetitions):
         offset = repetition % len(CONDITIONS)

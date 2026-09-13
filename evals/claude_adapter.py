@@ -47,17 +47,14 @@ def prepare_runtime(trial: Path, spec: dict, limits: dict) -> dict:
     bundle = {}
     for name in BUNDLE:
         body = bench.read_file(Path(__file__).resolve().parent / name)
-        with (runtime / name).open("xb") as handle:
-            handle.write(body)
-        (runtime / name).chmod(0o555)
+        bench.write_new_bytes(runtime / name, body, mode=0o555)
         bundle[name] = hashlib.sha256(body).hexdigest()
     adapter = {"kind": "claude_cli", "path": str(runtime / "claude_adapter.py"),
                "sha256": bundle["claude_adapter.py"], "version": VERSION,
                "origin": "frozen benchmark implementation bytes", "bundle": bundle,
                "cli": cli, "python": python}
-    bench.write_new(trial / "adapter-runtime.json", adapter)
+    bench.write_new(trial / "adapter-runtime.json", adapter, mode=0o444)
     adapter["runtime_sha256"] = bench.digest(adapter)
-    (trial / "adapter-runtime.json").chmod(0o444)
     return adapter
 
 

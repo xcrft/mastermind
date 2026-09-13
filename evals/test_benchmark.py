@@ -423,6 +423,65 @@ class BenchmarkTests(unittest.TestCase):
             bench.run_trial(trial)
         self.assertEqual(bench.load_json(trial / "result.json"), first)
 
+    def test_artifact_replacement_after_publication_cannot_return_success(self):
+        parent = self.root / "artifact-publication"
+        parent.mkdir()
+        target = parent / "result.json"
+        body = b"trusted artifact"
+        original_fsync = bench.os.fsync
+        replaced = False
+
+        def replace_after_publication(descriptor):
+            nonlocal replaced
+            result = original_fsync(descriptor)
+            if not replaced and target.exists():
+                replaced = True
+                target.unlink()
+                target.write_bytes(body)
+            return result
+
+        with patch.object(bench.os, "fsync", side_effect=replace_after_publication):
+            with self.assertRaises(bench.BenchmarkError) as raised:
+                bench.write_new_bytes(target, body)
+        self.assertEqual(raised.exception.code, "artifact_changed")
+        self.assertTrue(replaced)
+        self.assertEqual(target.read_bytes(), body)
+
+    def test_detached_artifact_parent_cannot_return_publication_success(self):
+        parent = self.root / "artifact-parent"
+        parent.mkdir()
+        target = parent / "result.json"
+        detached = self.root / "detached-artifact-parent"
+        original_fsync = bench.os.fsync
+        replaced = False
+
+        def detach_after_write(descriptor):
+            nonlocal replaced
+            result = original_fsync(descriptor)
+            if not replaced and target.exists():
+                replaced = True
+                parent.rename(detached)
+                parent.mkdir()
+            return result
+
+        with patch.object(bench.os, "fsync", side_effect=detach_after_write):
+            with self.assertRaises(bench.BenchmarkError) as raised:
+                bench.write_new_bytes(target, b"trusted artifact")
+        self.assertEqual(raised.exception.code, "artifact_changed")
+        self.assertTrue(replaced)
+        self.assertFalse(target.exists())
+        self.assertEqual(list(detached.iterdir()), [])
+
+    def test_verified_artifact_writer_never_replaces_an_existing_file(self):
+        parent = self.root / "artifact-no-clobber"
+        parent.mkdir()
+        target = parent / "result.json"
+        target.write_bytes(b"existing")
+        with self.assertRaises(bench.BenchmarkError) as raised:
+            bench.write_new_bytes(target, b"replacement")
+        self.assertEqual(raised.exception.code, "artifact_exists")
+        self.assertEqual(target.read_bytes(), b"existing")
+
     def test_missing_telemetry_and_exceeded_budget_do_not_grade_correctness(self):
         for extra in ("usage=None, turns=None", "turns=100, usage={'input_tokens': 2, 'output_tokens': 9000, 'cache_read_tokens': 0, 'cache_write_tokens': 0}"):
             with self.subTest(extra=extra):

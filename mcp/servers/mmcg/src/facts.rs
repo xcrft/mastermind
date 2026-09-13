@@ -571,13 +571,28 @@ fn canonical_remote_host_path(host: &str, path: &str) -> Option<String> {
 }
 
 pub(crate) fn repository_identity(root: &Path) -> Result<String, FactError> {
-    repository_identity_until(root, None)
+    repository_identity_until(root, None).map_err(|error| FactError::Git(error.to_string()))
 }
 
-fn worktree_path_identity(root: &Path) -> Result<String, FactError> {
-    let path = root
-        .to_str()
-        .ok_or_else(|| FactError::Git("the canonical repository path is not valid UTF-8".into()))?;
+#[derive(Debug)]
+pub(crate) enum RepositoryIdentityError {
+    Git(crate::diff::WorkingTreeDiffError),
+    InvalidPath,
+}
+
+impl fmt::Display for RepositoryIdentityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Git(error) => write!(formatter, "read bounded origin identity: {error}"),
+            Self::InvalidPath => {
+                formatter.write_str("the canonical repository path is not valid UTF-8")
+            }
+        }
+    }
+}
+
+fn worktree_path_identity(root: &Path) -> Result<String, RepositoryIdentityError> {
+    let path = root.to_str().ok_or(RepositoryIdentityError::InvalidPath)?;
     #[cfg(windows)]
     {
         Ok(path.replace('\\', "/"))
@@ -591,7 +606,7 @@ fn worktree_path_identity(root: &Path) -> Result<String, FactError> {
 pub(crate) fn repository_identity_until(
     root: &Path,
     deadline: Option<Instant>,
-) -> Result<String, FactError> {
+) -> Result<String, RepositoryIdentityError> {
     let output = crate::diff::run_bounded_git_with_limit_until(
         root,
         &["config", "--get", "remote.origin.url"],
@@ -599,7 +614,7 @@ pub(crate) fn repository_identity_until(
         4 * 1024,
         deadline,
     )
-    .map_err(|error| FactError::Git(format!("read bounded origin identity: {error}")))?;
+    .map_err(RepositoryIdentityError::Git)?;
     let canonical = if output.success {
         std::str::from_utf8(&output.stdout)
             .ok()
@@ -1953,7 +1968,7 @@ mod tests {
         let non_utf8 = PathBuf::from(OsString::from_vec(b"/tmp/repo-\xff".to_vec()));
         assert!(matches!(
             worktree_path_identity(&non_utf8),
-            Err(FactError::Git(_))
+            Err(RepositoryIdentityError::InvalidPath)
         ));
     }
 

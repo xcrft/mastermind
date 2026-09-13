@@ -636,8 +636,13 @@ impl Indexer {
             .root
             .canonicalize()
             .map_err(|error| IndexError::Io(error.to_string()))?;
+        let canonical_root = canonical_root.to_str().ok_or_else(|| {
+            IndexError::Other(
+                "canonical repository root is not valid UTF-8; the index was not bound".to_string(),
+            )
+        })?;
         store
-            .set_meta("index_root", &canonical_root.to_string_lossy())
+            .set_meta("index_root", canonical_root)
             .map_err(|error| IndexError::Other(error.to_string()))
     }
 
@@ -2928,6 +2933,28 @@ def placeholder():
             Some(crate::hex::encode(&Sha256::digest(bytes)).as_str())
         );
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn index_binding_rejects_a_non_utf8_repository_root() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent
+            .path()
+            .join(OsString::from_vec(b"repository-\xff".to_vec()));
+        fs::create_dir(&root).unwrap();
+        let store = Store::open(&parent.path().join("index.db")).unwrap();
+
+        let error = Indexer::new(&root)
+            .bind_or_validate_index_root(&store)
+            .unwrap_err();
+
+        assert!(matches!(error, IndexError::Other(_)));
+        assert!(error.to_string().contains("not valid UTF-8"));
+        assert!(store.meta_value("index_root").unwrap().is_none());
     }
 
     #[test]

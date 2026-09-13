@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Index bindings, Lens narrative bindings, and team lock manifests now reject
+  repository paths that cannot be represented exactly in their UTF-8 contracts.
+  Identity failures no longer fall back to lossy path hashes or serialized paths
+  that can collide with another repository or index.
 - Temporal CODEOWNERS baselines, change-impact subdirectory scopes, ignored
   snapshot paths, and strict-workflow task inventories now use the same exact
   repository-path identity. Unix backslash aliases can no longer select or

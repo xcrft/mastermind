@@ -66,6 +66,9 @@ reopens every index through
 Mastermind's private read-only snapshot path and rechecks all pins. Revision,
 identity, source freshness, DB/WAL drift, duplicate canonical roots, or
 duplicate canonical indexes fail closed.
+Canonical root, index, and output paths must have exact UTF-8 representations;
+`team lock` rejects them before writing rather than serializing a replacement
+path that could resolve to a different repository or database.
 
 Database and WAL digests stream through a retained capability for their shared
 parent directory. Each opened file is bounded and checked by identity before

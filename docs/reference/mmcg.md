@@ -85,6 +85,9 @@ Files already tracked by Git remain index candidates even if a broad ignore
 rule now matches them; ignore rules still exclude untracked files. Supported
 extensions are matched case-insensitively, Python type stubs (`.pyi`) are
 parsed as Python, and UTF-16 LE/BE sources with a BOM are decoded before parsing.
+The persisted index binding requires an exact UTF-8 canonical repository root;
+an unrepresentable root is rejected before source rows are written instead of
+being stored under a lossy path that could name another repository.
 These directories are always skipped: `.git`, `.mastermind`, `.venv`, `venv`,
 `__pycache__`, `node_modules`, `target`, `dist`, `build`, `.tox`, `.pytest_cache`,
 `.mypy_cache`, `.ruff_cache`, `.next`, `.turbo`, `.cache`.
@@ -809,6 +812,12 @@ the working-tree snapshot, and the exact returned map. A stale or foreign
 binding is rejected and Lens falls back to facts-only output. The default
 sidecar path is treated as Mastermind runtime state, so writing it does not
 invalidate the snapshot it describes.
+
+Lens emits a narrative binding only after it establishes the exact repository
+identity. An unavailable identity stops the snapshot with
+`repository_identity_unavailable`, while an exhausted Git deadline remains an
+`analysis_timeout`. Lens never substitutes a lossy local-path hash that could
+authorize a sidecar from another repository.
 
 `audit.narrative_state` distinguishes `absent`, `available`, `partial`,
 `rejected`, and `unavailable`. Its stable `reason` explains stale bindings,

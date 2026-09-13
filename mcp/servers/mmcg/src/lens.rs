@@ -403,6 +403,7 @@ pub enum LensError {
     SnapshotTooLarge,
     SnapshotTimeout,
     AnalysisTimeout,
+    RepositoryIdentityUnavailable,
     MapUnavailable(String),
     ImpactUnavailable(ChangeImpactError),
     DocumentGraph(crate::document_graph::DocumentGraphError),
@@ -420,6 +421,7 @@ impl LensError {
             Self::SnapshotTooLarge => "snapshot_too_large",
             Self::SnapshotTimeout => "snapshot_timeout",
             Self::AnalysisTimeout => "analysis_timeout",
+            Self::RepositoryIdentityUnavailable => "repository_identity_unavailable",
             Self::MapUnavailable(_) => "map_unavailable",
             Self::ImpactUnavailable(error) => error.code(),
             Self::DocumentGraph(error) => error.code(),
@@ -446,6 +448,9 @@ impl LensError {
             }
             Self::AnalysisTimeout => {
                 "Lens analysis exceeded its deadline; retry or narrow `--path`".into()
+            }
+            Self::RepositoryIdentityUnavailable => {
+                "Lens could not establish the exact repository identity; retry from a UTF-8 repository path or configure a canonical Git origin".into()
             }
             Self::MapUnavailable(_) => {
                 "Lens could not build the project map; refresh the index or narrow `--path`".into()
@@ -1416,13 +1421,7 @@ fn audit_narrative_binding(
     map: &ProjectMapResponse,
     deadline: Option<Instant>,
 ) -> Result<AuditNarrativeBinding, LensError> {
-    let repository_identity = crate::facts::repository_identity_until(root, deadline)
-        .unwrap_or_else(|_| {
-            format!(
-                "git-worktree:sha256:{}",
-                crate::hex::encode(&Sha256::digest(root.to_string_lossy().as_bytes()))
-            )
-        });
+    let repository_identity = audit_repository_identity(root, deadline)?;
     let map_bytes = serde_json::to_vec(map).map_err(|_| LensError::Serialization)?;
     Ok(AuditNarrativeBinding {
         repository_identity,
@@ -1431,6 +1430,19 @@ fn audit_narrative_binding(
         snapshot_token_sha256: impact.snapshot_token.clone(),
         map_sha256: crate::hex::encode(&Sha256::digest(map_bytes)),
     })
+}
+
+fn audit_repository_identity(root: &Path, deadline: Option<Instant>) -> Result<String, LensError> {
+    crate::facts::repository_identity_until(root, deadline).map_err(audit_repository_identity_error)
+}
+
+fn audit_repository_identity_error(error: crate::facts::RepositoryIdentityError) -> LensError {
+    match error {
+        crate::facts::RepositoryIdentityError::Git(
+            crate::diff::WorkingTreeDiffError::GitTimeout,
+        ) => LensError::AnalysisTimeout,
+        _ => LensError::RepositoryIdentityUnavailable,
+    }
 }
 
 fn audit_scope(map: &ProjectMapResponse) -> &str {
@@ -2468,6 +2480,7 @@ fn error_response(error: &LensError) -> HttpResponse {
         }
         LensError::IndexStale
         | LensError::SnapshotTooLarge
+        | LensError::RepositoryIdentityUnavailable
         | LensError::MapUnavailable(_)
         | LensError::ImpactUnavailable(_)
         | LensError::DocumentGraph(_) => 422,
@@ -2575,6 +2588,24 @@ mod tests {
             top: 100,
             production_only: false,
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn narrative_binding_rejects_a_non_utf8_repository_identity() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent
+            .path()
+            .join(OsString::from_vec(b"repository-\xff".to_vec()));
+        fs::create_dir(&root).unwrap();
+
+        assert!(matches!(
+            audit_repository_identity(&root, None),
+            Err(LensError::RepositoryIdentityUnavailable)
+        ));
     }
 
     #[test]
@@ -3965,6 +3996,26 @@ mod tests {
         for leaked in ["SELECT", "secret", "no such", "hidden"] {
             assert!(!body.contains(leaked), "leaked {leaked}: {body}");
         }
+    }
+
+    #[test]
+    fn repository_identity_failures_are_public_and_fail_closed() {
+        let response = error_response(&LensError::RepositoryIdentityUnavailable);
+        let body = String::from_utf8(response.body).unwrap();
+
+        assert_eq!(response.status, 422);
+        assert!(
+            body.contains("\"code\":\"repository_identity_unavailable\""),
+            "{body}"
+        );
+        assert!(body.contains("exact repository identity"), "{body}");
+
+        assert!(matches!(
+            audit_repository_identity_error(crate::facts::RepositoryIdentityError::Git(
+                crate::diff::WorkingTreeDiffError::GitTimeout
+            )),
+            LensError::AnalysisTimeout
+        ));
     }
 
     #[test]

@@ -332,6 +332,80 @@ action: passthrough
         self.assertEqual(loaded["kind"], runner.REPORT_KIND)
         self.assertEqual(loaded["cases"], report["cases"])
 
+    def test_report_writer_replaces_an_existing_report(self):
+        report = {"kind": runner.REPORT_KIND, "schema_version": 1}
+        with tempfile.TemporaryDirectory() as target:
+            path = Path(target) / "report.json"
+            path.write_text("old report\n")
+            runner.write_report(path, report)
+            self.assertEqual(json.loads(path.read_text()), report)
+
+    def test_report_writer_detects_final_path_replacement(self):
+        if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
+            self.skipTest("verified publication uses POSIX directory descriptors")
+        report = {"kind": runner.REPORT_KIND, "schema_version": 1}
+        with tempfile.TemporaryDirectory() as target:
+            path = Path(target) / "report.json"
+            external = (
+                json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+            ).encode("utf-8")
+            original_fsync = runner.os.fsync
+            replaced = False
+
+            def replace_after_publication(descriptor):
+                nonlocal replaced
+                result = original_fsync(descriptor)
+                if (
+                    not replaced
+                    and runner.stat.S_ISDIR(os.fstat(descriptor).st_mode)
+                    and path.exists()
+                ):
+                    path.unlink()
+                    path.write_bytes(external)
+                    replaced = True
+                return result
+
+            with (
+                patch.object(runner.os, "fsync", side_effect=replace_after_publication),
+                self.assertRaisesRegex(OSError, "changed during verification"),
+            ):
+                runner.write_report(path, report)
+            self.assertEqual(path.read_bytes(), external)
+
+    def test_report_writer_rejects_detached_parent(self):
+        if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
+            self.skipTest("verified publication uses POSIX directory descriptors")
+        report = {"kind": runner.REPORT_KIND, "schema_version": 1}
+        with tempfile.TemporaryDirectory() as target:
+            root = Path(target)
+            parent = root / "reports"
+            parent.mkdir()
+            path = parent / "report.json"
+            detached = root / "detached-reports"
+            original_fsync = runner.os.fsync
+            moved = False
+
+            def detach_after_publication(descriptor):
+                nonlocal moved
+                result = original_fsync(descriptor)
+                if (
+                    not moved
+                    and runner.stat.S_ISDIR(os.fstat(descriptor).st_mode)
+                    and path.exists()
+                ):
+                    parent.rename(detached)
+                    parent.mkdir()
+                    moved = True
+                return result
+
+            with (
+                patch.object(runner.os, "fsync", side_effect=detach_after_publication),
+                self.assertRaisesRegex(OSError, "parent changed"),
+            ):
+                runner.write_report(path, report)
+            self.assertFalse(path.exists())
+            self.assertEqual(list(detached.iterdir()), [])
+
     def test_report_gate_rejects_inconsistent_citation_scores(self):
         result = runner.Result(
             "source-case", "researcher", True, telemetry_complete=True,

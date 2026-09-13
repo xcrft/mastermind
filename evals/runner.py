@@ -38,6 +38,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -1356,28 +1357,217 @@ def compare_to_baseline(current: dict, baseline: dict) -> dict:
     return {"passed": not failures, "checks": checks, "failures": failures}
 
 
-def write_report(path: Path, report: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _same_report_node(left: os.stat_result, right: os.stat_result) -> bool:
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _report_file_identity(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _check_report_parent(
+    requested: Path,
+    canonical: Path,
+    descriptor: int,
+    expected: os.stat_result,
+) -> None:
+    try:
+        current = canonical.stat(follow_symlinks=False)
+        resolved = requested.resolve(strict=True)
+        opened = os.fstat(descriptor)
+    except (OSError, RuntimeError) as error:
+        raise OSError("eval report parent changed during publication") from error
+    if (
+        resolved != canonical
+        or not stat.S_ISDIR(current.st_mode)
+        or not _same_report_node(current, expected)
+        or not _same_report_node(opened, expected)
+    ):
+        raise OSError("eval report parent changed during publication")
+
+
+def _read_report_file_at(parent_descriptor: int, name: str, limit: int) -> bytes:
+    descriptor = os.open(
+        name,
+        os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+        dir_fd=parent_descriptor,
+    )
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
+            raise OSError("published eval report is not the expected regular file")
+        body = bytearray()
+        remaining = limit + 1
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            body.extend(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(descriptor)
+        current = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    finally:
+        os.close(descriptor)
+    if (
+        len(body) > limit
+        or _report_file_identity(before) != _report_file_identity(after)
+        or _report_file_identity(after) != _report_file_identity(current)
+    ):
+        raise OSError("published eval report changed during verification")
+    return bytes(body)
+
+
+def _write_report_portable(path: Path, body: bytes) -> None:
     temporary: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
+            mode="wb",
             dir=path.parent,
             prefix=f".{path.name}.",
             suffix=".tmp",
             delete=False,
         ) as handle:
             temporary = Path(handle.name)
-            json.dump(report, handle, indent=2, sort_keys=True, ensure_ascii=False)
-            handle.write("\n")
+            handle.write(body)
             handle.flush()
             os.fsync(handle.fileno())
         temporary.replace(path)
-    except Exception:
+        temporary = None
+        if path.read_bytes() != body:
+            raise OSError("published eval report changed during verification")
+    finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def write_report(path: Path, report: dict) -> None:
+    body = (
+        json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    ).encode("utf-8")
+    target = path.absolute()
+    if not target.name or target.name in {".", ".."}:
+        raise OSError("invalid eval report path")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
+        _write_report_portable(target, body)
+        return
+
+    requested_parent = target.parent
+    try:
+        canonical_parent = requested_parent.resolve(strict=True)
+        parent_descriptor = os.open(
+            canonical_parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK,
+        )
+    except (OSError, RuntimeError) as error:
+        raise OSError("cannot open eval report parent safely") from error
+
+    temporary_name = f".{target.name}.{uuid.uuid4().hex}.tmp"
+    descriptor: int | None = None
+    owned: tuple[int, int] | None = None
+    staged = False
+    published = False
+    try:
+        expected_parent = os.fstat(parent_descriptor)
+        if not stat.S_ISDIR(expected_parent.st_mode):
+            raise OSError("eval report parent is not a directory")
+        descriptor = os.open(
+            temporary_name,
+            os.O_RDWR
+            | os.O_CREAT
+            | os.O_EXCL
+            | os.O_NOFOLLOW
+            | os.O_NONBLOCK,
+            0o600,
+            dir_fd=parent_descriptor,
+        )
+        staged = True
+        opened = os.fstat(descriptor)
+        owned = (opened.st_dev, opened.st_ino)
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(os.dup(descriptor), "wb") as handle:
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        written = os.fstat(descriptor)
+        staged_stat = os.stat(
+            temporary_name, dir_fd=parent_descriptor, follow_symlinks=False
+        )
+        if (
+            not stat.S_ISREG(written.st_mode)
+            or stat.S_IMODE(written.st_mode) != 0o600
+            or written.st_size != len(body)
+            or not _same_report_node(written, staged_stat)
+        ):
+            raise OSError("staged eval report changed during publication")
+        _check_report_parent(
+            requested_parent, canonical_parent, parent_descriptor, expected_parent
+        )
+        os.replace(
+            temporary_name,
+            target.name,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+        staged = False
+        published = True
+        named = os.stat(target.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        if not _same_report_node(written, named):
+            raise OSError("published eval report changed during publication")
+        os.fsync(parent_descriptor)
+        _check_report_parent(
+            requested_parent, canonical_parent, parent_descriptor, expected_parent
+        )
+
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        retained = bytearray()
+        remaining = len(body) + 1
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            retained.extend(chunk)
+            remaining -= len(chunk)
+        written = os.fstat(descriptor)
+        current = os.stat(target.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        observed = _read_report_file_at(parent_descriptor, target.name, len(body))
+        if (
+            bytes(retained) != body
+            or observed != body
+            or owned != (written.st_dev, written.st_ino)
+            or not _same_report_node(written, current)
+            or _report_file_identity(written) != _report_file_identity(current)
+        ):
+            raise OSError("published eval report changed during verification")
+        _check_report_parent(
+            requested_parent, canonical_parent, parent_descriptor, expected_parent
+        )
+    except (OSError, KeyboardInterrupt):
+        cleanup_name = target.name if published else temporary_name
+        if (published or staged) and owned is not None:
+            try:
+                current = os.stat(
+                    cleanup_name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                if (current.st_dev, current.st_ino) == owned:
+                    os.unlink(cleanup_name, dir_fd=parent_descriptor)
+                    os.fsync(parent_descriptor)
+            except FileNotFoundError:
+                pass
         raise
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(parent_descriptor)
 
 
 # ----- fixture lifecycle ----------------------------------------------------

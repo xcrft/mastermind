@@ -67,7 +67,9 @@ python3 -m unittest evals/test_runner.py evals/test_evidence.py evals/test_bench
 
 ## Reports and token gates
 
-`--report` atomically writes a `mastermind-eval-report` schema-v1 JSON file.
+`--report` atomically writes and verifies a `mastermind-eval-report` schema-v1
+JSON file. On POSIX, success also requires a durable parent-directory update and
+the final path, inode, and bytes to remain the ones published by the runner.
 Every case retains quality, retry state, duration, API duration, turns, input
 and output tokens, prompt-cache creation/read tokens, reported cost, and
 telemetry completeness. Suite summaries use the nearest-rank rule for p50 and

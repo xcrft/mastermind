@@ -305,6 +305,7 @@ verifications_rerun:
                         keep_fixtures=False,
                         mmcg_binary=None,
                         claude_version="2.1.236 (Claude Code)",
+                        git_binary=Path("/runtime/git/bin/git"),
                     )
                     self.assertEqual(result.passed, passed, result.reasons)
                 self.assertEqual(len(invocations), 1)
@@ -318,6 +319,10 @@ verifications_rerun:
                 self.assertEqual(
                     invocation["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"],
                     "8192",
+                )
+                self.assertEqual(
+                    invocation["env"]["PATH"].split(os.pathsep)[0],
+                    "/runtime/git/bin",
                 )
                 self.assertIsInstance(invocation["stdin"], bytes)
                 self.assertEqual(
@@ -483,9 +488,16 @@ action: passthrough
                 "MAX_THINKING_TOKENS": "0",
                 "MCP_TOOL_TIMEOUT": "999999999",
                 "DEBUG": "1",
+                "GIT_DIR": "/private/other-repository",
+                "GIT_EXTERNAL_DIFF": "/private/untrusted-diff",
+                "GIT_CONFIG_GLOBAL": "/private/untrusted-gitconfig",
             },
+            pinned_executables=(Path("/runtime/git/bin/git"),),
         )
-        self.assertEqual(environment["PATH"], "/usr/bin")
+        self.assertEqual(
+            environment["PATH"],
+            f"/runtime/git/bin{os.pathsep}/usr/bin",
+        )
         self.assertEqual(environment["HOME"], "/tmp/home")
         self.assertEqual(
             environment["CLAUDE_CODE_OAUTH_TOKEN"], "subscription-token"
@@ -497,12 +509,33 @@ action: passthrough
             "DISABLE_COMPACT",
             "MAX_THINKING_TOKENS",
             "DEBUG",
+            "GIT_DIR",
+            "GIT_EXTERNAL_DIFF",
         ):
             self.assertNotIn(name, environment)
         self.assertEqual(environment["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "1400")
         self.assertEqual(environment["CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY"], "1")
+        self.assertEqual(environment["CLAUDE_CODE_DISABLE_AUTO_MEMORY"], "1")
         self.assertEqual(environment["MCP_TOOL_TIMEOUT"], "120000")
         self.assertEqual(environment["ENABLE_TOOL_SEARCH"], "false")
+        self.assertEqual(environment["GIT_CONFIG_GLOBAL"], os.devnull)
+        self.assertEqual(environment["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(environment["GIT_CONFIG_VALUE_1"], os.devnull)
+        self.assertEqual(environment["GIT_AUTHOR_DATE"], "2000-01-01T00:00:00Z")
+
+        git_environment = runner._git_environment(
+            {"PATH": "/usr/bin", "GIT_DIR": "/private/other-repository"}
+        )
+        self.assertEqual(git_environment["PATH"], "/usr/bin")
+        self.assertNotIn("GIT_DIR", git_environment)
+        self.assertEqual(git_environment["GIT_CONFIG_GLOBAL"], os.devnull)
+
+        with self.assertRaisesRegex(ValueError, "must be absolute"):
+            runner.evaluation_environment(
+                100,
+                source={"PATH": "/usr/bin"},
+                pinned_executables=(Path("relative/git"),),
+            )
 
     def test_harness_identity_includes_bounded_process_transport(self):
         definitions = {
@@ -2290,25 +2323,148 @@ class PromptIsolationTests(unittest.TestCase):
                 "input": {}, "expect": {"contains": ["changed"]},
             }
             fixture = Path("/unused-disposable-fixture")
-            process = subprocess.CompletedProcess([], 0, '{"result":"changed"}', "")
+            events = [
+                {
+                    "type": "system",
+                    "subtype": "init",
+                    "model": RESOLVED_MODEL,
+                    "claude_code_version": "2.1.236",
+                    "cwd": str(fixture),
+                    "permissionMode": "dontAsk",
+                    "tools": list(ablation.VANILLA_STREAM_TOOLS),
+                    "mcp_servers": [],
+                    "skills": [],
+                    "plugins": [],
+                },
+                {
+                    "type": "assistant",
+                    "message": {
+                        "model": RESOLVED_MODEL,
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "git-inspection",
+                                "name": "Bash",
+                                "input": {
+                                    "command": "git diff refs/tags/baseline --"
+                                },
+                            }
+                        ],
+                    },
+                },
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "git-inspection",
+                            }
+                        ]
+                    },
+                },
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": "changed",
+                    "duration_ms": 1,
+                    "duration_api_ms": 1,
+                    "num_turns": 1,
+                    "total_cost_usd": 0,
+                    "modelUsage": {RESOLVED_MODEL: {}},
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                    },
+                },
+            ]
+            process = ProcessResult(
+                stdout="\n".join(json.dumps(event) for event in events).encode(),
+                stderr=b"",
+                returncode=0,
+            )
             with (
                 self.subTest(staged=staged),
                 patch.object(runner, "setup_fixture", return_value=fixture) as setup,
                 patch.object(runner, "teardown_fixture"),
-                patch.object(ablation.subprocess, "run", return_value=process) as invoke,
+                patch.object(runner, "run_bounded", return_value=process) as invoke,
             ):
-                self.assertTrue(ablation.run_vanilla("opus", case))
-                setup.assert_called_once_with(
-                    "uncommitted-audit", "baseline", "executor-added", staged_paths=staged
+                self.assertTrue(
+                    ablation.run_vanilla(
+                        "opus",
+                        case,
+                        claude_binary=Path("/runtime/claude"),
+                        claude_version="2.1.236 (Claude Code)",
+                        git_binary=Path("/runtime/bin/git"),
+                    )
                 )
-                prompt = invoke.call_args.kwargs["input"]
+                setup.assert_called_once_with(
+                    "uncommitted-audit",
+                    "baseline",
+                    "executor-added",
+                    staged_paths=staged,
+                    fixtures_dir=None,
+                    git_binary=Path("/runtime/bin/git"),
+                    mmcg_binary=None,
+                )
+                prompt = invoke.call_args.kwargs["stdin"].decode()
                 self.assertIn("git diff refs/tags/baseline --", prompt)
                 self.assertIn("git ls-files --others --exclude-standard --", prompt)
                 self.assertNotIn("baseline..executor-added", prompt)
+                command = invoke.call_args.args[0]
+                for argument in (
+                    "--effort",
+                    "--max-turns",
+                    "--strict-mcp-config",
+                    "--setting-sources",
+                    "--disable-slash-commands",
+                    "--no-chrome",
+                ):
+                    self.assertIn(argument, command)
+                self.assertEqual(command[0], "/runtime/claude")
+                self.assertEqual(
+                    invoke.call_args.kwargs["env"]["PATH"].split(os.pathsep)[0],
+                    "/runtime/bin",
+                )
+                self.assertEqual(
+                    invoke.call_args.kwargs["stdout_limit"],
+                    runner.CLAUDE_STDOUT_LIMIT_BYTES,
+                )
+                self.assertEqual(
+                    invoke.call_args.kwargs["stderr_limit"],
+                    runner.CLAUDE_STDERR_LIMIT_BYTES,
+                )
         committed = ablation.vanilla_message({"input": {}}, fixture, "baseline", "after")
         self.assertIn(
             "git diff refs/tags/baseline..refs/tags/after --", committed
         )
+
+    def test_vanilla_requires_a_successful_simple_git_inspection(self):
+        valid = runner.ToolExecution(
+            "Bash",
+            "tool-1",
+            {"command": "git diff refs/tags/baseline --"},
+            result_seen=True,
+            succeeded=True,
+        )
+        self.assertTrue(ablation._successful_git_inspection([valid]))
+        for command, succeeded in (
+            ("git diff refs/tags/baseline --", False),
+            ("git diff refs/tags/baseline -- && curl example.invalid", True),
+            ("cargo test --locked unit", True),
+        ):
+            with self.subTest(command=command, succeeded=succeeded):
+                execution = runner.ToolExecution(
+                    "Bash",
+                    "tool-1",
+                    {"command": command},
+                    result_seen=True,
+                    succeeded=succeeded,
+                )
+                self.assertFalse(ablation._successful_git_inspection([execution]))
 
     def test_fixture_copy_exposes_same_size_changes_despite_matching_source_mtimes(self):
         with tempfile.TemporaryDirectory(prefix="mmcg-fixture-stat-cache-") as temporary:

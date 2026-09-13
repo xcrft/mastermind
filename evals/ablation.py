@@ -31,8 +31,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
+import re
+import shlex
+import shutil
 import sys
+from pathlib import Path
 
 if __package__:
     from . import runner
@@ -41,8 +44,8 @@ else:
 
 VANILLA_SYSTEM = (
     "You are a senior engineer doing a pre-merge review of a code change. The "
-    "working directory is a real git repository and you have shell access — use "
-    "`git diff`, `git log`, `cat`, `grep` to inspect the actual code. You are "
+    "working directory is a real git repository. Use read-only Git commands and "
+    "the provided read/search tools to inspect the actual code. You are "
     "given the author's own summary of what they changed. Verify that summary "
     "against the code and flag anything wrong or risky: a claimed change that "
     "isn't in the diff, a call to a symbol that doesn't exist, a test claimed "
@@ -50,6 +53,17 @@ VANILLA_SYSTEM = (
     "is still referenced. Name the specific symbol or file. If everything checks "
     "out, say the change looks correct."
 )
+
+VANILLA_ALLOWED_TOOLS = tuple(
+    tool
+    for tool in runner.AUDITOR_SAFE_ALLOWED_TOOLS
+    if not tool.startswith("Bash(cargo ")
+)
+VANILLA_STREAM_TOOLS = ("Read", "Glob", "Grep", "Bash", "EndConversation")
+_READ_ONLY_GIT_SUBCOMMANDS = frozenset(
+    {"diff", "grep", "log", "ls-files", "rev-parse", "show", "status"}
+)
+_SHELL_CONTROL_RE = re.compile(r"[;&|<>`$()\r\n]")
 
 
 def vanilla_message(case: dict, fixture_path, baseline_ref: str, after_ref: str) -> str:
@@ -85,39 +99,132 @@ def scored_caught(output: str, expect: dict) -> bool:
     return contains_ok and not_contains_ok
 
 
-def run_vanilla(model: str, case: dict) -> bool | None:
+def _successful_git_inspection(executions: list[runner.ToolExecution]) -> bool:
+    for execution in executions:
+        if (
+            execution.name != "Bash"
+            or not execution.result_seen
+            or not execution.succeeded
+        ):
+            continue
+        command = execution.arguments.get("command")
+        if not isinstance(command, str) or _SHELL_CONTROL_RE.search(command):
+            continue
+        try:
+            arguments = shlex.split(command)
+        except ValueError:
+            continue
+        if (
+            len(arguments) >= 2
+            and arguments[0] == "git"
+            and arguments[1] in _READ_ONLY_GIT_SUBCOMMANDS
+        ):
+            return True
+    return False
+
+
+def run_vanilla(
+    model: str,
+    case: dict,
+    *,
+    claude_binary: str | Path = "claude",
+    claude_version: str | None = None,
+    git_binary: str | Path = "git",
+    fixtures_dir: Path | None = None,
+) -> bool | None:
     """True if vanilla caught the planted defect, False if missed, None on error."""
-    fixture = runner.setup_fixture(
-        case["fixture"], case["baseline_ref"], case["after_ref"],
-        staged_paths=case.get("staged_paths"),
-    )
+    try:
+        fixture = runner.setup_fixture(
+            case["fixture"], case["baseline_ref"], case["after_ref"],
+            staged_paths=case.get("staged_paths"),
+            fixtures_dir=fixtures_dir,
+            git_binary=git_binary,
+            mmcg_binary=None,
+        )
+    except (OSError, RuntimeError, ValueError):
+        return None
     try:
         msg = vanilla_message(case, fixture, case["baseline_ref"], case["after_ref"])
+        limits = runner.case_runtime_limits("auditor", case.get("expect", {}))
         cmd = [
-            "claude", "-p",
+            str(claude_binary), "-p",
             "--model", model,
+            "--effort", runner.evaluation_effort(
+                "auditor", runner.SUITES["auditor"]["subagent"]
+            ),
             "--append-system-prompt", VANILLA_SYSTEM,
-            "--output-format", "json",
+            "--output-format", "stream-json",
+            "--verbose",
             "--no-session-persistence",
-            "--permission-mode", "default",
+            "--permission-mode", "dontAsk",
+            "--max-turns", str(limits["max_turns"]),
+            "--tools", "Read,Glob,Grep,Bash",
+            "--allowedTools", ",".join(VANILLA_ALLOWED_TOOLS),
+            "--setting-sources", "",
+            "--strict-mcp-config",
+            "--disable-slash-commands",
+            "--no-chrome",
             "--add-dir", str(fixture),
         ]
+        git_path = Path(git_binary)
+        pinned_executables = (git_path,) if git_path.is_absolute() else ()
+        environment = runner.evaluation_environment(
+            limits["max_output_tokens"],
+            pinned_executables=pinned_executables,
+        )
+        process = runner.run_bounded(
+            cmd,
+            cwd=fixture,
+            env=environment,
+            stdin=msg.encode("utf-8"),
+            timeout=runner.CLAUDE_CASE_TIMEOUT_SECONDS,
+            stdout_limit=runner.CLAUDE_STDOUT_LIMIT_BYTES,
+            stderr_limit=runner.CLAUDE_STDERR_LIMIT_BYTES,
+            start_new_session=True,
+        )
+        if process.stop_reason is not None or process.returncode != 0:
+            return None
         try:
-            proc = subprocess.run(
-                cmd, input=msg, capture_output=True, text=True,
-                env=runner._PROC_ENV, timeout=480,
+            stdout = process.stdout.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        try:
+            runtime_contract = (
+                None
+                if claude_version is None
+                else runner.StreamRuntimeContract(
+                    cwd=str(fixture),
+                    tools=VANILLA_STREAM_TOOLS,
+                    mcp_servers=(),
+                    claude_code_version=runner.claude_stream_version(
+                        claude_version
+                    ),
+                )
             )
-        except subprocess.TimeoutExpired:
+            payload, _, executions = runner.parse_claude_output(
+                stdout,
+                streamed=True,
+                runtime_contract=runtime_contract,
+            )
+        except (json.JSONDecodeError, TypeError, ValueError):
             return None
-        if proc.returncode != 0:
+        telemetry = runner.telemetry_from_payload(payload)
+        if telemetry["complete"] is not True or payload.get("permission_denials"):
             return None
-        try:
-            output = json.loads(proc.stdout).get("result", "")
-        except json.JSONDecodeError:
-            output = proc.stdout
+        if not _successful_git_inspection(executions):
+            return None
+        output = payload["result"]
         return scored_caught(output, case.get("expect", {}))
     finally:
         runner.teardown_fixture(fixture)
+
+
+def _mastermind_outcome(result: runner.Result) -> bool | None:
+    if not result.telemetry_complete or any(
+        reason.startswith("permission denied for tools") for reason in result.reasons
+    ):
+        return None
+    return result.passed
 
 
 def main() -> int:
@@ -127,43 +234,95 @@ def main() -> int:
     ap.add_argument("--with-mastermind", action="store_true", help="also re-run the auditor path")
     args = ap.parse_args()
 
-    if not all(map(__import__("shutil").which, ("claude", "git"))):
+    claude_location = shutil.which("claude")
+    git_location = shutil.which("git")
+    if claude_location is None or git_location is None:
         print("error: `claude` and `git` must be on PATH.", file=sys.stderr)
+        return 2
+    mmcg_location = shutil.which(str(runner.MMCG_BIN))
+    try:
+        claude_binary = Path(claude_location).resolve(strict=True)
+        git_binary = Path(git_location).resolve(strict=True)
+        mmcg_binary = (
+            None
+            if mmcg_location is None
+            else Path(mmcg_location).resolve(strict=True)
+        )
+        claude_definition = runner._stable_regular_file_definition(claude_binary)
+        claude_version = runner.claude_cli_version(claude_binary)
+        fixture_runtime = runner.fixture_runtime_definition(
+            git_binary, mmcg_binary if args.with_mastermind else None
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        print(f"error: cannot freeze ablation runtime: {error}", file=sys.stderr)
+        return 2
+    if claude_version is None:
+        print("error: cannot read `claude` CLI version.", file=sys.stderr)
         return 2
 
     cases_file = runner.EVALS_DIR / "auditor.jsonl"
+    try:
+        cases = runner.load_case_records(cases_file, suite_name="auditor")
+    except (OSError, ValueError) as error:
+        print(f"error: cannot load auditor cases: {error}", file=sys.stderr)
+        return 2
+    selected = [case for case in cases if not args.case or case["id"] == args.case]
+    if not selected:
+        print("error: no auditor cases matched", file=sys.stderr)
+        return 2
     defect_cases = []
-    with cases_file.open() as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("//"):
-                continue
-            c = json.loads(line)
-            if args.case and c["id"] != args.case:
-                continue
-            verdict = c.get("expect", {}).get("verdict")
-            is_golden = verdict == "held" or (isinstance(verdict, list) and verdict == ["held"])
-            if is_golden:
-                continue  # no planted defect to catch
-            defect_cases.append(c)
+    for case in selected:
+        verdict = case["expect"]["verdict"]
+        is_golden = verdict == "held" or (
+            isinstance(verdict, list) and verdict == ["held"]
+        )
+        if not is_golden:
+            defect_cases.append(case)
 
     if not defect_cases:
         print("no defect cases matched")
         return 0
+    if (
+        args.with_mastermind
+        and mmcg_binary is None
+        and any(not case.get("allow_no_mmcg") for case in defect_cases)
+    ):
+        print(
+            "error: `mmcg` must be available for the selected Mastermind cases.",
+            file=sys.stderr,
+        )
+        return 2
 
     print(f"\n=== diagnostic comparison over {len(defect_cases)} defect case(s) · {args.model} ===\n")
     rows = []
     for c in defect_cases:
         cid = c["id"]
         print(f"  [{cid}] vanilla ...", end=" ", flush=True)
-        v = run_vanilla(args.model, c)
+        v = run_vanilla(
+            args.model,
+            c,
+            claude_binary=claude_binary,
+            claude_version=claude_version,
+            git_binary=git_binary,
+        )
         v_str = "phrase pass" if v else ("phrase miss" if v is False else "err")
         print(v_str, end="", flush=True)
         m = None
         if args.with_mastermind:
-            r = runner.evaluate_case(args.model, "auditor", runner.SUITES["auditor"], c, keep_fixtures=False)
-            m = r.passed
-            print(f"  · mastermind contract {'pass' if m else 'fail'}", end="")
+            result = runner.evaluate_case(
+                args.model,
+                "auditor",
+                runner.SUITES["auditor"],
+                c,
+                keep_fixtures=False,
+                claude_binary=claude_binary,
+                claude_version=claude_version,
+                git_binary=git_binary,
+                mmcg_binary=mmcg_binary,
+            )
+            m = _mastermind_outcome(result)
+            m_str = "pass" if m else ("fail" if m is False else "err")
+            print(f"  · mastermind contract {m_str}", end="")
         print()
         rows.append((cid, v, m))
 
@@ -175,7 +334,28 @@ def main() -> int:
         print("  Different grading contracts: no quality-uplift estimate.")
     else:
         print("  mastermind was not run; use --with-mastermind for its full contract result.")
-    return 0
+    errors = sum(
+        v is None or (args.with_mastermind and m is None) for _, v, m in rows
+    )
+    if errors:
+        print(f"  infrastructure errors: {errors}", file=sys.stderr)
+
+    try:
+        runtime_stable = (
+            runner._stable_regular_file_definition(claude_binary)
+            == claude_definition
+            and runner.claude_cli_version(claude_binary) == claude_version
+            and runner.fixture_runtime_definition(
+                git_binary, mmcg_binary if args.with_mastermind else None
+            )
+            == fixture_runtime
+        )
+    except (OSError, RuntimeError, ValueError):
+        runtime_stable = False
+    if not runtime_stable:
+        print("error: ablation runtime changed during evaluation", file=sys.stderr)
+        return 1
+    return 1 if errors else 0
 
 
 if __name__ == "__main__":

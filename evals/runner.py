@@ -64,6 +64,7 @@ REPORT_KIND = "mastermind-eval-report"
 REPORT_SCHEMA_VERSION = 1
 REPORT_FILE_LIMIT_BYTES = 16 * 1024 * 1024
 EVALUATION_DEFINITION_FILE_LIMIT_BYTES = 4 * 1024 * 1024
+RUNTIME_IDENTITY_FILE_LIMIT_BYTES = 512 * 1024 * 1024
 CRITIC_VERDICTS = frozenset(
     {"ship it", "ship with caveats", "revise", "rethink", "insufficient evidence"}
 )
@@ -1756,27 +1757,54 @@ def _fixture_file_definition(
     )
 
 
-def _stable_regular_file_definition(path: Path) -> dict[str, str]:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+def _stable_regular_file_definition(
+    path: Path,
+    *,
+    limit: int = RUNTIME_IDENTITY_FILE_LIMIT_BYTES,
+    label: str = "runtime identity file",
+) -> dict[str, str]:
+    if limit <= 0:
+        raise ValueError(f"{label} byte cap must be positive")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     descriptor = os.open(path, flags)
     try:
         opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode):
-            raise ValueError(f"fixture tree contains a non-regular file: {path}")
+        if not stat.S_ISREG(opened.st_mode) or opened.st_size > limit:
+            raise ValueError(f"{label} is not a bounded regular file: {path}")
         digest = hashlib.sha256()
-        while chunk := os.read(descriptor, 1024 * 1024):
+        observed_bytes = 0
+        remaining = limit + 1
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
             digest.update(chunk)
+            observed_bytes += len(chunk)
+            remaining -= len(chunk)
         finished = os.fstat(descriptor)
     finally:
         os.close(descriptor)
     current = path.stat(follow_symlinks=False)
-    identity_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if observed_bytes > limit:
+        raise ValueError(f"{label} exceeds its {limit}-byte cap: {path}")
+    identity_fields = (
+        "st_dev",
+        "st_ino",
+        "st_mode",
+        "st_size",
+        "st_mtime_ns",
+        "st_ctime_ns",
+    )
     if any(
         getattr(opened, field) != getattr(finished, field)
         or getattr(opened, field) != getattr(current, field)
         for field in identity_fields
     ):
-        raise ValueError(f"fixture file changed while it was read: {path}")
+        raise ValueError(f"{label} changed while it was read: {path}")
     return {
         "sha256": digest.hexdigest(),
         "git_mode": "100755" if opened.st_mode & 0o111 else "100644",
@@ -2052,7 +2080,11 @@ def evaluation_harness_definition() -> dict[str, str]:
     sources = [
         {
             "path": path.relative_to(REPO_ROOT).as_posix(),
-            **_stable_regular_file_definition(path),
+            **_stable_regular_file_definition(
+                path,
+                limit=EVALUATION_DEFINITION_FILE_LIMIT_BYTES,
+                label="evaluation harness source",
+            ),
         }
         for path in (
             Path(__file__).resolve(),

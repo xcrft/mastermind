@@ -14,8 +14,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
-- Conditional atomic file creation now uses an operating-system no-clobber
-  rename, closing the race between the final absence check and publication.
+- Local Windows worktree bindings now use the retained directory object's
+  stable identity, so short, long, and canonical spellings of the same path do
+  not invalidate task state. Architecture-policy configs are resolved through
+  the repository capability instead of string-prefix path comparisons.
+- File-backed setup now reads and replaces configs through retained no-follow
+  directory capabilities instead of reopening checked path strings. Existing
+  Unix permission bits remain intact, concurrent identity changes fail closed,
+  and private backups use safe UTF-8 labels plus atomic no-clobber publication
+  in a capability-bound `0700` directory.
+- Conditional atomic file creation now uses an operating-system atomic
+  no-clobber publication primitive, closing the race between the final absence
+  check and publication.
   Fact key generation uses that primitive for complete files and publishes the
   public key first, so a later failure cannot leave a private seed by itself.
 - Controller artifacts now recognize only the exact

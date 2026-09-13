@@ -663,12 +663,34 @@ pub fn check_with_impact_engine(
     options: &CheckOptions,
     impact_engine: &ImpactEngine<'_>,
 ) -> Result<PolicyReport, PolicyError> {
+    let config_path = if options.config_path.is_absolute() {
+        let root_capability = crate::bounded_fs::RootCapability::open(root).map_err(|_| {
+            PolicyError::new("policy_root_unavailable", "project root cannot be resolved")
+        })?;
+        let relative = root_capability
+            .repository_relative(&options.config_path)
+            .map_err(|_| {
+                PolicyError::new(
+                    "invalid_policy_config",
+                    "policy config must resolve inside the repository",
+                )
+            })?;
+        root_capability.verify().map_err(|_| {
+            PolicyError::new(
+                "policy_snapshot_changed",
+                "project root changed while resolving the policy config",
+            )
+        })?;
+        relative
+    } else {
+        options.config_path.clone()
+    };
     let root = root.canonicalize().map_err(|_| {
         PolicyError::new("policy_root_unavailable", "project root cannot be resolved")
     })?;
-    let loaded = load_config(store, &root, &options.config_path)?;
+    let loaded = load_config(store, &root, &config_path)?;
     let input = evidence::collect(store, &root, &loaded.config, options, impact_engine)?;
-    let reloaded = load_config(store, &root, &options.config_path)?;
+    let reloaded = load_config(store, &root, &config_path)?;
     if !loaded.same_snapshot(&reloaded) {
         return Err(PolicyError::new(
             "policy_snapshot_changed",
@@ -697,20 +719,16 @@ fn load_config(store: &Store, root: &Path, requested: &Path) -> Result<LoadedCon
             "project root changed before the policy config could be read",
         )
     })?;
-    let requested_label = policy_config_label(root, &requested_path);
-    let path = requested_path.canonicalize().map_err(|_| {
-        PolicyError::new(
-            "policy_config_unavailable",
-            format!("cannot read `{requested_label}`"),
-        )
-    })?;
-    if !path.starts_with(root_capability.canonical_root()) {
-        return Err(PolicyError::new(
-            "invalid_policy_config",
-            "policy config must resolve inside the repository",
-        ));
-    }
-    let identity_path = policy_config_identity_path(root, &path)?;
+    let relative = root_capability
+        .repository_relative(&requested_path)
+        .map_err(|_| {
+            PolicyError::new(
+                "invalid_policy_config",
+                "policy config must resolve inside the repository",
+            )
+        })?;
+    let path = root_capability.requested_root().join(relative);
+    let identity_path = policy_config_identity_path(root_capability.requested_root(), &path)?;
     let interrupted = || store.work_interrupted();
     let source = crate::bounded_fs::read_regular_file_with_capability(
         &root_capability,
@@ -760,13 +778,6 @@ fn load_config(store: &Store, root: &Path, requested: &Path) -> Result<LoadedCon
         file_identity: source.identity,
         config,
     })
-}
-
-fn policy_config_label(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .ok()
-        .and_then(|relative| crate::bounded_fs::normalize_repository_relative_path(relative).ok())
-        .unwrap_or_else(|| "<invalid path>".into())
 }
 
 fn policy_config_identity_path(root: &Path, path: &Path) -> Result<String, PolicyError> {

@@ -16,8 +16,7 @@
 use serde::{de, Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -1115,26 +1114,32 @@ fn read_capped(path: &Path) -> Result<Option<Vec<u8>>, String> {
 
 pub(crate) fn read_config_capped(path: &Path) -> Result<Option<Vec<u8>>, String> {
     ensure_safe_target(path)?;
-    let metadata = match std::fs::metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+    let (root, target) = match crate::bounded_fs::open_file_target(path) {
+        Ok(target) => target,
+        Err(crate::bounded_fs::BoundedReadError::Io(error))
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            return Ok(None)
+        }
         Err(_) => return Err("config_read_failed".into()),
     };
-    if !metadata.is_file() {
-        return Err("config_not_regular".into());
+    match crate::bounded_fs::read_regular_file_with_capability(
+        &root,
+        &target,
+        CONFIG_MAX_BYTES as u64,
+        CONFIG_MAX_BYTES as u64,
+        crate::bounded_fs::ReadControl::default(),
+    ) {
+        Ok(file) => Ok(Some(file.bytes)),
+        Err(crate::bounded_fs::BoundedReadError::Io(error))
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Ok(None)
+        }
+        Err(crate::bounded_fs::BoundedReadError::NotRegular) => Err("config_not_regular".into()),
+        Err(crate::bounded_fs::BoundedReadError::TooLarge { .. }) => Err("config_too_large".into()),
+        Err(_) => Err("config_read_failed".into()),
     }
-    if metadata.len() > CONFIG_MAX_BYTES as u64 {
-        return Err("config_too_large".into());
-    }
-    let file = std::fs::File::open(path).map_err(|_| "config_read_failed".to_string())?;
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take(CONFIG_MAX_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "config_read_failed".to_string())?;
-    if bytes.len() > CONFIG_MAX_BYTES {
-        return Err("config_too_large".into());
-    }
-    Ok(Some(bytes))
 }
 
 fn redact_entry(entry: &Value) -> Value {
@@ -1160,62 +1165,74 @@ fn redact_entry(entry: &Value) -> Value {
 
 fn safe_replace(path: &Path, observed: Option<&[u8]>, body: &[u8]) -> Result<(), String> {
     ensure_safe_target(path)?;
-    let parent = path.parent().ok_or_else(|| "invalid_target".to_string())?;
-    std::fs::create_dir_all(parent).map_err(|_| "parent_create_failed".to_string())?;
-    ensure_safe_target(path)?;
-
-    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let id = NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let file_name = path
-        .file_name()
-        .unwrap_or_else(|| OsStr::new("config"))
-        .to_string_lossy();
-    let temp = parent.join(format!(
-        ".{file_name}.mastermind-{}-{id}.tmp",
-        std::process::id()
-    ));
-    let result = (|| {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(&temp)
-            .map_err(|_| "temp_create_failed".to_string())?;
-        if let Ok(metadata) = std::fs::metadata(path) {
-            file.set_permissions(metadata.permissions())
-                .map_err(|_| "mode_preserve_failed".to_string())?;
-        }
-        file.write_all(body)
-            .map_err(|_| "temp_write_failed".to_string())?;
-        file.sync_all()
-            .map_err(|_| "temp_sync_failed".to_string())?;
-        drop(file);
-
-        let current = match std::fs::read(path) {
-            Ok(bytes) => Some(bytes),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+    let (root, target) = crate::bounded_fs::prepare_file_target(path)
+        .map_err(|_| "parent_create_failed".to_string())?;
+    let (current, expectation, unix_mode) =
+        match crate::bounded_fs::read_regular_file_with_capability(
+            &root,
+            &target,
+            CONFIG_MAX_BYTES as u64,
+            CONFIG_MAX_BYTES as u64,
+            crate::bounded_fs::ReadControl::default(),
+        ) {
+            Ok(file) => {
+                #[cfg(unix)]
+                let unix_mode = file.identity.attributes() as u32 & 0o777;
+                #[cfg(not(unix))]
+                let unix_mode = 0o600;
+                (
+                    Some(file.bytes),
+                    crate::bounded_fs::AtomicWriteExpectation::File(file.identity),
+                    unix_mode,
+                )
+            }
+            Err(crate::bounded_fs::BoundedReadError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                let missing = crate::bounded_fs::inspect_absent_path(
+                    &root,
+                    &target,
+                    crate::bounded_fs::ReadControl::default(),
+                )
+                .map_err(|_| "config_recheck_failed".to_string())?
+                .ok_or_else(|| "config_changed_concurrently".to_string())?;
+                (
+                    None,
+                    crate::bounded_fs::AtomicWriteExpectation::Missing(missing),
+                    0o600,
+                )
+            }
+            Err(crate::bounded_fs::BoundedReadError::TooLarge { .. }) => {
+                return Err("config_too_large".into())
+            }
             Err(_) => return Err("config_recheck_failed".into()),
         };
-        let unchanged = match (observed, current.as_deref()) {
-            (None, None) => true,
-            (Some(before), Some(now)) => before == now,
-            _ => false,
-        };
-        if !unchanged {
-            return Err("config_changed_concurrently".into());
-        }
-        atomic_replace(&temp, path)?;
-        sync_parent(parent)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
+    let unchanged = match (observed, current.as_deref()) {
+        (None, None) => true,
+        (Some(before), Some(now)) => before == now,
+        _ => false,
+    };
+    if !unchanged {
+        return Err("config_changed_concurrently".into());
     }
-    result
+    crate::bounded_fs::write_atomic_regular_file_expected_with_capability_mode(
+        &root,
+        &target,
+        body,
+        unix_mode,
+        expectation,
+    )
+    .map_err(|error| match error {
+        crate::bounded_fs::BoundedReadError::SnapshotChanged => {
+            "config_changed_concurrently".to_string()
+        }
+        crate::bounded_fs::BoundedReadError::Io(error)
+            if error.kind() == std::io::ErrorKind::AlreadyExists =>
+        {
+            "config_changed_concurrently".to_string()
+        }
+        _ => "atomic_replace_failed".to_string(),
+    })
 }
 
 fn safe_remove(path: &Path, observed: Option<&[u8]>) -> Result<(), String> {
@@ -1240,35 +1257,66 @@ fn safe_remove(path: &Path, observed: Option<&[u8]>) -> Result<(), String> {
 fn backup_private(path: &Path, body: &[u8]) -> Result<PathBuf, String> {
     let home = setup_home_dir().ok_or_else(|| "home_directory_unavailable".to_string())?;
     let directory = home.join(".mastermind/setup-backups");
-    std::fs::create_dir_all(&directory).map_err(|_| "backup_directory_failed".to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
-            .map_err(|_| "backup_directory_mode_failed".to_string())?;
-    }
+    let (root, _) = crate::bounded_fs::prepare_file_target(&directory.join(".backup-anchor"))
+        .map_err(|_| "backup_directory_failed".to_string())?;
+    root.set_root_directory_mode(0o700)
+        .map_err(|_| "backup_directory_mode_failed".to_string())?;
     static NEXT_BACKUP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let id = NEXT_BACKUP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let source = path
         .file_name()
-        .unwrap_or_else(|| OsStr::new("config"))
-        .to_string_lossy();
-    let backup = directory.join(format!("{source}-{}-{id}.bak", std::process::id()));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        .and_then(|name| name.to_str())
+        .map(|name| {
+            let mut label = String::new();
+            let mut separator = false;
+            for character in name.chars() {
+                if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
+                    if separator && !label.is_empty() {
+                        label.push('-');
+                    }
+                    label.push(character);
+                    separator = false;
+                } else {
+                    separator = true;
+                }
+                if label.len() >= 48 {
+                    break;
+                }
+            }
+            label
+        })
+        .filter(|label| !label.is_empty())
+        .unwrap_or_else(|| "config".into());
+    for _ in 0..128 {
+        let id = NEXT_BACKUP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let backup = root
+            .requested_root()
+            .join(format!("{source}-{}-{id}.bak", std::process::id()));
+        let missing = match crate::bounded_fs::inspect_absent_path(
+            &root,
+            &backup,
+            crate::bounded_fs::ReadControl::default(),
+        ) {
+            Ok(Some(missing)) => missing,
+            Ok(None) => continue,
+            Err(_) => return Err("backup_create_failed".into()),
+        };
+        match crate::bounded_fs::write_atomic_regular_file_expected_with_capability(
+            &root,
+            &backup,
+            body,
+            true,
+            crate::bounded_fs::AtomicWriteExpectation::Missing(missing),
+        ) {
+            Ok(()) => return Ok(backup),
+            Err(crate::bounded_fs::BoundedReadError::Io(error))
+                if error.kind() == std::io::ErrorKind::AlreadyExists =>
+            {
+                continue
+            }
+            Err(_) => return Err("backup_write_failed".into()),
+        }
     }
-    let mut file = options
-        .open(&backup)
-        .map_err(|_| "backup_create_failed".to_string())?;
-    file.write_all(body)
-        .map_err(|_| "backup_write_failed".to_string())?;
-    file.sync_all()
-        .map_err(|_| "backup_sync_failed".to_string())?;
-    Ok(backup)
+    Err("backup_create_failed".into())
 }
 
 fn ensure_safe_target(path: &Path) -> Result<(), String> {
@@ -1304,35 +1352,6 @@ fn ensure_safe_target(path: &Path) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-#[cfg(windows)]
-fn atomic_replace(temp: &Path, path: &Path) -> Result<(), String> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    };
-
-    let temp: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
-    let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    // SAFETY: both pointers reference NUL-terminated buffers that remain alive
-    // for the duration of the call. The paths were constructed by this module.
-    let replaced = unsafe {
-        MoveFileExW(
-            temp.as_ptr(),
-            path.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if replaced == 0 {
-        return Err("atomic_replace_failed".into());
-    }
-    Ok(())
-}
-
-#[cfg(not(windows))]
-fn atomic_replace(temp: &Path, path: &Path) -> Result<(), String> {
-    std::fs::rename(temp, path).map_err(|_| "atomic_replace_failed".to_string())
 }
 
 #[cfg(test)]
@@ -2597,6 +2616,21 @@ mod tests {
         fs::remove_dir_all(root).ok();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn read_capped_rejects_a_symlink_without_reading_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = tmp("read-capped-link");
+        let victim = root.join("private.json");
+        let target = root.join("config.json");
+        fs::write(&victim, b"private").unwrap();
+        symlink(&victim, &target).unwrap();
+
+        assert_eq!(read_capped(&target).unwrap_err(), "symlink_target_rejected");
+        fs::remove_dir_all(root).ok();
+    }
+
     #[test]
     fn safe_replace_rejects_symlinked_parent() {
         #[cfg(unix)]
@@ -2643,11 +2677,16 @@ mod tests {
             safe_replace(&target, Some(&stale), b"rejected").unwrap_err(),
             "config_changed_concurrently"
         );
-        let temp_prefix = ".config.json.mastermind-";
+        let temp_prefix = ".mastermind-atomic-";
         let temp_files = fs::read_dir(&root)
             .unwrap()
             .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().starts_with(temp_prefix))
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with(temp_prefix))
+            })
             .count();
         assert_eq!(temp_files, 0);
         fs::remove_dir_all(root).ok();
@@ -2673,6 +2712,48 @@ mod tests {
             assert_eq!(directory_mode, 0o700);
             assert_eq!(file_mode, 0o600);
         }
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_backup_uses_a_safe_label_for_non_utf8_sources() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = tmp("private-backup-native-name");
+        let home = root.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let _home = TestHomeDirGuard::new(home);
+        let source = root.join(std::ffi::OsString::from_vec(b"config-\xff.json".to_vec()));
+
+        let backup = backup_private(&source, b"private").unwrap();
+
+        assert_eq!(fs::read(&backup).unwrap(), b"private");
+        assert!(backup
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("config-")));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_backup_rejects_a_linked_backup_directory() {
+        use std::os::unix::fs::symlink;
+
+        let root = tmp("private-backup-link");
+        let home = root.join("home");
+        let outside = root.join("outside");
+        fs::create_dir_all(home.join(".mastermind")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, home.join(".mastermind/setup-backups")).unwrap();
+        let _home = TestHomeDirGuard::new(home);
+
+        assert_eq!(
+            backup_private(&root.join("config.json"), b"private").unwrap_err(),
+            "backup_directory_failed"
+        );
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
         fs::remove_dir_all(root).ok();
     }
 

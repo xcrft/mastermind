@@ -366,6 +366,11 @@ impl RootCapability {
         &self.requested_root
     }
 
+    #[cfg(windows)]
+    pub(crate) fn object_identity_key(&self) -> String {
+        format!("{:016x}:{:016x}", self.identity.volume, self.identity.index)
+    }
+
     pub(crate) fn repository_relative(&self, path: &Path) -> Result<PathBuf, BoundedReadError> {
         self.relative(path)
     }
@@ -433,6 +438,23 @@ impl RootCapability {
                 Err(error) => return Err(classify_nofollow_open_error(error)),
             }
         }
+        self.verify()
+    }
+
+    pub(crate) fn set_root_directory_mode(&self, unix_mode: u32) -> Result<(), BoundedReadError> {
+        self.verify()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            self.directory
+                .try_clone()
+                .map_err(BoundedReadError::Io)?
+                .into_std_file()
+                .set_permissions(std::fs::Permissions::from_mode(unix_mode))
+                .map_err(BoundedReadError::Io)?;
+        }
+        #[cfg(not(unix))]
+        let _ = unix_mode;
         self.verify()
     }
 }
@@ -866,8 +888,15 @@ fn rename_file_noclobber(
     source: &std::ffi::OsStr,
     target: &std::ffi::OsStr,
 ) -> std::io::Result<()> {
-    // Windows rename without replace already fails when the destination exists.
-    parent.rename(source, parent, target)
+    // cap-std's Windows rename replaces an existing regular file. Creating a
+    // hard link is the capability-relative atomic no-clobber operation; remove
+    // the temporary name only after the final name exists.
+    parent.hard_link(source, parent, target)?;
+    // The final name is published once the hard link succeeds. Removal of the
+    // private temporary name is cleanup and must not turn a successful
+    // publication into a reported failure.
+    let _ = parent.remove_file(source);
+    Ok(())
 }
 
 #[cfg(not(any(
@@ -895,8 +924,24 @@ pub(crate) fn write_atomic_regular_file_expected_with_capability(
     private: bool,
     expectation: AtomicWriteExpectation,
 ) -> Result<(), BoundedReadError> {
+    write_atomic_regular_file_expected_with_capability_mode(
+        root,
+        path,
+        bytes,
+        if private { 0o600 } else { 0o644 },
+        expectation,
+    )
+}
+
+pub(crate) fn write_atomic_regular_file_expected_with_capability_mode(
+    root: &RootCapability,
+    path: &Path,
+    bytes: &[u8],
+    unix_mode: u32,
+    expectation: AtomicWriteExpectation,
+) -> Result<(), BoundedReadError> {
     #[cfg(not(unix))]
-    let _ = private;
+    let _ = unix_mode;
 
     root.verify()?;
     let relative = root.relative(path)?;
@@ -925,7 +970,9 @@ pub(crate) fn write_atomic_regular_file_expected_with_capability(
         #[cfg(unix)]
         {
             use cap_std::fs::OpenOptionsExt;
-            options.mode(if private { 0o600 } else { 0o644 });
+            // Keep the unpublished temporary private until all bytes are
+            // complete; apply the requested final mode through the open handle.
+            options.mode(0o600);
         }
         match parent.open_with(&candidate, &options) {
             Ok(file) => {
@@ -945,6 +992,12 @@ pub(crate) fn write_atomic_regular_file_expected_with_capability(
 
     let result = (|| {
         file.write_all(bytes).map_err(BoundedReadError::Io)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(unix_mode))
+                .map_err(BoundedReadError::Io)?;
+        }
         file.sync_all().map_err(BoundedReadError::Io)?;
         drop(file);
 

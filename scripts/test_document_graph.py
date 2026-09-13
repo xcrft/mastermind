@@ -597,6 +597,29 @@ class DocumentGraphTests(unittest.TestCase):
         result = self.cli("snapshot", "--relations", "relations-link.json", "--output", ".mastermind/research/no.json", expected=2)
         self.assertEqual(result["error"]["code"], "unsafe_path")
 
+    def test_output_replacement_after_publication_cannot_return_success(self):
+        repository = graph.Repository(self.root)
+        self.addCleanup(repository.close)
+        target = self.root / ".mastermind/research/replaced.json"
+        original_fsync = graph.os.fsync
+        replaced = False
+
+        def replace_after_publication(descriptor):
+            nonlocal replaced
+            result = original_fsync(descriptor)
+            if not replaced and target.exists():
+                replaced = True
+                target.unlink()
+                target.write_text("external replacement", encoding="utf-8")
+            return result
+
+        with patch.object(graph.os, "fsync", side_effect=replace_after_publication):
+            with self.assertRaisesRegex(graph.GraphError, "output_changed_during_operation"):
+                graph.snapshot(repository, "relations.json", ".mastermind/research/replaced.json")
+        self.assertTrue(replaced)
+        self.assertEqual(target.read_text(encoding="utf-8"), "external replacement")
+        self.assertEqual(list(target.parent.glob(".document-graph-*")), [])
+
     def test_limits_are_enforced_before_unbounded_work(self):
         value = deepcopy(self.manifest)
         value["relations"] = value["relations"][:1] * (graph.RELATION_LIMIT + 1)

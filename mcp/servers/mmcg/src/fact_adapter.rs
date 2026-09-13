@@ -156,6 +156,12 @@ fn output_identity(path: &Path) -> Result<PathBuf, AdapterError> {
     Ok(parent.join(name))
 }
 
+fn output_path_string(path: &Path) -> Result<String, AdapterError> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| contract_error("output path must have an exact UTF-8 representation"))
+}
+
 fn stable_fact_id(prefix: &str, fact: &Value) -> Result<String, AdapterError> {
     let canonical = crate::audit_bundle::canonical_json(fact)
         .map_err(|error| AdapterError::Contract(error.to_string()))?;
@@ -402,6 +408,7 @@ pub fn adapt(store: &Store, options: &AdaptOptions<'_>) -> Result<AdaptSummary, 
     let contract = facts::contract(store).map_err(contract_error)?;
     let (input, input_relative) = contained_artifact(&root, options.input)?;
     let output = output_identity(options.output)?;
+    let output_path = output_path_string(&output)?;
     if output == input {
         return Err(contract_error(
             "output must not overwrite the input artifact",
@@ -488,7 +495,7 @@ pub fn adapt(store: &Store, options: &AdaptOptions<'_>) -> Result<AdaptSummary, 
         schema_version: 1,
         api_version: facts::API_VERSION,
         format: options.format.provenance(),
-        output: output.to_string_lossy().into_owned(),
+        output: output_path,
         repository_identity: contract.repository.identity,
         revision: contract.repository.revision,
         artifact_sha256,
@@ -521,5 +528,23 @@ mod tests {
             contained_artifact(&root, Path::new("src\\report.sarif")),
             Err(AdapterError::Contract(_))
         ));
+    }
+
+    #[test]
+    fn output_summary_rejects_a_lossy_path_identity() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let requested = root
+            .path()
+            .join(OsString::from_vec(b"facts-\xff.json".to_vec()));
+        let output = output_identity(&requested).unwrap();
+
+        assert!(matches!(
+            output_path_string(&output),
+            Err(AdapterError::Contract(_))
+        ));
+        assert!(!requested.exists());
     }
 }

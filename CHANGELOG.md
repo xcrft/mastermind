@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Spec parsing, executor-report bundle binding, and fact-adapter summaries now
+  reject paths without exact UTF-8 identities instead of publishing lossy
+  aliases for the inputs or generated manifest.
 - Fact key generation now validates exact UTF-8 output identities before
   writing either key, so its JSON cannot return lossy paths for created files.
 - Architecture-policy reports now bind the config digest to an exact canonical

@@ -339,10 +339,46 @@ fn ensure_history_review(
     snapshot: &str,
 ) -> std::io::Result<bool> {
     let path = history_review_file_path(repo_root, spec_path);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let root = RootCapability::open(repo_root).map_err(std::io::Error::other)?;
+    let spec_identity = repository_relative_identity(&root, spec_path).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid history-review spec path: {error}"),
+        )
+    })?;
+    let release_identity = repository_relative_identity(&root, release_path).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid history-review release path: {error}"),
+        )
+    })?;
+    let audit_path = spec_path
+        .parent()
+        .map(|parent| parent.join("audit.md"))
+        .unwrap_or_else(|| spec_path.with_file_name("audit.md"));
+    let audit_identity = repository_relative_identity(&root, &audit_path).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid history-review audit path: {error}"),
+        )
+    })?;
+    let review_identity = repository_relative_identity(&root, &path).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid history-review output path: {error}"),
+        )
+    })?;
+    let review_parent = Path::new(&review_identity)
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "history-review output must have a repository-relative parent",
+            )
+        })?;
+    root.ensure_directory(review_parent)
+        .map_err(std::io::Error::other)?;
     match bounded_fs::read_regular_file_with_capability(
         &root,
         &path,
@@ -360,9 +396,18 @@ fn ensure_history_review(
             }
             // Keep the exact previous review for provenance before replacing
             // its dispositions with a review of the new audited inputs.
+            let stem = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "history-review archive name must have an exact UTF-8 identity",
+                    )
+                })?;
             let archive = path.with_file_name(format!(
                 "{}.{}.md",
-                path.file_stem().unwrap_or_default().to_string_lossy(),
+                stem,
                 crate::hex::encode(&Sha256::digest(&previous.bytes)),
             ));
             match bounded_fs::read_regular_file_with_capability(
@@ -394,13 +439,10 @@ fn ensure_history_review(
         Err(BoundedReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(std::io::Error::other(error)),
     }
-    let spec = display_relative(repo_root, spec_path);
-    let release = display_relative(repo_root, release_path);
-    let audit = spec_path
-        .parent()
-        .map(|parent| parent.join("audit.md"))
-        .unwrap_or_else(|| spec_path.with_file_name("audit.md"));
-    let audit = display_relative(repo_root, &audit);
+    let title = markdown_path(&spec_basename(spec_path));
+    let spec = markdown_path(&spec_identity);
+    let audit = markdown_path(&audit_identity);
+    let release = markdown_path(&release_identity);
     let body = format!(
         "# History review — {}\n\n\
 Complete this after semantic review. Replace each `pending` with `updated` or\n\
@@ -409,8 +451,8 @@ Complete this after semantic review. Replace each `pending` with `updated` or\n\
 - **Context:** pending\n\
 - **Lesson:** pending\n\
 - **Reason:** semantic review required\n\
-- **Evidence:** `{spec}`; `{audit}`; `{release}`\n",
-        spec_basename(spec_path),
+- **Evidence:** {spec}; {audit}; {release}\n",
+        title,
     );
     bounded_fs::write_atomic_regular_file(repo_root, &path, body.as_bytes(), false)
         .map_err(std::io::Error::other)?;
@@ -508,8 +550,9 @@ fn history_input_snapshot(
     digest.update(state.iteration.to_le_bytes());
     digest.update(state.started_at.to_le_bytes());
     let mut bytes_left = STRICT_EVIDENCE_TOTAL_BYTE_LIMIT;
-    let spec = display_relative(repo_root, spec_path);
-    let report = display_relative(repo_root, &spec_path.with_file_name("executor-report.md"));
+    let spec = repository_relative_identity(&root, spec_path)?;
+    let report =
+        repository_relative_identity(&root, &spec_path.with_file_name("executor-report.md"))?;
     let mut read_input = |path: &str| -> Result<String, String> {
         let file = hash_history_file(&root, path, true, &mut digest, &mut bytes_left)?
             .ok_or_else(|| format!("history input `{path}` is missing"))?;
@@ -588,10 +631,10 @@ fn history_input_snapshot(
     for artifact in [
         spec,
         report,
-        display_relative(repo_root, &spec_path.with_file_name("audit.md")),
-        display_relative(repo_root, &release_file_path(repo_root, spec_path)),
-        display_relative(repo_root, &history_review_file_path(repo_root, spec_path)),
-        display_relative(repo_root, &state_file_path(repo_root, spec_path)),
+        repository_relative_identity(&root, &spec_path.with_file_name("audit.md"))?,
+        repository_relative_identity(&root, &release_file_path(repo_root, spec_path))?,
+        repository_relative_identity(&root, &history_review_file_path(repo_root, spec_path))?,
+        repository_relative_identity(&root, &state_file_path(repo_root, spec_path))?,
     ] {
         paths.remove(&artifact);
     }
@@ -659,13 +702,8 @@ fn history_audit_snapshot(
         spec_path.with_file_name("audit.md"),
         release_file_path(repo_root, spec_path),
     ] {
-        let _ = hash_history_file(
-            &root,
-            &display_relative(repo_root, &path),
-            true,
-            &mut digest,
-            &mut bytes_left,
-        )?;
+        let identity = repository_relative_identity(&root, &path)?;
+        let _ = hash_history_file(&root, &identity, true, &mut digest, &mut bytes_left)?;
     }
     Ok(crate::hex::encode(&digest.finalize()))
 }
@@ -808,17 +846,44 @@ fn refresh_durable_history_at(index_path: &Path, repo_root: &Path) -> Result<u32
     refresh_durable_history(&mut store, repo_root)
 }
 
-fn display_relative(repo_root: &Path, path: &Path) -> String {
-    let resolved = if path.is_absolute() {
-        path.to_path_buf()
+fn repository_relative_identity(root: &RootCapability, path: &Path) -> Result<String, String> {
+    let relative = root
+        .repository_relative(path)
+        .map_err(|_| "path must resolve inside the selected repository".to_string())?;
+    bounded_fs::normalize_repository_relative_path(&relative)
+        .map_err(|_| "path must have an exact repository-relative UTF-8 identity".to_string())
+}
+
+fn markdown_path(path: &str) -> String {
+    let mut escaped = String::with_capacity(path.len());
+    for character in path.chars() {
+        match character {
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\\' => escaped.push_str("\\\\"),
+            character if character.is_control() => {
+                escaped.push_str(&format!("\\u{{{:x}}}", character as u32));
+            }
+            character => escaped.push(character),
+        }
+    }
+    let mut longest_run = 0;
+    let mut current_run = 0;
+    for character in escaped.chars() {
+        if character == '`' {
+            current_run += 1;
+            longest_run = longest_run.max(current_run);
+        } else {
+            current_run = 0;
+        }
+    }
+    let delimiter = "`".repeat(longest_run + 1);
+    if escaped.starts_with('`') || escaped.ends_with('`') {
+        format!("{delimiter} {escaped} {delimiter}")
     } else {
-        repo_root.join(path)
-    };
-    resolved
-        .strip_prefix(repo_root)
-        .unwrap_or(&resolved)
-        .to_string_lossy()
-        .replace('\\', "/")
+        format!("{delimiter}{escaped}{delimiter}")
+    }
 }
 
 fn spec_basename(spec_path: &Path) -> String {
@@ -1782,7 +1847,7 @@ fn run_pre(
             return Outcome::PreFailed;
         }
     };
-    let parsed = spec::parse_str(&spec_path.display().to_string(), &spec_body);
+    let parsed = spec::parse_str(&identity.spec_path, &spec_body);
 
     if parsed
         .frontmatter
@@ -2006,7 +2071,7 @@ fn run_post(
     };
     let inputs_before_audit = inputs.snapshot;
     let spec_body = inputs.spec_body;
-    let parsed = spec::parse_str(&spec_path.display().to_string(), &spec_body);
+    let parsed = spec::parse_str(&state.spec_path, &spec_body);
 
     println!(
         "\n=== Post-flight: {} (baseline `{}`) ===",
@@ -2807,6 +2872,46 @@ verifications: []\n\
             .set_len(HISTORY_REVIEW_BYTE_LIMIT + 1)
             .unwrap();
         assert!(!history_review_complete(&path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn history_review_rejects_backslash_aliases_before_creating_output() {
+        let root = tempfile::tempdir().unwrap();
+        let spec = Path::new(".mastermind/tasks/001\\alias/spec.md");
+        let release = root.path().join(".mastermind/releases/001-alias.md");
+
+        let error = ensure_history_review(root.path(), spec, &release, "snapshot").unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(!root.path().join(".mastermind").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn history_review_rejects_non_utf8_paths_before_creating_output() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let spec = PathBuf::from(".mastermind/tasks")
+            .join(std::ffi::OsString::from_vec(b"002-\xff".to_vec()))
+            .join("spec.md");
+        let release = root.path().join(".mastermind/releases/002.md");
+
+        let error = ensure_history_review(root.path(), &spec, &release, "snapshot").unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(!root.path().join(".mastermind").exists());
+    }
+
+    #[test]
+    fn history_review_paths_cannot_add_markdown_structure() {
+        assert_eq!(markdown_path("docs/a.md"), "`docs/a.md`");
+        assert_eq!(markdown_path("docs/a`b.md"), "``docs/a`b.md``");
+        assert_eq!(
+            markdown_path("docs/line\n- **Context:** updated.md"),
+            "`docs/line\\n- **Context:** updated.md`"
+        );
     }
 
     fn history_snapshot_fixture() -> (tempfile::TempDir, PathBuf, RunState) {

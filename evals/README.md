@@ -196,6 +196,13 @@ those binaries ahead of the inherited PATH, removes inherited Cargo/Rust
 overrides, and uses private external `CARGO_HOME` and `CARGO_TARGET_DIR`
 directories so a test cannot dirty the fixture. Their binary hashes, verbose
 versions, and stability are recorded as `verification_runtime`.
+
+Executable identities are streamed through non-blocking, no-follow reads where
+the platform supports them, with a 512 MiB per-file cap and stable device, inode,
+mode, size, mtime, and ctime checks. Evaluation-harness sources use the stricter
+4 MiB definition-file cap. Special files, oversized runtimes, and files changed
+while hashing fail before a trial can use or report that runtime identity.
+
 Prompt-only suites do not require Git, mmcg, Cargo, or rustc.
 
 ## Researcher and auditor fixture lifecycle

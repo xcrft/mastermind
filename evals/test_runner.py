@@ -3,12 +3,14 @@ import io
 import os
 import re
 import shlex
+import stat
 import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from evals import ablation, runner
@@ -738,7 +740,7 @@ action: passthrough
         }
         seen = []
 
-        def definition(path):
+        def definition(path, **_kwargs):
             seen.append(Path(path).name)
             return definitions[Path(path).name]
 
@@ -757,6 +759,67 @@ action: passthrough
             first_sources, ["runner.py", "benchmark_process.py", "evidence.py"]
         )
         self.assertNotEqual(before, after)
+
+    def test_runtime_identity_hashing_is_nonblocking_and_bounded(self):
+        with tempfile.TemporaryDirectory() as target:
+            root = Path(target)
+            regular = root / "runtime"
+            regular.write_bytes(b"x")
+            read_sizes = []
+
+            def endless_read(_descriptor, size):
+                read_sizes.append(size)
+                return b"x" * size
+
+            with (
+                patch.object(runner.os, "read", side_effect=endless_read),
+                self.assertRaisesRegex(ValueError, "exceeds its 32-byte cap"),
+            ):
+                runner._stable_regular_file_definition(regular, limit=32)
+            self.assertEqual(read_sizes, [33])
+
+            oversized = root / "oversized"
+            oversized.write_bytes(b"x" * 33)
+            with (
+                patch.object(runner.os, "read") as read,
+                self.assertRaisesRegex(ValueError, "bounded regular file"),
+            ):
+                runner._stable_regular_file_definition(oversized, limit=32)
+            read.assert_not_called()
+
+            if os.name == "posix" and hasattr(os, "mkfifo"):
+                fifo = root / "runtime.fifo"
+                os.mkfifo(fifo)
+                with self.assertRaisesRegex(ValueError, "bounded regular file"):
+                    runner._stable_regular_file_definition(fifo, limit=32)
+
+    def test_runtime_identity_detects_a_mode_only_change(self):
+        with tempfile.TemporaryDirectory() as target:
+            path = Path(target) / "runtime"
+            path.write_bytes(b"runtime")
+            original_fstat = runner.os.fstat
+            calls = 0
+
+            def changed_mode(descriptor):
+                nonlocal calls
+                calls += 1
+                observed = original_fstat(descriptor)
+                if calls != 2:
+                    return observed
+                return SimpleNamespace(
+                    st_dev=observed.st_dev,
+                    st_ino=observed.st_ino,
+                    st_mode=observed.st_mode ^ stat.S_IXUSR,
+                    st_size=observed.st_size,
+                    st_mtime_ns=observed.st_mtime_ns,
+                    st_ctime_ns=observed.st_ctime_ns,
+                )
+
+            with (
+                patch.object(runner.os, "fstat", side_effect=changed_mode),
+                self.assertRaisesRegex(ValueError, "changed while it was read"),
+            ):
+                runner._stable_regular_file_definition(path)
 
     def test_metadata_probes_use_bounded_process_transport(self):
         revision = "a" * 40

@@ -106,8 +106,12 @@ target digest; a current report may not. Its capture metadata records that only
 aggregate API duration was observable; the token and quality fields used by the
 gate were recorded per case. Its capture metadata also states how the resolved
 Opus model ID was verified immediately afterward with the same alias and CLI.
-Claude CLI reported cost is retained as telemetry, but these runs use the
-maintainer's existing Claude subscription rather than per-token API billing.
+New runs resolve one exact Claude executable before evaluation, call that path
+for every case, and record its SHA-256 and version. A runtime change before the
+run finishes fails every case. A legacy baseline may omit this binary identity;
+when both reports contain it, the gate requires an exact match. Claude CLI
+reported cost is retained as telemetry, but these runs use the maintainer's
+existing Claude subscription rather than per-token API billing.
 
 ## Researcher and auditor fixture lifecycle
 

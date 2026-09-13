@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Controller state now records a canonical repository-relative spec path and a
+  stable repository identity. Resume and post-flight reject copied state from
+  another repository, while legacy unbound state requires an explicit
+  pre-flight before its baseline and iteration can be reused.
 - Temporal SQLite snapshots and style-profile repository keys no longer pass
   canonical paths through lossy UTF-8 conversion. Unrepresentable paths fail
   before `VACUUM INTO` or profile-store writes can target another location or

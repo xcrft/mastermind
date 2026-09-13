@@ -1425,6 +1425,7 @@ mod tests {
                 blocking_reason: None,
                 last_artifact: Some("audit.md".into()),
                 spec_path: "/original/checkout/.mastermind/tasks/001-payment/spec.md".into(),
+                repository_identity: None,
                 spec_hash: crate::run_task::hash_text(spec_body),
                 baseline_ref: baseline.clone(),
                 held_snapshot_sha256: Some(held_snapshot),

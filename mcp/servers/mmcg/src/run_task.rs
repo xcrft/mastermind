@@ -56,8 +56,14 @@ pub struct RunState {
     pub blocking_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_artifact: Option<String>,
-    /// Resolved path to the spec file pre-flight ran against.
+    /// Canonical repository-relative path to the spec file pre-flight ran
+    /// against. Legacy state can contain an absolute path.
     pub spec_path: String,
+    /// Stable repository identity captured by pre-flight. Missing only from
+    /// legacy state, which must be rebound by a new explicit pre-flight before
+    /// its approval can be consumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_identity: Option<String>,
     /// SHA-256 of the approved spec body. Legacy 16-digit hashes remain readable.
     /// Post-flight requires an exact match or a new explicit pre-flight.
     pub spec_hash: String,
@@ -136,6 +142,26 @@ pub(crate) fn validate_run_state(state: &RunState) -> Result<(), String> {
                 "controller status {:?} cannot use next step {next_step:?}",
                 state.status
             ));
+        }
+    }
+    if let Some(identity) = state.repository_identity.as_deref() {
+        let valid_identity = ["git-remote:sha256:", "git-worktree:sha256:"]
+            .into_iter()
+            .find_map(|prefix| identity.strip_prefix(prefix))
+            .is_some_and(|digest| {
+                digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            });
+        if !valid_identity {
+            return Err("controller repository identity is invalid".into());
+        }
+        let normalized =
+            bounded_fs::normalize_repository_relative_path(Path::new(&state.spec_path))
+                .map_err(|_| "bound controller spec path is not canonical UTF-8".to_string())?;
+        if normalized != state.spec_path {
+            return Err("bound controller spec path is not canonical UTF-8".into());
         }
     }
     Ok(())
@@ -912,14 +938,46 @@ fn preflight_required_state(state: &RunState, reason: &str) -> RunState {
     blocked
 }
 
-fn state_matches_spec(repo_root: &Path, spec_path: &Path, state: &RunState) -> bool {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ControllerIdentity {
+    repository: String,
+    spec_path: String,
+}
+
+fn controller_identity(repo_root: &Path, spec_path: &Path) -> Result<ControllerIdentity, String> {
+    let root = RootCapability::open(repo_root)
+        .map_err(|error| format!("opening repository capability: {error}"))?;
+    let relative = root
+        .repository_relative(spec_path)
+        .map_err(|error| format!("resolving repository-relative spec path: {error}"))?;
+    let spec_path = bounded_fs::normalize_repository_relative_path(&relative)
+        .map_err(|_| "spec path is not canonical repository-relative UTF-8".to_string())?;
+    let repository = crate::facts::repository_identity(root.canonical_root())
+        .map_err(|error| format!("resolving repository identity: {error}"))?;
+    root.verify()
+        .map_err(|error| format!("repository changed while resolving task identity: {error}"))?;
+    Ok(ControllerIdentity {
+        repository,
+        spec_path,
+    })
+}
+
+fn legacy_state_matches_spec(
+    repo_root: &Path,
+    spec_path: &Path,
+    current: &ControllerIdentity,
+    state: &RunState,
+) -> bool {
+    if state.spec_path == current.spec_path {
+        return true;
+    }
     let resolved = if spec_path.is_absolute() {
         spec_path.to_path_buf()
     } else {
         repo_root.join(spec_path)
     };
     let stored = Path::new(&state.spec_path);
-    if stored == resolved {
+    if stored.is_absolute() && stored == resolved {
         return true;
     }
     let stored = if stored.is_absolute() {
@@ -935,12 +993,11 @@ fn state_matches_spec(repo_root: &Path, spec_path: &Path, state: &RunState) -> b
     {
         return true;
     }
-    // Canonical task artifacts can move with a checkout. Legacy basename-keyed
-    // state must match the actual spec path, not another same-named file.
-    let (Ok(root), Ok(current)) = (repo_root.canonicalize(), resolved.canonicalize()) else {
-        return false;
-    };
-    let Ok(task_spec) = current.strip_prefix(root.join(".mastermind/tasks")) else {
+    // A full pre-flight can migrate a legacy canonical task after its checkout
+    // moved. Match path components exactly; treating a literal backslash as a
+    // separator on Unix would alias a different task.
+    let relative = Path::new(&current.spec_path);
+    let Ok(task_spec) = relative.strip_prefix(Path::new(".mastermind/tasks")) else {
         return false;
     };
     if task_spec.components().count() != 2
@@ -948,12 +1005,35 @@ fn state_matches_spec(repo_root: &Path, spec_path: &Path, state: &RunState) -> b
     {
         return false;
     }
-    let suffix = format!(
-        ".mastermind/tasks/{}",
-        task_spec.to_string_lossy().replace('\\', "/")
-    );
-    let stored = state.spec_path.replace('\\', "/");
-    stored == suffix || stored.ends_with(&format!("/{suffix}"))
+    Path::new(&state.spec_path).ends_with(relative)
+}
+
+fn validate_state_binding(
+    repo_root: &Path,
+    spec_path: &Path,
+    current: &ControllerIdentity,
+    state: &RunState,
+    allow_legacy_rebind: bool,
+) -> Result<(), String> {
+    if let Some(repository) = state.repository_identity.as_deref() {
+        if repository != current.repository {
+            return Err("saved state belongs to a different repository".into());
+        }
+        if state.spec_path != current.spec_path {
+            return Err("saved state belongs to a different spec".into());
+        }
+        return Ok(());
+    }
+    if !legacy_state_matches_spec(repo_root, spec_path, current, state) {
+        return Err("saved state belongs to a different spec".into());
+    }
+    if !allow_legacy_rebind {
+        return Err(
+            "legacy state has no repository binding; run an explicit pre-flight to rebind it"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 fn preflight_baseline(repo_root: &Path, previous: Option<&RunState>) -> Result<String, String> {
@@ -1452,6 +1532,13 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts)
         eprintln!("error: --post-only cannot be combined with --pre-only or --reset");
         return Outcome::PreFailed;
     }
+    let identity = match controller_identity(repo_root, spec_path) {
+        Ok(identity) => identity,
+        Err(error) => {
+            eprintln!("error: resolving task identity: {error}");
+            return Outcome::PreFailed;
+        }
+    };
     let existing = match load_state(&state_path) {
         Ok(s) => s,
         Err(e) => {
@@ -1462,14 +1549,17 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts)
             return Outcome::PreFailed;
         }
     };
-    if existing
-        .as_ref()
-        .is_some_and(|state| !state_matches_spec(repo_root, spec_path, state))
-    {
-        eprintln!(
-            "error: saved state belongs to a different spec; use a separate canonical task folder"
-        );
-        return Outcome::PreFailed;
+    if let Some(state) = existing.as_ref() {
+        if let Err(error) = validate_state_binding(
+            repo_root,
+            spec_path,
+            &identity,
+            state,
+            opts.pre_only || opts.reset,
+        ) {
+            eprintln!("error: {error}");
+            return Outcome::PreFailed;
+        }
     }
 
     // Explicit retries keep the first baseline and the durable iteration count.
@@ -1488,6 +1578,7 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts)
             index_path,
             &state_path,
             opts,
+            &identity,
             existing.as_ref(),
         );
     }
@@ -1618,6 +1709,7 @@ fn run_pre(
     index_path: &Path,
     state_path: &Path,
     opts: RunOpts,
+    identity: &ControllerIdentity,
     previous: Option<&RunState>,
 ) -> Outcome {
     let mut opts = RunOpts {
@@ -1634,6 +1726,8 @@ fn run_pre(
     let mut revalidation_state = None;
     if let Some(previous) = previous {
         let mut pending = preflight_required_state(previous, "pre-flight validation is required");
+        pending.spec_path.clone_from(&identity.spec_path);
+        pending.repository_identity = Some(identity.repository.clone());
         if budget_exhausted && !opts.force_iteration {
             pending.blocking_reason = Some(format!(
                 "iteration budget exhausted (limit {}); review the design before explicitly using --force-iteration",
@@ -1795,10 +1889,16 @@ fn run_pre(
         .and_then(|frontmatter| frontmatter.risk.as_deref())
         .filter(|risk| matches!(*risk, "low" | "medium" | "high"))
         .unwrap_or("low");
-    let resolved_spec_path = if spec_path.is_absolute() {
-        spec_path.to_path_buf()
-    } else {
-        repo_root.join(spec_path)
+    let final_identity = match controller_identity(repo_root, spec_path) {
+        Ok(final_identity) if &final_identity == identity => final_identity,
+        Ok(_) => {
+            eprintln!("error: task identity changed during pre-flight; review it and retry");
+            return Outcome::PreFailed;
+        }
+        Err(error) => {
+            eprintln!("error: revalidating task identity: {error}");
+            return Outcome::PreFailed;
+        }
     };
     let state = RunState {
         status: "approved".into(),
@@ -1806,7 +1906,8 @@ fn run_pre(
         next_step: Some("run_executor".into()),
         blocking_reason: None,
         last_artifact: Some("spec.md".into()),
-        spec_path: resolved_spec_path.display().to_string(),
+        spec_path: final_identity.spec_path,
+        repository_identity: Some(final_identity.repository),
         spec_hash: hash_text(&spec_body),
         baseline_ref: head.clone(),
         held_snapshot_sha256: None,
@@ -2443,6 +2544,7 @@ verifications: []\n\
             blocking_reason: None,
             last_artifact: Some("spec.md".into()),
             spec_path: "specs/foo.md".into(),
+            repository_identity: Some(format!("git-worktree:sha256:{}", "a".repeat(64))),
             spec_hash: "deadbeefcafef00d".into(),
             baseline_ref: "abc1234".into(),
             held_snapshot_sha256: Some("feedface".into()),
@@ -2456,6 +2558,7 @@ verifications: []\n\
         save_state(&path, &state).unwrap();
         let loaded = load_state(&path).unwrap().expect("present");
         assert_eq!(loaded.spec_path, state.spec_path);
+        assert_eq!(loaded.repository_identity, state.repository_identity);
         assert_eq!(loaded.spec_hash, state.spec_hash);
         assert_eq!(loaded.baseline_ref, state.baseline_ref);
         assert_eq!(loaded.held_snapshot_sha256, state.held_snapshot_sha256);
@@ -2465,12 +2568,13 @@ verifications: []\n\
             .as_object_mut()
             .unwrap()
             .remove("held_snapshot_version");
-        assert_eq!(
-            serde_json::from_value::<RunState>(legacy)
-                .unwrap()
-                .held_snapshot_version,
-            1
-        );
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("repository_identity");
+        let legacy = serde_json::from_value::<RunState>(legacy).unwrap();
+        assert_eq!(legacy.held_snapshot_version, 1);
+        assert!(legacy.repository_identity.is_none());
         assert_eq!(
             loaded.history_snapshot_sha256,
             state.history_snapshot_sha256
@@ -2522,9 +2626,112 @@ verifications: []\n\
             save_state(&path, &incompatible).unwrap_err().kind(),
             std::io::ErrorKind::InvalidData
         );
+        let mut invalid_identity = state.clone();
+        invalid_identity.repository_identity = Some("git-remote:sha256:not-a-digest".into());
+        assert_eq!(
+            save_state(&path, &invalid_identity).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        let mut ambiguous_path = state.clone();
+        ambiguous_path.spec_path = "specs\\foo.md".into();
+        assert_eq!(
+            save_state(&path, &ambiguous_path).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
         delete_state(&path).unwrap();
         assert!(load_state(&path).unwrap().is_none());
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn controller_state_is_bound_to_the_selected_repository() {
+        let first = tmp("state_binding_first");
+        let second = tmp("state_binding_second");
+        init_repo(&first);
+        init_repo(&second);
+        let relative = Path::new(".mastermind/tasks/001-binding/spec.md");
+        for root in [&first, &second] {
+            fs::create_dir_all(root.join(relative).parent().unwrap()).unwrap();
+            fs::write(root.join(relative), "# Binding\n").unwrap();
+        }
+        let first_identity = controller_identity(&first, &first.join(relative)).unwrap();
+        let second_identity = controller_identity(&second, &second.join(relative)).unwrap();
+        assert_ne!(first_identity.repository, second_identity.repository);
+        let state: RunState = serde_json::from_value(serde_json::json!({
+            "spec_path": first_identity.spec_path,
+            "repository_identity": first_identity.repository,
+            "spec_hash": "0".repeat(64),
+            "baseline_ref": "0".repeat(40),
+            "started_at": 1
+        }))
+        .unwrap();
+        assert!(validate_state_binding(
+            &first,
+            &first.join(relative),
+            &controller_identity(&first, &first.join(relative)).unwrap(),
+            &state,
+            false
+        )
+        .is_ok());
+        assert!(validate_state_binding(
+            &second,
+            &second.join(relative),
+            &second_identity,
+            &state,
+            true
+        )
+        .unwrap_err()
+        .contains("different repository"));
+        fs::remove_dir_all(first).ok();
+        fs::remove_dir_all(second).ok();
+    }
+
+    #[test]
+    fn legacy_state_requires_explicit_preflight_before_rebinding() {
+        let root = tmp("legacy_state_rebind");
+        init_repo(&root);
+        let spec = root.join(".mastermind/tasks/001-legacy/spec.md");
+        fs::create_dir_all(spec.parent().unwrap()).unwrap();
+        fs::write(&spec, "# Legacy\n").unwrap();
+        let current = controller_identity(&root, &spec).unwrap();
+        let state: RunState = serde_json::from_value(serde_json::json!({
+            "spec_path": spec.display().to_string(),
+            "spec_hash": "0".repeat(64),
+            "baseline_ref": "0".repeat(40),
+            "started_at": 1
+        }))
+        .unwrap();
+        assert!(
+            validate_state_binding(&root, &spec, &current, &state, false)
+                .unwrap_err()
+                .contains("explicit pre-flight")
+        );
+        assert!(validate_state_binding(&root, &spec, &current, &state, true).is_ok());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn controller_identity_rejects_ambiguous_spec_paths() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = tmp("ambiguous_spec_identity");
+        init_repo(&root);
+        for task_name in [
+            std::ffi::OsString::from("001\\alias"),
+            std::ffi::OsString::from_vec(b"002-\xff".to_vec()),
+        ] {
+            let spec = root
+                .join(".mastermind/tasks")
+                .join(task_name)
+                .join("spec.md");
+            fs::create_dir_all(spec.parent().unwrap()).unwrap();
+            fs::write(&spec, "# Ambiguous\n").unwrap();
+            assert!(controller_identity(&root, &spec)
+                .unwrap_err()
+                .contains("canonical repository-relative UTF-8"));
+        }
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -3258,7 +3465,8 @@ verifications: []\n\
             .expect("pre-flight should have written state");
         assert!(!state.baseline_ref.is_empty());
         assert_eq!(state.spec_hash.len(), 64);
-        assert!(state.spec_path.ends_with("042-thing.md"));
+        assert_eq!(state.spec_path, ".mastermind/tasks/042-thing.md");
+        assert!(state.repository_identity.is_some());
 
         fs::remove_dir_all(&dir).ok();
     }

@@ -959,6 +959,7 @@ mod tests {
             blocking_reason: None,
             last_artifact: Some("history-review.md".into()),
             spec_path: task.join("spec.md").display().to_string(),
+            repository_identity: None,
             spec_hash: "0".repeat(64),
             baseline_ref: "0".repeat(40),
             held_snapshot_sha256: None,

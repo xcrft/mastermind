@@ -62,6 +62,7 @@ FIXTURES_DIR = EVALS_DIR / "fixtures"
 LEGACY_CONSOLE_BASELINE = EVALS_DIR / "baselines" / "critic-opus-pre-lean.json"
 REPORT_KIND = "mastermind-eval-report"
 REPORT_SCHEMA_VERSION = 1
+REPORT_FILE_LIMIT_BYTES = 16 * 1024 * 1024
 CRITIC_VERDICTS = frozenset(
     {"ship it", "ship with caveats", "revise", "rethink", "insufficient evidence"}
 )
@@ -3246,15 +3247,20 @@ def _strict_report_issues(
 
 def _is_shipped_legacy_baseline(path: Path) -> bool:
     try:
-        return os.path.samefile(path, LEGACY_CONSOLE_BASELINE)
-    except OSError:
+        return (
+            not path.is_symlink()
+            and path.resolve(strict=True)
+            == LEGACY_CONSOLE_BASELINE.resolve(strict=True)
+        )
+    except (OSError, RuntimeError):
         return False
 
 
 def load_report(path: Path, *, allow_legacy_capture: bool = False) -> dict:
     try:
-        report = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+        body = _read_report(path, REPORT_FILE_LIMIT_BYTES)
+        report = json.loads(body.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError(f"cannot read eval report {path}: {error}") from error
     issues = _strict_report_issues(
         report,
@@ -3588,6 +3594,71 @@ def _read_report_file_at(parent_descriptor: int, name: str, limit: int) -> bytes
     return bytes(body)
 
 
+def _read_report_portable(path: Path, limit: int) -> bytes:
+    if path.is_symlink():
+        raise OSError("eval report cannot be a symbolic link")
+    canonical = path.resolve(strict=True)
+    with canonical.open("rb") as handle:
+        before = os.fstat(handle.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
+            raise OSError("eval report is not a bounded regular file")
+        body = handle.read(limit + 1)
+        after = os.fstat(handle.fileno())
+    try:
+        current = canonical.stat(follow_symlinks=False)
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise OSError("eval report changed during reading") from error
+    if (
+        len(body) > limit
+        or resolved != canonical
+        or _report_file_identity(before) != _report_file_identity(after)
+        or _report_file_identity(after) != _report_file_identity(current)
+    ):
+        raise OSError("eval report changed during reading")
+    return body
+
+
+def _read_report(path: Path, limit: int) -> bytes:
+    target = path.absolute()
+    if not target.name or target.name in {".", ".."}:
+        raise OSError("invalid eval report path")
+    if limit <= 0:
+        raise ValueError("eval report byte cap must be positive")
+    if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
+        return _read_report_portable(target, limit)
+
+    requested_parent = target.parent
+    try:
+        canonical_parent = requested_parent.resolve(strict=True)
+        parent_descriptor = os.open(
+            canonical_parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK,
+        )
+    except (OSError, RuntimeError) as error:
+        raise OSError("cannot open eval report parent safely") from error
+    try:
+        expected_parent = os.fstat(parent_descriptor)
+        if not stat.S_ISDIR(expected_parent.st_mode):
+            raise OSError("eval report parent is not a directory")
+        _check_report_parent(
+            requested_parent,
+            canonical_parent,
+            parent_descriptor,
+            expected_parent,
+        )
+        body = _read_report_file_at(parent_descriptor, target.name, limit)
+        _check_report_parent(
+            requested_parent,
+            canonical_parent,
+            parent_descriptor,
+            expected_parent,
+        )
+        return body
+    finally:
+        os.close(parent_descriptor)
+
+
 def _write_report_portable(path: Path, body: bytes) -> None:
     temporary: Path | None = None
     try:
@@ -3604,7 +3675,7 @@ def _write_report_portable(path: Path, body: bytes) -> None:
             os.fsync(handle.fileno())
         temporary.replace(path)
         temporary = None
-        if path.read_bytes() != body:
+        if _read_report_portable(path, len(body)) != body:
             raise OSError("published eval report changed during verification")
     finally:
         if temporary is not None:
@@ -3615,6 +3686,8 @@ def write_report(path: Path, report: dict) -> None:
     body = (
         json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
     ).encode("utf-8")
+    if len(body) > REPORT_FILE_LIMIT_BYTES:
+        raise OSError("eval report exceeds its byte cap")
     target = path.absolute()
     if not target.name or target.name in {".", ".."}:
         raise OSError("invalid eval report path")

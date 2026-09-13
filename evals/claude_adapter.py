@@ -40,7 +40,7 @@ def prepare_runtime(trial: Path, spec: dict, limits: dict) -> dict:
     cli = bench.runtime_pin(spec["cli"], "claude_cli")
     python_path = Path(sys.executable).resolve(strict=True)
     python = bench.runtime_pin({"path": str(python_path),
-        "sha256": hashlib.sha256(bench.read_file(python_path, bench.BINARY_BYTE_LIMIT)).hexdigest(),
+        "sha256": bench.hash_file(python_path, bench.BINARY_BYTE_LIMIT)["sha256"],
         "version": sys.version.split()[0], "origin": "preparation interpreter; dependencies not attested"}, "python")
     runtime = trial / "runtime"
     runtime.mkdir(mode=0o700)

@@ -289,6 +289,8 @@ they do not establish compatibility with another installed version or a live API
 
 Preparation copies the adapter and its Python modules into each trial and pins
 every file, the preparation Python executable and the declared Claude binary.
+Executable identities are streamed under the binary byte cap instead of loading
+the complete executable into memory.
 Python uses `-I -S -B` to disable user/site imports and bytecode writes. Verification
 checks the bundle, sidecar descriptor and executable hashes before and after
 invocation. The CLI's `--version` output and stream version must match the pin.
@@ -327,7 +329,8 @@ Only condition three also exposes `mmcg_concept`, `mmcg_search`, `mmcg_outline`,
 index, command, environment or SQL. `mmcg_files.prefix` rejects `%`, `_` and
 backslash because the native implementation treats them as LIKE metacharacters.
 The broker invokes the pinned `--index FILE serve` read-only snapshot path,
-checks index contracts and hashes, and preserves native `isError`, ambiguity,
+checks index contracts and uses the stable hash returned by that validation,
+and preserves native `isError`, ambiguity,
 freshness, precision notes and truncation. A failed transport is closed before
 the next query. Tool replies are capped at 64 KiB and calls at 128 per server.
 

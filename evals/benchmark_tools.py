@@ -275,9 +275,11 @@ class SourceBroker:
         if self.native is None:
             graph = self.request["mmcg"]
             index = Path(graph["index"])
-            bench.validate_index(index, self.source, self.request["source_files"],
-                                 graph["index_contract"], graph["indexed_files"])
-            if hashlib.sha256(bench.read_file(index, bench.BINARY_BYTE_LIMIT)).hexdigest() != graph["index_sha256"]:
+            observed = bench.validate_index(
+                index, self.source, self.request["source_files"],
+                graph["index_contract"], graph["indexed_files"],
+            )
+            if observed != graph["index_sha256"]:
                 raise bench.BenchmarkError("index_changed", "index changed after preparation")
             bench.runtime_pin(graph["runtime"], "mmcg")
             env = bench.clean_environment(self.source.parent)

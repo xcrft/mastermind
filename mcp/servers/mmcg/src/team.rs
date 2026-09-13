@@ -610,16 +610,31 @@ fn inspect_repository(
     ))
 }
 
+fn lock_path_string(path: &Path, label: &str) -> Result<String, TeamError> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| TeamError::Contract(format!("{label} must be valid UTF-8")))
+}
+
 pub fn lock(manifest_path: &Path, output: &Path) -> Result<TeamLockSummary, TeamError> {
+    let output_label = lock_path_string(output, "team lock output path")?;
     let mut manifest = read_manifest(manifest_path, None, None)?;
     let resolved = resolve_repositories(manifest_path, &manifest)?;
     let deadline = Instant::now() + DEFAULT_DEADLINE;
     let mut total_bytes = 0_u64;
     for (entry, repository) in manifest.repositories.iter_mut().zip(&resolved) {
+        let root = lock_path_string(
+            &repository.root,
+            &format!("repository {} canonical root path", repository.manifest.id),
+        )?;
+        let index = lock_path_string(
+            &repository.index,
+            &format!("repository {} canonical index path", repository.manifest.id),
+        )?;
         let (_, identity, revision, digest) =
             inspect_repository(repository, deadline, &mut total_bytes)?;
-        entry.root = repository.root.to_string_lossy().into_owned();
-        entry.index = repository.index.to_string_lossy().into_owned();
+        entry.root = root;
+        entry.index = index;
         entry.repository_identity = Some(identity);
         entry.revision = Some(revision);
         entry.index_digest = Some(digest);
@@ -633,7 +648,7 @@ pub fn lock(manifest_path: &Path, output: &Path) -> Result<TeamLockSummary, Team
     Ok(TeamLockSummary {
         schema_version: 1,
         api_version: API_VERSION,
-        output: output.to_string_lossy().into_owned(),
+        output: output_label,
         manifest_sha256,
         repositories: manifest.repositories.len() as u32,
         relationships: manifest.relationships.len() as u32,
@@ -1115,6 +1130,34 @@ mod tests {
 
         assert!(matches!(error, TeamError::Contract(_)));
         assert_eq!(total_bytes, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_rejects_a_non_utf8_output_path_before_writing() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let parent = tempfile::tempdir().unwrap();
+        let output = parent
+            .path()
+            .join(OsString::from_vec(b"team-\xff.json".to_vec()));
+        let error = lock(&parent.path().join("missing.json"), &output).unwrap_err();
+
+        assert!(matches!(error, TeamError::Contract(_)));
+        assert!(error
+            .to_string()
+            .contains("output path must be valid UTF-8"));
+        assert!(!output.exists());
+
+        for label in [
+            "repository one canonical root path",
+            "repository one canonical index path",
+        ] {
+            let error = lock_path_string(&output, label).unwrap_err();
+            assert!(error.to_string().contains(label));
+            assert!(error.to_string().contains("must be valid UTF-8"));
+        }
     }
 
     #[test]

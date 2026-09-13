@@ -499,11 +499,10 @@ pub fn adapt(store: &Store, options: &AdaptOptions<'_>) -> Result<AdaptSummary, 
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn contained_artifact_rejects_a_backslash_path_alias() {
         let root = tempfile::tempdir().unwrap();

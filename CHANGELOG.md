@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- SARIF, LCOV/Cobertura, JUnit, and OTLP evidence no longer rewrites ambiguous
+  relative backslash paths onto another Unix source file. Unsafe paths are
+  omitted with partial-source diagnostics, while absolute Windows drive and UNC
+  paths remain portable across build hosts.
 - Fact-adapter inputs and installed workflow ownership digests now reject
   non-UTF-8 or ambiguous repository-relative artifact paths instead of hashing
   or importing them under another path identity.

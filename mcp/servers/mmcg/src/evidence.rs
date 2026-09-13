@@ -1295,11 +1295,16 @@ impl Collector<'_> {
                         .and_then(Value::as_str)
                         .and_then(|base_id| bases.get(base_id))
                         .map_or_else(|| uri.to_string(), |base| join_uri(base, uri));
-                    let Some(repo_path) =
-                        normalize_evidence_path(self.root, &combined, &self.relevant)
-                    else {
-                        continue;
-                    };
+                    let repo_path =
+                        match normalize_evidence_path(self.root, &combined, &self.relevant) {
+                            Ok(Some(path)) => path,
+                            Ok(None) => continue,
+                            Err(_) => {
+                                stats.partial = true;
+                                stats.invalid_records = true;
+                                continue;
+                            }
+                        };
                     let line = location
                         .pointer("/physicalLocation/region/startLine")
                         .and_then(Value::as_u64)
@@ -1332,6 +1337,13 @@ impl Collector<'_> {
                 id.clone(),
                 "finding_limit",
                 "Some matching SARIF findings were omitted by the bounded evidence envelope.",
+            );
+        }
+        if stats.invalid_records {
+            self.diagnostic(
+                id.clone(),
+                "invalid_sarif_record",
+                "Some SARIF locations had unsafe paths and were skipped.",
             );
         }
         self.source_done(id, "sarif", label, stats);
@@ -1429,9 +1441,14 @@ impl Collector<'_> {
             let Some(raw_path) = case.file.as_deref() else {
                 continue;
             };
-            let Some(repo_path) = normalize_evidence_path(self.root, raw_path, &self.relevant)
-            else {
-                continue;
+            let repo_path = match normalize_evidence_path(self.root, raw_path, &self.relevant) {
+                Ok(Some(path)) => path,
+                Ok(None) => continue,
+                Err(_) => {
+                    stats.partial = true;
+                    stats.invalid_records = true;
+                    continue;
+                }
             };
             let (added, failure_truncated) = self.add_test_case(&repo_path, &id, case);
             if added {
@@ -1506,9 +1523,14 @@ impl Collector<'_> {
             let Some(raw_path) = span.file.as_deref() else {
                 continue;
             };
-            let Some(repo_path) = normalize_evidence_path(self.root, raw_path, &self.relevant)
-            else {
-                continue;
+            let repo_path = match normalize_evidence_path(self.root, raw_path, &self.relevant) {
+                Ok(Some(path)) => path,
+                Ok(None) => continue,
+                Err(_) => {
+                    stats.partial = true;
+                    stats.invalid_records = true;
+                    continue;
+                }
             };
             if !self.add_runtime_span(&repo_path, &id, &span.trace_id) {
                 stats.partial = true;
@@ -2451,7 +2473,7 @@ fn sarif_rules(run: &Value) -> Vec<SarifRule> {
 }
 
 fn join_uri(base: &str, relative: &str) -> String {
-    if relative.starts_with("file:") || Path::new(relative).is_absolute() {
+    if relative.starts_with("file:") || absolute_evidence_path(relative) {
         return relative.to_string();
     }
     format!(
@@ -2461,65 +2483,127 @@ fn join_uri(base: &str, relative: &str) -> String {
     )
 }
 
-fn normalize_evidence_path(root: &Path, raw: &str, relevant: &BTreeSet<String>) -> Option<String> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InvalidEvidencePath;
+
+#[cfg(not(windows))]
+fn windows_absolute_evidence_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let offset = usize::from(bytes.first() == Some(&b'/'));
+    let drive_absolute = bytes.get(offset).is_some_and(u8::is_ascii_alphabetic)
+        && bytes.get(offset + 1) == Some(&b':')
+        && bytes
+            .get(offset + 2)
+            .is_some_and(|byte| matches!(*byte, b'/' | b'\\'));
+    let unc = value
+        .strip_prefix(r"\\")
+        .or_else(|| value.strip_prefix(r"/\\"))
+        .is_some_and(|rest| {
+            let mut parts = rest.split(['/', '\\']);
+            parts.next().is_some_and(|part| !part.is_empty())
+                && parts.next().is_some_and(|part| !part.is_empty())
+        });
+    drive_absolute || unc
+}
+
+fn absolute_evidence_path(value: &str) -> bool {
+    if Path::new(value).is_absolute() {
+        return true;
+    }
+    #[cfg(not(windows))]
+    {
+        windows_absolute_evidence_path(value)
+    }
+    #[cfg(windows)]
+    {
+        false
+    }
+}
+
+fn normalize_evidence_path(
+    root: &Path,
+    raw: &str,
+    relevant: &BTreeSet<String>,
+) -> Result<Option<String>, InvalidEvidencePath> {
     let without_fragment = raw.split(['?', '#']).next().unwrap_or(raw);
     if without_fragment.contains("://")
         && !without_fragment.starts_with("file:///")
         && !without_fragment.starts_with("file://localhost/")
     {
-        return None;
+        return Ok(None);
     }
-    let decoded = percent_decode(without_fragment)?;
+    let decoded = percent_decode(without_fragment).ok_or(InvalidEvidencePath)?;
     let decoded = decoded
         .strip_prefix("file://localhost")
         .or_else(|| decoded.strip_prefix("file://"))
-        .unwrap_or(&decoded)
-        .replace('\\', "/");
+        .unwrap_or(&decoded);
+    #[cfg(windows)]
+    let decoded = decoded.replace('\\', "/");
+    #[cfg(not(windows))]
+    let decoded = if decoded.contains('\\') {
+        if !windows_absolute_evidence_path(decoded) {
+            return Err(InvalidEvidencePath);
+        }
+        decoded.replace('\\', "/")
+    } else {
+        decoded.to_string()
+    };
     if decoded
         .chars()
         .any(|character| character == '\0' || character.is_control())
     {
-        return None;
+        return Err(InvalidEvidencePath);
     }
     if Path::new(&decoded)
         .components()
         .any(|component| matches!(component, Component::ParentDir))
     {
-        return None;
+        return Err(InvalidEvidencePath);
     }
 
     let candidate = PathBuf::from(&decoded);
     if candidate.is_absolute() {
         if let Ok(relative) = candidate.strip_prefix(root) {
-            let normalized = normalize_relative(relative)?;
+            let normalized = normalize_relative(relative).ok_or(InvalidEvidencePath)?;
             if relevant.contains(&normalized) {
-                return Some(normalized);
+                return Ok(Some(normalized));
             }
         }
         if let Ok(canonical) = candidate.canonicalize() {
             if let Ok(relative) = canonical.strip_prefix(root) {
-                let normalized = normalize_relative(relative)?;
+                let normalized = normalize_relative(relative).ok_or(InvalidEvidencePath)?;
                 if relevant.contains(&normalized) {
-                    return Some(normalized);
+                    return Ok(Some(normalized));
                 }
             }
         }
     }
 
-    let root_text = display_path(root);
-    if let Some(relative) = decoded
-        .strip_prefix(&root_text)
-        .and_then(|value| value.strip_prefix('/').or(Some(value)))
-    {
-        let normalized = normalize_relative(Path::new(relative))?;
-        if relevant.contains(&normalized) {
-            return Some(normalized);
+    let root_text = root.to_str().map(|root_text| {
+        #[cfg(windows)]
+        {
+            root_text.replace('\\', "/")
+        }
+        #[cfg(not(windows))]
+        {
+            root_text.to_string()
+        }
+    });
+    if let Some(root_text) = root_text {
+        if let Some(relative) = decoded
+            .strip_prefix(&root_text)
+            .and_then(|value| value.strip_prefix('/').or(Some(value)))
+        {
+            let normalized = normalize_relative(Path::new(relative)).ok_or(InvalidEvidencePath)?;
+            if relevant.contains(&normalized) {
+                return Ok(Some(normalized));
+            }
         }
     }
 
     if let Some(normalized) = normalize_relative(Path::new(decoded.trim_start_matches('/'))) {
         if relevant.contains(&normalized) {
-            return Some(normalized);
+            return Ok(Some(normalized));
         }
     }
 
@@ -2527,8 +2611,10 @@ fn normalize_evidence_path(root: &Path, raw: &str, relevant: &BTreeSet<String>) 
     let mut matches = relevant
         .iter()
         .filter(|path| suffix == path.as_str() || suffix.ends_with(&format!("/{path}")));
-    let first = matches.next()?.clone();
-    matches.next().is_none().then_some(first)
+    let Some(first) = matches.next().cloned() else {
+        return Ok(None);
+    };
+    Ok(matches.next().is_none().then_some(first))
 }
 
 fn normalize_relative(path: &Path) -> Option<String> {
@@ -2538,7 +2624,7 @@ fn normalize_relative(path: &Path) -> Option<String> {
             Component::CurDir => {}
             Component::Normal(value) => {
                 let value = value.to_str()?;
-                if value.is_empty() || value.chars().any(char::is_control) {
+                if value.is_empty() || value.contains('\\') || value.chars().any(char::is_control) {
                     return None;
                 }
                 parts.push(value);
@@ -2598,7 +2684,14 @@ fn parse_lcov(
         }
         if let Some(path) = line.strip_prefix("SF:") {
             saw_format_marker = true;
-            current = normalize_evidence_path(root, path.trim(), relevant);
+            current = match normalize_evidence_path(root, path.trim(), relevant) {
+                Ok(path) => path,
+                Err(_) => {
+                    stats.partial = true;
+                    stats.invalid_records = true;
+                    None
+                }
+            };
             continue;
         }
         if line == "end_of_record" {
@@ -2747,15 +2840,34 @@ fn add_cobertura_line(
         stats.invalid_records = true;
         return;
     };
-    let path = normalize_evidence_path(root, filename, relevant).or_else(|| {
-        sources.iter().find_map(|source| {
-            normalize_evidence_path(
+    let mut invalid_path = false;
+    let mut path = match normalize_evidence_path(root, filename, relevant) {
+        Ok(path) => path,
+        Err(_) => {
+            invalid_path = true;
+            None
+        }
+    };
+    if path.is_none() {
+        for source in sources {
+            match normalize_evidence_path(
                 root,
                 &format!("{}/{filename}", source.trim_end_matches('/')),
                 relevant,
-            )
-        })
-    });
+            ) {
+                Ok(Some(resolved)) => {
+                    path = Some(resolved);
+                    break;
+                }
+                Ok(None) => {}
+                Err(_) => invalid_path = true,
+            }
+        }
+    }
+    if path.is_none() && invalid_path {
+        stats.partial = true;
+        stats.invalid_records = true;
+    }
     if let Some(path) = path {
         records
             .entry(path)
@@ -3595,11 +3707,11 @@ mod tests {
         let relevant = BTreeSet::from(["src/pay me.rs".to_string()]);
         assert_eq!(
             normalize_evidence_path(root.path(), "src/pay%20me.rs", &relevant),
-            Some("src/pay me.rs".into())
+            Ok(Some("src/pay me.rs".into()))
         );
         assert_eq!(
             normalize_evidence_path(root.path(), "../src/pay%20me.rs", &relevant),
-            None
+            Err(InvalidEvidencePath)
         );
         assert_eq!(
             normalize_evidence_path(
@@ -3607,17 +3719,63 @@ mod tests {
                 "https://reports.example/src/pay%20me.rs",
                 &relevant,
             ),
-            None
+            Ok(None)
         );
         #[cfg(unix)]
-        assert_eq!(
-            normalize_evidence_path(
-                root.path(),
-                &format!("file://{}", root.path().join("src/pay me.rs").display()),
-                &relevant,
-            ),
-            Some("src/pay me.rs".into())
-        );
+        {
+            assert_eq!(
+                normalize_evidence_path(
+                    root.path(),
+                    &format!("file://{}", root.path().join("src/pay me.rs").display()),
+                    &relevant,
+                ),
+                Ok(Some("src/pay me.rs".into()))
+            );
+            assert_eq!(
+                normalize_evidence_path(root.path(), r"src\pay me.rs", &relevant),
+                Err(InvalidEvidencePath)
+            );
+            assert_eq!(
+                normalize_evidence_path(root.path(), r"C:\work\src\pay me.rs", &relevant),
+                Ok(Some("src/pay me.rs".into()))
+            );
+            assert_eq!(
+                join_uri("file:///ignored", r"C:\work\src\pay me.rs"),
+                r"C:\work\src\pay me.rs"
+            );
+            assert_eq!(
+                normalize_evidence_path(root.path(), r"\\server\share\src\pay me.rs", &relevant,),
+                Ok(Some("src/pay me.rs".into()))
+            );
+            assert_eq!(
+                normalize_evidence_path(root.path(), "src%5Cpay%20me.rs", &relevant),
+                Err(InvalidEvidencePath)
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_backslash_evidence_is_partial_and_not_attributed() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join("coverage.info"),
+            "SF:src\\pay.rs\nDA:1,1\nend_of_record\n",
+        )
+        .unwrap();
+        let mut collector = collector(root.path(), &["src/pay.rs"]);
+
+        collector.load_coverage(Path::new("coverage.info"), "coverage:0".into());
+        let snapshot = collector.finish(0);
+
+        assert!(snapshot.partial);
+        assert_eq!(snapshot.sources.items[0].status, "partial");
+        assert!(snapshot.files.items.is_empty());
+        assert!(snapshot
+            .diagnostics
+            .items
+            .iter()
+            .any(|diagnostic| diagnostic.code == "invalid_coverage_record"));
     }
 
     #[test]

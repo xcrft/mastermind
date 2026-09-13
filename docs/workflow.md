@@ -208,7 +208,9 @@ builds, tests, and runtime probes remain source/tool work rather than graph work
 Mechanical drift may create one lesson candidate per task. A candidate records
 the observed failure; it is not reusable guidance until semantic review writes
 the actual lesson and changes its status. Repeated failures refresh the same
-candidate instead of creating duplicates.
+candidate instead of creating duplicates. The candidate key uses the exact
+canonical repository-relative spec path, so task names that sanitize to the
+same display label remain separate.
 The refresh changes event counts, observations and the latest event evidence;
 it preserves reviewed provenance, evidence, lesson text and review notes.
 The candidate store is capped at 1 MiB, matching history indexing, and updated

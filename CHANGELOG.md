@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Lesson candidates now deduplicate by exact repository-relative spec identity
+  instead of a sanitized task label, preventing distinct task folders from
+  merging their evidence and occurrence counts.
 - Lens evidence and review manifests now require exact source labels; non-UTF-8
   names and Unix backslash aliases cannot be bound to a different path. Review
   output paths are also validated before package publication.

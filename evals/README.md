@@ -177,10 +177,13 @@ grader to `runner.py`, `benchmark_process.py`, `evidence.py`, Python, the
 platform, and PyYAML with `evaluation_harness.sha256`. That harness must remain
 stable within a run and match any non-legacy baseline, so a grader change cannot
 masquerade as agent quality improvement. Researcher and auditor runs also pin
-the exact Git
-and mmcg executables used to construct and index fixtures. Their hashes, Git
-version, and stability are recorded as `fixture_runtime`; future baselines must
-match them. Prompt-only suites do not require Git or mmcg.
+the exact Git and mmcg executables used to construct and index fixtures. Their
+hashes, Git version, and stability are recorded as `fixture_runtime`; future
+baselines must match them. An auditor case that reports a supported test command
+grants only its exact `cargo test --locked <test-filter>` command. The runner
+pins the Cargo launcher ahead of
+the inherited PATH, and records its executable identity and stability as
+`verification_runtime`. Prompt-only suites do not require Git, mmcg, or Cargo.
 
 ## Researcher and auditor fixture lifecycle
 
@@ -369,6 +372,9 @@ prompt under evaluation cannot operate on the maintainer checkout.
 - Use `min_turns`, `max_turns`, or `max_output_tokens` only when the behavior
   has a real tool-use or response budget. Claude's reported output includes
   intermediate tool-call turns, not only the final prose.
+- Keep `verification_rerun` to one focused canonical command:
+  `cargo test --locked <test-filter>`. Additional flags, wrappers, redirections,
+  pipes, and compound shell commands are rejected.
 - Use `code_comments` only when generated code, rather than prose advice, is
   under test.
 - Run the focused case before the full suite and record full-suite results in

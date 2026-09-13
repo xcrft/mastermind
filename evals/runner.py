@@ -248,7 +248,9 @@ AUDITOR_SAFE_ALLOWED_TOOLS = (
     "Bash(git ls-files)",
     "Bash(git ls-files *)",
     "Bash(git grep *)",
-    "Bash(cargo test --locked *)",
+)
+_VERIFICATION_RERUN_RE = re.compile(
+    r"cargo test --locked [A-Za-z0-9_][A-Za-z0-9_.:-]{0,199}"
 )
 
 
@@ -439,8 +441,42 @@ def subagent_mcp_tools(path: Path) -> tuple[str, ...]:
     )
 
 
+def verification_rerun_command(value: object) -> str:
+    if not isinstance(value, str) or _VERIFICATION_RERUN_RE.fullmatch(value) is None:
+        raise ValueError(
+            "expect.verification_rerun must be exactly "
+            "`cargo test --locked <test-filter>` with a canonical test filter"
+        )
+    return value
+
+
+def reported_cargo_verification_commands(case: dict) -> tuple[str, ...]:
+    inp = case.get("input")
+    report = inp.get("executor_report") if isinstance(inp, dict) else None
+    if not isinstance(report, str):
+        return ()
+    commands: list[str] = []
+    for line in report.splitlines():
+        if not line.startswith("VERIFY: "):
+            continue
+        candidate = line.removeprefix("VERIFY: ")
+        command, separator, status = candidate.rpartition(" — ")
+        if separator and status in {"PASSED", "FAILED", "OK"}:
+            candidate = command
+        try:
+            candidate = verification_rerun_command(candidate)
+        except ValueError:
+            continue
+        if candidate not in commands:
+            commands.append(candidate)
+    return tuple(commands)
+
+
 def auditor_allowed_tools(
-    subagent: Path | None = None, *, include_mmcg: bool = True
+    subagent: Path | None = None,
+    *,
+    include_mmcg: bool = True,
+    verification_commands: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     mcp_tools = (
         subagent_mcp_tools(
@@ -449,7 +485,11 @@ def auditor_allowed_tools(
         if include_mmcg
         else ()
     )
-    return AUDITOR_SAFE_ALLOWED_TOOLS + mcp_tools
+    verification_tools = tuple(
+        f"Bash({verification_rerun_command(command)})"
+        for command in verification_commands
+    )
+    return AUDITOR_SAFE_ALLOWED_TOOLS + verification_tools + mcp_tools
 
 
 def researcher_allowed_tools(
@@ -546,10 +586,31 @@ def evaluation_environment(
         }
     )
     pinned_directories: list[str] = []
+    pinned_by_name: dict[str, Path] = {}
     for executable in pinned_executables:
         path = Path(executable)
         if not path.is_absolute():
             raise ValueError("pinned evaluation executables must be absolute paths")
+        previous = pinned_by_name.get(path.name)
+        if previous is not None and previous != path:
+            raise ValueError(
+                f"multiple pinned executables are named {path.name!r}"
+            )
+        pinned_by_name[path.name] = path
+        for earlier_directory in pinned_directories:
+            earlier_candidate = Path(earlier_directory) / path.name
+            if not earlier_candidate.exists():
+                continue
+            try:
+                same_executable = os.path.samefile(earlier_candidate, path)
+            except OSError as error:
+                raise ValueError(
+                    f"cannot verify pinned {path.name!r} PATH precedence"
+                ) from error
+            if not same_executable:
+                raise ValueError(
+                    f"pinned {path.name!r} is shadowed by an earlier runtime directory"
+                )
         directory = str(path.parent)
         if directory not in pinned_directories:
             pinned_directories.append(directory)
@@ -1533,14 +1594,12 @@ def validate_case_record(suite_name: str, record: object) -> None:
         ):
             raise ValueError("expect.verdict contradicts not_contains")
     if "verification_rerun" in expect:
-        command = expect["verification_rerun"]
-        if (
-            not _nonblank_case_text(command)
-            or command.strip() != command
-            or "\n" in command
-            or "\r" in command
-        ):
-            raise ValueError("expect.verification_rerun must be one command line")
+        command = verification_rerun_command(expect["verification_rerun"])
+        if command not in reported_cargo_verification_commands(record):
+            raise ValueError(
+                "expect.verification_rerun must match a safe VERIFY command "
+                "in input.executor_report"
+            )
     if "citations" in expect:
         _validate_citation_expectations(expect["citations"])
     if "code_comments" in expect:
@@ -1969,6 +2028,16 @@ def fixture_runtime_definition(
     }
 
 
+def verification_runtime_definition(cargo_binary: Path) -> dict[str, object]:
+    if cargo_binary.name != "cargo":
+        raise ValueError("verification runtime launcher must be named `cargo`")
+    return {
+        "cargo": _stable_regular_file_definition(
+            cargo_binary.resolve(strict=True)
+        )
+    }
+
+
 def build_report(
     results: list[Result],
     *,
@@ -1987,6 +2056,8 @@ def build_report(
     harness_stable: bool = True,
     fixture_runtime: dict[str, object] | None = None,
     fixture_runtime_stable: bool = True,
+    verification_runtime: dict[str, object] | None = None,
+    verification_runtime_stable: bool = True,
 ) -> dict:
     suites: dict[str, list[Result]] = {}
     for result in results:
@@ -2048,6 +2119,11 @@ def build_report(
         report["fixture_runtime"] = {
             **fixture_runtime,
             "stable": fixture_runtime_stable,
+        }
+    if verification_runtime is not None:
+        report["verification_runtime"] = {
+            **verification_runtime,
+            "stable": verification_runtime_stable,
         }
     return report
 
@@ -2170,6 +2246,15 @@ def _valid_evaluation_runtime_controls(value: object) -> bool:
         )
     ):
         return False
+    for permission in tool_policy["allowed"]:
+        if not permission.startswith("Bash(cargo"):
+            continue
+        if not permission.endswith(")"):
+            return False
+        try:
+            verification_rerun_command(permission[5:-1])
+        except ValueError:
+            return False
 
     environment = value["environment"]
     return (
@@ -2208,6 +2293,7 @@ def report_comparison_issues(
     require_runtime_identity: bool = False,
     require_harness_identity: bool = False,
     require_fixture_runtime: bool = False,
+    require_verification_runtime: bool = False,
     require_definition_stability: bool = False,
     require_case_runtime_controls: bool = False,
     allow_legacy_capture: bool = False,
@@ -2227,6 +2313,7 @@ def report_comparison_issues(
         "claude_cli_stable",
         "evaluation_harness",
         "fixture_runtime",
+        "verification_runtime",
         "filters",
         "suites",
         "cases",
@@ -2363,6 +2450,32 @@ def report_comparison_issues(
             issues.append(f"{label} report has invalid fixture runtime identity")
         elif not fixture_runtime["stable"]:
             issues.append(f"{label} report changed fixture runtime during run")
+
+    verification_runtime = report.get("verification_runtime")
+    if verification_runtime is None:
+        if require_verification_runtime:
+            issues.append(f"{label} report has no verification runtime identity")
+    elif not isinstance(verification_runtime, dict) or set(
+        verification_runtime
+    ) != {"cargo", "stable"}:
+        issues.append(f"{label} report has invalid verification runtime identity")
+    else:
+        cargo_runtime = verification_runtime["cargo"]
+        if (
+            not isinstance(cargo_runtime, dict)
+            or set(cargo_runtime) != {"sha256", "git_mode"}
+            or not isinstance(cargo_runtime["sha256"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", cargo_runtime["sha256"]) is None
+            or cargo_runtime["git_mode"] not in {"100644", "100755"}
+            or not isinstance(verification_runtime["stable"], bool)
+        ):
+            issues.append(
+                f"{label} report has invalid verification runtime identity"
+            )
+        elif not verification_runtime["stable"]:
+            issues.append(
+                f"{label} report changed verification runtime during run"
+            )
 
     filters = report.get("filters")
     if (
@@ -2816,6 +2929,23 @@ def load_report(path: Path) -> dict:
     return report
 
 
+def _report_uses_cargo_verification(report: object) -> bool:
+    if not isinstance(report, dict) or not isinstance(report.get("cases"), list):
+        return False
+    for case in report["cases"]:
+        if not isinstance(case, dict):
+            continue
+        controls = case.get("runtime_controls")
+        policy = controls.get("tool_policy") if isinstance(controls, dict) else None
+        allowed = policy.get("allowed") if isinstance(policy, dict) else None
+        if isinstance(allowed, list) and any(
+            isinstance(tool, str) and tool.startswith("Bash(cargo test --locked ")
+            for tool in allowed
+        ):
+            return True
+    return False
+
+
 def compare_to_baseline(current: dict, baseline: dict) -> dict:
     checks: list[dict] = []
     current_summaries = current.get("suites") if isinstance(current, dict) else None
@@ -2823,6 +2953,7 @@ def compare_to_baseline(current: dict, baseline: dict) -> dict:
         SUITES.get(name, {}).get("uses_fixture") is True
         for name in current_summaries
     )
+    current_uses_verification = _report_uses_cargo_verification(current)
     failures = [
         *report_comparison_issues(
             current,
@@ -2831,12 +2962,14 @@ def compare_to_baseline(current: dict, baseline: dict) -> dict:
             require_runtime_identity=True,
             require_harness_identity=True,
             require_fixture_runtime=current_uses_fixture,
+            require_verification_runtime=current_uses_verification,
             require_definition_stability=True,
             require_case_runtime_controls=True,
         ),
         *report_comparison_issues(
             baseline,
             "baseline",
+            require_verification_runtime=current_uses_verification,
             require_case_runtime_controls=True,
             allow_legacy_capture=True,
         ),
@@ -2899,6 +3032,23 @@ def compare_to_baseline(current: dict, baseline: dict) -> dict:
         }
         if current_fixture_identity != baseline_fixture_identity:
             failures.append("fixture runtime differs from baseline")
+    current_verification_runtime = current.get("verification_runtime")
+    baseline_verification_runtime = baseline.get("verification_runtime")
+    if isinstance(current_verification_runtime, dict) and isinstance(
+        baseline_verification_runtime, dict
+    ):
+        current_verification_identity = {
+            key: value
+            for key, value in current_verification_runtime.items()
+            if key != "stable"
+        }
+        baseline_verification_identity = {
+            key: value
+            for key, value in baseline_verification_runtime.items()
+            if key != "stable"
+        }
+        if current_verification_identity != baseline_verification_identity:
+            failures.append("verification runtime differs from baseline")
 
     if current.get("filters") != baseline.get("filters"):
         failures.append("current filters differ from baseline filters")
@@ -3552,6 +3702,7 @@ def isolated_cli_args(
     *,
     subagent: Path | None = None,
     include_mmcg: bool = True,
+    verification_commands: tuple[str, ...] = (),
 ) -> list[str]:
     """Deny repository tools to suites whose fixtures exist only in prompts."""
     if suite_name in {"critic", "intake", "workflow"}:
@@ -3587,7 +3738,11 @@ def isolated_cli_args(
             "Read,Glob,Grep,Bash",
             "--allowedTools",
             ",".join(
-                auditor_allowed_tools(subagent, include_mmcg=include_mmcg)
+                auditor_allowed_tools(
+                    subagent,
+                    include_mmcg=include_mmcg,
+                    verification_commands=verification_commands,
+                )
             ),
             "--setting-sources",
             "",
@@ -3640,6 +3795,7 @@ def evaluation_runtime_controls(
     expect: dict,
     *,
     include_mmcg: bool,
+    verification_commands: tuple[str, ...] = (),
 ) -> dict[str, object]:
     """Describe the effective case policy that can change eval outcomes."""
     limits = case_runtime_limits(suite_name, expect)
@@ -3650,6 +3806,15 @@ def evaluation_runtime_controls(
         suite_name,
         subagent=subagent,
         include_mmcg=include_mmcg,
+        verification_commands=(
+            verification_commands
+            if verification_commands
+            else (
+                (verification_rerun_command(expect["verification_rerun"]),)
+                if expect.get("verification_rerun") is not None
+                else ()
+            )
+        ),
     )
     environment = evaluation_environment(
         limits["max_output_tokens"], source={}
@@ -3932,6 +4097,10 @@ def audit_verification_passed(
     expected_command: str,
     tool_executions: list[ToolExecution],
 ) -> bool:
+    try:
+        verification_rerun_command(expected_command)
+    except ValueError:
+        return False
     data = extract_audit_data(output)
     if not data:
         return False
@@ -4116,8 +4285,10 @@ def evaluate_case(
     claude_version: str | None = None,
     git_binary: str | Path = "git",
     mmcg_binary: str | Path | None = MMCG_BIN,
+    cargo_binary: str | Path | None = None,
 ) -> Result:
     case_id = case["id"]
+    verification_commands = reported_cargo_verification_commands(case)
     prompt_path = (
         workflow_prompt_path(case, repository_root=workflow_root)
         if suite_name == "workflow"
@@ -4153,6 +4324,7 @@ def evaluate_case(
                 prompt_path,
                 case.get("expect", {}),
                 include_mmcg=has_mmcg,
+                verification_commands=verification_commands,
             )
             if suite_name in {"auditor", "researcher"} and not has_mmcg and not case.get("allow_no_mmcg"):
                 return failed_evaluation_result(
@@ -4205,6 +4377,20 @@ def evaluate_case(
                 prompt_path,
                 case.get("expect", {}),
                 include_mmcg=False,
+                verification_commands=verification_commands,
+            )
+        if verification_commands and (
+            cargo_binary is None or not Path(cargo_binary).is_absolute()
+        ):
+            return failed_evaluation_result(
+                case_id,
+                suite_name,
+                "pinned Cargo runtime unavailable for required verification",
+                fixture_path=fixture_path,
+                telemetry_issue=(
+                    "evaluation did not start because pinned Cargo was unavailable"
+                ),
+                runtime_controls=runtime_controls,
             )
 
         # Pass the user message via stdin — passing it as a positional arg
@@ -4231,6 +4417,7 @@ def evaluate_case(
                 prompt_path if suite_name in {"auditor", "researcher"} else None
             ),
             include_mmcg=has_mmcg,
+            verification_commands=verification_commands,
         )
         if requires_prompt_sandbox(suite_name):
             prompt_sandbox = tempfile.TemporaryDirectory(prefix="mastermind-eval-")
@@ -4286,11 +4473,11 @@ def evaluate_case(
         # absorbs tail latency. Byte caps keep a broken or noisy CLI from
         # retaining an unbounded stream in memory. The process-group supervisor
         # also removes MCP descendants after every outcome.
-        pinned_executables = (
-            (git_binary,)
-            if suite_cfg["uses_fixture"] and Path(git_binary).is_absolute()
-            else ()
-        )
+        pinned_executables: tuple[str | Path, ...] = ()
+        if suite_cfg["uses_fixture"] and Path(git_binary).is_absolute():
+            pinned_executables += (git_binary,)
+        if verification_commands and cargo_binary is not None:
+            pinned_executables += (cargo_binary,)
         proc = run_bounded(
             cmd,
             cwd=case_cwd,
@@ -4623,7 +4810,9 @@ def main() -> int:
     target_definition_stability: dict[str, bool] = {}
     git_binary: Path | None = None
     mmcg_binary: Path | None = None
+    cargo_binary: Path | None = None
     frozen_fixture_runtime: dict[str, object] | None = None
+    frozen_verification_runtime: dict[str, object] | None = None
 
     for suite_name in suites_to_run:
         suite_cfg = SUITES[suite_name]
@@ -4666,6 +4855,37 @@ def main() -> int:
             except (OSError, RuntimeError, ValueError) as error:
                 print(
                     f"error: cannot freeze fixture runtime: {error}",
+                    file=sys.stderr,
+                )
+                return 2
+
+        suite_uses_verification = suite_name == "auditor" and any(
+            reported_cargo_verification_commands(case)
+            for case in suite_cases
+        )
+        if suite_uses_verification and frozen_verification_runtime is None:
+            cargo_location = shutil.which("cargo")
+            if not cargo_location:
+                print(
+                    "error: `cargo` not on PATH (required for auditor verification).",
+                    file=sys.stderr,
+                )
+                return 2
+            try:
+                cargo_binary = Path(cargo_location).absolute()
+                frozen_verification_runtime = verification_runtime_definition(
+                    cargo_binary
+                )
+                if git_binary is None:
+                    raise ValueError("pinned Git runtime unavailable")
+                evaluation_environment(
+                    1,
+                    source={},
+                    pinned_executables=(git_binary, cargo_binary),
+                )
+            except (OSError, RuntimeError, ValueError) as error:
+                print(
+                    f"error: cannot freeze verification runtime: {error}",
                     file=sys.stderr,
                 )
                 return 2
@@ -4781,6 +5001,7 @@ def main() -> int:
                     claude_version=frozen_claude_version,
                     git_binary=git_binary or "git",
                     mmcg_binary=mmcg_binary,
+                    cargo_binary=cargo_binary,
                 )
                 _SENTINEL_MISSING = "no structured audit verdict block found"
                 if (
@@ -4799,6 +5020,7 @@ def main() -> int:
                         claude_version=frozen_claude_version,
                         git_binary=git_binary or "git",
                         mmcg_binary=mmcg_binary,
+                        cargo_binary=cargo_binary,
                     )
                     r2.retry_attempted = True
                     r2.add_attempt(r)
@@ -4938,6 +5160,37 @@ def main() -> int:
                     result.reasons.append(reason)
             print(f"  ✗ FAIL  {reason}")
 
+    verification_runtime_stable = True
+    if frozen_verification_runtime is not None:
+        try:
+            verification_runtime_after_run = (
+                None
+                if cargo_binary is None
+                else verification_runtime_definition(cargo_binary)
+            )
+            if cargo_binary is not None:
+                if git_binary is None:
+                    raise ValueError("pinned Git runtime unavailable")
+                evaluation_environment(
+                    1,
+                    source={},
+                    pinned_executables=(git_binary, cargo_binary),
+                )
+        except (OSError, RuntimeError, ValueError):
+            verification_runtime_after_run = None
+        verification_runtime_stable = (
+            verification_runtime_after_run == frozen_verification_runtime
+        )
+        if not verification_runtime_stable:
+            reason = "Cargo verification runtime changed during evaluation"
+            for result in results:
+                if result.suite != "auditor":
+                    continue
+                result.passed = False
+                if reason not in result.reasons:
+                    result.reasons.append(reason)
+            print(f"  ✗ FAIL  {reason}")
+
     repository_revision_after_run = git_revision()
     if repository_revision_after_run != frozen_repository_revision:
         reason = "repository HEAD changed during evaluation"
@@ -4993,6 +5246,8 @@ def main() -> int:
         harness_stable=harness_stable,
         fixture_runtime=frozen_fixture_runtime,
         fixture_runtime_stable=fixture_runtime_stable,
+        verification_runtime=frozen_verification_runtime,
+        verification_runtime_stable=verification_runtime_stable,
     )
     for suite_name, summary in report["suites"].items():
         context = summary["usage"]["context_tokens"]

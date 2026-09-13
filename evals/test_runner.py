@@ -198,6 +198,55 @@ verifications_rerun:
                 duplicate, "cargo test --locked exact_test", [execution]
             )
         )
+        self.assertFalse(
+            runner.audit_verification_passed(
+                output,
+                "cargo test --locked exact_test && echo unsafe",
+                [execution],
+            )
+        )
+
+    def test_verification_rerun_is_one_canonical_focused_cargo_test(self):
+        command = "cargo test --locked module::exact_test"
+        self.assertEqual(runner.verification_rerun_command(command), command)
+        for invalid in (
+            "cargo test exact_test",
+            "cargo test --locked --all",
+            "cargo  test --locked exact_test",
+            "cargo test --locked exact/test",
+            "cargo test --locked 'exact test'",
+            "cargo test --locked exact_test && echo unsafe",
+            "cargo test --locked exact_test\nwhoami",
+        ):
+            with self.subTest(command=invalid), self.assertRaisesRegex(
+                ValueError, "must be exactly"
+            ):
+                runner.verification_rerun_command(invalid)
+
+        case = {
+            "input": {
+                "executor_report": (
+                    "VERIFY: cargo test --locked module::exact_test — PASSED\n"
+                    "VERIFY: cargo test --locked other_test && echo unsafe — PASSED\n"
+                    "VERIFY: python -m pytest — PASSED"
+                )
+            }
+        }
+        self.assertEqual(
+            runner.reported_cargo_verification_commands(case),
+            ("cargo test --locked module::exact_test",),
+        )
+
+        auditor = deepcopy(
+            runner.load_case_records(
+                runner.SUITES["auditor"]["cases"], suite_name="auditor"
+            )[2]
+        )
+        auditor["expect"]["verification_rerun"] = (
+            "cargo test --locked different_test"
+        )
+        with self.assertRaisesRegex(ValueError, "must match a safe VERIFY"):
+            runner.validate_case_record("auditor", auditor)
 
     def test_auditor_case_requires_the_attested_bash_execution(self):
         case = runner.load_case_records(
@@ -314,6 +363,7 @@ verifications_rerun:
                         mmcg_binary=None,
                         claude_version="2.1.236 (Claude Code)",
                         git_binary=Path("/runtime/git/bin/git"),
+                        cargo_binary=Path("/runtime/cargo/bin/cargo"),
                     )
                     self.assertEqual(result.passed, passed, result.reasons)
                 self.assertEqual(len(invocations), 1)
@@ -329,8 +379,8 @@ verifications_rerun:
                     "8192",
                 )
                 self.assertEqual(
-                    invocation["env"]["PATH"].split(os.pathsep)[0],
-                    "/runtime/git/bin",
+                    invocation["env"]["PATH"].split(os.pathsep)[:2],
+                    ["/runtime/git/bin", "/runtime/cargo/bin"],
                 )
                 self.assertIsInstance(invocation["stdin"], bytes)
                 self.assertEqual(
@@ -343,6 +393,33 @@ verifications_rerun:
                     invocation["stderr_limit"], runner.CLAUDE_STDERR_LIMIT_BYTES
                 )
                 self.assertTrue(invocation["start_new_session"])
+
+    def test_auditor_verification_requires_a_pinned_cargo_runtime(self):
+        case = runner.load_case_records(
+            runner.SUITES["auditor"]["cases"], suite_name="auditor"
+        )[2]
+        case = {**case, "allow_no_mmcg": True}
+        fixture = Path("/unused-disposable-fixture")
+        with (
+            patch.object(runner, "setup_fixture", return_value=fixture),
+            patch.object(runner, "teardown_fixture"),
+            patch.object(runner, "run_bounded") as invoke,
+        ):
+            result = runner.evaluate_case(
+                "opus",
+                "auditor",
+                runner.SUITES["auditor"],
+                case,
+                keep_fixtures=False,
+                mmcg_binary=None,
+                cargo_binary=None,
+            )
+        self.assertFalse(result.passed)
+        self.assertEqual(
+            result.reasons,
+            ["pinned Cargo runtime unavailable for required verification"],
+        )
+        invoke.assert_not_called()
 
     def test_intake_action_requires_valid_sentinel_yaml(self):
         valid = """\
@@ -544,6 +621,23 @@ action: passthrough
                 source={"PATH": "/usr/bin"},
                 pinned_executables=(Path("relative/git"),),
             )
+        with tempfile.TemporaryDirectory() as target:
+            root = Path(target)
+            git_directory = root / "git-bin"
+            cargo_directory = root / "cargo-bin"
+            git_directory.mkdir()
+            cargo_directory.mkdir()
+            (git_directory / "cargo").write_text("shadow")
+            (cargo_directory / "cargo").write_text("pinned")
+            with self.assertRaisesRegex(ValueError, "shadowed"):
+                runner.evaluation_environment(
+                    100,
+                    source={"PATH": "/usr/bin"},
+                    pinned_executables=(
+                        git_directory / "git",
+                        cargo_directory / "cargo",
+                    ),
+                )
 
     def test_effective_runtime_controls_expose_case_policy(self):
         controls = runner.evaluation_runtime_controls(
@@ -575,6 +669,11 @@ action: passthrough
             "1300",
         )
         self.assertTrue(runner._valid_evaluation_runtime_controls(controls))
+        unsafe = deepcopy(controls)
+        unsafe["tool_policy"]["allowed"].append(
+            "Bash(cargo test --locked *)"
+        )
+        self.assertFalse(runner._valid_evaluation_runtime_controls(unsafe))
 
         prompt_only = runner.evaluation_runtime_controls(
             "workflow", None, {}, include_mmcg=False
@@ -1296,6 +1395,61 @@ action: passthrough
         gate = runner.compare_to_baseline(current, baseline)
         self.assertTrue(
             any("fixture runtime differs" in item for item in gate["failures"])
+        )
+
+    def test_verification_gate_requires_and_compares_cargo_identity(self):
+        command = "cargo test --locked exact_test"
+        result = runner.Result(
+            "audit-case",
+            "auditor",
+            True,
+            input_tokens=100,
+            telemetry_complete=True,
+            resolved_models=[RESOLVED_MODEL],
+        )
+        baseline = runner.build_report(
+            [result], model="opus", suite_filter="auditor", case_filter=None
+        )
+        baseline["claude_cli_version"] = "test-cli"
+        baseline["suites"]["auditor"]["case_definition_digest"] = "a" * 64
+        bind_target_identity(baseline)
+        bind_fixture_runtime(baseline)
+        baseline["cases"][0]["runtime_controls"] = (
+            runner.evaluation_runtime_controls(
+                "auditor",
+                runner.SUITES["auditor"]["subagent"],
+                {"verification_rerun": command},
+                include_mmcg=True,
+            )
+        )
+        current = deepcopy(baseline)
+        current["cases"][0]["usage"]["input_tokens"] = 90
+        current["cases"][0]["usage"]["context_tokens"] = 90
+        current["cases"][0]["usage"]["total_tokens"] = 90
+        sync_gated_summaries(current, "auditor")
+
+        gate = runner.compare_to_baseline(current, baseline)
+        self.assertTrue(
+            any(
+                "no verification runtime identity" in item
+                for item in gate["failures"]
+            )
+        )
+
+        for report in (baseline, current):
+            report["verification_runtime"] = {
+                "cargo": {"sha256": "3" * 64, "git_mode": "100755"},
+                "stable": True,
+            }
+        self.assertTrue(runner.compare_to_baseline(current, baseline)["passed"])
+
+        current["verification_runtime"]["cargo"]["sha256"] = "2" * 64
+        gate = runner.compare_to_baseline(current, baseline)
+        self.assertTrue(
+            any(
+                "verification runtime differs" in item
+                for item in gate["failures"]
+            )
         )
 
     def test_baseline_gate_fails_closed_on_model_or_case_drift(self):
@@ -2937,7 +3091,6 @@ class PromptIsolationTests(unittest.TestCase):
             "Grep",
             "Bash(git diff *)",
             "Bash(git status *)",
-            "Bash(cargo test --locked *)",
             "mcp__mmcg__mmcg_status",
             "mcp__mmcg__mmcg_search",
             "mcp__mmcg__mmcg_callers",
@@ -2945,8 +3098,16 @@ class PromptIsolationTests(unittest.TestCase):
         ):
             self.assertIn(tool, allowed)
         self.assertNotIn("scratchpad_append", allowed)
+        self.assertNotIn("Bash(cargo", allowed)
         self.assertNotIn("Bash(cargo *)", allowed)
         self.assertNotIn("Bash(cargo test *)", allowed)
+        verification = "cargo test --locked exact_test"
+        auditor_args = runner.isolated_cli_args(
+            "auditor", verification_commands=(verification,)
+        )
+        allowed = auditor_args[auditor_args.index("--allowedTools") + 1]
+        self.assertIn(f"Bash({verification})", allowed)
+        self.assertNotIn("Bash(cargo test --locked *)", allowed)
         self.assertFalse(runner.requires_prompt_sandbox("auditor"))
 
     def test_source_only_subagent_runtime_removes_unavailable_mmcg(self):
@@ -3160,9 +3321,12 @@ class PromptIsolationTests(unittest.TestCase):
         )
         command = verify.removeprefix("VERIFY: ").removesuffix(" — PASSED")
         self.assertTrue(command.startswith("cargo test --locked "))
-        allowed = runner.isolated_cli_args("auditor")
+        allowed = runner.isolated_cli_args(
+            "auditor", verification_commands=(command,)
+        )
         allowed = allowed[allowed.index("--allowedTools") + 1]
-        self.assertIn("Bash(cargo test --locked *)", allowed)
+        self.assertIn(f"Bash({command})", allowed)
+        self.assertNotIn("Bash(cargo test --locked *)", allowed)
 
         with tempfile.TemporaryDirectory() as target:
             result = subprocess.run(

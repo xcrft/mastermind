@@ -271,6 +271,16 @@ class BenchmarkTests(unittest.TestCase):
         config.pop("mmcg")
         self.assert_setup_failure(self.prepare("portable_mmcg", config=config), "mmcg_missing")
 
+    def test_every_condition_requires_an_available_exact_tool_commit(self):
+        tree = self.git("rev-parse", "HEAD^{tree}").strip()
+        for revision, reason in (("0" * 40, "tool_revision_unavailable"),
+                                 (tree, "tool_revision_unavailable")):
+            for condition in bench.CONDITIONS:
+                with self.subTest(revision=revision, condition=condition):
+                    config = copy.deepcopy(self.config)
+                    config["tool_revision"] = revision
+                    self.assert_setup_failure(self.prepare(condition, config=config), reason)
+
     def test_failed_partial_stale_or_uncheckpointed_indexes_never_run(self):
         expected = {"exit_failure": "index_setup_failed", "partial": "index_source_mismatch",
                     "wrong_root": "index_root_mismatch", "wrong_hash": "index_source_mismatch",
@@ -407,6 +417,19 @@ class BenchmarkTests(unittest.TestCase):
                 self.assertFalse(result["comparability"]["eligible"])
                 self.assertTrue((trial / "trace.jsonl").exists())
                 self.assertTrue((trial / "stderr.txt").exists())
+
+    def test_runtime_identity_mismatch_cannot_hide_behind_a_model_failure(self):
+        self.adapter("""
+            init('unexpected-model')
+            final('', model_error=True,
+                  failure={'state': 'model_error', 'code': 'provider_failed'})
+        """)
+        result = bench.run_trial(self.prepare())
+        self.assertEqual(result["run_status"], {
+            "state": "identity_mismatch",
+            "reason": "observed_model_or_adapter_version_mismatch",
+        })
+        self.assertIn("identity_mismatch", result["comparability"]["reasons"])
 
     def test_missing_or_duplicate_terminal_event_is_not_success(self):
         for body, issue in (("init()\n", "missing_result"), ("final()\n", "missing_init"),

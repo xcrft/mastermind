@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Research trials now require the shared tool revision to be an available exact
+  commit in every condition, disable Git lazy transport while freezing inputs,
+  and report an observed model or adapter mismatch even when that runtime also
+  reports a model failure.
 - Local worktree bindings now resolve Unix filesystem aliases to the canonical
   directory and use the retained directory object's stable identity on
   Windows, so equivalent spellings do not invalidate task state.

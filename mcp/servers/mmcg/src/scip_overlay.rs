@@ -1043,9 +1043,12 @@ fn artifact_label(artifact: &Path, root: &Path) -> String {
     artifact
         .strip_prefix(root)
         .ok()
-        .and_then(|relative| relative.to_str())
-        .filter(|relative| !relative.is_empty())
-        .map(|relative| relative.replace('\\', "/"))
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .and_then(|relative| {
+            crate::bounded_fs::normalize_repository_relative_path(relative)
+                .ok()
+                .or_else(|| relative.to_str().map(str::to_string))
+        })
         .or_else(|| {
             artifact
                 .file_name()
@@ -1885,6 +1888,24 @@ mod tests {
         SingleLineRange, SymbolInformation, SymbolRole, ToolInfo,
     };
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_label_preserves_a_literal_backslash() {
+        let root = Path::new("/repo");
+        assert_eq!(
+            artifact_label(Path::new("/repo/index.scip"), root),
+            "index.scip"
+        );
+        assert_eq!(
+            artifact_label(Path::new(r"/repo/nested\index.scip"), root),
+            r"nested\index.scip"
+        );
+        assert_ne!(
+            artifact_label(Path::new(r"/repo/nested\index.scip"), root),
+            artifact_label(Path::new("/repo/nested/index.scip"), root)
+        );
+    }
 
     fn definition(symbol: &str, line: i32, body_start: i32, body_end: i32) -> Occurrence {
         let mut occurrence = Occurrence::new();

@@ -574,6 +574,20 @@ pub(crate) fn repository_identity(root: &Path) -> Result<String, FactError> {
     repository_identity_until(root, None)
 }
 
+fn worktree_path_identity(root: &Path) -> Result<String, FactError> {
+    let path = root
+        .to_str()
+        .ok_or_else(|| FactError::Git("the canonical repository path is not valid UTF-8".into()))?;
+    #[cfg(windows)]
+    {
+        Ok(path.replace('\\', "/"))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(path.to_string())
+    }
+}
+
 pub(crate) fn repository_identity_until(
     root: &Path,
     deadline: Option<Instant>,
@@ -594,8 +608,10 @@ pub(crate) fn repository_identity_until(
     } else {
         None
     };
-    let (kind, identity) =
-        canonical.unwrap_or_else(|| ("git-worktree", root.to_string_lossy().replace('\\', "/")));
+    let (kind, identity) = match canonical {
+        Some(identity) => identity,
+        None => ("git-worktree", worktree_path_identity(root)?),
+    };
     Ok(format!(
         "{kind}:sha256:{}",
         crate::hex::encode(&Sha256::digest(identity.as_bytes()))
@@ -1922,6 +1938,23 @@ mod tests {
         );
         assert!(canonical_remote("/tmp/local-repo").is_none());
         assert_ne!(source_public_id("a/b", "c"), source_public_id("a", "b/c"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worktree_repository_identity_preserves_path_identity() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        assert_ne!(
+            worktree_path_identity(Path::new(r"/tmp/repo\nested")).unwrap(),
+            worktree_path_identity(Path::new("/tmp/repo/nested")).unwrap()
+        );
+        let non_utf8 = PathBuf::from(OsString::from_vec(b"/tmp/repo-\xff".to_vec()));
+        assert!(matches!(
+            worktree_path_identity(&non_utf8),
+            Err(FactError::Git(_))
+        ));
     }
 
     #[test]

@@ -681,11 +681,13 @@ fn collect_workflow_evidence(
     let mut files: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for task_name in &task_names {
         let task_dir = path.join(task_name);
-        let Some(task_name_text) = task_name.to_str() else {
+        let Ok(task_name_text) =
+            bounded_fs::normalize_repository_relative_path(Path::new(task_name))
+        else {
             gaps.push(gap(
                 FAMILY_WORKFLOW,
                 "workflow_inventory_invalid",
-                "Workflow evidence inventory contains a non-UTF-8 entry.",
+                "Workflow evidence inventory contains a non-canonical task name.",
             ));
             continue;
         };
@@ -813,11 +815,20 @@ fn collect_workflow_evidence(
                 continue;
             }
         }
-        let evidence_path = task_dir
-            .strip_prefix(root)
-            .unwrap_or(&task_dir)
-            .to_string_lossy()
-            .replace('\\', "/");
+        let evidence_path = match task_dir.strip_prefix(root) {
+            Ok(relative) => match bounded_fs::normalize_repository_relative_path(relative) {
+                Ok(relative) => relative,
+                Err(_) => {
+                    gaps.push(gap(
+                        FAMILY_WORKFLOW,
+                        "workflow_inventory_invalid",
+                        "Workflow task path is not a canonical repository-relative path.",
+                    ));
+                    continue;
+                }
+            },
+            Err(_) => format!("workflow-evidence/{task_name_text}"),
+        };
         for path in touches.intersection(relevant_files) {
             files
                 .entry(path.clone())
@@ -1082,6 +1093,28 @@ mod tests {
                 assert_eq!(committed, approved);
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workflow_evidence_rejects_a_backslash_task_alias() {
+        let (repo, evidence, baseline) = external_workflow_fixture(2);
+        let original = evidence.path().join("001-critical");
+        let aliased = evidence.path().join(r"001\critical");
+        fs::rename(&original, &aliased).unwrap();
+        let state_path = aliased.join("state.json");
+        let mut state: serde_json::Value =
+            serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        let spec_path = aliased.join("spec.md");
+        state["spec_path"] = spec_path.to_str().unwrap().to_string().into();
+        fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+
+        let (approved, gaps, _) = external_workflow(repo.path(), evidence.path(), &baseline);
+
+        assert!(approved.is_empty());
+        assert!(gaps
+            .iter()
+            .any(|gap| gap.code == "workflow_inventory_invalid"));
     }
 
     #[test]

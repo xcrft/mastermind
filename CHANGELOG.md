@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Temporal CODEOWNERS baselines, change-impact subdirectory scopes, ignored
+  snapshot paths, and strict-workflow task inventories now use the same exact
+  repository-path identity. Unix backslash aliases can no longer select or
+  suppress evidence for another path.
+- Local-worktree fact identities preserve literal Unix backslashes and reject
+  non-UTF-8 roots; SCIP provenance labels and SARIF artifact URIs also keep
+  distinct paths distinct instead of rewriting them onto slash paths.
 - SARIF, LCOV/Cobertura, JUnit, and OTLP evidence no longer rewrites ambiguous
   relative backslash paths onto another Unix source file. Unsafe paths are
   omitted with partial-source diagnostics, while absolute Windows drive and UNC

@@ -2129,17 +2129,8 @@ pub(crate) fn validate_change_impact_snapshot_ignoring_path(
     let ignored_path_prefix = ignored_path
         .and_then(|path| path.strip_prefix(&repository_root).ok())
         .map(|relative| {
-            if relative.as_os_str().is_empty()
-                || relative
-                    .components()
-                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
-            {
-                return Err(ChangeImpactError::SnapshotChanged);
-            }
-            relative
-                .to_str()
-                .map(|value| value.replace('\\', "/"))
-                .ok_or(ChangeImpactError::SnapshotChanged)
+            crate::bounded_fs::normalize_repository_relative_path(relative)
+                .map_err(|_| ChangeImpactError::SnapshotChanged)
         })
         .transpose()?;
     let interrupted = || store.work_interrupted();
@@ -2438,7 +2429,11 @@ pub fn change_impact(
         .strip_prefix(&repository_root)
         .ok()
         .filter(|value| !value.as_os_str().is_empty())
-        .map(|value| value.to_string_lossy().replace('\\', "/"))
+        .map(|value| {
+            crate::bounded_fs::normalize_repository_relative_path(value)
+                .map_err(|_| ChangeImpactError::RootMismatch)
+        })
+        .transpose()?
         .unwrap_or_else(|| ".".to_string());
 
     let interrupted = || store.work_interrupted();
@@ -9110,6 +9105,24 @@ fn checks_value() { assert_eq!(value(), 1); }
             .items
             .iter()
             .any(|file| file.path == "src/app.py"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn change_impact_rejects_a_backslash_subdirectory_alias() {
+        let root = impact_repo(
+            "backslash_subdir",
+            &[("src/app.py", "def value():\n    return 1\n")],
+        );
+        let store = index_impact(&root, "backslash_subdir");
+        let aliased_scope = root.join(r"src\scope");
+        std::fs::create_dir(&aliased_scope).unwrap();
+
+        assert_eq!(
+            change_impact(&store, &aliased_scope, "HEAD", 3, 100).unwrap_err(),
+            ChangeImpactError::RootMismatch
+        );
         std::fs::remove_dir_all(root).ok();
     }
 

@@ -131,10 +131,11 @@ response length varies with generation. A missing, malformed, negative, or
 non-finite required telemetry field fails the case and cannot become a zero-cost
 improvement.
 
-Report loading is fail-closed: unknown fields or suites, malformed timestamps
-or revisions, filter/selection mismatches, inconsistent retry and telemetry
-states, and summaries that do not recompute from the raw case records are
-rejected before comparison. An unfiltered report must contain every suite.
+Report loading is fail-closed: unknown fields or suites, malformed or missing
+repository identity, filter/selection mismatches, incomplete runtime, harness,
+target, or fixture evidence, inconsistent retry and telemetry states, and
+summaries that do not recompute from the raw case records are rejected before
+comparison. An unfiltered report must contain every suite.
 
 `--baseline-report` is intentionally strict. Current and baseline evidence must
 have the same requested model, resolved model IDs, Claude CLI version,
@@ -158,9 +159,10 @@ was transcribed from the runner's console output. A legacy baseline may omit the
 target digest and per-case runtime controls; a current report may not. Its
 capture metadata records that only aggregate API duration was observable; the
 token and quality fields used by the gate were recorded per case. That explicit
-legacy capture exception is accepted only for baseline evidence and cannot
-weaken validation of a current report. New-format baselines must contain the
-same effective per-case runtime controls as the current run.
+legacy capture exception is accepted only when `--baseline-report` resolves to
+the checked-in `evals/baselines/critic-opus-pre-lean.json`; a copied report
+cannot self-declare the exception. New-format baselines must carry complete
+evidence and the same effective per-case runtime controls as the current run.
 Its capture metadata also states how the resolved Opus model ID was verified
 immediately afterward with the same alias and CLI.
 New runs resolve one exact Claude executable before evaluation, call that path

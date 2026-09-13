@@ -2590,7 +2590,8 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    // APFS rejects invalid UTF-8 directory names before the identity code runs.
+    #[cfg(target_os = "linux")]
     #[test]
     fn narrative_binding_rejects_a_non_utf8_repository_identity() {
         use std::ffi::OsString;

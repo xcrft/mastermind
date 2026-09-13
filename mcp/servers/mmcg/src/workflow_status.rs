@@ -4699,7 +4699,9 @@ fn count_matching_files(dir: &Path, prefix: &str, suffix: &str) -> usize {
             rd.filter_map(|e| e.ok())
                 .filter(|e| {
                     let n = e.file_name();
-                    let s = n.to_string_lossy();
+                    let Some(s) = n.to_str() else {
+                        return false;
+                    };
                     e.file_type().map(|t| t.is_file()).unwrap_or(false)
                         && s.starts_with(prefix)
                         && s.ends_with(suffix)
@@ -4715,7 +4717,9 @@ fn count_workflow_skill_dirs(dir: &Path) -> usize {
             rd.filter_map(|e| e.ok())
                 .filter(|e| {
                     let name = e.file_name();
-                    let name = name.to_string_lossy();
+                    let Some(name) = name.to_str() else {
+                        return false;
+                    };
                     e.file_type().map(|t| t.is_dir()).unwrap_or(false)
                         && (name.starts_with("mastermind-") || name == "no-ai-slop-comments")
                 })
@@ -4750,6 +4754,15 @@ fn scan_tasks(root: &Path) -> TaskScan {
             ));
         }
     };
+    let repository_identity =
+        match crate::facts::repository_identity(root_capability.canonical_root()) {
+            Ok(identity) => identity,
+            Err(error) => {
+                return TaskScan::failed(format!(
+                    "cannot resolve repository identity for task state: {error}"
+                ));
+            }
+        };
     let entries = match crate::bounded_fs::read_directory_names_with_capability(
         &root_capability,
         &tasks_dir,
@@ -4765,7 +4778,7 @@ fn scan_tasks(root: &Path) -> TaskScan {
             ));
         }
     };
-    let inflight_spec = read_inflight_spec(&root_capability, root);
+    let inflight_spec = read_inflight_spec(&root_capability, root, &repository_identity);
 
     let mut tasks = Vec::new();
     for file_name in &entries {
@@ -4824,8 +4837,44 @@ fn scan_tasks(root: &Path) -> TaskScan {
             }
         }
 
+        let spec_identity = match root_capability
+            .repository_relative(&spec_path)
+            .and_then(|relative| crate::bounded_fs::normalize_repository_relative_path(&relative))
+        {
+            Ok(identity) => identity,
+            Err(error) => {
+                tasks.push(held_task(
+                    folder,
+                    spec_path,
+                    format!("task spec path has no exact repository identity: {error}"),
+                ));
+                continue;
+            }
+        };
+
         let mut state = match read_task_state(&root_capability, &task_dir) {
-            Ok(state) => state,
+            Ok(Some(run_state)) => {
+                match crate::run_task::validate_bound_state_identity(
+                    &repository_identity,
+                    &spec_identity,
+                    &run_state,
+                ) {
+                    Ok(()) => Some(project_task_state(run_state)),
+                    Err(error)
+                        if run_state.repository_identity.is_none()
+                            && crate::run_task::legacy_state_matches_spec(
+                                root,
+                                &spec_path,
+                                &spec_identity,
+                                &run_state,
+                            ) =>
+                    {
+                        Some(preflight_required_task_state(error))
+                    }
+                    Err(error) => Some(invalid_task_state(error)),
+                }
+            }
+            Ok(None) => None,
             Err(error) => Some(invalid_task_state(error)),
         };
         if state.is_none() {
@@ -4915,6 +4964,28 @@ fn invalid_task_state(reason: String) -> TaskState {
     }
 }
 
+fn preflight_required_task_state(reason: String) -> TaskState {
+    TaskState {
+        status: "held".into(),
+        history_snapshot_sha256: None,
+        risk: None,
+        next_step: Some("run_preflight".into()),
+        blocking_reason: Some(reason),
+        last_artifact: Some("state.json".into()),
+    }
+}
+
+fn project_task_state(state: crate::run_task::RunState) -> TaskState {
+    TaskState {
+        status: state.status,
+        history_snapshot_sha256: state.history_snapshot_sha256,
+        risk: state.risk,
+        next_step: state.next_step,
+        blocking_reason: state.blocking_reason,
+        last_artifact: state.last_artifact,
+    }
+}
+
 fn held_task(folder: String, spec_path: PathBuf, reason: String) -> TaskInfo {
     TaskInfo {
         folder,
@@ -4927,6 +4998,7 @@ fn held_task(folder: String, spec_path: PathBuf, reason: String) -> TaskInfo {
 fn read_inflight_spec(
     root: &crate::bounded_fs::RootCapability,
     repository: &Path,
+    repository_identity: &str,
 ) -> Result<Option<PathBuf>, String> {
     let state_file = repository
         .join(".mastermind")
@@ -4954,13 +5026,24 @@ fn read_inflight_spec(
             state_file.display()
         )
     })?;
-    Ok(Some(PathBuf::from(state.spec_path)))
+    let Some(saved_repository) = state.repository_identity.as_deref() else {
+        return Err(
+            "legacy workflow state has no repository binding; run an explicit pre-flight".into(),
+        );
+    };
+    if saved_repository != repository_identity {
+        return Err("legacy workflow state belongs to a different repository".into());
+    }
+    let relative =
+        crate::bounded_fs::normalize_repository_relative_path(Path::new(&state.spec_path))
+            .map_err(|_| "legacy workflow state has an invalid bound spec path".to_string())?;
+    Ok(Some(repository.join(relative)))
 }
 
 fn read_task_state(
     root: &crate::bounded_fs::RootCapability,
     task_dir: &Path,
-) -> Result<Option<TaskState>, String> {
+) -> Result<Option<crate::run_task::RunState>, String> {
     let path = task_dir.join("state.json");
     let file = match crate::bounded_fs::read_regular_file_with_capability(
         root,
@@ -4980,14 +5063,7 @@ fn read_task_state(
     };
     let state = crate::run_task::parse_run_state(&file.bytes)
         .map_err(|error| format!("cannot parse task state {}: {error}", path.display()))?;
-    Ok(Some(TaskState {
-        status: state.status,
-        history_snapshot_sha256: state.history_snapshot_sha256,
-        risk: state.risk,
-        next_step: state.next_step,
-        blocking_reason: state.blocking_reason,
-        last_artifact: state.last_artifact,
-    }))
+    Ok(Some(state))
 }
 
 fn detect_phase(
@@ -5046,14 +5122,19 @@ mod tests {
     use std::process::Command;
 
     fn controller_state(spec: &Path, status: &str) -> crate::run_task::RunState {
+        let root = spec
+            .ancestors()
+            .nth(4)
+            .expect("canonical task spec must have a repository ancestor");
+        let spec_path = spec.strip_prefix(root).unwrap();
         crate::run_task::RunState {
             status: status.into(),
             risk: Some("low".into()),
             next_step: Some("run_executor".into()),
             blocking_reason: None,
             last_artifact: Some("spec.md".into()),
-            spec_path: spec.display().to_string(),
-            repository_identity: None,
+            spec_path: crate::bounded_fs::normalize_repository_relative_path(spec_path).unwrap(),
+            repository_identity: Some(crate::facts::repository_identity(root).unwrap()),
             spec_hash: "0".repeat(64),
             baseline_ref: "0".repeat(40),
             held_snapshot_sha256: None,
@@ -5286,7 +5367,8 @@ mod tests {
         .is_err());
     }
 
-    #[cfg(unix)]
+    // APFS rejects invalid UTF-8 names before inventory can observe them.
+    #[cfg(target_os = "linux")]
     #[test]
     fn workflow_audit_rejects_symlinked_source_inventory_parent() {
         use std::os::unix::fs::symlink;
@@ -6150,6 +6232,8 @@ mod tests {
             "unknown_field",
             "invalid_risk",
             "incompatible_step",
+            "foreign_repository",
+            "wrong_spec",
         ] {
             let root = tempfile::tempdir().unwrap();
             let task = root.path().join(".mastermind/tasks/001-ambiguous");
@@ -6184,6 +6268,17 @@ mod tests {
                     state.next_step = Some("run_executor".into());
                     (serde_json::to_vec(&state).unwrap(), "cannot use next step")
                 }
+                "foreign_repository" => {
+                    let mut state = controller_state(&spec, "approved");
+                    state.repository_identity =
+                        Some(format!("git-worktree:sha256:{}", "a".repeat(64)));
+                    (serde_json::to_vec(&state).unwrap(), "different repository")
+                }
+                "wrong_spec" => {
+                    let mut state = controller_state(&spec, "approved");
+                    state.spec_path = ".mastermind/tasks/other/spec.md".into();
+                    (serde_json::to_vec(&state).unwrap(), "different spec")
+                }
                 _ => unreachable!(),
             };
             fs::write(task.join("state.json"), state).unwrap();
@@ -6199,6 +6294,32 @@ mod tests {
                 .is_some_and(|reason| reason.contains(expected)));
             assert!(status.next_action().unwrap().command.is_none());
         }
+    }
+
+    #[test]
+    fn legacy_unbound_task_state_routes_to_explicit_preflight() {
+        let root = tempfile::tempdir().unwrap();
+        let task = root.path().join(".mastermind/tasks/001-legacy");
+        fs::create_dir_all(&task).unwrap();
+        let spec = task.join("spec.md");
+        fs::write(&spec, "# Legacy\n").unwrap();
+        let mut state = controller_state(&spec, "approved");
+        state.spec_path = spec.display().to_string();
+        state.repository_identity = None;
+        fs::write(task.join("state.json"), serde_json::to_vec(&state).unwrap()).unwrap();
+
+        let status = WorkflowStatus::scan(root.path());
+        assert!(status.task_scan_error.is_none());
+        assert_eq!(status.tasks[0].phase, TaskPhase::Held);
+        assert!(status.tasks[0]
+            .state
+            .as_ref()
+            .and_then(|state| state.blocking_reason.as_deref())
+            .is_some_and(|reason| reason.contains("no repository binding")));
+        assert!(status
+            .next_action()
+            .and_then(|action| action.command)
+            .is_some_and(|command| command.ends_with(" --pre-only")));
     }
 
     #[test]
@@ -6427,6 +6548,34 @@ mod tests {
         assert!(inventory.contains("inventory only"));
         assert!(!inventory.contains("drift"));
         assert!(!inventory.contains("up to date"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_inventory_does_not_count_lossy_filename_aliases() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let agents = root.path().join("agents");
+        let skills = root.path().join("skills");
+        fs::create_dir_all(&agents).unwrap();
+        fs::create_dir_all(&skills).unwrap();
+        fs::write(agents.join("mastermind-valid.md"), "valid\n").unwrap();
+        fs::write(
+            agents.join(std::ffi::OsString::from_vec(
+                b"mastermind-invalid-\xff.md".to_vec(),
+            )),
+            "invalid\n",
+        )
+        .unwrap();
+        fs::create_dir(skills.join("mastermind-valid")).unwrap();
+        fs::create_dir(skills.join(std::ffi::OsString::from_vec(
+            b"mastermind-invalid-\xff".to_vec(),
+        )))
+        .unwrap();
+
+        assert_eq!(count_matching_files(&agents, "mastermind-", ".md"), 1);
+        assert_eq!(count_workflow_skill_dirs(&skills), 1);
     }
 
     #[test]

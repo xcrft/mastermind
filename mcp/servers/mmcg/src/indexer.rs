@@ -2935,7 +2935,8 @@ def placeholder():
         fs::remove_dir_all(&dir).ok();
     }
 
-    #[cfg(unix)]
+    // APFS rejects invalid UTF-8 directory names before the binding code runs.
+    #[cfg(target_os = "linux")]
     #[test]
     fn index_binding_rejects_a_non_utf8_repository_root() {
         use std::ffi::OsString;

@@ -2099,7 +2099,8 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    // APFS rejects invalid UTF-8 directory names before canonicalization runs.
+    #[cfg(target_os = "linux")]
     #[test]
     fn repository_keys_reject_non_utf8_canonical_paths() {
         use std::ffi::OsString;

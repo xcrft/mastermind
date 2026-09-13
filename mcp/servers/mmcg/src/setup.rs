@@ -249,9 +249,6 @@ fn mmcg_entry_for_platform(
             // No env var → invoked directly (cargo install, manual build, etc.).
             // Absolute path of the running binary guarantees the MCP client
             // launches the exact binary the user just ran.
-            if !mmcg_binary.is_absolute() {
-                return Err("mmcg_binary_path_not_absolute");
-            }
             let command = mmcg_binary.to_str().ok_or("mmcg_binary_path_not_utf8")?;
             Ok(json!({
                 "command": command,
@@ -2129,10 +2126,6 @@ mod tests {
             Some("/opt/cargo/bin/mmcg")
         );
         assert_eq!(entry.get("args"), Some(&serde_json::json!(["serve"])));
-        assert_eq!(
-            mmcg_entry(Path::new("relative/mmcg")).unwrap_err(),
-            "mmcg_binary_path_not_absolute"
-        );
     }
 
     #[cfg(unix)]

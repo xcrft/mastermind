@@ -467,6 +467,17 @@ fn check_history_review_with_capability(
             hint: None,
         };
     }
+    let repository_identity = match crate::facts::repository_identity(root.canonical_root()) {
+        Ok(identity) => identity,
+        Err(error) => {
+            return Check {
+                name: "history review",
+                status: Status::Warn,
+                message: format!("repository identity unavailable: {error}"),
+                hint: Some("restore an exact repository identity before reviewing history".into()),
+            };
+        }
+    };
     let mut unresolved = Vec::new();
     for task in tasks {
         let task_name = task
@@ -492,6 +503,12 @@ fn check_history_review_with_capability(
                 continue;
             }
         };
+        if let Some(state) = state.as_ref() {
+            if validate_task_state_binding(root, task, &repository_identity, state).is_err() {
+                unresolved.push(format!("{task_name}: task state is not repository-bound"));
+                continue;
+            }
+        }
         let snapshot = state
             .as_ref()
             .and_then(|state| state.history_snapshot_sha256.as_deref());
@@ -679,6 +696,8 @@ fn history_review_task_dirs(
     root: &crate::bounded_fs::RootCapability,
     tasks_dir: &Path,
 ) -> Result<Vec<PathBuf>, String> {
+    let repository_identity = crate::facts::repository_identity(root.canonical_root())
+        .map_err(|error| format!("cannot resolve repository identity: {error}"))?;
     let names = match crate::bounded_fs::read_directory_names_with_capability(
         root,
         tasks_dir,
@@ -729,11 +748,34 @@ fn history_review_task_dirs(
             continue;
         };
         if matches!(state.status.as_str(), "learned" | "history_review_required") {
+            validate_task_state_binding(root, &path, &repository_identity, &state).map_err(
+                |error| {
+                    format!(
+                        "task state at {} is not repository-bound: {error}",
+                        path.display()
+                    )
+                },
+            )?;
             tasks.push(path);
         }
     }
     tasks.sort();
     Ok(tasks)
+}
+
+fn validate_task_state_binding(
+    root: &crate::bounded_fs::RootCapability,
+    task: &Path,
+    repository_identity: &str,
+    state: &crate::run_task::RunState,
+) -> Result<(), String> {
+    let spec = task.join("spec.md");
+    let relative = root
+        .repository_relative(&spec)
+        .map_err(|error| format!("cannot resolve task spec path: {error}"))?;
+    let spec_identity = crate::bounded_fs::normalize_repository_relative_path(&relative)
+        .map_err(|_| "task spec path has no exact UTF-8 identity".to_string())?;
+    crate::run_task::validate_bound_state_identity(repository_identity, &spec_identity, state)
 }
 
 fn read_task_state_with_capability(
@@ -943,6 +985,11 @@ mod tests {
     use super::*;
 
     fn write_task_state(task: &Path, status: &str, snapshot: Option<&str>) {
+        let root = task
+            .ancestors()
+            .nth(3)
+            .expect("canonical task must have a repository ancestor");
+        let spec_path = task.join("spec.md");
         let state = crate::run_task::RunState {
             status: status.into(),
             risk: Some("low".into()),
@@ -958,8 +1005,11 @@ mod tests {
             ),
             blocking_reason: None,
             last_artifact: Some("history-review.md".into()),
-            spec_path: task.join("spec.md").display().to_string(),
-            repository_identity: None,
+            spec_path: crate::bounded_fs::normalize_repository_relative_path(
+                spec_path.strip_prefix(root).unwrap(),
+            )
+            .unwrap(),
+            repository_identity: Some(crate::facts::repository_identity(root).unwrap()),
             spec_hash: "0".repeat(64),
             baseline_ref: "0".repeat(40),
             held_snapshot_sha256: None,
@@ -1061,7 +1111,7 @@ mod tests {
     #[test]
     fn tasks_requiring_history_review_are_selected_by_exact_status() {
         let dir = tempfile::tempdir().unwrap();
-        let tasks = dir.path().join("tasks");
+        let tasks = dir.path().join(".mastermind/tasks");
         let learned = tasks.join("001-learned");
         let awaiting = tasks.join("002-awaiting");
         let unrelated = tasks.join("003-unrelated");
@@ -1221,6 +1271,40 @@ mod tests {
             .checks
             .iter()
             .any(|check| check.name == "history review" && check.status == Status::Ok));
+    }
+
+    #[test]
+    fn doctor_rejects_unbound_or_foreign_completion_state() {
+        for mutation in ["unbound", "foreign"] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("CONTEXT.md"), context()).unwrap();
+            let task = dir.path().join(".mastermind/tasks/001-binding");
+            std::fs::create_dir_all(&task).unwrap();
+            write_task_state(&task, "learned", None);
+            let state_path = task.join("state.json");
+            let mut state: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+            if mutation == "unbound" {
+                state.as_object_mut().unwrap().remove("repository_identity");
+            } else {
+                state["repository_identity"] =
+                    format!("git-worktree:sha256:{}", "a".repeat(64)).into();
+            }
+            std::fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+            std::fs::write(
+                task.join("history-review.md"),
+                "- **Context:** updated\n- **Lesson:** updated\n- **Reason:** reviewed\n",
+            )
+            .unwrap();
+
+            let check = run(dir.path())
+                .checks
+                .into_iter()
+                .find(|check| check.name == "history review")
+                .unwrap();
+            assert_eq!(check.status, Status::Fail, "{mutation}");
+            assert!(check.message.contains("not repository-bound"), "{mutation}");
+        }
     }
 
     #[test]

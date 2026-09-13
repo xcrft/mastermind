@@ -14,8 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
-- Direct-install MCP setup now requires an absolute, exact UTF-8 executable
-  path before it renders or writes client configuration. Setup and doctor no
+- Workflow status, next/resume routing, context history checks, and architecture
+  policy now enforce the same task-state repository and spec binding as
+  `run-task`. Legacy state routes to explicit pre-flight, while foreign state
+  cannot appear ready, complete, or valid policy evidence.
+- Claude workflow inventory counts only exact UTF-8 agent and skill names;
+  lossy filename aliases no longer inflate the installed-adapter totals.
+- Direct-install MCP setup now requires an exact UTF-8 executable path before
+  it renders or writes client configuration. Setup and doctor no
   longer serialize a lossy command that can launch a different binary.
 - Controller state now records a canonical repository-relative spec path and a
   stable repository identity. Resume and post-flight reject copied state from

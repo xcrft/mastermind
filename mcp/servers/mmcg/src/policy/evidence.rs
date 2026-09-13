@@ -629,6 +629,20 @@ fn collect_workflow_evidence(
     if relevant_files.is_empty() {
         return (BTreeMap::new(), Vec::new(), None);
     }
+    let repository_identity = match crate::facts::repository_identity(root) {
+        Ok(identity) => identity,
+        Err(error) => {
+            return (
+                BTreeMap::new(),
+                vec![gap(
+                    FAMILY_WORKFLOW,
+                    "workflow_repository_identity_unavailable",
+                    format!("Workflow repository identity is unavailable: {error}"),
+                )],
+                None,
+            );
+        }
+    };
     let path = if requested.is_absolute() {
         requested.to_path_buf()
     } else {
@@ -781,7 +795,20 @@ fn collect_workflow_evidence(
         {
             continue;
         }
-        if !state_spec_matches(&state.spec_path, &spec_path, &task_dir) {
+        let expected_spec_path = format!(".mastermind/tasks/{task_name_text}/spec.md");
+        if let Err(error) = crate::run_task::validate_bound_state_identity(
+            &repository_identity,
+            &expected_spec_path,
+            &state,
+        ) {
+            gaps.push(gap(
+                FAMILY_WORKFLOW,
+                "workflow_state_binding_invalid",
+                format!(
+                    "Workflow state `{}` is not bound: {error}",
+                    state_path.display()
+                ),
+            ));
             continue;
         }
         let Some(audit) = read_workflow_artifact(&mut artifacts, &audit_path, &mut gaps) else {
@@ -895,18 +922,6 @@ fn workflow_changed_gap() -> EvidenceGap {
         "workflow_evidence_changed",
         "Workflow artifacts changed during evaluation; retry with a stable evidence directory.",
     )
-}
-
-fn state_spec_matches(state_spec: &str, current_spec: &Path, task_dir: &Path) -> bool {
-    if Path::new(state_spec) == current_spec {
-        return true;
-    }
-    let Some(task_id) = task_dir.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    let normalized = state_spec.replace('\\', "/");
-    let suffix = format!(".mastermind/tasks/{task_id}/spec.md");
-    normalized == suffix || normalized.ends_with(&format!("/{suffix}"))
 }
 
 struct WorkflowArtifacts<'a> {
@@ -1047,7 +1062,8 @@ mod tests {
         )
         .unwrap();
         let mut state = serde_json::json!({
-            "status": "learned", "spec_path": "/original/checkout/.mastermind/tasks/001-critical/spec.md",
+            "status": "learned", "spec_path": ".mastermind/tasks/001-critical/spec.md",
+            "repository_identity": crate::facts::repository_identity(repo.path()).unwrap(),
             "spec_hash": crate::run_task::hash_text(spec), "baseline_ref": baseline,
             "held_snapshot_sha256": snapshot, "started_at": 1,
         });
@@ -1124,6 +1140,8 @@ mod tests {
             "wrong_version",
             "invalid_touch",
             "incompatible_state",
+            "unbound_state",
+            "foreign_repository",
         ] {
             let (repo, evidence, baseline) = external_workflow_fixture(2);
             let task = evidence.path().join("001-critical");
@@ -1146,6 +1164,11 @@ mod tests {
                     .into();
             } else if mutation == "unknown_version" {
                 state["held_snapshot_version"] = 999.into();
+            } else if mutation == "unbound_state" {
+                state.as_object_mut().unwrap().remove("repository_identity");
+            } else if mutation == "foreign_repository" {
+                state["repository_identity"] =
+                    format!("git-worktree:sha256:{}", "a".repeat(64)).into();
             } else {
                 state["next_step"] = "run_executor".into();
             }
@@ -1424,8 +1447,8 @@ mod tests {
                 next_step: Some("close".into()),
                 blocking_reason: None,
                 last_artifact: Some("audit.md".into()),
-                spec_path: "/original/checkout/.mastermind/tasks/001-payment/spec.md".into(),
-                repository_identity: None,
+                spec_path: ".mastermind/tasks/001-payment/spec.md".into(),
+                repository_identity: Some(crate::facts::repository_identity(root.path()).unwrap()),
                 spec_hash: crate::run_task::hash_text(spec_body),
                 baseline_ref: baseline.clone(),
                 held_snapshot_sha256: Some(held_snapshot),

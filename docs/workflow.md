@@ -149,7 +149,10 @@ malformed entries are surfaced as blocked workflow state instead of disappearing
 Architecture policy applies the same task-entry rule and marks malformed evidence
 inventories incomplete even when another task covers the changed file.
 The same repository-bound replacement protects controller-written `audit.md`,
-release-note drafts, `history-review.md`, and review archives.
+release-note drafts, `history-review.md`, and review archives. History snapshots
+and review evidence use exact canonical repository-relative paths. Non-UTF-8
+names and Unix backslash aliases fail before an output directory or archive is
+created.
 
 ## What the gates prove
 

@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- History snapshots, spec parser labels, and generated review evidence now use
+  exact repository-relative path identities. Non-UTF-8 names and Unix
+  backslash aliases fail before the controller creates or archives an artifact.
 - Lesson candidates now deduplicate by exact repository-relative spec identity
   instead of a sanitized task label, preventing distinct task folders from
   merging their evidence and occurrence counts.

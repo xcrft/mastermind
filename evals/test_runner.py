@@ -55,6 +55,14 @@ def bind_target_identity(report, digest="9" * 64):
         "platform": "test",
         "pyyaml_version": "test",
     }
+    for case in report["cases"]:
+        suite_name = case["suite"]
+        case["runtime_controls"] = runner.evaluation_runtime_controls(
+            suite_name,
+            runner.SUITES[suite_name]["subagent"],
+            {},
+            include_mmcg=runner.SUITES[suite_name]["uses_fixture"],
+        )
     for summary in report["suites"].values():
         summary["target_definition_digest"] = digest
         summary["target_definition_stable"] = True
@@ -536,6 +544,44 @@ action: passthrough
                 source={"PATH": "/usr/bin"},
                 pinned_executables=(Path("relative/git"),),
             )
+
+    def test_effective_runtime_controls_expose_case_policy(self):
+        controls = runner.evaluation_runtime_controls(
+            "auditor",
+            runner.SUITES["auditor"]["subagent"],
+            {"max_turns": 7, "max_output_tokens": 1300},
+            include_mmcg=False,
+        )
+        self.assertEqual(controls["effort"], "high")
+        self.assertEqual(controls["max_turns"], 7)
+        self.assertEqual(controls["max_output_tokens"], 1300)
+        self.assertEqual(
+            controls["transport"],
+            {
+                "timeout_seconds": runner.CLAUDE_CASE_TIMEOUT_SECONDS,
+                "stdout_limit_bytes": runner.CLAUDE_STDOUT_LIMIT_BYTES,
+                "stderr_limit_bytes": runner.CLAUDE_STDERR_LIMIT_BYTES,
+            },
+        )
+        self.assertFalse(controls["isolation"]["safe_mode"])
+        self.assertFalse(controls["isolation"]["auto_memory"])
+        self.assertEqual(
+            controls["tool_policy"]["builtins"],
+            ["Read", "Glob", "Grep", "Bash"],
+        )
+        self.assertEqual(controls["tool_policy"]["mcp_servers"], [])
+        self.assertEqual(
+            controls["environment"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"],
+            "1300",
+        )
+        self.assertTrue(runner._valid_evaluation_runtime_controls(controls))
+
+        prompt_only = runner.evaluation_runtime_controls(
+            "workflow", None, {}, include_mmcg=False
+        )
+        self.assertTrue(prompt_only["isolation"]["safe_mode"])
+        self.assertEqual(prompt_only["tool_policy"]["builtins"], [])
+        self.assertEqual(prompt_only["tool_policy"]["expected_stream"], [])
 
     def test_harness_identity_includes_bounded_process_transport(self):
         definitions = {
@@ -1138,7 +1184,7 @@ action: passthrough
         current["suites"]["critic"]["target_definition_digest"] = "2" * 64
         gate = runner.compare_to_baseline(current, baseline)
         self.assertTrue(gate["passed"])
-        self.assertEqual(len(gate["checks"]), 8)
+        self.assertEqual(len(gate["checks"]), 9)
 
         inconsistent = deepcopy(current)
         inconsistent["suites"]["critic"]["quality"]["pass_rate"] = 0.8
@@ -1306,6 +1352,16 @@ action: passthrough
         current["claude_cli_version"] = "other-cli"
         gate = runner.compare_to_baseline(current, baseline)
         self.assertTrue(any("CLI version mismatch" in item for item in gate["failures"]))
+
+        current = deepcopy(baseline)
+        current["cases"][0]["runtime_controls"]["max_turns"] += 1
+        gate = runner.compare_to_baseline(current, baseline)
+        self.assertTrue(
+            any(
+                "effective runtime controls differ" in item
+                for item in gate["failures"]
+            )
+        )
 
         current = deepcopy(baseline)
         current["claude_cli_sha256"] = "7" * 64

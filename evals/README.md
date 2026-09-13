@@ -118,10 +118,12 @@ JSON file. On POSIX, success also requires a durable parent-directory update and
 the final path, inode, and bytes to remain the ones published by the runner.
 Every case retains quality, retry state, duration, API duration, turns, input
 and output tokens, prompt-cache creation/read tokens, reported cost, and
-telemetry completeness. Suite summaries use the nearest-rank rule for p50 and
-p95; raw cases stay in the same report so each aggregate is auditable. Gate
-inputs are recomputed from those raw cases, and an inconsistent summary fails
-closed.
+telemetry completeness. It also records the effective effort, turn and output
+caps, process transport limits, settings/session isolation, tool allowlist and
+expected stream inventory, MCP servers, and outcome-affecting environment
+controls. Suite summaries use the nearest-rank rule for p50 and p95; raw cases
+stay in the same report so each aggregate is auditable. Gate inputs are
+recomputed from those raw cases, and an inconsistent summary fails closed.
 
 Context tokens are `input_tokens + cache_creation_input_tokens +
 cache_read_input_tokens`. Output tokens remain separately reported because
@@ -153,10 +155,12 @@ an error.
 
 The checked-in critic baseline predates report emission and target identity, and
 was transcribed from the runner's console output. A legacy baseline may omit the
-target digest; a current report may not. Its capture metadata records that only
-aggregate API duration was observable; the token and quality fields used by the
-gate were recorded per case. That explicit legacy capture exception is accepted
-only for baseline evidence and cannot weaken validation of a current report.
+target digest and per-case runtime controls; a current report may not. Its
+capture metadata records that only aggregate API duration was observable; the
+token and quality fields used by the gate were recorded per case. That explicit
+legacy capture exception is accepted only for baseline evidence and cannot
+weaken validation of a current report. New-format baselines must contain the
+same effective per-case runtime controls as the current run.
 Its capture metadata also states how the resolved Opus model ID was verified
 immediately afterward with the same alias and CLI.
 New runs resolve one exact Claude executable before evaluation, call that path

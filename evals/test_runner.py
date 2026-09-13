@@ -29,9 +29,12 @@ def sync_gated_summaries(report, suite_name):
         "first_pass": first_pass,
         "first_pass_rate": first_pass / len(cases),
     }
-    summary["usage"]["context_tokens"] = runner.metric_summary(
-        [case["usage"]["context_tokens"] for case in cases]
-    )
+    for field in ("duration_ms", "duration_api_ms", "turns", "cost_usd"):
+        summary[field] = runner.metric_summary([case[field] for case in cases])
+    for field in summary["usage"]:
+        summary["usage"][field] = runner.metric_summary(
+            [case["usage"][field] for case in cases]
+        )
     summary["telemetry"] = {
         "complete": all(case["telemetry"]["complete"] for case in cases),
         "incomplete_cases": [
@@ -66,6 +69,27 @@ def bind_fixture_runtime(report, git_digest="5" * 64, mmcg_digest="4" * 64):
         "mmcg": {"sha256": mmcg_digest, "git_mode": "100755"},
         "stable": True,
     }
+
+
+def valid_critic_report(case_id="c-1"):
+    report = runner.build_report(
+        [
+            runner.Result(
+                case_id,
+                "critic",
+                True,
+                input_tokens=10,
+                telemetry_complete=True,
+                resolved_models=[RESOLVED_MODEL],
+            )
+        ],
+        model="opus",
+        suite_filter="critic",
+        case_filter=None,
+    )
+    report["claude_cli_version"] = "test-cli"
+    report["suites"]["critic"]["case_definition_digest"] = "a" * 64
+    return report
 
 
 class StructuredOutputTests(unittest.TestCase):
@@ -511,6 +535,7 @@ action: passthrough
         )
 
         current["cases"][0]["passed"] = False
+        current["cases"][0]["reasons"] = ["quality regression"]
         last_usage = current["cases"][-1]["usage"]
         last_usage["input_tokens"] = 140
         last_usage["context_tokens"] = 140
@@ -528,13 +553,13 @@ action: passthrough
                 telemetry_complete=True, resolved_models=[RESOLVED_MODEL],
             ),
             runner.Result(
-                "b", "critic", False, input_tokens=100,
+                "b", "critic", False, reasons=["baseline failure"], input_tokens=100,
                 telemetry_complete=True, resolved_models=[RESOLVED_MODEL],
             ),
         ]
         current_results = [
             runner.Result(
-                "a", "critic", False, input_tokens=90,
+                "a", "critic", False, reasons=["current failure"], input_tokens=90,
                 telemetry_complete=True, resolved_models=[RESOLVED_MODEL],
             ),
             runner.Result(
@@ -769,6 +794,83 @@ action: passthrough
             runner.write_report(path, report)
             with self.assertRaisesRegex(ValueError, "case 0 must be an object"):
                 runner.load_report(path)
+
+    def test_report_schema_rejects_inconsistent_records(self):
+        report = valid_critic_report()
+        malformed_reports = []
+
+        malformed = deepcopy(report)
+        malformed["unexpected"] = True
+        malformed_reports.append((malformed, "unexpected fields"))
+
+        malformed = deepcopy(report)
+        malformed["generated_at"] = "not-a-timestamp"
+        malformed_reports.append((malformed, "invalid generation time"))
+
+        malformed = deepcopy(report)
+        malformed["git_revision"] = "HEAD"
+        malformed_reports.append((malformed, "invalid Git revision"))
+
+        malformed = deepcopy(report)
+        malformed["cases"][0]["suite"] = "unknown"
+        malformed_reports.append((malformed, "unknown suite"))
+
+        malformed = deepcopy(report)
+        malformed["suites"]["critic"]["duration_ms"]["total"] = 1
+        malformed_reports.append((malformed, "duration_ms summary"))
+
+        malformed = deepcopy(report)
+        malformed["cases"][0]["retry_used"] = True
+        malformed_reports.append((malformed, "inconsistent retry state"))
+
+        malformed = deepcopy(report)
+        malformed["cases"][0]["telemetry"]["issues"] = ["missing usage"]
+        malformed_reports.append((malformed, "inconsistent telemetry status"))
+
+        malformed = deepcopy(report)
+        malformed["filters"]["suite"] = "researcher"
+        malformed_reports.append((malformed, "suite filter does not match"))
+
+        malformed = deepcopy(report)
+        malformed["filters"]["case"] = "another-case"
+        malformed_reports.append((malformed, "case filter does not match"))
+
+        malformed = deepcopy(report)
+        malformed["filters"] = {"suite": None, "case": None}
+        malformed_reports.append((malformed, "does not contain every suite"))
+
+        for malformed, expected_issue in malformed_reports:
+            with self.subTest(expected_issue=expected_issue):
+                issues = runner.report_comparison_issues(malformed, "test")
+                self.assertTrue(
+                    any(expected_issue in issue for issue in issues), issues
+                )
+
+    def test_current_report_requires_definition_stability(self):
+        baseline = valid_critic_report()
+        current = deepcopy(baseline)
+        for report in (baseline, current):
+            bind_target_identity(report)
+        del current["suites"]["critic"]["definition_stable"]
+
+        gate = runner.compare_to_baseline(current, baseline)
+
+        self.assertTrue(
+            any("no definition stability" in issue for issue in gate["failures"])
+        )
+
+    def test_legacy_capture_is_limited_to_baseline_evidence(self):
+        baseline_path = runner.EVALS_DIR / "baselines" / "critic-opus-pre-lean.json"
+        legacy = runner.load_report(baseline_path)
+        self.assertEqual(legacy["capture"]["mode"], "pre-report-console")
+
+        current = valid_critic_report()
+        current["capture"] = deepcopy(legacy["capture"])
+        current["suites"]["critic"]["duration_api_ms"]["total"] = 1
+        issues = runner.report_comparison_issues(current, "current")
+
+        self.assertTrue(any("cannot use legacy capture" in issue for issue in issues))
+        self.assertTrue(any("duration_api_ms summary" in issue for issue in issues))
 
     def test_fixture_content_changes_case_definition_digest(self):
         with tempfile.TemporaryDirectory() as target:

@@ -83,6 +83,11 @@ response length varies with generation. A missing, malformed, negative, or
 non-finite required telemetry field fails the case and cannot become a zero-cost
 improvement.
 
+Report loading is fail-closed: unknown fields or suites, malformed timestamps
+or revisions, filter/selection mismatches, inconsistent retry and telemetry
+states, and summaries that do not recompute from the raw case records are
+rejected before comparison. An unfiltered report must contain every suite.
+
 `--baseline-report` is intentionally strict. Current and baseline evidence must
 have the same requested model, resolved model IDs, Claude CLI version,
 suite/case filters, selected suites, case order, and SHA-256 digest of the
@@ -104,8 +109,10 @@ The checked-in critic baseline predates report emission and target identity, and
 was transcribed from the runner's console output. A legacy baseline may omit the
 target digest; a current report may not. Its capture metadata records that only
 aggregate API duration was observable; the token and quality fields used by the
-gate were recorded per case. Its capture metadata also states how the resolved
-Opus model ID was verified immediately afterward with the same alias and CLI.
+gate were recorded per case. That explicit legacy capture exception is accepted
+only for baseline evidence and cannot weaken validation of a current report.
+Its capture metadata also states how the resolved Opus model ID was verified
+immediately afterward with the same alias and CLI.
 New runs resolve one exact Claude executable before evaluation, call that path
 for every case, and record its SHA-256 and version. A runtime change before the
 run finishes fails every case. A legacy baseline may omit this binary identity;

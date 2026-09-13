@@ -173,7 +173,9 @@ files are not indexed. Custom selection does not apply the stricter corpus
 schema or imply that the key has been source reviewed.
 
 This creates nine trials by default: three repetitions with rotating condition
-order. `batch.json` records the planned sequence, including setup failures.
+order. `batch.json` records the planned sequence, including setup failures, and
+hashes the full plan. Every new batch trial binds that hash, its batch ID and its
+position into its condition identity.
 Preparation never invokes the model adapter. A failed index setup remains a
 failed graph trial; it cannot become a source-only result.
 
@@ -187,9 +189,14 @@ python3 evals/benchmark.py run /absolute/path/to/batch-id/trial-id
 invoking environment. The other accepted names are `ANTHROPIC_API_KEY` and
 `CLAUDE_CODE_OAUTH_TOKEN`. Credentials are not written into the request or
 manifest. All other inherited environment variables are cleared. Each trial
-gets fresh HOME, XDG and temporary directories. Every attempt takes an exclusive
-lock; a failed trial cannot be silently rerun. Prepare a new balanced batch when
-the runtime or experiment configuration changes.
+gets fresh HOME, XDG and temporary directories. A batch-level lock allows only
+one active attempt and requires every earlier planned result before the next
+trial can start. An out-of-order or overlapping command is rejected before that
+trial's one-shot `run.lock` is created. Each result links the hash of its
+predecessor, so offline review can verify a complete execution chain. A crash
+after claiming an attempt leaves the batch incomplete; it does not permit a
+selective retry. Prepare a new balanced batch when the runtime or experiment
+configuration changes.
 
 ## Adapter protocol
 
@@ -206,7 +213,8 @@ newline. `request.json` holds that object:
   the pinned native runtime, index hash, contracts and indexed-file inventory.
 
 Previously prepared version 1 generic requests retain their original shape and
-remain runnable. Newly prepared trials use manifest version 2.
+remain runnable. Standalone trials use manifest version 2. New batch-bound
+trials use version 3; their adapter request keeps the version 2 transport shape.
 
 The request does not contain the rubric, expected conclusions, other trials, or
 the original repository path. It describes a read-only tool contract. The
@@ -339,7 +347,11 @@ coverage checks, and rejects SQLite sidecars that appear before or during them.
 | `run_status` | Setup, timeout, output cap, model budget, invocation, protocol, model, identity or input-mutation failure; otherwise `completed` |
 | `quality` | `not_evaluated`, or `review_pending` when an answer is retained; score is always null |
 | `diagnostics` | Usage completeness, reported tools, budget exceedances, elapsed time, exit code and protocol issues |
+| `batch_execution` | For bound trials, exact batch/plan position and the previous result hash |
 | `comparability` | Always ineligible in this transport slice; records additional failure reasons |
+
+Standalone results retain schema version 1. Batch-bound results use version 2
+because they include the execution-chain receipt.
 
 Missing usage or an unexpected reported tool does not become an incorrect
 research finding. Conversely, a successful process or valid citation syntax
@@ -376,7 +388,8 @@ python3 -m evals.benchmark_corpus --source-repo .
 The tests use real subprocess I/O, disposable Git histories and SQLite indexes.
 They cover source projection, configuration separation, input identity checks,
 failed and partial indexes, full answer retention, timeout and process cleanup,
-malformed protocol events, telemetry separation and counterbalanced preparation.
+malformed protocol events, telemetry separation, counterbalanced preparation,
+ordered one-shot execution and result-chain verification.
 The Claude tests also cover actual source/MCP subprocesses, graph result fidelity,
 transport recovery, credentials, pinned bundle tampering, model switches, live
 budget stops, partial stream retention and nested process cleanup.

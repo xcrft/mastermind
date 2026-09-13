@@ -4,8 +4,8 @@
 packet, validates submitted evidence assessments and reports attempt counts.
 It uses Python 3.10+ on POSIX. It never invokes Git, a model, an indexer or the
 researched code, and does not require the old runtime binaries to remain
-installed. Generic manifest versions 1 and 2 are supported, including relocated
-batch directories.
+installed. Generic manifest versions 1, 2 and batch-bound version 3 are
+supported, including relocated batch directories.
 
 This workflow accepts the structured, source-reviewed **research** key schema
 used by the calibration corpus. Decision-task grading and older custom keys
@@ -28,7 +28,8 @@ Input directories must be canonical, without symlinks. An export contains:
 - `reviewer/answers/`: exact retained answer bytes under opaque names.
 - `reviewer/assessment-template.json`: the original, unfilled assessment form.
 - `coordinator.json`: private mapping to conditions/repetitions/trial IDs,
-  runtime metadata, artifact hashes and attempt states.
+  runtime metadata, artifact hashes, attempt states and batch execution-chain
+  integrity.
 - `seal.json`: hashes of the packet, original form and coordinator mapping.
 - `reviews/`: immutable imported assessments, created on the first import.
 
@@ -49,6 +50,13 @@ The collector checks the producer's three-condition counterbalanced matrix,
 unique trial directories and all planned repetitions. It rejects a batch that
 omits trial directories still present on disk. A missing manifest or missing
 trial directory remains an anonymous slot with no reviewable answer.
+
+For batch schema 2, the collector also checks every trial's plan binding and
+each result's predecessor hash. `execution_order_integrity` is `verified` only
+when all planned results form one complete chain. An intact prefix followed by
+missing or unfinished attempts is `partial`; a bound batch with no verified
+result is `not_established`. Older batch artifacts are `unverified_legacy`.
+These states describe transport evidence and do not grade answer quality.
 
 | State in the coordinator | Treatment |
 |---|---|
@@ -141,7 +149,7 @@ admission lock if the importing process exits.
 
 `status` verifies the exported evidence and imported receipts. It reports planned,
 completed, failed, not-run, unfinished, missing-artifact and retained-answer
-counts, plus reviewers and distinct reviewed attempts. Multiple reviewers do
+counts, execution-order integrity, reviewers and distinct reviewed attempts. Multiple reviewers do
 not multiply the number of experiments. Original `result.json` files retain
 their transport status and `review_pending` state; assessments are separate.
 

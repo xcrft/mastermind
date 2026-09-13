@@ -418,6 +418,7 @@ class BenchmarkTests(unittest.TestCase):
     def test_attempt_cannot_be_silently_retried(self):
         trial = self.prepare()
         first = bench.run_trial(trial)
+        (trial / "run.lock").unlink()
         with self.assertRaisesRegex(bench.BenchmarkError, "already attempted"):
             bench.run_trial(trial)
         self.assertEqual(bench.load_json(trial / "result.json"), first)
@@ -533,6 +534,9 @@ class BenchmarkTests(unittest.TestCase):
         batch = bench.prepare_batch(task=self.task, rubric=self.rubric, config=self.config,
             source_repo=self.repo, tool_repo=self.repo, output=self.root / "batches", repetitions=3)
         value = bench.load_json(batch / "batch.json")
+        self.assertEqual(value["schema_version"], 2)
+        self.assertEqual(value["batch_id"], batch.name)
+        self.assertEqual(value["plan_sha256"], bench.digest(bench.batch_plan_identity(value)))
         self.assertEqual([t["condition"] for t in value["trials"]], [
             "source", "portable", "portable_mmcg", "portable", "portable_mmcg", "source",
             "portable_mmcg", "source", "portable"])
@@ -541,6 +545,30 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIsNone(value["quality_uplift"])
         self.assertFalse(value["comparison_accepted"])
         self.assertFalse(list(batch.rglob("adapter-called")))
+        for position, item in enumerate(value["trials"]):
+            manifest = self.manifest(batch / item["directory"])
+            self.assertEqual(manifest["schema_version"], 3)
+            self.assertEqual(manifest["batch"], {"batch_id": value["batch_id"],
+                "plan_sha256": value["plan_sha256"], "position": position})
+
+    def test_batch_enforces_recorded_order_without_spending_a_later_attempt(self):
+        batch = bench.prepare_batch(task=self.task, rubric=self.rubric, config=self.config,
+            source_repo=self.repo, tool_repo=self.repo, output=self.root / "batches", repetitions=1)
+        value = bench.load_json(batch / "batch.json")
+        trials = [batch / item["directory"] for item in value["trials"]]
+        with self.assertRaises(bench.BenchmarkError) as raised:
+            bench.run_trial(trials[1])
+        self.assertEqual(raised.exception.code, "batch_order")
+        self.assertFalse((trials[1] / "run.lock").exists())
+        self.assertFalse((trials[1] / "adapter-called").exists())
+
+        first = bench.run_trial(trials[0])
+        second = bench.run_trial(trials[1])
+        self.assertEqual(first["batch_execution"]["position"], 0)
+        self.assertIsNone(first["batch_execution"]["previous_result_sha256"])
+        self.assertEqual(second["batch_execution"], {"batch_id": value["batch_id"],
+            "plan_sha256": value["plan_sha256"], "position": 1,
+            "previous_result_sha256": hashlib.sha256((trials[0] / "result.json").read_bytes()).hexdigest()})
 
     def test_source_allowlist_rejects_control_files_and_path_escapes(self):
         for path in (".", "../private", "/private", "src//service.py", "src/./service.py",

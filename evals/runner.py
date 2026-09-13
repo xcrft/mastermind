@@ -123,6 +123,30 @@ METADATA_OUTPUT_LIMIT_BYTES = 64 * 1024
 FIXTURE_GIT_TIMEOUT_SECONDS = 30
 FIXTURE_PROCESS_OUTPUT_LIMIT_BYTES = 1024 * 1024
 MMCG_INDEX_TIMEOUT_SECONDS = 60
+EVALUATION_RUNTIME_ENV_KEYS = (
+    "API_TIMEOUT_MS",
+    "BASH_DEFAULT_TIMEOUT_MS",
+    "BASH_MAX_OUTPUT_LENGTH",
+    "BASH_MAX_TIMEOUT_MS",
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    "CLAUDE_CODE_ENABLE_TASKS",
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+    "CLAUDE_CODE_MAX_RETRIES",
+    "CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY",
+    "CLAUDE_CODE_MCP_ALLOWLIST_ENV",
+    "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT",
+    "DISABLE_AUTOUPDATER",
+    "DISABLE_ERROR_REPORTING",
+    "DISABLE_GROWTHBOOK",
+    "DISABLE_TELEMETRY",
+    "ENABLE_TOOL_SEARCH",
+    "MAX_MCP_OUTPUT_TOKENS",
+    "MCP_DISCOVERY_CACHE",
+    "MCP_TIMEOUT",
+    "MCP_TOOL_TIMEOUT",
+)
 
 WORKFLOW_ARTIFACTS = frozenset(
     {
@@ -251,6 +275,7 @@ class Result:
     resolved_models: list[str] = field(default_factory=list)
     tool_calls: list[str] = field(default_factory=list)
     citation_checks: dict | None = None
+    runtime_controls: dict[str, object] | None = None
 
     @property
     def context_tokens(self) -> int:
@@ -917,7 +942,7 @@ def metric_summary(values: list[int | float]) -> dict[str, int | float]:
 
 
 def result_report(result: Result) -> dict:
-    return {
+    report = {
         "id": result.case_id,
         "suite": result.suite,
         "passed": result.passed,
@@ -944,6 +969,9 @@ def result_report(result: Result) -> dict:
         "tool_calls": result.tool_calls,
         "citation_checks": result.citation_checks,
     }
+    if result.runtime_controls is not None:
+        report["runtime_controls"] = result.runtime_controls
+    return report
 
 
 def load_case_records(
@@ -2070,6 +2098,90 @@ def _valid_legacy_console_capture(value: object) -> bool:
     )
 
 
+def _valid_evaluation_runtime_controls(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "effort",
+        "max_turns",
+        "max_output_tokens",
+        "transport",
+        "isolation",
+        "tool_policy",
+        "environment",
+    }:
+        return False
+    if value["effort"] not in CLAUDE_EFFORT_LEVELS:
+        return False
+    if any(
+        not _non_negative_integer(value[field]) or value[field] == 0
+        for field in ("max_turns", "max_output_tokens")
+    ):
+        return False
+
+    transport = value["transport"]
+    if (
+        not isinstance(transport, dict)
+        or set(transport)
+        != {"timeout_seconds", "stdout_limit_bytes", "stderr_limit_bytes"}
+        or any(
+            not _non_negative_integer(transport[field]) or transport[field] == 0
+            for field in transport
+        )
+    ):
+        return False
+
+    isolation = value["isolation"]
+    if (
+        not isinstance(isolation, dict)
+        or set(isolation)
+        != {
+            "safe_mode",
+            "permission_mode",
+            "setting_sources",
+            "strict_mcp_config",
+            "slash_commands",
+            "chrome",
+            "session_persistence",
+            "auto_memory",
+        }
+        or isolation["permission_mode"] != "dontAsk"
+        or isolation["setting_sources"] != []
+        or isolation["strict_mcp_config"] is not True
+        or isolation["slash_commands"] is not False
+        or isolation["chrome"] is not False
+        or isolation["session_persistence"] is not False
+        or isolation["auto_memory"] is not False
+        or not isinstance(isolation["safe_mode"], bool)
+    ):
+        return False
+
+    tool_policy = value["tool_policy"]
+    if (
+        not isinstance(tool_policy, dict)
+        or set(tool_policy)
+        != {"builtins", "allowed", "expected_stream", "mcp_servers"}
+        or any(
+            not _string_list(tool_policy[field], allow_empty=True)
+            for field in tool_policy
+        )
+        or tool_policy["mcp_servers"] not in ([], ["mmcg"])
+        or (
+            isolation["safe_mode"]
+            and any(tool_policy[field] for field in tool_policy)
+        )
+    ):
+        return False
+
+    environment = value["environment"]
+    return (
+        isinstance(environment, dict)
+        and set(environment) == set(EVALUATION_RUNTIME_ENV_KEYS)
+        and all(isinstance(item, str) and item for item in environment.values())
+        and environment["CLAUDE_CODE_MAX_OUTPUT_TOKENS"]
+        == str(value["max_output_tokens"])
+        and environment["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
+    )
+
+
 def raw_suite_gate_metrics(report: dict, suite_name: str) -> dict[str, object]:
     cases = [case for case in report["cases"] if case["suite"] == suite_name]
     context_values = [case["usage"]["context_tokens"] for case in cases]
@@ -2097,6 +2209,7 @@ def report_comparison_issues(
     require_harness_identity: bool = False,
     require_fixture_runtime: bool = False,
     require_definition_stability: bool = False,
+    require_case_runtime_controls: bool = False,
     allow_legacy_capture: bool = False,
 ) -> list[str]:
     issues: list[str] = []
@@ -2309,7 +2422,10 @@ def report_comparison_issues(
         "resolved_models",
         "tool_calls",
     }
-    allowed_case_fields = required_case_fields | {"citation_checks"}
+    allowed_case_fields = required_case_fields | {
+        "citation_checks",
+        "runtime_controls",
+    }
     for index, case in enumerate(cases):
         if not isinstance(case, dict):
             issues.append(f"{label} case {index} must be an object")
@@ -2407,6 +2523,16 @@ def report_comparison_issues(
             case.get("tool_calls"), allow_empty=True, unique=False
         ):
             issues.append(f"{label} case {case_id!r} has invalid tool calls")
+
+        if "runtime_controls" not in case:
+            if require_case_runtime_controls and not legacy_console_capture:
+                issues.append(
+                    f"{label} case {case_id!r} has no effective runtime controls"
+                )
+        elif not _valid_evaluation_runtime_controls(case["runtime_controls"]):
+            issues.append(
+                f"{label} case {case_id!r} has invalid effective runtime controls"
+            )
 
         citations = case.get("citation_checks")
         if citations is not None:
@@ -2706,9 +2832,13 @@ def compare_to_baseline(current: dict, baseline: dict) -> dict:
             require_harness_identity=True,
             require_fixture_runtime=current_uses_fixture,
             require_definition_stability=True,
+            require_case_runtime_controls=True,
         ),
         *report_comparison_issues(
-            baseline, "baseline", allow_legacy_capture=True
+            baseline,
+            "baseline",
+            require_case_runtime_controls=True,
+            allow_legacy_capture=True,
         ),
     ]
     if failures:
@@ -2772,6 +2902,51 @@ def compare_to_baseline(current: dict, baseline: dict) -> dict:
 
     if current.get("filters") != baseline.get("filters"):
         failures.append("current filters differ from baseline filters")
+
+    baseline_runtime_cases = [
+        case for case in baseline["cases"] if "runtime_controls" in case
+    ]
+    if baseline_runtime_cases:
+        if len(baseline_runtime_cases) != len(baseline["cases"]):
+            failures.append("baseline has incomplete effective runtime controls")
+        else:
+            current_controls = [
+                {"id": case["id"], "runtime_controls": case["runtime_controls"]}
+                for case in current["cases"]
+            ]
+            baseline_controls = [
+                {"id": case["id"], "runtime_controls": case["runtime_controls"]}
+                for case in baseline["cases"]
+            ]
+            current_controls_digest = hashlib.sha256(
+                json.dumps(
+                    current_controls,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            baseline_controls_digest = hashlib.sha256(
+                json.dumps(
+                    baseline_controls,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            controls_match = current_controls_digest == baseline_controls_digest
+            checks.append(
+                {
+                    "metric": "effective_runtime_controls",
+                    "statistic": "sha256",
+                    "operator": "==",
+                    "baseline": baseline_controls_digest,
+                    "current": current_controls_digest,
+                    "passed": controls_match,
+                }
+            )
+            if not controls_match:
+                failures.append("effective runtime controls differ from baseline")
 
     current_suites = set(current["suites"])
     baseline_suites = set(baseline["suites"])
@@ -3448,6 +3623,76 @@ def expected_stream_tools(
     return (*tools, "EndConversation") if tools else ()
 
 
+def _comma_separated_cli_option(arguments: list[str], option: str) -> list[str]:
+    try:
+        index = arguments.index(option)
+    except ValueError:
+        return []
+    if index + 1 >= len(arguments) or not isinstance(arguments[index + 1], str):
+        raise ValueError(f"evaluation CLI option {option!r} has no value")
+    value = arguments[index + 1]
+    return [] if not value else value.split(",")
+
+
+def evaluation_runtime_controls(
+    suite_name: str,
+    prompt_path: Path | None,
+    expect: dict,
+    *,
+    include_mmcg: bool,
+) -> dict[str, object]:
+    """Describe the effective case policy that can change eval outcomes."""
+    limits = case_runtime_limits(suite_name, expect)
+    subagent = (
+        prompt_path if suite_name in {"auditor", "researcher"} else None
+    )
+    safety_arguments = isolated_cli_args(
+        suite_name,
+        subagent=subagent,
+        include_mmcg=include_mmcg,
+    )
+    environment = evaluation_environment(
+        limits["max_output_tokens"], source={}
+    )
+    return {
+        "effort": evaluation_effort(suite_name, prompt_path),
+        "max_turns": limits["max_turns"],
+        "max_output_tokens": limits["max_output_tokens"],
+        "transport": {
+            "timeout_seconds": CLAUDE_CASE_TIMEOUT_SECONDS,
+            "stdout_limit_bytes": CLAUDE_STDOUT_LIMIT_BYTES,
+            "stderr_limit_bytes": CLAUDE_STDERR_LIMIT_BYTES,
+        },
+        "isolation": {
+            "safe_mode": "--safe-mode" in safety_arguments,
+            "permission_mode": "dontAsk",
+            "setting_sources": [],
+            "strict_mcp_config": "--strict-mcp-config" in safety_arguments,
+            "slash_commands": "--disable-slash-commands" not in safety_arguments,
+            "chrome": "--no-chrome" not in safety_arguments,
+            "session_persistence": False,
+            "auto_memory": environment["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] != "1",
+        },
+        "tool_policy": {
+            "builtins": _comma_separated_cli_option(safety_arguments, "--tools"),
+            "allowed": _comma_separated_cli_option(
+                safety_arguments, "--allowedTools"
+            ),
+            "expected_stream": list(
+                expected_stream_tools(
+                    suite_name,
+                    subagent=subagent,
+                    include_mmcg=include_mmcg,
+                )
+            ),
+            "mcp_servers": ["mmcg"] if include_mmcg else [],
+        },
+        "environment": {
+            name: environment[name] for name in EVALUATION_RUNTIME_ENV_KEYS
+        },
+    }
+
+
 def requires_prompt_sandbox(suite_name: str) -> bool:
     """Return whether a prompt-only suite needs a fresh, empty working tree."""
     return suite_name in {"critic", "intake", "workflow"}
@@ -3817,6 +4062,7 @@ def failed_evaluation_result(
     telemetry_issue: str | None = None,
     telemetry: dict[str, object] | None = None,
     tool_calls: list[str] | None = None,
+    runtime_controls: dict[str, object] | None = None,
 ) -> Result:
     """Create a structurally valid failure without persisting model output."""
     if telemetry is None:
@@ -3853,6 +4099,7 @@ def failed_evaluation_result(
         telemetry_issues=list(telemetry["issues"]),
         resolved_models=list(telemetry["resolved_models"]),
         tool_calls=[] if tool_calls is None else tool_calls,
+        runtime_controls=runtime_controls,
     )
 
 
@@ -3882,6 +4129,7 @@ def evaluate_case(
     prompt_sandbox: tempfile.TemporaryDirectory[str] | None = None
     extra_cmd: list[str] = []
     has_mmcg = False
+    runtime_controls: dict[str, object] | None = None
     try:
         if suite_cfg["uses_fixture"]:
             fixture_name = case["fixture"]
@@ -3900,6 +4148,12 @@ def evaluate_case(
 
             db_path = fixture_path / ".mastermind" / "mmcg.db"
             has_mmcg = mmcg_binary is not None and db_path.is_file()
+            runtime_controls = evaluation_runtime_controls(
+                suite_name,
+                prompt_path,
+                case.get("expect", {}),
+                include_mmcg=has_mmcg,
+            )
             if suite_name in {"auditor", "researcher"} and not has_mmcg and not case.get("allow_no_mmcg"):
                 return failed_evaluation_result(
                     case_id,
@@ -3908,6 +4162,7 @@ def evaluate_case(
                     "(`cargo build --release`)",
                     fixture_path=fixture_path,
                     telemetry_issue="evaluation did not start because mmcg was unavailable",
+                    runtime_controls=runtime_controls,
                 )
             if suite_name == "auditor":
                 user_message = render_auditor_input(
@@ -3943,6 +4198,14 @@ def evaluate_case(
             user_message = render_workflow_input(case["input"])
         else:
             user_message = render_critic_input(case["input"])
+
+        if runtime_controls is None:
+            runtime_controls = evaluation_runtime_controls(
+                suite_name,
+                prompt_path,
+                case.get("expect", {}),
+                include_mmcg=False,
+            )
 
         # Pass the user message via stdin — passing it as a positional arg
         # collides with `--add-dir <directories...>` (variadic), which would
@@ -3996,8 +4259,11 @@ def evaluate_case(
                 claude_code_version=claude_stream_version(claude_version),
             )
         )
-        runtime_limits = case_runtime_limits(suite_name, case.get("expect", {}))
-        effort = evaluation_effort(suite_name, prompt_path)
+        runtime_limits = {
+            "max_turns": int(runtime_controls["max_turns"]),
+            "max_output_tokens": int(runtime_controls["max_output_tokens"]),
+        }
+        effort = str(runtime_controls["effort"])
         streamed_output = True
         cmd = [
             str(claude_binary),
@@ -4053,6 +4319,7 @@ def evaluate_case(
                 reason,
                 fixture_path=fixture_path,
                 telemetry_issue=reason,
+                runtime_controls=runtime_controls,
             )
 
         if proc.returncode != 0:
@@ -4063,6 +4330,7 @@ def evaluate_case(
                 reason,
                 fixture_path=fixture_path,
                 telemetry_issue="Claude exited before valid telemetry",
+                runtime_controls=runtime_controls,
             )
 
         try:
@@ -4074,6 +4342,7 @@ def evaluate_case(
                 "invalid Claude stream encoding",
                 fixture_path=fixture_path,
                 telemetry_issue="Claude stream encoding was invalid",
+                runtime_controls=runtime_controls,
             )
 
         permission_denials: list[dict] = []
@@ -4103,6 +4372,7 @@ def evaluate_case(
                 f"invalid Claude stream: {error}",
                 fixture_path=fixture_path,
                 telemetry_issue="Claude stream was invalid",
+                runtime_controls=runtime_controls,
             )
 
         if telemetry["complete"] is not True:
@@ -4113,6 +4383,7 @@ def evaluate_case(
                 fixture_path=fixture_path,
                 telemetry=telemetry,
                 tool_calls=tool_calls,
+                runtime_controls=runtime_controls,
             )
         if permission_denials:
             denied_tools = sorted(
@@ -4130,6 +4401,7 @@ def evaluate_case(
                 fixture_path=fixture_path,
                 telemetry=telemetry,
                 tool_calls=tool_calls,
+                runtime_controls=runtime_controls,
             )
 
         expect = case.get("expect", {})
@@ -4274,6 +4546,7 @@ def evaluate_case(
             resolved_models=list(telemetry["resolved_models"]),
             tool_calls=tool_calls,
             citation_checks=citation_checks,
+            runtime_controls=runtime_controls,
         )
     finally:
         if prompt_sandbox is not None:

@@ -47,6 +47,7 @@ const MAX_OWNERS_PER_RULE: usize = 50;
 const MAX_CONTRIBUTORS_PER_FILE: usize = 5;
 const MAX_DIAGNOSTICS: usize = 100;
 const GIT_HISTORY_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
+const MAX_SOURCE_IDENTITY_CHARS: usize = 180;
 
 #[derive(Debug, Clone, Default)]
 pub struct EvidenceOptions {
@@ -411,6 +412,7 @@ impl CodeownersDiscoveryError {
 #[derive(Debug)]
 enum SourceFailure {
     Unavailable,
+    InvalidIdentity,
     ProjectHistoryStale,
     ProjectHistoryIncomplete,
     TooLarge,
@@ -427,6 +429,7 @@ impl SourceFailure {
     fn code(&self) -> &'static str {
         match self {
             Self::Unavailable => "source_unavailable",
+            Self::InvalidIdentity => "invalid_source_identity",
             Self::ProjectHistoryStale => "project_history_stale",
             Self::ProjectHistoryIncomplete => "project_history_incomplete",
             Self::TooLarge => "source_too_large",
@@ -445,6 +448,9 @@ impl SourceFailure {
     fn message(&self) -> &'static str {
         match self {
             Self::Unavailable => "The evidence source could not be read.",
+            Self::InvalidIdentity => {
+                "The evidence source path has no exact UTF-8 identity or uses an ambiguous repository alias."
+            }
             Self::ProjectHistoryStale => {
                 "Indexed project history no longer matches Markdown; its matches were omitted. Run `mastermind index .` and refresh."
             }
@@ -1027,18 +1033,11 @@ impl Collector<'_> {
         if self.deadline_reached() {
             return Err(SourceFailure::Deadline);
         }
-        let label = resolved
-            .strip_prefix(self.root)
-            .ok()
-            .map(display_path)
-            .or_else(|| {
-                resolved
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-            })
-            .unwrap_or_else(|| "evidence artifact".into());
+        let label = artifact_source_identity(self.root, &resolved)
+            .map(|(label, _)| label)
+            .ok_or(SourceFailure::InvalidIdentity)?;
         Ok(SourceInput {
-            label: truncate_text(&label, 180),
+            label,
             bytes: source.bytes,
         })
     }
@@ -2261,13 +2260,24 @@ fn strip_utf8_bom(bytes: &[u8]) -> &[u8] {
 
 fn requested_label(path: &Path) -> String {
     path.file_name()
-        .map(|name| name.to_string_lossy().into_owned())
+        .and_then(OsStr::to_str)
+        .map(str::to_owned)
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "evidence artifact".into())
 }
 
-fn display_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+pub(crate) fn artifact_source_identity(root: &Path, resolved: &Path) -> Option<(String, bool)> {
+    let (path, repository_relative) = match resolved.strip_prefix(root) {
+        Ok(relative) => crate::bounded_fs::normalize_repository_relative_path(relative)
+            .ok()
+            .map(|path| (path, true))?,
+        Err(_) => resolved
+            .file_name()
+            .and_then(OsStr::to_str)
+            .filter(|name| !name.is_empty())
+            .map(|name| (name.to_owned(), false))?,
+    };
+    (path.chars().count() <= MAX_SOURCE_IDENTITY_CHARS).then_some((path, repository_relative))
 }
 
 fn saturating_u32(value: usize) -> u32 {
@@ -3776,6 +3786,30 @@ mod tests {
             .items
             .iter()
             .any(|diagnostic| diagnostic.code == "invalid_coverage_record"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ambiguous_source_identities_are_rejected_without_lossy_aliases() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = Path::new("/repository");
+        let non_utf8 = root.join(OsString::from_vec(b"report-\xff.sarif".to_vec()));
+
+        assert_eq!(
+            artifact_source_identity(root, &root.join("report.sarif")),
+            Some(("report.sarif".into(), true))
+        );
+        assert_eq!(
+            artifact_source_identity(root, &root.join("reports\\report.sarif")),
+            None
+        );
+        assert_eq!(artifact_source_identity(root, &non_utf8), None);
+        assert_eq!(
+            artifact_source_identity(root, &root.join("a".repeat(MAX_SOURCE_IDENTITY_CHARS + 1))),
+            None
+        );
     }
 
     #[test]

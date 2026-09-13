@@ -57,6 +57,7 @@ pub enum ReviewPackageError {
     UnsafeOutput,
     OutputInsideDocumentCorpus(String),
     DocumentGraphChanged(String),
+    InvalidEvidenceIdentity,
     EvidenceUnavailable(String),
     EvidenceTooLarge(String),
     EvidenceChanged(String),
@@ -85,6 +86,9 @@ impl fmt::Display for ReviewPackageError {
             Self::DocumentGraphChanged(message) => {
                 write!(formatter, "document graph changed during export: {message}")
             }
+            Self::InvalidEvidenceIdentity => formatter.write_str(
+                "review evidence path must have an exact UTF-8 identity without ambiguous repository aliases",
+            ),
             Self::EvidenceUnavailable(label) => {
                 write!(formatter, "review evidence is unavailable: {label}")
             }
@@ -667,7 +671,11 @@ fn read_source(root: &Path, request: &SourceRequest) -> Result<SourceIdentity, R
     } else {
         root.join(&request.path)
     };
-    let fallback_label = display_path(&request.path);
+    let fallback_label = request
+        .path
+        .to_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| "<invalid path>".into());
     let (resolved, source) = crate::bounded_fs::read_selected_regular_file(
         &requested,
         request.maximum_bytes,
@@ -675,16 +683,8 @@ fn read_source(root: &Path, request: &SourceRequest) -> Result<SourceIdentity, R
         crate::bounded_fs::ReadControl::default(),
     )
     .map_err(|error| evidence_read_error(error, &fallback_label))?;
-    let (label, repository_relative) = match resolved.strip_prefix(root) {
-        Ok(relative) => (display_path(relative), true),
-        Err(_) => (
-            resolved
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "evidence-artifact".into()),
-            false,
-        ),
-    };
+    let (label, repository_relative) = crate::evidence::artifact_source_identity(root, &resolved)
+        .ok_or(ReviewPackageError::InvalidEvidenceIdentity)?;
     let sha256 = sha256_hex(&source.bytes);
     let bytes = source.declared_len;
     Ok(SourceIdentity {
@@ -1062,7 +1062,7 @@ fn ensure_document_graph_unchanged(
                 .map_err(|error| ReviewPackageError::Serialization(error.to_string()))?;
             if observed != expected {
                 return Err(ReviewPackageError::DocumentGraphChanged(
-                    path.to_string_lossy().into_owned(),
+                    path.to_str().unwrap_or("<invalid path>").to_owned(),
                 ));
             }
             Ok(())
@@ -1364,6 +1364,9 @@ fn output_target(path: &Path) -> Result<PathBuf, ReviewPackageError> {
         .canonicalize()
         .map_err(|_| ReviewPackageError::OutputParentUnavailable)?;
     let target = parent.join(name);
+    if target.to_str().is_none() {
+        return Err(ReviewPackageError::UnsafeOutput);
+    }
     match std::fs::symlink_metadata(&target) {
         Ok(_) => Err(ReviewPackageError::OutputExists),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(target),
@@ -1588,10 +1591,6 @@ fn normalize_relative(value: &str) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("/"))
 }
 
-fn display_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
-}
-
 fn short_oid(value: &str) -> &str {
     value.get(..12).unwrap_or(value)
 }
@@ -1803,6 +1802,47 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(error, ReviewPackageError::EvidenceUnavailable(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn evidence_reader_rejects_an_ambiguous_repository_label() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let report = root.join("reports\\semgrep.sarif");
+        std::fs::write(&report, b"{}").unwrap();
+
+        let error = read_source(
+            &root,
+            &SourceRequest {
+                id: "sarif:0".into(),
+                kind: "sarif",
+                path: report,
+                maximum_bytes: crate::evidence::MAX_ARTIFACT_BYTES,
+                retain_body: false,
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, ReviewPackageError::InvalidEvidenceIdentity));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_target_rejects_an_inexact_path_before_publication() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let output = root
+            .path()
+            .join(OsString::from_vec(b"review-\xff".to_vec()));
+
+        assert!(matches!(
+            output_target(&output),
+            Err(ReviewPackageError::UnsafeOutput)
+        ));
+        assert!(!output.exists());
     }
 
     #[test]

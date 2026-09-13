@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Lens evidence and review manifests now require exact source labels; non-UTF-8
+  names and Unix backslash aliases cannot be bound to a different path. Review
+  output paths are also validated before package publication.
 - Spec parsing, executor-report bundle binding, and fact-adapter summaries now
   reject paths without exact UTF-8 identities instead of publishing lossy
   aliases for the inputs or generated manifest.

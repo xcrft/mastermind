@@ -917,7 +917,11 @@ file counts as observations when parsing was partial.
 
 Explicit evidence paths are resolved once and then read through a retained
 parent capability with no-follow handles. Only bounded regular files are
-accepted; path substitutions and special files fail closed.
+accepted; path substitutions and special files fail closed. Source labels must
+have exact UTF-8 identities, and repository-relative labels must use canonical
+slash paths within the 180-character source-identity limit. Lens exposes a
+rejected label as partial evidence; review export fails before publication
+because its manifest cannot bind an ambiguous source.
 Review export also fixes the automatically discovered CODEOWNERS path before
 Lens analysis and rechecks that priority selection before publication. A file
 appearing, disappearing, or moving between `.github`, the repository root, and
@@ -983,6 +987,7 @@ partial evidence when several conditions apply to the same snapshot.
 snapshot without starting an HTTP server. `DIR` must not already exist. The
 export is assembled in a private sibling temporary directory and renamed only
 after every payload is synced, so a failed run does not publish a half-package.
+The resolved output path must have an exact UTF-8 representation.
 
 The package contains:
 

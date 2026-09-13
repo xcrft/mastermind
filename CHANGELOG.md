@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Evaluation runtime identity hashing is now non-blocking and bounded, includes
   file mode in stability checks, and applies the stricter definition-file cap
   to harness sources.
+- Benchmark index validation now rejects every SQLite sidecar, including empty
+  WAL, journal, and shared-memory files that previously escaped the size check.
 - History and task retrieval now distinguish a known incomplete corpus from an
   unavailable live freshness scan. Responses expose a stable `freshness_error`,
   and managed MCP serving refuses to scan an index root outside its authorized

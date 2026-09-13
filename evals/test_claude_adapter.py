@@ -72,7 +72,7 @@ try:
     model = option('--model')
     emit({'type': 'system', 'subtype': 'init', 'model': model,
           'claude_code_version': '2.1.236', 'cwd': str(cwd), 'permissionMode': 'dontAsk',
-          'tools': [] if MODE == 'bad_mcp' else names + (['Bash'] if MODE == 'extra_tool' else []),
+          'tools': [] if MODE == 'bad_mcp' else names + ['EndConversation'] + (['Bash'] if MODE == 'extra_tool' else []),
           'mcp_servers': [{'name': 'research', 'status': 'failed' if MODE == 'bad_mcp' else 'connected'}],
           'skills': [], 'plugins': []})
     if MODE in ('hang', 'slow_version_hang'):

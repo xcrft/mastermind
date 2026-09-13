@@ -78,6 +78,12 @@ def exposed_tools(request: dict) -> list[str]:
     return [f"mcp__{SERVER_NAME}__{tool['name']}" for tool in tool_definitions(request["mmcg"] is not None)]
 
 
+def observed_cli_tools(request: dict) -> list[str]:
+    # MCP availability keeps Claude Code's built-in EndConversation tool in
+    # the runtime inventory even when --tools is the empty string.
+    return [*exposed_tools(request), "EndConversation"]
+
+
 def cli_environment(trial: Path, request: dict, key: str) -> dict[str, str]:
     env = bench.clean_environment(trial, {"ANTHROPIC_API_KEY": key})
     env.update({"ENABLE_TOOL_SEARCH": "false", "MCP_DISCOVERY_CACHE": "0",
@@ -152,7 +158,7 @@ class StreamObserver:
                 return self.fail("setup_error", "mcp_server_unavailable")
             tools = event.get("tools")
             if (not isinstance(tools, list) or any(not isinstance(t, str) for t in tools)
-                    or sorted(tools) != sorted(exposed_tools(self.request))):
+                    or sorted(tools) != sorted(observed_cli_tools(self.request))):
                 return self.fail("identity_mismatch", "observed_tool_inventory_mismatch")
             if event.get("skills", []) or event.get("plugins", []):
                 return self.fail("identity_mismatch", "unexpected_cli_extensions")

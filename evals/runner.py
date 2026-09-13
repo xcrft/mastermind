@@ -105,6 +105,16 @@ SUITES = {
     },
 }
 
+SUITE_RUNTIME_LIMITS = {
+    "critic": {"max_turns": 10, "max_output_tokens": 8192},
+    "researcher": {"max_turns": 12, "max_output_tokens": 2200},
+    "auditor": {"max_turns": 20, "max_output_tokens": 8192},
+    "intake": {"max_turns": 4, "max_output_tokens": 4096},
+    "workflow": {"max_turns": 12, "max_output_tokens": 4096},
+}
+SUITE_DEFAULT_EFFORT = {"workflow": "medium"}
+CLAUDE_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
+
 WORKFLOW_ARTIFACTS = frozenset(
     {
         "skills/code-review/mastermind-comment-audit/SKILL.md",
@@ -154,6 +164,30 @@ GIT_ENV = {
 # (CI, piped output, shells where $TERM is unset). Prefer the caller's TERM
 # when available so color hints still work in interactive mode.
 _PROC_ENV: dict[str, str] = {**os.environ, "TERM": os.environ.get("TERM") or "dumb"}
+_CLAUDE_AUTH_ENV = frozenset({"CLAUDE_CODE_OAUTH_TOKEN"})
+_CLAUDE_GENERIC_RUNTIME_ENV = frozenset(
+    {
+        "API_FORCE_IDLE_TIMEOUT",
+        "API_TIMEOUT_MS",
+        "BASH_DEFAULT_TIMEOUT_MS",
+        "BASH_MAX_OUTPUT_LENGTH",
+        "BASH_MAX_TIMEOUT_MS",
+        "BETA_TRACING_ENDPOINT",
+        "DEBUG",
+        "DISABLE_COMPACT",
+        "ENABLE_TOOL_SEARCH",
+        "FORCE_AUTOUPDATE_PLUGINS",
+        "MAX_MCP_OUTPUT_TOKENS",
+        "MAX_STRUCTURED_OUTPUT_RETRIES",
+        "MAX_THINKING_TOKENS",
+        "MCP_CONNECTION_NONBLOCKING",
+        "MCP_DISCOVERY_CACHE",
+        "MCP_REMOTE_SERVER_CONNECTION_BATCH_SIZE",
+        "MCP_SERVER_CONNECTION_BATCH_SIZE",
+        "MCP_TIMEOUT",
+        "MCP_TOOL_TIMEOUT",
+    }
+)
 
 AUDITOR_SAFE_ALLOWED_TOOLS = (
     "Read",
@@ -384,6 +418,85 @@ def researcher_allowed_tools(
         else ()
     )
     return ("Read", "Glob", "Grep") + mcp_tools
+
+
+def case_runtime_limits(suite_name: str, expect: dict) -> dict[str, int]:
+    defaults = SUITE_RUNTIME_LIMITS.get(suite_name)
+    if defaults is None:
+        raise ValueError(f"suite {suite_name!r} has no runtime limits")
+    limits = {
+        field: expect.get(field, default)
+        for field, default in defaults.items()
+    }
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value <= 0
+        for value in limits.values()
+    ):
+        raise ValueError("evaluation runtime limits must be positive integers")
+    return limits
+
+
+def evaluation_effort(suite_name: str, prompt_path: Path | None) -> str:
+    effort = SUITE_DEFAULT_EFFORT.get(suite_name)
+    if effort is None and prompt_path is not None:
+        _, definition = subagent_runtime_definition(prompt_path)
+        effort = definition.get("effort")
+    if effort not in CLAUDE_EFFORT_LEVELS:
+        raise ValueError(f"suite {suite_name!r} has no valid evaluation effort")
+    return effort
+
+
+def evaluation_environment(
+    max_output_tokens: int,
+    *,
+    source: dict[str, str] | None = None,
+) -> dict[str, str]:
+    if (
+        isinstance(max_output_tokens, bool)
+        or not isinstance(max_output_tokens, int)
+        or max_output_tokens <= 0
+    ):
+        raise ValueError("maximum output tokens must be a positive integer")
+    inherited = _PROC_ENV if source is None else source
+    environment = {
+        name: value
+        for name, value in inherited.items()
+        if not (
+            (name.startswith("ANTHROPIC_") and name not in _CLAUDE_AUTH_ENV)
+            or (name.startswith("CLAUDE_") and name not in _CLAUDE_AUTH_ENV)
+            or name == "CLAUDECODE"
+            or name.startswith("DISABLE_")
+            or name.startswith("MCP_")
+            or name.startswith("OTEL_")
+            or name in _CLAUDE_GENERIC_RUNTIME_ENV
+        )
+    }
+    environment.update(
+        {
+            "API_TIMEOUT_MS": "300000",
+            "BASH_DEFAULT_TIMEOUT_MS": "120000",
+            "BASH_MAX_OUTPUT_LENGTH": "30000",
+            "BASH_MAX_TIMEOUT_MS": "120000",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            "CLAUDE_CODE_ENABLE_TASKS": "0",
+            "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0",
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(max_output_tokens),
+            "CLAUDE_CODE_MAX_RETRIES": "2",
+            "CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY": "1",
+            "CLAUDE_CODE_MCP_ALLOWLIST_ENV": "1",
+            "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT": "120000",
+            "DISABLE_AUTOUPDATER": "1",
+            "DISABLE_ERROR_REPORTING": "1",
+            "DISABLE_GROWTHBOOK": "1",
+            "DISABLE_TELEMETRY": "1",
+            "ENABLE_TOOL_SEARCH": "false",
+            "MAX_MCP_OUTPUT_TOKENS": "25000",
+            "MCP_DISCOVERY_CACHE": "0",
+            "MCP_TIMEOUT": "30000",
+            "MCP_TOOL_TIMEOUT": "120000",
+        }
+    )
+    return environment
 
 
 def _nonnegative_int(value: object) -> int:
@@ -3248,7 +3361,9 @@ def expected_stream_tools(
         or len(tools) != len(set(tools))
     ):
         raise ValueError(f"suite {suite_name!r} has an invalid tool inventory")
-    return tuple(tools)
+    # Claude Code keeps EndConversation when any other built-in or MCP tool is
+    # available, even when it is omitted from --tools.
+    return (*tools, "EndConversation") if tools else ()
 
 
 def requires_prompt_sandbox(suite_name: str) -> bool:
@@ -3753,17 +3868,21 @@ def evaluate_case(
                 claude_code_version=claude_stream_version(claude_version),
             )
         )
+        runtime_limits = case_runtime_limits(suite_name, case.get("expect", {}))
+        effort = evaluation_effort(suite_name, prompt_path)
         streamed_output = True
         cmd = [
             str(claude_binary),
             "-p",
             "--model", model,
+            "--effort", effort,
             *prompt_args,
             *agent_args,
             "--output-format", "stream-json" if streamed_output else "json",
             *(["--verbose"] if streamed_output else []),
             "--no-session-persistence",
             "--permission-mode", "dontAsk",
+            "--max-turns", str(runtime_limits["max_turns"]),
             *workflow_safety,
             *extra_cmd,
         ]
@@ -3774,7 +3893,7 @@ def evaluate_case(
         try:
             proc = subprocess.run(
                 cmd, input=user_message, capture_output=True, text=True,
-                env=_PROC_ENV,
+                env=evaluation_environment(runtime_limits["max_output_tokens"]),
                 cwd=case_cwd,
                 timeout=480,
             )

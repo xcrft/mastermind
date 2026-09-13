@@ -290,11 +290,14 @@ invocation. The CLI's `--version` output and stream version must match the pin.
 This does not attest the interpreter's shared libraries or CLI provenance.
 
 The CLI runs in a new empty `client/` directory with fresh HOME/XDG state, bare
-mode, an explicit system prompt, no built-in tools, no slash commands, empty
-setting sources, no session persistence and one strict MCP configuration. The
-adapter checks the observed tool inventory, server connection, permission mode,
-extensions, working directory and model identities. Managed host policies can
-still affect execution; separate directories are not an OS sandbox.
+mode, an explicit system prompt, no general-purpose built-in tools, no slash
+commands, empty setting sources, no session persistence and one strict MCP
+configuration. Claude Code keeps its built-in `EndConversation` entry while MCP
+tools exist; the adapter expects that entry but does not report it as a research
+tool. The adapter checks the observed tool inventory, server connection,
+permission mode, extensions, working directory and model identities. Managed
+host policies can still affect execution; separate directories are not an OS
+sandbox.
 
 Bare mode requires an explicitly forwarded `ANTHROPIC_API_KEY`:
 

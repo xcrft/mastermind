@@ -302,6 +302,24 @@ class BenchmarkTests(unittest.TestCase):
                 self.assertTrue((trial / "index/mmcg.db").is_file())
                 self.assert_setup_failure(trial, reason)
 
+    def test_index_validation_rejects_empty_sqlite_sidecars(self):
+        trial = self.prepare("portable_mmcg")
+        manifest = self.manifest(trial)
+        index = trial / "index/mmcg.db"
+        for suffix in ("-wal", "-journal", "-shm"):
+            with self.subTest(suffix=suffix):
+                sidecar = index.with_name(index.name + suffix)
+                sidecar.touch()
+                try:
+                    with self.assertRaises(bench.BenchmarkError) as raised:
+                        bench.validate_index(
+                            index, trial / "source", manifest["source_files"],
+                            manifest["index_contract"], manifest["indexed_files"],
+                        )
+                    self.assertEqual(raised.exception.code, "index_uncheckpointed")
+                finally:
+                    sidecar.unlink(missing_ok=True)
+
     def test_index_validation_rejects_a_same_byte_database_replacement(self):
         trial = self.prepare("portable_mmcg")
         manifest = self.manifest(trial)

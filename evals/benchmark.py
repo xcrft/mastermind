@@ -571,14 +571,17 @@ def validate_index(path: Path, source: Path, files: list[dict], contract: dict,
         for suffix in ("-wal", "-journal", "-shm"):
             sidecar = path.with_name(path.name + suffix)
             try:
-                if sidecar.is_symlink():
-                    raise BenchmarkError("invalid_file", "symbolic SQLite sidecar")
-                if sidecar.exists():
-                    read_file(sidecar, 0)
-            except BenchmarkError as error:
+                sidecar.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as error:
                 raise BenchmarkError(
-                    "index_uncheckpointed", "index has an uncheckpointed SQLite sidecar"
+                    "index_uncheckpointed",
+                    "cannot establish an exclusive checkpointed SQLite database",
                 ) from error
+            raise BenchmarkError(
+                "index_uncheckpointed", "index has an uncheckpointed SQLite sidecar"
+            )
 
     verify_sidecars()
     before = hash_file(path, BINARY_BYTE_LIMIT, len(b"SQLite format 3\0"))

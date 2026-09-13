@@ -822,7 +822,7 @@ mod tests {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
 
-        let path = PathBuf::from(OsString::from_vec(b"spec-\xff.md".to_vec()));
+        let path = std::path::PathBuf::from(OsString::from_vec(b"spec-\xff.md".to_vec()));
         let error = parse_file_bytes(&path, b"# Exact identity\n".to_vec()).unwrap_err();
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);

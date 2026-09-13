@@ -577,29 +577,38 @@ pub(crate) fn repository_identity(root: &Path) -> Result<String, FactError> {
 #[derive(Debug)]
 pub(crate) enum RepositoryIdentityError {
     Git(crate::diff::WorkingTreeDiffError),
+    #[cfg(not(windows))]
     InvalidPath,
+    #[cfg(windows)]
+    Root(crate::bounded_fs::BoundedReadError),
 }
 
 impl fmt::Display for RepositoryIdentityError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Git(error) => write!(formatter, "read bounded origin identity: {error}"),
+            #[cfg(not(windows))]
             Self::InvalidPath => {
                 formatter.write_str("the canonical repository path is not valid UTF-8")
             }
+            #[cfg(windows)]
+            Self::Root(error) => write!(formatter, "retain repository identity: {error}"),
         }
     }
 }
 
 fn worktree_path_identity(root: &Path) -> Result<String, RepositoryIdentityError> {
-    let path = root.to_str().ok_or(RepositoryIdentityError::InvalidPath)?;
     #[cfg(windows)]
     {
-        Ok(path.replace('\\', "/"))
+        let root =
+            crate::bounded_fs::RootCapability::open(root).map_err(RepositoryIdentityError::Root)?;
+        Ok(root.object_identity_key())
     }
     #[cfg(not(windows))]
     {
-        Ok(path.to_string())
+        root.to_str()
+            .map(str::to_string)
+            .ok_or(RepositoryIdentityError::InvalidPath)
     }
 }
 
@@ -1953,6 +1962,18 @@ mod tests {
         );
         assert!(canonical_remote("/tmp/local-repo").is_none());
         assert_ne!(source_public_id("a/b", "c"), source_public_id("a", "b/c"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn worktree_repository_identity_uses_the_directory_object() {
+        let root = tempfile::tempdir().unwrap();
+        let canonical = root.path().canonicalize().unwrap();
+
+        assert_eq!(
+            worktree_path_identity(root.path()).unwrap(),
+            worktree_path_identity(&canonical).unwrap()
+        );
     }
 
     #[cfg(unix)]

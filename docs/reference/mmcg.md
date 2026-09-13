@@ -908,8 +908,11 @@ be mistaken for complete evidence.
 
 Repository-relative artifact paths match exactly. Reports produced under a
 different absolute build root may use a unique repository-path suffix match;
-this relocation and the maximum-hit merge used for duplicate coverage lines
-are reported as precision notes. Artifact labels preserve provenance, but Lens
+absolute Windows drive and UNC paths remain portable across build hosts. A
+relative backslash path on Unix is ambiguous, so it is omitted and makes the
+evidence source partial instead of being rewritten onto a slash path. This
+relocation and the maximum-hit merge used for duplicate coverage lines are
+reported as precision notes. Artifact labels preserve provenance, but Lens
 alone cannot prove that a SARIF, coverage, JUnit, or OTLP report was produced
 from the current Git revision. A PR evidence package binds the exact report
 bytes a reviewer saw to its resolved HEAD, while an optional producer

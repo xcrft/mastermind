@@ -91,18 +91,23 @@ The runner loads each selected JSONL case before the suite starts and copies
 fixture inputs into a private snapshot; disposable repositories are created
 from that snapshot rather than the live fixture tree. If a selected definition
 changes before the suite finishes, every result in that suite fails and the
-report is marked non-comparable. For every suite, the pass rate cannot fall,
-every baseline-passing case must still pass, and both p50 and p95 context tokens
-must be strictly lower. Malformed or incomparable evidence exits non-zero. A
-case filter that matches nothing is also an error.
+report is marked non-comparable. The evaluated agent or workflow skill is frozen
+the same way and recorded as `target_definition_digest`; target changes are
+allowed between baseline and current because that is the product under test,
+but a target change within either run makes its report non-comparable. For every
+suite, the pass rate cannot fall, every baseline-passing case must still pass,
+and both p50 and p95 context tokens must be strictly lower. Malformed or
+incomparable evidence exits non-zero. A case filter that matches nothing is also
+an error.
 
-The checked-in critic baseline predates report emission and was transcribed from
-the runner's console output. Its capture metadata records that only aggregate
-API duration was observable; the token and quality fields used by the gate were
-recorded per case. Its capture metadata also states how the resolved Opus model
-ID was verified immediately afterward with the same alias and CLI. Claude CLI
-reported cost is retained as telemetry, but these runs use the maintainer's
-existing Claude subscription rather than per-token API billing.
+The checked-in critic baseline predates report emission and target identity, and
+was transcribed from the runner's console output. A legacy baseline may omit the
+target digest; a current report may not. Its capture metadata records that only
+aggregate API duration was observable; the token and quality fields used by the
+gate were recorded per case. Its capture metadata also states how the resolved
+Opus model ID was verified immediately afterward with the same alias and CLI.
+Claude CLI reported cost is retained as telemetry, but these runs use the
+maintainer's existing Claude subscription rather than per-token API billing.
 
 ## Researcher and auditor fixture lifecycle
 

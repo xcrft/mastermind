@@ -305,15 +305,15 @@ def subagent_mcp_tools(path: Path) -> tuple[str, ...]:
     )
 
 
-def auditor_allowed_tools() -> tuple[str, ...]:
+def auditor_allowed_tools(subagent: Path | None = None) -> tuple[str, ...]:
     return AUDITOR_SAFE_ALLOWED_TOOLS + subagent_mcp_tools(
-        SUITES["auditor"]["subagent"]
+        SUITES["auditor"]["subagent"] if subagent is None else subagent
     )
 
 
-def researcher_allowed_tools() -> tuple[str, ...]:
+def researcher_allowed_tools(subagent: Path | None = None) -> tuple[str, ...]:
     return ("Read", "Glob", "Grep") + subagent_mcp_tools(
-        SUITES["researcher"]["subagent"]
+        SUITES["researcher"]["subagent"] if subagent is None else subagent
     )
 
 
@@ -664,7 +664,7 @@ def _fixture_tree_paths(root: Path) -> list[Path]:
     return paths
 
 
-def _fixture_file_definition(path: Path) -> dict[str, str]:
+def _stable_regular_file_definition(path: Path) -> dict[str, str]:
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
     try:
@@ -696,7 +696,7 @@ def fixture_tree_definition(root: Path) -> list[dict[str, str]]:
     records = [
         {
             "path": path.relative_to(root).as_posix(),
-            **_fixture_file_definition(path),
+            **_stable_regular_file_definition(path),
         }
         for path in paths
     ]
@@ -793,6 +793,8 @@ def suite_report(
     *,
     definition_digest: str | None = None,
     definition_stable: bool = True,
+    target_digest: str | None = None,
+    target_stable: bool = True,
 ) -> dict:
     if not results:
         raise ValueError("cannot build a suite report without cases")
@@ -807,7 +809,7 @@ def suite_report(
         "total_tokens",
     )
     case_ids = [result.case_id for result in results]
-    return {
+    report = {
         "case_ids": case_ids,
         "case_definition_digest": (
             definition_digest
@@ -839,6 +841,10 @@ def suite_report(
         },
         "cost_usd": metric_summary([result.cost_usd for result in results]),
     }
+    if target_digest is not None:
+        report["target_definition_digest"] = target_digest
+        report["target_definition_stable"] = target_stable
+    return report
 
 
 def git_revision() -> str | None:
@@ -878,6 +884,8 @@ def build_report(
     case_filter: str | None,
     case_definition_digests: dict[str, str] | None = None,
     case_definition_stability: dict[str, bool] | None = None,
+    target_definition_digests: dict[str, str] | None = None,
+    target_definition_stability: dict[str, bool] | None = None,
 ) -> dict:
     suites: dict[str, list[Result]] = {}
     for result in results:
@@ -905,6 +913,16 @@ def build_report(
                     True
                     if case_definition_stability is None
                     else case_definition_stability[name]
+                ),
+                target_digest=(
+                    None
+                    if target_definition_digests is None
+                    else target_definition_digests[name]
+                ),
+                target_stable=(
+                    True
+                    if target_definition_stability is None
+                    else target_definition_stability[name]
                 ),
             )
             for name, suite_results in suites.items()
@@ -955,7 +973,12 @@ def raw_suite_gate_metrics(report: dict, suite_name: str) -> dict[str, object]:
     }
 
 
-def report_comparison_issues(report: object, label: str) -> list[str]:
+def report_comparison_issues(
+    report: object,
+    label: str,
+    *,
+    require_target_identity: bool = False,
+) -> list[str]:
     issues: list[str] = []
     if not isinstance(report, dict):
         return [f"{label} report must be a JSON object"]
@@ -1143,6 +1166,34 @@ def report_comparison_issues(report: object, label: str) -> list[str]:
             issues.append(
                 f"{label} suite {suite_name!r} changed definition during evaluation"
             )
+        has_target_digest = "target_definition_digest" in summary
+        has_target_stability = "target_definition_stable" in summary
+        if require_target_identity and not has_target_digest and not has_target_stability:
+            issues.append(
+                f"{label} suite {suite_name!r} has no target identity"
+            )
+        elif has_target_digest != has_target_stability:
+            issues.append(
+                f"{label} suite {suite_name!r} has incomplete target identity"
+            )
+        elif has_target_digest:
+            target_digest = summary["target_definition_digest"]
+            target_stable = summary["target_definition_stable"]
+            if (
+                not isinstance(target_digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", target_digest) is None
+            ):
+                issues.append(
+                    f"{label} suite {suite_name!r} has invalid target definition digest"
+                )
+            if not isinstance(target_stable, bool):
+                issues.append(
+                    f"{label} suite {suite_name!r} has invalid target stability"
+                )
+            elif not target_stable:
+                issues.append(
+                    f"{label} suite {suite_name!r} changed target during evaluation"
+                )
 
         suite_cases = cases_by_suite.get(suite_name, [])
         can_recompute = (
@@ -1224,7 +1275,9 @@ def load_report(path: Path) -> dict:
 def compare_to_baseline(current: dict, baseline: dict) -> dict:
     checks: list[dict] = []
     failures = [
-        *report_comparison_issues(current, "current"),
+        *report_comparison_issues(
+            current, "current", require_target_identity=True
+        ),
         *report_comparison_issues(baseline, "baseline"),
     ]
     if failures:
@@ -1761,7 +1814,9 @@ def render_researcher_input(
     )
 
 
-def isolated_cli_args(suite_name: str) -> list[str]:
+def isolated_cli_args(
+    suite_name: str, *, subagent: Path | None = None
+) -> list[str]:
     """Deny repository tools to suites whose fixtures exist only in prompts."""
     if suite_name in {"critic", "intake", "workflow"}:
         return ["--safe-mode", "--tools", ""]
@@ -1770,7 +1825,7 @@ def isolated_cli_args(suite_name: str) -> list[str]:
             "--tools",
             "Read,Glob,Grep",
             "--allowedTools",
-            ",".join(researcher_allowed_tools()),
+            ",".join(researcher_allowed_tools(subagent)),
             "--setting-sources",
             "",
             "--strict-mcp-config",
@@ -1782,7 +1837,7 @@ def isolated_cli_args(suite_name: str) -> list[str]:
             "--tools",
             "Read,Glob,Grep,Bash",
             "--allowedTools",
-            ",".join(auditor_allowed_tools()),
+            ",".join(auditor_allowed_tools(subagent)),
             "--setting-sources",
             "",
             "--strict-mcp-config",
@@ -1814,18 +1869,89 @@ def render_workflow_input(inp: dict) -> str:
     return str(inp.get("prompt", ""))
 
 
-def workflow_prompt_path(case: dict) -> Path:
+def workflow_prompt_path(
+    case: dict, *, repository_root: Path | None = None
+) -> Path:
     artifact = case.get("artifact")
     if artifact not in WORKFLOW_ARTIFACTS:
         raise ValueError(f"workflow artifact is not allowlisted: {artifact!r}")
-    path = (REPO_ROOT / artifact).resolve()
+    root = (REPO_ROOT if repository_root is None else repository_root).resolve()
+    path = (root / artifact).resolve()
     try:
-        path.relative_to(REPO_ROOT.resolve())
+        path.relative_to(root)
     except ValueError as error:
         raise ValueError("workflow artifact must stay inside the repository") from error
     if not path.is_file():
         raise FileNotFoundError(f"workflow artifact not found: {path}")
     return path
+
+
+def evaluation_target_digest(
+    suite_name: str,
+    suite_cfg: dict,
+    selected: list[dict],
+    *,
+    workflow_root: Path | None = None,
+) -> str:
+    if suite_name == "workflow":
+        records = [
+            {
+                "case_id": case["id"],
+                "artifact": case["artifact"],
+                **_stable_regular_file_definition(
+                    workflow_prompt_path(case, repository_root=workflow_root)
+                ),
+            }
+            for case in selected
+        ]
+    else:
+        subagent = suite_cfg.get("subagent")
+        if not isinstance(subagent, (str, os.PathLike)):
+            raise ValueError(f"suite {suite_name!r} has no subagent definition")
+        records = [
+            {
+                "artifact": "subagent",
+                **_stable_regular_file_definition(Path(subagent)),
+            }
+        ]
+    return hashlib.sha256(
+        json.dumps(
+            records,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def snapshot_evaluation_targets(
+    suite_name: str,
+    suite_cfg: dict,
+    selected: list[dict],
+    destination: Path,
+) -> tuple[dict, Path | None]:
+    if suite_name == "workflow":
+        copied: set[str] = set()
+        for case in selected:
+            artifact = case["artifact"]
+            if artifact in copied:
+                continue
+            source = workflow_prompt_path(case)
+            _stable_regular_file_definition(source)
+            target = destination / artifact
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(source, target)
+            copied.add(artifact)
+        return dict(suite_cfg), destination
+
+    subagent = suite_cfg.get("subagent")
+    if not isinstance(subagent, (str, os.PathLike)):
+        raise ValueError(f"suite {suite_name!r} has no subagent definition")
+    source = Path(subagent)
+    _stable_regular_file_definition(source)
+    target = destination / "subagent.md"
+    shutil.copy(source, target)
+    return {**suite_cfg, "subagent": target}, None
 
 
 def render_auditor_input(
@@ -2068,10 +2194,11 @@ def evaluate_case(
     *,
     keep_fixtures: bool,
     fixtures_dir: Path | None = None,
+    workflow_root: Path | None = None,
 ) -> Result:
     case_id = case["id"]
     prompt_path = (
-        workflow_prompt_path(case)
+        workflow_prompt_path(case, repository_root=workflow_root)
         if suite_name == "workflow"
         else suite_cfg["subagent"]
     )
@@ -2156,7 +2283,12 @@ def evaluate_case(
             )
             prompt_args = [prompt_flag, system_prompt]
             agent_args = []
-        workflow_safety = isolated_cli_args(suite_name)
+        workflow_safety = isolated_cli_args(
+            suite_name,
+            subagent=(
+                prompt_path if suite_name in {"auditor", "researcher"} else None
+            ),
+        )
         if requires_prompt_sandbox(suite_name):
             prompt_sandbox = tempfile.TemporaryDirectory(prefix="mastermind-eval-")
         case_cwd = evaluation_cwd(
@@ -2436,6 +2568,8 @@ def main() -> int:
     results: list[Result] = []
     case_definition_digests: dict[str, str] = {}
     case_definition_stability: dict[str, bool] = {}
+    target_definition_digests: dict[str, str] = {}
+    target_definition_stability: dict[str, bool] = {}
 
     for suite_name in suites_to_run:
         suite_cfg = SUITES[suite_name]
@@ -2502,16 +2636,65 @@ def main() -> int:
         else:
             frozen_digest = live_digest
 
+        target_snapshot = tempfile.TemporaryDirectory(
+            prefix=f"mastermind-eval-{suite_name}-target-"
+        )
+        target_snapshot_root = Path(target_snapshot.name)
+        try:
+            live_target_digest = evaluation_target_digest(
+                suite_name, suite_cfg, suite_cases
+            )
+            suite_cfg_for_run, workflow_root_for_run = snapshot_evaluation_targets(
+                suite_name,
+                suite_cfg,
+                suite_cases,
+                target_snapshot_root,
+            )
+            frozen_target_digest = evaluation_target_digest(
+                suite_name,
+                suite_cfg_for_run,
+                suite_cases,
+                workflow_root=workflow_root_for_run,
+            )
+            live_target_digest_after_snapshot = evaluation_target_digest(
+                suite_name, suite_cfg, suite_cases
+            )
+        except (KeyError, OSError, ValueError) as error:
+            target_snapshot.cleanup()
+            if fixture_snapshot is not None:
+                fixture_snapshot.cleanup()
+            print(
+                f"error: freezing suite {suite_name} target: {error}",
+                file=sys.stderr,
+            )
+            return 2
+        if not (
+            live_target_digest
+            == frozen_target_digest
+            == live_target_digest_after_snapshot
+        ):
+            target_snapshot.cleanup()
+            if fixture_snapshot is not None:
+                fixture_snapshot.cleanup()
+            print(
+                f"error: suite {suite_name} target changed while being frozen",
+                file=sys.stderr,
+            )
+            return 2
+
         case_definition_digests[suite_name] = frozen_digest
         case_definition_stability[suite_name] = True
+        target_definition_digests[suite_name] = frozen_target_digest
+        target_definition_stability[suite_name] = True
         suite_result_start = len(results)
         try:
             for case in suite_cases:
                 print(f"  [{case['id']}] running ...", end=" ", flush=True)
                 r = evaluate_case(
-                    args.model, suite_name, suite_cfg, case,
+                    args.model, suite_name, suite_cfg_for_run, case,
                     keep_fixtures=args.keep_fixtures,
                     fixtures_dir=fixtures_dir_for_run,
+                    workflow_root=workflow_root_for_run,
                 )
                 _SENTINEL_MISSING = "no structured audit verdict block found"
                 if (
@@ -2522,9 +2705,10 @@ def main() -> int:
                 ):
                     print(f"retry (sentinel missing) ...", end=" ", flush=True)
                     r2 = evaluate_case(
-                        args.model, suite_name, suite_cfg, case,
+                        args.model, suite_name, suite_cfg_for_run, case,
                         keep_fixtures=args.keep_fixtures,
                         fixtures_dir=fixtures_dir_for_run,
+                        workflow_root=workflow_root_for_run,
                     )
                     r2.retry_attempted = True
                     r2.add_attempt(r)
@@ -2549,16 +2733,59 @@ def main() -> int:
                     for line in r.output_excerpt.splitlines():
                         print(f"      {line}")
         finally:
+            try:
+                frozen_case_digest_after_run = (
+                    frozen_digest
+                    if fixtures_dir_for_run is None
+                    else case_definition_digest_from_records(
+                        suite_name,
+                        suite_cases,
+                        fixtures_dir=fixtures_dir_for_run,
+                    )
+                )
+            except (KeyError, OSError, ValueError):
+                frozen_case_digest_after_run = None
+            try:
+                frozen_target_digest_after_run = evaluation_target_digest(
+                    suite_name,
+                    suite_cfg_for_run,
+                    suite_cases,
+                    workflow_root=workflow_root_for_run,
+                )
+            except (KeyError, OSError, ValueError):
+                frozen_target_digest_after_run = None
+            target_snapshot.cleanup()
             if fixture_snapshot is not None:
                 fixture_snapshot.cleanup()
 
         suite_case_ids = [case["id"] for case in suite_cases]
         definition_stable = (
-            case_definition_digest(suite_name, suite_case_ids) == frozen_digest
+            case_definition_digest(suite_name, suite_case_ids)
+            == frozen_case_digest_after_run
+            == frozen_digest
         )
         case_definition_stability[suite_name] = definition_stable
         if not definition_stable:
             reason = "case or fixture definition changed during evaluation"
+            for result in results[suite_result_start:]:
+                result.passed = False
+                if reason not in result.reasons:
+                    result.reasons.append(reason)
+            print(f"  ✗ FAIL  {reason}")
+        try:
+            live_target_digest_after_run = evaluation_target_digest(
+                suite_name, suite_cfg, suite_cases
+            )
+        except (KeyError, OSError, ValueError):
+            live_target_digest_after_run = None
+        target_stable = (
+            live_target_digest_after_run
+            == frozen_target_digest_after_run
+            == frozen_target_digest
+        )
+        target_definition_stability[suite_name] = target_stable
+        if not target_stable:
+            reason = "evaluated agent or skill changed during evaluation"
             for result in results[suite_result_start:]:
                 result.passed = False
                 if reason not in result.reasons:
@@ -2605,6 +2832,8 @@ def main() -> int:
         case_filter=args.case,
         case_definition_digests=case_definition_digests,
         case_definition_stability=case_definition_stability,
+        target_definition_digests=target_definition_digests,
+        target_definition_stability=target_definition_stability,
     )
     for suite_name, summary in report["suites"].items():
         context = summary["usage"]["context_tokens"]

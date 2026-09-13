@@ -103,6 +103,8 @@ every retained answer has been assessed.
 Every retained `result.json` must still have its empty one-shot `run.lock`.
 Missing or changed attempt locks invalidate the export instead of allowing a
 result copied outside the claimed execution lifecycle to count as completed.
+Bound v2 batches must also retain the empty `execution.lock` used to serialize
+the recorded attempt chain. Legacy batches make no verified order claim.
 
 For each answer, provide:
 

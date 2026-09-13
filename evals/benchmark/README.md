@@ -302,9 +302,10 @@ commands, empty setting sources, no session persistence and one strict MCP
 configuration. Claude Code keeps its built-in `EndConversation` entry while MCP
 tools exist; the adapter expects that entry but does not report it as a research
 tool. The adapter checks the observed tool inventory, server connection,
-permission mode, extensions, working directory and model identities. Managed
-host policies can still affect execution; separate directories are not an OS
-sandbox.
+permission mode, extensions, working directory and model identities. Partial
+and final events must keep each tool-call ID bound to one name, with exactly one
+observed result before a successful terminal event. Managed host policies can
+still affect execution; separate directories are not an OS sandbox.
 
 Bare mode requires an explicitly forwarded `ANTHROPIC_API_KEY`:
 

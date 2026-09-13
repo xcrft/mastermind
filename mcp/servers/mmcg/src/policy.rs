@@ -697,10 +697,11 @@ fn load_config(store: &Store, root: &Path, requested: &Path) -> Result<LoadedCon
             "project root changed before the policy config could be read",
         )
     })?;
+    let requested_label = policy_config_label(root, &requested_path);
     let path = requested_path.canonicalize().map_err(|_| {
         PolicyError::new(
             "policy_config_unavailable",
-            format!("cannot read `{}`", display_path(root, &requested_path)),
+            format!("cannot read `{requested_label}`"),
         )
     })?;
     if !path.starts_with(root_capability.canonical_root()) {
@@ -709,6 +710,7 @@ fn load_config(store: &Store, root: &Path, requested: &Path) -> Result<LoadedCon
             "policy config must resolve inside the repository",
         ));
     }
+    let identity_path = policy_config_identity_path(root, &path)?;
     let interrupted = || store.work_interrupted();
     let source = crate::bounded_fs::read_regular_file_with_capability(
         &root_capability,
@@ -739,7 +741,7 @@ fn load_config(store: &Store, root: &Path, requested: &Path) -> Result<LoadedCon
         ),
         crate::bounded_fs::BoundedReadError::Io(_) => PolicyError::new(
             "policy_config_unavailable",
-            format!("cannot read `{}`", display_path(root, &path)),
+            format!("cannot read `{identity_path}`"),
         ),
     })?;
     if source.declared_len == 0 {
@@ -751,7 +753,7 @@ fn load_config(store: &Store, root: &Path, requested: &Path) -> Result<LoadedCon
     let config = parse_config(&source.bytes)?;
     Ok(LoadedConfig {
         identity: PolicyConfigIdentity {
-            path: display_path(root, &path),
+            path: identity_path,
             sha256: crate::hex::encode(&Sha256::digest(&source.bytes)),
             version: config.version,
         },
@@ -760,11 +762,26 @@ fn load_config(store: &Store, root: &Path, requested: &Path) -> Result<LoadedCon
     })
 }
 
-fn display_path(root: &Path, path: &Path) -> String {
+fn policy_config_label(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
+        .ok()
+        .and_then(|relative| crate::bounded_fs::normalize_repository_relative_path(relative).ok())
+        .unwrap_or_else(|| "<invalid path>".into())
+}
+
+fn policy_config_identity_path(root: &Path, path: &Path) -> Result<String, PolicyError> {
+    let relative = path.strip_prefix(root).map_err(|_| {
+        PolicyError::new(
+            "invalid_policy_config",
+            "policy config must resolve inside the repository",
+        )
+    })?;
+    crate::bounded_fs::normalize_repository_relative_path(relative).map_err(|_| {
+        PolicyError::new(
+            "invalid_policy_config",
+            "policy config path must be an exact UTF-8 repository-relative path",
+        )
+    })
 }
 
 pub fn evaluate(
@@ -1408,8 +1425,24 @@ rules:
 
         let after = load_config(&store, repository.path(), &config).unwrap();
 
+        assert_eq!(before.identity.path, DEFAULT_CONFIG_PATH);
         assert_eq!(before.identity.sha256, after.identity.sha256);
         assert!(!before.same_snapshot(&after));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn policy_config_identity_rejects_lossy_and_backslash_aliases() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = Path::new("/repository");
+        let non_utf8 = root.join(OsString::from_vec(b"policy-\xff.yml".to_vec()));
+
+        for path in [root.join("policy\\alias.yml"), non_utf8] {
+            let error = policy_config_identity_path(root, &path).unwrap_err();
+            assert_eq!(error.code(), "invalid_policy_config");
+        }
     }
 
     #[cfg(unix)]

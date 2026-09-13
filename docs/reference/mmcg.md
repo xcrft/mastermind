@@ -586,7 +586,8 @@ requires every parsed fact to map to the current index, and publishes nothing
 when parsing is partial or truncated. Its input artifact must also have an exact
 UTF-8 repository-relative path; ambiguous Unix backslash aliases are rejected.
 Exact duplicate findings are collapsed by their content-derived IDs. `mmcg facts keygen` creates a non-overwriting local
-Ed25519 keypair from the operating system CSPRNG; `mmcg facts sign` and
+Ed25519 keypair from the operating system CSPRNG and requires exact UTF-8 output
+paths before it writes either file; `mmcg facts sign` and
 `mmcg facts verify` add a domain-separated Ed25519 proof defined by
 [`mastermind-fact-signature-v1`](../../schemas/mastermind-fact-signature-v1.schema.json).
 Trusted import uses `mmcg enrich --facts ... --signature ... --public-key ...

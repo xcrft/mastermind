@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Fact key generation now validates exact UTF-8 output identities before
+  writing either key, so its JSON cannot return lossy paths for created files.
+- Architecture-policy reports now bind the config digest to an exact canonical
+  repository-relative path and reject non-UTF-8 or Unix backslash aliases.
 - Workflow status, next/resume routing, context history checks, and architecture
   policy now enforce the same task-state repository and spec binding as
   `run-task`. Legacy state routes to explicit pre-flight, while foreign state

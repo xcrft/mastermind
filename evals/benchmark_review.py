@@ -359,6 +359,64 @@ def attempt_counts(slots):
     return counts
 
 
+def assessment_summary(coordinator, assessments):
+    def counts(condition=None):
+        retained = sum(slot["answer_sha256"] is not None
+                       and (condition is None or slot["condition"] == condition)
+                       for slot in coordinator["slots"])
+        return {"retained_answers": retained, "answer_assessments": 0,
+                "reviewer_selected_claims": {name: 0 for name in (
+                    "supported", "unsupported", "contradicted", "unknown")},
+                "material_error_claims": 0, "answer_assessments_with_material_error": 0,
+                "known_coverage": {name: 0 for name in ("covered", "partial", "missing")},
+                "unknown_handling": {name: 0 for name in ("appropriate", "overclaimed", "omitted")}}
+
+    overall = counts()
+    conditions = {condition: counts(condition) for condition in bench.CONDITIONS}
+    slots = {slot["review_id"]: slot for slot in coordinator["slots"] if slot["answer_sha256"] is not None}
+    aligned = {review_id: [] for review_id in slots}
+    for assessment in assessments:
+        for item in assessment["reviews"]:
+            slot = slots[item["review_id"]]
+            targets = (overall, conditions[slot["condition"]])
+            for target in targets:
+                target["answer_assessments"] += 1
+                for claim in item["claims"]:
+                    target["reviewer_selected_claims"][claim["support"]] += 1
+                    target["material_error_claims"] += claim["material_error"]
+                target["answer_assessments_with_material_error"] += any(
+                    claim["material_error"] for claim in item["claims"])
+                for known in item["knowns"]:
+                    target["known_coverage"][known["coverage"]] += 1
+                for unknown in item["unknowns"]:
+                    target["unknown_handling"][unknown["handling"]] += 1
+            aligned[item["review_id"]].append({
+                "material_error": any(claim["material_error"] for claim in item["claims"]),
+                "knowns": {row["known_index"]: row["coverage"] for row in item["knowns"]},
+                "unknowns": {row["unknown_index"]: row["handling"] for row in item["unknowns"]},
+            })
+    disagreement = {"answers_compared": 0, "answers_with_disagreement": 0,
+                    "material_error_flags_with_disagreement": 0,
+                    "known_dimensions_with_disagreement": 0,
+                    "unknown_dimensions_with_disagreement": 0}
+    if len(assessments) >= 2:
+        for records in aligned.values():
+            disagreement["answers_compared"] += 1
+            material = len({record["material_error"] for record in records}) > 1
+            known = sum(len({record["knowns"][index] for record in records}) > 1
+                        for index in records[0]["knowns"])
+            unknown = sum(len({record["unknowns"][index] for record in records}) > 1
+                          for index in records[0]["unknowns"])
+            disagreement["material_error_flags_with_disagreement"] += material
+            disagreement["known_dimensions_with_disagreement"] += known
+            disagreement["unknown_dimensions_with_disagreement"] += unknown
+            disagreement["answers_with_disagreement"] += material or known > 0 or unknown > 0
+    return {"semantics": "descriptive_reviewer_declarations", "reviewers": len(assessments),
+            "overall": overall, "by_condition": [dict(condition=name, **conditions[name])
+                                                   for name in bench.CONDITIONS],
+            "disagreement": disagreement}
+
+
 def export_review(batch: Path, output: Path):
     destination = output.parent.resolve(strict=True) / output.name
     with Root(batch) as root:
@@ -626,6 +684,7 @@ def review_status(export: Path):
     with Root(export) as root:
         seal, packet, coordinator, answers, sources = load_export(root)
         reviewers = []
+        assessments = []
         for name in sorted(receipt_names(root)):
             receipt = root.json("reviews/" + name)
             fields(receipt, ("kind", "schema_version", "export_id", "packet_sha256", "coordinator_sha256", "assessment_sha256",
@@ -640,12 +699,14 @@ def review_status(export: Path):
             check_assessment(receipt["assessment"], seal, packet, answers, sources)
             require(name == receipt["assessment"]["reviewer"] + ".json", "reviewer identity differs from its receipt", "review_identity")
             reviewers.append({"reviewer": receipt["assessment"]["reviewer"], "reviewed": len(receipt["assessment"]["reviews"])})
+            assessments.append(receipt["assessment"])
         root.recheck()
-        return {"kind": "mastermind-research-review-status", "schema_version": 2, "export_id": seal["export_id"],
+        return {"kind": "mastermind-research-review-status", "schema_version": 3, "export_id": seal["export_id"],
                 "attempts": attempt_counts(coordinator["slots"]), "reviewers": reviewers,
                 "reviewed_attempts": len(answers) if reviewers else 0,
                 "attempts_without_verified_source": sum(slot["source_integrity"] != "verified" for slot in coordinator["slots"]),
                 "execution_order_integrity": coordinator.get("execution_order_integrity", "unverified_legacy"),
+                "assessment_summary": assessment_summary(coordinator, assessments),
                 "assessment_semantics": "reviewer_declared_not_machine_verified", "comparison_accepted": False, "quality_uplift": None}
 
 

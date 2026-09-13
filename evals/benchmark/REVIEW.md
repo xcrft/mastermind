@@ -153,6 +153,14 @@ counts, execution-order integrity, reviewers and distinct reviewed attempts. Mul
 not multiply the number of experiments. Original `result.json` files retain
 their transport status and `review_pending` state; assessments are separate.
 
+`assessment_summary` exposes descriptive reviewer declarations overall and by
+condition: selected claim-support counts, material-error flags, required-known
+coverage and expected-unknown handling. It also counts disagreement on aligned
+known/unknown dimensions and on the per-answer material-error flag. Claim rows
+are reviewer-selected excerpts, so their support counts are not treated as
+aligned votes. The summary does not average reviewers, rank conditions or turn
+these declarations into a quality score.
+
 ## Limits and interpretation
 
 Reads and writes use directory descriptors and do not follow symlinks. Publication

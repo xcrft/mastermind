@@ -35,6 +35,8 @@ import re
 import shlex
 import shutil
 import sys
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 if __package__:
@@ -64,6 +66,15 @@ _READ_ONLY_GIT_SUBCOMMANDS = frozenset(
     {"diff", "grep", "log", "ls-files", "rev-parse", "show", "status"}
 )
 _SHELL_CONTROL_RE = re.compile(r"[;&|<>`$()\r\n]")
+
+
+@dataclass(frozen=True)
+class ConditionOutcome:
+    passed: bool
+    resolved_models: tuple[str, ...]
+
+    def __bool__(self) -> bool:
+        return self.passed
 
 
 def vanilla_message(case: dict, fixture_path, baseline_ref: str, after_ref: str) -> str:
@@ -131,8 +142,8 @@ def run_vanilla(
     claude_version: str | None = None,
     git_binary: str | Path = "git",
     fixtures_dir: Path | None = None,
-) -> bool | None:
-    """True if vanilla caught the planted defect, False if missed, None on error."""
+) -> ConditionOutcome | None:
+    """Return the phrase result and resolved model identity, or None on error."""
     try:
         fixture = runner.setup_fixture(
             case["fixture"], case["baseline_ref"], case["after_ref"],
@@ -214,17 +225,39 @@ def run_vanilla(
         if not _successful_git_inspection(executions):
             return None
         output = payload["result"]
-        return scored_caught(output, case.get("expect", {}))
+        return ConditionOutcome(
+            passed=scored_caught(output, case.get("expect", {})),
+            resolved_models=tuple(telemetry["resolved_models"]),
+        )
     finally:
         runner.teardown_fixture(fixture)
 
 
-def _mastermind_outcome(result: runner.Result) -> bool | None:
+def _mastermind_outcome(result: runner.Result) -> ConditionOutcome | None:
     if not result.telemetry_complete or any(
         reason.startswith("permission denied for tools") for reason in result.reasons
     ):
         return None
-    return result.passed
+    return ConditionOutcome(
+        passed=result.passed,
+        resolved_models=tuple(result.resolved_models),
+    )
+
+
+def merge_model_identity(
+    expected: tuple[str, ...] | None,
+    outcome: ConditionOutcome,
+    label: str,
+) -> tuple[tuple[str, ...], str | None]:
+    if expected is None:
+        return outcome.resolved_models, None
+    if outcome.resolved_models == expected:
+        return expected, None
+    return (
+        expected,
+        f"{label} resolved model ids {list(outcome.resolved_models)!r} "
+        f"!= {list(expected)!r}",
+    )
 
 
 def main() -> int:
@@ -253,11 +286,19 @@ def main() -> int:
         fixture_runtime = runner.fixture_runtime_definition(
             git_binary, mmcg_binary if args.with_mastermind else None
         )
+        ablation_definition = runner._stable_regular_file_definition(
+            Path(__file__).resolve()
+        )
+        harness_definition = runner.evaluation_harness_definition()
+        repository_revision = runner.git_revision(git_binary)
     except (OSError, RuntimeError, ValueError) as error:
         print(f"error: cannot freeze ablation runtime: {error}", file=sys.stderr)
         return 2
     if claude_version is None:
         print("error: cannot read `claude` CLI version.", file=sys.stderr)
+        return 2
+    if repository_revision is None:
+        print("error: cannot identify repository HEAD.", file=sys.stderr)
         return 2
 
     cases_file = runner.EVALS_DIR / "auditor.jsonl"
@@ -293,69 +334,253 @@ def main() -> int:
         )
         return 2
 
-    print(f"\n=== diagnostic comparison over {len(defect_cases)} defect case(s) · {args.model} ===\n")
-    rows = []
-    for c in defect_cases:
-        cid = c["id"]
-        print(f"  [{cid}] vanilla ...", end=" ", flush=True)
-        v = run_vanilla(
-            args.model,
-            c,
-            claude_binary=claude_binary,
-            claude_version=claude_version,
-            git_binary=git_binary,
+    case_ids = [case["id"] for case in defect_cases]
+    fixture_snapshot = tempfile.TemporaryDirectory(
+        prefix="mastermind-ablation-fixtures-"
+    )
+    target_snapshot: tempfile.TemporaryDirectory[str] | None = None
+    fixture_snapshot_root = Path(fixture_snapshot.name)
+    suite_cfg_for_run = runner.SUITES["auditor"]
+    frozen_target_digest: str | None = None
+    try:
+        live_case_digest = runner.case_definition_digest("auditor", case_ids)
+        loaded_case_digest = runner.case_definition_digest_from_records(
+            "auditor", defect_cases
         )
-        v_str = "phrase pass" if v else ("phrase miss" if v is False else "err")
-        print(v_str, end="", flush=True)
-        m = None
+        runner.snapshot_fixture_definitions(
+            defect_cases, fixture_snapshot_root
+        )
+        frozen_case_digest = runner.case_definition_digest_from_records(
+            "auditor",
+            defect_cases,
+            fixtures_dir=fixture_snapshot_root,
+        )
+        live_case_digest_after_snapshot = runner.case_definition_digest(
+            "auditor", case_ids
+        )
+        if not (
+            live_case_digest
+            == loaded_case_digest
+            == frozen_case_digest
+            == live_case_digest_after_snapshot
+        ):
+            raise ValueError("auditor cases changed while being frozen")
+
         if args.with_mastermind:
-            result = runner.evaluate_case(
-                args.model,
+            target_snapshot = tempfile.TemporaryDirectory(
+                prefix="mastermind-ablation-target-"
+            )
+            live_target_digest = runner.evaluation_target_digest(
+                "auditor", runner.SUITES["auditor"], defect_cases
+            )
+            suite_cfg_for_run, _ = runner.snapshot_evaluation_targets(
                 "auditor",
                 runner.SUITES["auditor"],
-                c,
-                keep_fixtures=False,
+                defect_cases,
+                Path(target_snapshot.name),
+            )
+            frozen_target_digest = runner.evaluation_target_digest(
+                "auditor", suite_cfg_for_run, defect_cases
+            )
+            live_target_digest_after_snapshot = runner.evaluation_target_digest(
+                "auditor", runner.SUITES["auditor"], defect_cases
+            )
+            if not (
+                live_target_digest
+                == frozen_target_digest
+                == live_target_digest_after_snapshot
+            ):
+                raise ValueError("auditor target changed while being frozen")
+    except (KeyError, OSError, RuntimeError, ValueError) as error:
+        if target_snapshot is not None:
+            target_snapshot.cleanup()
+        fixture_snapshot.cleanup()
+        print(f"error: cannot freeze ablation inputs: {error}", file=sys.stderr)
+        return 2
+
+    print(
+        f"\n=== diagnostic comparison over {len(defect_cases)} "
+        f"defect case(s) · {args.model} ===\n"
+    )
+    rows: list[
+        tuple[str, ConditionOutcome | None, ConditionOutcome | None]
+    ] = []
+    expected_models: tuple[str, ...] | None = None
+    model_issues: list[str] = []
+    runtime_stable = False
+    definition_stable = False
+    target_stable = not args.with_mastermind
+    source_stable = False
+    repository_stable = False
+    try:
+        for case in defect_cases:
+            case_id = case["id"]
+            print(f"  [{case_id}] vanilla ...", end=" ", flush=True)
+            vanilla = run_vanilla(
+                args.model,
+                case,
                 claude_binary=claude_binary,
                 claude_version=claude_version,
                 git_binary=git_binary,
-                mmcg_binary=mmcg_binary,
+                fixtures_dir=fixture_snapshot_root,
             )
-            m = _mastermind_outcome(result)
-            m_str = "pass" if m else ("fail" if m is False else "err")
-            print(f"  · mastermind contract {m_str}", end="")
-        print()
-        rows.append((cid, v, m))
-
-    v_caught = sum(1 for _, v, _ in rows if v)
-    print(f"\n  vanilla phrase checks passed: {v_caught}/{len(rows)}")
-    if args.with_mastermind:
-        m_caught = sum(1 for _, _, m in rows if m)
-        print(f"  mastermind full contract passed: {m_caught}/{len(rows)}")
-        print("  Different grading contracts: no quality-uplift estimate.")
-    else:
-        print("  mastermind was not run; use --with-mastermind for its full contract result.")
-    errors = sum(
-        v is None or (args.with_mastermind and m is None) for _, v, m in rows
-    )
-    if errors:
-        print(f"  infrastructure errors: {errors}", file=sys.stderr)
-
-    try:
-        runtime_stable = (
-            runner._stable_regular_file_definition(claude_binary)
-            == claude_definition
-            and runner.claude_cli_version(claude_binary) == claude_version
-            and runner.fixture_runtime_definition(
-                git_binary, mmcg_binary if args.with_mastermind else None
+            vanilla_label = (
+                "err"
+                if vanilla is None
+                else "phrase pass" if vanilla.passed else "phrase miss"
             )
-            == fixture_runtime
+            print(vanilla_label, end="", flush=True)
+            if vanilla is not None:
+                expected_models, issue = merge_model_identity(
+                    expected_models, vanilla, f"{case_id} vanilla"
+                )
+                if issue is not None:
+                    model_issues.append(issue)
+
+            mastermind = None
+            if args.with_mastermind:
+                result = runner.evaluate_case(
+                    args.model,
+                    "auditor",
+                    suite_cfg_for_run,
+                    case,
+                    keep_fixtures=False,
+                    fixtures_dir=fixture_snapshot_root,
+                    claude_binary=claude_binary,
+                    claude_version=claude_version,
+                    git_binary=git_binary,
+                    mmcg_binary=mmcg_binary,
+                )
+                mastermind = _mastermind_outcome(result)
+                mastermind_label = (
+                    "err"
+                    if mastermind is None
+                    else "pass" if mastermind.passed else "fail"
+                )
+                print(
+                    f"  · mastermind contract {mastermind_label}", end=""
+                )
+                if mastermind is not None:
+                    expected_models, issue = merge_model_identity(
+                        expected_models,
+                        mastermind,
+                        f"{case_id} mastermind",
+                    )
+                    if issue is not None:
+                        model_issues.append(issue)
+            print()
+            rows.append((case_id, vanilla, mastermind))
+
+        vanilla_caught = sum(
+            1
+            for _, outcome, _ in rows
+            if outcome is not None and outcome.passed
         )
-    except (OSError, RuntimeError, ValueError):
-        runtime_stable = False
+        print(
+            f"\n  vanilla phrase checks passed: {vanilla_caught}/{len(rows)}"
+        )
+        if args.with_mastermind:
+            mastermind_caught = sum(
+                1
+                for _, _, outcome in rows
+                if outcome is not None and outcome.passed
+            )
+            print(
+                "  mastermind full contract passed: "
+                f"{mastermind_caught}/{len(rows)}"
+            )
+            print("  Different grading contracts: no quality-uplift estimate.")
+        else:
+            print(
+                "  mastermind was not run; use --with-mastermind for its "
+                "full contract result."
+            )
+        errors = sum(
+            vanilla is None
+            or (args.with_mastermind and mastermind is None)
+            for _, vanilla, mastermind in rows
+        )
+        if errors:
+            print(f"  infrastructure errors: {errors}", file=sys.stderr)
+        if expected_models is not None:
+            print(f"  resolved model ids: {list(expected_models)!r}")
+        for issue in model_issues:
+            print(f"  model identity error: {issue}", file=sys.stderr)
+
+        try:
+            runtime_stable = (
+                runner._stable_regular_file_definition(claude_binary)
+                == claude_definition
+                and runner.claude_cli_version(claude_binary) == claude_version
+                and runner.fixture_runtime_definition(
+                    git_binary,
+                    mmcg_binary if args.with_mastermind else None,
+                )
+                == fixture_runtime
+            )
+        except (OSError, RuntimeError, ValueError):
+            runtime_stable = False
+        try:
+            definition_stable = (
+                runner.case_definition_digest("auditor", case_ids)
+                == runner.case_definition_digest_from_records(
+                    "auditor",
+                    defect_cases,
+                    fixtures_dir=fixture_snapshot_root,
+                )
+                == frozen_case_digest
+            )
+        except (KeyError, OSError, ValueError):
+            definition_stable = False
+        if args.with_mastermind:
+            try:
+                target_stable = (
+                    runner.evaluation_target_digest(
+                        "auditor", runner.SUITES["auditor"], defect_cases
+                    )
+                    == runner.evaluation_target_digest(
+                        "auditor", suite_cfg_for_run, defect_cases
+                    )
+                    == frozen_target_digest
+                )
+            except (KeyError, OSError, ValueError):
+                target_stable = False
+        try:
+            source_stable = (
+                runner._stable_regular_file_definition(Path(__file__).resolve())
+                == ablation_definition
+                and runner.evaluation_harness_definition()
+                == harness_definition
+            )
+        except (OSError, ValueError):
+            source_stable = False
+        repository_stable = (
+            runner.git_revision(git_binary) == repository_revision
+        )
+    finally:
+        if target_snapshot is not None:
+            target_snapshot.cleanup()
+        fixture_snapshot.cleanup()
+
     if not runtime_stable:
         print("error: ablation runtime changed during evaluation", file=sys.stderr)
-        return 1
-    return 1 if errors else 0
+    if not definition_stable:
+        print("error: ablation case inputs changed during evaluation", file=sys.stderr)
+    if not target_stable:
+        print("error: auditor target changed during evaluation", file=sys.stderr)
+    if not source_stable:
+        print("error: ablation harness changed during evaluation", file=sys.stderr)
+    if not repository_stable:
+        print("error: repository HEAD changed during evaluation", file=sys.stderr)
+    return 1 if (
+        errors
+        or model_issues
+        or not runtime_stable
+        or not definition_stable
+        or not target_stable
+        or not source_stable
+        or not repository_stable
+    ) else 0
 
 
 if __name__ == "__main__":

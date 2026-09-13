@@ -385,11 +385,16 @@ Git fixture trees, preserving staged, unstaged, and untracked changes:
 
 Both conditions use the same pinned Claude and Git executables, explicit model,
 effort, turn and output limits, scrubbed environment, bounded process transport,
-and isolated Claude settings. The vanilla condition exposes only built-in
-read/search tools and read-only Git commands, builds no mmcg index, and counts a
-phrase result only after the event stream proves a successful Git inspection.
-Runtime, parse, permission, and transport failures are reported as errors and
-make the command exit non-zero.
+and isolated Claude settings. Case records and fixture trees are copied once
+before either condition runs; both conditions build their disposable repository
+from that immutable snapshot. With `--with-mastermind`, the auditor definition
+is frozen too. Every successful condition must report the same resolved model
+IDs across cases and conditions. Input, target, harness, repository HEAD, model,
+or executable drift makes the comparison exit non-zero. The vanilla condition
+exposes only built-in read/search tools and read-only Git commands, builds no
+mmcg index, and counts a phrase result only after the event stream proves a
+successful Git inspection. Runtime, parse, permission, and transport failures
+are reported as errors and make the command exit non-zero.
 
 Golden `held` cases are excluded because there is no defect to catch.
 

@@ -92,6 +92,21 @@ def valid_critic_report(case_id="c-1"):
     return report
 
 
+def valid_critic_case_definition():
+    return {
+        "id": "case",
+        "why": "Exercise the runner lifecycle with a valid critic case.",
+        "input": {
+            "problem": "Choose a safe change.",
+            "design": "Keep the current contract.",
+            "alternatives": "None.",
+            "constraints": "Preserve behavior.",
+            "mmcg_snapshot": "No repository evidence is required.",
+        },
+        "expect": {"verdict": "ship it"},
+    }
+
+
 class StructuredOutputTests(unittest.TestCase):
     def test_audit_verdict_requires_valid_sentinel_yaml(self):
         valid = """\
@@ -872,6 +887,129 @@ action: passthrough
         self.assertTrue(any("cannot use legacy capture" in issue for issue in issues))
         self.assertTrue(any("duration_api_ms summary" in issue for issue in issues))
 
+    def test_shipped_case_definitions_match_the_fail_closed_schema(self):
+        for suite_name, suite in runner.SUITES.items():
+            with self.subTest(suite=suite_name):
+                records = runner.load_case_records(
+                    suite["cases"], suite_name=suite_name
+                )
+                self.assertTrue(records)
+                self.assertRegex(
+                    runner.case_definition_digest_from_records(
+                        suite_name, records
+                    ),
+                    r"^[0-9a-f]{64}$",
+                )
+
+    def test_case_schema_rejects_typos_and_impossible_expectations(self):
+        base = valid_critic_case_definition()
+        malformed_cases = []
+
+        malformed = deepcopy(base)
+        malformed["extra"] = True
+        malformed_cases.append((malformed, "invalid fields"))
+
+        malformed = deepcopy(base)
+        malformed["input"]["problemm"] = malformed["input"].pop("problem")
+        malformed_cases.append((malformed, "input has invalid fields"))
+
+        malformed = deepcopy(base)
+        malformed["expect"]["contain"] = ["ship"]
+        malformed_cases.append((malformed, "expect has unexpected fields"))
+
+        malformed = deepcopy(base)
+        malformed["expect"].update({"min_turns": 3, "max_turns": 2})
+        malformed_cases.append((malformed, "min_turns exceeds"))
+
+        malformed = deepcopy(base)
+        malformed["expect"].update(
+            {"contains": ["same"], "not_contains": ["same"]}
+        )
+        malformed_cases.append((malformed, "contradict"))
+
+        malformed = deepcopy(base)
+        malformed["expect"]["verdict"] = "looks good"
+        malformed_cases.append((malformed, "unsupported values"))
+
+        malformed = deepcopy(base)
+        del malformed["expect"]["verdict"]
+        malformed["expect"]["max_turns"] = 1
+        malformed_cases.append((malformed, "must define expect.verdict"))
+
+        for malformed, expected_error in malformed_cases:
+            with self.subTest(expected_error=expected_error), self.assertRaisesRegex(
+                ValueError, expected_error
+            ):
+                runner.validate_case_record("critic", malformed)
+
+    def test_case_schema_rejects_unavailable_tools_and_invalid_citations(self):
+        researcher = runner.load_case_records(
+            runner.SUITES["researcher"]["cases"], suite_name="researcher"
+        )[0]
+
+        unavailable = deepcopy(researcher)
+        unavailable["expect"]["tools"]["contains"].append("mmcg_serch")
+        with self.assertRaisesRegex(ValueError, "unavailable tools"):
+            runner.validate_case_record("researcher", unavailable)
+
+        impossible_max = deepcopy(researcher)
+        impossible_max["expect"]["tools"]["max"] = 0
+        with self.assertRaisesRegex(ValueError, "lower than mandatory"):
+            runner.validate_case_record("researcher", impossible_max)
+
+        optional_index = deepcopy(researcher)
+        optional_index["allow_no_mmcg"] = True
+        with self.assertRaisesRegex(ValueError, "conflicts with a required mmcg"):
+            runner.validate_case_record("researcher", optional_index)
+
+        unsafe_citation = deepcopy(researcher)
+        unsafe_citation["expect"]["citations"][0]["path"] = "../outside.rs"
+        with self.assertRaisesRegex(ValueError, "canonical relative path"):
+            runner.validate_case_record("researcher", unsafe_citation)
+
+        missing_anchor = deepcopy(researcher)
+        missing_anchor["expect"]["citations"][0]["anchor"] = "not in source"
+        with self.assertRaisesRegex(ValueError, "exactly one source line"):
+            runner.case_definition_digest_from_records(
+                "researcher", [missing_anchor]
+            )
+
+        duplicate_line = deepcopy(researcher)
+        duplicate_line["expect"]["citations"].append(
+            {
+                "path": "src/session.rs",
+                "anchor": "session_count(&self)",
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "same source line"):
+            runner.case_definition_digest_from_records(
+                "researcher", [duplicate_line]
+            )
+
+        no_output_oracle = deepcopy(researcher)
+        for field_name in ("contains", "contains_any", "citations"):
+            no_output_oracle["expect"].pop(field_name, None)
+        with self.assertRaisesRegex(ValueError, "no positive output oracle"):
+            runner.validate_case_record("researcher", no_output_oracle)
+
+        intake = runner.load_case_records(
+            runner.SUITES["intake"]["cases"], suite_name="intake"
+        )[0]
+        intake["expect"]["action"] = ["refined"]
+        with self.assertRaisesRegex(ValueError, "expect.action"):
+            runner.validate_case_record("intake", intake)
+
+    def test_case_loader_rejects_unknown_expectation_fields_before_execution(self):
+        malformed = valid_critic_case_definition()
+        malformed["expect"]["contain"] = ["ship"]
+        with tempfile.TemporaryDirectory() as target:
+            path = Path(target) / "critic.jsonl"
+            path.write_text(json.dumps(malformed) + "\n")
+            with self.assertRaisesRegex(
+                ValueError, "critic.jsonl:1:.*unexpected fields"
+            ):
+                runner.load_case_records(path, suite_name="critic")
+
     def test_fixture_content_changes_case_definition_digest(self):
         with tempfile.TemporaryDirectory() as target:
             fixture_root = Path(target) / "fake-session"
@@ -879,13 +1017,21 @@ action: passthrough
             after = fixture_root / "changes" / "clean-add"
             baseline.mkdir(parents=True)
             after.mkdir(parents=True)
-            (baseline / "source.rs").write_text("fn before() {}\n")
-            (after / "source.rs").write_text("fn after() {}\n")
+            baseline_source = baseline / "src" / "session.rs"
+            after_source = after / "src" / "session.rs"
+            baseline_source.parent.mkdir()
+            after_source.parent.mkdir()
+            baseline_source.write_text("fn before() {}\n")
+            after_source.write_text(
+                "pub fn session_count(&self) -> usize {\n"
+                "    self.sessions.read().unwrap().len()\n"
+                "}\n"
+            )
             with patch.object(runner, "FIXTURES_DIR", Path(target)):
                 before = runner.case_definition_digest(
                     "researcher", ["r-001-structural-source-cross-check"]
                 )
-                (after / "source.rs").write_text("fn changed() {}\n")
+                after_source.write_text(after_source.read_text() + "// changed\n")
                 changed = runner.case_definition_digest(
                     "researcher", ["r-001-structural-source-cross-check"]
                 )
@@ -899,9 +1045,16 @@ action: passthrough
             after = fixture_root / "changes" / "clean-add"
             baseline.mkdir(parents=True)
             after.mkdir(parents=True)
-            (baseline / "source.rs").write_text("fn before() {}\n")
-            changed_file = after / "source.rs"
-            changed_file.write_text("fn after() {}\n")
+            baseline_source = baseline / "src" / "session.rs"
+            changed_file = after / "src" / "session.rs"
+            baseline_source.parent.mkdir()
+            changed_file.parent.mkdir()
+            baseline_source.write_text("fn before() {}\n")
+            changed_file.write_text(
+                "pub fn session_count(&self) -> usize {\n"
+                "    self.sessions.read().unwrap().len()\n"
+                "}\n"
+            )
             with patch.object(runner, "FIXTURES_DIR", Path(target)):
                 before = runner.case_definition_digest(
                     "researcher", ["r-001-structural-source-cross-check"]
@@ -916,9 +1069,12 @@ action: passthrough
     def test_frozen_fixture_snapshot_isolated_from_later_source_changes(self):
         case = {
             "id": "case",
+            "why": "Verify that fixture snapshots remain immutable.",
             "fixture": "sample",
             "baseline_ref": "baseline",
             "after_ref": "current",
+            "input": {"question": "What changed?", "scope": "source.py"},
+            "expect": {"contains": ["after"]},
         }
         with tempfile.TemporaryDirectory() as target:
             root = Path(target)
@@ -1048,9 +1204,8 @@ action: passthrough
         with tempfile.TemporaryDirectory() as target:
             root = Path(target)
             cases = root / "critic.jsonl"
-            cases.write_text(
-                json.dumps({"id": "case", "input": {}, "expect": {}}) + "\n"
-            )
+            case_definition = valid_critic_case_definition()
+            cases.write_text(json.dumps(case_definition) + "\n")
             subagent = root / "agent.md"
             subagent.write_text("---\nname: test\ndescription: test\n---\nPrompt.\n")
             report_path = root / "report.json"
@@ -1064,11 +1219,9 @@ action: passthrough
             }
 
             def evaluate(*_args, **_kwargs):
+                changed_definition = {**case_definition, "changed": True}
                 cases.write_text(
-                    json.dumps(
-                        {"id": "case", "input": {}, "expect": {}, "changed": True}
-                    )
-                    + "\n"
+                    json.dumps(changed_definition) + "\n"
                 )
                 return runner.Result(
                     "case",
@@ -1149,9 +1302,7 @@ action: passthrough
         with tempfile.TemporaryDirectory() as target:
             root = Path(target)
             cases = root / "critic.jsonl"
-            cases.write_text(
-                json.dumps({"id": "case", "input": {}, "expect": {}}) + "\n"
-            )
+            cases.write_text(json.dumps(valid_critic_case_definition()) + "\n")
             subagent = root / "agent.md"
             subagent.write_text("---\nname: test\ndescription: test\n---\nPrompt.\n")
             report_path = root / "report.json"
@@ -1214,9 +1365,7 @@ action: passthrough
         with tempfile.TemporaryDirectory() as target:
             root = Path(target)
             cases = root / "critic.jsonl"
-            cases.write_text(
-                json.dumps({"id": "case", "input": {}, "expect": {}}) + "\n"
-            )
+            cases.write_text(json.dumps(valid_critic_case_definition()) + "\n")
             subagent = root / "agent.md"
             subagent.write_text("---\nname: test\ndescription: test\n---\nPrompt.\n")
             report_path = root / "report.json"

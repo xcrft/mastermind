@@ -8,7 +8,7 @@ COPY mcp/servers/mmcg/templates ./mcp/servers/mmcg/templates
 COPY mcp/servers/mmcg/benches ./mcp/servers/mmcg/benches
 RUN cargo +1.96.0 build --manifest-path mcp/servers/mmcg/Cargo.toml --release --locked
 
-FROM buildpack-deps:bookworm-scm@sha256:de4e518f98c6533eceeee6f8b14a77a918856fa8282a1b711c0292d089157c0c
+FROM buildpack-deps:bookworm-scm@sha256:4274ea4975976f86239384ac206f98af5f0978fd8f054886eec1371fc7664025
 RUN git --version
 COPY --from=builder /source/mcp/servers/mmcg/target/release/mmcg /usr/local/bin/mastermind
 COPY --chmod=0755 scripts/audit-action-entrypoint.sh /usr/local/bin/audit-action-entrypoint

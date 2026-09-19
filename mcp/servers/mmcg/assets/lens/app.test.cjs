@@ -1798,6 +1798,11 @@ async function main() {
     1,
     "A normalized relationship may decorate only the existing exact-endpoint edge"
   );
+  const matchedFactEdge = harness.nodes.get("trace-graph")
+    .querySelectorAll("[data-edge-id]")
+    .find((edge) => /normalized relationship fact matched/i.test(edge.getAttribute("aria-label")));
+  assert.ok(matchedFactEdge, "A matching relationship must stay neutral about the producer's relation semantics");
+  assert.doesNotMatch(matchedFactEdge.getAttribute("aria-label"), /normalized fact corroborated/i);
   const changedInspector = harness.nodes.get("inspector-body").textContent;
   assert.match(changedInspector, /Findings · file-level/i);
   assert.match(changedInspector, /Semgrep \/ auth\.bypass:42:3/i);
@@ -1854,6 +1859,7 @@ async function main() {
   assert.match(harness.nodes.get("inspector-body").textContent, /reference at src\/target\.rs:9/i);
   assert.match(harness.nodes.get("inspector-body").textContent, /Runtime trace corroboration/i);
   assert.match(harness.nodes.get("inspector-body").textContent, /src\/auth\.rs → src\/target\.rs/i);
+  assert.match(harness.nodes.get("inspector-body").textContent, /Normalized relationship fact\s*Exact endpoints matched/i);
   assert.match(harness.nodes.get("inspector-body").textContent, /Normalized relationship facts/i);
   assert.match(harness.nodes.get("inspector-body").textContent, /Compiler-resolved auth to target call/i);
   assert.match(harness.nodes.get("inspector-body").textContent, /facts:sha256:[0-9a-f]{64}/i);

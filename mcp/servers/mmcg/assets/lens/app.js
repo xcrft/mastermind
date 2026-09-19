@@ -4080,7 +4080,7 @@
     const boundary = edge.crossing ? ", boundary crossing" : "";
     const ownership = overlayEnabled("ownership") && edge.ownershipBoundary ? ", ownership boundary" : "";
     const runtime = overlayEnabled("runtime") && edge.runtimeEvidence.length > 0 ? ", runtime trace corroborated" : "";
-    const facts = overlayEnabled("facts") && edge.factEvidence.length > 0 ? ", normalized fact corroborated" : "";
+    const facts = overlayEnabled("facts") && edge.factEvidence.length > 0 ? ", normalized relationship fact matched" : "";
     const semantic = overlayEnabled("semantic") && edge.semanticEvidence.length > 0 ? ", SCIP compiler-resolved, high confidence" : ", Tree-sitter syntactic, medium confidence";
     return relation + " from " + text(edge.from.symbol.name, "unnamed seed")
       + " to " + text(edge.to.symbol.name, "unnamed claim") + boundary + ownership + semantic + runtime + facts + ". Select for details.";
@@ -4681,7 +4681,7 @@
       ["Boundary crossing", edge.crossing ? "Observed" : "Not returned"],
       ["Ownership boundary", overlayEnabled("ownership") && edge.ownershipBoundary ? "Observed from CODEOWNERS" : "Not returned"],
       ["Runtime trace", overlayEnabled("runtime") && edge.runtimeEvidence.length > 0 ? "Corroborated" : "Not returned"],
-      ["Normalized facts", overlayEnabled("facts") && edge.factEvidence.length > 0 ? "Corroborated" : "Not returned"],
+      ["Normalized relationship fact", overlayEnabled("facts") && edge.factEvidence.length > 0 ? "Exact endpoints matched" : "Not returned"],
     ]);
     appendClaimList("Evidence endpoints", [
       "FROM · " + text(edge.from.symbol.name, "unnamed") + " · " + text(edge.from.symbol.file, "file unavailable") + formatLine(edge.from.symbol.line),

@@ -1596,6 +1596,18 @@ fn error_hint(class: &str) -> Option<String> {
             describe_unsafe_path_entries(&std::env::var_os("PATH").unwrap_or_default())
         }
         "path_unavailable" => Some("PATH is not set in this environment".to_string()),
+        "native_inspect_failed" => Some(
+            "Codex did not return a usable MCP list. Run `codex mcp list --json` directly, fix its configuration error, then retry."
+                .to_string(),
+        ),
+        "native_install_not_confirmed" => Some(
+            "Codex accepted the add command but the requested active entry was not observed. Run `codex mcp list --json` before retrying."
+                .to_string(),
+        ),
+        "native_remove_not_confirmed" => Some(
+            "Codex accepted the remove command but the entry is still listed. Run `codex mcp list --json` before retrying."
+                .to_string(),
+        ),
         _ => None,
     }
 }

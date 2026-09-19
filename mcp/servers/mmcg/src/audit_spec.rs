@@ -1712,14 +1712,19 @@ fn compute_verdict(findings: &[Finding]) -> Verdict {
 fn extract_planned_test_names(body: &str) -> Vec<String> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<String> = Vec::new();
+    let prose = crate::context_doctor::prose_lines(body)
+        .into_iter()
+        .map(|line| line.text)
+        .collect::<Vec<_>>()
+        .join("\n");
 
     // Pass 1: backticked tokens.
-    let mut chars = body.char_indices().peekable();
+    let mut chars = prose.char_indices().peekable();
     while let Some((i, c)) = chars.next() {
         if c != '`' {
             continue;
         }
-        let rest = &body[i + 1..];
+        let rest = &prose[i + 1..];
         let Some(end) = rest.find('`') else { continue };
         let token = &rest[..end];
         if is_test_name(token) && seen.insert(token.to_string()) {
@@ -1735,7 +1740,7 @@ fn extract_planned_test_names(body: &str) -> Vec<String> {
     }
 
     // Pass 2: bare `test_*` words (often in unbacked bullets).
-    for word in body.split(|c: char| !c.is_alphanumeric() && c != '_') {
+    for word in prose.split(|c: char| !c.is_alphanumeric() && c != '_') {
         if is_test_name(word) && seen.insert(word.to_string()) {
             out.push(word.to_string());
         }
@@ -2229,6 +2234,21 @@ Add caller2() in `src/lib.py`
             Finding::PlannedTestNotAdded { test } if test == "test_foo"
         )));
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn planned_tests_ignore_non_prose_examples() {
+        let body = "\
+- `test_real` covers the changed behavior
+<!-- test_comment -->
+~~~rust
+fn test_fenced() {}
+~~~
+> test_quoted
+    test_indented
+";
+
+        assert_eq!(extract_planned_test_names(body), vec!["test_real"]);
     }
 
     #[test]

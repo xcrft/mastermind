@@ -723,14 +723,14 @@ fn is_executable_file(p: &Path) -> bool {
     }
 }
 
-/// Body is effectively empty when it's only whitespace, template placeholder
-/// bullets (`- <thing>` with angle-bracket hints), or HTML comments.
+/// Body is effectively empty when it has no prose beyond whitespace or template
+/// placeholder bullets (`- <thing>` with angle-bracket hints).
 fn body_is_effectively_empty(body: &str) -> bool {
-    let stripped: String = body
-        .lines()
-        .map(str::trim)
+    let prose = crate::context_doctor::prose_lines(body);
+    let stripped: String = prose
+        .iter()
+        .map(|line| line.text.trim())
         .filter(|l| !l.is_empty())
-        .filter(|l| !l.starts_with("<!--"))
         // Drop unchanged template placeholders: lines with balanced angle-bracket
         // hints like `- <Alt 1 short name>` or `<symbol>`.
         .filter(|l| {
@@ -801,6 +801,40 @@ mod tests {
             |e| matches!(e, Finding::EmptyMandatorySection { section } if section == "Tests Plan")
         ));
         assert!(r.errors.iter().any(|e| matches!(e, Finding::EmptyMandatorySection { section } if section == "Alternatives Considered")));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn mandatory_sections_require_prose() {
+        let root = tmp();
+        let body = "\
+---
+mode: verified
+---
+## Goals
+- Observable outcome
+## Scope
+<!--
+- Hidden scope
+-->
+~~~text
+- Example scope
+~~~
+> - Quoted scope
+    - Indented scope
+## Acceptance Criteria
+- Observable behavior
+## Tests Plan
+- focused test
+## Final Verification
+- repository gate
+";
+        let spec = spec::parse_str("t.md", body);
+        let report = run(&spec, None, &root);
+
+        assert!(report.errors.iter().any(
+            |error| matches!(error, Finding::EmptyMandatorySection { section } if section == "Scope")
+        ));
         fs::remove_dir_all(&root).ok();
     }
 

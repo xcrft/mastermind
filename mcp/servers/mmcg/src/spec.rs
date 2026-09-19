@@ -559,31 +559,19 @@ fn fence_closes(line: &str, fence: CodeFence) -> bool {
     width >= fence.width && trimmed.chars().skip(width).all(char::is_whitespace)
 }
 
-/// Returns true for a code-fence delimiter or a line inside its payload.
-fn consume_fenced_code_line(line: &str, active: &mut Option<CodeFence>) -> bool {
-    if let Some(fence) = *active {
-        if fence_closes(line, fence) {
-            *active = None;
-        }
-        return true;
-    }
-    if let Some(fence) = fence_opener(line) {
-        *active = Some(fence);
-        return true;
-    }
-    false
-}
-
 fn split_sections(body: &str) -> (BTreeMap<String, String>, Vec<String>, Vec<String>) {
     let mut sections: BTreeMap<String, String> = BTreeMap::new();
     let mut order: Vec<String> = Vec::new();
     let mut seen_section_keys = HashSet::new();
     let mut duplicate_section_keys = Vec::new();
     let mut current: Option<(String, String)> = None;
-    let mut code_fence = None;
+    let prose_indexes: HashSet<usize> = crate::context_doctor::prose_lines(body)
+        .into_iter()
+        .map(|line| line.index)
+        .collect();
 
-    for line in body.lines() {
-        if consume_fenced_code_line(line, &mut code_fence) {
+    for (index, line) in body.lines().enumerate() {
+        if !prose_indexes.contains(&index) {
             if let Some((_, body)) = current.as_mut() {
                 body.push_str(line);
                 body.push('\n');
@@ -640,12 +628,8 @@ fn commit_section(
 /// (case-insensitive).
 fn extract_snapshot(body: &str) -> Vec<SymbolClaim> {
     let mut out: Vec<SymbolClaim> = Vec::new();
-    let mut code_fence = None;
-    for line in body.lines() {
-        if consume_fenced_code_line(line, &mut code_fence) {
-            continue;
-        }
-        let trimmed = line.trim();
+    for line in crate::context_doctor::prose_lines(body) {
+        let trimmed = line.text.trim();
         if !trimmed.starts_with('-') {
             continue;
         }
@@ -709,12 +693,8 @@ fn extract_caller_count(text: &str) -> Option<u32> {
 fn extract_mentioned_files(body: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut code_fence = None;
-    for line in body.lines() {
-        if consume_fenced_code_line(line, &mut code_fence) {
-            continue;
-        }
-        extract_mentioned_files_from_line(line, &mut out, &mut seen);
+    for line in crate::context_doctor::prose_lines(body) {
+        extract_mentioned_files_from_line(line.text, &mut out, &mut seen);
     }
     out
 }
@@ -770,12 +750,8 @@ fn looks_like_path(s: &str) -> bool {
 /// leading bold marker, returns the command text.
 fn extract_verify_commands(body: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    let mut code_fence = None;
-    for line in body.lines() {
-        if consume_fenced_code_line(line, &mut code_fence) {
-            continue;
-        }
-        let trimmed = line.trim();
+    for line in crate::context_doctor::prose_lines(body) {
+        let trimmed = line.text.trim();
         let after = trimmed
             .strip_prefix("**VERIFY**:")
             .or_else(|| trimmed.strip_prefix("**VERIFY:**"))
@@ -819,11 +795,14 @@ fn extract_find_blocks(body: &str) -> Vec<FindBlock> {
     let mut out: Vec<FindBlock> = Vec::new();
     let mut current_file: Option<String> = None;
     let mut current_phase: Option<String> = None;
-    let mut code_fence = None;
-    let mut lines = body.lines().peekable();
+    let prose_indexes: HashSet<usize> = crate::context_doctor::prose_lines(body)
+        .into_iter()
+        .map(|line| line.index)
+        .collect();
+    let mut lines = body.lines().enumerate().peekable();
 
-    while let Some(line) = lines.next() {
-        if consume_fenced_code_line(line, &mut code_fence) {
+    while let Some((index, line)) = lines.next() {
+        if !prose_indexes.contains(&index) {
             continue;
         }
         let trimmed = line.trim();
@@ -863,7 +842,7 @@ fn extract_find_blocks(body: &str) -> Vec<FindBlock> {
             let mut payload = String::new();
             // Skip blanks, then expect fence opener.
             let mut opened = None;
-            while let Some(next) = lines.peek() {
+            while let Some((_, next)) = lines.peek() {
                 let nt = next.trim();
                 if nt.is_empty() && opened.is_none() {
                     lines.next();
@@ -1087,6 +1066,17 @@ pub fn refresh(&self) -> Result<Session> {
 ## Goals
 - Real outcome
 
+<!--
+## Scope
+- Fake scope in a comment
+VERIFY: `false`
+**File:** `src/comment.rs`
+FIND:
+```rust
+fn comment_decoy() {}
+```
+-->
+
 ~~~markdown
 ## Scope
 - Fake scope in an example
@@ -1098,6 +1088,11 @@ fn decoy() {}
 ```
 ~~~
 
+> VERIFY: `false`
+> `src/quoted.rs`
+    VERIFY: `false`
+    `src/indented.rs`
+
 ## Scope
 - Edit `src/real.rs`
 
@@ -1105,7 +1100,12 @@ fn decoy() {}
 ~~~text
 - `decoy` — 99 callers
 ~~~
+<!--
+- `comment_decoy` — 88 callers
+-->
 - `real` — 1 caller
+> - `quoted_decoy` — 77 callers
+    - `indented_decoy` — 66 callers
 ";
         let s = parse_str("test.md", body);
 

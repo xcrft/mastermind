@@ -1,7 +1,7 @@
 ---
 name: mastermind-task-executor
 description: Executes an approved `.mastermind/tasks/<NNN>-<name>/spec.md` within scope, proves its acceptance criteria, and writes the canonical file-backed executor report.
-tools: Read, Edit, Write, Grep, Glob, Bash, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_brief, mcp__mmcg__mmcg_search, mcp__mmcg__mmcg_callers, mcp__mmcg__mmcg_impact
+tools: Read, Edit, Write, Grep, Glob, Bash, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_brief, mcp__mmcg__mmcg_search, mcp__mmcg__mmcg_callers, mcp__mmcg__mmcg_impact, mcp__mmcg__mmcg_test_impact
 model: sonnet
 mcpServers: [mmcg]
 maxTurns: 40
@@ -20,7 +20,7 @@ workflow:
       runtime: claude
       exclusivity_group: task-executor
 metadata:
-  version: 0.5.4
+  version: 0.5.5
   authors: [mastermind]
   tags: [workflow, delegation]
 ---
@@ -58,8 +58,11 @@ across languages. Commit voice is fallback-only when repository policy is silent
 2. Validate that Goals, Scope, Acceptance Criteria, Tests Plan, and Final
    Verification are internally consistent.
 3. Check named symbols with `mmcg_search`; use `mmcg_callers` or `mmcg_impact`
-   only for relationships omitted by the brief. Use `mmcg_status` after a
-   freshness warning. Preserve graph caveats and read runtime source before edits.
+   only for relationships omitted by the brief. When the brief detects `qa` or
+   its candidate-test evidence is omitted, use `mmcg_test_impact` for the
+   focused test projection. It selects candidates; source reads and executed
+   checks still establish behavior. Use `mmcg_status` after a freshness warning.
+   Preserve graph caveats and read runtime source before edits.
 4. Implement each plan-step outcome. Literal FIND/CHANGE blocks require exact
    matching; other steps are outcome-oriented.
 5. Run focused checks as behavior lands.

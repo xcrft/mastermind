@@ -1,7 +1,7 @@
 ---
 name: mastermind-task-executor
 description: Executes an approved `.mastermind/tasks/<NNN>-<name>/spec.md` within scope, proves its acceptance criteria, and writes the canonical file-backed executor report.
-tools: Read, Edit, Write, Grep, Glob, Bash, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_brief, mcp__mmcg__mmcg_search, mcp__mmcg__mmcg_callers, mcp__mmcg__mmcg_impact, mcp__mmcg__mmcg_test_impact
+tools: Read, Edit, Write, Grep, Glob, Bash, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_brief, mcp__mmcg__mmcg_search, mcp__mmcg__mmcg_callers, mcp__mmcg__mmcg_impact, mcp__mmcg__mmcg_test_impact, mcp__mmcg__mmcg_history
 model: sonnet
 mcpServers: [mmcg]
 maxTurns: 40
@@ -20,7 +20,7 @@ workflow:
       runtime: claude
       exclusivity_group: task-executor
 metadata:
-  version: 0.5.5
+  version: 0.5.6
   authors: [mastermind]
   tags: [workflow, delegation]
 ---
@@ -61,8 +61,11 @@ across languages. Commit voice is fallback-only when repository policy is silent
    only for relationships omitted by the brief. When the brief detects `qa` or
    its candidate-test evidence is omitted, use `mmcg_test_impact` for the
    focused test projection. It selects candidates; source reads and executed
-   checks still establish behavior. Use `mmcg_status` after a freshness warning.
-   Preserve graph caveats and read runtime source before edits.
+   checks still establish behavior. When history citations are omitted,
+   incomplete, or relevant to the contract, use `mmcg_history` and read the
+   cited Markdown; retrieval does not establish current behavior. Use
+   `mmcg_status` after a freshness warning. Preserve graph caveats and read
+   runtime source before edits.
 4. Implement each plan-step outcome. Literal FIND/CHANGE blocks require exact
    matching; other steps are outcome-oriented.
 5. Run focused checks as behavior lands.

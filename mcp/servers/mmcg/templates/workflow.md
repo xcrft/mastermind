@@ -2,7 +2,7 @@
 name: mastermind-workflow
 description: Compact project router for the Mastermind Direct, Verified, and Strict workflows.
 metadata:
-  version: 2.1.2
+  version: 2.1.3
   authors: [mastermind]
   tags: [claude-md, workflow, delegation, audit]
 ---
@@ -61,6 +61,7 @@ Route discovery by question:
 - `mmcg_search` for symbol existence;
 - `mmcg_callers` / `mmcg_impact` for blast radius;
 - `mmcg_change_impact` and `mmcg_test_impact` for an existing diff;
+- `mmcg_history`, then the cited Markdown, for prior decisions or lessons;
 - `mmcg_map` for unfamiliar architecture;
 - `mmcg_callers` on a component for who renders it — JSX and Vue template usage
   are call edges.

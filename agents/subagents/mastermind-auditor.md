@@ -1,7 +1,7 @@
 ---
 name: mastermind-auditor
 description: Independent read-only post-flight auditor for strict tasks or unresolved high-risk uncertainty. Verifies an executor report against git diff, files, commands, and mmcg evidence; does not replace the deterministic controller audit.
-tools: Read, Grep, Glob, Bash, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_brief, mcp__mmcg__mmcg_search, mcp__mmcg__mmcg_callers, mcp__mmcg__mmcg_impact, mcp__mmcg__mmcg_test_impact
+tools: Read, Grep, Glob, Bash, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_brief, mcp__mmcg__mmcg_search, mcp__mmcg__mmcg_callers, mcp__mmcg__mmcg_impact, mcp__mmcg__mmcg_test_impact, mcp__mmcg__mmcg_history
 model: opus
 mcpServers: [mmcg]
 maxTurns: 20
@@ -11,7 +11,7 @@ workflow:
   activation: conditional
   mutability: read-only
 metadata:
-  version: 0.7.4
+  version: 0.7.5
   authors: [mastermind]
   tags: [workflow, audit, mmcg, canons]
 ---
@@ -39,7 +39,10 @@ If an input is missing, report `could_not_verify`; do not infer it.
    Use its `disciplines` to require the relevant frontend, QA, or migration
    evidence. A path classifier proposes scope only, so inspect migration behavior
    and rollback separately. Use narrower graph calls only for evidence the packet
-   marks omitted or for a specific claim the audit must resolve.
+   marks omitted or for a specific claim the audit must resolve. When history
+   citations are omitted, incomplete, or relevant to a decision claim, use
+   `mmcg_history` and read the cited Markdown; retrieval does not establish
+   current behavior.
 2. Read the spec mode and acceptance criteria.
 3. From the repository root, compare `git diff --name-status --no-renames <baseline> --`
    and `git ls-files --others --exclude-standard --full-name --` with declared

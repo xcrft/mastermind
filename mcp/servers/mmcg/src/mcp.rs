@@ -2083,7 +2083,7 @@ fn schema_dependency_cycles() -> Value {
 fn schema_tasks() -> Value {
     json!({
         "name": "mmcg_tasks",
-        "description": "Full-text search past task specs in `.mastermind/tasks/`. Use to recall prior designs and surface 'we already tried this' before drafting a new spec. FTS5 MATCH syntax — bare words AND-joined ('rate limit'), phrases double-quoted ('\\\"rate limit\\\"'), OR/NOT supported. Returns paths, titles, snippet excerpts with «match» highlights ranked by BM25, exact coverage, and live freshness; `freshness_error` identifies an unavailable scan.",
+        "description": "Full-text search past task specs in `.mastermind/tasks/`. Use to recall prior designs and surface 'we already tried this' before drafting a new spec. FTS5 MATCH syntax — bare words AND-joined ('rate limit'), phrases double-quoted ('\\\"rate limit\\\"'), OR/NOT supported. Returns paths, titles, snippet excerpts with «match» highlights ranked by BM25, exact coverage, and live freshness; `freshness_error` identifies an unavailable scan. Ranking is retrieval evidence only, and zero matches do not prove no relevant prior task exists.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -2098,7 +2098,7 @@ fn schema_tasks() -> Value {
 fn schema_history() -> Value {
     json!({
         "name": "mmcg_history",
-        "description": "Search durable project history across active and archived CONTEXT files, canonical task specs, executor reports, audits, release notes, lessons, and Markdown architecture decisions in conventional ADR directories. Candidate lessons are unresolved audit signals, not active guidance. Returns observed FTS matches plus skipped/truncated and live-freshness signals; `freshness_error` identifies an unavailable scan instead of treating it as a known incomplete corpus. Ranking and co-occurrence do not establish causality or correctness. The returned Markdown paths remain the source of truth, and callers should re-index after Markdown changes. Optionally live-check one portable document graph; its content freshness is independent of the FTS index and every declared relation remains unverified.",
+        "description": "Search durable project history across active and archived CONTEXT files, canonical task specs, executor reports, audits, release notes, lessons, and Markdown architecture decisions in conventional ADR directories. Candidate lessons are unresolved audit signals, not active guidance. Returns observed FTS matches plus skipped/truncated and live-freshness signals; `freshness_error` identifies an unavailable scan instead of treating it as a known incomplete corpus. Ranking and co-occurrence do not establish causality or correctness, and zero matches do not prove that no relevant decision exists. The returned Markdown paths remain the source of truth, and callers should re-index after Markdown changes. Optionally live-check one portable document graph; its content freshness is independent of the FTS index and every declared relation remains unverified.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -4687,6 +4687,11 @@ mod tests {
         assert!(result.get("truncation_reason").is_none());
         assert_eq!(result["freshness"], "unknown");
         assert_eq!(result["freshness_error"], "index_root_missing");
+        assert!(result["precision_notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|note| note == "zero_matches_do_not_prove_no_relevant_history"));
         assert!(result.get("document_graph").is_none());
         let _ = std::fs::remove_file(&path);
     }
@@ -4737,6 +4742,11 @@ mod tests {
             .unwrap()
             .contains("Markdown"));
         assert!(result["inference"].as_str().unwrap().contains("none"));
+        assert!(result["precision_notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|note| note == "zero_matches_do_not_prove_no_relevant_history"));
         let _ = std::fs::remove_file(&path);
     }
 

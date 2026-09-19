@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- History retrieval now emits precision notes that FTS matches do not establish
+  current semantic truth and an empty page does not prove a relevant decision
+  is absent from project history.
 - Lens snapshots and review packages now retain dead-code candidate precision
   notes and per-symbol static-edge limitations, so their JSON cannot imply
   deletion proof merely because the browser warning is visible.

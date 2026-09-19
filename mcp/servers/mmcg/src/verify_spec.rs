@@ -416,7 +416,7 @@ fn run_internal(
                 section: section.to_string(),
             }),
             Some(body) => {
-                if body_is_effectively_empty(body) {
+                if body_is_effectively_empty(section, body) {
                     errors.push(Finding::EmptyMandatorySection {
                         section: section.to_string(),
                     });
@@ -724,13 +724,18 @@ fn is_executable_file(p: &Path) -> bool {
 }
 
 /// Body is effectively empty when it has no prose beyond whitespace or template
-/// placeholder bullets (`- <thing>` with angle-bracket hints).
-fn body_is_effectively_empty(body: &str) -> bool {
+/// placeholder bullets (`- <thing>` with angle-bracket hints). Final Verification
+/// may instead contain concrete shell commands in a fenced block.
+fn body_is_effectively_empty(section: &str, body: &str) -> bool {
+    if section == "Final Verification" && has_concrete_fenced_command(body) {
+        return false;
+    }
     let prose = crate::context_doctor::prose_lines(body);
     let stripped: String = prose
         .iter()
         .map(|line| line.text.trim())
         .filter(|l| !l.is_empty())
+        .filter(|line| !is_markdown_structure(line))
         // Drop unchanged template placeholders: lines with balanced angle-bracket
         // hints like `- <Alt 1 short name>` or `<symbol>`.
         .filter(|l| {
@@ -741,6 +746,61 @@ fn body_is_effectively_empty(body: &str) -> bool {
         .collect::<Vec<_>>()
         .join("\n");
     stripped.trim().is_empty()
+}
+
+fn is_markdown_structure(line: &str) -> bool {
+    let compact = line.chars().filter(|character| !character.is_whitespace());
+    let mut count = 0;
+    let mut marker = None;
+    for character in compact {
+        if marker.is_none() {
+            marker = Some(character);
+        }
+        if Some(character) != marker {
+            return line.starts_with("### ");
+        }
+        count += 1;
+    }
+    line.starts_with("### ") || (count >= 3 && matches!(marker, Some('-' | '_' | '*')))
+}
+
+fn has_concrete_fenced_command(body: &str) -> bool {
+    let mut fence: Option<(u8, usize)> = None;
+    for raw in body.lines() {
+        let indent = raw.bytes().take_while(|byte| *byte == b' ').count();
+        let text = &raw[indent..];
+        let marker = text.as_bytes().first().copied();
+        let width = text
+            .bytes()
+            .take_while(|byte| Some(*byte) == marker)
+            .count();
+        if let Some((character, opening_width)) = fence {
+            if indent <= 3
+                && marker == Some(character)
+                && width >= opening_width
+                && text[width..].trim_matches([' ', '\t']).is_empty()
+            {
+                fence = None;
+            } else {
+                let command = text.trim();
+                let open = command.matches('<').count();
+                let placeholders = open > 0 && open == command.matches('>').count();
+                if !command.is_empty() && !command.starts_with('#') && !placeholders {
+                    return true;
+                }
+            }
+            continue;
+        }
+        if indent > 3 || text.starts_with('\t') {
+            continue;
+        }
+        if let Some(character @ (b'`' | b'~')) = marker {
+            if width >= 3 && (character != b'`' || !text[width..].contains('`')) {
+                fence = Some((character, width));
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -836,6 +896,26 @@ mode: verified
             |error| matches!(error, Finding::EmptyMandatorySection { section } if section == "Scope")
         ));
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn final_verification_accepts_concrete_fenced_commands_only() {
+        assert!(!body_is_effectively_empty(
+            "Final Verification",
+            "```bash\ncargo test -p mmcg\n```"
+        ));
+        assert!(body_is_effectively_empty(
+            "Final Verification",
+            "```bash\n<focused test command>\n```"
+        ));
+    }
+
+    #[test]
+    fn markdown_structure_does_not_fill_a_mandatory_section() {
+        assert!(body_is_effectively_empty(
+            "Goals",
+            "### Placeholder detail\n\n---\n"
+        ));
     }
 
     #[test]

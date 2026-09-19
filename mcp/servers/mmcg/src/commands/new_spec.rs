@@ -156,7 +156,7 @@ expected_docs: []
 ## Acceptance Criteria
 
 - [ ] <behavior that can be observed or asserted>
-- [ ] Existing relevant behavior remains compatible
+> - [ ] Existing relevant behavior remains compatible
 
 ## Pre-edit Snapshot
 
@@ -279,20 +279,20 @@ You are implementing {description}.
 
 - <primary goal — what counts as done>
 
-**Rules (global):**
-- DO NOT add features beyond what this spec lists (YAGNI)
-- DO NOT refactor unrelated code (KISS)
-- RUN `<typecheck command>` after each phase — must exit 0
+> **Rules (global):**
+> - DO NOT add features beyond what this spec lists (YAGNI)
+> - DO NOT refactor unrelated code (KISS)
+> - RUN `<typecheck command>` after each phase — must exit 0
 
-**Critic findings baked into rules** *(paste concern/fail items from critic here; delete if no critic spawned):*
-- <caveat>
+> **Critic findings baked into rules** *(paste concern/fail items from critic here; delete if no critic spawned):*
+> - <caveat>
 
 ---
 
 ## Alternatives Considered
 
-Include only plausible alternatives for a real design choice. Remove unused
-placeholders and explain when no meaningful alternative exists.
+> Include only plausible alternatives for a real design choice. Remove unused
+> placeholders and explain when no meaningful alternative exists.
 
 ### Alternative A — <name>
 
@@ -384,7 +384,7 @@ VERIFY: `<command>`
 
 ## Documentation Plan *(MANDATORY)*
 
-- [ ] **CHANGELOG** — new entry under `[Unreleased]`
+> - [ ] **CHANGELOG** — new entry under `[Unreleased]`
 - [ ] **No external doc changes needed** — <reason>
 
 ---
@@ -393,14 +393,14 @@ VERIFY: `<command>`
 
 - **On success:** <log line / metric>
 - **On failure:** <error log>
-- n/a — no production runtime
+> - n/a — no production runtime
 
 ---
 
 ## Performance Considerations *(MANDATORY)*
 
 - **Call frequency:** <per-request / one-time / etc.>
-- n/a — not hot path
+> - n/a — not hot path
 
 ---
 
@@ -492,24 +492,24 @@ You are implementing {description}.
 - [ ] <observable, machine-checkable behavior>
 - [ ] <compatibility expectation or explicitly accepted break>
 
-**Rules (global):**
-- DO NOT add features beyond what this spec lists (YAGNI)
-- DO NOT refactor unrelated code (KISS)
-- DO NOT introduce breaking changes without explicit ack in frontmatter `breaking_changes`
-- RUN `<typecheck command>` after each phase — must exit 0
-- VERIFY `mmcg_callers` count stays consistent on touched symbols
+> **Rules (global):**
+> - DO NOT add features beyond what this spec lists (YAGNI)
+> - DO NOT refactor unrelated code (KISS)
+> - DO NOT introduce breaking changes without explicit ack in frontmatter `breaking_changes`
+> - RUN `<typecheck command>` after each phase — must exit 0
+> - VERIFY `mmcg_callers` count stays consistent on touched symbols
 
-**Critic findings baked into rules** *(paste evidenced concern/fail items here):*
-- <security caveat>
-- <performance caveat>
-- <simplicity caveat>
+> **Critic findings baked into rules** *(paste evidenced concern/fail items here):*
+> - <security caveat>
+> - <performance caveat>
+> - <simplicity caveat>
 
 ---
 
 ## Alternatives Considered
 
-Include only plausible alternatives for a real design choice. Remove unused
-placeholders and explain when no meaningful alternative exists.
+> Include only plausible alternatives for a real design choice. Remove unused
+> placeholders and explain when no meaningful alternative exists.
 
 ### Alternative A — <name>
 
@@ -559,10 +559,10 @@ Column values: `pass / concern / fail` for Correctness; `low / medium / high` fo
 
 ## Risk Register *(MANDATORY for strict)*
 
-| Risk | Probability | Impact | Evidence | Mitigation | Owner phase |
-|---|---|---|---|---|---|
-| breaks existing callers | medium | high | `mmcg_callers X → N` | preserve signature, add compat wrapper | Phase 1 |
-| <risk> | <low/medium/high> | <low/medium/high> | <evidence> | <mitigation> | Phase N |
+> | Risk | Probability | Impact | Evidence | Mitigation | Owner phase |
+> |---|---|---|---|---|---|
+> | breaks existing callers | medium | high | `mmcg_callers X → N` | preserve signature, add compat wrapper | Phase 1 |
+> | <risk> | <low/medium/high> | <low/medium/high> | <evidence> | <mitigation> | Phase N |
 
 ---
 
@@ -575,11 +575,11 @@ Column values: `pass / concern / fail` for Correctness; `low / medium / high` fo
 
 ## Evidence Ledger *(MANDATORY for strict)*
 
-| Claim | Evidence type | Evidence | Confidence |
-|---|---|---|---|
-| `<symbol>` has N callers | mmcg | `mmcg_callers <symbol> → N` | high |
-| `<file>` contains `<pattern>` | file | `grep '<pattern>' <file>` | high |
-| <claim> | assumption | <what was assumed and why> | medium |
+> | Claim | Evidence type | Evidence | Confidence |
+> |---|---|---|---|
+> | `<symbol>` has N callers | mmcg | `mmcg_callers <symbol> → N` | high |
+> | `<file>` contains `<pattern>` | file | `grep '<pattern>' <file>` | high |
+> | <claim> | assumption | <what was assumed and why> | medium |
 
 ---
 
@@ -624,10 +624,10 @@ VERIFY: `<command>`
 
 ## Documentation Plan *(MANDATORY)*
 
-- [ ] **CHANGELOG** — new entry under `[Unreleased]`
-- [ ] **API docs** — `<file:line>` for `<symbol>`
-- [ ] **Project history** — update `CONTEXT.md` only for durable knowledge;
-      otherwise resolve `history-review.md` as `not applicable`
+> - [ ] **CHANGELOG** — new entry under `[Unreleased]`
+> - [ ] **API docs** — `<file:line>` for `<symbol>`
+> - [ ] **Project history** — update `CONTEXT.md` only for durable knowledge;
+>       otherwise resolve `history-review.md` as `not applicable`
 
 ---
 
@@ -850,6 +850,32 @@ mod tests {
                 mmcg::spec::section_body(&parsed, section).is_some(),
                 "strict template must contain `{section}`: {content}"
             );
+        }
+    }
+
+    #[test]
+    fn generated_templates_require_each_mandatory_section_to_be_completed() {
+        let root = tempfile::tempdir().unwrap();
+        for mode in [Mode::Standard, Mode::Verified, Mode::Strict] {
+            let content = render_spec("change behavior", 7, &mode);
+            let parsed = mmcg::spec::parse_str("spec.md", &content);
+            let mode_name = parsed
+                .frontmatter
+                .as_ref()
+                .and_then(|frontmatter| frontmatter.mode.as_deref());
+            let report = mmcg::verify_spec::run(&parsed, None, root.path());
+
+            for section in mmcg::verify_spec::mandatory_sections_for_mode(mode_name) {
+                assert!(
+                    report.errors.iter().any(|error| matches!(
+                        error,
+                        mmcg::verify_spec::Finding::EmptyMandatorySection { section: actual }
+                            if actual == section
+                    )),
+                    "fresh template must require a concrete `{section}` entry: {:?}",
+                    report.errors
+                );
+            }
         }
     }
 

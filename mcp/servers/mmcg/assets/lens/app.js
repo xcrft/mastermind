@@ -205,7 +205,8 @@
   function documentGraphRevisionStatus(graph, reviewHead) {
     const graphHead = text(record(record(graph).snapshot_revision).head, "");
     const expectedHead = text(reviewHead, "");
-    if (!graphHead || !expectedHead) {
+    const exactOid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+    if (!exactOid.test(graphHead) || !exactOid.test(expectedHead)) {
       return "unavailable";
     }
     return graphHead === expectedHead ? "matches" : "differs";

@@ -1077,6 +1077,15 @@ async function main() {
   assert.ok(differentRevisionHarness.nodes.get("completeness-status").classList.contains("is-partial"));
   assert.match(differentRevisionHarness.nodes.get("status-region").textContent, /different snapshot revision/i);
 
+  const unavailableRevision = withDocumentGraph(fixture(), "current");
+  unavailableRevision.document_graph.snapshot_revision.head = "not-a-git-revision";
+  const unavailableRevisionHarness = await renderFixture(unavailableRevision);
+  assert.match(unavailableRevisionHarness.nodes.get("notice-stack").textContent, /snapshot revision unavailable/i);
+  assert.match(unavailableRevisionHarness.nodes.get("precision-list").textContent, /packet revision cannot be bound/i);
+  assert.match(unavailableRevisionHarness.nodes.get("evidence-source-list").textContent, /snapshot revision unavailable/i);
+  assert.match(unavailableRevisionHarness.nodes.get("completeness-status").textContent, /Document evidence revision unavailable/i);
+  assert.match(unavailableRevisionHarness.nodes.get("status-region").textContent, /no review-bound snapshot revision/i);
+
   const auditHarness = await renderFixture(fixture(), { width: 1200 });
   assert.match(auditHarness.nodes.get("audit-summary").textContent, /2 components across 1 language/i, "Audit summary must explain the codebase shape");
   assert.match(auditHarness.nodes.get("audit-summary").textContent, /3 dead-code candidates/i, "Audit summary must count dead-code candidates from the true total");

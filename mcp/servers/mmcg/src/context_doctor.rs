@@ -288,34 +288,11 @@ fn check_placeholders(body: Option<&str>) -> Check {
 
 fn placeholder_tokens(text: &str) -> Vec<String> {
     let mut tokens = BTreeSet::new();
-    let mut fenced = false;
-    let mut html_comment = false;
-    for line in text.lines() {
-        if line.trim_start().starts_with("```") {
-            fenced = !fenced;
-            continue;
-        }
-        if fenced {
-            continue;
-        }
+    for line in prose_lines(text).into_iter().map(|line| line.text) {
         let mut in_inline_code = false;
         let chars: Vec<char> = line.chars().collect();
         let mut index = 0;
         while index < chars.len() {
-            if html_comment {
-                if chars[index..].starts_with(&['-', '-', '>']) {
-                    html_comment = false;
-                    index += 3;
-                } else {
-                    index += 1;
-                }
-                continue;
-            }
-            if !in_inline_code && chars[index..].starts_with(&['<', '!', '-', '-']) {
-                html_comment = true;
-                index += 4;
-                continue;
-            }
             if chars[index] == '`' {
                 in_inline_code = !in_inline_code;
                 index += 1;
@@ -1076,7 +1053,7 @@ mod tests {
     #[test]
     fn detects_real_template_placeholders_but_ignores_code() {
         let tokens = placeholder_tokens(
-            "# <PROJECT_NAME>\n<one or two sentences>\n<!-- <ignored> -->\n`<task>/state.json`\n```ts\nconst x = <T>();\n```\n",
+            "# <PROJECT_NAME>\n<one or two sentences>\n<!-- <ignored> -->\n`<task>/state.json`\n```ts\nconst x = <T>();\n```\n~~~typescript\nconst y = <U>();\n~~~\n> <quoted example>\n    <indented example>\n",
         );
         assert_eq!(
             tokens,

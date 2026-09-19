@@ -153,14 +153,16 @@ function artifactDigest(artifact) {
 export function bundled(share = DEFAULT_SHARE) {
   const agentsDir = path.join(share, "agents");
   const skillsDir = path.join(share, "skills");
-  const subagents = fs.existsSync(agentsDir)
+  const agentsPresent = checkedDirectory(agentsDir, "bundle agents directory");
+  const skillsPresent = checkedDirectory(skillsDir, "bundle skills directory");
+  const subagents = agentsPresent
     ? fs
         .readdirSync(agentsDir, { withFileTypes: true })
         .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
         .map((entry) => safeName(entry.name, "agent"))
         .sort()
     : [];
-  const skills = fs.existsSync(skillsDir)
+  const skills = skillsPresent
     ? fs
         .readdirSync(skillsDir, { withFileTypes: true })
         .filter((entry) => entry.isDirectory())
@@ -169,6 +171,15 @@ export function bundled(share = DEFAULT_SHARE) {
     : [];
   if (subagents.length === 0 || skills.length === 0) {
     throw new Error("workflow bundle is incomplete: expected at least one agent and one skill");
+  }
+  for (const skill of skills) {
+    const manifest = checkedExistingPath(
+      path.join(skillsDir, skill, "SKILL.md"),
+      `bundle skill ${skill} manifest`,
+    );
+    if (manifest === null || !manifest.isFile()) {
+      throw new Error(`workflow bundle skill ${skill} must contain a regular SKILL.md`);
+    }
   }
   return { subagents, skills };
 }

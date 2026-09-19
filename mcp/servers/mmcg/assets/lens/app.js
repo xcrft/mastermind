@@ -957,6 +957,7 @@
 
   function collectPrecisionNotes(map, impact, evidence, semantic) {
     const notes = [];
+    const disciplines = record(impact.disciplines);
     array(map.precision_notes).forEach(function (value) {
       const note = record(value);
       if (Object.keys(note).length > 0) {
@@ -979,6 +980,22 @@
         notes.push({ code: text(value, "Impact precision"), message: "", source: "Impact" });
       }
     });
+    const disciplineScopeReason = text(disciplines.scope_incomplete_reason, "");
+    if (disciplineScopeReason) {
+      notes.push({
+        code: "discipline_scope_incomplete",
+        message: "Detected disciplines derive only from the returned changed-file subset (" + disciplineScopeReason + ").",
+        source: "Impact",
+      });
+    }
+    const unclassifiedOmitted = finiteNumber(disciplines.unclassified_omitted);
+    if (unclassifiedOmitted !== null && unclassifiedOmitted > 0) {
+      notes.push({
+        code: "unclassified_discipline_paths_omitted",
+        message: unclassifiedOmitted + " unclassified changed path" + (unclassifiedOmitted === 1 ? " was" : "s were") + " omitted after the bounded sample.",
+        source: "Impact",
+      });
+    }
     array(evidence.precision_notes).forEach(function (value) {
       const note = record(value);
       notes.push({

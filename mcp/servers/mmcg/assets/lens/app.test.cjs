@@ -947,6 +947,18 @@ async function main() {
     "The headline must count changed symbols with no test path"
   );
 
+  const partialDisciplinePayload = fixture();
+  partialDisciplinePayload.impact.disciplines = {
+    detected: [],
+    unclassified: ["src/backend/one.rs"],
+    unclassified_omitted: 2,
+    note: "Path-based classification proposes an evidence set.",
+    scope_incomplete_reason: "file_limit",
+  };
+  const partialDisciplineHarness = await renderFixture(partialDisciplinePayload);
+  assert.match(partialDisciplineHarness.nodes.get("precision-list").textContent, /Detected disciplines derive only from the returned changed-file subset \(file_limit\)/i);
+  assert.match(partialDisciplineHarness.nodes.get("precision-list").textContent, /2 unclassified changed paths were omitted after the bounded sample/i);
+
   const ambiguousSeedPayload = fixture();
   const ambiguousSeed = {
     file: "src/other.rs",

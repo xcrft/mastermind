@@ -14,7 +14,7 @@ function integrity(file) {
   return `sha512-${crypto.createHash("sha512").update(fs.readFileSync(file)).digest("base64")}`;
 }
 
-function fixture({ published = {}, lookupErrors = {} } = {}) {
+function fixture({ published = {}, lookupErrors = {}, visibilityDelays = {} } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mastermind-npm-publish-"));
   const packed = path.join(root, "packed");
   const bin = path.join(root, "bin");
@@ -46,7 +46,7 @@ function fixture({ published = {}, lookupErrors = {} } = {}) {
   const statePath = path.join(root, "state.json");
   fs.writeFileSync(
     statePath,
-    JSON.stringify({ published, lookupErrors, files, events: [] }),
+    JSON.stringify({ published, lookupErrors, visibilityDelays, files, events: [], views: {} }),
   );
   const fakeNpm = path.join(bin, "npm");
   fs.writeFileSync(
@@ -68,6 +68,13 @@ if (args[0] === "view") {
     console.error("npm error code E404");
     process.exit(1);
   }
+  state.views[spec] = (state.views[spec] || 0) + 1;
+  if (state.views[spec] <= (state.visibilityDelays[spec] || 0)) {
+    fs.writeFileSync(statePath, JSON.stringify(state));
+    console.error("npm error code E404");
+    process.exit(1);
+  }
+  fs.writeFileSync(statePath, JSON.stringify(state));
   console.log(JSON.stringify(state.published[spec]));
   process.exit(0);
 }
@@ -93,7 +100,7 @@ throw new Error("unexpected npm invocation: " + args.join(" "));
     manifest,
     statePath,
     files,
-    run() {
+    run(env = {}) {
       return spawnSync("bash", [publisher, packed, manifest], {
         encoding: "utf8",
         env: {
@@ -101,6 +108,8 @@ throw new Error("unexpected npm invocation: " + args.join(" "));
           PATH: `${bin}${path.delimiter}${process.env.PATH}`,
           NPM_RESUME_STATE: statePath,
           NPM_PUBLISH_VERIFY_ATTEMPTS: "1",
+          NPM_PUBLISH_VERIFY_DELAY_SECONDS: "0",
+          ...env,
         },
       });
     },
@@ -134,6 +143,23 @@ test("a partial npm release resumes, verifies existing bytes, and publishes root
       assert.ok(args.includes("--access"), args.join(" "));
       assert.ok(args.includes("public"), args.join(" "));
     }
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("an accepted package is given time to become visible before the next publish", () => {
+  const delayed = "@scope/platform-a@1.2.3";
+  const f = fixture({ visibilityDelays: { [delayed]: 2 } });
+  try {
+    const result = f.run({ NPM_PUBLISH_VERIFY_ATTEMPTS: "3" });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /platform-a@1\.2\.3 published with matching integrity/);
+    assert.deepEqual(f.state().events.map(({ spec }) => spec), [
+      "@scope/platform-a@1.2.3",
+      "@scope/platform-b@1.2.3",
+      "@scope/root@1.2.3",
+    ]);
   } finally {
     f.cleanup();
   }

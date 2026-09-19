@@ -1313,12 +1313,14 @@ pub fn render_brief(
     output.push_str("\nImpacted callers\n");
     for caller in &packet.callers.items {
         output.push_str(&format!(
-            "  {} {} — {}:{} (depth {})\n",
+            "  {} {} — {}:{} (depth {}; name collisions {}; edge precision {})\n",
             safe_text(&caller.kind),
             safe_text(&caller.name),
             safe_text(&caller.file),
             caller.line,
-            caller.minimum_depth
+            caller.minimum_depth,
+            caller.name_collision_count,
+            safe_text(&caller.edge_precision.join(", "))
         ));
     }
     output.push_str("\nCandidate tests\n");
@@ -1895,6 +1897,11 @@ mod map_tests {
                 kind: "function".into(),
                 line: 19,
                 minimum_depth: 1,
+                name_collision_count: 2,
+                edge_precision: vec![
+                    "medium:syntactic".into(),
+                    "targets:name_based_candidates".into(),
+                ],
             }]),
             tests: complete_brief_collection(vec![queries::BriefTest {
                 file: "tests/api.rs".into(),
@@ -1952,7 +1959,9 @@ mod map_tests {
         assert!(text.contains(
             "scope incomplete — disciplines derive from returned changed files (file_limit)"
         ));
-        assert!(text.contains("function caller — src/api.rs:19 (depth 1)"));
+        assert!(text.contains(
+            "function caller — src/api.rs:19 (depth 1; name collisions 2; edge precision medium:syntactic, targets:name_based_candidates)"
+        ));
         assert!(text.contains("test checks_api — tests/api.rs:31 (heuristic, low, depth unknown)"));
         assert!(text.contains(
             "performed: false\n  terms: none\n  empty reason: no_eligible_changed_terms"

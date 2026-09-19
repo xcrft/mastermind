@@ -2071,6 +2071,11 @@ pub struct BriefCaller {
     pub kind: String,
     pub line: u32,
     pub minimum_depth: u32,
+    /// Same-name definitions can make this caller an over-approximate impact
+    /// candidate until the relationship is resolved in source.
+    pub name_collision_count: u32,
+    /// Source-language extraction and resolution limits from change impact.
+    pub edge_precision: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -3749,6 +3754,8 @@ pub fn brief(
                     kind: safe_brief_string(&caller.symbol.kind)?,
                     line: caller.symbol.line,
                     minimum_depth: caller.minimum_depth,
+                    name_collision_count: caller.name_collision_count,
+                    edge_precision: caller.edge_precision.clone(),
                 })
             }),
         caller_source_limit,
@@ -8491,11 +8498,17 @@ mod tests {
             .items
             .iter()
             .any(|symbol| symbol.name == "target"));
-        assert!(first
+        let caller = first
             .callers
             .items
             .iter()
-            .any(|caller| caller.name == "caller"));
+            .find(|caller| caller.name == "caller")
+            .expect("brief should retain the impacted caller");
+        assert_eq!(caller.name_collision_count, 1);
+        assert!(caller
+            .edge_precision
+            .iter()
+            .any(|precision| precision == "medium:syntactic"));
         assert!(first
             .history
             .query_terms

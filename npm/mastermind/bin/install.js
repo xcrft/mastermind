@@ -91,6 +91,39 @@ function safeName(name, kind) {
   return name;
 }
 
+function lstatIfPresent(target) {
+  try {
+    return fs.lstatSync(target);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+function checkedDirectory(target, label, { create = false } = {}) {
+  let entry = lstatIfPresent(target);
+  if (entry === null && create) {
+    fs.mkdirSync(target, { recursive: true, mode: 0o700 });
+    entry = fs.lstatSync(target);
+  }
+  if (entry === null) return false;
+  if (entry.isSymbolicLink()) {
+    throw new Error(`workflow ${label} cannot be a symbolic link: ${target}`);
+  }
+  if (!entry.isDirectory()) {
+    throw new Error(`workflow ${label} must be a directory: ${target}`);
+  }
+  return true;
+}
+
+function checkedExistingPath(target, label) {
+  const entry = lstatIfPresent(target);
+  if (entry?.isSymbolicLink()) {
+    throw new Error(`workflow ${label} cannot be a symbolic link: ${target}`);
+  }
+  return entry;
+}
+
 function artifactDigest(artifact) {
   const hash = createHash("sha256");
   const visit = (current, relative) => {
@@ -199,7 +232,11 @@ function targetFor(home, client) {
 }
 
 export function readManifest(manifestPath) {
-  if (!fs.existsSync(manifestPath)) return null;
+  const manifest = checkedExistingPath(manifestPath, "manifest");
+  if (manifest === null) return null;
+  if (!manifest.isFile()) {
+    throw new Error(`workflow manifest must be a regular file: ${manifestPath}`);
+  }
   let value;
   try {
     value = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
@@ -252,12 +289,29 @@ function artifactPath(target, kind, name) {
   return path.join(target.root, directory, name);
 }
 
+function managedDirectory(target, kind, { create = false } = {}) {
+  const directory = kind === "agents" ? target.config.agentsDir : target.config.skillsDir;
+  if (!directory) throw new Error(`${target.client} does not support ${kind}`);
+  return checkedDirectory(path.join(target.root, directory), `${kind} directory`, { create });
+}
+
 function removePath(target) {
   fs.rmSync(target, { recursive: true, force: true });
 }
 
 function beginClientInstall({ share, target, client, version, profile, previous, desired }) {
-  fs.mkdirSync(target.root, { recursive: true });
+  const rootPresent = checkedDirectory(target.root, "root");
+  if (rootPresent) {
+    for (const kind of ["agents", "skills"]) {
+      if (kind === "agents" && !target.config.agents) continue;
+      managedDirectory(target, kind);
+    }
+  }
+  checkedDirectory(target.root, "root", { create: true });
+  for (const kind of ["agents", "skills"]) {
+    if (kind === "agents" && !target.config.agents) continue;
+    managedDirectory(target, kind, { create: true });
+  }
   if (previous && previous.client !== client) {
     throw new Error(`workflow manifest client mismatch at ${target.manifestPath}`);
   }
@@ -323,7 +377,7 @@ function beginClientInstall({ share, target, client, version, profile, previous,
     });
 
     const moveAside = (destination, label) => {
-      if (!fs.existsSync(destination)) return;
+      if (checkedExistingPath(destination, "managed artifact") === null) return;
       const backup = path.join(backupRoot, label);
       fs.mkdirSync(path.dirname(backup), { recursive: true });
       fs.renameSync(destination, backup);
@@ -398,6 +452,7 @@ export function copyAll({
   const bundle = bundled(share);
   const installs = names.map((name) => {
     const target = targetFor(home, name);
+    checkedDirectory(target.root, "root");
     const previous = readManifest(target.manifestPath);
     const selectedProfile = profile ?? manifestProfile(previous);
     const selected = profileBundle(bundle, selectedProfile, share);
@@ -453,6 +508,7 @@ export function workflowStatus({
   const bundle = bundled(share);
   return expandClients(client).map((name) => {
     const target = targetFor(home, name);
+    const rootPresent = checkedDirectory(target.root, "root");
     let manifest;
     let manifestError = null;
     try {
@@ -471,12 +527,16 @@ export function workflowStatus({
     const expectedDigests = {};
     for (const kind of ["agents", "skills"]) {
       if (kind === "agents" && !target.config.agents) continue;
+      const directoryPresent = rootPresent && managedDirectory(target, kind);
       for (const artifact of expected[kind]) {
         const key = `${kind}/${artifact}`;
         const bundledPath = path.join(share, kind, artifact);
         expectedDigests[key] = artifactDigest(bundledPath);
         const installedPath = artifactPath(target, kind, artifact);
-        if (!fs.existsSync(installedPath)) {
+        const installed = directoryPresent
+          ? checkedExistingPath(installedPath, "managed artifact")
+          : null;
+        if (installed === null) {
           missing.push(key);
         } else {
           try {

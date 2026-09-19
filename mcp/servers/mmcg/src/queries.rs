@@ -3290,6 +3290,12 @@ fn brief_history_terms(changes: &ImpactChanges) -> Vec<String> {
     terms
 }
 
+fn brief_history_terms_scope_incomplete(changes: &ImpactChanges) -> bool {
+    [&changes.files, &changes.symbols]
+        .into_iter()
+        .any(|collection| collection.truncated || collection.total.is_none())
+}
+
 fn brief_history_query(terms: &[String]) -> String {
     terms
         .iter()
@@ -3551,6 +3557,7 @@ pub fn brief(
     }
 
     let terms = brief_history_terms(&impact.changes);
+    let history_terms_scope_incomplete = brief_history_terms_scope_incomplete(&impact.changes);
     let query = brief_history_query(&terms);
     let history_source_limit;
     let mut raw_history = Vec::new();
@@ -3699,6 +3706,9 @@ pub fn brief(
     let history_token =
         safe_brief_string(&checked.history_inventory_token).ok_or(BriefError::SnapshotChanged)?;
     let mut precision_notes = impact.precision_notes.clone();
+    if history_terms_scope_incomplete {
+        precision_notes.push("history_query_scope_incomplete".to_string());
+    }
     if checked.history_freshness == crate::indexer::ProjectHistoryFreshness::Incomplete {
         precision_notes.push("history_index_incomplete".to_string());
     }
@@ -3745,7 +3755,13 @@ pub fn brief(
         history: BriefHistory {
             query_terms: terms,
             query_performed,
-            empty_reason: (!query_performed).then(|| "no_eligible_changed_terms".to_string()),
+            empty_reason: (!query_performed).then(|| {
+                if history_terms_scope_incomplete {
+                    "changed_term_scope_incomplete".to_string()
+                } else {
+                    "no_eligible_changed_terms".to_string()
+                }
+            }),
             total: citations_total,
             returned: citations_returned,
         },
@@ -8602,6 +8618,57 @@ mod tests {
             r#""alpha" OR "handler" OR "beta_handler" OR "http" OR "client" OR "ignored""#
         );
         assert!(terms.len() <= BRIEF_HISTORY_TERM_LIMIT);
+    }
+
+    #[test]
+    fn brief_history_scope_reports_partial_changed_inputs() {
+        let complete_files = Collection {
+            total: Some(1),
+            returned: 1,
+            truncated: false,
+            truncation_reason: None,
+            items: vec![ChangedFile {
+                path: "src/app.py".into(),
+                status: "modified".into(),
+            }],
+        };
+        let complete_symbols = Collection {
+            total: Some(1),
+            returned: 1,
+            truncated: false,
+            truncation_reason: None,
+            items: vec![ChangedSymbol {
+                file: "src/app.py".into(),
+                name: "current".into(),
+                kind: "function".into(),
+                line: 1,
+                change: "body_changed".into(),
+            }],
+        };
+        assert!(!brief_history_terms_scope_incomplete(&ImpactChanges {
+            files: complete_files.clone(),
+            symbols: complete_symbols.clone(),
+        }));
+        assert!(brief_history_terms_scope_incomplete(&ImpactChanges {
+            files: Collection {
+                total: None,
+                returned: 1,
+                truncated: true,
+                truncation_reason: Some("file_limit".into()),
+                items: complete_files.items,
+            },
+            symbols: complete_symbols.clone(),
+        }));
+        assert!(brief_history_terms_scope_incomplete(&ImpactChanges {
+            files: complete_files,
+            symbols: Collection {
+                total: None,
+                returned: 1,
+                truncated: true,
+                truncation_reason: Some("symbol_limit".into()),
+                items: complete_symbols.items,
+            },
+        }));
     }
 
     #[test]

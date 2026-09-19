@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- The executor and independent auditor can now follow omitted or relevant brief
+  history with `mmcg_history`, then read the cited Markdown instead of treating
+  the bounded initial citation set as complete research.
 - Test-audit workflows now treat `mmcg_test_impact` classifications as static
   candidate ranking. A missing `direct` candidate is a research gap, not proof
   of uncovered behavior without complete scope, source inspection, and observed

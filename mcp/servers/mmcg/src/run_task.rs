@@ -1584,8 +1584,8 @@ fn git_diff_stat(repo_root: &Path, baseline_ref: &str) -> Result<String, String>
 
 /// First `# Title` line BEFORE any `##` section header. None when absent.
 fn extract_h1_title(body: &str) -> Option<String> {
-    for line in body.lines() {
-        let t = line.trim_start();
+    for line in crate::context_doctor::prose_lines(body) {
+        let t = line.text;
         if let Some(rest) = t.strip_prefix("# ") {
             return Some(rest.trim().to_string());
         }
@@ -3705,6 +3705,10 @@ verifications: []\n\
         assert_eq!(extract_h1_title(""), None);
         // H1 behind an H2 doesn't count — it's inside a section.
         assert_eq!(extract_h1_title("## Section\n# Not a title"), None);
+        assert_eq!(
+            extract_h1_title("~~~markdown\n# Example title\n~~~\n> # Quoted title\n# Durable title\n## Goals\n- x"),
+            Some("Durable title".to_string())
+        );
     }
 
     #[test]

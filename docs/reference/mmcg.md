@@ -1602,10 +1602,13 @@ truncation state, its name-collision count, and source-language edge precision
 from change impact. A brief can therefore show both why an impact candidate was
 selected and where its relationship remains low precision. An unknown source
 total is printed as unknown and a non-exact source omission as a lower bound.
+Each candidate test likewise retains up to eight direct, transitive, or
+same-component evidence records with exact count and truncation state, so a
+classification is not separated from the static relation that produced it.
 
 Candidate caps are 100 changed files, 100 changed symbols, 100 callers, eight
-seeds per caller, 50 tests, 10 history citations, and eight derived history
-terms. Discipline labels
+seeds per caller, 50 tests, eight evidence records per test, 10 history
+citations, and eight derived history terms. Discipline labels
 are fixed path-classifier metadata and stay in every admitted packet; when the
 change-file scope is incomplete, their `scope_incomplete_reason` keeps the
 brief partial. History performs

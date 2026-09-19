@@ -1624,6 +1624,7 @@ const BRIEF_CHANGED_SYMBOL_LIMIT: usize = 100;
 const BRIEF_CALLER_LIMIT: usize = 100;
 const BRIEF_CALLER_SEED_LIMIT: usize = 8;
 const BRIEF_TEST_LIMIT: usize = 50;
+const BRIEF_TEST_EVIDENCE_LIMIT: usize = 8;
 const BRIEF_HISTORY_LIMIT: usize = 10;
 const BRIEF_HISTORY_TERM_LIMIT: usize = 8;
 const BRIEF_REPOSITORY_STRING_BYTES: usize = 512;
@@ -2107,6 +2108,21 @@ pub struct BriefTest {
     pub classification: String,
     pub minimum_depth: Option<u32>,
     pub confidence: String,
+    /// Exact count before this row's bounded evidence projection.
+    pub evidence_total: u32,
+    /// True when `evidence` is a bounded prefix rather than every static reason
+    /// that selected this candidate.
+    pub evidence_truncated: bool,
+    pub evidence: Vec<BriefTestEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BriefTestEvidence {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<BriefSeed>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -2151,6 +2167,7 @@ pub struct BriefLimits {
     pub callers: u32,
     pub caller_seeds: u32,
     pub tests: u32,
+    pub test_evidence: u32,
     pub history_citations: u32,
     pub history_terms: u32,
     pub impact_depth: u32,
@@ -3306,6 +3323,31 @@ fn safe_brief_string(value: &str) -> Option<String> {
     Some(output)
 }
 
+fn brief_seed(seed: &SeedEvidence) -> Option<BriefSeed> {
+    Some(BriefSeed {
+        file: safe_brief_string(&seed.file)?,
+        name: safe_brief_string(&seed.name)?,
+        kind: safe_brief_string(&seed.kind)?,
+        line: seed.line,
+        change: safe_brief_string(&seed.change)?,
+        name_resolution_count: seed.name_resolution_count,
+    })
+}
+
+fn brief_test_evidence(evidence: &TestEvidence) -> Option<BriefTestEvidence> {
+    Some(BriefTestEvidence {
+        kind: safe_brief_string(&evidence.kind)?,
+        seed: match evidence.seed.as_ref() {
+            Some(seed) => Some(brief_seed(seed)?),
+            None => None,
+        },
+        component: match evidence.component.as_deref() {
+            Some(component) => Some(safe_brief_string(component)?),
+            None => None,
+        },
+    })
+}
+
 fn brief_disciplines(
     disciplines: &ImpactDisciplines,
     change_impact_file_count: u32,
@@ -3781,16 +3823,7 @@ pub fn brief(
                         .seeds
                         .iter()
                         .take(BRIEF_CALLER_SEED_LIMIT)
-                        .map(|seed| {
-                            Some(BriefSeed {
-                                file: safe_brief_string(&seed.file)?,
-                                name: safe_brief_string(&seed.name)?,
-                                kind: safe_brief_string(&seed.kind)?,
-                                line: seed.line,
-                                change: safe_brief_string(&seed.change)?,
-                                name_resolution_count: seed.name_resolution_count,
-                            })
-                        })
+                        .map(brief_seed)
                         .collect::<Option<Vec<_>>>()?,
                     name_collision_count: caller.name_collision_count,
                     edge_precision: caller.edge_precision.clone(),
@@ -3815,6 +3848,14 @@ pub fn brief(
                     classification: safe_brief_string(&test.classification)?,
                     minimum_depth: test.minimum_depth,
                     confidence: safe_brief_string(&test.confidence)?,
+                    evidence_total: brief_u32(test.evidence.len()),
+                    evidence_truncated: test.evidence.len() > BRIEF_TEST_EVIDENCE_LIMIT,
+                    evidence: test
+                        .evidence
+                        .iter()
+                        .take(BRIEF_TEST_EVIDENCE_LIMIT)
+                        .map(brief_test_evidence)
+                        .collect::<Option<Vec<_>>>()?,
                 })
             }),
         test_source_limit,
@@ -3931,6 +3972,7 @@ pub fn brief(
             callers: BRIEF_CALLER_LIMIT as u32,
             caller_seeds: BRIEF_CALLER_SEED_LIMIT as u32,
             tests: BRIEF_TEST_LIMIT as u32,
+            test_evidence: BRIEF_TEST_EVIDENCE_LIMIT as u32,
             history_citations: BRIEF_HISTORY_LIMIT as u32,
             history_terms: BRIEF_HISTORY_TERM_LIMIT as u32,
             impact_depth: 3,
@@ -8552,6 +8594,16 @@ mod tests {
         assert!(!caller.seeds_truncated);
         assert_eq!(caller.seeds.len(), 1);
         assert_eq!(caller.seeds[0].name, "target");
+        let test = first
+            .tests
+            .items
+            .iter()
+            .find(|test| test.name == "test_target")
+            .expect("brief should retain the candidate test");
+        assert_eq!(test.evidence_total, 1);
+        assert!(!test.evidence_truncated);
+        assert_eq!(test.evidence[0].kind, "graph_seed");
+        assert_eq!(test.evidence[0].seed.as_ref().unwrap().name, "target");
         assert!(first
             .history
             .query_terms
@@ -8597,6 +8649,13 @@ mod tests {
                 classification: "direct".into(),
                 minimum_depth: Some(1),
                 confidence: "high".into(),
+                evidence_total: 1,
+                evidence_truncated: false,
+                evidence: vec![BriefTestEvidence {
+                    kind: "graph_seed".into(),
+                    seed: None,
+                    component: None,
+                }],
             });
             full.citations.items.push(BriefHistoryCitation {
                 path: format!(".mastermind/tasks/{index}/spec.md"),

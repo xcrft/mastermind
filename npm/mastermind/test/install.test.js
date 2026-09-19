@@ -197,6 +197,20 @@ test("installer rejects a bundle skill without a regular SKILL manifest before w
   }
 });
 
+test("bundle rejects names that would become paths on another platform", () => {
+  const f = fixture();
+  try {
+    fs.mkdirSync(path.join(f.share, "skills", "back\\slash"));
+
+    assert.throws(
+      () => bundled(f.share),
+      /unsafe skill name in workflow bundle/,
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
 test("newer manifest schemas fail before replacing installed files", () => {
   const f = fixture();
   try {

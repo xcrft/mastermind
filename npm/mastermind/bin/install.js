@@ -85,7 +85,14 @@ function packageVersion() {
 }
 
 function safeName(name, kind) {
-  if (!name || name === "." || name === ".." || path.basename(name) !== name) {
+  if (
+    !name
+    || name === "."
+    || name === ".."
+    || path.basename(name) !== name
+    || name.includes("\\")
+    || /[\u0000-\u001f\u007f]/.test(name)
+  ) {
     throw new Error(`unsafe ${kind} name in workflow bundle: ${JSON.stringify(name)}`);
   }
   return name;

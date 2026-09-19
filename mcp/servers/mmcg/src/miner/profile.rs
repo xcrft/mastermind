@@ -45,6 +45,8 @@ const DEEP_OUTPUT_LIMIT: usize = 64 * 1024;
 const DEEP_COMMIT_FIELD_LIMIT: usize = 160;
 const DEEP_CODE_SAMPLE_LIMIT: usize = 6000;
 const DEEP_TIMEOUT: Duration = Duration::from_secs(180);
+const DEEP_PIPE_DRAIN_GRACE: Duration = Duration::from_millis(200);
+const DEEP_PIPE_CLEANUP_GRACE: Duration = Duration::from_millis(100);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const INTERPRETED_HEADING: &str = "## Design patterns & tendencies (interpreted)";
 
@@ -1564,13 +1566,33 @@ fn run_claude_capture(root: &Path, prompt: &str) -> Result<String, String> {
     }
     let claude = crate::setup::resolve_native_cli("claude", root)
         .map_err(|error| format!("resolve claude: {error}"))?;
-    let mut child = Command::new(claude)
+    run_claude_capture_with_timeout(&claude, root, prompt, DEEP_TIMEOUT)
+}
+
+fn run_claude_capture_with_timeout(
+    claude: &Path,
+    root: &Path,
+    prompt: &str,
+    timeout: Duration,
+) -> Result<String, String> {
+    let mut command = Command::new(claude);
+    command
         .arg("-p")
         .arg(prompt)
         .current_dir(root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        // `claude -p` can start MCP helpers that inherit its pipes. Keeping
+        // them in a private group prevents a finished CLI from leaving an
+        // orphaned helper behind when capture reaches its bound.
+        command.process_group(0);
+    }
+    let mut child = command
         .spawn()
         .map_err(|e| {
             format!("spawn claude: {e} — is the Claude Code CLI installed and on PATH?")
@@ -1589,30 +1611,40 @@ fn run_claude_capture(root: &Path, prompt: &str) -> Result<String, String> {
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() < DEEP_TIMEOUT => {
+            Ok(None) if started.elapsed() < timeout => {
                 std::thread::sleep(PROCESS_POLL_INTERVAL);
             }
             Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                terminate_claude_process_tree(&mut child);
                 return Err(format!(
                     "claude timed out after {} seconds",
-                    DEEP_TIMEOUT.as_secs()
+                    timeout.as_secs()
                 ));
             }
             Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                terminate_claude_process_tree(&mut child);
                 return Err(format!("wait for claude: {error}"));
             }
         }
     };
-    let (stdout, stdout_exceeded) = stdout
-        .recv_timeout(Duration::from_secs(1))
-        .map_err(|_| "capture claude stdout did not finish".to_string())??;
-    let (stderr, stderr_exceeded) = stderr
-        .recv_timeout(Duration::from_secs(1))
-        .map_err(|_| "capture claude stderr did not finish".to_string())??;
+    let mut stdout_result = stdout.recv_timeout(DEEP_PIPE_DRAIN_GRACE).ok();
+    let mut stderr_result = stderr.recv_timeout(DEEP_PIPE_DRAIN_GRACE).ok();
+    if stdout_result.is_none() || stderr_result.is_none() {
+        // A normally exited CLI should close both pipes. If it does not, an
+        // inherited descriptor belongs to a descendant, which must not turn a
+        // valid synthesis into a long false timeout or survive this request.
+        terminate_claude_process_tree(&mut child);
+        if stdout_result.is_none() {
+            stdout_result = stdout.recv_timeout(DEEP_PIPE_CLEANUP_GRACE).ok();
+        }
+        if stderr_result.is_none() {
+            stderr_result = stderr.recv_timeout(DEEP_PIPE_CLEANUP_GRACE).ok();
+        }
+    }
+    let (stdout, stdout_exceeded) = stdout_result
+        .ok_or_else(|| "capture claude stdout did not finish".to_string())??;
+    let (stderr, stderr_exceeded) = stderr_result
+        .ok_or_else(|| "capture claude stderr did not finish".to_string())??;
     if stdout_exceeded || stderr_exceeded {
         return Err(format!(
             "claude output exceeded the {DEEP_OUTPUT_LIMIT}-byte limit"
@@ -1633,6 +1665,20 @@ fn run_claude_capture(root: &Path, prompt: &str) -> Result<String, String> {
         ));
     }
     String::from_utf8(stdout).map_err(|_| "claude output was not valid UTF-8".into())
+}
+
+fn terminate_claude_process_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let process_group = child.id() as libc::pid_t;
+        // SAFETY: the command starts a dedicated process group before exec.
+        // A failed kill only means that it was already gone.
+        unsafe {
+            let _ = libc::kill(-process_group, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn read_bounded_pipe<R: Read + Send + 'static>(
@@ -2591,6 +2637,46 @@ diff --git a/app/bar.ts b/app/bar.ts
             .unwrap();
         assert_eq!(output.0.len(), 33);
         assert!(output.1);
+    }
+
+    #[test]
+    fn completed_deep_capture_cleans_descendant_holding_pipes_open() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let root = tempfile::tempdir().unwrap();
+            let script = root.path().join("claude");
+            std::fs::write(
+                &script,
+                "#!/bin/sh\nsleep 5 &\necho $!\nprintf '## Design patterns & tendencies (interpreted)\\n\\n- bounded\\n'\nexit 0\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+            let started = Instant::now();
+            let output = run_claude_capture_with_timeout(
+                &script,
+                root.path(),
+                "prompt",
+                Duration::from_secs(1),
+            )
+            .unwrap();
+            let mut lines = output.lines();
+            let pid: u32 = lines.next().unwrap().parse().unwrap();
+            assert!(lines.any(|line| line == "- bounded"));
+            assert!(started.elapsed() < Duration::from_secs(1));
+            let check = Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .unwrap();
+            assert!(
+                !check.status.success()
+                    || String::from_utf8_lossy(&check.stdout)
+                        .trim()
+                        .starts_with('Z')
+            );
+        }
     }
 
     #[test]

@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Native setup-client inspection no longer reports a completed command as a
   timeout when a descendant retains its output pipes. The supervisor briefly
   drains output, then terminates its owned process group.
+- Deep style analysis now also terminates inherited-pipe descendants after a
+  bounded drain, so a completed `claude -p` synthesis cannot leave helpers
+  running or fail as an unrelated pipe timeout.
 - Evaluation runtime identity hashing is now non-blocking and bounded, includes
   file mode in stability checks, and applies the stricter definition-file cap
   to harness sources.

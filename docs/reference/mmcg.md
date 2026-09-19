@@ -1892,20 +1892,23 @@ Labels and ordinary shell fences do not declare machine-checked obligations.
 Command matching trims outside whitespace only. Arguments, case, wrappers and
 internal whitespace remain significant; separate rows cannot satisfy a compound
 command. Missing commands produce `verification_requirement_unmet` with
-`missing_result`. A matching row that does not claim a pass, reports a nonzero
-exit, or reports zero tests for a recognized test run produces `not_passed`;
-mixing it with passing rows produces
-`conflicting_results`. These findings make the audit and bundle `broken` and
-return the controller to planner review. Repeated successful rows may have
-different excerpts or positive test counts. Optional observations remain
-optional. Empty results can pass coverage
-when the spec has no command obligations.
+`missing_result`. A canonical matching pass needs `observed.exit_code: 0` and is
+rejected by the parser without it; a legacy matching pass that omits the exit
+receipt produces `unobserved_exit`. A matching row that does not claim a pass,
+reports a nonzero exit, or reports zero tests for a recognized test run produces
+`not_passed`; mixing it with passing rows produces `conflicting_results`. These
+findings make the audit and bundle `broken` and return the controller to planner
+review. Repeated successful rows may have different excerpts or positive test
+counts. `tests_run` remains optional, and an executor-reported zero exit code is
+only a self-consistency receipt, not proof that the command ran. Empty results
+can pass coverage when the spec has no command obligations.
 
 For a claimed pass, a nonzero `observed.exit_code` produces
 `observed_exit_code_non_zero` for any command. `observed.tests_run: 0` produces
 `observed_zero_tests` only for recognized test execution, whether the exit code
 is zero or omitted. A positive count cannot override a nonzero exit. Missing
-observations are not converted to successful execution or to a zero count.
+test counts are not converted to a zero count; passing canonical reports always
+carry the required self-reported zero exit receipt.
 
 Recognition covers a small subset of direct `cargo test`, `go test`, `pytest`,
 `python -m pytest`, `python3 -m pytest`, `jest`, and explicit `vitest run` or

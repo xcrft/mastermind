@@ -157,7 +157,7 @@ fn executor_report_canonical_schema_rejects_nulls_types_and_empty_claim_fields()
 #[test]
 fn executor_report_sentinels_select_one_complete_span_without_reading_literal_tokens() {
     let mut value = canonical("complete");
-    value["verifications"] = json!([{"cmd": "echo mastermind:report-end", "result": "pass", "output_excerpt": "literal ``` and <!-- mastermind:executor-begin -->"}]);
+    value["verifications"] = json!([{"cmd": "echo mastermind:report-end", "result": "pass", "output_excerpt": "literal ``` and <!-- mastermind:executor-begin -->", "observed": {"exit_code": 0}}]);
     let expected = parsed(&value);
     for text in [
         fenced(&value),
@@ -171,14 +171,13 @@ fn executor_report_sentinels_select_one_complete_span_without_reading_literal_to
     }
     let excerpt = "<!-- mastermind:report-begin -->\n<!-- mastermind:report-end -->\n<!-- mastermind:executor-begin -->\n<!-- mastermind:executor-end -->";
     let mut literal = canonical("complete");
-    literal["verifications"] =
-        json!([{"cmd": "echo checked", "result": "pass", "output_excerpt": excerpt}]);
+    literal["verifications"] = json!([{"cmd": "echo checked", "result": "pass", "output_excerpt": excerpt, "observed": {"exit_code": 0}}]);
     let yaml = serde_norway::to_string(&canonical("complete")).unwrap();
     assert!(yaml.contains("verifications: []"));
     let yaml = yaml.replace(
         "verifications: []",
         &format!(
-            "verifications:\n  - cmd: echo checked\n    result: pass\n    output_excerpt: |-\n{}",
+            "verifications:\n  - cmd: echo checked\n    result: pass\n    observed:\n      exit_code: 0\n    output_excerpt: |-\n{}",
             excerpt
                 .lines()
                 .map(|line| format!("      {line}"))

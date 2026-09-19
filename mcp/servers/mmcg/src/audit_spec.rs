@@ -803,9 +803,26 @@ fn check_declared_verifications(
 ) {
     let mut outcomes = BTreeMap::new();
     for row in &report.verify {
-        let (passed, unsuccessful) = outcomes.entry(row.cmd.trim()).or_insert((0usize, 0usize));
-        if row.claimed.as_deref() == Some("passed") && pass_contradiction(row).is_none() {
+        let (passed, unsuccessful, unobserved_exit) = outcomes
+            .entry(row.cmd.trim())
+            .or_insert((0usize, 0usize, 0usize));
+        if row.claimed.as_deref() == Some("passed")
+            && pass_contradiction(row).is_none()
+            && row
+                .observed
+                .as_ref()
+                .and_then(|observed| observed.exit_code)
+                == Some(0)
+        {
             *passed += 1;
+        } else if row.claimed.as_deref() == Some("passed")
+            && row
+                .observed
+                .as_ref()
+                .and_then(|observed| observed.exit_code)
+                .is_none()
+        {
+            *unobserved_exit += 1;
         } else {
             *unsuccessful += 1;
         }
@@ -813,8 +830,9 @@ fn check_declared_verifications(
     for cmd in spec.declared_verify_commands() {
         let reason = match outcomes.get(cmd) {
             None => "missing_result",
-            Some((_, 0)) => continue,
-            Some((0, _)) => "not_passed",
+            Some((_, 0, 0)) => continue,
+            Some((0, 0, _)) => "unobserved_exit",
+            Some((0, _, 0)) => "not_passed",
             Some(_) => "conflicting_results",
         };
         findings.push(Finding::VerificationRequirementUnmet {

@@ -23,7 +23,7 @@ fn report_value(rows: Vec<Value>) -> Value {
 }
 
 fn passed(cmd: &str) -> Value {
-    json!({"cmd": cmd, "result": "pass"})
+    json!({"cmd": cmd, "result": "pass", "observed": {"exit_code": 0}})
 }
 
 fn executor(rows: Vec<Value>) -> ExecutorReport {
@@ -320,15 +320,26 @@ fn verification_coverage_checks_all_duplicate_rows_and_observed_failures() {
     let report = fixture.audit(Some(&executor(vec![bad])));
     assert_eq!(unmet(&report), [(FIRST, "not_passed")]);
     let report = fixture.audit(Some(&executor(vec![
-        json!({"cmd": FIRST, "result": "pass", "output_excerpt": "first run", "observed": {"tests_run": 1}}),
+        json!({"cmd": FIRST, "result": "pass", "output_excerpt": "first run", "observed": {"exit_code": 0, "tests_run": 1}}),
         json!({"cmd": format!(" {FIRST} "), "result": "pass", "output_excerpt": "second run", "observed": {"exit_code": 0, "tests_run": 2}}),
     ])));
     assert_eq!(report.verdict, Verdict::Held, "{report:?}");
     assert_eq!(report.executor_report.unwrap().verify.len(), 2);
-    let report = fixture.audit(Some(&executor(vec![
+    let unobserved = report_value(vec![
         json!({"cmd": FIRST, "result": "pass", "observed": {}}),
-    ])));
-    assert_eq!(report.verdict, Verdict::Held);
+    ]);
+    assert!(
+        executor_report::parse_canonical_str(&unobserved.to_string())
+            .unwrap_err()
+            .contains("successful executor verification requires observed exit_code: 0")
+    );
+    let legacy_unobserved =
+        executor_report::parse_str(&format!("verify:\n  - cmd: {FIRST}\n    claimed: passed\n"))
+            .unwrap();
+    assert_eq!(
+        unmet(&fixture.audit(Some(&legacy_unobserved))),
+        [(FIRST, "unobserved_exit")]
+    );
 
     let mut partial = report_value(vec![json!({"cmd": FIRST, "result": "fail"})]);
     partial["status"] = json!("partial");
@@ -543,12 +554,15 @@ fn verification_coverage_controller_rejects_recovers_and_never_executes_commands
     assert!(!fixture.root().join(".mastermind/should-not-run").exists());
 }
 
-fn observed(cmd: &str, outcome: Value) -> Value {
+fn observed(cmd: &str, mut outcome: Value) -> Value {
+    if outcome.get("exit_code").is_none() {
+        outcome["exit_code"] = json!(0);
+    }
     json!({"cmd": cmd, "result": "pass", "observed": outcome})
 }
 
 #[test]
-fn zero_test_observations_reject_recognized_runs_with_or_without_exit_code() {
+fn zero_test_observations_reject_recognized_runs_with_a_success_receipt() {
     let mut fixture = Fixture::with_test_files(&[], true);
     fixture.change();
     for cmd in [
@@ -570,10 +584,7 @@ fn zero_test_observations_reject_recognized_runs_with_or_without_exit_code() {
         "vitest.exe --run -t keep",
         "vitest --run -t list",
     ] {
-        for outcome in [
-            json!({"tests_run": 0}),
-            json!({"tests_run": 0, "exit_code": 0}),
-        ] {
+        for outcome in [json!({"tests_run": 0, "exit_code": 0})] {
             let report = fixture.audit(Some(&executor(vec![observed(cmd, outcome)])));
             assert_eq!(report.verdict, Verdict::Broken, "{cmd}: {report:?}");
             assert!(
@@ -662,10 +673,7 @@ fn zero_test_observations_allow_compile_discovery_and_unknown_commands() {
         "cargo test --package *",
         "./cargo test",
     ] {
-        for outcome in [
-            json!({"tests_run": 0}),
-            json!({"tests_run": 0, "exit_code": 0}),
-        ] {
+        for outcome in [json!({"tests_run": 0, "exit_code": 0})] {
             std::fs::write(fixture.spec(), spec_text(json!([{"cmd": cmd}]), "")).unwrap();
             let report = fixture.audit(Some(&executor(vec![observed(cmd, outcome)])));
             assert_eq!(report.verdict, Verdict::Held, "{cmd}: {report:?}");
@@ -698,12 +706,11 @@ fn zero_test_observations_preserve_nonzero_exit_precedence_for_all_commands() {
 }
 
 #[test]
-fn zero_test_observations_preserve_optional_evidence_and_advisory_scan_boundaries() {
+fn zero_test_observations_preserve_optional_test_counts_and_advisory_scan_boundaries() {
     let mut with_tests = Fixture::with_test_files(&["cargo test"], true);
     with_tests.change();
     for row in [
         passed("cargo test"),
-        observed("cargo test", json!({})),
         observed("cargo test", json!({"exit_code": 0})),
     ] {
         let report = with_tests.audit(Some(&executor(vec![row])));
@@ -719,10 +726,7 @@ fn zero_test_observations_preserve_optional_evidence_and_advisory_scan_boundarie
         [Finding::VacuousTestClaim { .. }]
     ));
     for cmd in ["cargo test", "go test", "pytest", "jest", "vitest run"] {
-        for outcome in [
-            json!({"tests_run": 2}),
-            json!({"tests_run": 2, "exit_code": 0}),
-        ] {
+        for outcome in [json!({"tests_run": 2, "exit_code": 0})] {
             let report = bare.audit(Some(&executor(vec![observed(cmd, outcome)])));
             assert_eq!(report.verdict, Verdict::Held, "{cmd}: {report:?}");
         }
@@ -734,10 +738,7 @@ fn zero_test_observations_cannot_be_hidden_by_duplicate_passing_rows() {
     let cmd = "cargo test";
     let mut fixture = Fixture::with_test_files(&[cmd], true);
     fixture.change();
-    for outcome in [
-        json!({"tests_run": 0}),
-        json!({"tests_run": 0, "exit_code": 0}),
-    ] {
+    for outcome in [json!({"tests_run": 0, "exit_code": 0})] {
         let zero = observed(" \n cargo test \r\n", outcome);
         let good = observed(" cargo test ", json!({"tests_run": 2}));
         for rows in [vec![zero.clone(), good.clone()], vec![good, zero.clone()]] {

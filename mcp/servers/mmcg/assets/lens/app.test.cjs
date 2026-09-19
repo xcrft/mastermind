@@ -1072,6 +1072,10 @@ async function main() {
   assert.match(differentRevisionHarness.nodes.get("notice-stack").textContent, /different snapshot revision/i);
   assert.match(differentRevisionHarness.nodes.get("precision-list").textContent, /unrelated changes remain outside/i);
   assert.match(differentRevisionHarness.nodes.get("evidence-source-list").textContent, /review head differs/i);
+  assert.match(differentRevisionHarness.nodes.get("evidence-summary").textContent, /partial/i);
+  assert.match(differentRevisionHarness.nodes.get("completeness-status").textContent, /Document evidence revision differs/i);
+  assert.ok(differentRevisionHarness.nodes.get("completeness-status").classList.contains("is-partial"));
+  assert.match(differentRevisionHarness.nodes.get("status-region").textContent, /different snapshot revision/i);
 
   const auditHarness = await renderFixture(fixture(), { width: 1200 });
   assert.match(auditHarness.nodes.get("audit-summary").textContent, /2 components across 1 language/i, "Audit summary must explain the codebase shape");
@@ -1187,6 +1191,12 @@ async function main() {
   endpointOnlyAuditPayload.evidence.files.items.forEach((file) => { file.findings = []; });
   var endpointOnlyAuditHarness = await renderFixture(endpointOnlyAuditPayload, { width: 1200 });
   assert.equal(endpointOnlyAuditHarness.nodes.get("audit-verdict-word").textContent, "Incomplete", "Endpoint-only document freshness cannot produce a complete audit verdict");
+
+  var differentRevisionAuditPayload = withDocumentGraph(fixture(), "current");
+  differentRevisionAuditPayload.document_graph.snapshot_revision.head = "4".repeat(40);
+  differentRevisionAuditPayload.evidence.files.items.forEach((file) => { file.findings = []; });
+  var differentRevisionAuditHarness = await renderFixture(differentRevisionAuditPayload, { width: 1200 });
+  assert.equal(differentRevisionAuditHarness.nodes.get("audit-verdict-word").textContent, "Incomplete", "A document packet bound to a different revision cannot produce a complete audit verdict");
 
   var boundedPayload = fixture();
   boundedPayload.evidence.files.items.forEach((file) => { file.findings = []; });

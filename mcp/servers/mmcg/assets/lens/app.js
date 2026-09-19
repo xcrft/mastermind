@@ -202,6 +202,15 @@
     return forward ? "forward" : (reverse ? "reverse" : "none");
   }
 
+  function documentGraphRevisionStatus(graph, reviewHead) {
+    const graphHead = text(record(record(graph).snapshot_revision).head, "");
+    const expectedHead = text(reviewHead, "");
+    if (!graphHead || !expectedHead) {
+      return "unavailable";
+    }
+    return graphHead === expectedHead ? "matches" : "differs";
+  }
+
   function factMatchesGraphEdge(value, edge) {
     const fact = record(value);
     const fromFile = text(edge.from.symbol.file, "");
@@ -782,13 +791,20 @@
           source: "Document graph",
         });
       }
-      const graphRevision = record(documentGraph.snapshot_revision);
-      const graphHead = text(graphRevision.head, "");
-      const reviewHead = text(record(impact.baseline).head_oid, "");
-      if (graphHead && reviewHead && graphHead !== reviewHead) {
+      const revisionStatus = documentGraphRevisionStatus(
+        documentGraph,
+        text(record(impact.baseline).head_oid, "")
+      );
+      if (revisionStatus === "differs") {
         precisionNotes.push({
           code: "document_graph_revision_differs",
           message: "The packet was captured at a different Git revision. Its named bytes were checked live, but unrelated changes remain outside its declared scope.",
+          source: "Document graph",
+        });
+      } else if (revisionStatus === "unavailable") {
+        precisionNotes.push({
+          code: "document_graph_revision_unavailable",
+          message: "The packet revision cannot be bound to the review head, so its declared scope is incomplete.",
           source: "Document graph",
         });
       }
@@ -1725,6 +1741,10 @@
       || temporal.partial === true
       || Boolean(documentGraph && text(documentGraph.status, "needs_review") === "needs_review")
       || Boolean(documentGraph && text(record(documentGraph.corpus).status, "not_tracked") === "not_tracked")
+      || Boolean(documentGraph && documentGraphRevisionStatus(
+        documentGraph,
+        text(record(model.baseline).head_oid, "")
+      ) !== "matches")
       || record(map.scope).aggregation_paths_truncated === true
       || record(audit.bus_factor).partial === true
       || sections.some(function (value) {
@@ -2542,12 +2562,19 @@
       if (state.model.documentGraph) {
         const graphHead = text(record(state.model.documentGraph.snapshot_revision).head, "");
         const reviewHead = text(state.model.baseline.head_oid, "");
-        if (graphHead && reviewHead && graphHead !== reviewHead) {
+        const revisionStatus = documentGraphRevisionStatus(state.model.documentGraph, reviewHead);
+        if (revisionStatus === "differs") {
           appendNotice(
             "warning",
             "Document evidence · different snapshot revision",
             "Named bytes were checked live. The packet does not cover unrelated changes between "
               + shortOid(graphHead) + " and " + shortOid(reviewHead) + "."
+          );
+        } else if (revisionStatus === "unavailable") {
+          appendNotice(
+            "warning",
+            "Document evidence · snapshot revision unavailable",
+            "The packet revision cannot be bound to this review head, so its declared scope is incomplete."
           );
         }
       }
@@ -2584,9 +2611,18 @@
     const temporalUnavailable = text(state.model.temporalEnvelope.status, "unavailable") !== "available";
     const documentReview = state.model.documentGraph
       && text(state.model.documentGraph.status, "needs_review") === "needs_review";
+    const documentRevisionStatus = documentGraphRevisionStatus(
+      state.model.documentGraph,
+      text(state.model.baseline.head_oid, "")
+    );
     const partial = snapshotIsPartial();
     if (documentReview) {
       elements.completeness.textContent = "Document evidence needs review";
+      elements.completeness.classList.add("is-partial");
+    } else if (state.model.documentGraph && documentRevisionStatus !== "matches") {
+      elements.completeness.textContent = documentRevisionStatus === "differs"
+        ? "Document evidence revision differs"
+        : "Document evidence revision unavailable";
       elements.completeness.classList.add("is-partial");
     } else if (partial) {
       elements.completeness.textContent = "Partial evidence";
@@ -2611,7 +2647,11 @@
       || record(state.model.temporal).partial === true
       || Boolean(state.model.documentGraph
         && (text(state.model.documentGraph.status, "needs_review") === "needs_review"
-          || text(record(state.model.documentGraph.corpus).status, "not_tracked") === "not_tracked"));
+          || text(record(state.model.documentGraph.corpus).status, "not_tracked") === "not_tracked"
+          || documentGraphRevisionStatus(
+            state.model.documentGraph,
+            text(state.model.baseline.head_oid, "")
+          ) !== "matches"));
   }
 
   function completeZeroChange() {
@@ -2806,9 +2846,13 @@
     const documentReview = documentGraph && text(documentGraph.status, "needs_review") === "needs_review";
     const documentCorpusNotTracked = documentGraph
       && text(record(documentGraph.corpus).status, "not_tracked") === "not_tracked";
+    const documentRevisionStatus = documentGraphRevisionStatus(
+      documentGraph,
+      text(state.model.baseline.head_oid, "")
+    );
     elements.evidenceSummary.textContent = sourceMetric.knownZero
       ? "No external evidence sources loaded; the static graph remains available."
-      : sourceMetric.value + " source" + (sourceMetric.count === 1 ? "" : "s") + " · " + matchedFilesValue + " matched trace file" + (matchedFiles === 1 ? "" : "s") + ((record(state.model.evidence).partial === true || semantic.partial === true || documentReview || documentCorpusNotTracked || sourceMetric.partial || matchedFilesPartial) ? " · partial" : "");
+      : sourceMetric.value + " source" + (sourceMetric.count === 1 ? "" : "s") + " · " + matchedFilesValue + " matched trace file" + (matchedFiles === 1 ? "" : "s") + ((record(state.model.evidence).partial === true || semantic.partial === true || documentReview || documentCorpusNotTracked || (documentGraph && documentRevisionStatus !== "matches") || sourceMetric.partial || matchedFilesPartial) ? " · partial" : "");
     if (sourceMetric.knownZero) {
       elements.evidenceSourceList.appendChild(createElement("p", "evidence-source-list__empty", "Use mastermind enrich --scip index.scip, enrich --facts facts.json, or external evidence flags to add corroborating facts."));
       return;
@@ -2823,7 +2867,7 @@
       const packet = record(documentGraph.packet);
       const card = createElement(
         "article",
-        "evidence-source evidence-source--" + (graphStatus === "current" && corpusStatus !== "not_tracked" ? "loaded" : "partial")
+        "evidence-source evidence-source--" + (graphStatus === "current" && corpusStatus !== "not_tracked" && documentRevisionStatus === "matches" ? "loaded" : "partial")
       );
       card.appendChild(createElement("span", "evidence-source__kind", "document graph · " + graphStatus.replace("_", " ")));
       card.appendChild(createElement("span", "evidence-source__label", text(packet.path, "Selected packet")));
@@ -2831,11 +2875,17 @@
       card.appendChild(createElement("span", "evidence-source__facts", relations + " declared relation" + (relations === 1 ? "" : "s") + " · all unverified · corpus " + corpusStatus.replace(/_/g, " ")));
       const graphHead = text(record(documentGraph.snapshot_revision).head, "");
       const reviewHead = text(state.model.baseline.head_oid, "");
-      if (graphHead && reviewHead) {
+      if (documentRevisionStatus === "matches" || documentRevisionStatus === "differs") {
         card.appendChild(createElement(
           "span",
           "evidence-source__facts",
-          "snapshot " + shortOid(graphHead) + " · review head " + (graphHead === reviewHead ? "matches" : "differs")
+          "snapshot " + shortOid(graphHead) + " · review head " + documentRevisionStatus
+        ));
+      } else {
+        card.appendChild(createElement(
+          "span",
+          "evidence-source__facts",
+          "snapshot revision unavailable · review head " + (reviewHead ? "present" : "unavailable")
         ));
       }
       const digest = text(packet.artifact_sha256, "");
@@ -4840,6 +4890,10 @@
       && text(model.documentGraph.status, "needs_review") === "needs_review";
     const documentCorpusNotTracked = model.documentGraph
       && text(record(model.documentGraph.corpus).status, "not_tracked") === "not_tracked";
+    const documentRevisionStatus = documentGraphRevisionStatus(
+      model.documentGraph,
+      text(model.baseline.head_oid, "")
+    );
     const evidenceSourceMetric = additiveMetricPresentation(
       model.evidenceSources,
       semanticSourceCount + (model.documentGraph ? 1 : 0)
@@ -4850,6 +4904,11 @@
     }
     if (documentCorpusNotTracked) {
       conditions.push("The document corpus is not tracked; only named endpoints were checked.");
+    }
+    if (model.documentGraph && documentRevisionStatus === "differs") {
+      conditions.push("Document evidence uses a different snapshot revision.");
+    } else if (model.documentGraph && documentRevisionStatus === "unavailable") {
+      conditions.push("Document evidence has no review-bound snapshot revision.");
     }
     if (temporalUnavailable) {
       conditions.push("Temporal comparison is unavailable.");

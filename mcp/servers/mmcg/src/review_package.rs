@@ -1126,6 +1126,13 @@ fn analysis_binding(snapshot: &LensSnapshot, value: &Value) -> AnalysisBinding {
                 reason: Some("only named endpoints were freshness-checked".into()),
             });
         }
+        if graph.snapshot_revision.head != snapshot.impact.baseline.head_oid {
+            states.insert(AnalysisState {
+                path: "$.document_graph.snapshot_revision".into(),
+                state: "revision_mismatch",
+                reason: Some("snapshot head does not match the review head".into()),
+            });
+        }
     }
     let states = states.into_iter().collect::<Vec<_>>();
     AnalysisBinding {
@@ -2084,6 +2091,40 @@ mod tests {
         let summary = std::fs::read_to_string(output.join("summary.md")).unwrap();
         assert!(summary.contains("Analysis: **partial**"));
         assert!(summary.contains("$.document_graph.corpus: not_tracked"));
+    }
+
+    #[test]
+    fn export_marks_different_document_graph_revision_as_partial() {
+        let (repository, _state, index_path) = fixture();
+        let graph = indexed_document_graph(repository.path(), &index_path);
+        let mut value = crate::document_graph::test_support::read_value(repository.path());
+        value["revision"]["head"] = Value::String("4".repeat(40));
+        crate::document_graph::test_support::repair_digest(&mut value);
+        crate::document_graph::test_support::write_value(repository.path(), &value);
+        let output = repository.path().join("different-revision-document-review");
+        let mut options = export_options(repository.path(), index_path, output.clone());
+        options.document_graph = Some(graph);
+
+        let result = export(&options).unwrap();
+
+        assert!(result.partial);
+        let manifest: Value =
+            serde_json::from_slice(&std::fs::read(output.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(manifest["document_graph"]["status"], "current");
+        assert_eq!(manifest["document_graph"]["head_matches_snapshot"], false);
+        assert_eq!(manifest["analysis"]["partial"], true);
+        assert!(manifest["analysis"]["states"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|state| {
+                state["path"] == "$.document_graph.snapshot_revision"
+                    && state["state"] == "revision_mismatch"
+                    && state["reason"] == "snapshot head does not match the review head"
+            }));
+        let summary = std::fs::read_to_string(output.join("summary.md")).unwrap();
+        assert!(summary.contains("Analysis: **partial**"));
+        assert!(summary.contains("$.document_graph.snapshot_revision: revision_mismatch"));
     }
 
     #[test]

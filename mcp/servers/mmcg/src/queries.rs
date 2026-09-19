@@ -3495,9 +3495,10 @@ fn brief_history_terms(changes: &ImpactChanges) -> Vec<String> {
 }
 
 fn brief_history_terms_scope_incomplete(changes: &ImpactChanges) -> bool {
-    [&changes.files, &changes.symbols]
-        .into_iter()
-        .any(|collection| collection.truncated || collection.total.is_none())
+    changes.files.truncated
+        || changes.files.total.is_none()
+        || changes.symbols.truncated
+        || changes.symbols.total.is_none()
 }
 
 fn brief_history_query(terms: &[String]) -> String {
@@ -8988,7 +8989,7 @@ mod tests {
                 returned: 1,
                 truncated: true,
                 truncation_reason: Some("file_limit".into()),
-                items: complete_files.items,
+                items: complete_files.items.clone(),
             },
             symbols: complete_symbols.clone(),
         }));

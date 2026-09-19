@@ -995,7 +995,7 @@ fn classify_native_state(
             enabled,
             command: observed_command,
             args: observed_args,
-        } => *enabled && observed_command == command && observed_args == &args,
+        } => *enabled && observed_command == command && observed_args.as_slice() == args,
     };
     if canonical {
         Ok(NativeState::Canonical(parsed))

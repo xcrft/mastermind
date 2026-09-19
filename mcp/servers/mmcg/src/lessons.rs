@@ -500,6 +500,7 @@ fn summarize_findings(findings: &[Finding]) -> String {
     let mut counts: std::collections::BTreeMap<&'static str, u32> = Default::default();
     for f in findings {
         let key = match f {
+            Finding::InvalidFrontmatter { .. } => "invalid frontmatter",
             Finding::UnexpectedFile { .. } => "scope creep",
             Finding::MissingExpectedFile { .. } => "missing expected file",
             Finding::DeclaredFileUnavailable { .. } => "declared file unavailable",

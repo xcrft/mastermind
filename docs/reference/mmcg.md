@@ -1597,13 +1597,15 @@ evidence and does not establish behavior. Structural and history freshness have
 separate checked tokens and statuses. The default text rendering exposes the
 same revision binding, overall and per-section coverage, all three omission
 classes, discipline routing, history query state, limits, and precision notes.
-Each caller preserves its name-collision count and source-language edge
-precision from change impact, so a brief cannot present a low-precision impact
-candidate as a resolved caller. An unknown source total is printed as unknown
-and a non-exact source omission as a lower bound.
+Each caller retains up to eight changed-symbol seeds, plus exact seed count and
+truncation state, its name-collision count, and source-language edge precision
+from change impact. A brief can therefore show both why an impact candidate was
+selected and where its relationship remains low precision. An unknown source
+total is printed as unknown and a non-exact source omission as a lower bound.
 
-Candidate caps are 100 changed files, 100 changed symbols, 100 callers, 50
-tests, 10 history citations, and eight derived history terms. Discipline labels
+Candidate caps are 100 changed files, 100 changed symbols, 100 callers, eight
+seeds per caller, 50 tests, 10 history citations, and eight derived history
+terms. Discipline labels
 are fixed path-classifier metadata and stay in every admitted packet; when the
 change-file scope is incomplete, their `scope_incomplete_reason` keeps the
 brief partial. History performs

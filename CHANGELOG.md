@@ -14,9 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
-- Brief caller rows now retain the name-collision count and language-edge
-  precision from change impact, including in the text projection, so role
-  packets do not flatten low-precision impact candidates into resolved callers.
+- Brief caller rows now retain their bounded changed-symbol seeds, exact seed
+  count, name-collision count, and language-edge precision from change impact,
+  including in the text projection, so role packets keep both the cause and
+  uncertainty of impact candidates.
 - Frontend audit now treats a component with zero static callers as a wiring
   hypothesis. It requires inspection of routes, lazy registration, barrels,
   stories, and auto-import before reporting an unrendered defect; its eval

@@ -1622,6 +1622,7 @@ pub const BRIEF_DEFAULT_BUDGET_TOKENS: u32 = 2_000;
 const BRIEF_CHANGED_FILE_LIMIT: usize = 100;
 const BRIEF_CHANGED_SYMBOL_LIMIT: usize = 100;
 const BRIEF_CALLER_LIMIT: usize = 100;
+const BRIEF_CALLER_SEED_LIMIT: usize = 8;
 const BRIEF_TEST_LIMIT: usize = 50;
 const BRIEF_HISTORY_LIMIT: usize = 10;
 const BRIEF_HISTORY_TERM_LIMIT: usize = 8;
@@ -2071,11 +2072,30 @@ pub struct BriefCaller {
     pub kind: String,
     pub line: u32,
     pub minimum_depth: u32,
+    /// Exact count before this row's bounded seed projection.
+    pub seed_total: u32,
+    /// True when `seeds` is a bounded prefix rather than every changed symbol
+    /// that led to this caller candidate.
+    pub seeds_truncated: bool,
+    /// Changed symbols that led to this caller candidate. Repository strings
+    /// are bounded and sanitized for the brief envelope.
+    pub seeds: Vec<BriefSeed>,
     /// Same-name definitions can make this caller an over-approximate impact
     /// candidate until the relationship is resolved in source.
     pub name_collision_count: u32,
     /// Source-language extraction and resolution limits from change impact.
     pub edge_precision: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BriefSeed {
+    pub file: String,
+    pub name: String,
+    pub kind: String,
+    pub line: u32,
+    pub change: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_resolution_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -2129,6 +2149,7 @@ pub struct BriefLimits {
     pub changed_files: u32,
     pub changed_symbols: u32,
     pub callers: u32,
+    pub caller_seeds: u32,
     pub tests: u32,
     pub history_citations: u32,
     pub history_terms: u32,
@@ -3754,6 +3775,23 @@ pub fn brief(
                     kind: safe_brief_string(&caller.symbol.kind)?,
                     line: caller.symbol.line,
                     minimum_depth: caller.minimum_depth,
+                    seed_total: brief_u32(caller.seeds.len()),
+                    seeds_truncated: caller.seeds.len() > BRIEF_CALLER_SEED_LIMIT,
+                    seeds: caller
+                        .seeds
+                        .iter()
+                        .take(BRIEF_CALLER_SEED_LIMIT)
+                        .map(|seed| {
+                            Some(BriefSeed {
+                                file: safe_brief_string(&seed.file)?,
+                                name: safe_brief_string(&seed.name)?,
+                                kind: safe_brief_string(&seed.kind)?,
+                                line: seed.line,
+                                change: safe_brief_string(&seed.change)?,
+                                name_resolution_count: seed.name_resolution_count,
+                            })
+                        })
+                        .collect::<Option<Vec<_>>>()?,
                     name_collision_count: caller.name_collision_count,
                     edge_precision: caller.edge_precision.clone(),
                 })
@@ -3891,6 +3929,7 @@ pub fn brief(
             changed_files: BRIEF_CHANGED_FILE_LIMIT as u32,
             changed_symbols: BRIEF_CHANGED_SYMBOL_LIMIT as u32,
             callers: BRIEF_CALLER_LIMIT as u32,
+            caller_seeds: BRIEF_CALLER_SEED_LIMIT as u32,
             tests: BRIEF_TEST_LIMIT as u32,
             history_citations: BRIEF_HISTORY_LIMIT as u32,
             history_terms: BRIEF_HISTORY_TERM_LIMIT as u32,
@@ -8509,6 +8548,10 @@ mod tests {
             .edge_precision
             .iter()
             .any(|precision| precision == "medium:syntactic"));
+        assert_eq!(caller.seed_total, 1);
+        assert!(!caller.seeds_truncated);
+        assert_eq!(caller.seeds.len(), 1);
+        assert_eq!(caller.seeds[0].name, "target");
         assert!(first
             .history
             .query_terms

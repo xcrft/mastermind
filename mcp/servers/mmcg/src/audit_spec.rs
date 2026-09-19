@@ -415,7 +415,7 @@ fn render_finding(f: &Finding) -> String {
         }
         Finding::ObservedExitCodeNonZero { cmd, exit_code } => {
             format!(
-                "observed_exit_code_nonzero: `{cmd}` claimed passed but observed exit_code={exit_code}"
+                "observed_exit_code_non_zero: `{cmd}` claimed passed but observed exit_code={exit_code}"
             )
         }
         Finding::ObservedZeroTests { cmd } => {
@@ -1838,6 +1838,18 @@ mod tests {
         let value = serde_json::to_value(Bundle::from_report(&report, None)).unwrap();
         assert_eq!(value["git_ref"], value["baseline"]);
         assert_eq!(value["files_diff"], value["changed_files"]);
+    }
+
+    #[test]
+    fn observed_exit_code_text_uses_the_serialized_finding_kind() {
+        let finding = Finding::ObservedExitCodeNonZero {
+            cmd: "pytest".into(),
+            exit_code: 1,
+        };
+        let value = serde_json::to_value(&finding).unwrap();
+
+        assert_eq!(value["kind"], "observed_exit_code_non_zero");
+        assert!(render_finding_text(&finding).starts_with("observed_exit_code_non_zero:"));
     }
 
     #[test]

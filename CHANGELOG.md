@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Native setup-client inspection no longer reports a completed command as a
+  timeout when a descendant retains its output pipes. The supervisor briefly
+  drains output, then terminates its owned process group.
 - Evaluation runtime identity hashing is now non-blocking and bounded, includes
   file mode in stability checks, and applies the stricter definition-file cap
   to harness sources.

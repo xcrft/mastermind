@@ -2,7 +2,7 @@
 name: mastermind-workflow
 description: Compact project router for the Mastermind Direct, Verified, and Strict workflows.
 metadata:
-  version: 2.1.1
+  version: 2.1.2
   authors: [mastermind]
   tags: [claude-md, workflow, delegation, audit]
 ---
@@ -148,9 +148,9 @@ Pre-flight, before a diff exists, route on the paths named in the spec's Scope.
 - Runtime research: who already consumes a service, who writes the state, which
   boundaries the change crosses — and which invocations the graph cannot see at
   all. Zero static callers on a handler is a gap, not an absence.
-- Test auditor: does the change's behaviour have a `direct` test that reaches
-  the production path — a `heuristic` candidate is a filename match, not
-  coverage.
+- Test auditor: does a `direct` static candidate have a source-confirmed
+  production path, assertion, and observed relevant run — a `heuristic`
+  candidate is a filename match, not coverage.
 - Frontend auditor: React or Vue change — unrendered components, props-contract
   breaks, duplicates, raw values. Research the component graph before writing
   UI, not after.

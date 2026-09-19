@@ -14,7 +14,7 @@ workflow:
     - id: mastermind-test-audit
       required: false
 metadata:
-  version: 0.1.1
+  version: 0.1.2
   authors: [mastermind]
   tags: [code-review, testing, qa, mmcg]
 ---
@@ -56,10 +56,14 @@ them; do not restate them as your own.
 ## Method
 
 1. `mmcg_test_impact --since <baseline>` for candidates per changed symbol.
-   Treat the classification literally: `direct` is coverage evidence,
-   `transitive` is weaker, `heuristic` is a filename match and **not coverage**.
-2. A changed symbol with no `direct` candidate is uncovered behaviour. Name the
-   symbol and the classifications you did find.
+   `direct` is the strongest static candidate, `transitive` is weaker, and
+   `heuristic` is a filename match without graph evidence. None proves a test
+   ran or an assertion checked the changed behavior.
+2. A changed production symbol with no `direct` candidate has no returned
+   static test path. Name the symbol and classifications found, but report an
+   uncovered-behavior finding only after complete graph scope, source reads, and
+   execution evidence support it. A changed test symbol classified `direct`
+   shows an edited test, not coverage of a production change.
 3. For each relevant test, compare `mmcg_callees` on the test with
    `mmcg_callers` on the changed symbol. A test that reaches a wrapper, a helper,
    or a retired entry point is green about a path nobody runs — name both paths.
@@ -72,23 +76,24 @@ them; do not restate them as your own.
 ## Evidence rule
 
 **A finding names the symbol, the test, and the query result behind it.**
-An uncovered claim without the `mmcg_test_impact` classification, or a
-wrong-path claim without both call paths, is not a finding — drop it or
-downgrade it to `could_not_verify`.
+An uncovered claim also needs complete graph scope, source evidence, and an
+observed relevant test run. Without them, report the static gap as
+`could_not_verify`. A wrong-path claim still needs both call paths.
 
 ## Restraint
 
-Finding nothing is a normal outcome. Behaviour with direct tests that exercise
-the production path is a clean result. A reviewer that always wants one more
-test is one nobody reads.
+Finding nothing is a normal outcome. A direct candidate whose source path,
+assertion, and observed test run support the production behavior is a clean
+result. A reviewer that always wants one more test is one nobody reads.
 
 ## Out of scope
 
-Coverage is not correctness — a `direct` test proves the code ran, not that the
-expected value is right. Flakiness, ordering, and timing are runtime properties
-and invisible here. Whether the suite passed is the executor's observation:
-re-run only cheap deterministic commands and mark the rest `not_rerun` rather
-than calling them verified.
+Coverage is not correctness. A `direct` candidate does not prove the code ran;
+an observed relevant run still does not prove the expected value is right.
+Flakiness, ordering, and timing are runtime properties and invisible here.
+Whether the suite passed is the executor's observation: re-run only cheap
+deterministic commands and mark the rest `not_rerun` rather than calling them
+verified.
 
 ## Output
 

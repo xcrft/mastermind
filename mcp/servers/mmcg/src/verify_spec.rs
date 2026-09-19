@@ -287,7 +287,7 @@ fn render_finding(f: &Finding) -> String {
             let lang = language.as_deref().unwrap_or("<any>");
             format!("missing_symbol_at_file: {symbol} not found at {file} (language={lang})")
         }
-        Finding::StrictViolation { reason } => format!("strict: {reason}"),
+        Finding::StrictViolation { reason } => format!("strict_violation: {reason}"),
     }
 }
 
@@ -708,7 +708,7 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn snapshot_caller_count_text_uses_the_serialized_finding_kind() {
+    fn preflight_finding_text_uses_the_serialized_finding_kind() {
         let finding = Finding::SnapshotCallerCountDrift {
             symbol: "submit".into(),
             spec_says: 1,
@@ -718,6 +718,13 @@ mod tests {
 
         assert_eq!(value["kind"], "snapshot_caller_count_drift");
         assert!(render_finding(&finding).starts_with("snapshot_caller_count_drift:"));
+
+        let finding = Finding::StrictViolation {
+            reason: "missing frontmatter".into(),
+        };
+        let value = serde_json::to_value(&finding).unwrap();
+        assert_eq!(value["kind"], "strict_violation");
+        assert!(render_finding(&finding).starts_with("strict_violation:"));
     }
 
     fn tmp() -> PathBuf {

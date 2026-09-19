@@ -1780,7 +1780,7 @@ impl SourceMatcher {
 /// First `# Heading` line of a markdown spec — falls back to the filename
 /// (minus extension) if no heading exists.
 fn extract_spec_title(body: &str, filename: &str) -> String {
-    for line in crate::context_doctor::prose_lines(body) {
+    for line in crate::context_doctor::prose_lines(crate::spec::markdown_body(body)) {
         let trimmed = line.text.trim();
         if let Some(rest) = trimmed.strip_prefix("# ") {
             let t = rest.trim();
@@ -2932,7 +2932,7 @@ def placeholder():
 
     #[test]
     fn project_history_titles_ignore_markdown_examples() {
-        let body = "~~~markdown\n# Example title\n~~~\n> # Quoted title\n# Durable title\n";
+        let body = "---\n# Metadata title\n---\n~~~markdown\n# Example title\n~~~\n> # Quoted title\n# Durable title\n";
 
         assert_eq!(extract_spec_title(body, "fallback.md"), "Durable title");
         assert_eq!(

@@ -454,6 +454,7 @@ fn run_internal(
         .data_version()
         .map_err(|_| DiffError::GitFailed("index_version_unavailable".into()))?;
     let has_claims = executor_report.is_some_and(|report| !report.claims.is_empty());
+    let has_canonical_report = executor_report.is_some_and(|report| report.canonical.is_some());
     if (has_claims
         || spec
             .frontmatter
@@ -666,7 +667,10 @@ fn run_internal(
         check_vacuous_tests(report, repo_root, store, deadline, &mut findings);
         checks
     });
-    if removal_plan.is_some() || has_claims {
+    // Canonical report metadata is compared with the same worktree snapshot as
+    // the derived diff, so a concurrent edit cannot make file evidence look
+    // consistent with a different revision.
+    if removal_plan.is_some() || has_claims || has_canonical_report {
         diff::validate_working_tree_snapshot_controlled(
             repo_root,
             &worktree.baseline_oid,

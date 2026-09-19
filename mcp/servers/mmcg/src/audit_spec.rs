@@ -793,10 +793,16 @@ fn check_executor_completion(
     deadline: Instant,
     findings: &mut Vec<Finding>,
 ) {
+    // A legacy report without verification rows carries no completion claim and
+    // remains advisory-only. Once it names verification outcomes, those
+    // outcomes must still satisfy the task's declared commands.
+    if report.canonical.is_none() && report.verify.is_empty() {
+        return;
+    }
+    check_declared_verifications(report, spec, report.canonical.is_some(), findings);
     let Some(metadata) = &report.canonical else {
         return;
     };
-    check_declared_verifications(report, spec, findings);
     if let Some(reason) = report.completion_rejection() {
         findings.push(Finding::ExecutorReportRejected {
             reason: reason.into(),
@@ -859,6 +865,7 @@ fn check_executor_completion(
 fn check_declared_verifications(
     report: &ExecutorReport,
     spec: &ParsedSpec,
+    require_coverage: bool,
     findings: &mut Vec<Finding>,
 ) {
     let mut outcomes = BTreeMap::new();
@@ -889,7 +896,8 @@ fn check_declared_verifications(
     }
     for cmd in spec.declared_verify_commands() {
         let reason = match outcomes.get(cmd) {
-            None => "missing_result",
+            None if require_coverage => "missing_result",
+            None => continue,
             Some((_, 0, 0)) => continue,
             Some((0, 0, _)) => "unobserved_exit",
             Some((0, _, 0)) => "not_passed",

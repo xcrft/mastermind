@@ -30,6 +30,37 @@ fn executor(rows: Vec<Value>) -> ExecutorReport {
     executor_report::parse_canonical_str(&report_value(rows).to_string()).unwrap()
 }
 
+fn in_memory_executor(verify: Vec<executor_report::VerifyResult>) -> ExecutorReport {
+    ExecutorReport {
+        canonical: Some(executor_report::CanonicalMetadata {
+            schema_version: 1,
+            spec: SPEC.to_owned(),
+            status: executor_report::ReportStatus::Complete,
+            phases: Vec::new(),
+            files_modified: vec!["service.py".to_owned()],
+            defects: Vec::new(),
+        }),
+        claims: Vec::new(),
+        verify,
+    }
+}
+
+fn in_memory_verify(
+    cmd: &str,
+    exit_code: i32,
+    tests_run: Option<u32>,
+) -> executor_report::VerifyResult {
+    executor_report::VerifyResult {
+        cmd: cmd.to_owned(),
+        claimed: Some("passed".to_owned()),
+        observed: Some(executor_report::ObservedOutcome {
+            exit_code: Some(exit_code),
+            tests_run,
+        }),
+        output_excerpt: None,
+    }
+}
+
 fn spec_text(verify: Value, body: &str) -> String {
     let metadata = json!({
         "mode": "lite", "touches": [{"file": "service.py", "symbols": ["keep"]}],
@@ -303,12 +334,12 @@ fn verification_coverage_audit_rejects_missing_partial_and_different_commands() 
 fn verification_coverage_checks_all_duplicate_rows_and_observed_failures() {
     let mut fixture = Fixture::new(&[FIRST]);
     fixture.change();
-    let bad = json!({"cmd": FIRST, "result": "pass", "observed": {"exit_code": 7}});
+    let bad = in_memory_verify(FIRST, 7, None);
     for rows in [
-        vec![passed(FIRST), bad.clone()],
-        vec![bad.clone(), passed(FIRST)],
+        vec![in_memory_verify(FIRST, 0, None), bad.clone()],
+        vec![bad.clone(), in_memory_verify(FIRST, 0, None)],
     ] {
-        let report = fixture.audit(Some(&executor(rows)));
+        let report = fixture.audit(Some(&in_memory_executor(rows)));
         assert_eq!(report.verdict, Verdict::Broken);
         assert_eq!(unmet(&report), [(FIRST, "conflicting_results")]);
         assert!(report
@@ -317,7 +348,7 @@ fn verification_coverage_checks_all_duplicate_rows_and_observed_failures() {
             .any(|f| matches!(f, Finding::ObservedExitCodeNonZero { exit_code: 7, .. })));
         assert_eq!(report.executor_report.unwrap().verify.len(), 2);
     }
-    let report = fixture.audit(Some(&executor(vec![bad])));
+    let report = fixture.audit(Some(&in_memory_executor(vec![bad])));
     assert_eq!(unmet(&report), [(FIRST, "not_passed")]);
     let report = fixture.audit(Some(&executor(vec![
         json!({"cmd": FIRST, "result": "pass", "output_excerpt": "first run", "observed": {"exit_code": 0, "tests_run": 1}}),
@@ -695,9 +726,10 @@ fn zero_test_observations_preserve_nonzero_exit_precedence_for_all_commands() {
         "env custom tests",
     ] {
         for count in [0, 3] {
-            let report = fixture.audit(Some(&executor(vec![observed(
+            let report = fixture.audit(Some(&in_memory_executor(vec![in_memory_verify(
                 cmd,
-                json!({"exit_code": 7, "tests_run": count}),
+                7,
+                Some(count),
             )])));
             assert_eq!(report.verdict, Verdict::Broken);
             assert!(
@@ -1054,10 +1086,10 @@ fn test_scan_audit_budget_exhaustion_preserves_hard_observations() {
     let file = std::fs::File::create(fixture.root().join(".mastermind/scan/src/large.rs")).unwrap();
     file.set_len(1024 * 1024 + 1).unwrap();
     drop(file);
-    let mut rows = vec![passed(SCAN_COMMAND); 16];
-    rows.push(observed(SCAN_COMMAND, json!({"tests_run": 0})));
-    rows.push(observed("cargo check", json!({"exit_code": 7})));
-    let report = fixture.audit(Some(&executor(rows)));
+    let mut rows = vec![in_memory_verify(SCAN_COMMAND, 0, None); 16];
+    rows.push(in_memory_verify(SCAN_COMMAND, 0, Some(0)));
+    rows.push(in_memory_verify("cargo check", 7, None));
+    let report = fixture.audit(Some(&in_memory_executor(rows)));
     assert_eq!(report.verdict, Verdict::Broken);
     assert!(matches!(
         report.findings.as_slice(),

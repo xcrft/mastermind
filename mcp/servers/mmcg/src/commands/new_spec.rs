@@ -854,10 +854,11 @@ mod tests {
     }
 
     #[test]
-    fn generated_templates_require_each_mandatory_section_to_be_completed() {
+    fn generated_templates_require_concrete_entries_beyond_the_supplied_goal() {
         let root = tempfile::tempdir().unwrap();
         for mode in [Mode::Standard, Mode::Verified, Mode::Strict] {
-            let content = render_spec("change behavior", 7, &mode);
+            let goal_is_seeded = matches!(mode, Mode::Verified);
+            let content = render_spec("add retry guard to submit handler", 7, &mode);
             let parsed = mmcg::spec::parse_str("spec.md", &content);
             let mode_name = parsed
                 .frontmatter
@@ -866,12 +867,23 @@ mod tests {
             let report = mmcg::verify_spec::run(&parsed, None, root.path());
 
             for section in mmcg::verify_spec::mandatory_sections_for_mode(mode_name) {
-                assert!(
-                    report.errors.iter().any(|error| matches!(
+                let empty = report.errors.iter().any(|error| {
+                    matches!(
                         error,
                         mmcg::verify_spec::Finding::EmptyMandatorySection { section: actual }
                             if actual == section
-                    )),
+                    )
+                });
+                if *section == "Goals" && goal_is_seeded {
+                    assert!(
+                        !empty,
+                        "the requested description must seed `{section}`: {:?}",
+                        report.errors
+                    );
+                    continue;
+                }
+                assert!(
+                    empty,
                     "fresh template must require a concrete `{section}` entry: {:?}",
                     report.errors
                 );

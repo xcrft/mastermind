@@ -8668,7 +8668,7 @@ mod tests {
         assert!(caller
             .edge_precision
             .iter()
-            .any(|precision| precision == "medium:syntactic"));
+            .any(|precision| precision == "medium:heuristic"));
         assert_eq!(caller.seed_total, 1);
         assert!(!caller.seeds_truncated);
         assert_eq!(caller.seeds.len(), 1);
@@ -8688,10 +8688,19 @@ mod tests {
             .iter()
             .find(|test| test.name == "test_target")
             .expect("brief should retain the candidate test");
-        assert_eq!(test.evidence_total, 1);
+        assert_eq!(test.evidence_total, 2);
         assert!(!test.evidence_truncated);
-        assert_eq!(test.evidence[0].kind, "graph_seed");
-        assert_eq!(test.evidence[0].seed.as_ref().unwrap().name, "target");
+        assert!(test.evidence.iter().any(|evidence| {
+            evidence.kind == "graph_seed"
+                && evidence
+                    .seed
+                    .as_ref()
+                    .is_some_and(|seed| seed.name == "target")
+        }));
+        assert!(test
+            .evidence
+            .iter()
+            .any(|evidence| evidence.kind == "same_component_test_filename"));
         assert!(first
             .history
             .query_terms

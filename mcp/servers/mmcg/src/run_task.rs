@@ -4060,16 +4060,30 @@ verify:
 
 ## Goals
 - Add `extra()` to `src/lib.py`
+## Scope
+- Change only `src/lib.py`.
+## Acceptance Criteria
+- `extra()` is present and the existing function remains intact.
 ## Alternatives Considered
 - a — rejected
 ## Tests Plan
 - n/a
+## Final Verification
+```sh
+python3 -m py_compile src/lib.py
+```
+## Risk Register
+- Low risk: the change is additive.
+## Evidence Ledger
+- The scoped source snapshot identifies `stays` in `src/lib.py`.
 ## Documentation Plan
 - n/a
 ## Observability Plan
 - n/a
 ## Performance Considerations
 - O(1)
+## Rollback / Migration
+- Revert the single source-file commit.
 ",
         )
         .unwrap();

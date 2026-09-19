@@ -836,7 +836,11 @@ fn git_log_patch(
         );
         match out {
             Ok(out) if out.success => {
-                return Ok((String::from_utf8_lossy(&out.stdout).into_owned(), sampled));
+                let sampled_commits = git_sample_count(root, &author, sampled, history_ref)?;
+                return Ok((
+                    String::from_utf8_lossy(&out.stdout).into_owned(),
+                    sampled_commits,
+                ));
             }
             Ok(_) => return Err("git log -p exited unsuccessfully".into()),
             Err(WorkingTreeDiffError::GitOutputLimit) if sampled > 1 => {
@@ -845,6 +849,33 @@ fn git_log_patch(
             Err(error) => return Err(format!("git log -p failed: {error}").into()),
         }
     }
+}
+
+/// Count the exact prefix selected for a bounded patch sample. The requested
+/// cap is only an upper bound: a short history must not be reported as though
+/// it supplied more commits than it contains.
+fn git_sample_count(
+    root: &Path,
+    author_option: &str,
+    cap: usize,
+    history_ref: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let count = format!("-n{cap}");
+    let out = run_profile_git(
+        root,
+        &[
+            "rev-list",
+            "--count",
+            "--no-merges",
+            "--fixed-strings",
+            author_option,
+            &count,
+            history_ref,
+        ],
+        GIT_METADATA_OUTPUT_LIMIT,
+        "git sampled history count",
+    )?;
+    Ok(String::from_utf8(out)?.trim().parse::<usize>()?)
 }
 
 fn date_only(iso: &str) -> &str {

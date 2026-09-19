@@ -124,9 +124,9 @@ repository needs it:
 
 | Profile | Skills | Focus |
 |---|---:|---|
-| `core` | 14 | Planning, codegraph research, change/test impact, execution, and comment/test audit |
-| `frontend` | 19 | `core` plus component, design, browser, frontend, and runtime research |
-| `security` | 17 | `core` plus security research, agent review, and audit attestation |
+| `core` | 15 | Product intake, planning, codegraph research, change/test impact, execution, and comment/test audit |
+| `frontend` | 20 | `core` plus component, design, browser, frontend, and runtime research |
+| `security` | 18 | `core` plus security research, agent review, and audit attestation |
 | `full` | 26 | Every shipped portable skill |
 
 ```bash

@@ -213,8 +213,9 @@ mastermind doctor --workflow --client all
 mastermind workflow audit --root .
 ```
 
-Fresh workflow installs default to the 14-skill `core` profile. Use `frontend`
-or `security` for a focused extension, or `full` for all 26 portable skills.
+Fresh workflow installs default to the 15-skill `core` profile, including
+product intake. Use `frontend` or `security` for a focused extension, or `full`
+for all 26 portable skills.
 Profiles reduce skill discovery; Claude keeps the complete named-subagent set so
 workflow routes do not dangle. `mastermind update` preserves each client's
 installed profile unless `--profile` explicitly switches it.

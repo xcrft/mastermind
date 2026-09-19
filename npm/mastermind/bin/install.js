@@ -28,6 +28,7 @@ const CORE_SKILLS = [
   "mastermind-investigation-ledger",
   "mastermind-project-history",
   "mastermind-project-map",
+  "mastermind-product-intake",
   "mastermind-structured-report-contract",
   "mastermind-task-executor",
   "mastermind-task-planning",

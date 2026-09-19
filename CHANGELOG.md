@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Run-task no longer returns a learned task as complete from an unbound legacy
+  history review. A terminal lifecycle state now requires its audit snapshot
+  binding before the early-completion path can run.
 - Context doctor now treats a bound semantic-review state without an audit
   snapshot as unresolved instead of accepting its Markdown dispositions.
 - Workflow status no longer reports a learned or history-review task as

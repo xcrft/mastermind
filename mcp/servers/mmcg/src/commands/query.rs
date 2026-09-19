@@ -1347,15 +1347,53 @@ pub fn render_brief(
         let minimum_depth = test
             .minimum_depth
             .map_or_else(|| "unknown".to_string(), |depth| depth.to_string());
+        let evidence_summary = test
+            .evidence
+            .iter()
+            .map(|evidence| {
+                let source = evidence.seed.as_ref().map_or_else(
+                    || {
+                        evidence
+                            .component
+                            .as_deref()
+                            .map_or_else(|| "none".to_string(), safe_text)
+                    },
+                    |seed| {
+                        format!(
+                            "{} {} — {}:{} ({})",
+                            safe_text(&seed.kind),
+                            safe_text(&seed.name),
+                            safe_text(&seed.file),
+                            seed.line,
+                            safe_text(&seed.change)
+                        )
+                    },
+                );
+                format!("{}: {}", safe_text(&evidence.kind), source)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         output.push_str(&format!(
-            "  {} {} — {}:{} ({}, {}, depth {})\n",
+            "  {} {} — {}:{} ({}, {}, depth {}; evidence {}/{}{}: {})\n",
             safe_text(&test.kind),
             safe_text(&test.name),
             safe_text(&test.file),
             test.line,
             safe_text(&test.classification),
             safe_text(&test.confidence),
-            minimum_depth
+            minimum_depth,
+            test.evidence.len(),
+            test.evidence_total,
+            if test.evidence_truncated {
+                " truncated"
+            } else {
+                ""
+            },
+            if evidence_summary.is_empty() {
+                "none"
+            } else {
+                &evidence_summary
+            }
         ));
     }
     output.push_str("\nHistory query\n");
@@ -1940,6 +1978,13 @@ mod map_tests {
                 classification: "heuristic".into(),
                 minimum_depth: None,
                 confidence: "low".into(),
+                evidence_total: 2,
+                evidence_truncated: true,
+                evidence: vec![queries::BriefTestEvidence {
+                    kind: "same_component_test_filename".into(),
+                    seed: None,
+                    component: Some("src".into()),
+                }],
             }]),
             history: queries::BriefHistory {
                 query_terms: Vec::new(),
@@ -1967,6 +2012,7 @@ mod map_tests {
                 callers: 100,
                 caller_seeds: 8,
                 tests: 50,
+                test_evidence: 8,
                 history_citations: 10,
                 history_terms: 8,
                 impact_depth: 3,
@@ -1992,7 +2038,9 @@ mod map_tests {
         assert!(text.contains(
             "function caller — src/api.rs:19 (depth 1; seeds 1/2 truncated: function target — src/target.rs:7 (body_changed); name collisions 2; edge precision medium:syntactic, targets:name_based_candidates)"
         ));
-        assert!(text.contains("test checks_api — tests/api.rs:31 (heuristic, low, depth unknown)"));
+        assert!(text.contains(
+            "test checks_api — tests/api.rs:31 (heuristic, low, depth unknown; evidence 1/2 truncated: same_component_test_filename: src)"
+        ));
         assert!(text.contains(
             "performed: false\n  terms: none\n  empty reason: no_eligible_changed_terms"
         ));

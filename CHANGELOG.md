@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   count, name-collision count, and language-edge precision from change impact,
   including in the text projection, so role packets keep both the cause and
   uncertainty of impact candidates.
+- Brief test rows now retain bounded source evidence with exact counts and
+  truncation state, so `direct`, `transitive`, and `heuristic` classifications
+  remain traceable to their static reason.
 - Frontend audit now treats a component with zero static callers as a wiring
   hypothesis. It requires inspection of routes, lazy registration, barrels,
   stories, and auto-import before reporting an unrendered defect; its eval

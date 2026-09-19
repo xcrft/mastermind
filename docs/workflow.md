@@ -236,7 +236,8 @@ audit output requires another audit. The controller archives the previous
 review before opening one for changed evidence. Writing CONTEXT, its archives
 and lessons is part of semantic review; declared task files remain bound.
 A bound task state without that snapshot cannot be shown as complete or ready
-for semantic review: `status` routes it back to post-flight audit.
+for semantic review: `status` routes it back to post-flight audit and
+`context-doctor` reports the review unresolved.
 
 `context-doctor` checks pending and completed tasks, explicit review dispositions,
 allowed lesson statuses and non-placeholder evidence. An `audit.md` file by

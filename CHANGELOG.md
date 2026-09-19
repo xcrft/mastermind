@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-09-19
+
 ### Added
 - `mastermind ui` and `mastermind review export` accept an explicit portable
   document graph. Lens exposes live endpoint and Markdown-corpus drift in a
@@ -14,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- `mmcg` now reports the exact number of commits in a bounded history sample,
+  and legacy verification reports validate results for matching declared
+  commands without claiming coverage for commands they do not name.
+- npm workflow bundles now omit Python bytecode caches and reject a tarball
+  containing one before publication.
 - Unreferenced-symbol research now excludes conventional `main` entry points,
   reducing dead-code candidates caused only by runtime process startup.
 - New-spec now normalizes a description to one printable line before rendering
@@ -1403,7 +1410,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Seven prebuilt platform packages (`@xcraftmind/mmcg-*`) covering macOS (arm64, x64), Linux glibc and musl (x64, arm64), and Windows (x64). npm installs only the package matching the host's `os` / `cpu` / `libc`.
 - Install-mode-aware `setup claude` that writes the correct MCP `command` form for npx, global, project-local, and cargo installs.
 
-[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v2.1.0...HEAD
+[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v2.1.1...HEAD
+[2.1.1]: https://github.com/xcrft/mastermind/compare/npm-v2.1.0...npm-v2.1.1
 [2.1.0]: https://github.com/xcrft/mastermind/compare/npm-v2.0.1...npm-v2.1.0
 [2.0.1]: https://github.com/xcrft/mastermind/compare/npm-v2.0.0...npm-v2.0.1
 [2.0.0]: https://github.com/xcrft/mastermind/compare/npm-v1.2.1...npm-v2.0.0

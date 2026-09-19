@@ -192,6 +192,10 @@ jobs:
           for pkg_dir in npm/mastermind npm/platforms/*/; do
             (cd "$pkg_dir" && npm pack --pack-destination "$GITHUB_WORKSPACE/packed")
           done
+          if tar tzf "$GITHUB_WORKSPACE/packed/xcraftmind-mastermind-$(node -p "require('./npm/mastermind/package.json').version").tgz" | grep -Eq '(^|/)__pycache__(/|$)|\.py[co]$'; then
+            echo "::error::root npm tarball contains Python bytecode cache files"
+            exit 1
+          fi
           ls -la packed/
 
       - name: Verify every platform tarball contains its binary

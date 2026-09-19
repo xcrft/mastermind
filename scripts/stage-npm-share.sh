@@ -27,6 +27,12 @@ while IFS= read -r skill_md; do
   cp -R "$src" "$SHARE/skills/$(basename "$src")"
 done < <(find "$REPO_ROOT/skills" -name SKILL.md | sort)
 
+# Python can leave bytecode beside canonical skill sources while local checks
+# run. Those caches are machine-specific implementation debris, not workflow
+# artifacts, so remove them after copying rather than shipping them in npm.
+find "$SHARE/skills" -type d -name __pycache__ -prune -exec rm -rf {} +
+find "$SHARE/skills" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+
 agents_n=$(find "$SHARE/agents" -name '*.md' | wc -l | tr -d ' ')
 skills_n=$(find "$SHARE/skills" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
 if [ "$agents_n" -eq 0 ] || [ "$skills_n" -eq 0 ]; then

@@ -61,6 +61,11 @@ Give `spec.md` to the implementation agent. The executor may change only the
 approved product files and must write `executor-report.md`. It must not edit
 `state.json`, `audit.md`, or controller-owned history files.
 
+For a runnable UI change, the executor records browser observations in that
+report before post-flight, or writes `not checked` with the blocker. These are
+review evidence for accessibility, errors, and viewport coverage; they do not
+certify visual fidelity or replace declared verification commands.
+
 ### 3. Audit the real diff
 
 ```bash

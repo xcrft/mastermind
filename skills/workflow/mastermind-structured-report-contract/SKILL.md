@@ -63,6 +63,12 @@ verifications:
 `phases` is the schema-v1 compatibility name for execution steps. New specs may
 use IDs such as `plan-1`; they do not need phase-shaped prose or checklists.
 
+When a runnable UI was in scope, keep a `### Browser observations` prose section
+before the canonical tail. Record accessibility-tree states, console/network
+errors, and each checked viewport; every unavailable check is `not checked` with
+its reason. This is retained review evidence, not a schema-v1 claim or proof of
+visual fidelity.
+
 List every changed non-controller path in `files_modified`. The controller
 normalizes it and compares it with the authoritative Git diff. Do not include
 the executor report or other `.mastermind/` controller artifacts.

@@ -86,7 +86,9 @@ and truncation caveats; source reads and tests remain authoritative for runtime 
    ```
 
 5. Use `mastermind-task-executor`. It writes
-   `<task>/executor-report.md` and never writes lifecycle state.
+   `<task>/executor-report.md` and never writes lifecycle state. For a runnable
+   UI change, it records browser observations there before post-flight, or marks
+   each unavailable check as `not checked` with the reason.
 6. Run controller-owned post-flight:
 
    ```bash
@@ -113,7 +115,7 @@ research skill and one audit skill per detected discipline:
 
 | discipline | before the change | after the change |
 |---|---|---|
-| `frontend` | [[mastermind-component-research]] | [[mastermind-frontend-audit]] |
+| `frontend` | [[mastermind-component-research]] | [[mastermind-frontend-audit]]; [[mastermind-browser-verification]] before post-flight when the client is runnable |
 | `qa` | [[mastermind-test-impact]] | [[mastermind-test-audit]] |
 | `migration` | [[mastermind-runtime-research]] | [[mastermind-architecture-review]] |
 
@@ -131,6 +133,8 @@ nothing about what the migration does — destructive, backfilling, or additive 
 a question for the review.
 
 Pre-flight, before a diff exists, route on the paths named in the spec's Scope.
+Browser observations stay report evidence: they do not certify visual fidelity
+and do not replace declared verification commands.
 
 ### Role routing
 

@@ -354,6 +354,7 @@ struct Collector<'a> {
     runtime_span_count: usize,
     runtime_edges: BTreeMap<(String, String), RuntimeEdgeAccumulator>,
     runtime_edges_truncated: bool,
+    runtime_edges_scope_limited: bool,
     fact_artifacts: Vec<crate::facts::FactArtifact>,
     fact_artifacts_truncated: bool,
     fact_relationships: Vec<crate::facts::FactRelationship>,
@@ -557,6 +558,13 @@ fn collect_internal(
         .saturating_add(extensions.junit.len())
         .saturating_add(extensions.otel.len())
         > MAX_ARTIFACT_SOURCES;
+    let earlier_artifact_sources = options
+        .sarif
+        .len()
+        .saturating_add(options.coverage.len())
+        .saturating_add(extensions.junit.len());
+    let otel_sources_truncated =
+        extensions.otel.len() > MAX_ARTIFACT_SOURCES.saturating_sub(earlier_artifact_sources);
     let mut collector = Collector {
         root,
         relevant,
@@ -574,6 +582,7 @@ fn collect_internal(
         runtime_span_count: 0,
         runtime_edges: BTreeMap::new(),
         runtime_edges_truncated: false,
+        runtime_edges_scope_limited: relevant_truncated || otel_sources_truncated,
         fact_artifacts: Vec::new(),
         fact_artifacts_truncated: false,
         fact_relationships: Vec::new(),
@@ -770,6 +779,7 @@ pub(crate) fn collect_for_fact_adapter(
         runtime_span_count: 0,
         runtime_edges: BTreeMap::new(),
         runtime_edges_truncated: false,
+        runtime_edges_scope_limited: false,
         fact_artifacts: Vec::new(),
         fact_artifacts_truncated: false,
         fact_relationships: Vec::new(),
@@ -882,6 +892,9 @@ impl Collector<'_> {
         failure: SourceFailure,
     ) {
         self.diagnostic(id.clone(), failure.code(), failure.message());
+        if kind == "otel" {
+            self.runtime_edges_scope_limited = true;
+        }
         let artifact = self.artifact_identities.remove(&id);
         self.sources.push(EvidenceSource {
             id,
@@ -1503,9 +1516,10 @@ impl Collector<'_> {
             Ok(parsed) => parsed,
             Err(error) => return self.source_error(id, "otel", label, error),
         };
+        let parsed_partial = parsed.partial;
         let mut stats = SourceStats {
             facts_total: parsed.facts_total,
-            partial: parsed.partial,
+            partial: parsed_partial,
             invalid_records: parsed.invalid_records,
             work_limited: parsed.work_limited,
             deadline_reached: parsed.deadline_reached,
@@ -1598,6 +1612,8 @@ impl Collector<'_> {
                 SourceFailure::Deadline.message(),
             );
         }
+        self.runtime_edges_scope_limited |=
+            parsed_partial || stats.invalid_records || stats.work_limited || stats.deadline_reached;
         self.source_done(id, "otel", label, stats);
     }
 
@@ -2058,6 +2074,17 @@ impl Collector<'_> {
 
     fn finish(self, git_commits: u16) -> EvidenceSnapshot {
         let partial = self.partial || self.diagnostics_truncated;
+        let runtime_edges_partial =
+            self.runtime_edges_truncated || self.runtime_edges_scope_limited;
+        let runtime_edges_truncation_reason = match (
+            self.runtime_edges_scope_limited,
+            self.runtime_edges_truncated,
+        ) {
+            (true, true) => Some("runtime_scope_and_edge_limit"),
+            (true, false) => Some("runtime_evidence_scope"),
+            (false, true) => Some("runtime_edge_limit"),
+            (false, false) => None,
+        };
         let runtime_edges = self
             .runtime_edges
             .into_iter()
@@ -2181,10 +2208,10 @@ impl Collector<'_> {
                 items: files,
             },
             runtime_edges: EvidenceCollection {
-                total: (!self.runtime_edges_truncated).then_some(runtime_edge_count),
+                total: (!runtime_edges_partial).then_some(runtime_edge_count),
                 returned: runtime_edge_count,
-                truncated: self.runtime_edges_truncated,
-                truncation_reason: self.runtime_edges_truncated.then_some("runtime_edge_limit"),
+                truncated: runtime_edges_partial,
+                truncation_reason: runtime_edges_truncation_reason,
                 items: runtime_edges,
             },
             fact_artifacts: EvidenceCollection {
@@ -3174,6 +3201,7 @@ mod tests {
             runtime_span_count: 0,
             runtime_edges: BTreeMap::new(),
             runtime_edges_truncated: false,
+            runtime_edges_scope_limited: false,
             fact_artifacts: Vec::new(),
             fact_artifacts_truncated: false,
             fact_relationships: Vec::new(),
@@ -3489,6 +3517,46 @@ mod tests {
             .unwrap();
         assert_eq!(pay.runtime.as_ref().unwrap().spans, 1);
         assert_eq!(pay.runtime.as_ref().unwrap().traces, 1);
+    }
+
+    #[test]
+    fn runtime_edges_are_partial_when_an_otel_source_is_incomplete() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join("traces.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "resourceSpans": [{"scopeSpans": [{"spans": [
+                    {
+                        "traceId": "00112233445566778899aabbccddeeff",
+                        "spanId": "0011223344556677",
+                        "name": "checkout",
+                        "attributes": [{"key": "code.file.path", "value": {"stringValue": "src/caller.rs"}}]
+                    },
+                    {
+                        "traceId": "00112233445566778899aabbccddeeff",
+                        "spanId": "8899aabbccddeeff",
+                        "parentSpanId": "0011223344556677",
+                        "name": "charge",
+                        "attributes": [{"key": "code.file.path", "value": {"stringValue": "src/pay.rs"}}]
+                    },
+                    {"name": "malformed"}
+                ]}]}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut collector = collector(root.path(), &["src/caller.rs", "src/pay.rs"]);
+        collector.load_otel(Path::new("traces.json"), "otel:0".into());
+        let snapshot = collector.finish(0);
+
+        assert_eq!(snapshot.runtime_edges.returned, 1);
+        assert_eq!(snapshot.runtime_edges.total, None);
+        assert!(snapshot.runtime_edges.truncated);
+        assert_eq!(
+            snapshot.runtime_edges.truncation_reason,
+            Some("runtime_evidence_scope")
+        );
     }
 
     #[test]

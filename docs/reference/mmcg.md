@@ -1903,6 +1903,11 @@ Labels and ordinary shell fences do not declare machine-checked obligations.
 `verify-spec --strict` requires at least one such command; labels or blank
 `cmd` values cannot satisfy that requirement.
 
+Only one normalized `##` heading may define each contract section. For example,
+`## Scope` and `## Scope *(MANDATORY)*` are a `duplicate_section` error rather
+than competing definitions. Headings and directives inside fenced code examples
+are treated as example text, not contract data.
+
 Command matching trims outside whitespace only. Arguments, case, wrappers and
 internal whitespace remain significant; separate rows cannot satisfy a compound
 command. Missing commands produce `verification_requirement_unmet` with

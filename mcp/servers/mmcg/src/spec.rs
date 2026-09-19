@@ -24,11 +24,13 @@ const MAX_FRONTMATTER_DEPTH: usize = 64;
 #[derive(Debug, Serialize, Clone)]
 pub struct ParsedSpec {
     pub path: String,
-    /// All `## Name` sections in source order. Body runs until the next `##`
+    /// All distinct raw `## Name` sections. Body runs until the next `##`
     /// header; subsections (`### …`) stay inside their parent.
     pub sections: BTreeMap<String, String>,
-    /// Section appearance order (BTreeMap loses it).
+    /// First source occurrence for each normalized section name.
     pub section_order: Vec<String>,
+    /// Normalized section names that appear more than once outside code fences.
+    pub duplicate_section_keys: Vec<String>,
     /// Symbols the planner declared in "Pre-edit symbol snapshot".
     pub pre_edit_snapshot: Vec<SymbolClaim>,
     /// Backticked file paths the spec mentions (deduplicated).
@@ -376,11 +378,12 @@ pub fn parse_repository_file(repo_root: &Path, path: &Path) -> std::io::Result<P
 pub fn parse_str(source_path: &str, body: &str) -> ParsedSpec {
     // Retain the readable body for diagnostics while gates reject bad metadata.
     let (frontmatter, frontmatter_error, body_after_fm) = extract_frontmatter(body);
-    let (sections, order) = split_sections(body_after_fm);
-    let pre_edit_snapshot = sections
+    let (sections, order, duplicate_section_keys) = split_sections(body_after_fm);
+    let pre_edit_snapshot = order
         .iter()
-        .find(|(k, _)| section_key(k) == "pre-edit symbol snapshot")
-        .map(|(_, body)| extract_snapshot(body))
+        .find(|name| section_key(name) == "pre-edit symbol snapshot")
+        .and_then(|name| sections.get(name))
+        .map(|body| extract_snapshot(body))
         .unwrap_or_default();
     let mentioned_files = extract_mentioned_files(body_after_fm);
     let verify_commands = extract_verify_commands(body_after_fm);
@@ -390,6 +393,7 @@ pub fn parse_str(source_path: &str, body: &str) -> ParsedSpec {
         path: source_path.to_string(),
         sections,
         section_order: order,
+        duplicate_section_keys,
         pre_edit_snapshot,
         mentioned_files,
         verify_commands,
@@ -504,10 +508,11 @@ fn strict_frontmatter_value(
 /// tolerates `*(MANDATORY ...)*` suffix annotations.
 pub fn section_body<'a>(spec: &'a ParsedSpec, name: &str) -> Option<&'a str> {
     let want = section_key(name);
-    spec.sections
+    spec.section_order
         .iter()
-        .find(|(k, _)| section_key(k) == want)
-        .map(|(_, body)| body.trim())
+        .find(|section| section_key(section) == want)
+        .and_then(|section| spec.sections.get(section))
+        .map(|body| body.trim())
 }
 
 /// Whitespace + annotation-stripped lowercase form for case-insensitive
@@ -565,9 +570,11 @@ fn consume_fenced_code_line(line: &str, active: &mut Option<CodeFence>) -> bool 
     false
 }
 
-fn split_sections(body: &str) -> (BTreeMap<String, String>, Vec<String>) {
+fn split_sections(body: &str) -> (BTreeMap<String, String>, Vec<String>, Vec<String>) {
     let mut sections: BTreeMap<String, String> = BTreeMap::new();
     let mut order: Vec<String> = Vec::new();
+    let mut seen_section_keys = HashSet::new();
+    let mut duplicate_section_keys = Vec::new();
     let mut current: Option<(String, String)> = None;
     let mut code_fence = None;
 
@@ -580,13 +587,13 @@ fn split_sections(body: &str) -> (BTreeMap<String, String>, Vec<String>) {
             continue;
         }
         if let Some(rest) = line.strip_prefix("## ") {
-            // Commit previous section.
-            if let Some((name, body)) = current.take() {
-                if !sections.contains_key(&name) {
-                    order.push(name.clone());
-                }
-                sections.insert(name, body);
-            }
+            commit_section(
+                current.take(),
+                &mut sections,
+                &mut order,
+                &mut seen_section_keys,
+                &mut duplicate_section_keys,
+            );
             current = Some((rest.trim().to_string(), String::new()));
         } else if let Some((_, body)) = current.as_mut() {
             body.push_str(line);
@@ -594,13 +601,33 @@ fn split_sections(body: &str) -> (BTreeMap<String, String>, Vec<String>) {
         }
         // Lines before the first `##` ignored (frontmatter / preamble).
     }
-    if let Some((name, body)) = current.take() {
-        if !sections.contains_key(&name) {
-            order.push(name.clone());
-        }
-        sections.insert(name, body);
+    commit_section(
+        current.take(),
+        &mut sections,
+        &mut order,
+        &mut seen_section_keys,
+        &mut duplicate_section_keys,
+    );
+    (sections, order, duplicate_section_keys)
+}
+
+fn commit_section(
+    section: Option<(String, String)>,
+    sections: &mut BTreeMap<String, String>,
+    order: &mut Vec<String>,
+    seen_section_keys: &mut HashSet<String>,
+    duplicate_section_keys: &mut Vec<String>,
+) {
+    let Some((name, body)) = section else {
+        return;
+    };
+    let key = section_key(&name);
+    if seen_section_keys.insert(key.clone()) {
+        order.push(name.clone());
+    } else if !duplicate_section_keys.contains(&key) {
+        duplicate_section_keys.push(key);
     }
-    (sections, order)
+    sections.entry(name).or_insert(body);
 }
 
 /// `- \`name\` — 8 callers (...)` or `- \`name\` — added` bullet lines.
@@ -1079,6 +1106,17 @@ fn decoy() {}
         assert!(s.find_blocks.is_empty());
         assert_eq!(s.pre_edit_snapshot.len(), 1);
         assert_eq!(s.pre_edit_snapshot[0].name, "real");
+    }
+
+    #[test]
+    fn records_normalized_duplicate_section_headers() {
+        let s = parse_str(
+            "test.md",
+            "## Goals\n- First outcome\n## Goals *(MANDATORY)*\n- Second outcome\n",
+        );
+
+        assert_eq!(s.duplicate_section_keys, vec!["goals"]);
+        assert_eq!(section_body(&s, "Goals"), Some("- First outcome"));
     }
 
     #[test]

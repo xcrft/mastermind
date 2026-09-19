@@ -264,6 +264,9 @@ mmcg run-task .mastermind/tasks/042-feature/spec.md --force-iteration  # bypass 
 # status, next, resume, doctor, and architecture-policy evidence enforce this
 # same binding. They hold legacy state for pre-flight and reject foreign state
 # instead of projecting it as ready or complete.
+# A learned or history-review state also needs its audit snapshot binding. When
+# it is absent, status routes the task to post-flight audit instead of reporting
+# a Markdown review marker as completion.
 # Canonical `.mastermind/tasks/<task>/spec.md` inputs keep task-local state and
 # review files. Legacy flat task specs keep their basename paths. Other
 # repository-contained specs use a SHA-256 key of the exact relative path under

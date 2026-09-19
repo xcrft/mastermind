@@ -722,6 +722,7 @@ fn collect_internal(
             &collector.relevant,
             crate::facts::MAX_LENS_FACTS,
             deadline,
+            relevant_truncated,
         ) {
             Ok(snapshot) => collector.load_normalized_facts(snapshot),
             Err(error) => {

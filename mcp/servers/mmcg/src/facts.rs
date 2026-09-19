@@ -31,6 +31,7 @@ const MAX_ARTIFACTS_RETURNED: usize = MAX_LENS_ARTIFACTS;
 // response remains below the server's 8 MiB serialized-result limit.
 const MAX_FACTS_RETURNED: usize = 400;
 pub const MAX_LENS_FACTS: usize = 200;
+const MAX_PATH_FILTER: usize = 1_000;
 const MAX_DIAGNOSTICS: usize = 100;
 const MAX_ID_BYTES: usize = 256;
 const MAX_NAME_BYTES: usize = 128;
@@ -1414,18 +1415,35 @@ pub(crate) fn snapshot_for_paths(
     paths: &BTreeSet<String>,
     top: usize,
     deadline: Option<Instant>,
+    scope_incomplete: bool,
 ) -> Result<FactSnapshot, FactError> {
     let mut normalized = Vec::new();
-    for path in paths.iter().take(1_000) {
+    for path in paths.iter().take(MAX_PATH_FILTER) {
         normalized.push(normalize_fact_path(path)?);
     }
-    snapshot_filtered(
+    let mut snapshot = snapshot_filtered(
         store,
         FactQueryFilter::Paths(normalized),
         top,
         false,
         deadline,
-    )
+    )?;
+    if scope_incomplete || paths.len() > MAX_PATH_FILTER {
+        snapshot.partial = true;
+        mark_path_scope_incomplete(&mut snapshot.annotations);
+        mark_path_scope_incomplete(&mut snapshot.relationships);
+    }
+    Ok(snapshot)
+}
+
+fn mark_path_scope_incomplete<T>(collection: &mut FactCollection<T>) {
+    collection.total = None;
+    collection.truncated = true;
+    collection.truncation_reason = Some(match collection.truncation_reason {
+        None => "impact_scope_incomplete",
+        Some("fact_limit") => "impact_scope_and_fact_limit",
+        Some(_) => "impact_scope_and_fact_limit",
+    });
 }
 
 fn snapshot_filtered(
@@ -1821,6 +1839,33 @@ mod tests {
         assert!(snapshot.relationships.items[0]
             .source_id
             .starts_with("facts:sha256:"));
+    }
+
+    #[test]
+    fn path_scoped_snapshot_marks_facts_incomplete_when_impact_scope_is_partial() {
+        let fixture = fixture();
+        let path = write_manifest(&fixture, &manifest(&fixture), "facts.json");
+        import(&fixture.store, &path).unwrap();
+        let paths = BTreeSet::from(["src/lib.rs".to_string()]);
+
+        let snapshot = snapshot_for_paths(&fixture.store, &paths, 100, None, true).unwrap();
+
+        assert!(snapshot.available);
+        assert!(snapshot.partial);
+        assert_eq!(snapshot.annotations.total, None);
+        assert!(snapshot.annotations.truncated);
+        assert_eq!(
+            snapshot.annotations.truncation_reason,
+            Some("impact_scope_incomplete")
+        );
+        assert_eq!(snapshot.relationships.total, None);
+        assert!(snapshot.relationships.truncated);
+        assert_eq!(
+            snapshot.relationships.truncation_reason,
+            Some("impact_scope_incomplete")
+        );
+        assert_eq!(snapshot.artifacts.total, Some(1));
+        assert!(!snapshot.artifacts.truncated);
     }
 
     #[test]

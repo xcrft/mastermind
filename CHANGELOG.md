@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- A document graph captured at a different Git revision now marks Lens and the
+  exported review packet partial. Its current named bytes do not establish
+  coverage of unrelated review-head changes.
 - Lens now marks the document-evidence source summary partial when the packet
   checks named endpoints only, matching the review coverage status.
 - Endpoint-only document freshness now marks Lens and exported review packets

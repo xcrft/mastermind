@@ -1631,8 +1631,9 @@ make a matched lexeme differ from the derived query term. `omitted` separates
 upstream/source limits, rejected unsafe content, and budget admission for every
 collection. A null collection `total` and `source_limit_exact: false` preserve
 an upstream lower bound instead of inventing an exact count. Planner priority is
-changes → callers → history → tests; executor is changes → tests → callers →
-history; auditor is tests → callers → changes → history. Stable file-limit and
+changes → API crossings → callers → history → tests; executor is changes → API
+crossings → tests → callers → history; auditor is tests → API crossings →
+callers → changes → history. Stable file-limit and
 non-UTF-8-path omissions remain explicit upstream limits in the packet.
 
 The estimate is `ceil(serialized MCP tool-result bytes / 4)`. It includes the

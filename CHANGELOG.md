@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Audit file-scope and executor-report file findings now use deterministic path
+  order, keeping equivalent mechanical audits and sealed evidence stable.
 - Canonical executor-report `files_modified` now has to match the actual,
   normalized changed-file set, excluding controller artifacts. Missing or
   invented file declarations can no longer enter a held audit or sealed bundle.

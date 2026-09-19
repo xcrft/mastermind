@@ -40,7 +40,7 @@ use crate::terminal::{
 use crate::test_scan::TestScanner;
 use crate::verification::{pass_contradiction, PassContradiction};
 use serde::Serialize;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 use std::time::Instant;
 
@@ -517,8 +517,8 @@ fn run_internal(
     let spec_files_owned: Vec<_> = crate::declared_files::paths(spec)
         .filter_map(|file| crate::declared_files::normalize(file).ok())
         .collect();
-    let spec_files: HashSet<&str> = spec_files_owned.iter().map(String::as_str).collect();
-    let diff_files: HashSet<&str> = symbol_diff
+    let spec_files: BTreeSet<&str> = spec_files_owned.iter().map(String::as_str).collect();
+    let diff_files: BTreeSet<&str> = symbol_diff
         .files_in_diff
         .iter()
         .filter(|f| !f.starts_with(".mastermind/") && !f.starts_with(".mastermind\\"))
@@ -776,7 +776,7 @@ fn check_executor_completion(
     report: &ExecutorReport,
     spec: &ParsedSpec,
     root: &Path,
-    changed_files: &HashSet<&str>,
+    changed_files: &BTreeSet<&str>,
     deadline: Instant,
     findings: &mut Vec<Finding>,
 ) {
@@ -824,7 +824,7 @@ fn check_executor_completion(
             reason: reason.into(),
         });
     }
-    let reported_files: HashSet<_> = metadata
+    let reported_files: BTreeSet<_> = metadata
         .files_modified
         .iter()
         .map(|file| norm_path(file))

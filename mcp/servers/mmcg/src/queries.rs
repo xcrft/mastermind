@@ -1338,6 +1338,9 @@ pub struct ImpactChanges {
 pub struct ImpactDisciplines {
     pub detected: Vec<DisciplineSignal>,
     pub unclassified: Vec<String>,
+    /// Number of unclassified paths omitted after the bounded sample.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unclassified_omitted: Option<u32>,
     pub note: String,
     /// Present when changed-file collection omitted paths, so the signals only
     /// describe the returned subset rather than the entire change.
@@ -2335,17 +2338,24 @@ fn classify_disciplines(files: &[ChangedFile]) -> ImpactDisciplines {
         });
     }
 
-    let unclassified: Vec<String> = files
+    let unclassified_paths = files
         .iter()
         .map(|file| file.path.as_str())
         .filter(|path| !classified.contains(path))
-        .take(DISCIPLINE_SAMPLE)
         .map(|path| path.to_string())
-        .collect();
+        .collect::<Vec<_>>();
+    let unclassified_total = unclassified_paths.len();
+    let unclassified = unclassified_paths
+        .into_iter()
+        .take(DISCIPLINE_SAMPLE)
+        .collect::<Vec<_>>();
+    let unclassified_omitted = (unclassified_total > unclassified.len())
+        .then(|| u32::try_from(unclassified_total - unclassified.len()).unwrap_or(u32::MAX));
 
     ImpactDisciplines {
         detected,
         unclassified,
+        unclassified_omitted,
         note: DISCIPLINE_NOTE.to_string(),
         scope_incomplete_reason: None,
     }
@@ -10119,6 +10129,7 @@ fn checks_value() { assert_eq!(value(), 1); }
             result.unclassified,
             vec!["src/server/queue_consumer.ts".to_string()]
         );
+        assert_eq!(result.unclassified_omitted, None);
     }
 
     #[test]
@@ -10149,6 +10160,7 @@ fn checks_value() { assert_eq!(value(), 1); }
             result.unclassified,
             vec!["src/orders/repository.ts".to_string()]
         );
+        assert_eq!(result.unclassified_omitted, None);
     }
 
     #[test]
@@ -10160,5 +10172,20 @@ fn checks_value() { assert_eq!(value(), 1); }
         let result = classify_disciplines(&files);
         assert!(result.detected.is_empty());
         assert_eq!(result.unclassified, vec!["README.md".to_string()]);
+        assert_eq!(result.unclassified_omitted, None);
+    }
+
+    #[test]
+    fn disciplines_report_omitted_unclassified_paths() {
+        let files = (0..=DISCIPLINE_SAMPLE)
+            .map(|index| ChangedFile {
+                path: format!("src/backend/module_{index}.rs"),
+                status: "M".to_string(),
+            })
+            .collect::<Vec<_>>();
+        let result = classify_disciplines(&files);
+
+        assert_eq!(result.unclassified.len(), DISCIPLINE_SAMPLE);
+        assert_eq!(result.unclassified_omitted, Some(1));
     }
 }

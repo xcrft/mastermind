@@ -46,15 +46,19 @@ mastermind setup codex --scope user --write
 
 `mastermind setup codex --scope project` is rejected before configuration reads
 or subprocesses. Mastermind resolves Codex only from absolute `PATH` entries
-outside the current repository and invokes it without a shell. JSON inspection
-must contain the exact stdio command and ordered arguments. Truncated output is
-rejected, and executable identity is rechecked before every inspection or
-mutation within the ten-second bound.
+outside the current repository and invokes it without a shell. Inspection uses
+the successful `codex mcp list --json` response: exactly one `mmcg` entry must
+contain the exact stdio command, ordered arguments, and `enabled: true`.
+Truncated or malformed output is rejected, and executable identity is rechecked
+before every inspection or mutation within the ten-second bound.
 
 ## Change or undo safely
 
-A matching native entry is an idempotent no-op. A customized entry requires
-`--force`; `--force` never implies `--write`.
+A matching enabled native entry is an idempotent no-op. A disabled or customized
+entry requires `--force`; `--force` never implies `--write`. After a successful
+native add or remove, Mastermind reads the list again and returns `Wrote` only
+when the requested configuration state is observed. This verifies registration,
+not an MCP server handshake.
 
 ```bash
 mastermind setup codex --scope user --remove          # dry-run

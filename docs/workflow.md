@@ -44,6 +44,11 @@ approval. Then record the baseline:
 mastermind run-task .mastermind/tasks/001-add-account-recovery/spec.md --pre-only
 ```
 
+When product writing initiated the task, run product intake before completing
+the spec. Preserve its stable source and parked outcome in `## Product Context`.
+Only observable behaviour belongs in Goals and Acceptance Criteria; the outcome
+guides semantic review and is never a merge-time claim.
+
 ### 2. Implement against the approved spec
 
 Give `spec.md` to the implementation agent. The executor may change only the

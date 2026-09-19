@@ -101,6 +101,10 @@ mastermind new-spec "<description>" --mode verified
 Fill only these sections:
 
 - **Goals** — observable definition of done.
+- **Product Context** — for product-derived work, retain the stable source and
+  parked outcome from product intake. It informs semantic review but does not
+  become a merge-time criterion. Remove the section for work without product
+  intake.
 - **Scope** — owned files/components and explicit boundary.
 - **Acceptance Criteria** — behavior that code or tests can demonstrate.
 - **Pre-edit Snapshot** — only symbols actually changed; caller count and signature.

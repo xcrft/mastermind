@@ -136,6 +136,12 @@ expected_docs: []
 - {description}
 - <observable definition of done>
 
+## Product Context
+
+<!-- Keep this section when product intake informed the task. Remove it otherwise. -->
+- Source: <PRD/ticket ID or stable URL>
+- Outcome (not acceptance criteria): <metric, instrument, cadence, owner; or no instrument in place>
+
 ## Scope
 
 - Change: `<path/to/file.ext>` — <intended outcome>
@@ -455,6 +461,12 @@ You are implementing {description}.
 
 **Goals:**
 1. <primary goal — what counts as done>
+
+## Product Context
+
+<!-- Keep this section when product intake informed the task. Remove it otherwise. -->
+- Source: <PRD/ticket ID or stable URL>
+- Outcome (not acceptance criteria): <metric, instrument, cadence, owner; or no instrument in place>
 
 **Rules (global):**
 - DO NOT add features beyond what this spec lists (YAGNI)

@@ -62,9 +62,13 @@ impl ParsedSpec {
             .filter_map(VerifyEntry::command)
             .chain(self.verify_commands.iter().map(String::as_str))
             .map(str::trim)
-            .filter(|cmd| !cmd.is_empty() && seen.insert(*cmd))
+            .filter(|cmd| is_command_declaration(cmd) && seen.insert(*cmd))
             .collect()
     }
+}
+
+fn is_command_declaration(command: &str) -> bool {
+    !command.is_empty() && !command.starts_with('#')
 }
 
 /// Structured spec metadata from a YAML frontmatter block. All fields optional
@@ -1066,6 +1070,15 @@ pub fn refresh(&self) -> Result<Session> {
             s.verify_commands,
             vec!["cargo test session_count_returns_current_size".to_string()]
         );
+    }
+
+    #[test]
+    fn ignores_shell_comments_as_verify_commands() {
+        let s = parse_str(
+            "test.md",
+            "---\nverify:\n  - cmd: \"# deferred\"\n---\n## Goals\n- Real work\nVERIFY: # also deferred\n",
+        );
+        assert!(s.declared_verify_commands().is_empty());
     }
 
     #[test]

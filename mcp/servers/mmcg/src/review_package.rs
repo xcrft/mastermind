@@ -135,6 +135,11 @@ struct SourceRequest {
     retain_body: bool,
 }
 
+struct OutputTarget {
+    path: PathBuf,
+    parent: crate::bounded_fs::RootCapability,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SourceIdentity {
     id: String,
@@ -374,7 +379,11 @@ pub fn export(options: &ReviewExportOptions) -> Result<ReviewExportResult, Revie
         options.document_graph.as_deref(),
     )?;
     ensure_codeowners_discovery_unchanged(&root, discovered_codeowners.as_ref())?;
-    ensure_output_outside_document_corpus(&root, &output_dir, snapshot.document_graph.as_ref())?;
+    ensure_output_outside_document_corpus(
+        &root,
+        &output_dir.path,
+        snapshot.document_graph.as_ref(),
+    )?;
 
     let after_sources = read_sources(&root, &requests)?;
     ensure_sources_unchanged(&before_sources, &after_sources)?;
@@ -568,7 +577,7 @@ pub fn export(options: &ReviewExportOptions) -> Result<ReviewExportResult, Revie
     })?;
 
     Ok(ReviewExportResult {
-        output_dir,
+        output_dir: output_dir.path,
         head_oid,
         partial: manifest.analysis.partial,
         artifacts: manifest.artifacts.len() as u32 + 1,
@@ -1346,7 +1355,7 @@ fn summary_markdown(
     output
 }
 
-fn output_target(path: &Path) -> Result<PathBuf, ReviewPackageError> {
+fn output_target(path: &Path) -> Result<OutputTarget, ReviewPackageError> {
     let name = path.file_name().ok_or(ReviewPackageError::UnsafeOutput)?;
     if name.is_empty() || matches!(path.components().next_back(), Some(Component::ParentDir)) {
         return Err(ReviewPackageError::UnsafeOutput);
@@ -1355,32 +1364,39 @@ fn output_target(path: &Path) -> Result<PathBuf, ReviewPackageError> {
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let metadata = std::fs::symlink_metadata(parent)
+    let parent = crate::bounded_fs::RootCapability::open(parent)
         .map_err(|_| ReviewPackageError::OutputParentUnavailable)?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(ReviewPackageError::OutputParentUnavailable);
-    }
-    let parent = parent
-        .canonicalize()
-        .map_err(|_| ReviewPackageError::OutputParentUnavailable)?;
-    let target = parent.join(name);
+    let target = parent.canonical_root().join(name);
     if target.to_str().is_none() {
         return Err(ReviewPackageError::UnsafeOutput);
     }
     match std::fs::symlink_metadata(&target) {
         Ok(_) => Err(ReviewPackageError::OutputExists),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(target),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            parent
+                .verify()
+                .map_err(|_| ReviewPackageError::OutputParentUnavailable)?;
+            Ok(OutputTarget {
+                path: target,
+                parent,
+            })
+        }
         Err(error) => Err(ReviewPackageError::Io(error.to_string())),
     }
 }
 
 fn write_package(
-    target: &Path,
+    target: &OutputTarget,
     documents: Vec<PackageDocument>,
     manifest: &[u8],
     validate_before_publish: impl FnOnce(&Path) -> Result<(), ReviewPackageError>,
 ) -> Result<(), ReviewPackageError> {
+    target
+        .parent
+        .verify()
+        .map_err(|_| ReviewPackageError::PackageChanged("review output parent changed".into()))?;
     let parent = target
+        .path
         .parent()
         .ok_or(ReviewPackageError::OutputParentUnavailable)?;
     let temporary = tempfile::Builder::new()
@@ -1404,18 +1420,39 @@ fn write_package(
         .map_err(|error| ReviewPackageError::PackageChanged(error.to_string()))?;
     validate_before_publish(temporary.path())?;
     ensure_staged_package_unchanged(&staging, &documents, manifest)?;
+    target
+        .parent
+        .verify()
+        .map_err(|_| ReviewPackageError::PackageChanged("review output parent changed".into()))?;
     drop(staging);
-    match rename_package_noclobber(temporary.path(), target) {
+    let staging_name = temporary
+        .path()
+        .file_name()
+        .ok_or_else(|| ReviewPackageError::PackageChanged("staging directory is unnamed".into()))?;
+    let target_name = target
+        .path
+        .file_name()
+        .ok_or_else(|| ReviewPackageError::PackageChanged("review output is unnamed".into()))?;
+    match target
+        .parent
+        .rename_child_directory_noclobber(staging_name, target_name)
+    {
         Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+        Err(crate::bounded_fs::BoundedReadError::Io(error))
+            if error.kind() == std::io::ErrorKind::AlreadyExists =>
+        {
             return Err(ReviewPackageError::OutputExists);
         }
-        Err(error) => return Err(ReviewPackageError::Io(error.to_string())),
+        Err(error) => {
+            return Err(ReviewPackageError::PackageChanged(format!(
+                "review output publication: {error}"
+            )));
+        }
     }
-    #[cfg(unix)]
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| ReviewPackageError::Io(error.to_string()))?;
+    target
+        .parent
+        .sync()
+        .map_err(|_| ReviewPackageError::PackageChanged("review output parent changed".into()))?;
     Ok(())
 }
 
@@ -1463,75 +1500,6 @@ fn ensure_staged_package_unchanged(
         }
     }
     Ok(())
-}
-
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-fn rename_package_noclobber(source: &Path, target: &Path) -> std::io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let source = CString::new(source.as_os_str().as_bytes())
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in source path"))?;
-    let target = CString::new(target.as_os_str().as_bytes())
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in target path"))?;
-    // SAFETY: both arguments are live NUL-terminated path buffers. RENAME_EXCL
-    // gives the directory publication the same no-clobber contract as create_new.
-    let status = unsafe { libc::renamex_np(source.as_ptr(), target.as_ptr(), libc::RENAME_EXCL) };
-    if status == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn rename_package_noclobber(source: &Path, target: &Path) -> std::io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let source = CString::new(source.as_os_str().as_bytes())
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in source path"))?;
-    let target = CString::new(target.as_os_str().as_bytes())
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in target path"))?;
-    // SAFETY: both path pointers remain valid for the syscall. renameat2 with
-    // RENAME_NOREPLACE publishes atomically and never replaces another entry.
-    let status = unsafe {
-        libc::syscall(
-            libc::SYS_renameat2,
-            libc::AT_FDCWD,
-            source.as_ptr(),
-            libc::AT_FDCWD,
-            target.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    };
-    if status == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(windows)]
-fn rename_package_noclobber(source: &Path, target: &Path) -> std::io::Result<()> {
-    // MoveFileEx without MOVEFILE_REPLACE_EXISTING is the behavior used by
-    // std::fs::rename on Windows, so an existing destination fails. Windows
-    // reports a non-empty destination directory as ERROR_DIR_NOT_EMPTY; map it
-    // to the cross-platform no-clobber contract consumed by write_package.
-    match std::fs::rename(source, target) {
-        Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => Err(
-            std::io::Error::new(std::io::ErrorKind::AlreadyExists, error),
-        ),
-        result => result,
-    }
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", windows)))]
-fn rename_package_noclobber(_source: &Path, _target: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "atomic no-clobber directory publication is unavailable on this platform",
-    ))
 }
 
 fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), ReviewPackageError> {
@@ -2533,9 +2501,19 @@ mod tests {
         std::fs::create_dir(&target).unwrap();
         std::fs::write(target.join("owner"), b"existing").unwrap();
 
-        let error = rename_package_noclobber(source.path(), &target).unwrap_err();
+        let capability = crate::bounded_fs::RootCapability::open(parent.path()).unwrap();
+        let error = capability
+            .rename_child_directory_noclobber(
+                source.path().file_name().unwrap(),
+                target.file_name().unwrap(),
+            )
+            .unwrap_err();
 
-        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(matches!(
+            error,
+            crate::bounded_fs::BoundedReadError::Io(ref error)
+                if error.kind() == std::io::ErrorKind::AlreadyExists
+        ));
         assert_eq!(std::fs::read(target.join("owner")).unwrap(), b"existing");
         assert!(source.path().join("payload").is_file());
     }
@@ -2544,7 +2522,8 @@ mod tests {
     fn package_tampering_before_publication_fails_closed() {
         for mutation in ["payload", "extra-entry"] {
             let parent = tempfile::tempdir().unwrap();
-            let target = parent.path().join("review");
+            let output = parent.path().join("review");
+            let target = output_target(&output).unwrap();
             let documents = vec![PackageDocument {
                 path: "index.html",
                 media_type: "text/html",
@@ -2567,11 +2546,39 @@ mod tests {
                 matches!(&error, ReviewPackageError::PackageChanged(_)),
                 "{mutation}: {error}"
             );
-            assert!(!target.exists(), "{mutation}");
+            assert!(!output.exists(), "{mutation}");
             assert!(
                 std::fs::read_dir(parent.path()).unwrap().next().is_none(),
                 "{mutation}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_rejects_a_replaced_output_parent_before_publication() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("output");
+        std::fs::create_dir(&parent).unwrap();
+        let target = output_target(&parent.join("review")).unwrap();
+        let relocated = root.path().join("relocated-output");
+        let outside = tempfile::tempdir().unwrap();
+        let documents = vec![PackageDocument {
+            path: "index.html",
+            media_type: "text/html",
+            body: b"expected".to_vec(),
+        }];
+
+        let error = write_package(&target, documents, b"{}\n", |_| {
+            std::fs::rename(&parent, &relocated).unwrap();
+            symlink(outside.path(), &parent).unwrap();
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert!(matches!(error, ReviewPackageError::PackageChanged(_)));
+        assert!(!outside.path().join("review").exists());
     }
 }

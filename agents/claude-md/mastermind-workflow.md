@@ -159,8 +159,10 @@ Pre-flight, before a diff exists, route on the paths named in the spec's Scope.
   criteria that can fail. Visual fidelity is parked explicitly, never smuggled
   into acceptance criteria.
 - Product intake: a PRD or ticket becomes behaviour, constraint, and outcome.
-  Only the first is acceptance criteria; a success metric cannot fail at merge
-  time, and the cases the PRD never mentions are asked before approval.
+  Preserve its stable source and parked outcome in Product Context of the derived
+  spec. Only behaviour and measurable constraints are acceptance criteria; a
+  success metric cannot fail at merge time, and the cases the PRD never mentions
+  are asked before approval.
 - Browser verification: record what was observed and at which viewport. The
   accessibility tree and the console are evidence; a screenshot is not, and an
   unchecked item is marked unchecked.

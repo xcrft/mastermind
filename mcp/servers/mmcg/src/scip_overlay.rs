@@ -1833,6 +1833,15 @@ pub fn for_lens(
     root: &Path,
     relevant_paths: impl IntoIterator<Item = String>,
 ) -> Result<SemanticOverlaySnapshot, ScipOverlayError> {
+    for_lens_with_scope(store, root, relevant_paths, false)
+}
+
+pub(crate) fn for_lens_with_scope(
+    store: &Store,
+    root: &Path,
+    relevant_paths: impl IntoIterator<Item = String>,
+    impact_scope_incomplete: bool,
+) -> Result<SemanticOverlaySnapshot, ScipOverlayError> {
     let source = store
         .semantic_source()
         .map_err(|error| ScipOverlayError::Store(error.to_string()))?;
@@ -1866,23 +1875,48 @@ pub fn for_lens(
     });
     let mut diagnostics = revision_diagnostic(&source).into_iter().collect::<Vec<_>>();
     diagnostics.extend(stale_diagnostic(&stale));
-    let partial = edges_truncated || !stale.is_empty() || !source.revision_verified;
+    let mut definitions = collection(Vec::new(), 0, false, "definition_limit");
+    let mut edge_collection = collection(
+        edges,
+        edge_candidates,
+        edges_truncated,
+        "semantic_edge_limit",
+    );
+    if impact_scope_incomplete {
+        mark_impact_scope_incomplete(&mut definitions);
+        mark_impact_scope_incomplete(&mut edge_collection);
+        diagnostics.push(SemanticDiagnostic {
+            code: "semantic_impact_scope_incomplete",
+            message: "SCIP evidence covers only returned change-impact paths. The impact analysis is incomplete, so semantic collection totals are unknown.".into(),
+        });
+    }
+    let partial = impact_scope_incomplete
+        || edges_truncated
+        || !stale.is_empty()
+        || !source.revision_verified;
     Ok(SemanticOverlaySnapshot {
         schema_version: 1,
         available: true,
         partial,
         fallback_active: false,
         source: Some(source),
-        definitions: collection(Vec::new(), 0, false, "definition_limit"),
-        edges: collection(
-            edges,
-            edge_candidates,
-            edges_truncated,
-            "semantic_edge_limit",
-        ),
+        definitions,
+        edges: edge_collection,
         diagnostics,
         resolution: resolution(),
     })
+}
+
+fn mark_impact_scope_incomplete<T>(collection: &mut SemanticCollection<T>) {
+    collection.total = None;
+    collection.truncated = true;
+    collection.truncation_reason = Some(match collection.truncation_reason {
+        None => "impact_scope_incomplete",
+        Some("semantic_edge_limit") => "impact_scope_and_semantic_limit",
+        Some("stale_documents") => "impact_scope_and_stale_documents",
+        Some("query_limit_and_stale_documents") => "impact_scope_query_and_stale_documents",
+        Some(_) => "impact_scope_and_semantic_limit",
+    });
 }
 
 #[cfg(test)]
@@ -2315,6 +2349,34 @@ mod tests {
         let snapshot = for_lens(&store, &root, Vec::<String>::new()).unwrap();
         assert!(snapshot.available);
         assert!(snapshot.edges.items.is_empty());
+    }
+
+    #[test]
+    fn lens_marks_semantic_collections_partial_for_incomplete_impact_scope() {
+        let (temp, store, path) = fixture();
+        import(&store, &path).unwrap();
+        let root = temp.path().join("repo").canonicalize().unwrap();
+
+        let snapshot =
+            for_lens_with_scope(&store, &root, ["a.cpp".into(), "b.cpp".into()], true).unwrap();
+
+        assert!(snapshot.partial);
+        assert_eq!(snapshot.definitions.total, None);
+        assert!(snapshot.definitions.truncated);
+        assert_eq!(
+            snapshot.definitions.truncation_reason,
+            Some("impact_scope_incomplete")
+        );
+        assert_eq!(snapshot.edges.total, None);
+        assert!(snapshot.edges.truncated);
+        assert_eq!(
+            snapshot.edges.truncation_reason,
+            Some("impact_scope_incomplete")
+        );
+        assert!(snapshot
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "semantic_impact_scope_incomplete"));
     }
 
     #[test]

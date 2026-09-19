@@ -1774,8 +1774,9 @@ fn build_snapshot_until(
                 .iter()
                 .map(|item| item.symbol.file.clone()),
         );
-    let semantic = crate::scip_overlay::for_lens(store, &root, semantic_paths)
-        .unwrap_or_else(|_| crate::scip_overlay::unavailable_with_diagnostic());
+    let semantic =
+        crate::scip_overlay::for_lens_with_scope(store, &root, semantic_paths, impact.is_partial())
+            .unwrap_or_else(|_| crate::scip_overlay::unavailable_with_diagnostic());
     let evidence = crate::evidence::collect_with_store_and_normalized_facts(
         &root,
         evidence_options,

@@ -320,7 +320,7 @@ function fixture() {
         hotspots: {
           entered: { total: 1, returned: 1, truncated: false, items: [{ file: "src/auth.rs", name: "authorize", kind: "function", rank: 1, in_degree: 5 }] },
           exited: { total: 1, returned: 1, truncated: false, items: [{ file: "legacy/auth.py", name: "legacy_auth", kind: "function", rank: 2, in_degree: 3 }] },
-          moved: { total: 1, returned: 1, truncated: false, items: [] },
+          moved: { total: 0, returned: 0, truncated: false, items: [] },
         },
         ownership: {
           changes: { total: 1, returned: 1, truncated: false, items: [{ path: "src/auth.rs", base_owners: ["@platform"], head_owners: ["@security"] }] },
@@ -480,7 +480,7 @@ function fixture() {
     },
     map: {
       scope: { aggregation_paths_truncated: false },
-      files: { total: 4, returned: 4, truncated: false, items: [] },
+      files: { total: 4, returned: 4, truncated: false },
       languages: { total: 1, returned: 1, truncated: false, items: [{ language: "rust", file_count: 3 }] },
       components: {
         total: 2,
@@ -1526,6 +1526,18 @@ async function main() {
   assert.ok(missingSymbolsHarness.nodes.get("completeness-status").classList.contains("is-partial"));
   assert.match(missingSymbolsHarness.nodes.get("graph-state").textContent, /snapshot is partial/i);
   assert.doesNotMatch(missingSymbolsHarness.nodes.get("graph-state").textContent, /No changes in captured scope/i);
+
+  const inconsistentSymbols = emptyFixture();
+  inconsistentSymbols.impact.changes.symbols = {
+    total: 0,
+    returned: 1,
+    truncated: false,
+    items: [],
+  };
+  const inconsistentSymbolsHarness = await renderFixture(inconsistentSymbols);
+  assert.match(inconsistentSymbolsHarness.nodes.get("completeness-status").textContent, /Partial evidence/i);
+  assert.match(inconsistentSymbolsHarness.nodes.get("notice-stack").textContent, /Changed symbols/i);
+  assert.doesNotMatch(inconsistentSymbolsHarness.nodes.get("graph-state").textContent, /No changes in captured scope/i);
 
   const truncated = cloneFixture();
   truncated.impact.impact.total = 18;

@@ -119,6 +119,8 @@ Updates preserve each client's installed profile unless `--profile` explicitly
 changes it. Legacy schema-v1 manifests migrate as `full`. Older installers
 reject the schema-v2 manifest without replacing managed files, so use the
 current package for later updates.
+Install and update reject symbolic links at managed workflow paths instead of
+following them into another directory.
 
 `workflow audit` is read-only. It graphs only repository-owned source workflow
 files or artifacts listed by an installed ownership manifest, then reports

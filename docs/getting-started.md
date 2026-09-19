@@ -142,6 +142,9 @@ without silently retiring skills.
 Manifest schema downgrades are unsupported. An older installer rejects a
 schema-v2 manifest before replacing managed files, so use the current package
 for later updates.
+Install and update reject symbolic links at the managed client root, manifest,
+skill directory, agent directory, or owned artifact. Resolve that local path
+first; the installer will not follow it into another directory.
 
 If final cleanup fails after a committed install, the command succeeds with a
 `cleanup pending` warning. The reported staging directory keeps the pre-update

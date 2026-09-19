@@ -160,6 +160,28 @@ test("invalid ownership manifest fails before replacing installed files", () => 
   }
 });
 
+test("installer rejects a symlinked managed directory without touching its target", () => {
+  const f = fixture();
+  try {
+    const claude = path.join(f.home, ".claude");
+    const outside = path.join(f.root, "outside-skills");
+    fs.mkdirSync(path.join(outside, "alpha"), { recursive: true });
+    fs.writeFileSync(path.join(outside, "alpha", "SKILL.md"), "external\n");
+    fs.mkdirSync(claude, { recursive: true });
+    fs.symlinkSync(outside, path.join(claude, "skills"), "dir");
+
+    assert.throws(
+      () => copyAll({ home: f.home, share: f.share, client: "claude", version: "1.0.0", profile: "full" }),
+      /skills directory cannot be a symbolic link/,
+    );
+    assert.equal(fs.readFileSync(path.join(outside, "alpha", "SKILL.md"), "utf8"), "external\n");
+    assert.equal(fs.existsSync(path.join(claude, ".mastermind-workflow.json")), false);
+    assert.equal(fs.existsSync(path.join(claude, "agents")), false);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test("newer manifest schemas fail before replacing installed files", () => {
   const f = fixture();
   try {
@@ -452,7 +474,7 @@ test("client all rolls back an earlier client when a later client fails", () => 
           version: "2.0.0",
           profile: "core",
         }),
-      /EEXIST|ENOTDIR/,
+      /workflow root must be a directory|EEXIST|ENOTDIR/,
     );
 
     assert.equal(fs.readFileSync(manifestPath(f, "claude"), "utf8"), beforeManifest);

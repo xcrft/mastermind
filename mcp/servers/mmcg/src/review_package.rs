@@ -2090,7 +2090,7 @@ mod tests {
             }));
         let summary = std::fs::read_to_string(output.join("summary.md")).unwrap();
         assert!(summary.contains("Analysis: **partial**"));
-        assert!(summary.contains("$.document_graph.corpus: not_tracked"));
+        assert!(summary.contains("`$.document_graph.corpus`: not_tracked"));
     }
 
     #[test]
@@ -2124,7 +2124,7 @@ mod tests {
             }));
         let summary = std::fs::read_to_string(output.join("summary.md")).unwrap();
         assert!(summary.contains("Analysis: **partial**"));
-        assert!(summary.contains("$.document_graph.snapshot_revision: revision_mismatch"));
+        assert!(summary.contains("`$.document_graph.snapshot_revision`: revision_mismatch"));
     }
 
     #[test]

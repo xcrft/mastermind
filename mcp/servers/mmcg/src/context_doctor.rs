@@ -1241,7 +1241,7 @@ mod tests {
         std::fs::write(dir.path().join("CONTEXT.md"), context()).unwrap();
         let task = dir.path().join(".mastermind/tasks/001-awaiting");
         std::fs::create_dir_all(&task).unwrap();
-        write_task_state(&task, "history_review_required", None);
+        write_task_state(&task, "history_review_required", Some("reviewed-snapshot"));
         let review = task.join("history-review.md");
         std::fs::write(
             &review,
@@ -1256,7 +1256,7 @@ mod tests {
         }));
         std::fs::write(
             &review,
-            "- **Context:** not applicable\n- **Lesson:** not applicable\n- **Reason:** The verified typo fix adds no durable rule.\n",
+            "- **Context:** not applicable\n- **Lesson:** not applicable\n- **Reason:** The verified typo fix adds no durable rule.\n- **Audit snapshot:** reviewed-snapshot\n",
         )
         .unwrap();
         let report = run(dir.path());

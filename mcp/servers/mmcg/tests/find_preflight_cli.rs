@@ -256,7 +256,18 @@ fn find_preflight_cli_rejects_partial_reads_and_shared_budget_exhaustion() {
     unavailable(&fixture.verify(false), Some(INPUT), "target_too_large");
     let base = std::fs::read_to_string(fixture.spec()).unwrap();
     let phase = base[base.find("## Phase 1: replace").unwrap()..].to_string();
-    fixture.write(SPEC, format!("{base}{}", phase.repeat(7)).as_bytes());
+    let repeated_phases = |count| {
+        (2..count + 2)
+            .map(|number| {
+                phase.replacen(
+                    "## Phase 1: replace",
+                    &format!("## Phase {number}: replace"),
+                    1,
+                )
+            })
+            .collect::<String>()
+    };
+    fixture.write(SPEC, format!("{base}{}", repeated_phases(7)).as_bytes());
     let repeated = fixture.verify(false);
     let findings = repeated["errors"].as_array().unwrap();
     assert_eq!(findings.len(), 8, "{repeated}");
@@ -266,7 +277,7 @@ fn find_preflight_cli_rejects_partial_reads_and_shared_budget_exhaustion() {
     assert!(findings
         .iter()
         .any(|finding| finding["reason"] == "read_budget_exhausted"));
-    fixture.write(SPEC, format!("{base}{}", phase.repeat(1024)).as_bytes());
+    fixture.write(SPEC, format!("{base}{}", repeated_phases(1024)).as_bytes());
     let capped = fixture.verify(false);
     assert_eq!(
         capped["errors"],

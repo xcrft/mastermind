@@ -1235,6 +1235,31 @@ verify:
     }
 
     #[test]
+    fn strict_check_rejects_comment_only_verify_declarations() {
+        let body = "\
+---
+touches:
+  - file: src/foo.rs
+    symbols:
+      - name: foo
+verify:
+  - cmd: \"# deferred\"
+---
+
+## Goals
+- Change foo
+";
+        let s = spec::parse_str("t.md", body);
+        assert!(
+            strict_check(&s).iter().any(|finding| matches!(
+                finding,
+                Finding::StrictViolation { reason } if reason.contains("no verify command")
+            )),
+            "a shell comment must not satisfy the strict verification gate"
+        );
+    }
+
+    #[test]
     fn lite_mode_goals_section_passes() {
         let root = tmp();
         let body = "\

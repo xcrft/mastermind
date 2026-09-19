@@ -1903,7 +1903,7 @@ requires a passing reported result for every nonempty `verify[].cmd` and each
 recognized `VERIFY:`, `**VERIFY**:` or `**VERIFY:**` command line in the spec.
 Labels and ordinary shell fences do not declare machine-checked obligations.
 `verify-spec --strict` requires at least one such command; labels or blank
-`cmd` values cannot satisfy that requirement.
+`cmd` values or shell-comment declarations cannot satisfy that requirement.
 
 Only one normalized `##` heading may define each contract section. For example,
 `## Scope` and `## Scope *(MANDATORY)*` are a `duplicate_section` error rather

@@ -56,7 +56,25 @@ fn slugify(s: &str) -> String {
 }
 
 fn yaml_quote(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    let mut quoted = String::with_capacity(s.len() + 2);
+    quoted.push('"');
+    for character in s.chars() {
+        match character {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\t' => quoted.push_str("\\t"),
+            '\u{0008}' => quoted.push_str("\\b"),
+            '\u{000C}' => quoted.push_str("\\f"),
+            control if control.is_control() => {
+                quoted.push_str(&format!("\\u{:04X}", control as u32));
+            }
+            character => quoted.push(character),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 fn render_spec(description: &str, n: u32, mode: &Mode) -> String {
@@ -673,6 +691,18 @@ mod tests {
     fn yaml_quote_inner_double_quote() {
         let q = yaml_quote(r#"fix "broken" audit"#);
         assert_eq!(q, r#""fix \"broken\" audit""#);
+    }
+
+    #[test]
+    fn new_spec_escapes_control_text_before_frontmatter_extraction() {
+        let description = "first line\n---\nmode: strict\t\u{0007}";
+        let content = render_spec(description, 1, &Mode::Verified);
+        let parsed = mmcg::spec::parse_str("spec.md", &content);
+
+        assert!(parsed.frontmatter_error.is_none(), "{content}");
+        let frontmatter = parsed.frontmatter.unwrap();
+        assert_eq!(frontmatter.title.as_deref(), Some(description));
+        assert_eq!(frontmatter.mode.as_deref(), Some("verified"));
     }
 
     #[test]

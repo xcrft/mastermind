@@ -63,6 +63,10 @@ verifications:
 `phases` is the schema-v1 compatibility name for execution steps. New specs may
 use IDs such as `plan-1`; they do not need phase-shaped prose or checklists.
 
+For every `result: pass`, include `observed.exit_code: 0`. `tests_run` is
+optional when the command does not expose a reliable count. This is
+self-reported evidence only; it does not authenticate that the command ran.
+
 The machine source of truth is
 `schemas/executor-report-v1.schema.json` plus the stricter Rust consistency
 checks. Unknown fields, unsupported versions, duplicate step IDs, empty
@@ -85,8 +89,9 @@ commands, contradictory complete reports, and reports over 1 MiB fail closed.
   intended check. Match `verify[].cmd` and legacy `VERIFY:` declarations exactly
   apart from outside whitespace. Missing results or unsuccessful matching rows
   block completion; another passing row cannot conceal a failed run. Repeated
-  successful runs may have different excerpts or positive test counts. Optional
-  observations remain optional; coverage does not authenticate execution.
+  successful runs may have different excerpts or positive test counts. Every
+  pass includes `observed.exit_code: 0`; `tests_run` remains optional. The
+  receipt does not authenticate execution.
 
 ## Independent auditor output
 

@@ -63,7 +63,25 @@
           "result": { "enum": ["pass", "fail"] },
           "output_excerpt": { "type": "string" },
           "observed": { "$ref": "#/$defs/observed" }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": { "result": { "const": "pass" } },
+              "required": ["result"]
+            },
+            "then": {
+              "required": ["observed"],
+              "properties": {
+                "observed": {
+                  "type": "object",
+                  "required": ["exit_code"],
+                  "properties": { "exit_code": { "const": 0 } }
+                }
+              }
+            }
+          }
+        ]
       }
     }
   },

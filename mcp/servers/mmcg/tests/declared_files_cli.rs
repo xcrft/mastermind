@@ -99,7 +99,7 @@ impl Fixture {
         let value = json!({
             "schema_version": 1, "spec": SPEC, "status": "complete",
             "phases": [{"id": "1", "status": "done"}], "files_modified": files,
-            "claims": [], "defects": [], "verifications": [{"cmd": VERIFY, "result": "pass"}],
+            "claims": [], "defects": [], "verifications": [{"cmd": VERIFY, "result": "pass", "observed": {"exit_code": 0}}],
         });
         std::fs::write(
             self.spec().with_file_name("executor-report.md"),

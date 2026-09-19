@@ -58,11 +58,15 @@ verifications:
 - `defects`: concrete blockers with `kind`, `phase`, `details`, and
   `remediation_hint`. Kinds are recommended labels, not an enforced enum.
 - `verifications`: commands actually run, their `pass`/`fail` result, optional
-  short output, and optional observed exit/test counts.
+  short output, and observed exit/test counts. A `pass` must include
+  `observed.exit_code: 0`; `tests_run` remains optional because generic command
+  output does not always expose a reliable count. The self-reported exit code
+  makes the report internally consistent, not authenticated execution proof.
 
 ## Consistency rules
 
 - `complete` requires no defects, all steps `done`, and no failed verification.
+- Every passing verification requires `observed.exit_code: 0`.
 - `partial` and `failed` require at least one defect.
 - Empty step IDs, duplicate step IDs, empty paths, empty defect fields, and
   empty verification commands are invalid.

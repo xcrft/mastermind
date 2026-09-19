@@ -4082,7 +4082,7 @@ verify:
                 "schema_version": 1, "spec": spec_path.display().to_string(),
                 "status": "complete", "phases": [{"id": "1", "status": "done"}],
                 "files_modified": ["src/lib.py"], "claims": [], "defects": [],
-                "verifications": [{"cmd": "python3 -m py_compile src/lib.py", "result": "pass"}]
+                "verifications": [{"cmd": "python3 -m py_compile src/lib.py", "result": "pass", "observed": {"exit_code": 0}}]
             });
             fs::write(
                 spec_path.parent().unwrap().join("executor-report.md"),

@@ -212,6 +212,17 @@ impl TryFrom<CanonicalExecutorReport> for ExecutorReport {
             if verification.cmd.trim().is_empty() {
                 return Err("executor report verification command must not be empty".into());
             }
+            if matches!(verification.result, VerificationStatus::Pass)
+                && verification
+                    .observed
+                    .as_ref()
+                    .and_then(|observed| observed.exit_code)
+                    != Some(0)
+            {
+                return Err(
+                    "successful executor verification requires observed exit_code: 0".into(),
+                );
+            }
         }
         for claim in &report.claims {
             let (required, optional) = match claim {
@@ -587,6 +598,14 @@ mod tests {
         assert!(parse_str(&failed_verification)
             .unwrap_err()
             .contains("complete executor report must not contain failed verifications"));
+
+        let unobserved_verification = canonical_yaml("").replace(
+            "    observed:\n      exit_code: 0\n      tests_run: 12\n",
+            "",
+        );
+        assert!(parse_str(&unobserved_verification)
+            .unwrap_err()
+            .contains("successful executor verification requires observed exit_code: 0"));
 
         let pending_step = canonical_yaml("").replacen("status: done", "status: pending", 1);
         assert!(parse_str(&pending_step)

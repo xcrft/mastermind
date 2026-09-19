@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Canonical executor-report passes now require `observed.exit_code: 0`; an
+  unobserved pass cannot satisfy a required verification command. The receipt is
+  self-reported consistency evidence, not execution provenance.
 - Brief packets now retain bounded API-crossing candidates with component, seed,
   impacted symbol, depth, and omission coverage, so a public-boundary risk is
   not lost between change-impact analysis and role handoff.

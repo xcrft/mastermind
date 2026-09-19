@@ -552,6 +552,10 @@ function fixture() {
         total: 3,
         returned: 3,
         truncated: false,
+        precision_notes: [
+          "unreferenced_candidates_are_not_proven_dead_code",
+          "external_entry_points_and_runtime_registration_may_be_missing",
+        ],
         items: [
           { name: "unused_helper", kind: "function", file: "src/dead.rs", line: 9 },
           { name: "OldWidget", kind: "class", file: "src/old.rs", line: 2 },
@@ -1138,6 +1142,7 @@ async function main() {
   assert.match(auditHarness.nodes.get("audit-health").textContent, /Dead-code candidates/i);
   assert.match(auditHarness.nodes.get("audit-health").textContent, /unused_helper · function/i, "Health must list dead-code candidates");
   assert.doesNotMatch(auditHarness.nodes.get("audit-health").textContent, /Showing .* candidates/i, "Complete health results must not claim a bounded page");
+  assert.match(auditHarness.nodes.get("precision-list").textContent, /unreferenced_candidates_are_not_proven_dead_code/i, "Lens must retain the dead-code candidate caveat in the method ledger");
 
   assert.match(auditHarness.nodes.get("audit-change").textContent, /Churn × centrality/i);
   assert.match(auditHarness.nodes.get("audit-change").textContent, /src\/auth\.rs[\s\S]*9 commits × 5 in/i, "Change card must show both axes");

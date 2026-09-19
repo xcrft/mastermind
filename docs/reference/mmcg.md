@@ -764,8 +764,10 @@ change-hotspot, largest-file, and authorship windows expose truncation instead
 of presenting a capped page as complete.
 
 The four audit result collections report `total`, `returned`, `truncated`, and
-`truncation_reason`, and Lens includes them in the method ledger. Dead-code
-totals stay exact across the 100-symbol response cap. Largest-file totals
+`truncation_reason`, and Lens includes them in the method ledger. The dead-code
+collection also retains static-graph `precision_notes`, and each returned symbol
+carries language-specific edge precision; candidates are never deletion proof.
+Dead-code totals stay exact across the 100-symbol response cap. Largest-file totals
 become unknown when a cap-plus-one probe finds more than 20 ranked files.
 Change-hotspot totals become
 unknown when the 2,000-row centrality candidate window fills, because churn can

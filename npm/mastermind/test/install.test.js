@@ -197,17 +197,20 @@ test("installer rejects a bundle skill without a regular SKILL manifest before w
   }
 });
 
-test("bundle rejects names that would become paths on another platform", () => {
-  const f = fixture();
-  try {
-    fs.mkdirSync(path.join(f.share, "skills", "back\\slash"));
+test("bundle rejects names that are unsafe on another supported platform", () => {
+  for (const name of ["back\\slash", "aux", "skill:bad", "trailing."]) {
+    const f = fixture();
+    try {
+      fs.mkdirSync(path.join(f.share, "skills", name));
 
-    assert.throws(
-      () => bundled(f.share),
-      /unsafe skill name in workflow bundle/,
-    );
-  } finally {
-    f.cleanup();
+      assert.throws(
+        () => bundled(f.share),
+        /unsafe skill name in workflow bundle/,
+        name,
+      );
+    } finally {
+      f.cleanup();
+    }
   }
 });
 

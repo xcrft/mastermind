@@ -85,13 +85,18 @@ function packageVersion() {
   return JSON.parse(fs.readFileSync(PACKAGE_JSON, "utf8")).version;
 }
 
+const WINDOWS_DEVICE_NAME = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
+const PORTABLE_NAME_FORBIDDEN = /[<>:"/\\|?*]/;
+
 function safeName(name, kind) {
   if (
     !name
     || name === "."
     || name === ".."
     || path.basename(name) !== name
-    || name.includes("\\")
+    || PORTABLE_NAME_FORBIDDEN.test(name)
+    || /[. ]$/.test(name)
+    || WINDOWS_DEVICE_NAME.test(name)
     || /[\u0000-\u001f\u007f]/.test(name)
   ) {
     throw new Error(`unsafe ${kind} name in workflow bundle: ${JSON.stringify(name)}`);

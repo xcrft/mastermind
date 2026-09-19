@@ -1127,6 +1127,12 @@ fn render_change_impact_text(response: ChangeImpactTextView<'_>) -> String {
             safe_text(&response.disciplines.note)
         ));
     }
+    if let Some(reason) = &response.disciplines.scope_incomplete_reason {
+        output.push_str(&format!(
+            "  scope incomplete — disciplines derive from returned changed files ({})\n",
+            safe_text(reason)
+        ));
+    }
     output.push_str("\nPrecision notes\n");
     for note in response.precision_notes {
         output.push_str(&format!("  {}\n", safe_text(note)));
@@ -1748,6 +1754,7 @@ mod map_tests {
             }],
             unclassified: vec!["unknown.file".into()],
             note: "Review the returned paths.".into(),
+            scope_incomplete_reason: None,
         };
         let precision_notes = vec!["syntax_only".into()];
         let response = ChangeImpactTextView {

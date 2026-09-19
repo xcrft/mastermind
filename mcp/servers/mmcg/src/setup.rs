@@ -841,12 +841,36 @@ fn run_native(request: &Request, entry: &Value) -> Outcome {
         }
     }
     if request.remove {
-        return finish_outcome(request, "native", "remove", entry, Outcome::Wrote);
+        return match native_inspect(request.client, &program, &identity, entry) {
+            Ok(NativeState::Absent) => {
+                finish_outcome(request, "native", "remove", entry, Outcome::Wrote)
+            }
+            Ok(_) => finish_error(
+                request,
+                "native",
+                "remove",
+                entry,
+                "native_remove_not_confirmed",
+            ),
+            Err(class) => finish_error(request, "native", "remove", entry, &class),
+        };
     }
     let add_args = native_add_args(request.client, entry);
     match run_native_checked(&program, &identity, &add_args) {
         Ok(output) if output.status.success() => {
-            finish_outcome(request, "native", "install", entry, Outcome::Wrote)
+            match native_inspect(request.client, &program, &identity, entry) {
+                Ok(NativeState::Canonical(_)) => {
+                    finish_outcome(request, "native", "install", entry, Outcome::Wrote)
+                }
+                Ok(_) => finish_error(
+                    request,
+                    "native",
+                    "install",
+                    entry,
+                    "native_install_not_confirmed",
+                ),
+                Err(class) => finish_error(request, "native", "install", entry, &class),
+            }
         }
         _ => finish_error(request, "native", "install", entry, "native_add_failed"),
     }
@@ -2971,6 +2995,40 @@ mod tests {
             native_matches(Client::Codex, &codex_disabled, &entry).unwrap(),
             NativeState::Customized(_)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_writes_require_observed_postconditions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tmp("native-postcondition");
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let executable = bin.join("codex");
+        fs::write(
+            &executable,
+            "#!/bin/sh\nSTATE_FILE=\"$0.state\"\nif [ \"$2\" = \"get\" ]; then [ -f \"$STATE_FILE\" ] || exit 1; printf '%s\\n' '{\"name\":\"mmcg\",\"enabled\":true,\"transport\":{\"type\":\"stdio\",\"command\":\"/bin/mmcg\",\"args\":[\"serve\"]}}'; exit 0; fi\nif [ \"$2\" = \"add\" ] || [ \"$2\" = \"remove\" ]; then exit 0; fi\nexit 1\n",
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let _native_bin = TestNativeBinGuard::new(bin);
+        let mut request = Request {
+            client: Client::Codex,
+            scope: Scope::User,
+            root: root.clone(),
+            config: None,
+            write: true,
+            remove: false,
+            force: false,
+        };
+
+        assert_eq!(run(&request, Path::new("/bin/mmcg")), Outcome::Error);
+
+        fs::write(executable.with_extension("state"), b"canonical").unwrap();
+        request.remove = true;
+        assert_eq!(run(&request, Path::new("/bin/mmcg")), Outcome::Error);
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

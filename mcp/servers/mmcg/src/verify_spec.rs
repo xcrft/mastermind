@@ -234,7 +234,7 @@ fn render_finding(f: &Finding) -> String {
             spec_says,
             index_says,
         } => {
-            format!("snapshot_drift: spec says {symbol} has {spec_says} callers, index says {index_says} — refresh the snapshot caller count")
+            format!("snapshot_caller_count_drift: spec says {symbol} has {spec_says} callers, index says {index_says} — refresh the snapshot caller count")
         }
         Finding::SnapshotSignatureDrift {
             symbol,
@@ -706,6 +706,19 @@ mod tests {
     use crate::spec;
     use std::fs;
     use std::path::PathBuf;
+
+    #[test]
+    fn snapshot_caller_count_text_uses_the_serialized_finding_kind() {
+        let finding = Finding::SnapshotCallerCountDrift {
+            symbol: "submit".into(),
+            spec_says: 1,
+            index_says: 2,
+        };
+        let value = serde_json::to_value(&finding).unwrap();
+
+        assert_eq!(value["kind"], "snapshot_caller_count_drift");
+        assert!(render_finding(&finding).starts_with("snapshot_caller_count_drift:"));
+    }
 
     fn tmp() -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};

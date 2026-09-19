@@ -1,8 +1,8 @@
 ---
 name: mastermind-frontend-audit
-description: Read-only review of a finished UI change against the codegraph — a component nothing renders, a props contract changed without its callers, a reinvented component, or a raw value where the design system has a token. Use after implementing React or Vue work; triggers "review this UI change", "check the component", or a finished frontend diff.
+description: Read-only review of a finished UI change against the codegraph — a component with no confirmed renderer, a props contract changed without its callers, a reinvented component, or a raw value where the design system has a token. Use after implementing React or Vue work; triggers "review this UI change", "check the component", or a finished frontend diff.
 metadata:
-  version: 0.1.0
+  version: 0.1.1
   authors:
     - mastermind
   tags:
@@ -33,17 +33,18 @@ shows what the rest of the codebase expects.
 
 ## The four checks
 
-### 1. A component nothing renders
+### 1. A component with no confirmed renderer
 
 For every component the change added, `mmcg_callers <Name>` gives the components
-that render it. Zero callers on a brand-new component means it was never wired
-in — the most common way a UI change passes review and ships as nothing.
+that statically render it. Zero callers makes missing wiring a hypothesis, not a
+finding: the graph cannot see every renderer registration.
 
-Do not report this as dead code. Check the paths the graph cannot see first: a
+Do not report it as dead code. Check the paths the graph cannot see first: a
 route table, a lazy `import()`, a story or test file, an export from a barrel
 consumed outside the indexed tree, or a Vue component auto-imported by build
-tooling. If one of those explains it, the finding is `could_not_verify`, not a
-defect.
+tooling. If one of those explains it, drop the finding; if that registration
+cannot be inspected, report `could_not_verify`. Report an unrendered defect only
+after the static zero and those checks establish no renderer.
 
 ### 2. A props contract changed without its callers
 
@@ -78,8 +79,9 @@ is.
 ## Evidence rule
 
 **A finding names the file, the line, and the query result that establishes it.**
-"`Card` has no callers" is a claim; "`mmcg_callers Card` → 0, and `Card` appears
-in no route table or story file" is a finding. Without the query, downgrade it to
+"`Card` has no callers" is a claim; "`mmcg_callers Card` → 0, and no inspected
+route, lazy registration, story, barrel, or auto-import wiring renders `Card`"
+is a finding. Without the query or those checks, downgrade it to
 `could_not_verify` or drop it.
 
 ## Restraint

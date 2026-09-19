@@ -880,6 +880,9 @@ fn check_mcp_config_at(root: &Path, home: Option<&Path>, canonical: &serde_json:
                 .transpose()
                 .map(Option::flatten)
         }) {
+            Ok(Some(entry)) if entry.get("enabled") == Some(&serde_json::Value::Bool(false)) => {
+                "disabled"
+            }
             Ok(Some(entry)) if mcp_entries_equivalent(&entry, canonical) => {
                 canonical_found = true;
                 "canonical"
@@ -959,10 +962,18 @@ fn parse_codex_mmcg(bytes: &[u8]) -> Result<Option<serde_json::Value>, String> {
                 .ok_or_else(|| "invalid_codex_args".to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(Some(serde_json::json!({
+    let mut entry = serde_json::json!({
         "command": command,
         "args": args,
-    })))
+    });
+    match mmcg.get("enabled") {
+        None | Some(toml::Value::Boolean(true)) => {}
+        Some(toml::Value::Boolean(false)) => {
+            entry["enabled"] = serde_json::Value::Bool(false);
+        }
+        Some(_) => return Err("invalid_codex_enabled".into()),
+    }
+    Ok(Some(entry))
 }
 
 /// Spawn `mmcg --index <db> serve`, write `initialize` + `tools/list`, read
@@ -1816,6 +1827,32 @@ mod tests {
             let check = check_mcp_config_at(&root, Some(&home), &canonical);
             assert_eq!(check.status, Status::Ok, "{}", check.message);
             assert!(check.message.contains("codex-user=canonical"));
+            fs::remove_dir_all(root).ok();
+            fs::remove_dir_all(home).ok();
+        }
+    }
+
+    #[test]
+    fn check_mcp_config_rejects_disabled_or_wrong_typed_codex_server() {
+        let canonical = serde_json::json!({"command": "/trusted/mmcg", "args": ["serve"]});
+        for (enabled, expected) in [
+            ("false", "codex-user=disabled"),
+            ("\"false\"", "codex-user=malformed"),
+        ] {
+            let root = tmp().canonicalize().unwrap();
+            let home = tmp().canonicalize().unwrap();
+            let codex = home.join(".codex/config.toml");
+            fs::create_dir_all(codex.parent().unwrap()).unwrap();
+            fs::write(
+                codex,
+                format!(
+                    "[mcp_servers.mmcg]\ncommand = '/trusted/mmcg'\nargs = ['serve']\nenabled = {enabled}\n"
+                ),
+            )
+            .unwrap();
+            let check = check_mcp_config_at(&root, Some(&home), &canonical);
+            assert_eq!(check.status, Status::Warn, "{}", check.message);
+            assert!(check.message.contains(expected), "{}", check.message);
             fs::remove_dir_all(root).ok();
             fs::remove_dir_all(home).ok();
         }

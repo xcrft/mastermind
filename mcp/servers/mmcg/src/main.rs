@@ -1139,6 +1139,11 @@ fn index_path_for_root(explicit: Option<&std::path::Path>, root: &std::path::Pat
         .unwrap_or_else(|| root.join(".mastermind/mmcg.db"))
 }
 
+fn canonical_root(root: PathBuf) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    root.canonicalize()
+        .map_err(|error| format!("canonicalize {}: {error}", root.display()).into())
+}
+
 fn open_enrichment_store(
     index_path: &std::path::Path,
 ) -> Result<Store, Box<dyn std::error::Error>> {
@@ -1666,9 +1671,7 @@ fn run_cli_inner(
             mmcg::watcher::run(root, store)?;
         }
         Cmd::Status { root } => {
-            let root = root
-                .canonicalize()
-                .unwrap_or_else(|_| std::env::current_dir().unwrap_or(root));
+            let root = canonical_root(root)?;
             let index_path = index_path_for_root(index_override.as_deref(), &root);
             let ws = mmcg::workflow_status::WorkflowStatus::scan_with_index(&root, &index_path);
             print!("{}", ws.render_text());
@@ -1691,17 +1694,13 @@ fn run_cli_inner(
             commands::query::dispatch_why(&query, top, &index_path)?;
         }
         Cmd::Next { root } => {
-            let root = root
-                .canonicalize()
-                .unwrap_or_else(|_| std::env::current_dir().unwrap_or(root));
+            let root = canonical_root(root)?;
             let index_path = index_path_for_root(index_override.as_deref(), &root);
             let ws = mmcg::workflow_status::WorkflowStatus::scan_with_index(&root, &index_path);
             print!("{}", ws.render_next_text());
         }
         Cmd::Resume { root, task } => {
-            let root = root
-                .canonicalize()
-                .unwrap_or_else(|_| std::env::current_dir().unwrap_or(root));
+            let root = canonical_root(root)?;
             let index_path = index_path_for_root(index_override.as_deref(), &root);
             let ws = mmcg::workflow_status::WorkflowStatus::scan_with_index(&root, &index_path);
             print!("{}", ws.render_resume_text(task.as_deref()));
@@ -2053,6 +2052,20 @@ mod tests {
             index_path_for_root(Some(std::path::Path::new("custom/index.db")), root),
             PathBuf::from("custom/index.db")
         );
+    }
+
+    #[test]
+    fn root_scoped_workflow_commands_reject_a_missing_root() {
+        let missing = std::env::temp_dir().join(format!(
+            "mmcg-missing-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(!missing.exists());
+        assert!(canonical_root(missing).is_err());
     }
 
     #[test]

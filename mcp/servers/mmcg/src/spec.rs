@@ -407,6 +407,17 @@ pub fn parse_str(source_path: &str, body: &str) -> ParsedSpec {
     }
 }
 
+/// Markdown content after a leading YAML frontmatter block. Unterminated
+/// frontmatter has no trustworthy Markdown body.
+pub fn markdown_body(body: &str) -> &str {
+    let (_, error, remainder) = extract_frontmatter(body);
+    if error.as_deref() == Some("frontmatter_unterminated") {
+        ""
+    } else {
+        remainder
+    }
+}
+
 /// Split a `---\n...\n---\n` block off the top. Returns parsed frontmatter
 /// (None if absent or unparseable), any contract error and the body remainder.
 ///
@@ -1130,6 +1141,15 @@ fn decoy() {}
 
         assert_eq!(s.duplicate_section_keys, vec!["goals"]);
         assert_eq!(section_body(&s, "Goals"), Some("- First outcome"));
+    }
+
+    #[test]
+    fn markdown_body_excludes_frontmatter_comments() {
+        let body =
+            "---\n# Metadata comment, not a Markdown title\nmode: verified\n---\n# Actual title\n";
+
+        assert_eq!(markdown_body(body), "# Actual title\n");
+        assert_eq!(markdown_body("---\n# Unterminated metadata"), "");
     }
 
     #[test]

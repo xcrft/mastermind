@@ -1165,6 +1165,7 @@ fn brief_is_partial(packet: &queries::BriefPacket) -> bool {
         || brief_collection_is_partial(&packet.changes.files, &packet.omitted.changed_files)
         || brief_collection_is_partial(&packet.changes.symbols, &packet.omitted.changed_symbols)
         || brief_collection_is_partial(&packet.callers, &packet.omitted.callers)
+        || brief_collection_is_partial(&packet.api_crossings, &packet.omitted.api_crossings)
         || brief_collection_is_partial(&packet.tests, &packet.omitted.tests)
         || brief_collection_is_partial(&packet.citations, &packet.omitted.history_citations)
 }
@@ -1241,6 +1242,11 @@ pub fn render_brief(
         "impacted callers",
         &packet.callers,
         &packet.omitted.callers,
+    ));
+    output.push_str(&brief_coverage_line(
+        "API crossings",
+        &packet.api_crossings,
+        &packet.omitted.api_crossings,
     ));
     output.push_str(&brief_coverage_line(
         "candidate tests",
@@ -1340,6 +1346,24 @@ pub fn render_brief(
             if seed_summary.is_empty() { "none" } else { &seed_summary },
             caller.name_collision_count,
             safe_text(&caller.edge_precision.join(", "))
+        ));
+    }
+    output.push_str("\nAPI crossings\n");
+    for crossing in &packet.api_crossings.items {
+        output.push_str(&format!(
+            "  {} :: {} {} — {}:{} ({}) -> {} :: {} {} — {}:{} (depth {})\n",
+            safe_text(&crossing.changed_component),
+            safe_text(&crossing.seed.kind),
+            safe_text(&crossing.seed.name),
+            safe_text(&crossing.seed.file),
+            crossing.seed.line,
+            safe_text(&crossing.seed.change),
+            safe_text(&crossing.impacted_component),
+            safe_text(&crossing.impacted.kind),
+            safe_text(&crossing.impacted.name),
+            safe_text(&crossing.impacted.file),
+            crossing.impacted.line,
+            crossing.minimum_depth
         ));
     }
     output.push_str("\nCandidate tests\n");
@@ -1970,6 +1994,25 @@ mod map_tests {
                     "targets:name_based_candidates".into(),
                 ],
             }]),
+            api_crossings: complete_brief_collection(vec![queries::BriefApiCrossing {
+                seed: queries::BriefSeed {
+                    file: "src/target.rs".into(),
+                    name: "target".into(),
+                    kind: "function".into(),
+                    line: 7,
+                    change: "body_changed".into(),
+                    name_resolution_count: Some(2),
+                },
+                changed_component: "core".into(),
+                impacted: queries::BriefSymbol {
+                    file: "api/consumer.rs".into(),
+                    name: "boundary".into(),
+                    kind: "function".into(),
+                    line: 11,
+                },
+                impacted_component: "api".into(),
+                minimum_depth: 1,
+            }]),
             tests: complete_brief_collection(vec![queries::BriefTest {
                 file: "tests/api.rs".into(),
                 name: "checks_api".into(),
@@ -2003,6 +2046,7 @@ mod map_tests {
                 },
                 changed_symbols: exact_brief_omission(),
                 callers: exact_brief_omission(),
+                api_crossings: exact_brief_omission(),
                 tests: exact_brief_omission(),
                 history_citations: exact_brief_omission(),
             },
@@ -2011,6 +2055,7 @@ mod map_tests {
                 changed_symbols: 100,
                 callers: 100,
                 caller_seeds: 8,
+                api_crossings: 50,
                 tests: 50,
                 test_evidence: 8,
                 history_citations: 10,
@@ -2037,6 +2082,9 @@ mod map_tests {
         ));
         assert!(text.contains(
             "function caller — src/api.rs:19 (depth 1; seeds 1/2 truncated: function target — src/target.rs:7 (body_changed); name collisions 2; edge precision medium:syntactic, targets:name_based_candidates)"
+        ));
+        assert!(text.contains(
+            "core :: function target — src/target.rs:7 (body_changed) -> api :: function boundary — api/consumer.rs:11 (depth 1)"
         ));
         assert!(text.contains(
             "test checks_api — tests/api.rs:31 (heuristic, low, depth unknown; evidence 1/2 truncated: same_component_test_filename: src)"

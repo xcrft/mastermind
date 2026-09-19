@@ -1587,7 +1587,7 @@ contract is current.
 logical `structuredContent` packet; text is only a rendering of those fields.
 The fixed schema-v1 fields are `repository_content_untrusted`, `role`,
 `freshness`, `baseline`, `scope`, `budget`, `changes`, `disciplines`,
-`callers`, `tests`, `history`, `citations`, `omitted`, `limits`, and
+`callers`, `api_crossings`, `tests`, `history`, `citations`, `omitted`, `limits`, and
 `precision_notes` (plus `schema_version`). `disciplines` carries the number of
 change-impact paths classified before brief-budget admission, detected rule
 names, rule bases, changed-file counts, the unclassified count, and any
@@ -1602,13 +1602,16 @@ truncation state, its name-collision count, and source-language edge precision
 from change impact. A brief can therefore show both why an impact candidate was
 selected and where its relationship remains low precision. An unknown source
 total is printed as unknown and a non-exact source omission as a lower bound.
+API-crossing rows preserve the changed seed, changed and impacted components,
+impacted symbol, and minimum static depth. They remain structural candidates,
+not a runtime boundary proof.
 Each candidate test likewise retains up to eight direct, transitive, or
 same-component evidence records with exact count and truncation state, so a
 classification is not separated from the static relation that produced it.
 
 Candidate caps are 100 changed files, 100 changed symbols, 100 callers, eight
-seeds per caller, 50 tests, eight evidence records per test, 10 history
-citations, and eight derived history terms. Discipline labels
+seeds per caller, 50 API crossings, 50 tests, eight evidence records per test,
+10 history citations, and eight derived history terms. Discipline labels
 are fixed path-classifier metadata and stay in every admitted packet; when the
 change-file scope is incomplete, their `scope_incomplete_reason` keeps the
 brief partial. History performs

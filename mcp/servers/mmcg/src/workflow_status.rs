@@ -5111,6 +5111,11 @@ fn detect_phase(
         if s.status == "approved" && executor_report_is_regular {
             return TaskPhase::AwaitingAudit;
         }
+        if matches!(s.status.as_str(), "learned" | "history_review_required")
+            && s.history_snapshot_sha256.is_none()
+        {
+            return TaskPhase::AwaitingAudit;
+        }
         return match s.status.as_str() {
             "history_review_required" => TaskPhase::AwaitingHistoryReview,
             "learned"
@@ -6269,22 +6274,30 @@ mod tests {
 
         assert_eq!(
             detect_phase(&spec_path, None, Some(&state), false),
+            TaskPhase::AwaitingAudit
+        );
+
+        state.status = "history_review_required".into();
+        assert_eq!(
+            detect_phase(&spec_path, None, Some(&state), false),
+            TaskPhase::AwaitingAudit
+        );
+
+        state.status = "learned".into();
+        state.history_snapshot_sha256 = Some("current".into());
+        assert_eq!(
+            detect_phase(&spec_path, None, Some(&state), false),
             TaskPhase::AwaitingHistoryReview
         );
 
         fs::write(
             task_dir.join("history-review.md"),
-            "- **Context:** not applicable\n- **Lesson:** updated\n- **Reason:** captured the retry invariant\n",
+            "- **Audit snapshot:** current\n- **Context:** not applicable\n- **Lesson:** updated\n- **Reason:** captured the retry invariant\n",
         )
         .unwrap();
         assert_eq!(
             detect_phase(&spec_path, None, Some(&state), false),
             TaskPhase::Complete
-        );
-        state.history_snapshot_sha256 = Some("current".into());
-        assert_eq!(
-            detect_phase(&spec_path, None, Some(&state), false),
-            TaskPhase::AwaitingHistoryReview
         );
         fs::write(task_dir.join("history-review.md"), "- **Audit snapshot:** foreign\n- **Context:** updated\n- **Lesson:** not applicable\n- **Reason:** reviewed\n").unwrap();
         assert_eq!(

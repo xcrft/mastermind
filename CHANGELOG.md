@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Workflow status no longer reports a learned or history-review task as
+  complete when its audit snapshot binding is missing; it now routes that
+  state back through post-flight audit.
 - Workflow-audit text and documentation now distinguish complete inventory
   collection from diagnostic-free wiring, runtime execution, and acceptance.
 - Audit file-scope and executor-report file findings now use deterministic path

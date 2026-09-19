@@ -2698,6 +2698,8 @@ pub fn change_impact(
 
     let mut precision_notes = impact_precision_notes();
     precision_notes.push("focused_tests_do_not_replace_full_gate".into());
+    precision_notes
+        .push("test_candidates_are_static_and_do_not_prove_execution_or_assertion_coverage".into());
     if !seed_name_resolution_counts.is_empty() {
         precision_notes.push(
             "same_named_seed_definitions_are_candidate_attribution_until_definition_resolved"
@@ -9645,6 +9647,10 @@ fn checks_value() { assert_eq!(value(), 1); }
         assert!(response
             .precision_notes
             .contains(&"focused_tests_do_not_replace_full_gate".to_string()));
+        assert!(response.precision_notes.contains(
+            &"test_candidates_are_static_and_do_not_prove_execution_or_assertion_coverage"
+                .to_string()
+        ));
         assert!(response
             .precision_notes
             .contains(&"empty_result_does_not_prove_no_dependencies".to_string()));

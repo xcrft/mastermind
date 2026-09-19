@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Change and test-impact JSON now carry a precision note that candidate
+  classification does not prove execution or assertion coverage, matching the
+  test-audit contract for every API consumer.
 - The executor and independent auditor can now follow omitted or relevant brief
   history with `mmcg_history`, then read the cited Markdown instead of treating
   the bounded initial citation set as complete research.

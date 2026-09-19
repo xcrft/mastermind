@@ -59,6 +59,9 @@ pub enum Verdict {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Finding {
+    /// A YAML frontmatter block was present but invalid, so its contract cannot
+    /// be weakened into legacy prose heuristics.
+    InvalidFrontmatter { reason: String },
     /// File differs from the baseline (committed or not) but the spec didn't
     /// mention it.
     UnexpectedFile { file: String },
@@ -227,7 +230,8 @@ impl Report {
                 | Finding::SnapshotSignatureDrift { .. }
                 | Finding::PlannedTestNotAdded { .. }
                 | Finding::VacuousTestClaim { .. } => "⚠️ ",
-                Finding::DeclaredFileUnavailable { .. }
+                Finding::InvalidFrontmatter { .. }
+                | Finding::DeclaredFileUnavailable { .. }
                 | Finding::SnapshotSymbolGone { .. }
                 | Finding::SnapshotUnresolved { .. }
                 | Finding::RemovedSymbolNotAcknowledged { .. }
@@ -282,6 +286,9 @@ pub fn render_finding_text(f: &Finding) -> String {
 
 fn render_finding(f: &Finding) -> String {
     match f {
+        Finding::InvalidFrontmatter { reason } => {
+            format!("invalid_frontmatter: {reason} — repair the YAML contract")
+        }
         Finding::UnexpectedFile { file } => {
             format!("unexpected_file: `{file}` changed but not in spec → scope creep")
         }
@@ -482,6 +489,11 @@ fn run_internal(
     .map_err(|error| diff::worktree_scope_error(git_ref, error))?;
     let symbol_diff = &worktree.diff;
     let mut findings: Vec<Finding> = Vec::new();
+    if let Some(reason) = &spec.frontmatter_error {
+        findings.push(Finding::InvalidFrontmatter {
+            reason: reason.clone(),
+        });
+    }
     let removal_plan = spec_removals::Plan::build(
         spec,
         repo_root,
@@ -611,6 +623,7 @@ fn run_internal(
         for removed in &symbol_diff.removed {
             if removed.kind != "module"
                 && (spec.frontmatter.is_some()
+                    || spec.frontmatter_error.is_some()
                     || !spec_body_lower.contains(&removed.name.to_lowercase()))
             {
                 findings.push(Finding::RemovedSymbolNotAcknowledged {
@@ -1646,7 +1659,8 @@ fn compute_verdict(findings: &[Finding]) -> Verdict {
     if findings.iter().any(|f| {
         matches!(
             f,
-            Finding::DeclaredFileUnavailable { .. }
+            Finding::InvalidFrontmatter { .. }
+                | Finding::DeclaredFileUnavailable { .. }
                 | Finding::SnapshotSymbolGone { .. }
                 | Finding::SnapshotUnresolved { .. }
                 | Finding::RemovedSymbolNotAcknowledged { .. }
@@ -1850,6 +1864,16 @@ mod tests {
 
         assert_eq!(value["kind"], "observed_exit_code_non_zero");
         assert!(render_finding_text(&finding).starts_with("observed_exit_code_non_zero:"));
+    }
+
+    #[test]
+    fn invalid_frontmatter_breaks_an_audit() {
+        assert_eq!(
+            compute_verdict(&[Finding::InvalidFrontmatter {
+                reason: "frontmatter_invalid".into(),
+            }]),
+            Verdict::Broken
+        );
     }
 
     #[test]

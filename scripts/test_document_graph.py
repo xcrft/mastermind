@@ -713,6 +713,42 @@ class DocumentGraphTests(unittest.TestCase):
             self.root.rmdir()
             replacement.rename(self.root)
 
+    def test_git_clean_exit_drains_briefly_and_kills_owned_descendants(self):
+        repository = graph.Repository(self.root)
+        self.addCleanup(repository.close)
+        with tempfile.TemporaryDirectory(prefix="document-graph-git-child-") as temporary:
+            pid_file = Path(temporary) / "child.pid"
+            original = subprocess.Popen
+            child_code = "import time; time.sleep(10)"
+            parent_code = (
+                "from pathlib import Path; import subprocess, sys; "
+                f"child = subprocess.Popen([sys.executable, '-c', {child_code!r}]); "
+                f"Path({str(pid_file)!r}).write_text(str(child.pid), encoding='ascii')"
+            )
+            command = [sys.executable, "-c", parent_code]
+
+            try:
+                with patch.object(graph.subprocess, "Popen",
+                                  side_effect=lambda *_args, **kwargs: original(command, **kwargs)), \
+                        patch.object(graph, "GIT_TIMEOUT", 0.5):
+                    self.assertEqual(repository.git(["rev-parse", "HEAD"]), b"")
+                child = int(pid_file.read_text(encoding="ascii"))
+                deadline = graph.time.monotonic() + 1
+                while True:
+                    try:
+                        os.kill(child, 0)
+                    except ProcessLookupError:
+                        break
+                    if graph.time.monotonic() >= deadline:
+                        self.fail("Git helper descendant survived process-group cleanup")
+                    graph.time.sleep(0.01)
+            finally:
+                if pid_file.exists():
+                    try:
+                        os.kill(int(pid_file.read_text(encoding="ascii")), 9)
+                    except ProcessLookupError:
+                        pass
+
     def test_missing_promised_git_objects_do_not_trigger_fetch_or_object_writes(self):
         with tempfile.TemporaryDirectory(prefix="document-graph-promisor-") as temporary:
             remote = Path(temporary) / "remote.git"

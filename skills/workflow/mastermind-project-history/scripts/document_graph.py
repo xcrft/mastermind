@@ -14,6 +14,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import selectors
+import signal
 import stat
 import subprocess
 import sys
@@ -35,6 +36,7 @@ CORPUS_PATH_COMPONENT_LIMIT = 32
 CORPUS_TIMEOUT = 10
 GIT_OUTPUT_LIMIT = 1024 * 1024
 GIT_TIMEOUT = 5
+GIT_DRAIN_GRACE = 0.2
 RELATIONS = {
     "supersedes", "documents", "constrains", "supports", "contradicts", "verified_by", "mentions"
 }
@@ -477,19 +479,29 @@ class Repository:
                    "-c", "protocol.allow=never", *arguments]
         try:
             process = subprocess.Popen(command, cwd=self.root, env=environment,
-                                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                       start_new_session=True)
         except OSError as error:
             raise GraphError("git_unavailable") from error
         output = bytearray()
         deadline = time.monotonic() + GIT_TIMEOUT
+        exited_at = None
         try:
             with selectors.DefaultSelector() as selector:
                 selector.register(process.stdout, selectors.EVENT_READ)
                 while selector.get_map():
-                    remaining = deadline - time.monotonic()
+                    now = time.monotonic()
+                    if process.poll() is not None:
+                        exited_at = exited_at or now
+                        # A Git helper can inherit stdout after Git itself exits.
+                        # Drain briefly, then return Git's result and terminate the
+                        # owned process group in finally.
+                        if now - exited_at > GIT_DRAIN_GRACE:
+                            break
+                    remaining = deadline - now
                     if remaining <= 0:
                         raise GraphError("git_timeout")
-                    for key, _ in selector.select(remaining):
+                    for key, _ in selector.select(min(remaining, 0.05)):
                         chunk = os.read(key.fileobj.fileno(), 65536)
                         if not chunk:
                             selector.unregister(key.fileobj)
@@ -502,10 +514,13 @@ class Repository:
         except subprocess.TimeoutExpired as error:
             raise GraphError("git_timeout") from error
         finally:
-            if process.poll() is None:
-                process.kill()
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (PermissionError, ProcessLookupError):
+                pass
+            finally:
                 process.wait()
-            process.stdout.close()
+                process.stdout.close()
         self.assert_root_binding()
         return bytes(output)
 

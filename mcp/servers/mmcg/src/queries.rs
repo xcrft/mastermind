@@ -1228,6 +1228,19 @@ pub fn bounded_symbol_diff_response(
 pub const CHANGE_SEED_LIMIT: usize = 200;
 pub const IMPACT_ROW_LIMIT: usize = 5_000;
 
+fn graph_seed_limit_reason(
+    unique_names: usize,
+    changed_definitions: usize,
+) -> Option<&'static str> {
+    if unique_names > CHANGE_SEED_LIMIT {
+        Some("changed_seed_work_limit")
+    } else if changed_definitions > CHANGE_SEED_LIMIT {
+        Some("changed_seed_evidence_work_limit")
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Collection<T> {
     pub total: Option<u32>,
@@ -2625,7 +2638,8 @@ pub fn change_impact(
                 .into(),
         );
     }
-    let graph_seed_overflow = seed_names.len() > CHANGE_SEED_LIMIT;
+    let seed_limit_reason = graph_seed_limit_reason(seed_names.len(), seed_evidence.len());
+    let graph_seed_overflow = seed_limit_reason.is_some();
     let graph_had_parent_budget = store.work_budget_depth() > 0;
     let graph_interrupt_before = store.interrupt_source();
     let (graph_total, graph_rows, graph_budget_exhausted) =
@@ -2650,8 +2664,8 @@ pub fn change_impact(
         };
     let graph_overflow =
         graph_seed_overflow || graph_budget_exhausted || graph_total > IMPACT_ROW_LIMIT as u32;
-    if graph_seed_overflow {
-        precision_notes.push("changed_seed_work_limit".to_string());
+    if let Some(reason) = seed_limit_reason {
+        precision_notes.push(reason.to_string());
     } else if graph_total > IMPACT_ROW_LIMIT as u32 {
         precision_notes.push("graph_work_limit".to_string());
     }
@@ -9341,6 +9355,19 @@ fn checks_value() { assert_eq!(value(), 1); }
             Some("work_limit")
         );
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn graph_seed_limit_covers_changed_definitions_with_shared_names() {
+        assert_eq!(graph_seed_limit_reason(1, CHANGE_SEED_LIMIT), None);
+        assert_eq!(
+            graph_seed_limit_reason(1, CHANGE_SEED_LIMIT + 1),
+            Some("changed_seed_evidence_work_limit")
+        );
+        assert_eq!(
+            graph_seed_limit_reason(CHANGE_SEED_LIMIT + 1, 1),
+            Some("changed_seed_work_limit")
+        );
     }
 
     #[test]

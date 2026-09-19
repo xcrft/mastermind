@@ -603,6 +603,16 @@ pub fn history_review_complete_for_snapshot(review_path: &Path, snapshot: Option
     history_review_body_complete(&body, snapshot)
 }
 
+/// A lifecycle state can be terminal only when its completed review is bound to
+/// the exact snapshot recorded in that state. `history_review_complete` keeps
+/// accepting unbound legacy review files for standalone callers.
+fn bound_history_review_complete(review_path: &Path, snapshot: Option<&str>) -> bool {
+    let Some(snapshot) = snapshot else {
+        return false;
+    };
+    history_review_complete_for_snapshot(review_path, Some(snapshot))
+}
+
 pub(crate) fn history_review_body_complete(body: &str, snapshot: Option<&str>) -> bool {
     let Some(fields) = history_review_fields(body) else {
         return false;
@@ -1804,7 +1814,7 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts)
     if !opts.post_only {
         if let Some(state) = existing.as_ref() {
             let review_path = history_review_file_path(repo_root, spec_path);
-            let review_complete = history_review_complete_for_snapshot(
+            let review_complete = bound_history_review_complete(
                 &review_path,
                 state.history_snapshot_sha256.as_deref(),
             );
@@ -1861,7 +1871,7 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts)
                         .ok()
                         .as_ref()
                         != state.history_snapshot_sha256.as_ref()
-                        || !history_review_complete_for_snapshot(
+                        || !bound_history_review_complete(
                             &review_path,
                             state.history_snapshot_sha256.as_deref(),
                         )
@@ -2992,6 +3002,8 @@ verifications: []\n\
             &path,
             Some("foreign")
         ));
+        assert!(!bound_history_review_complete(&path, None));
+        assert!(bound_history_review_complete(&path, Some("current")));
         fs::OpenOptions::new()
             .write(true)
             .open(&path)

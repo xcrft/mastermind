@@ -197,7 +197,9 @@ manifest. All other inherited environment variables are cleared. Each trial
 gets fresh HOME, XDG and temporary directories. A batch-level lock allows only
 one active attempt and requires every earlier planned result before the next
 trial can start. An out-of-order or overlapping command is rejected before that
-trial's one-shot `run.lock` is created. Each result links the hash of its
+trial's one-shot `run.lock` is created. The runner holds the batch directory
+while acquiring this lock and rejects a replaced batch root before an attempt
+can start. Each result links the hash of its
 predecessor, so offline review can verify a complete execution chain. A crash
 after claiming an attempt leaves the batch incomplete; it does not permit a
 selective retry. Prepare a new balanced batch when the runtime or experiment

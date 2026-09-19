@@ -14,9 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
-- New-spec now escapes line breaks and control characters in generated YAML
-  titles. A multiline description can no longer terminate frontmatter early or
-  override its workflow contract.
+- New-spec now normalizes a description to one printable line before rendering
+  YAML or Markdown. Multiline control text can no longer terminate frontmatter,
+  override its workflow contract, or inject task sections.
 - Run-task no longer returns a learned task as complete from an unbound legacy
   history review. A terminal lifecycle state now requires its audit snapshot
   binding before the early-completion path can run.

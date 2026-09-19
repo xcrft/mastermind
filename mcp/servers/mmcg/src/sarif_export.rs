@@ -448,6 +448,7 @@ mod tests {
                 kind: "function".into(),
                 line: 7,
                 change: "body_changed".into(),
+                name_resolution_count: None,
             },
             changed_component: "core".into(),
             impacted: SymbolEvidence {

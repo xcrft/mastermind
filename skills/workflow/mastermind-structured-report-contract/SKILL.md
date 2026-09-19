@@ -63,6 +63,10 @@ verifications:
 `phases` is the schema-v1 compatibility name for execution steps. New specs may
 use IDs such as `plan-1`; they do not need phase-shaped prose or checklists.
 
+List every changed non-controller path in `files_modified`. The controller
+normalizes it and compares it with the authoritative Git diff. Do not include
+the executor report or other `.mastermind/` controller artifacts.
+
 For every `result: pass`, include `observed.exit_code: 0`. `tests_run` is
 optional when the command does not expose a reliable count. This is
 self-reported evidence only; it does not authenticate that the command ran.

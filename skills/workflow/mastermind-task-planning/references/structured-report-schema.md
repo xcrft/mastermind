@@ -51,7 +51,9 @@ verifications:
   phase ID; IDs must be unique. Status is `done`, `pending`, `stopped_here`, or
   `skipped`.
 - `files_modified`: paths the executor says it changed. The controller derives
-  the authoritative changed-file set from git.
+  the authoritative changed-file set from git and requires this normalized list
+  to match it exactly, excluding `.mastermind/` controller artifacts. This
+  evidence does not replace the spec's scope or prove plan coverage.
 - `claims`: optional deterministic assertions. Supported kinds:
   - `function_added`: `symbol`, optional `file` and `signature`.
   - `integration`: `from`, `to`, optional files and relation.

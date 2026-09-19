@@ -125,6 +125,12 @@ pub enum Finding {
     },
     /// Executor completion, task identity or checked-report binding is invalid.
     ExecutorReportRejected { reason: String },
+    /// A changed file is absent from the canonical executor report's declared
+    /// file set.
+    ExecutorReportMissingChangedFile { file: String },
+    /// The canonical executor report names a changed file that is absent from
+    /// the actual baseline-to-worktree diff.
+    ExecutorReportUnexpectedFile { file: String },
     /// A declared command has missing, unsuccessful or conflicting report rows.
     VerificationRequirementUnmet { cmd: String, reason: String },
     /// The integration claim has no matching target definition in its scope.
@@ -230,6 +236,8 @@ impl Report {
                 | Finding::ClaimedSymbolNotAdded { .. }
                 | Finding::ExecutorClaimUnresolved { .. }
                 | Finding::ExecutorReportRejected { .. }
+                | Finding::ExecutorReportMissingChangedFile { .. }
+                | Finding::ExecutorReportUnexpectedFile { .. }
                 | Finding::VerificationRequirementUnmet { .. }
                 | Finding::HallucinatedSymbol { .. }
                 | Finding::MissingCallEdge { .. }
@@ -361,6 +369,16 @@ fn render_finding(f: &Finding) -> String {
         }
         Finding::ExecutorReportRejected { reason } => {
             format!("executor_report_rejected: {reason}")
+        }
+        Finding::ExecutorReportMissingChangedFile { file } => {
+            format!(
+                "executor_report_missing_changed_file: `{file}` differs from the baseline but is absent from files_modified"
+            )
+        }
+        Finding::ExecutorReportUnexpectedFile { file } => {
+            format!(
+                "executor_report_unexpected_file: files_modified names `{file}` but it is absent from the baseline-to-worktree diff"
+            )
         }
         Finding::VerificationRequirementUnmet { cmd, reason } => {
             format!("verification_requirement_unmet: `{cmd}`: {reason}")
@@ -623,7 +641,14 @@ fn run_internal(
         crate::verify_spec::run_postflight(spec, Some(store), repo_root, removal_plan.as_ref())
     });
     let claim_checks = executor_report.map(|report| {
-        check_executor_completion(report, spec, repo_root, deadline, &mut findings);
+        check_executor_completion(
+            report,
+            spec,
+            repo_root,
+            &diff_files,
+            deadline,
+            &mut findings,
+        );
         let checks = executor_claims::evaluate(
             report,
             &executor_claims::Context {
@@ -747,6 +772,7 @@ fn check_executor_completion(
     report: &ExecutorReport,
     spec: &ParsedSpec,
     root: &Path,
+    changed_files: &HashSet<&str>,
     deadline: Instant,
     findings: &mut Vec<Finding>,
 ) {
@@ -793,6 +819,23 @@ fn check_executor_completion(
         findings.push(Finding::ExecutorReportRejected {
             reason: reason.into(),
         });
+    }
+    let reported_files: HashSet<_> = metadata
+        .files_modified
+        .iter()
+        .map(|file| norm_path(file))
+        .collect();
+    for file in changed_files {
+        if !reported_files.contains(*file) {
+            findings.push(Finding::ExecutorReportMissingChangedFile {
+                file: (*file).to_string(),
+            });
+        }
+    }
+    for file in reported_files {
+        if !changed_files.contains(file.as_str()) {
+            findings.push(Finding::ExecutorReportUnexpectedFile { file });
+        }
     }
 }
 
@@ -1471,6 +1514,8 @@ fn build_human_summary(
                     | Finding::ClaimedSymbolNotAdded { .. }
                     | Finding::ExecutorClaimUnresolved { .. }
                     | Finding::ExecutorReportRejected { .. }
+                    | Finding::ExecutorReportMissingChangedFile { .. }
+                    | Finding::ExecutorReportUnexpectedFile { .. }
                     | Finding::VerificationRequirementUnmet { .. }
                     | Finding::HallucinatedSymbol { .. }
                     | Finding::MissingCallEdge { .. }
@@ -1492,6 +1537,8 @@ fn build_human_summary(
                     | Finding::ClaimedSymbolNotAdded { .. }
                     | Finding::ExecutorClaimUnresolved { .. }
                     | Finding::ExecutorReportRejected { .. }
+                    | Finding::ExecutorReportMissingChangedFile { .. }
+                    | Finding::ExecutorReportUnexpectedFile { .. }
                     | Finding::VerificationRequirementUnmet { .. }
                     | Finding::HallucinatedSymbol { .. }
                     | Finding::MissingCallEdge { .. }
@@ -1604,6 +1651,8 @@ fn compute_verdict(findings: &[Finding]) -> Verdict {
                 | Finding::ClaimedSymbolNotAdded { .. }
                 | Finding::ExecutorClaimUnresolved { .. }
                 | Finding::ExecutorReportRejected { .. }
+                | Finding::ExecutorReportMissingChangedFile { .. }
+                | Finding::ExecutorReportUnexpectedFile { .. }
                 | Finding::VerificationRequirementUnmet { .. }
                 | Finding::HallucinatedSymbol { .. }
                 | Finding::MissingCallEdge { .. }

@@ -1836,7 +1836,8 @@ provenance and does not silently upgrade these default graph queries.
   time indexing ran or Git history. A stale index can omit newer worktree
   changes. After a rebase or forced re-index, use `git log --since=...` for Git
   truth.
-- `mmcg_unreferenced` suppresses recognized framework entry points:
+- `mmcg_unreferenced` suppresses conventional `main` functions and recognized
+  framework entry points:
   pytest fixtures/marks, common web routes, JIT/task/CLI decorators, Rust test
   attributes, C# test/web/benchmark attributes, JUnit/Spring annotations, and
   PHPUnit/Symfony/Livewire attributes. It also filters `test_*` functions in

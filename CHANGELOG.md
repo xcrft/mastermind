@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Unreferenced-symbol research now excludes conventional `main` entry points,
+  reducing dead-code candidates caused only by runtime process startup.
 - New-spec now normalizes a description to one printable line before rendering
   YAML or Markdown. Multiline control text can no longer terminate frontmatter,
   override its workflow contract, or inject task sections.

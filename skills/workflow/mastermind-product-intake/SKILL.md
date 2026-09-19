@@ -125,6 +125,11 @@ one is true.
 A metric listed anywhere else eventually gets read as something the merge gate
 checked.
 
+When this intake becomes a `spec.md`, retain **Source** and **Outcome** in its
+optional `## Product Context` section. Copy only the observable behaviour into
+Goals and Acceptance Criteria. This leaves the semantic reviewer the original
+product bet without asking a mechanical gate to certify it.
+
 ## What this does not do
 
 It does not write the PRD, prioritise, or validate the product assumption —

@@ -211,6 +211,20 @@ test("bundle rejects names that would become paths on another platform", () => {
   }
 });
 
+test("workflow profiles reject linked skills absent from the bundle", () => {
+  const f = fixture();
+  try {
+    fs.writeFileSync(path.join(f.share, "skills", "alpha", "SKILL.md"), "[[missing-skill]]\n");
+
+    assert.throws(
+      () => profileBundle(bundled(f.share), "full", f.share),
+      /workflow bundle skill alpha references missing skill missing-skill/,
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
 test("newer manifest schemas fail before replacing installed files", () => {
   const f = fixture();
   try {

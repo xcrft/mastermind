@@ -16,7 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Frontend audit now treats a component with zero static callers as a wiring
   hypothesis. It requires inspection of routes, lazy registration, barrels,
-  stories, and auto-import before reporting an unrendered defect.
+  stories, and auto-import before reporting an unrendered defect; its eval
+  fixture now supplies that complete registration evidence.
 - History retrieval now emits precision notes that FTS matches do not establish
   current semantic truth and an empty page does not prove a relevant decision
   is absent from project history.

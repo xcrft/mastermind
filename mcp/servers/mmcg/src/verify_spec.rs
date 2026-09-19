@@ -96,6 +96,9 @@ pub enum IndexCheckStatus {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Finding {
+    /// A YAML frontmatter block was present but could not be parsed as a
+    /// contract. It must not fall back to legacy inference.
+    InvalidFrontmatter { reason: String },
     /// Spec names a symbol the index doesn't know about.
     MissingSymbol {
         symbol: String,
@@ -228,6 +231,9 @@ impl Report {
 
 fn render_finding(f: &Finding) -> String {
     match f {
+        Finding::InvalidFrontmatter { reason } => {
+            format!("invalid_frontmatter: {reason} — repair the YAML contract")
+        }
         Finding::MissingSymbol {
             symbol, section, ..
         } => {
@@ -390,6 +396,11 @@ fn run_internal(
     let mut errors: Vec<Finding> = Vec::new();
     let mut warnings: Vec<Finding> = Vec::new();
 
+    if let Some(reason) = &spec.frontmatter_error {
+        errors.push(Finding::InvalidFrontmatter {
+            reason: reason.clone(),
+        });
+    }
     errors.extend(
         spec.duplicate_section_keys
             .iter()
@@ -790,6 +801,40 @@ mod tests {
             |e| matches!(e, Finding::EmptyMandatorySection { section } if section == "Tests Plan")
         ));
         assert!(r.errors.iter().any(|e| matches!(e, Finding::EmptyMandatorySection { section } if section == "Alternatives Considered")));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn invalid_frontmatter_cannot_fall_back_to_legacy_validation() {
+        let root = tmp();
+        let body = "\
+---
+mode: strcit
+---
+
+## Goals
+- Observable outcome
+## Alternatives Considered
+- One option
+## Tests Plan
+- focused test
+## Documentation Plan
+- documentation impact
+## Observability Plan
+- observability impact
+## Performance Considerations
+- performance impact
+";
+        let s = spec::parse_str("t.md", body);
+        let r = run(&s, None, &root);
+        assert!(
+            r.errors.iter().any(|error| matches!(
+                error,
+                Finding::InvalidFrontmatter { reason } if reason == "frontmatter_invalid"
+            )),
+            "invalid YAML must fail instead of using legacy requirements: {:?}",
+            r.errors
+        );
         fs::remove_dir_all(&root).ok();
     }
 

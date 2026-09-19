@@ -1461,6 +1461,8 @@ so a written scope, signature, caller count, or workflow setting cannot silently
 turn into an absent declaration.
 `mode` accepts `verified` and `strict` plus legacy `lite` and `standard`; `risk`
 accepts only `low`, `medium`, or `high`.
+An invalid or unterminated frontmatter block is a hard `invalid_frontmatter`
+finding in preflight and audit. It never falls back to legacy prose inference.
 
 Admission opens files without following links and rechecks their identity and
 metadata through one root capability. It reads no content, imposes no file-size

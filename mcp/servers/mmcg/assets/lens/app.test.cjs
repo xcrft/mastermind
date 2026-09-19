@@ -1030,6 +1030,9 @@ async function main() {
   assert.doesNotMatch(endpointOnlyGraphHarness.nodes.get("document-graph-list").textContent, /Tracked corpus roots/i);
   assert.match(endpointOnlyGraphHarness.nodes.get("precision-list").textContent, /Only named endpoints are freshness-checked/i);
   assert.match(endpointOnlyGraphHarness.nodes.get("status-region").textContent, /document corpus is not tracked/i);
+  assert.match(endpointOnlyGraphHarness.nodes.get("status-region").textContent, /The result is partial/i);
+  assert.match(endpointOnlyGraphHarness.nodes.get("completeness-status").textContent, /Partial evidence/i);
+  assert.ok(endpointOnlyGraphHarness.nodes.get("completeness-status").classList.contains("is-partial"));
 
   const endpointOnlyPartialGraph = withDocumentGraph(fixture(), "current");
   endpointOnlyPartialGraph.document_graph.packet.snapshot_schema_version = 1;
@@ -1170,6 +1173,13 @@ async function main() {
   documentReviewAuditPayload.evidence.files.items.forEach((file) => { file.findings = []; });
   var documentReviewAuditHarness = await renderFixture(documentReviewAuditPayload, { width: 1200 });
   assert.equal(documentReviewAuditHarness.nodes.get("audit-verdict-word").textContent, "Incomplete", "Document evidence needing review cannot produce a complete audit verdict");
+
+  var endpointOnlyAuditPayload = withDocumentGraph(fixture(), "current");
+  endpointOnlyAuditPayload.document_graph.packet.snapshot_schema_version = 1;
+  endpointOnlyAuditPayload.document_graph.corpus = { status: "not_tracked", directories: [], changed_files: [] };
+  endpointOnlyAuditPayload.evidence.files.items.forEach((file) => { file.findings = []; });
+  var endpointOnlyAuditHarness = await renderFixture(endpointOnlyAuditPayload, { width: 1200 });
+  assert.equal(endpointOnlyAuditHarness.nodes.get("audit-verdict-word").textContent, "Incomplete", "Endpoint-only document freshness cannot produce a complete audit verdict");
 
   var boundedPayload = fixture();
   boundedPayload.evidence.files.items.forEach((file) => { file.findings = []; });

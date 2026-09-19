@@ -1724,6 +1724,7 @@
       || text(temporalEnvelope.status, "unavailable") !== "available"
       || temporal.partial === true
       || Boolean(documentGraph && text(documentGraph.status, "needs_review") === "needs_review")
+      || Boolean(documentGraph && text(record(documentGraph.corpus).status, "not_tracked") === "not_tracked")
       || record(map.scope).aggregation_paths_truncated === true
       || record(audit.bus_factor).partial === true
       || sections.some(function (value) {
@@ -2609,7 +2610,8 @@
       || record(state.model.semantic).partial === true
       || record(state.model.temporal).partial === true
       || Boolean(state.model.documentGraph
-        && text(state.model.documentGraph.status, "needs_review") === "needs_review");
+        && (text(state.model.documentGraph.status, "needs_review") === "needs_review"
+          || text(record(state.model.documentGraph.corpus).status, "not_tracked") === "not_tracked"));
   }
 
   function completeZeroChange() {

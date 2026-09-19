@@ -1107,20 +1107,25 @@ fn analysis_binding(snapshot: &LensSnapshot, value: &Value) -> AnalysisBinding {
         });
     }
     let document_graph_status = snapshot.document_graph.as_ref().map(|graph| graph.status);
-    if let Some(graph) = snapshot
-        .document_graph
-        .as_ref()
-        .filter(|graph| graph.status == "needs_review")
-    {
-        states.insert(AnalysisState {
-            path: "$.document_graph".into(),
-            state: "needs_review",
-            reason: Some(format!(
-                "{} endpoint changes, {} corpus changes",
-                graph.changed_files.len(),
-                graph.corpus.changed_files.len(),
-            )),
-        });
+    if let Some(graph) = snapshot.document_graph.as_ref() {
+        if graph.status == "needs_review" {
+            states.insert(AnalysisState {
+                path: "$.document_graph".into(),
+                state: "needs_review",
+                reason: Some(format!(
+                    "{} endpoint changes, {} corpus changes",
+                    graph.changed_files.len(),
+                    graph.corpus.changed_files.len(),
+                )),
+            });
+        }
+        if graph.corpus.status == "not_tracked" {
+            states.insert(AnalysisState {
+                path: "$.document_graph.corpus".into(),
+                state: "not_tracked",
+                reason: Some("only named endpoints were freshness-checked".into()),
+            });
+        }
     }
     let states = states.into_iter().collect::<Vec<_>>();
     AnalysisBinding {
@@ -1732,7 +1737,15 @@ mod tests {
     }
 
     fn indexed_document_graph(repository: &Path, index_path: &Path) -> PathBuf {
-        let graph = crate::document_graph::test_support::write_snapshot(repository, true);
+        indexed_document_graph_with_corpus(repository, index_path, true)
+    }
+
+    fn indexed_document_graph_with_corpus(
+        repository: &Path,
+        index_path: &Path,
+        track_corpus: bool,
+    ) -> PathBuf {
+        let graph = crate::document_graph::test_support::write_snapshot(repository, track_corpus);
         let head = git(repository, &["rev-parse", "HEAD"]);
         let mut value = crate::document_graph::test_support::read_value(repository);
         value["revision"]["head"] = Value::String(head);
@@ -2041,6 +2054,36 @@ mod tests {
         assert!(html.contains("mastermind_native_document_evidence_check"));
         assert!(html.contains("\"root_label\":\".\""));
         assert!(!html.contains(repository.path().to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn export_marks_endpoint_only_document_graph_as_partial() {
+        let (repository, _state, index_path) = fixture();
+        let graph = indexed_document_graph_with_corpus(repository.path(), &index_path, false);
+        let output = repository.path().join("endpoint-only-document-review");
+        let mut options = export_options(repository.path(), index_path, output.clone());
+        options.document_graph = Some(graph);
+
+        let result = export(&options).unwrap();
+
+        assert!(result.partial);
+        let manifest: Value =
+            serde_json::from_slice(&std::fs::read(output.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(manifest["document_graph"]["status"], "current");
+        assert_eq!(manifest["document_graph"]["corpus_status"], "not_tracked");
+        assert_eq!(manifest["analysis"]["partial"], true);
+        assert!(manifest["analysis"]["states"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|state| {
+                state["path"] == "$.document_graph.corpus"
+                    && state["state"] == "not_tracked"
+                    && state["reason"] == "only named endpoints were freshness-checked"
+            }));
+        let summary = std::fs::read_to_string(output.join("summary.md")).unwrap();
+        assert!(summary.contains("Analysis: **partial**"));
+        assert!(summary.contains("$.document_graph.corpus: not_tracked"));
     }
 
     #[test]

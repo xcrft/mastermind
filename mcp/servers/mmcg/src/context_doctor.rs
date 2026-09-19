@@ -383,9 +383,9 @@ fn check_core_sections(body: Option<&str>) -> Check {
     let Some(text) = body else {
         return skipped("core sections", "file not readable");
     };
-    let headings: BTreeSet<String> = text
-        .lines()
-        .filter_map(|line| line.strip_prefix("## "))
+    let headings: BTreeSet<String> = prose_lines(text)
+        .into_iter()
+        .filter_map(|line| line.text.strip_prefix("## "))
         .map(|heading| heading.trim().to_ascii_lowercase())
         .collect();
     let missing: Vec<&str> = REQUIRED_CONTEXT_SECTIONS
@@ -1098,6 +1098,18 @@ mod tests {
         );
         assert_eq!(report.summary.fail, 0);
         assert_eq!(report.summary.warn, 0);
+    }
+
+    #[test]
+    fn core_sections_ignore_fenced_heading_examples() {
+        let text = "~~~markdown\n## Identity\n## Active goals\n## Decision log\n~~~\n";
+
+        let check = check_core_sections(Some(text));
+
+        assert_eq!(check.status, Status::Fail);
+        assert!(check.message.contains("identity"));
+        assert!(check.message.contains("active goals"));
+        assert!(check.message.contains("decision log"));
     }
 
     #[test]

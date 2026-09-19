@@ -102,6 +102,10 @@ jobs:
           mkdir -p packed
           (cd npm/mastermind && npm pack --pack-destination "$GITHUB_WORKSPACE/packed")
           (cd npm/platforms/linux-x64-gnu && npm pack --pack-destination "$GITHUB_WORKSPACE/packed")
+          if tar tzf "$GITHUB_WORKSPACE/packed/xcraftmind-mastermind-$(node -p "require('./npm/mastermind/package.json').version").tgz" | grep -Eq '(^|/)__pycache__(/|$)|\.py[co]$'; then
+            echo "::error::root npm tarball contains Python bytecode cache files"
+            exit 1
+          fi
           ls -la packed/
 
       - name: Install from tarballs + smoke the wrapper

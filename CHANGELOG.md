@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Lens now calls a runtime trace corroboration only when the observed parent to
+  child file direction matches the displayed impact line. A reverse pair stays
+  visible as a file-level observation.
 - Lens no longer calls a compiler-resolved edge high confidence when its SCIP
   artifact cannot prove that it was generated from the current revision. The
   edge remains inspectable and is labelled as partial revision evidence.

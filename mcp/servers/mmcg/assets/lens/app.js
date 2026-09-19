@@ -188,6 +188,20 @@
       : "partial";
   }
 
+  function runtimeEvidenceDirection(edge) {
+    const fromFile = text(edge.from.symbol.file, "");
+    const toFile = text(edge.to.symbol.file, "");
+    let forward = false;
+    let reverse = false;
+    array(edge.runtimeEvidence).map(record).forEach(function (runtime) {
+      const parent = text(runtime.parent_file, "");
+      const child = text(runtime.child_file, "");
+      forward = forward || (parent === fromFile && child === toFile);
+      reverse = reverse || (parent === toFile && child === fromFile);
+    });
+    return forward ? "forward" : (reverse ? "reverse" : "none");
+  }
+
   function factMatchesGraphEdge(value, edge) {
     const fact = record(value);
     const fromFile = text(edge.from.symbol.file, "");
@@ -4089,7 +4103,12 @@
     const relation = edge.type === "test" ? "Test evidence" : "Impact evidence";
     const boundary = edge.crossing ? ", boundary crossing" : "";
     const ownership = overlayEnabled("ownership") && edge.ownershipBoundary ? ", ownership boundary" : "";
-    const runtime = overlayEnabled("runtime") && edge.runtimeEvidence.length > 0 ? ", runtime trace corroborated" : "";
+    const runtimeDirection = runtimeEvidenceDirection(edge);
+    const runtime = !overlayEnabled("runtime") || runtimeDirection === "none"
+      ? ""
+      : (runtimeDirection === "forward"
+        ? ", runtime trace corroborated"
+        : ", runtime file pair observed in reverse direction");
     const facts = overlayEnabled("facts") && edge.factEvidence.length > 0 ? ", normalized relationship fact matched" : "";
     const semanticConfidence = semanticEvidenceConfidence(state.model.semantic, edge.semanticEvidence);
     const semantic = !overlayEnabled("semantic") || semanticConfidence === "fallback"
@@ -4681,6 +4700,8 @@
     const variant = edge.crossing ? "risk" : (isTest ? "test" : "");
     const semanticConfidence = semanticEvidenceConfidence(state.model.semantic, edge.semanticEvidence);
     const hasSemanticEvidence = overlayEnabled("semantic") && semanticConfidence !== "fallback";
+    const runtimeDirection = runtimeEvidenceDirection(edge);
+    const hasRuntimeEvidence = overlayEnabled("runtime") && runtimeDirection !== "none";
     appendClaimHeading(
       edge.crossing ? "Boundary evidence line" : (isTest ? "Test evidence line" : "Impact evidence line"),
       text(edge.from.symbol.name, "Unnamed seed") + " → " + text(edge.to.symbol.name, "Unnamed target"),
@@ -4697,7 +4718,7 @@
       ["Name collisions", displayNumber(edge.collisionCount)],
       ["Boundary crossing", edge.crossing ? "Observed" : "Not returned"],
       ["Ownership boundary", overlayEnabled("ownership") && edge.ownershipBoundary ? "Observed from CODEOWNERS" : "Not returned"],
-      ["Runtime trace", overlayEnabled("runtime") && edge.runtimeEvidence.length > 0 ? "Corroborated" : "Not returned"],
+      ["Runtime trace", !hasRuntimeEvidence ? "Not returned" : (runtimeDirection === "forward" ? "Corroborated" : "Observed in reverse direction")],
       ["Normalized relationship fact", overlayEnabled("facts") && edge.factEvidence.length > 0 ? "Exact endpoints matched" : "Not returned"],
     ]);
     appendClaimList("Evidence endpoints", [
@@ -4720,9 +4741,9 @@
         "No CODEOWNERS evidence returned."
       );
     }
-    if (overlayEnabled("runtime") && edge.runtimeEvidence.length > 0) {
+    if (hasRuntimeEvidence) {
       appendClaimList(
-        "Runtime trace corroboration",
+        runtimeDirection === "forward" ? "Runtime trace corroboration" : "Runtime file-pair observation",
         edge.runtimeEvidence.map(function (value) {
           const runtime = record(value);
           const names = array(runtime.span_names).map(function (name) { return text(name, ""); }).filter(Boolean);

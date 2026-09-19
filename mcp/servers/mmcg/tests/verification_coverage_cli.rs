@@ -584,13 +584,14 @@ fn zero_test_observations_reject_recognized_runs_with_a_success_receipt() {
         "vitest.exe --run -t keep",
         "vitest --run -t list",
     ] {
-        for outcome in [json!({"tests_run": 0, "exit_code": 0})] {
-            let report = fixture.audit(Some(&executor(vec![observed(cmd, outcome)])));
-            assert_eq!(report.verdict, Verdict::Broken, "{cmd}: {report:?}");
-            assert!(
-                matches!(report.findings.as_slice(), [Finding::ObservedZeroTests { cmd: actual }] if actual == cmd)
-            );
-        }
+        let report = fixture.audit(Some(&executor(vec![observed(
+            cmd,
+            json!({"tests_run": 0, "exit_code": 0}),
+        )])));
+        assert_eq!(report.verdict, Verdict::Broken, "{cmd}: {report:?}");
+        assert!(
+            matches!(report.findings.as_slice(), [Finding::ObservedZeroTests { cmd: actual }] if actual == cmd)
+        );
     }
 }
 
@@ -673,12 +674,13 @@ fn zero_test_observations_allow_compile_discovery_and_unknown_commands() {
         "cargo test --package *",
         "./cargo test",
     ] {
-        for outcome in [json!({"tests_run": 0, "exit_code": 0})] {
-            std::fs::write(fixture.spec(), spec_text(json!([{"cmd": cmd}]), "")).unwrap();
-            let report = fixture.audit(Some(&executor(vec![observed(cmd, outcome)])));
-            assert_eq!(report.verdict, Verdict::Held, "{cmd}: {report:?}");
-            assert!(report.findings.is_empty(), "{cmd}: {report:?}");
-        }
+        std::fs::write(fixture.spec(), spec_text(json!([{"cmd": cmd}]), "")).unwrap();
+        let report = fixture.audit(Some(&executor(vec![observed(
+            cmd,
+            json!({"tests_run": 0, "exit_code": 0}),
+        )])));
+        assert_eq!(report.verdict, Verdict::Held, "{cmd}: {report:?}");
+        assert!(report.findings.is_empty(), "{cmd}: {report:?}");
     }
 }
 
@@ -726,10 +728,11 @@ fn zero_test_observations_preserve_optional_test_counts_and_advisory_scan_bounda
         [Finding::VacuousTestClaim { .. }]
     ));
     for cmd in ["cargo test", "go test", "pytest", "jest", "vitest run"] {
-        for outcome in [json!({"tests_run": 2, "exit_code": 0})] {
-            let report = bare.audit(Some(&executor(vec![observed(cmd, outcome)])));
-            assert_eq!(report.verdict, Verdict::Held, "{cmd}: {report:?}");
-        }
+        let report = bare.audit(Some(&executor(vec![observed(
+            cmd,
+            json!({"tests_run": 2, "exit_code": 0}),
+        )])));
+        assert_eq!(report.verdict, Verdict::Held, "{cmd}: {report:?}");
     }
 }
 

@@ -27,6 +27,7 @@
     "node": ">=24"
   },
   "scripts": {
+    "prepack": "../../scripts/stage-npm-share.sh",
     "test": "node --test test/*.test.js"
   },
   "keywords": [

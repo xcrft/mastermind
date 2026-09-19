@@ -32,6 +32,12 @@ legacy task-file modes; do not create new ones.
   the delivered behavior or permission boundary.
 - Keep unrelated cleanup out of Scope.
 
+When the input is a PRD, ticket, or feature request, use
+[[mastermind-product-intake]] before turning it into Scope or Acceptance
+Criteria. Resolve the intake's behavior, constraints, source, and questions
+first; preserve its source and parked outcome in Product Context when creating
+the spec. Do not silently choose an answer to an open product question.
+
 ## Ground the contract
 
 Use [[mastermind-codegraph-research]] for structural claims:

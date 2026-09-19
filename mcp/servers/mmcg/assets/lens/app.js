@@ -79,7 +79,7 @@
     return typeof value === "number" && Number.isFinite(value) ? value : null;
   }
 
-  function collection(value) {
+  function collection(value, itemsRequired = true) {
     const source = record(value);
     const count = function (candidate) {
       return typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate >= 0
@@ -92,22 +92,37 @@
     const returned = count(source.returned);
     const observed = count(source.observed);
     const total = source.total === null ? null : count(source.total);
-    const incomplete = !has("items") || !Array.isArray(source.items)
+    const items = array(source.items);
+    const malformed = (itemsRequired && (!has("items") || !Array.isArray(source.items)))
       || !has("total") || (source.total !== null && total === null)
       || !has("returned") || returned === null
       || typeof source.truncated !== "boolean";
+    const inconsistent = !malformed && (
+      (itemsRequired && returned !== items.length)
+      || (total !== null && total < returned)
+      || (observed !== null && observed < returned)
+      || (source.truncated === false && total !== null && total !== returned)
+    );
+    const incomplete = malformed || inconsistent;
     return {
       source: source,
-      items: array(source.items),
+      items: items,
       total: total,
       totalUnknown: !has("total") || source.total === null || total === null,
       returned: returned,
       observed: observed === null ? returned : observed,
       truncated: source.truncated === true || incomplete,
-      reason: text(source.truncation_reason, incomplete ? "incomplete collection" : ""),
+      reason: text(
+        source.truncation_reason,
+        inconsistent ? "inconsistent collection" : incomplete ? "incomplete collection" : "",
+      ),
       projectionTruncated: source.projection_truncated === true,
       projectionReason: text(source.projection_reason, ""),
     };
+  }
+
+  function countCollection(value) {
+    return collection(value, false);
   }
 
   function returnedCount(value) {
@@ -966,7 +981,7 @@
       ["Impacted symbols", impact.impact],
       ["API crossings", impact.api_crossings],
       ["Candidate tests", impact.tests],
-      ["Map files", map.files],
+      ["Map files", map.files, false],
       ["Map languages", map.languages],
       ["Map components", map.components],
       ["Map entry points", map.entry_points],
@@ -986,7 +1001,7 @@
       ["Bus-factor ranking", audit.bus_factor],
     ];
     candidates.forEach(function (candidate) {
-      const value = collection(candidate[1]);
+      const value = collection(candidate[1], candidate[2]);
       if (value.truncated || value.totalUnknown) {
         results.push({
           label: candidate[0],
@@ -1368,7 +1383,7 @@
     var components = collection(map.components);
     var entryPoints = collection(map.entry_points);
     var languages = collection(map.languages);
-    var files = collection(map.files);
+    var files = countCollection(map.files);
     var componentMetric = metricPresentation(components);
     var entryPointMetric = metricPresentation(entryPoints);
     var languageMetric = metricPresentation(languages);
@@ -1674,9 +1689,11 @@
     var semantic = record(model.semantic);
     var documentGraph = model.documentGraph;
     var sections = [
-      map.files, map.languages, map.components, map.entry_points, map.hotspots, map.cycles,
-      changes.files, changes.symbols, impact.impact, impact.api_crossings, impact.tests,
-      audit.dead_code, audit.change_hotspots, audit.largest_files, audit.bus_factor,
+      countCollection(map.files), collection(map.languages), collection(map.components),
+      collection(map.entry_points), collection(map.hotspots), collection(map.cycles),
+      collection(changes.files), collection(changes.symbols), collection(impact.impact),
+      collection(impact.api_crossings), collection(impact.tests), collection(audit.dead_code),
+      collection(audit.change_hotspots), collection(audit.largest_files), collection(audit.bus_factor),
     ];
     return record(model.evidence).partial === true
       || semantic.partial === true
@@ -1685,8 +1702,7 @@
       || Boolean(documentGraph && text(documentGraph.status, "needs_review") === "needs_review")
       || record(map.scope).aggregation_paths_truncated === true
       || record(audit.bus_factor).partial === true
-      || sections.some(function (section) {
-        var value = collection(section);
+      || sections.some(function (value) {
         return value.truncated || value.totalUnknown;
       })
       || text(record(audit.change_hotspots).status, "") !== "available"
@@ -1699,7 +1715,7 @@
     var components = collection(map.components);
     var languages = collection(map.languages);
     var cycles = collection(map.cycles);
-    var files = collection(map.files);
+    var files = countCollection(map.files);
     var audit = record(model.audit);
     var changeSource = record(audit.change_hotspots);
     var change = collection(changeSource);

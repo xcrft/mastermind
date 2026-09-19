@@ -661,6 +661,33 @@ class BenchmarkTests(unittest.TestCase):
             "plan_sha256": value["plan_sha256"], "position": 1,
             "previous_result_sha256": hashlib.sha256((trials[0] / "result.json").read_bytes()).hexdigest()})
 
+    def test_batch_lock_rejects_a_detached_root_before_spending_an_attempt(self):
+        import fcntl
+
+        batch = bench.prepare_batch(task=self.task, rubric=self.rubric, config=self.config,
+            source_repo=self.repo, tool_repo=self.repo, output=self.root / "batches", repetitions=1)
+        trial = batch / bench.load_json(batch / "batch.json")["trials"][0]["directory"]
+        detached = self.root / "detached-batch"
+        original_flock = fcntl.flock
+        swapped = False
+
+        def swap_after_lock(descriptor, operation):
+            nonlocal swapped
+            result = original_flock(descriptor, operation)
+            if operation & fcntl.LOCK_EX and not swapped:
+                swapped = True
+                batch.rename(detached)
+                shutil.copytree(detached, batch)
+            return result
+
+        with patch.object(fcntl, "flock", side_effect=swap_after_lock):
+            with self.assertRaises(bench.BenchmarkError) as raised:
+                bench.run_trial(trial)
+        self.assertEqual(raised.exception.code, "batch_lock")
+        self.assertTrue(swapped)
+        self.assertFalse((trial / "run.lock").exists())
+        self.assertFalse((trial / "adapter-called").exists())
+
     def test_source_allowlist_rejects_control_files_and_path_escapes(self):
         for path in (".", "../private", "/private", "src//service.py", "src/./service.py",
                      "src/../service.py", "src\\service.py", "evals/answer.json", "AGENTS.md",

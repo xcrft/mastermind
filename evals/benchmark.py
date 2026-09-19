@@ -163,6 +163,18 @@ def _check_output_parent(parent: Path, descriptor: int, expected: os.stat_result
         raise BenchmarkError("artifact_changed", "artifact parent changed during publication")
 
 
+def _check_batch_root(root: Path, descriptor: int, expected: os.stat_result) -> None:
+    """Ensure a held batch-directory descriptor still names the batch root."""
+    try:
+        observed = root.stat(follow_symlinks=False)
+        canonical_root = root.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise BenchmarkError("batch_lock", "batch root changed while holding its execution lock") from error
+    if (not stat.S_ISDIR(observed.st_mode) or not _same_node(observed, expected)
+            or not _same_node(os.fstat(descriptor), expected) or canonical_root != root):
+        raise BenchmarkError("batch_lock", "batch root changed while holding its execution lock")
+
+
 def write_new_bytes(path: Path, body: bytes, *, mode: int = 0o600) -> None:
     """Publish one owned regular file and verify its final name and bytes."""
     if (os.name != "posix" or not hasattr(os, "O_NOFOLLOW")
@@ -1014,30 +1026,54 @@ def batch_execution_guard(trial: Path, manifest: dict, manifest_bytes: bytes):
     if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
         raise BenchmarkError("batch_platform", "batch execution requires POSIX no-follow file locking")
     import fcntl
-    path = trial.parent / "execution.lock"
+    root = trial.parent
+    path = root / "execution.lock"
+    root_descriptor = None
+    descriptor = None
     try:
-        descriptor = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+        root_descriptor = os.open(
+            root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        root_before = os.fstat(root_descriptor)
+        if not stat.S_ISDIR(root_before.st_mode):
+            raise BenchmarkError("batch_lock", "batch root is not a directory")
+        _check_batch_root(root, root_descriptor, root_before)
+        descriptor = os.open(
+            "execution.lock", os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=root_descriptor)
     except OSError as error:
+        if root_descriptor is not None:
+            os.close(root_descriptor)
         raise BenchmarkError("batch_lock", "cannot acquire the batch execution lock") from error
+    except Exception:
+        if root_descriptor is not None:
+            os.close(root_descriptor)
+        raise
     try:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode) or before.st_size != 0:
             raise BenchmarkError("batch_lock", "batch execution lock is invalid")
+        named = os.stat("execution.lock", dir_fd=root_descriptor, follow_symlinks=False)
         current = path.lstat()
-        if file_identity(before) != file_identity(current):
+        if file_identity(before) != file_identity(named) or file_identity(before) != file_identity(current):
             raise BenchmarkError("batch_lock", "batch execution lock changed while opening")
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise BenchmarkError("batch_busy", "another batch attempt is still running") from error
+        _check_batch_root(root, root_descriptor, root_before)
     except OSError as error:
         os.close(descriptor)
+        os.close(root_descriptor)
         raise BenchmarkError("batch_lock", "cannot acquire the batch execution lock") from error
     except Exception:
         os.close(descriptor)
+        os.close(root_descriptor)
         raise
     try:
         snapshot = load_bound_batch(trial, manifest, manifest_bytes)
+        if snapshot["root_identity"][:2] != (root_before.st_dev, root_before.st_ino):
+            raise BenchmarkError("batch_lock", "batch root changed while validating the execution lock")
+        _check_batch_root(root, root_descriptor, root_before)
         receipt, fingerprints = batch_attempt_state(snapshot, claimed=False)
         snapshot.update(receipt=receipt, fingerprints=fingerprints,
                         lock_identity=file_identity(before))
@@ -1047,6 +1083,7 @@ def batch_execution_guard(trial: Path, manifest: dict, manifest_bytes: bytes):
             fcntl.flock(descriptor, fcntl.LOCK_UN)
         finally:
             os.close(descriptor)
+            os.close(root_descriptor)
 
 
 def verify_batch_snapshot(trial: Path, manifest: dict, manifest_bytes: bytes,

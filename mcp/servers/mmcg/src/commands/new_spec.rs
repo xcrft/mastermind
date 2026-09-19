@@ -142,6 +142,12 @@ expected_docs: []
 - Source: <PRD/ticket ID or stable URL>
 - Outcome (not acceptance criteria): <metric, instrument, cadence, owner; or no instrument in place>
 
+## Design Context
+
+<!-- Keep this section when a design handoff informed the task. Remove it otherwise. -->
+- Source: <file key and node id, or frame URL>
+- Human review (not acceptance criteria): <frame, viewports, and visual or motion judgement; or none>
+
 ## Scope
 
 - Change: `<path/to/file.ext>` — <intended outcome>
@@ -467,6 +473,12 @@ You are implementing {description}.
 <!-- Keep this section when product intake informed the task. Remove it otherwise. -->
 - Source: <PRD/ticket ID or stable URL>
 - Outcome (not acceptance criteria): <metric, instrument, cadence, owner; or no instrument in place>
+
+## Design Context
+
+<!-- Keep this section when a design handoff informed the task. Remove it otherwise. -->
+- Source: <file key and node id, or frame URL>
+- Human review (not acceptance criteria): <frame, viewports, and visual or motion judgement; or none>
 
 **Rules (global):**
 - DO NOT add features beyond what this spec lists (YAGNI)

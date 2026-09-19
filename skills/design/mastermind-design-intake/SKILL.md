@@ -103,6 +103,12 @@ Use these headings so a reviewer can find each part, especially the last one:
 `Not verifiable` is never empty on a real design handoff. An intake that omits
 it has smuggled a visual judgement into criteria a mechanical gate will pass.
 
+When this intake becomes a `spec.md`, retain **Source** and **Not verifiable**
+in its optional `## Design Context` section. Copy only resolved components,
+tokens, states, and observable behavior into Scope and Acceptance Criteria.
+Give browser verification the named frame and viewports, then record what it
+actually observed or mark it not checked.
+
 ## What this step does not do
 
 It does not implement, and it does not promise the result will match. A contract

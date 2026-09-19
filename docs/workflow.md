@@ -49,6 +49,12 @@ the spec. Preserve its stable source and parked outcome in `## Product Context`.
 Only observable behaviour belongs in Goals and Acceptance Criteria; the outcome
 guides semantic review and is never a merge-time claim.
 
+When a design handoff initiated the task, run design intake before completing
+the spec. Preserve its frame source and the named human visual review in
+`## Design Context`. Components, tokens, states, and observable behaviour can
+be acceptance criteria; visual fidelity and motion remain observations to record
+through browser verification or mark as not checked.
+
 ### 2. Implement against the approved spec
 
 Give `spec.md` to the implementation agent. The executor may change only the

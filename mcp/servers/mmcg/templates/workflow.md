@@ -156,8 +156,9 @@ Pre-flight, before a diff exists, route on the paths named in the spec's Scope.
   breaks, duplicates, raw values. Research the component graph before writing
   UI, not after.
 - Design intake: a design handoff becomes named components, token names, and
-  criteria that can fail. Visual fidelity is parked explicitly, never smuggled
-  into acceptance criteria.
+  criteria that can fail. Preserve its source and human visual review in Design
+  Context. Visual fidelity is parked explicitly, never smuggled into acceptance
+  criteria.
 - Product intake: a PRD or ticket becomes behaviour, constraint, and outcome.
   Preserve its stable source and parked outcome in Product Context of the derived
   spec. Only behaviour and measurable constraints are acceptance criteria; a

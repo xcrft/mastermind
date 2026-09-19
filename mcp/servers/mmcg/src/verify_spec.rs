@@ -47,6 +47,22 @@ pub const VERIFIED_MANDATORY_SECTIONS: &[&str] = &[
     "Tests Plan",
     "Final Verification",
 ];
+/// Strict contracts retain the verified contract and add the evidence required
+/// to evaluate a high-risk change and its rollback.
+pub const STRICT_MANDATORY_SECTIONS: &[&str] = &[
+    "Goals",
+    "Scope",
+    "Acceptance Criteria",
+    "Tests Plan",
+    "Final Verification",
+    "Alternatives Considered",
+    "Risk Register",
+    "Evidence Ledger",
+    "Documentation Plan",
+    "Observability Plan",
+    "Performance Considerations",
+    "Rollback / Migration",
+];
 
 /// Mandatory sections to enforce for the spec's declared `mode` (frontmatter).
 /// Falls back to `MANDATORY_SECTIONS` when no mode is declared (back-compat with
@@ -55,6 +71,7 @@ pub fn mandatory_sections_for_mode(mode: Option<&str>) -> &'static [&'static str
     match mode {
         Some("lite") => LITE_MANDATORY_SECTIONS,
         Some("verified") => VERIFIED_MANDATORY_SECTIONS,
+        Some("strict") => STRICT_MANDATORY_SECTIONS,
         _ => MANDATORY_SECTIONS,
     }
 }
@@ -1259,6 +1276,49 @@ mode: verified
                 error,
                 Finding::EmptyMandatorySection { section } if section == strict_only
             )));
+        }
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn strict_mode_requires_verified_contract_and_high_risk_evidence() {
+        let root = tmp();
+        let body = "\
+---
+id: \"1\"
+mode: strict
+---
+
+## Goals
+- Observable outcome
+## Scope
+- Bounded change
+## Acceptance Criteria
+- [ ] Behavior is observable
+## Tests Plan
+- focused test
+## Final Verification
+- repository gate
+";
+        let s = spec::parse_str("t.md", body);
+        let r = run(&s, None, &root);
+        for strict_only in [
+            "Alternatives Considered",
+            "Risk Register",
+            "Evidence Ledger",
+            "Documentation Plan",
+            "Observability Plan",
+            "Performance Considerations",
+            "Rollback / Migration",
+        ] {
+            assert!(
+                r.errors.iter().any(|error| matches!(
+                    error,
+                    Finding::EmptyMandatorySection { section } if section == strict_only
+                )),
+                "strict mode must require `{strict_only}`; got {:?}",
+                r.errors
+            );
         }
         fs::remove_dir_all(&root).ok();
     }

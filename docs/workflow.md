@@ -109,11 +109,12 @@ covers the indexed project, so narrowing the spec alone does not remove this lim
 mastermind new-spec "Rotate signing keys" --mode strict
 ```
 
-Strict uses the same state machine and adds the evidence that high-risk work
-needs: explicit alternatives, threat/failure cases, rollback or migration,
-design criticism, and independent review. A security review is required when
-the change crosses authentication, authorization, secrets, tool permissions,
-agent delegation, or the supply chain.
+Strict retains the Verified contract (Goals, Scope, Acceptance Criteria, Tests
+Plan, and Final Verification) and the same state machine. It adds the evidence
+that high-risk work needs: explicit alternatives, threat/failure cases,
+rollback or migration, design criticism, and independent review. A security
+review is required when the change crosses authentication, authorization,
+secrets, tool permissions, agent delegation, or the supply chain.
 
 The declared `mode: strict` enables strict pre-flight checks automatically in
 both `verify-spec` and `run-task`; a separate `--strict` flag is only needed to

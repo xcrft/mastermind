@@ -482,6 +482,16 @@ You are implementing {description}.
 - Source: <file key and node id, or frame URL>
 - Human review (not acceptance criteria): <frame, viewports, and visual or motion judgement; or none>
 
+## Scope
+
+- Change: `<path/to/file.ext>` — <intended outcome>
+- Do not change: <explicit boundary>
+
+## Acceptance Criteria
+
+- [ ] <observable, machine-checkable behavior>
+- [ ] <compatibility expectation or explicitly accepted break>
+
 **Rules (global):**
 - DO NOT add features beyond what this spec lists (YAGNI)
 - DO NOT refactor unrelated code (KISS)
@@ -596,7 +606,7 @@ VERIFY: `<command>`
 
 ---
 
-## Phase N: Final verification
+## Final Verification
 
 ```bash
 <typecheck command>
@@ -809,13 +819,36 @@ mod tests {
     }
 
     #[test]
-    fn standard_and_strict_templates_have_a_goals_section() {
-        for mode in [Mode::Standard, Mode::Strict] {
-            let content = render_spec("change behavior", 7, &mode);
-            let parsed = mmcg::spec::parse_str("spec.md", &content);
+    fn standard_template_has_a_goals_section() {
+        let content = render_spec("change behavior", 7, &Mode::Standard);
+        let parsed = mmcg::spec::parse_str("spec.md", &content);
+        assert!(
+            mmcg::spec::section_body(&parsed, "Goals").is_some(),
+            "template must satisfy the Goals section contract: {content}"
+        );
+    }
+
+    #[test]
+    fn strict_template_has_every_required_contract_section() {
+        let content = render_spec("change behavior", 7, &Mode::Strict);
+        let parsed = mmcg::spec::parse_str("spec.md", &content);
+        for section in [
+            "Goals",
+            "Scope",
+            "Acceptance Criteria",
+            "Tests Plan",
+            "Final Verification",
+            "Alternatives Considered",
+            "Risk Register",
+            "Evidence Ledger",
+            "Documentation Plan",
+            "Observability Plan",
+            "Performance Considerations",
+            "Rollback / Migration",
+        ] {
             assert!(
-                mmcg::spec::section_body(&parsed, "Goals").is_some(),
-                "template must satisfy the Goals section contract: {content}"
+                mmcg::spec::section_body(&parsed, section).is_some(),
+                "strict template must contain `{section}`: {content}"
             );
         }
     }

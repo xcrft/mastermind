@@ -2,7 +2,7 @@
 name: mastermind-test-audit
 description: Read-only review of whether the tests in a finished change actually prove its behaviour — changed code no test reaches, a test exercising a different path than the one that changed, an assertion edited to match the new output, and a suite that ran nothing. Use after implementation, and whenever a change claims to be covered.
 metadata:
-  version: 0.1.0
+  version: 0.1.1
   authors:
     - mastermind
   tags:
@@ -50,15 +50,16 @@ without new evidence.
 a classification that is the whole point:
 
 - `direct` — the test is a changed test symbol, or reaches the change at graph
-  depth 1. This is coverage evidence.
+  depth 1. This is the strongest static candidate, not coverage evidence.
 - `transitive` — reaches it at depth ≥2. Weaker: the test may pass while the
   changed line never executes.
 - `heuristic` — a filename matched. **This is not coverage.** It is a place to
   look, and treating it as proof is the mistake this check exists to catch.
 
-A changed symbol with no `direct` candidate is uncovered behaviour. Say which
-symbol and what classification you did find; "there are tests nearby" is not an
-answer.
+A changed production symbol with no `direct` candidate has no returned static
+test path. Say which symbol and what classification you did find; "there are
+tests nearby" is not an answer. Call it uncovered behavior only after complete
+graph scope, source reads, and observed execution evidence support that claim.
 
 ### 2. The test exercises a different path than the change
 
@@ -90,20 +91,21 @@ when the change added or edited it, and quote the body.
 
 **A finding names the symbol, the test, and the query result behind it.**
 "`createOrder` is untested" is a claim; "`mmcg_test_impact` returns one
-`heuristic` candidate for `createOrder` and no `direct` one" is a finding.
-Without the query, downgrade to `could_not_verify` or drop it.
+`heuristic` candidate for `createOrder` and no `direct` one" is a static gap.
+It becomes an uncovered-behavior finding only with complete graph scope, source
+reads, and observed execution evidence. Otherwise report `could_not_verify`.
 
 ## Restraint
 
-Finding nothing is a normal outcome. A change whose behaviour has direct tests
-that exercise the production path is a clean result, and reporting it as clean
-is correct. Do not manufacture coverage findings — a reviewer that always wants
-one more test is one nobody reads.
+Finding nothing is a normal outcome. A change whose direct candidate has a
+source-confirmed production path and assertion plus an observed relevant run is
+a clean result. Do not manufacture coverage findings — a reviewer that always
+wants one more test is one nobody reads.
 
 ## What this review cannot judge
 
-- **Coverage is not correctness.** A `direct` test proves the code ran, not that
-  the expected value is right.
+- **Coverage is not correctness.** A `direct` candidate does not prove the code
+  ran; an observed relevant run still does not prove the expected value is right.
 - **Flakiness, ordering, and timing** are runtime properties and are invisible
   here.
 - **Whether the suite passed** is the executor's observation, not yours. Re-run

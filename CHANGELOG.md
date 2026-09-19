@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Test-audit workflows now treat `mmcg_test_impact` classifications as static
+  candidate ranking. A missing `direct` candidate is a research gap, not proof
+  of uncovered behavior without complete scope, source inspection, and observed
+  execution evidence.
 - The executor and independent auditor can now call `mmcg_test_impact` when a
   role brief detects QA scope or omits candidate-test evidence, so their
   read-only tool allowlists match the required focused test research.

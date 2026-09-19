@@ -31,14 +31,23 @@ jobs:
       id-token: write
       actions: read
     steps:
+      # Keep recovery mechanics on main, while every release input below is
+      # read from the immutable tag. This lets a recovery use a fixed helper
+      # without moving or rebuilding the release tag.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.release_tag }}
           fetch-depth: 0
+          path: release
 
       - name: Verify immutable tag and version
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
+        working-directory: release
         run: |
           set -euo pipefail
           ROOT_VERSION=$(node -p "require('./npm/mastermind/package.json').version")
@@ -78,7 +87,7 @@ jobs:
       - name: Resume publication or verify existing package bytes
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: bash scripts/publish-npm-tarballs.sh "$GITHUB_WORKSPACE/packed" "$GITHUB_WORKSPACE/npm/mastermind/package.json"
+        run: bash scripts/publish-npm-tarballs.sh "$GITHUB_WORKSPACE/packed" "$GITHUB_WORKSPACE/release/npm/mastermind/package.json"
 
   registry-smoke:
     name: Public npm install smoke

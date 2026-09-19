@@ -855,6 +855,36 @@ class RepositoryDeliveryContractTests(unittest.TestCase):
         self.assertIn("scripts/publish-npm-tarballs.sh", publish["run"])
         self.assertNotIn("npm publish", publish["run"])
 
+    def test_npm_recovery_publishes_exact_tag_artifacts_with_current_helper(self):
+        workflow = yaml.safe_load(
+            (ROOT / ".github/workflows/recover-publish-npm.yml").read_text(encoding="utf-8")
+        )
+        publish = workflow["jobs"]["publish"]
+        self.assertEqual(publish["environment"], "npm-prod")
+        self.assertEqual(publish["permissions"], {
+            "contents": "read",
+            "id-token": "write",
+            "actions": "read",
+        })
+        checkouts = [
+            step for step in publish["steps"] if "actions/checkout@" in step.get("uses", "")
+        ]
+        self.assertEqual(len(checkouts), 2)
+        self.assertNotIn("ref", checkouts[0].get("with", {}))
+        self.assertEqual(checkouts[1]["with"]["ref"], "${{ inputs.release_tag }}")
+        self.assertEqual(checkouts[1]["with"]["path"], "release")
+        download = next(
+            step for step in publish["steps"] if step.get("name") == "Download original verified tarballs"
+        )
+        self.assertEqual(download["with"]["name"], "npm-tarballs")
+        self.assertEqual(download["with"]["run-id"], "${{ inputs.source_run_id }}")
+        resume = next(
+            step for step in publish["steps"]
+            if step.get("name") == "Resume publication or verify existing package bytes"
+        )
+        self.assertIn("bash scripts/publish-npm-tarballs.sh", resume["run"])
+        self.assertIn("$GITHUB_WORKSPACE/release/npm/mastermind/package.json", resume["run"])
+
     def test_crate_publish_uploads_the_verified_artifact_without_repackaging(self):
         workflow = yaml.safe_load(
             (ROOT / ".github/workflows/publish-mmcg.yml").read_text(encoding="utf-8")

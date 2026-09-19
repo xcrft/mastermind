@@ -3005,6 +3005,13 @@ pub fn change_impact(
     } else {
         bounded_collection(tests, 500, "test_limit")
     };
+    let affected_components_collection = if graph_overflow || heuristic_overflow {
+        let mut retained = components;
+        retained.truncate(500);
+        work_limited_collection(retained)
+    } else {
+        bounded_collection(components, 500, "component_limit")
+    };
     Ok(ChangeImpactResponse {
         schema_version: 1,
         worktree_files_truncated: working.files_truncated,
@@ -3025,7 +3032,7 @@ pub fn change_impact(
             files: files_collection,
             symbols: bounded_collection(changed_symbols, 50_000, "symbol_limit"),
         },
-        affected_components: bounded_collection(components, 500, "component_limit"),
+        affected_components: affected_components_collection,
         impact: impact_collection,
         api_crossings: crossing_collection,
         tests: tests_collection,
@@ -9310,6 +9317,12 @@ fn checks_value() { assert_eq!(value(), 1); }
             Some("work_limit")
         );
         assert!(response.impact.items.is_empty());
+        assert_eq!(response.affected_components.total, None);
+        assert!(response.affected_components.truncated);
+        assert_eq!(
+            response.affected_components.truncation_reason.as_deref(),
+            Some("work_limit")
+        );
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -9576,6 +9589,11 @@ fn checks_value() { assert_eq!(value(), 1); }
             response.tests.truncation_reason.as_deref(),
             Some("work_limit")
         );
+        assert_eq!(response.affected_components.total, None);
+        assert_eq!(
+            response.affected_components.truncation_reason.as_deref(),
+            Some("work_limit")
+        );
         assert_eq!(store.interrupt_source(), None);
         std::fs::remove_dir_all(root).ok();
     }
@@ -9786,6 +9804,12 @@ fn checks_value() { assert_eq!(value(), 1); }
         assert!(overflow
             .precision_notes
             .contains(&"heuristic_work_limit".to_string()));
+        assert_eq!(overflow.affected_components.total, None);
+        assert!(overflow.affected_components.truncated);
+        assert_eq!(
+            overflow.affected_components.truncation_reason.as_deref(),
+            Some("work_limit")
+        );
         std::fs::remove_dir_all(root).ok();
     }
 

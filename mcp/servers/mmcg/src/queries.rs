@@ -238,7 +238,7 @@ pub fn lang_precision(file_path: &str) -> EdgePrecision {
     precision
 }
 
-fn symbol_hit_with_precision(symbol: Symbol) -> SymbolHit {
+pub(crate) fn symbol_hit_with_precision(symbol: Symbol) -> SymbolHit {
     let mut hit = SymbolHit::from(symbol);
     hit.precision = Some(lang_precision(&hit.file));
     hit
@@ -254,6 +254,13 @@ fn graph_precision_notes() -> Vec<String> {
     .into_iter()
     .map(String::from)
     .collect()
+}
+
+pub(crate) fn unreferenced_precision_notes() -> Vec<String> {
+    let mut notes = graph_precision_notes();
+    notes.push("unreferenced_candidates_are_not_proven_dead_code".into());
+    notes.push("external_entry_points_and_runtime_registration_may_be_missing".into());
+    notes
 }
 
 fn edge_query_precision_notes(edge_kind: &str) -> Vec<String> {
@@ -4487,9 +4494,6 @@ pub fn unreferenced(
     };
     let syms: Vec<SymbolHit> = symbols.into_iter().map(symbol_hit_with_precision).collect();
     let count = u32::try_from(syms.len()).unwrap_or(u32::MAX);
-    let mut precision_notes = graph_precision_notes();
-    precision_notes.push("unreferenced_candidates_are_not_proven_dead_code".into());
-    precision_notes.push("external_entry_points_and_runtime_registration_may_be_missing".into());
     Ok(UnreferencedResponse {
         kind: kind.map(String::from),
         language: language.map(String::from),
@@ -4498,7 +4502,7 @@ pub fn unreferenced(
         truncated: row_limit.is_some() && total > count,
         row_limit,
         symbols: syms,
-        precision_notes,
+        precision_notes: unreferenced_precision_notes(),
     })
 }
 

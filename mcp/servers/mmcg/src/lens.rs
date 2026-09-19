@@ -378,6 +378,7 @@ pub struct LensDeadCode {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncation_reason: Option<&'static str>,
     pub items: Vec<crate::queries::SymbolHit>,
+    pub precision_notes: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1820,7 +1821,7 @@ fn build_snapshot_until(
         .map_err(|_| LensError::ImpactUnavailable(ChangeImpactError::SnapshotChanged))?;
     let dead_items = dead_symbols
         .into_iter()
-        .map(crate::queries::SymbolHit::from)
+        .map(crate::queries::symbol_hit_with_precision)
         .collect::<Vec<_>>();
     let dead_truncated = dead_total > dead_items.len() as u32;
     const CHURN_WINDOW_COMMITS: u32 = 500;
@@ -2016,6 +2017,7 @@ fn build_snapshot_until(
             truncated: dead_truncated,
             truncation_reason: dead_truncated.then_some("symbol_limit"),
             items: dead_items,
+            precision_notes: crate::queries::unreferenced_precision_notes(),
         },
         change_hotspots,
         largest_files,
@@ -2929,6 +2931,17 @@ mod tests {
             dead["items"].as_array().unwrap().len() as u64
         );
         assert_eq!(dead["truncated"], false);
+        assert_eq!(
+            dead["precision_notes"],
+            serde_json::json!([
+                "heuristic_name_resolution_without_compiler_types",
+                "dynamic_generated_and_cross_language_edges_may_be_missing",
+                "empty_result_does_not_prove_no_dependencies",
+                "truncated_describes_query_limits_not_extraction_completeness",
+                "unreferenced_candidates_are_not_proven_dead_code",
+                "external_entry_points_and_runtime_registration_may_be_missing",
+            ])
+        );
         let names: Vec<&str> = dead["items"]
             .as_array()
             .unwrap()
@@ -2943,6 +2956,13 @@ mod tests {
             !names.contains(&"seed"),
             "a referenced symbol must not be listed as dead"
         );
+        let caller = dead["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["name"] == "caller")
+            .unwrap();
+        assert_eq!(caller["precision"]["resolution"], "syntactic");
     }
 
     #[test]

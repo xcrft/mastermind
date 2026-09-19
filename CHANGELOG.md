@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Lens snapshots and review packages now retain dead-code candidate precision
+  notes and per-symbol static-edge limitations, so their JSON cannot imply
+  deletion proof merely because the browser warning is visible.
 - Change and test-impact JSON now carry a precision note that candidate
   classification does not prove execution or assertion coverage, matching the
   test-audit contract for every API consumer.

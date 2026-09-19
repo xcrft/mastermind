@@ -780,7 +780,7 @@
       mapComponents.items,
       nodes
     );
-    const precisionNotes = collectPrecisionNotes(map, impact, evidence, semantic);
+    const precisionNotes = collectPrecisionNotes(map, impact, evidence, semantic, audit);
     if (documentGraph) {
       precisionNotes.push({
         code: "declared_relations_unverified",
@@ -955,7 +955,7 @@
     });
   }
 
-  function collectPrecisionNotes(map, impact, evidence, semantic) {
+  function collectPrecisionNotes(map, impact, evidence, semantic, audit) {
     const notes = [];
     const disciplines = record(impact.disciplines);
     array(map.precision_notes).forEach(function (value) {
@@ -1018,6 +1018,13 @@
         code: text(diagnostic.code, "Semantic diagnostic"),
         message: text(diagnostic.message, ""),
         source: "Semantic · SCIP",
+      });
+    });
+    array(record(audit.dead_code).precision_notes).forEach(function (value) {
+      notes.push({
+        code: text(value, "Dead-code precision"),
+        message: "",
+        source: "Audit · dead-code candidates",
       });
     });
     const seen = new Set();

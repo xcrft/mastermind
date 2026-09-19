@@ -891,12 +891,20 @@ fn native_inspect(
     identity: &ExecutableIdentity,
     entry: &Value,
 ) -> Result<NativeState, String> {
-    let mut args = vec!["mcp".into(), "get".into(), "mmcg".into()];
-    if client == Client::Codex {
-        args.push("--json".into());
+    let args = match client {
+        Client::Claude => vec!["mcp".into(), "get".into(), "mmcg".into()],
+        // `codex mcp get` uses a nonzero exit status both when the named entry
+        // is absent and when configuration loading fails. Listing JSON keeps
+        // absence as a successful, structurally checkable empty result.
+        Client::Codex => vec!["mcp".into(), "list".into(), "--json".into()],
+        _ => return Err("invalid_native_client".into()),
     };
     let output = run_native_checked(program, identity, &args)?;
-    native_matches(client, &output, entry)
+    match client {
+        Client::Codex => codex_list_matches(&output, entry),
+        Client::Claude => native_matches(client, &output, entry),
+        _ => unreachable!(),
+    }
 }
 
 fn native_matches(
@@ -932,6 +940,52 @@ fn native_matches(
         Client::Codex => parse_codex_native(&output.stdout)?,
         _ => return Err("invalid_native_client".into()),
     };
+    classify_native_state(parsed, command, &args)
+}
+
+fn codex_list_matches(output: &BoundedOutput, entry: &Value) -> Result<NativeState, String> {
+    if output.stdout_truncated || output.stderr_truncated {
+        return Err("native_output_truncated".into());
+    }
+    if !output.status.success() {
+        return Err("native_inspect_failed".into());
+    }
+    let command = entry
+        .get("command")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "native_entry_invalid".to_string())?;
+    let args = entry
+        .get("args")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "native_entry_invalid".to_string())?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| "native_entry_invalid".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let value = parse_json_unique(&output.stdout).map_err(|_| "native_parse_failed".to_string())?;
+    let mut servers = value
+        .as_array()
+        .ok_or_else(|| "native_parse_failed".to_string())?
+        .iter()
+        .filter(|server| server.get("name").and_then(Value::as_str) == Some("mmcg"));
+    let Some(server) = servers.next() else {
+        return Ok(NativeState::Absent);
+    };
+    if servers.next().is_some() {
+        return Err("native_parse_failed".into());
+    }
+    classify_native_state(parse_codex_native_value(server)?, command, &args)
+}
+
+fn classify_native_state(
+    parsed: ParsedNativeState,
+    command: &str,
+    args: &[String],
+) -> Result<NativeState, String> {
     let canonical = match &parsed {
         ParsedNativeState::Claude {
             command_fields,
@@ -969,6 +1023,10 @@ fn parse_claude_native(bytes: &[u8]) -> Result<ParsedNativeState, String> {
 
 fn parse_codex_native(bytes: &[u8]) -> Result<ParsedNativeState, String> {
     let value = parse_json_unique(bytes).map_err(|_| "native_parse_failed".to_string())?;
+    parse_codex_native_value(&value)
+}
+
+fn parse_codex_native_value(value: &Value) -> Result<ParsedNativeState, String> {
     let server = value
         .as_object()
         .ok_or_else(|| "native_parse_failed".to_string())?;
@@ -2997,6 +3055,48 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn codex_list_requires_one_structurally_valid_mmcg_entry() {
+        let entry = json!({"command": "/bin/mmcg", "args": ["serve"]});
+        let canonical = bounded_stdout(
+            br#"[{"name":"mmcg","enabled":true,"transport":{"type":"stdio","command":"/bin/mmcg","args":["serve"]}}]"#,
+            false,
+        );
+        assert!(matches!(
+            codex_list_matches(&canonical, &entry).unwrap(),
+            NativeState::Canonical(_)
+        ));
+        let absent = bounded_stdout(b"[]", false);
+        assert!(matches!(
+            codex_list_matches(&absent, &entry).unwrap(),
+            NativeState::Absent
+        ));
+        let duplicate = bounded_stdout(
+            br#"[{"name":"mmcg","enabled":true,"transport":{"type":"stdio","command":"/bin/mmcg","args":["serve"]}},{"name":"mmcg","enabled":true,"transport":{"type":"stdio","command":"/bin/mmcg","args":["serve"]}}]"#,
+            false,
+        );
+        assert_eq!(
+            codex_list_matches(&duplicate, &entry).unwrap_err(),
+            "native_parse_failed"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+
+            let failed = BoundedOutput {
+                status: std::process::ExitStatus::from_raw(1 << 8),
+                stdout: b"[]".to_vec(),
+                stderr: Vec::new(),
+                stdout_truncated: false,
+                stderr_truncated: false,
+            };
+            assert_eq!(
+                codex_list_matches(&failed, &entry).unwrap_err(),
+                "native_inspect_failed"
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn native_writes_require_observed_postconditions() {
@@ -3008,7 +3108,7 @@ mod tests {
         let executable = bin.join("codex");
         fs::write(
             &executable,
-            "#!/bin/sh\nSTATE_FILE=\"$0.state\"\nif [ \"$2\" = \"get\" ]; then [ -f \"$STATE_FILE\" ] || exit 1; printf '%s\\n' '{\"name\":\"mmcg\",\"enabled\":true,\"transport\":{\"type\":\"stdio\",\"command\":\"/bin/mmcg\",\"args\":[\"serve\"]}}'; exit 0; fi\nif [ \"$2\" = \"add\" ] || [ \"$2\" = \"remove\" ]; then exit 0; fi\nexit 1\n",
+            "#!/bin/sh\nSTATE_FILE=\"$0.state\"\nif [ \"$2\" = \"list\" ]; then [ -f \"$STATE_FILE\" ] || { printf '%s\\n' '[]'; exit 0; }; printf '%s\\n' '[{\"name\":\"mmcg\",\"enabled\":true,\"transport\":{\"type\":\"stdio\",\"command\":\"/bin/mmcg\",\"args\":[\"serve\"]}}]'; exit 0; fi\nif [ \"$2\" = \"add\" ] || [ \"$2\" = \"remove\" ]; then exit 0; fi\nexit 1\n",
         )
         .unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
@@ -3271,7 +3371,7 @@ mod tests {
                 let script = if name == "claude" {
                     "#!/bin/sh\nSTATE_FILE=\"$0.state\"\nif [ \"$2\" = \"get\" ]; then [ -f \"$STATE_FILE\" ] || exit 1; STATE=\"\"; read -r STATE < \"$STATE_FILE\" || :; [ \"$STATE\" = \"removed\" ] && exit 1; printf 'Command: /bin/mmcg\\nArgs: serve\\n'; exit 0; fi\nif [ \"$2\" = \"add\" ]; then : > \"$STATE_FILE\"; exit 0; fi\nif [ \"$2\" = \"remove\" ]; then printf 'removed\\n' > \"$STATE_FILE\"; exit 0; fi\nexit 1\n"
                 } else {
-                    "#!/bin/sh\nSTATE_FILE=\"$0.state\"\nif [ \"$2\" = \"get\" ]; then [ \"$4\" = \"--json\" ] || exit 2; [ -f \"$STATE_FILE\" ] || exit 1; STATE=\"\"; read -r STATE < \"$STATE_FILE\" || :; [ \"$STATE\" = \"removed\" ] && exit 1; printf '%s\\n' '{\"name\":\"mmcg\",\"enabled\":true,\"transport\":{\"type\":\"stdio\",\"command\":\"/bin/mmcg\",\"args\":[\"serve\"],\"env\":null,\"env_vars\":[],\"cwd\":null}}'; exit 0; fi\nif [ \"$2\" = \"add\" ]; then : > \"$STATE_FILE\"; exit 0; fi\nif [ \"$2\" = \"remove\" ]; then printf 'removed\\n' > \"$STATE_FILE\"; exit 0; fi\nexit 1\n"
+                    "#!/bin/sh\nSTATE_FILE=\"$0.state\"\nif [ \"$2\" = \"list\" ]; then [ \"$3\" = \"--json\" ] || exit 2; [ -f \"$STATE_FILE\" ] || { printf '%s\\n' '[]'; exit 0; }; STATE=\"\"; read -r STATE < \"$STATE_FILE\" || :; [ \"$STATE\" = \"removed\" ] && { printf '%s\\n' '[]'; exit 0; }; printf '%s\\n' '[{\"name\":\"mmcg\",\"enabled\":true,\"transport\":{\"type\":\"stdio\",\"command\":\"/bin/mmcg\",\"args\":[\"serve\"],\"env\":null,\"env_vars\":[],\"cwd\":null}}]'; exit 0; fi\nif [ \"$2\" = \"add\" ]; then : > \"$STATE_FILE\"; exit 0; fi\nif [ \"$2\" = \"remove\" ]; then printf 'removed\\n' > \"$STATE_FILE\"; exit 0; fi\nexit 1\n"
                 };
                 fs::write(&executable, script).unwrap();
                 fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();

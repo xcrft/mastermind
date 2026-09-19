@@ -73,7 +73,9 @@ mastermind doctor --workflow --client codex
 ```
 
 Doctor recognizes only the `[mcp_servers.mmcg]` table with a string `command`
-and ordered string `args` in `~/.codex/config.toml`. It parses normal TOML
-quoting, comments, and multiline arrays, while rejecting malformed types,
-duplicate keys, and symlinked config ancestry. Doctor does not execute Codex or
-a configured command. The old YAML configuration shape is unsupported.
+and ordered string `args` in `~/.codex/config.toml`. An omitted `enabled` uses
+Codex's active default; `enabled = false` is reported as disabled rather than
+healthy. It parses normal TOML quoting, comments, and multiline arrays, while
+rejecting malformed types, duplicate keys, and symlinked config ancestry. Doctor
+does not execute Codex or a configured command. The old YAML configuration shape
+is unsupported.

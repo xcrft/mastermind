@@ -83,6 +83,12 @@ legacy `VERIFY:` declaration after the focused checks pass. Preserve the full
 command and arguments in the canonical report. Commands must terminate; do not
 launch a server or watcher as verification.
 
+For a runnable UI change or a spec with `## Design Context`, collect browser
+observations before closing the report. Record the accessibility tree states,
+console/network errors, and checked viewports in prose; state `not checked` and
+the reason for every unavailable check. These observations are evidence for
+semantic review, never a claim that visual fidelity passed.
+
 ## Comments
 
 Before Final Verification, inspect comments added or modified by this task.
@@ -113,6 +119,9 @@ phase IDs are also valid:
 
 ### Verification results
 - `<command>` → passed | failed: <short exact evidence>
+
+### Browser observations
+- <observed UI evidence, or **not checked** with the reason>
 
 ### Files modified
 - `path/relative/to/repository`

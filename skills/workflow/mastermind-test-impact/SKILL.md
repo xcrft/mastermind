@@ -2,7 +2,7 @@
 name: mastermind-test-impact
 description: Build a focused, evidence-backed test plan from `mastermind impact` or `mmcg_test_impact`. Use when deciding which tests to run for a change, explaining direct/transitive/heuristic candidates, or sequencing fast feedback before the repository's required full test gate.
 metadata:
-  version: 0.1.1
+  version: 0.1.2
   authors: [mastermind]
   tags: [workflow, testing, mmcg]
 ---
@@ -19,8 +19,10 @@ that omitted tests are unnecessary.
    authorized; never infer candidates from a stale graph.
 2. Run `mastermind impact --since REF --format json`, or call
    `mmcg_test_impact` for the exact test projection.
-3. Reject a response that omits the
-   `focused_tests_do_not_replace_full_gate` caveat.
+3. Reject a response that omits either the
+   `focused_tests_do_not_replace_full_gate` or
+   `test_candidates_are_static_and_do_not_prove_execution_or_assertion_coverage`
+   caveat.
 4. Group candidates in this order:
 
    - `direct`: a changed test symbol at depth 0 or a graph-linked test at depth 1;

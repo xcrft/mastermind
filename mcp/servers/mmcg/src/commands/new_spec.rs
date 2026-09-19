@@ -275,8 +275,9 @@ expected_docs: []
 
 You are implementing {description}.
 
-**Goals:**
-1. <primary goal — what counts as done>
+## Goals
+
+- <primary goal — what counts as done>
 
 **Rules (global):**
 - DO NOT add features beyond what this spec lists (YAGNI)
@@ -465,8 +466,9 @@ breaking_changes:
 
 You are implementing {description}.
 
-**Goals:**
-1. <primary goal — what counts as done>
+## Goals
+
+- <primary goal — what counts as done>
 
 ## Product Context
 
@@ -804,6 +806,18 @@ mod tests {
         );
         assert!(!content.contains("Decision Matrix"));
         assert!(!content.contains("Risk Register"));
+    }
+
+    #[test]
+    fn standard_and_strict_templates_have_a_goals_section() {
+        for mode in [Mode::Standard, Mode::Strict] {
+            let content = render_spec("change behavior", 7, &mode);
+            let parsed = mmcg::spec::parse_str("spec.md", &content);
+            assert!(
+                mmcg::spec::section_body(&parsed, "Goals").is_some(),
+                "template must satisfy the Goals section contract: {content}"
+            );
+        }
     }
 
     #[test]

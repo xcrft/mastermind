@@ -576,13 +576,20 @@ pub(crate) fn analyze_with_impact(
         },
         &mut diagnostics,
     )?;
-    let history_review_candidates = history_review_candidates(
+    let mut history_review_candidates = history_review_candidates(
         store,
         &changed_files,
         &components,
         &boundaries,
         &mut diagnostics,
     )?;
+    if mark_history_trigger_scope_partial(&mut history_review_candidates, &components, &boundaries)
+    {
+        diagnostics.push(diagnostic(
+            "history_trigger_scope_incomplete",
+            "Some removed components or public API changes were omitted before historical document correlation.",
+        ));
+    }
 
     let validation_deadline = store
         .remaining_work_budget()
@@ -1571,6 +1578,26 @@ fn history_review_candidates(
     Ok(response)
 }
 
+/// Historical document correlation starts from removed or changed architecture
+/// rows. A bounded delta can therefore hide additional paths that should have
+/// been searched, even when every searched history artifact was available.
+fn mark_history_trigger_scope_partial(
+    candidates: &mut TemporalCollection<TemporalHistoryCandidate>,
+    components: &TemporalComponents,
+    boundaries: &TemporalBoundaryDelta,
+) -> bool {
+    if !components.removed.truncated
+        && !boundaries.removed.truncated
+        && !boundaries.changed.truncated
+    {
+        return false;
+    }
+    candidates.total = None;
+    candidates.truncated = true;
+    candidates.truncation_reason = Some("architecture_delta_limit");
+    true
+}
+
 fn exact_path_boundaries(body: &str, start: usize, end: usize) -> bool {
     let bytes = body.as_bytes();
     let before = start.checked_sub(1).and_then(|index| bytes.get(index));
@@ -1789,6 +1816,33 @@ mod tests {
                 &ownership,
             ),
             None
+        );
+    }
+
+    #[test]
+    fn incomplete_architecture_triggers_keep_history_candidates_partial() {
+        let base = ArchitectureProjection {
+            components_partial: true,
+            ..ArchitectureProjection::default()
+        };
+        let head = ArchitectureProjection::default();
+        let components = component_delta(&base, &head);
+        let boundaries = boundary_delta(&base, &head);
+        let mut candidates = bounded(
+            Vec::<TemporalHistoryCandidate>::new(),
+            HISTORY_CANDIDATE_LIMIT,
+        );
+
+        assert!(mark_history_trigger_scope_partial(
+            &mut candidates,
+            &components,
+            &boundaries,
+        ));
+        assert_eq!(candidates.total, None);
+        assert!(candidates.truncated);
+        assert_eq!(
+            candidates.truncation_reason,
+            Some("architecture_delta_limit")
         );
     }
 

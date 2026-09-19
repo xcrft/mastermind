@@ -24,6 +24,8 @@ use std::time::{Duration, Instant};
 pub const CONFIG_MAX_BYTES: usize = 2 * 1024 * 1024;
 pub const PROCESS_OUTPUT_MAX_BYTES: usize = 64 * 1024;
 pub const PROCESS_TIMEOUT: Duration = Duration::from_secs(10);
+const PROCESS_PIPE_DRAIN_GRACE: Duration = Duration::from_millis(200);
+const PROCESS_PIPE_CLEANUP_GRACE: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1567,11 +1569,22 @@ fn run_bounded_with_timeout(
     args: &[String],
     timeout: Duration,
 ) -> Result<BoundedOutput, String> {
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        // Own descendants as well as the direct CLI process. Some native
+        // clients spawn a helper that inherits stdout/stderr and outlives a
+        // normally exited parent.
+        command.process_group(0);
+    }
+    let mut child = command
         .spawn()
         .map_err(|_| "native_spawn_failed".to_string())?;
     let stdout = child
@@ -1592,16 +1605,19 @@ fn run_bounded_with_timeout(
     });
     let started = Instant::now();
     let mut status = None;
+    let mut exited_at = None;
     let mut stdout_result = None;
     let mut stderr_result = None;
     loop {
         if status.is_none() {
             match child.try_wait() {
-                Ok(Some(completed)) => status = Some(completed),
+                Ok(Some(completed)) => {
+                    status = Some(completed);
+                    exited_at = Some(Instant::now());
+                }
                 Ok(None) => {}
                 Err(_) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    terminate_process_tree(&mut child);
                     return Err("native_wait_failed".into());
                 }
             }
@@ -1639,11 +1655,31 @@ fn run_bounded_with_timeout(
                 stderr_result = pending_stderr;
             }
         }
-        if started.elapsed() >= timeout {
-            if status.is_none() {
-                let _ = child.kill();
-                let _ = child.wait();
+        if status.is_some()
+            && exited_at.is_some_and(|exited| exited.elapsed() >= PROCESS_PIPE_DRAIN_GRACE)
+            && (stdout_result.is_none() || stderr_result.is_none())
+        {
+            // The direct process has already completed successfully, so the
+            // remaining open pipe belongs to a descendant. Give it a short
+            // chance to flush, then terminate only this command's process
+            // group and collect its final pipe closure.
+            terminate_process_tree(&mut child);
+            if stdout_result.is_none() {
+                stdout_result = stdout_receiver
+                    .recv_timeout(PROCESS_PIPE_CLEANUP_GRACE)
+                    .ok();
             }
+            if stderr_result.is_none() {
+                stderr_result = stderr_receiver
+                    .recv_timeout(PROCESS_PIPE_CLEANUP_GRACE)
+                    .ok();
+            }
+            if stdout_result.is_none() || stderr_result.is_none() {
+                return Err("native_reader_failed".into());
+            }
+        }
+        if started.elapsed() >= timeout {
+            terminate_process_tree(&mut child);
             if stdout_result.is_none() {
                 stdout_result = stdout_receiver
                     .recv_timeout(Duration::from_millis(100))
@@ -1664,6 +1700,21 @@ fn run_bounded_with_timeout(
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+fn terminate_process_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let process_group = child.id() as libc::pid_t;
+        // SAFETY: the child starts its own process group before exec. A
+        // negative PID targets only that group; failure means it has already
+        // exited and is harmless for cleanup.
+        unsafe {
+            let _ = libc::kill(-process_group, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn channel_result(
@@ -2992,20 +3043,33 @@ mod tests {
     }
 
     #[test]
-    fn native_timeout_returns_when_descendant_holds_pipes_open() {
+    fn native_normal_exit_cleans_descendant_holding_pipes_open() {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let root = tmp("native-descendant-timeout");
             let script = root.join("descendant");
-            fs::write(&script, "#!/bin/sh\nsleep 5 &\nexit 0\n").unwrap();
+            fs::write(&script, "#!/bin/sh\nsleep 5 &\necho $!\nexit 0\n").unwrap();
             fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
             let started = Instant::now();
-            assert_eq!(
-                run_bounded_with_timeout(&script, &[], Duration::from_millis(50)).unwrap_err(),
-                "native_timeout"
-            );
+            let output = run_bounded(&script, &[]).unwrap();
+            let pid: u32 = String::from_utf8(output.stdout)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            assert!(output.status.success());
             assert!(started.elapsed() < Duration::from_secs(1));
+            let check = Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .unwrap();
+            assert!(
+                !check.status.success()
+                    || String::from_utf8_lossy(&check.stdout)
+                        .trim()
+                        .starts_with('Z')
+            );
             fs::remove_dir_all(root).ok();
         }
     }

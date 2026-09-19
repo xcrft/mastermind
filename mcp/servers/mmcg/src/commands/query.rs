@@ -1160,6 +1160,8 @@ fn brief_collection_is_partial<T>(
 fn brief_is_partial(packet: &queries::BriefPacket) -> bool {
     packet.freshness.structural.status != "fresh"
         || packet.freshness.history.status != "fresh"
+        || packet.disciplines.detected_unsafe_omitted > 0
+        || packet.disciplines.scope_incomplete_reason.is_some()
         || brief_collection_is_partial(&packet.changes.files, &packet.omitted.changed_files)
         || brief_collection_is_partial(&packet.changes.symbols, &packet.omitted.changed_symbols)
         || brief_collection_is_partial(&packet.callers, &packet.omitted.callers)
@@ -1249,6 +1251,45 @@ pub fn render_brief(
         "history citations",
         &packet.citations,
         &packet.omitted.history_citations,
+    ));
+    output.push_str("\nEvidence disciplines\n");
+    output.push_str(&format!(
+        "  classified scope — {} changed paths before brief budget admission\n",
+        packet.disciplines.change_impact_file_count
+    ));
+    for discipline in &packet.disciplines.detected {
+        let file_label = if discipline.file_count == 1 {
+            "file"
+        } else {
+            "files"
+        };
+        output.push_str(&format!(
+            "  {} — {} ({} changed {})\n",
+            safe_text(&discipline.name),
+            safe_text(&discipline.basis),
+            discipline.file_count,
+            file_label
+        ));
+    }
+    if packet.disciplines.detected_unsafe_omitted > 0 {
+        output.push_str(&format!(
+            "  detected — {} unsafe classifications omitted\n",
+            packet.disciplines.detected_unsafe_omitted
+        ));
+    }
+    output.push_str(&format!(
+        "  unclassified — {} changed paths in classified scope\n",
+        packet.disciplines.unclassified_count
+    ));
+    if let Some(reason) = &packet.disciplines.scope_incomplete_reason {
+        output.push_str(&format!(
+            "  scope incomplete — disciplines derive from returned changed files ({})\n",
+            safe_text(reason)
+        ));
+    }
+    output.push_str(&format!(
+        "  note — {}\n",
+        safe_text(&packet.disciplines.note)
     ));
     output.push_str("\nChanged files\n");
     for file in &packet.changes.files.items {
@@ -1835,6 +1876,19 @@ mod map_tests {
                 },
                 symbols: complete_brief_collection(Vec::new()),
             },
+            disciplines: queries::BriefDisciplines {
+                change_impact_file_count: 4,
+                detected: vec![queries::BriefDisciplineSignal {
+                    name: "frontend".into(),
+                    basis: "component file type".into(),
+                    file_count: 1,
+                }],
+                detected_unsafe_omitted: 0,
+                unclassified_count: 2,
+                scope_incomplete_reason: Some("file_limit".into()),
+                note: "Path classification routes follow-up evidence; it does not prove behavior."
+                    .into(),
+            },
             callers: complete_brief_collection(vec![queries::BriefCaller {
                 file: "src/api.rs".into(),
                 name: "caller".into(),
@@ -1891,6 +1945,12 @@ mod map_tests {
         assert!(text.contains("Coverage: partial"));
         assert!(text.contains(
             "changed files: 1/unknown · source omitted at least 2 · unsafe omitted 1 · budget omitted 3"
+        ));
+        assert!(text.contains("frontend — component file type (1 changed file)"));
+        assert!(text.contains("classified scope — 4 changed paths before brief budget admission"));
+        assert!(text.contains("unclassified — 2 changed paths in classified scope"));
+        assert!(text.contains(
+            "scope incomplete — disciplines derive from returned changed files (file_limit)"
         ));
         assert!(text.contains("function caller — src/api.rs:19 (depth 1)"));
         assert!(text.contains("test checks_api — tests/api.rs:31 (heuristic, low, depth unknown)"));

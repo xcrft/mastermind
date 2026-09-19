@@ -2,7 +2,7 @@
 name: mastermind-codegraph-research
 description: Use mmcg before Bash or literal search for repository orientation, natural-language symbol discovery, symbol existence, callers, callees, imports, blast radius, file existence, or stale-index handling.
 metadata:
-  version: 0.3.2
+  version: 0.3.3
   authors:
     - mastermind
   tags:
@@ -28,6 +28,11 @@ re-exports, and cross-language edges can reduce precision.
 
 - **Bounded orientation** (relevant changes, symbols, callers, tests, and history
   for a role) → one `mmcg_brief` before broad discovery.
+  Use its aggregate `disciplines` to route needed evidence: inspect frontend
+  interaction states, QA coverage, or migration data and rollback boundaries
+  when those disciplines are detected. The classifier is path-based and is not proof
+  of behavior; a scope-incomplete signal means it classified only returned
+  changed files.
 - **Concept discovery** (the intent is known but the exact symbol is not) →
   `mmcg_concept`, then an exact structural query on the selected candidate.
   The query joins normalized terms with `AND`; it is not sentence-level semantic

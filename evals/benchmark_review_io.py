@@ -101,6 +101,7 @@ class Root:
     def read(self, path, limit=bench.CONTROL_BYTE_LIMIT, optional=False):
         try:
             with self.parent(path) as (parent, name):
+                expected_parent = os.fstat(parent)
                 fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
                 with os.fdopen(fd, "rb") as stream:
                     before = os.fstat(stream.fileno())
@@ -111,6 +112,7 @@ class Root:
                 current = os.stat(name, dir_fd=parent, follow_symlinks=False)
                 if len(body) > limit or identity(before) != identity(after) or identity(after) != identity(current):
                     raise bench.BenchmarkError("review_changed", "artifact changed while reading")
+                self.check_parent(path, expected_parent)
             self.read_bytes += len(body)
             if self.read_bytes > READ_LIMIT:
                 raise bench.BenchmarkError("review_limit", "review input exceeds its aggregate read cap")
@@ -131,19 +133,24 @@ class Root:
 
     def names(self, directory=None):
         descriptor = os.dup(self.fd)
+        expected_directory = None
         try:
             if directory is not None:
                 with self.parent(directory) as (parent, name):
                     nested = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
                     os.close(descriptor)
                     descriptor = nested
+                    expected_directory = os.fstat(descriptor)
             values = set()
             with os.scandir(descriptor) as entries:
                 for entry in entries:
                     if len(values) >= 512:
                         raise bench.BenchmarkError("review_limit", "artifact directory exceeds its entry cap")
                     values.add(entry.name)
-            self.check_root()
+            if directory is None:
+                self.check_root()
+            else:
+                self.check_parent(directory + "/.review-receipt", expected_directory)
             self.listings[directory] = values
             return values
         except OSError as error:

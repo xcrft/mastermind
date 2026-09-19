@@ -2804,9 +2804,11 @@
       ? matchedFiles > 0 ? "≥" + displayNumber(matchedFiles) : "?"
       : displayNumber(matchedFiles);
     const documentReview = documentGraph && text(documentGraph.status, "needs_review") === "needs_review";
+    const documentCorpusNotTracked = documentGraph
+      && text(record(documentGraph.corpus).status, "not_tracked") === "not_tracked";
     elements.evidenceSummary.textContent = sourceMetric.knownZero
       ? "No external evidence sources loaded; the static graph remains available."
-      : sourceMetric.value + " source" + (sourceMetric.count === 1 ? "" : "s") + " · " + matchedFilesValue + " matched trace file" + (matchedFiles === 1 ? "" : "s") + ((record(state.model.evidence).partial === true || semantic.partial === true || documentReview || sourceMetric.partial || matchedFilesPartial) ? " · partial" : "");
+      : sourceMetric.value + " source" + (sourceMetric.count === 1 ? "" : "s") + " · " + matchedFilesValue + " matched trace file" + (matchedFiles === 1 ? "" : "s") + ((record(state.model.evidence).partial === true || semantic.partial === true || documentReview || documentCorpusNotTracked || sourceMetric.partial || matchedFilesPartial) ? " · partial" : "");
     if (sourceMetric.knownZero) {
       elements.evidenceSourceList.appendChild(createElement("p", "evidence-source-list__empty", "Use mastermind enrich --scip index.scip, enrich --facts facts.json, or external evidence flags to add corroborating facts."));
       return;
@@ -2819,7 +2821,10 @@
       const graphStatus = text(documentGraph.status, "needs_review");
       const corpusStatus = text(record(documentGraph.corpus).status, "not_tracked");
       const packet = record(documentGraph.packet);
-      const card = createElement("article", "evidence-source evidence-source--" + (graphStatus === "current" ? "loaded" : "partial"));
+      const card = createElement(
+        "article",
+        "evidence-source evidence-source--" + (graphStatus === "current" && corpusStatus !== "not_tracked" ? "loaded" : "partial")
+      );
       card.appendChild(createElement("span", "evidence-source__kind", "document graph · " + graphStatus.replace("_", " ")));
       card.appendChild(createElement("span", "evidence-source__label", text(packet.path, "Selected packet")));
       const relations = array(documentGraph.edges).length;

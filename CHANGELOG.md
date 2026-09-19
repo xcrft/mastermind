@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Lens now fails closed when document-graph or review revision fields are not
+  exact Git object IDs, rather than treating equal arbitrary strings as a
+  revision binding.
 - A document graph captured at a different Git revision now marks Lens and the
   exported review packet partial. Its current named bytes do not establish
   coverage of unrelated review-head changes.

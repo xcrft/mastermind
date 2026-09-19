@@ -4240,7 +4240,7 @@ impl WorkflowStatus {
         ) {
             Ok(file) => match String::from_utf8(file.bytes) {
                 Ok(spec_text) => {
-                    let goal_snippet = extract_section(&spec_text, "Goal");
+                    let goal_snippet = extract_section(&spec_text, "Goals");
                     if !goal_snippet.is_empty() {
                         out.push_str("Goal\n");
                         for line in goal_snippet.lines().take(8) {
@@ -4365,23 +4365,10 @@ impl WorkflowStatus {
 }
 
 fn extract_section(text: &str, heading: &str) -> String {
-    let mut in_section = false;
-    let mut lines = Vec::new();
-    for line in text.lines() {
-        if line.starts_with("## ") {
-            if in_section {
-                break;
-            }
-            if line.contains(heading) {
-                in_section = true;
-                continue;
-            }
-        }
-        if in_section && !line.trim().is_empty() {
-            lines.push(line);
-        }
-    }
-    lines.join("\n")
+    let spec = crate::spec::parse_str("workflow-status.md", text);
+    crate::spec::section_body(&spec, heading)
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn scan_index(root: &Path, db: &Path) -> IndexInfo {
@@ -5196,6 +5183,13 @@ mod tests {
             "git init failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn extract_section_ignores_fenced_heading_examples() {
+        let text = "~~~markdown\n## Goals\n- Decoy goal\n~~~\n## Goals\n- Actual goal\n## Scope\n- Bounded change\n";
+
+        assert_eq!(extract_section(text, "Goals"), "- Actual goal");
     }
 
     fn source_fixture() -> tempfile::TempDir {

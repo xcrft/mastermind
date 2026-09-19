@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Canonical executor-report `files_modified` now has to match the actual,
+  normalized changed-file set, excluding controller artifacts. Missing or
+  invented file declarations can no longer enter a held audit or sealed bundle.
 - Canonical executor-report passes now require `observed.exit_code: 0`; an
   unobserved pass cannot satisfy a required verification command. The receipt is
   self-reported consistency evidence, not execution provenance.

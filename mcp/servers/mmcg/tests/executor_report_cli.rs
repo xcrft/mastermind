@@ -402,6 +402,30 @@ fn executor_report_completion_and_task_identity_reach_the_shared_audit() {
 }
 
 #[test]
+fn canonical_report_files_must_match_the_actual_changed_file_set() {
+    let mut fixture = Fixture::new();
+    fixture.change();
+
+    let mut missing = canonical("complete");
+    missing["files_modified"] = json!([]);
+    let report = fixture.audit(&parsed(&missing));
+    assert_eq!(report.verdict, Verdict::Broken);
+    assert!(matches!(
+        report.findings.as_slice(),
+        [Finding::ExecutorReportMissingChangedFile { file }] if file == "service.py"
+    ));
+
+    let mut unexpected = canonical("complete");
+    unexpected["files_modified"] = json!(["./service.py", "src/not-changed.py"]);
+    let report = fixture.audit(&parsed(&unexpected));
+    assert_eq!(report.verdict, Verdict::Broken);
+    assert!(matches!(
+        report.findings.as_slice(),
+        [Finding::ExecutorReportUnexpectedFile { file }] if file == "src/not-changed.py"
+    ));
+}
+
+#[test]
 fn executor_report_bundle_binds_metadata_verification_and_current_disk_input() {
     let mut fixture = Fixture::new();
     fixture.change();

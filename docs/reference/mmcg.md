@@ -1872,7 +1872,9 @@ modified-file declarations, defects and verification excerpts. A `partial` or
 `failed` report produces `executor_report_rejected` and a `broken` audit, even
 when there are no claims. Its `spec` must identify the audited task inside the
 repository; absolute and repository-relative paths are supported. Reported
-files and phases do not replace the spec's scope or prove plan coverage.
+files are normalized and compared bidirectionally with the actual diff, excluding
+`.mastermind/` controller artifacts; a missing or extra declaration makes the
+audit `broken`. They do not replace the spec's scope or prove plan coverage.
 
 `run-task` postflight and CI with `--require-executor-report` or `--bundle-dir`
 reject legacy reports. Ordinary `audit-spec` and CI without those flags retain

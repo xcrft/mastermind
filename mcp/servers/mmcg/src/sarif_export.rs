@@ -494,6 +494,7 @@ mod tests {
                 detected: Vec::new(),
                 unclassified: Vec::new(),
                 note: String::new(),
+                scope_incomplete_reason: None,
             },
             limits: ImpactLimits {
                 changed_files: 100,

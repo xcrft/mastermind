@@ -1339,6 +1339,10 @@ pub struct ImpactDisciplines {
     pub detected: Vec<DisciplineSignal>,
     pub unclassified: Vec<String>,
     pub note: String,
+    /// Present when changed-file collection omitted paths, so the signals only
+    /// describe the returned subset rather than the entire change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope_incomplete_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2343,6 +2347,7 @@ fn classify_disciplines(files: &[ChangedFile]) -> ImpactDisciplines {
         detected,
         unclassified,
         note: DISCIPLINE_NOTE.to_string(),
+        scope_incomplete_reason: None,
     }
 }
 
@@ -2972,20 +2977,22 @@ pub fn change_impact(
             status: file.status.clone(),
         })
         .collect::<Vec<_>>();
-    let disciplines = classify_disciplines(&files);
     let files_partial = working.files_truncated || working.skipped_non_utf8_paths > 0;
+    let files_truncation_reason = files_partial.then(|| {
+        if working.files_truncated {
+            "file_limit"
+        } else {
+            "non_utf8_path"
+        }
+        .to_string()
+    });
+    let mut disciplines = classify_disciplines(&files);
+    disciplines.scope_incomplete_reason = files_truncation_reason.clone();
     let files_collection = Collection {
         total: working.files_total,
         returned: files.len() as u32,
         truncated: files_partial,
-        truncation_reason: files_partial.then(|| {
-            if working.files_truncated {
-                "file_limit"
-            } else {
-                "non_utf8_path"
-            }
-            .to_string()
-        }),
+        truncation_reason: files_truncation_reason,
         items: files,
     };
     let impact_collection = if graph_overflow {
@@ -9673,6 +9680,10 @@ fn checks_value() { assert_eq!(value(), 1); }
         assert!(response
             .precision_notes
             .contains(&"non_utf8_changed_paths_skipped:1".to_string()));
+        assert_eq!(
+            response.disciplines.scope_incomplete_reason.as_deref(),
+            Some("non_utf8_path")
+        );
         std::fs::remove_dir_all(root).ok();
     }
 

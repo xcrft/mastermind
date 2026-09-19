@@ -554,6 +554,33 @@ final(model_error=mode == 'partial')
         self.assertFalse((destination / "reviews/alice.json").exists())
         self.assertEqual(list(detached.iterdir()), [])
 
+    def test_review_status_rejects_a_detached_parent_during_its_final_recheck(self):
+        batch, _ = self.batch()
+        review.export_review(batch, self.output)
+        packet = bench.load_json(self.output / "reviewer/packet.json")
+        answer_path = packet["items"][-1]["answer"]["path"]
+        answer_name = Path(answer_path).name
+        reviewer = self.output / "reviewer"
+        detached = self.root / "detached-reviewer"
+        original_open = review_io.os.open
+        opens = 0
+
+        def replace_after_final_answer_open(path, *arguments, **keywords):
+            nonlocal opens
+            result = original_open(path, *arguments, **keywords)
+            if path == answer_name and "dir_fd" in keywords:
+                opens += 1
+                if opens == 2:
+                    reviewer.rename(detached)
+                    shutil.copytree(detached, reviewer)
+            return result
+
+        with patch.object(review_io.os, "open", new=replace_after_final_answer_open):
+            with self.assertRaises(bench.BenchmarkError) as raised:
+                review.review_status(self.output)
+        self.assertEqual(raised.exception.code, "review_changed")
+        self.assertEqual(opens, 2)
+
     def test_export_rechecks_earlier_artifacts_after_seal_publication(self):
         batch, _ = self.batch()
         original_write = Root.write_new

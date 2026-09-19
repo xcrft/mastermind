@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Endpoint-only document freshness now marks Lens and exported review packets
+  partial. Named document bytes can still be current, while unlisted corpus
+  documents remain outside the review coverage.
 - Lens now calls a runtime trace corroboration only when the observed parent to
   child file direction matches the displayed impact line. A reverse pair stays
   visible as a file-level observation.

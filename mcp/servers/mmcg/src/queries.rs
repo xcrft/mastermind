@@ -2972,7 +2972,7 @@ pub fn change_impact(
     } else {
         bounded_collection(crossings, 500, "crossing_limit")
     };
-    let tests_collection = if heuristic_overflow {
+    let tests_collection = if graph_overflow || heuristic_overflow {
         let mut retained = tests;
         retained.truncate(500);
         work_limited_collection(retained)
@@ -9495,6 +9495,12 @@ fn checks_value() { assert_eq!(value(), 1); }
         assert!(response.impact.truncated);
         assert_eq!(
             response.impact.truncation_reason.as_deref(),
+            Some("work_limit")
+        );
+        assert!(response.tests.truncated);
+        assert_eq!(response.tests.total, None);
+        assert_eq!(
+            response.tests.truncation_reason.as_deref(),
             Some("work_limit")
         );
         assert_eq!(store.interrupt_source(), None);

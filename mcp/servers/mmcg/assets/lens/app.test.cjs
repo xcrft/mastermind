@@ -1857,6 +1857,27 @@ async function main() {
     harness.nodes.get("evidence-source-list").textContent,
     /manifest sha256 a{12}… · 1,?024 bytes/i
   );
+  const staleFactsPayload = fixture();
+  staleFactsPayload.evidence.partial = true;
+  const staleFactsSource = staleFactsPayload.evidence.sources.items.find((source) => source.id === FACT_SOURCE_ID);
+  staleFactsSource.status = "stale";
+  staleFactsSource.facts_returned = 0;
+  staleFactsSource.files_matched = 0;
+  staleFactsSource.signature_status = "verified";
+  staleFactsSource.signing_key_id = "sha256:" + "c".repeat(64);
+  staleFactsPayload.evidence.fact_artifacts.items = [];
+  staleFactsPayload.evidence.fact_artifacts.total = 0;
+  staleFactsPayload.evidence.fact_artifacts.returned = 0;
+  staleFactsPayload.evidence.fact_relationships.items = [];
+  staleFactsPayload.evidence.fact_relationships.total = 0;
+  staleFactsPayload.evidence.fact_relationships.returned = 0;
+  staleFactsPayload.evidence.files.items.forEach((file) => {
+    file.findings = file.findings.filter((finding) => finding.source_id !== FACT_SOURCE_ID);
+  });
+  const staleFactsHarness = await renderFixture(staleFactsPayload);
+  assert.match(staleFactsHarness.nodes.get("evidence-source-list").textContent, /facts · stale/i);
+  assert.match(staleFactsHarness.nodes.get("evidence-source-list").textContent, /producer signature verified at import/i);
+  assert.doesNotMatch(staleFactsHarness.nodes.get("evidence-source-list").textContent, /verified producer signature/i);
   const revisionUnverifiedPayload = fixture();
   revisionUnverifiedPayload.semantic.partial = true;
   revisionUnverifiedPayload.semantic.source.revision_verified = false;

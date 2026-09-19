@@ -2937,7 +2937,7 @@
           "span",
           "evidence-source__facts",
           signatureStatus === "verified"
-            ? "verified producer signature · key " + signingKey.slice(0, 19) + "…"
+            ? (status === "loaded" ? "verified producer signature" : "producer signature verified at import") + " · key " + signingKey.slice(0, 19) + "…"
             : "unsigned producer attestation"
         );
         if (signingKey) {

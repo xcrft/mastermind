@@ -670,6 +670,7 @@ enum ParsedNativeState {
         args_fields: Vec<String>,
     },
     Codex {
+        enabled: bool,
         command: String,
         args: Vec<String>,
     },
@@ -913,9 +914,10 @@ fn native_matches(
             args_fields,
         } => command_fields.as_slice() == [command] && args_fields.as_slice() == [args.join(" ")],
         ParsedNativeState::Codex {
+            enabled,
             command: observed_command,
             args: observed_args,
-        } => observed_command == command && observed_args == &args,
+        } => *enabled && observed_command == command && observed_args == &args,
     };
     if canonical {
         Ok(NativeState::Canonical(parsed))
@@ -949,6 +951,10 @@ fn parse_codex_native(bytes: &[u8]) -> Result<ParsedNativeState, String> {
     if server.get("name").and_then(Value::as_str) != Some("mmcg") {
         return Err("native_parse_failed".into());
     }
+    let enabled = server
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "native_parse_failed".to_string())?;
     let transport = server
         .get("transport")
         .and_then(Value::as_object)
@@ -973,7 +979,11 @@ fn parse_codex_native(bytes: &[u8]) -> Result<ParsedNativeState, String> {
                 .ok_or_else(|| "native_parse_failed".to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(ParsedNativeState::Codex { command, args })
+    Ok(ParsedNativeState::Codex {
+        enabled,
+        command,
+        args,
+    })
 }
 
 fn native_remove_args(client: Client) -> Vec<String> {
@@ -2938,7 +2948,7 @@ mod tests {
         ));
 
         let codex = bounded_stdout(
-            br#"{"name":"mmcg","transport":{"type":"stdio","command":"/bin/mmcg","args":["serve"]}}"#,
+            br#"{"name":"mmcg","enabled":true,"transport":{"type":"stdio","command":"/bin/mmcg","args":["serve"]}}"#,
             false,
         );
         assert!(matches!(
@@ -2946,11 +2956,19 @@ mod tests {
             NativeState::Canonical(_)
         ));
         let codex_superset = bounded_stdout(
-            br#"{"name":"mmcg","transport":{"type":"stdio","command":"/bin/mmcg-custom","args":["serve","--extra"]}}"#,
+            br#"{"name":"mmcg","enabled":true,"transport":{"type":"stdio","command":"/bin/mmcg-custom","args":["serve","--extra"]}}"#,
             false,
         );
         assert!(matches!(
             native_matches(Client::Codex, &codex_superset, &entry).unwrap(),
+            NativeState::Customized(_)
+        ));
+        let codex_disabled = bounded_stdout(
+            br#"{"name":"mmcg","enabled":false,"transport":{"type":"stdio","command":"/bin/mmcg","args":["serve"]}}"#,
+            false,
+        );
+        assert!(matches!(
+            native_matches(Client::Codex, &codex_disabled, &entry).unwrap(),
             NativeState::Customized(_)
         ));
     }

@@ -1605,6 +1605,8 @@ const BRIEF_TEST_LIMIT: usize = 50;
 const BRIEF_HISTORY_LIMIT: usize = 10;
 const BRIEF_HISTORY_TERM_LIMIT: usize = 8;
 const BRIEF_REPOSITORY_STRING_BYTES: usize = 512;
+const BRIEF_DISCIPLINE_NOTE: &str =
+    "Path classification routes follow-up evidence; it does not prove behavior.";
 
 pub const CONCEPT_DEFAULT_TOP: u32 = 10;
 pub const CONCEPT_MAX_TOP: u32 = 50;
@@ -1940,6 +1942,7 @@ pub struct BriefPacket {
     pub scope: BriefScope,
     pub budget: BriefBudget,
     pub changes: BriefChanges,
+    pub disciplines: BriefDisciplines,
     pub callers: BriefCollection<BriefCaller>,
     pub tests: BriefCollection<BriefTest>,
     pub history: BriefHistory,
@@ -1997,6 +2000,32 @@ pub struct BriefCollection<T> {
 pub struct BriefChanges {
     pub files: BriefCollection<BriefChangedFile>,
     pub symbols: BriefCollection<BriefChangedSymbol>,
+}
+
+/// Compact evidence-routing signals from the change-impact path classifier.
+/// These are counts and rules only: raw sample paths remain in `changes`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BriefDisciplines {
+    /// Number of changed paths the classifier observed before brief budget
+    /// admission removed any `changes.files` candidates.
+    pub change_impact_file_count: u32,
+    pub detected: Vec<BriefDisciplineSignal>,
+    /// A classifier signal was withheld because its static label could not be
+    /// safely represented. This should normally remain zero.
+    pub detected_unsafe_omitted: u32,
+    /// Number of returned changed paths that did not match a known discipline.
+    pub unclassified_count: u32,
+    /// Present when change-impact could only classify a returned file subset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope_incomplete_reason: Option<String>,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BriefDisciplineSignal {
+    pub name: String,
+    pub basis: String,
+    pub file_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -3228,6 +3257,45 @@ fn safe_brief_string(value: &str) -> Option<String> {
     Some(output)
 }
 
+fn brief_disciplines(
+    disciplines: &ImpactDisciplines,
+    change_impact_file_count: u32,
+) -> BriefDisciplines {
+    let mut detected_unsafe_omitted = 0u32;
+    let detected = disciplines
+        .detected
+        .iter()
+        .filter_map(|discipline| {
+            let (Some(name), Some(basis)) = (
+                safe_brief_string(&discipline.name),
+                safe_brief_string(&discipline.basis),
+            ) else {
+                detected_unsafe_omitted = detected_unsafe_omitted.saturating_add(1);
+                return None;
+            };
+            Some(BriefDisciplineSignal {
+                name,
+                basis,
+                file_count: discipline.file_count,
+            })
+        })
+        .collect();
+    let unclassified_count = brief_u32(disciplines.unclassified.len())
+        .saturating_add(disciplines.unclassified_omitted.unwrap_or(0));
+
+    BriefDisciplines {
+        change_impact_file_count,
+        detected,
+        detected_unsafe_omitted,
+        unclassified_count,
+        scope_incomplete_reason: disciplines
+            .scope_incomplete_reason
+            .as_deref()
+            .and_then(safe_brief_string),
+        note: BRIEF_DISCIPLINE_NOTE.to_string(),
+    }
+}
+
 fn brief_history_terms(changes: &ImpactChanges) -> Vec<String> {
     const STOP_WORDS: &[&str] = &[
         "added",
@@ -3719,6 +3787,7 @@ pub fn brief(
         safe_brief_string(&checked.structural_worktree_token).ok_or(BriefError::SnapshotChanged)?;
     let history_token =
         safe_brief_string(&checked.history_inventory_token).ok_or(BriefError::SnapshotChanged)?;
+    let disciplines = brief_disciplines(&impact.disciplines, impact.changes.files.returned);
     let mut precision_notes = impact.precision_notes.clone();
     if history_terms_scope_incomplete {
         precision_notes.push("history_query_scope_incomplete".to_string());
@@ -3764,6 +3833,7 @@ pub fn brief(
             bytes_per_token: 4,
         },
         changes: BriefChanges { files, symbols },
+        disciplines,
         callers,
         tests,
         history: BriefHistory {
@@ -8739,6 +8809,54 @@ mod tests {
         assert!(omitted.source_limit_exact);
         assert_eq!(omitted.unsafe_content, 1);
         assert_eq!(omitted.budget, 0);
+    }
+
+    #[test]
+    fn brief_disciplines_keep_routing_counts_without_exposing_path_samples() {
+        let disciplines = brief_disciplines(
+            &ImpactDisciplines {
+                detected: vec![
+                    DisciplineSignal {
+                        name: "frontend".into(),
+                        basis: "component file type".into(),
+                        file_count: 3,
+                        files: vec!["web/source.tsx".into()],
+                    },
+                    DisciplineSignal {
+                        name: "\u{202e}".into(),
+                        basis: "unsafe".into(),
+                        file_count: 1,
+                        files: vec!["hidden.rs".into()],
+                    },
+                ],
+                unclassified: vec!["internal/secret-name.rs".into()],
+                unclassified_omitted: Some(2),
+                note: "Repository-derived note is not a brief contract.".into(),
+                scope_incomplete_reason: Some("file_limit".into()),
+            },
+            4,
+        );
+
+        assert_eq!(disciplines.change_impact_file_count, 4);
+        assert_eq!(
+            disciplines.detected,
+            vec![BriefDisciplineSignal {
+                name: "frontend".into(),
+                basis: "component file type".into(),
+                file_count: 3,
+            }]
+        );
+        assert_eq!(disciplines.detected_unsafe_omitted, 1);
+        assert_eq!(disciplines.unclassified_count, 3);
+        assert_eq!(
+            disciplines.scope_incomplete_reason.as_deref(),
+            Some("file_limit")
+        );
+        let encoded = serde_json::to_string(&disciplines).unwrap();
+        assert!(!encoded.contains("web/source.tsx"));
+        assert!(!encoded.contains("internal/secret-name.rs"));
+        assert!(!encoded.contains("Repository-derived note"));
+        assert!(encoded.contains(BRIEF_DISCIPLINE_NOTE));
     }
 
     #[test]

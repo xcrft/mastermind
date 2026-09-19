@@ -2,7 +2,7 @@
 name: mastermind-workflow
 description: Compact project router for the Mastermind Direct, Verified, and Strict workflows.
 metadata:
-  version: 2.1.0
+  version: 2.1.1
   authors: [mastermind]
   tags: [claude-md, workflow, delegation, audit]
 ---
@@ -51,6 +51,9 @@ Call `mmcg_brief` once with the active `planner`, `executor`, or `auditor` role,
 baseline, and a 2,000-token budget before broad discovery on non-trivial work.
 Skip it only for a literal-only or already-localized Direct change. If MCP tools are deferred, load
 the required bounded set once instead of discovering tools one by one.
+Use the brief's aggregate `disciplines` to route frontend, QA, or migration
+evidence. They classify paths, not behavior; inspect the change and preserve any
+scope-incomplete boundary before treating a discipline as covered.
 
 Route discovery by question:
 

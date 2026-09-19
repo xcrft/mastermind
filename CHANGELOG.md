@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- `mmcg_brief` now carries compact path-classified evidence disciplines from its
+  revision-bound change-impact snapshot, so planner, executor, and auditor
+  workflows can route frontend, QA, and migration proof before broad discovery.
+  The packet reports incomplete file scope and never duplicates path samples.
 - Lens now fails closed when document-graph or review revision fields are not
   exact Git object IDs, rather than treating equal arbitrary strings as a
   revision binding.

@@ -1596,9 +1596,11 @@ bounded `changes.files` collection for those. Classification routes follow-up
 evidence and does not establish behavior. Structural and history freshness have
 separate checked tokens and statuses. The default text rendering exposes the
 same revision binding, overall and per-section coverage, all three omission
-classes, discipline routing, history query state, limits, and precision notes;
-an unknown source total is printed as unknown and a non-exact source omission as
-a lower bound.
+classes, discipline routing, history query state, limits, and precision notes.
+Each caller preserves its name-collision count and source-language edge
+precision from change impact, so a brief cannot present a low-precision impact
+candidate as a resolved caller. An unknown source total is printed as unknown
+and a non-exact source omission as a lower bound.
 
 Candidate caps are 100 changed files, 100 changed symbols, 100 callers, 50
 tests, 10 history citations, and eight derived history terms. Discipline labels

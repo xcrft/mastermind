@@ -588,8 +588,8 @@ enum Cmd {
         /// Write audit bundle JSONs to this directory (one per spec).
         #[arg(long)]
         bundle_dir: Option<PathBuf>,
-        /// Audit only task folders whose spec or executor report changed
-        /// between `since` and HEAD. Intended for pull-request CI.
+        /// Audit only task folders with changed task artifacts between `since`
+        /// and HEAD. Intended for pull-request CI.
         #[arg(long)]
         changed_only: bool,
         /// Fail when a selected task has no canonical executor-report.md.

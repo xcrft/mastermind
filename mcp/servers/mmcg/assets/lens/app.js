@@ -81,17 +81,30 @@
 
   function collection(value) {
     const source = record(value);
-    const returned = finiteNumber(source.returned);
-    const observed = finiteNumber(source.observed);
+    const count = function (candidate) {
+      return typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate >= 0
+        ? candidate
+        : null;
+    };
+    const has = function (key) {
+      return Object.prototype.hasOwnProperty.call(source, key);
+    };
+    const returned = count(source.returned);
+    const observed = count(source.observed);
+    const total = source.total === null ? null : count(source.total);
+    const incomplete = !has("items") || !Array.isArray(source.items)
+      || !has("total") || (source.total !== null && total === null)
+      || !has("returned") || returned === null
+      || typeof source.truncated !== "boolean";
     return {
       source: source,
       items: array(source.items),
-      total: finiteNumber(source.total),
-      totalUnknown: Object.prototype.hasOwnProperty.call(source, "total") && source.total === null,
+      total: total,
+      totalUnknown: !has("total") || source.total === null || total === null,
       returned: returned,
       observed: observed === null ? returned : observed,
-      truncated: source.truncated === true,
-      reason: text(source.truncation_reason, ""),
+      truncated: source.truncated === true || incomplete,
+      reason: text(source.truncation_reason, incomplete ? "incomplete collection" : ""),
       projectionTruncated: source.projection_truncated === true,
       projectionReason: text(source.projection_reason, ""),
     };

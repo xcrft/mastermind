@@ -1519,6 +1519,14 @@ async function main() {
   assert.ok(missingSchemaHarness.nodes.get("completeness-status").classList.contains("is-error"));
   assert.doesNotMatch(missingSchemaHarness.nodes.get("trace-context").textContent, /Review complete/i);
 
+  const missingSymbols = emptyFixture();
+  delete missingSymbols.impact.changes.symbols;
+  const missingSymbolsHarness = await renderFixture(missingSymbols);
+  assert.match(missingSymbolsHarness.nodes.get("completeness-status").textContent, /Partial evidence/i);
+  assert.ok(missingSymbolsHarness.nodes.get("completeness-status").classList.contains("is-partial"));
+  assert.match(missingSymbolsHarness.nodes.get("graph-state").textContent, /snapshot is partial/i);
+  assert.doesNotMatch(missingSymbolsHarness.nodes.get("graph-state").textContent, /No changes in captured scope/i);
+
   const truncated = cloneFixture();
   truncated.impact.impact.total = 18;
   truncated.impact.impact.returned = 1;

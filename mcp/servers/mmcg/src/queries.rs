@@ -761,6 +761,7 @@ pub struct TaskSearchResponse {
     pub freshness_error: Option<&'static str>,
     pub inference: &'static str,
     pub source_of_truth: &'static str,
+    pub precision_notes: Vec<&'static str>,
 }
 
 pub fn tasks(store: &Store, query: &str, top: u32) -> rusqlite::Result<TaskSearchResponse> {
@@ -791,6 +792,7 @@ pub fn tasks(store: &Store, query: &str, top: u32) -> rusqlite::Result<TaskSearc
         inference:
             "none; a matching task spec does not prove current behavior or an accepted decision",
         source_of_truth: history.source_of_truth,
+        precision_notes: history_precision_notes(),
     })
 }
 
@@ -824,6 +826,17 @@ pub struct HistorySearchResponse {
     /// `freshness` is `unknown`, except a recoverable work cap is `incomplete`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub freshness_error: Option<&'static str>,
+    /// Retrieval caveats that every history consumer must retain, including
+    /// when the FTS page is empty.
+    pub precision_notes: Vec<&'static str>,
+}
+
+fn history_precision_notes() -> Vec<&'static str> {
+    vec![
+        "fts_matches_are_retrieval_not_semantic_or_currentness_proof",
+        "zero_matches_do_not_prove_no_relevant_history",
+        "corpus_coverage_and_freshness_are_reported_separately",
+    ]
 }
 
 #[derive(Debug, Serialize)]
@@ -1070,6 +1083,7 @@ pub fn history(
         truncation_reason,
         freshness,
         freshness_error,
+        precision_notes: history_precision_notes(),
     })
 }
 

@@ -2162,6 +2162,11 @@ mod map_tests {
                 truncation_reason: truncated.then_some("corpus_limit"),
                 freshness,
                 freshness_error,
+                precision_notes: vec![
+                    "fts_matches_are_retrieval_not_semantic_or_currentness_proof",
+                    "zero_matches_do_not_prove_no_relevant_history",
+                    "corpus_coverage_and_freshness_are_reported_separately",
+                ],
             };
             let text = history_snapshot_notice(&response);
             assert!(text.contains(&format!("History snapshot: {freshness}")));

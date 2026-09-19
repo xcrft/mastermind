@@ -965,6 +965,23 @@ pub(crate) fn project_history_freshness_status(
     )
 }
 
+fn history_truncation_reason(
+    result_truncated: bool,
+    corpus_truncated: bool,
+    skipped_artifacts: u32,
+) -> Option<&'static str> {
+    match (result_truncated, corpus_truncated, skipped_artifacts > 0) {
+        (true, true, true) => Some("top_corpus_limit_and_skipped_artifacts"),
+        (true, true, false) => Some("top_and_corpus_limit"),
+        (true, false, true) => Some("top_and_skipped_artifacts"),
+        (true, false, false) => Some("top"),
+        (false, true, true) => Some("corpus_limit_and_skipped_artifacts"),
+        (false, true, false) => Some("corpus_limit"),
+        (false, false, true) => Some("skipped_artifacts"),
+        (false, false, false) => None,
+    }
+}
+
 pub fn history(
     store: &Store,
     query: &str,
@@ -1027,12 +1044,9 @@ pub fn history(
     }
     let count = observed.len() as u32;
     let result_truncated = count < indexed_total;
-    let truncation_reason = match (result_truncated, corpus_truncated) {
-        (true, true) => Some("top_and_corpus_limit"),
-        (true, false) => Some("top"),
-        (false, true) => Some("corpus_limit"),
-        (false, false) => None,
-    };
+    let truncated = result_truncated || corpus_truncated || skipped_artifacts > 0;
+    let truncation_reason =
+        history_truncation_reason(result_truncated, corpus_truncated, skipped_artifacts);
     Ok(HistorySearchResponse {
         query: query.to_string(),
         kind: kind.map(str::to_string),
@@ -1045,7 +1059,7 @@ pub fn history(
         source_of_truth: "Markdown artifacts at the returned paths; this FTS index is derived",
         skipped_artifacts,
         corpus_truncated,
-        truncated: result_truncated || corpus_truncated,
+        truncated,
         truncation_reason,
         freshness,
         freshness_error,
@@ -5767,6 +5781,33 @@ mod tests {
             .set_meta("project_history_truncated", "not-a-boolean")
             .unwrap();
         assert!(history(&store, "decision", None, 10).is_err());
+    }
+
+    #[test]
+    fn history_marks_skipped_artifacts_as_incomplete_coverage() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("mmcg.db")).unwrap();
+        store
+            .replace_project_history(&[crate::store::ProjectHistoryEntry {
+                path: "CONTEXT.md".into(),
+                kind: "context".into(),
+                title: "Stored decision".into(),
+                body: "The durable boundary remains searchable.".into(),
+            }])
+            .unwrap();
+        store.set_meta("project_history_skipped", "2").unwrap();
+        store
+            .set_meta("project_history_truncated", "false")
+            .unwrap();
+
+        let response = history(&store, "durable", None, 10).unwrap();
+
+        assert_eq!(response.indexed_total, 1);
+        assert_eq!(response.count, 1);
+        assert!(!response.result_truncated);
+        assert_eq!(response.skipped_artifacts, 2);
+        assert!(response.truncated);
+        assert_eq!(response.truncation_reason, Some("skipped_artifacts"));
     }
 
     #[test]

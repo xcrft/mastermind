@@ -933,7 +933,7 @@ impl Collector<'_> {
         self.sources_truncated |= snapshot.sources.truncated;
         self.fact_artifacts_truncated |= snapshot.artifacts.truncated;
         self.fact_relationships_truncated |= snapshot.relationships.truncated;
-        if !snapshot.sources.items.is_empty() {
+        if snapshot.available {
             self.notes.push(EvidencePrecisionNote {
                 source_id: "facts",
                 code: "normalized_fact_overlay",
@@ -3200,6 +3200,101 @@ mod tests {
                 .count(),
             MAX_TRUNCATED_CHANGED_FILES
         );
+    }
+
+    #[test]
+    fn stale_normalized_facts_do_not_add_a_provenance_assurance() {
+        let root = tempfile::tempdir().unwrap();
+        let mut collector = collector(root.path(), &["src/pay.rs"]);
+        collector.load_normalized_facts(crate::facts::FactSnapshot {
+            schema_version: 1,
+            available: false,
+            partial: true,
+            contract: crate::facts::FactContract {
+                api_version: "mastermind-facts/v1",
+                supported_capabilities: ["annotations", "relationships"],
+                repository: crate::facts::FactRepository {
+                    identity: "git:example.invalid/repository".into(),
+                    revision: "0123456789abcdef0123456789abcdef01234567".into(),
+                },
+            },
+            sources: crate::facts::FactCollection {
+                total: Some(1),
+                returned: 1,
+                truncated: false,
+                truncation_reason: None,
+                items: vec![crate::facts::FactSourceView {
+                    id: "facts:sha256:source".into(),
+                    producer: "com.example.analyzer".into(),
+                    producer_version: "1.0.0".into(),
+                    dataset: "default".into(),
+                    provenance: "static-analysis".into(),
+                    capabilities: vec!["annotations".into()],
+                    repository_identity: "git:example.invalid/repository".into(),
+                    revision: "0123456789abcdef0123456789abcdef01234567".into(),
+                    manifest_sha256: "a".repeat(64),
+                    manifest_bytes: 1,
+                    signature_status: "unsigned".into(),
+                    signing_key_id: None,
+                    signature_sha256: None,
+                    signature_bytes: None,
+                    signing_public_key: None,
+                    signature: None,
+                    signed_manifest_digest: None,
+                    imported_at: 0,
+                    status: "stale",
+                    facts_total: 1,
+                    facts_returned: 0,
+                    files_matched: 0,
+                }],
+            },
+            artifacts: crate::facts::FactCollection {
+                total: Some(0),
+                returned: 0,
+                truncated: false,
+                truncation_reason: None,
+                items: Vec::new(),
+            },
+            annotations: crate::facts::FactCollection {
+                total: Some(0),
+                returned: 0,
+                truncated: false,
+                truncation_reason: None,
+                items: Vec::new(),
+            },
+            relationships: crate::facts::FactCollection {
+                total: Some(0),
+                returned: 0,
+                truncated: false,
+                truncation_reason: None,
+                items: Vec::new(),
+            },
+            diagnostics: crate::facts::FactCollection {
+                total: Some(0),
+                returned: 0,
+                truncated: false,
+                truncation_reason: None,
+                items: Vec::new(),
+            },
+            limits: crate::facts::FactLimits {
+                sources: 1,
+                facts: 1,
+                diagnostics: 1,
+                provenance_artifacts: 1,
+                manifest_bytes: 1,
+                files_per_manifest: 1,
+                source_bytes_per_manifest: 1,
+                artifacts_per_manifest: 1,
+                artifact_bytes: 1,
+            },
+        });
+
+        assert!(collector.partial);
+        assert_eq!(collector.sources[0].status, "stale");
+        assert!(!collector
+            .notes
+            .iter()
+            .any(|note| note.code == "normalized_fact_overlay"));
     }
 
     fn git(root: &Path, args: &[&str]) {

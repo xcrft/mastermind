@@ -2460,6 +2460,29 @@ fn work_limited_collection<T>(items: Vec<T>) -> Collection<T> {
     }
 }
 
+fn incomplete_input_collection<T>(
+    mut items: Vec<T>,
+    limit: usize,
+    input_reason: &str,
+    output_reason: &str,
+) -> Collection<T> {
+    let output_truncated = items.len() > limit;
+    if output_truncated {
+        items.truncate(limit);
+    }
+    Collection {
+        total: None,
+        returned: u32::try_from(items.len()).unwrap_or(u32::MAX),
+        truncated: true,
+        truncation_reason: Some(if output_truncated {
+            format!("{input_reason}_and_{output_reason}")
+        } else {
+            input_reason.to_string()
+        }),
+        items,
+    }
+}
+
 fn consume_graph_precision_interrupt(
     store: &Store,
     had_parent_budget: bool,
@@ -3010,6 +3033,9 @@ pub fn change_impact(
         }
         .to_string()
     });
+    let derived_scope_reason = files_truncation_reason
+        .as_deref()
+        .map(|reason| format!("changed_file_scope_{reason}"));
     let mut disciplines = classify_disciplines(&files);
     disciplines.scope_incomplete_reason = files_truncation_reason.clone();
     let files_collection = Collection {
@@ -3021,11 +3047,15 @@ pub fn change_impact(
     };
     let impact_collection = if graph_overflow {
         work_limited_collection(Vec::new())
+    } else if let Some(reason) = derived_scope_reason.as_deref() {
+        incomplete_input_collection(impacts, top, reason, "top_limit")
     } else {
         bounded_collection(impacts, top, "top_limit")
     };
     let crossing_collection = if graph_overflow {
         work_limited_collection(Vec::new())
+    } else if let Some(reason) = derived_scope_reason.as_deref() {
+        incomplete_input_collection(crossings, 500, reason, "crossing_limit")
     } else {
         bounded_collection(crossings, 500, "crossing_limit")
     };
@@ -3033,6 +3063,8 @@ pub fn change_impact(
         let mut retained = tests;
         retained.truncate(500);
         work_limited_collection(retained)
+    } else if let Some(reason) = derived_scope_reason.as_deref() {
+        incomplete_input_collection(tests, 500, reason, "test_limit")
     } else {
         bounded_collection(tests, 500, "test_limit")
     };
@@ -3040,8 +3072,15 @@ pub fn change_impact(
         let mut retained = components;
         retained.truncate(500);
         work_limited_collection(retained)
+    } else if let Some(reason) = derived_scope_reason.as_deref() {
+        incomplete_input_collection(components, 500, reason, "component_limit")
     } else {
         bounded_collection(components, 500, "component_limit")
+    };
+    let symbols_collection = if let Some(reason) = derived_scope_reason.as_deref() {
+        incomplete_input_collection(changed_symbols, 50_000, reason, "symbol_limit")
+    } else {
+        bounded_collection(changed_symbols, 50_000, "symbol_limit")
     };
     Ok(ChangeImpactResponse {
         schema_version: 1,
@@ -3061,7 +3100,7 @@ pub fn change_impact(
         },
         changes: ImpactChanges {
             files: files_collection,
-            symbols: bounded_collection(changed_symbols, 50_000, "symbol_limit"),
+            symbols: symbols_collection,
         },
         affected_components: affected_components_collection,
         impact: impact_collection,
@@ -9721,6 +9760,21 @@ fn checks_value() { assert_eq!(value(), 1); }
             response.disciplines.scope_incomplete_reason.as_deref(),
             Some("non_utf8_path")
         );
+        macro_rules! assert_incomplete_changed_file_scope {
+            ($collection:expr) => {
+                assert_eq!($collection.total, None);
+                assert!($collection.truncated);
+                assert_eq!(
+                    $collection.truncation_reason.as_deref(),
+                    Some("changed_file_scope_non_utf8_path")
+                );
+            };
+        }
+        assert_incomplete_changed_file_scope!(response.changes.symbols);
+        assert_incomplete_changed_file_scope!(response.affected_components);
+        assert_incomplete_changed_file_scope!(response.impact);
+        assert_incomplete_changed_file_scope!(response.api_crossings);
+        assert_incomplete_changed_file_scope!(response.tests);
         std::fs::remove_dir_all(root).ok();
     }
 

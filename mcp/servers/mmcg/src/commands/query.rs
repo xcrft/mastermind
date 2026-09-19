@@ -1672,6 +1672,7 @@ mod map_tests {
             kind: "function".into(),
             line: 7,
             change: "body_changed".into(),
+            name_resolution_count: None,
         };
         let impacted = queries::SymbolEvidence {
             file: "src/api.rs".into(),

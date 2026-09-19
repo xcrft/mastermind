@@ -705,6 +705,7 @@
             minimumDepth: finiteNumber(node.item.minimum_depth),
             precision: array(node.item.edge_precision).map(function (value) { return text(value, ""); }).filter(Boolean),
             collisionCount: finiteNumber(node.item.name_collision_count),
+            seedResolutionCount: finiteNumber(seed.name_resolution_count),
           });
         });
       });
@@ -729,6 +730,7 @@
             minimumDepth: finiteNumber(node.item.minimum_depth),
             precision: [],
             collisionCount: null,
+            seedResolutionCount: finiteNumber(seed.name_resolution_count),
           });
         });
       });
@@ -3440,7 +3442,7 @@
     const qualifier = trace.automatic ? "Search-resolved trace" : "Selected local trace";
     renderTraceContext(
       qualifier,
-      text(trace.root.symbol.name, "Changed seed") + " has " + connectedClaims + " connected returned claim" + (connectedClaims === 1 ? "" : "s") + "; " + visibleEdges.length + " exact seed edge" + (visibleEdges.length === 1 ? "" : "s") + " displayed.",
+      text(trace.root.symbol.name, "Changed seed") + " has " + connectedClaims + " connected returned claim" + (connectedClaims === 1 ? "" : "s") + "; " + visibleEdges.length + " returned seed edge" + (visibleEdges.length === 1 ? "" : "s") + " displayed.",
       actions
     );
     elements.traceCount.textContent = visibleNodes.length + " claims displayed / " + aperture.length + " in aperture";
@@ -3722,7 +3724,7 @@
 
     renderTraceContext(
       "Component-cluster overview",
-      nodes.length + " returned claims are compressed into " + overview.clusters.length + " bounded clusters; " + overview.edges.length + " exact seed-link groups are shown. Activate a cluster to browse its claims.",
+      nodes.length + " returned claims are compressed into " + overview.clusters.length + " bounded clusters; " + overview.edges.length + " returned seed-link groups are shown. Activate a cluster to browse its claims.",
       [{
         label: "Browse claims",
         handler: function () {
@@ -3955,7 +3957,7 @@
 
   function drawAggregateEdge(visibleLayer, interactionLayer, edge, from, to, width) {
     const path = edgePath(from, to, false, width, edge.type);
-    const label = edge.count + " exact returned " + edge.type + " seed link" + (edge.count === 1 ? "" : "s") + " from " + edge.from.label + " to " + edge.to.label + (edge.crossingCount > 0 ? ", including " + edge.crossingCount + " boundary crossing" + (edge.crossingCount === 1 ? "" : "s") : "") + ". Activate to browse the source cluster.";
+    const label = edge.count + " returned " + edge.type + " seed link" + (edge.count === 1 ? "" : "s") + " from " + edge.from.label + " to " + edge.to.label + (edge.crossingCount > 0 ? ", including " + edge.crossingCount + " boundary crossing" + (edge.crossingCount === 1 ? "" : "s") : "") + ". Activate to browse the source cluster.";
     const hit = createSvg("path", {
       d: path,
       class: "graph-edge-hit",
@@ -4174,8 +4176,11 @@
       : (semanticConfidence === "high"
         ? ", SCIP compiler-resolved, high confidence"
         : ", SCIP compiler-resolved, partial revision confidence");
+    const ambiguousSeed = edge.seedResolutionCount !== null && edge.seedResolutionCount > 1 && semanticConfidence === "fallback"
+      ? ", candidate attribution across " + edge.seedResolutionCount + " same-named definitions"
+      : "";
     return relation + " from " + text(edge.from.symbol.name, "unnamed seed")
-      + " to " + text(edge.to.symbol.name, "unnamed claim") + boundary + ownership + semantic + runtime + facts + ". Select for details.";
+      + " to " + text(edge.to.symbol.name, "unnamed claim") + boundary + ownership + semantic + runtime + facts + ambiguousSeed + ". Select for details.";
   }
 
   function drawEdge(visibleLayer, interactionLayer, edge, from, to, mobile, width) {
@@ -4758,6 +4763,9 @@
     const variant = edge.crossing ? "risk" : (isTest ? "test" : "");
     const semanticConfidence = semanticEvidenceConfidence(state.model.semantic, edge.semanticEvidence);
     const hasSemanticEvidence = overlayEnabled("semantic") && semanticConfidence !== "fallback";
+    const ambiguousSeedAttribution = edge.seedResolutionCount !== null
+      && edge.seedResolutionCount > 1
+      && semanticConfidence === "fallback";
     const runtimeDirection = runtimeEvidenceDirection(edge);
     const hasRuntimeEvidence = overlayEnabled("runtime") && runtimeDirection !== "none";
     appendClaimHeading(
@@ -4773,7 +4781,8 @@
       ["Precision", hasSemanticEvidence ? (semanticConfidence === "high" ? "high" : "partial revision evidence") : (edge.precision.join(", ") || "medium")],
       ["Static provenance", hasSemanticEvidence ? (semanticConfidence === "high" ? "SCIP (preferred)" : "SCIP (revision unverified)") : "Tree-sitter (fallback)"],
       ["Evidence kind", edge.evidence ? text(edge.evidence.kind, "Not classified") : "Impact seed"],
-      ["Name collisions", displayNumber(edge.collisionCount)],
+      ["Target definitions sharing this name", displayNumber(edge.collisionCount)],
+      ["Changed seed attribution", ambiguousSeedAttribution ? "Candidate among " + edge.seedResolutionCount + " same-named definitions" : "Exact changed definition"],
       ["Boundary crossing", edge.crossing ? "Observed" : "Not returned"],
       ["Ownership boundary", overlayEnabled("ownership") && edge.ownershipBoundary ? "Observed from CODEOWNERS" : "Not returned"],
       ["Runtime trace", !hasRuntimeEvidence ? "Not returned" : (runtimeDirection === "forward" ? "Corroborated" : "Observed in reverse direction")],
@@ -4868,13 +4877,15 @@
     elements.inspector.appendChild(createElement(
       "p",
       "claim-note",
-      isTest
-        ? "This line exists only because the test evidence explicitly names the changed symbol as its seed."
-        : (hasSemanticEvidence
+      ambiguousSeedAttribution
+        ? "The static graph resolved this line by a name shared by " + edge.seedResolutionCount + " indexed definitions. The displayed changed seed is a candidate attribution until definition-aware evidence corroborates it."
+        : (isTest
+          ? "This line exists only because the test evidence explicitly names the changed symbol as its seed."
+          : (hasSemanticEvidence
           ? (semanticConfidence === "high"
             ? "SCIP is the preferred static provenance for this exact endpoint and symbol pair; Tree-sitter remains the fallback topology."
             : "SCIP exactly matches this endpoint and symbol pair, but its imported revision is unverified; Tree-sitter remains the fallback topology.")
-          : "This line exists only because the impacted symbol explicitly names the changed symbol in its seeds array.")
+          : "This line exists only because the impacted symbol explicitly names the changed symbol in its seeds array."))
     ));
   }
 

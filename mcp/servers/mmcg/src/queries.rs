@@ -1387,6 +1387,11 @@ pub struct SeedEvidence {
     pub kind: String,
     pub line: u32,
     pub change: String,
+    /// Present when multiple indexed definitions share this leaf name. The
+    /// syntactic impact walk starts from the name, so each attached seed is a
+    /// candidate attribution until definition-aware evidence corroborates it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_resolution_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2563,7 +2568,7 @@ pub fn change_impact(
     }));
     changed_symbols.sort();
     changed_symbols.dedup();
-    let seed_evidence: Vec<SeedEvidence> = changed_symbols
+    let mut seed_evidence: Vec<SeedEvidence> = changed_symbols
         .iter()
         .map(|symbol| SeedEvidence {
             file: symbol.file.clone(),
@@ -2571,6 +2576,7 @@ pub fn change_impact(
             kind: symbol.kind.clone(),
             line: symbol.line,
             change: symbol.change.clone(),
+            name_resolution_count: None,
         })
         .collect();
     let seed_names: Vec<String> = seed_evidence
@@ -2583,8 +2589,27 @@ pub fn change_impact(
     let checked_snapshot =
         checked_snapshot_token(store, &repository_root, &working.snapshot_token)?;
 
+    let mut seed_name_resolution_counts = BTreeMap::new();
+    for name in &seed_names {
+        let count = store
+            .definition_count(name)
+            .map_err(|_| ChangeImpactError::SnapshotChanged)?;
+        if count > 1 {
+            seed_name_resolution_counts.insert(name.clone(), count);
+        }
+    }
+    for seed in &mut seed_evidence {
+        seed.name_resolution_count = seed_name_resolution_counts.get(&seed.name).copied();
+    }
+
     let mut precision_notes = impact_precision_notes();
     precision_notes.push("focused_tests_do_not_replace_full_gate".into());
+    if !seed_name_resolution_counts.is_empty() {
+        precision_notes.push(
+            "same_named_seed_definitions_are_candidate_attribution_until_definition_resolved"
+                .into(),
+        );
+    }
     let graph_seed_overflow = seed_names.len() > CHANGE_SEED_LIMIT;
     let graph_had_parent_budget = store.work_budget_depth() > 0;
     let graph_interrupt_before = store.interrupt_source();
@@ -2728,6 +2753,7 @@ pub fn change_impact(
                 kind: changed.kind.clone(),
                 line: changed.line,
                 change: changed.change.clone(),
+                name_resolution_count: seed_name_resolution_counts.get(&changed.name).copied(),
             };
             let symbol = symbol_evidence(&symbol);
             tests_by_symbol.insert(
@@ -9383,6 +9409,51 @@ fn checks_value() { assert_eq!(value(), 1); }
     }
 
     #[test]
+    fn change_impact_marks_same_named_seeds_as_candidate_attribution() {
+        let root = impact_repo(
+            "same_named_seeds",
+            &[
+                (
+                    "src/first.py",
+                    "def shared():\n    return 1\n\ndef first_caller():\n    return shared()\n",
+                ),
+                (
+                    "src/second.py",
+                    "def shared():\n    return 1\n\ndef second_caller():\n    return shared()\n",
+                ),
+            ],
+        );
+        write_impact_file(
+            &root,
+            "src/first.py",
+            "def shared():\n    return 2\n\ndef first_caller():\n    return shared()\n",
+        );
+        write_impact_file(
+            &root,
+            "src/second.py",
+            "def shared():\n    return 2\n\ndef second_caller():\n    return shared()\n",
+        );
+        let store = index_impact(&root, "same_named_seeds");
+        let response = change_impact(&store, &root, "HEAD", 3, 100).unwrap();
+
+        assert!(response.precision_notes.iter().any(|note| {
+            note == "same_named_seed_definitions_are_candidate_attribution_until_definition_resolved"
+        }));
+        let shared_seeds = response
+            .impact
+            .items
+            .iter()
+            .flat_map(|impact| impact.seeds.iter())
+            .filter(|seed| seed.name == "shared")
+            .collect::<Vec<_>>();
+        assert!(!shared_seeds.is_empty());
+        assert!(shared_seeds
+            .iter()
+            .all(|seed| seed.name_resolution_count == Some(2)));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn change_impact_aggregates_multiple_seeds_deterministically() {
         let mut seeds = [
             SeedEvidence {
@@ -9391,6 +9462,7 @@ fn checks_value() { assert_eq!(value(), 1); }
                 kind: "function".into(),
                 line: 2,
                 change: "body_changed".into(),
+                name_resolution_count: None,
             },
             SeedEvidence {
                 file: "a.rs".into(),
@@ -9398,6 +9470,7 @@ fn checks_value() { assert_eq!(value(), 1); }
                 kind: "function".into(),
                 line: 1,
                 change: "added".into(),
+                name_resolution_count: None,
             },
         ];
         seeds.sort();

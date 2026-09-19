@@ -947,6 +947,35 @@ async function main() {
     "The headline must count changed symbols with no test path"
   );
 
+  const ambiguousSeedPayload = fixture();
+  const ambiguousSeed = {
+    file: "src/other.rs",
+    name: "authorize",
+    kind: "function",
+    line: 9,
+    change: "body_changed",
+    name_resolution_count: 2,
+  };
+  ambiguousSeedPayload.impact.changes.symbols.items = [
+    Object.assign({}, ambiguousSeedPayload.impact.changes.symbols.items[0], { name_resolution_count: 2 }),
+    ambiguousSeed,
+  ];
+  ambiguousSeedPayload.impact.changes.symbols.total = 2;
+  ambiguousSeedPayload.impact.changes.symbols.returned = 2;
+  ambiguousSeedPayload.impact.impact.items[0].seeds = ambiguousSeedPayload.impact.changes.symbols.items;
+  ambiguousSeedPayload.impact.precision_notes.push(
+    "same_named_seed_definitions_are_candidate_attribution_until_definition_resolved"
+  );
+  ambiguousSeedPayload.semantic.edges = { total: 0, returned: 0, truncated: false, items: [] };
+  const ambiguousSeedHarness = await renderFixture(ambiguousSeedPayload, { width: 390 });
+  ambiguousSeedHarness.nodes.get("mobile-trace-list").querySelectorAll(".mobile-candidate")[0].dispatch("click");
+  const ambiguousSeedEdge = ambiguousSeedHarness.nodes.get("trace-graph").querySelectorAll("[data-edge-id]")[0];
+  assert.ok(ambiguousSeedEdge, "Same-named seed evidence must remain inspectable");
+  assert.match(ambiguousSeedEdge.getAttribute("aria-label"), /candidate attribution across 2 same-named definitions/i);
+  ambiguousSeedEdge.dispatch("click");
+  assert.match(ambiguousSeedHarness.nodes.get("inspector-body").textContent, /Changed seed attributionCandidate among 2 same-named definitions/i);
+  assert.match(ambiguousSeedHarness.nodes.get("inspector-body").textContent, /displayed changed seed is a candidate attribution/i);
+
   const partialHeadlinePayload = fixture();
   partialHeadlinePayload.impact.api_crossings = {
     total: 1,

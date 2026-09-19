@@ -103,15 +103,19 @@ fn mine_to_paths(
         None => resolve_git_author(repo_root)?,
     };
 
-    let mut prov = collect_provenance(repo_root, &author)?;
+    // All corpus queries must read one Git snapshot. Otherwise a commit or
+    // force-push between provenance, patch, and message reads can combine
+    // different histories while reporting one sample size.
+    let history_ref = history_snapshot(repo_root)?;
+    let mut prov = collect_provenance(repo_root, &author, &history_ref)?;
     if prov.commits_total == 0 {
         return Ok(SeedOutcome::NoCommits { author });
     }
 
     let requested_sample = prov.commits_total.min(COMMIT_SAMPLE_CAP);
-    let (raw, sampled_commits) = git_log_patch(repo_root, &author, requested_sample)?;
+    let (raw, sampled_commits) = git_log_patch(repo_root, &author, requested_sample, &history_ref)?;
     let lines = parse_added_lines(&raw);
-    let commit_msgs = collect_commits(repo_root, &author, sampled_commits)?;
+    let commit_msgs = collect_commits(repo_root, &author, sampled_commits, &history_ref)?;
     prov.commits_sampled = sampled_commits;
     prov.added_lines_sampled = lines.len();
 
@@ -679,9 +683,30 @@ fn resolve_git_author(root: &Path) -> Result<String, Box<dyn std::error::Error>>
         })
 }
 
+/// Resolve the immutable commit all history reads in one mine must use. Keeping
+/// a SHA rather than the moving `HEAD` makes provenance, diffs, and messages a
+/// single reproducible corpus even when the checkout changes concurrently.
+fn history_snapshot(root: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let snapshot = run_profile_git(
+        root,
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+        GIT_METADATA_OUTPUT_LIMIT,
+        "git history snapshot",
+    )?;
+    let snapshot = String::from_utf8(snapshot)?.trim().to_string();
+    if snapshot.is_empty() {
+        return Err("git history snapshot returned no commit".into());
+    }
+    Ok(snapshot)
+}
+
 /// Count the author's commits, record the latest mine point, and collect the distinct identities
 /// (emails) the filter matched — over the *full* history.
-fn collect_provenance(root: &Path, author: &str) -> Result<Provenance, Box<dyn std::error::Error>> {
+fn collect_provenance(
+    root: &Path,
+    author: &str,
+    history_ref: &str,
+) -> Result<Provenance, Box<dyn std::error::Error>> {
     let author = format!("--author={author}");
     let total = run_profile_git(
         root,
@@ -691,7 +716,7 @@ fn collect_provenance(root: &Path, author: &str) -> Result<Provenance, Box<dyn s
             "--no-merges",
             "--fixed-strings",
             &author,
-            "HEAD",
+            history_ref,
         ],
         GIT_METADATA_OUTPUT_LIMIT,
         "git provenance count",
@@ -716,6 +741,7 @@ fn collect_provenance(root: &Path, author: &str) -> Result<Provenance, Box<dyn s
             "--no-merges",
             "--fixed-strings",
             &author,
+            history_ref,
             "--pretty=format:%aI%x1f%ae%x1f%H",
         ],
         GIT_METADATA_OUTPUT_LIMIT,
@@ -738,7 +764,7 @@ fn collect_provenance(root: &Path, author: &str) -> Result<Provenance, Box<dyn s
             "--no-merges",
             "--fixed-strings",
             &author,
-            "HEAD",
+            history_ref,
         ],
         GIT_METADATA_OUTPUT_LIMIT,
         "git provenance identities",
@@ -781,6 +807,7 @@ fn git_log_patch(
     root: &Path,
     author: &str,
     cap: usize,
+    history_ref: &str,
 ) -> Result<(String, usize), Box<dyn std::error::Error>> {
     if cap == 0 {
         return Ok((String::new(), 0));
@@ -802,6 +829,7 @@ fn git_log_patch(
                 &count,
                 "--no-color",
                 "--pretty=format:", // suppress commit headers — we only want diffs
+                history_ref,
             ],
             None,
             GIT_SAMPLE_OUTPUT_LIMIT,
@@ -834,6 +862,7 @@ fn collect_commits(
     root: &Path,
     author: &str,
     cap: usize,
+    history_ref: &str,
 ) -> Result<Vec<Commit>, Box<dyn std::error::Error>> {
     let author = format!("--author={author}");
     let count = format!("-n{cap}");
@@ -845,6 +874,7 @@ fn collect_commits(
             "--fixed-strings",
             &author,
             &count,
+            history_ref,
             // RS (1e) between commits, US (1f) between subject and body.
             "--pretty=format:%x1e%s%x1f%b",
         ],
@@ -1592,11 +1622,9 @@ fn run_claude_capture_with_timeout(
         // orphaned helper behind when capture reaches its bound.
         command.process_group(0);
     }
-    let mut child = command
-        .spawn()
-        .map_err(|e| {
-            format!("spawn claude: {e} — is the Claude Code CLI installed and on PATH?")
-        })?;
+    let mut child = command.spawn().map_err(|e| {
+        format!("spawn claude: {e} — is the Claude Code CLI installed and on PATH?")
+    })?;
     let stdout = child
         .stdout
         .take()
@@ -1641,10 +1669,10 @@ fn run_claude_capture_with_timeout(
             stderr_result = stderr.recv_timeout(DEEP_PIPE_CLEANUP_GRACE).ok();
         }
     }
-    let (stdout, stdout_exceeded) = stdout_result
-        .ok_or_else(|| "capture claude stdout did not finish".to_string())??;
-    let (stderr, stderr_exceeded) = stderr_result
-        .ok_or_else(|| "capture claude stderr did not finish".to_string())??;
+    let (stdout, stdout_exceeded) =
+        stdout_result.ok_or_else(|| "capture claude stdout did not finish".to_string())??;
+    let (stderr, stderr_exceeded) =
+        stderr_result.ok_or_else(|| "capture claude stderr did not finish".to_string())??;
     if stdout_exceeded || stderr_exceeded {
         return Err(format!(
             "claude output exceeded the {DEEP_OUTPUT_LIMIT}-byte limit"
@@ -2048,14 +2076,15 @@ mod tests {
             ],
         );
 
-        let provenance = collect_provenance(&root, "A. User").unwrap();
+        let snapshot = history_snapshot(&root).unwrap();
+        let provenance = collect_provenance(&root, "A. User", &snapshot).unwrap();
         assert_eq!(provenance.commits_total, 1);
         assert_eq!(provenance.identities, vec!["author@example.test"]);
-        let (patch, sampled) = git_log_patch(&root, "A. User", 1).unwrap();
+        let (patch, sampled) = git_log_patch(&root, "A. User", 1, &snapshot).unwrap();
         assert_eq!(sampled, 1);
         assert!(patch.contains("let sample_0"));
         assert!(!patch.contains("OTHER_AUTHOR_SENTINEL"));
-        let commits = collect_commits(&root, "A. User", COMMIT_SAMPLE_CAP).unwrap();
+        let commits = collect_commits(&root, "A. User", COMMIT_SAMPLE_CAP, &snapshot).unwrap();
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].subject, "feat: own sample");
         assert_eq!(
@@ -2063,11 +2092,38 @@ mod tests {
             Some(0)
         );
         assert_eq!(
-            collect_provenance(&root, "Alex [Team]")
+            collect_provenance(&root, "Alex [Team]", &snapshot)
                 .unwrap()
                 .commits_total,
             1
         );
+    }
+
+    #[test]
+    fn history_snapshot_keeps_miner_evidence_on_one_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let first_sha = fixture_repository(&root, "Alice");
+        let snapshot = history_snapshot(&root).unwrap();
+        assert_eq!(snapshot, first_sha);
+
+        std::fs::write(
+            root.join("src/later.rs"),
+            "pub const SNAPSHOT_ESCAPE_SENTINEL: bool = true;\n",
+        )
+        .unwrap();
+        fixture_git(&root, &["add", "src/later.rs"]);
+        fixture_git(&root, &["commit", "-qm", "fix: later commit"]);
+
+        let provenance = collect_provenance(&root, "Alice", &snapshot).unwrap();
+        assert_eq!(provenance.commits_total, 1);
+        let (patch, sampled) = git_log_patch(&root, "Alice", COMMIT_SAMPLE_CAP, &snapshot).unwrap();
+        assert_eq!(sampled, 1);
+        assert!(patch.contains("let sample_0"));
+        assert!(!patch.contains("SNAPSHOT_ESCAPE_SENTINEL"));
+        let commits = collect_commits(&root, "Alice", COMMIT_SAMPLE_CAP, &snapshot).unwrap();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].subject, "feat: own sample");
     }
 
     #[test]
@@ -2191,18 +2247,21 @@ mod tests {
                 git_config(&second, "user.name").as_deref(),
                 Some("Second Alias")
             );
+            let snapshot = history_snapshot(&second).unwrap();
             assert_eq!(
-                collect_provenance(&second, "Second Alias")
+                collect_provenance(&second, "Second Alias", &snapshot)
                     .unwrap()
                     .commits_total,
                 2
             );
-            assert!(git_log_patch(&second, "Second Alias", 400)
+            assert!(git_log_patch(&second, "Second Alias", 400, &snapshot)
                 .unwrap()
                 .0
                 .contains("SECOND_REPOSITORY_SENTINEL"));
             assert_eq!(
-                collect_commits(&second, "Second Alias", 400).unwrap().len(),
+                collect_commits(&second, "Second Alias", 400, &snapshot)
+                    .unwrap()
+                    .len(),
                 2
             );
             assert_eq!(

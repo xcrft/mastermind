@@ -112,8 +112,8 @@ mastermind doctor --workflow --client all
 mastermind workflow audit --root . --json
 ```
 
-Fresh installs default to `core` (14 portable skills). `frontend` installs 19,
-`security` installs 17, and `full` installs all 26. Every profile keeps the
+Fresh installs default to `core` (15 portable skills, including product intake).
+`frontend` installs 20, `security` installs 18, and `full` installs all 26. Every profile keeps the
 complete Claude subagent set; only portable skill discovery is narrowed.
 Updates preserve each client's installed profile unless `--profile` explicitly
 changes it. Legacy schema-v1 manifests migrate as `full`. Older installers

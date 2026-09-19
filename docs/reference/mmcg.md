@@ -444,6 +444,12 @@ come from the same report. Human output includes every returned node and edge,
 each context estimate, all diagnostics, and the complete limit set. Exit 0 means complete input and no error diagnostic;
 exit 1 means an error or incomplete input; clap usage errors remain exit 2.
 
+`complete` reports only whether configured inventory, traversal, and input
+checks finished. It is independent of diagnostic-free wiring, runtime
+execution, security or policy acceptance, and a correct workflow decision. A
+complete collection can therefore still contain error diagnostics; use the exit
+code and `diagnostics` to decide whether the audit passed.
+
 The loader limits source/installed input to 128 agents, 512 skills, 256 KiB per
 Markdown file, a 1 MiB manifest, 8 MiB aggregate text, 8,192 directory entries,
 4,096 directories, 4,096 nodes, 16,384 edges, and depth 16. Per-component

@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Workflow-audit text and documentation now distinguish complete inventory
+  collection from diagnostic-free wiring, runtime execution, and acceptance.
 - Audit file-scope and executor-report file findings now use deterministic path
   order, keeping equivalent mechanical audits and sealed evidence stable.
 - Canonical executor-report `files_modified` now has to match the actual,

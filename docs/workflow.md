@@ -266,6 +266,12 @@ backslash aliases are rejected before an ownership digest is accepted. Source
 agent and skill inventories apply the same identity rule before creating graph
 nodes or counting components; an unrepresentable entry makes the audit partial.
 
+The report's `complete` field covers only that inventory, traversal, and input
+checks finished. It does not mean the graph has no wiring diagnostics, a
+workflow executed, policy or security acceptance occurred, or a decision is
+correct. A complete collection may still contain errors; use the exit code and
+diagnostics for the audit result.
+
 Managed agents declare `workflow.schema_version: 1`, `activation`
 (`always`, `conditional`, or `manual`), `mutability` (`read-only` or `writer`),
 optional skill relations, and canonical writes. Skill links from an agent are

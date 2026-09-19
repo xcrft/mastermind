@@ -223,6 +223,9 @@ installed profile unless `--profile` explicitly switches it.
 skills, models, MCP servers, tools, artifacts, and writers. Point `--root` at
 the repository for source validation or at an installed `.claude`/`.codex`
 directory for manifest-scoped validation; add `--json` for the schema-v1 report.
+Its `complete` field records collection coverage only. Read diagnostics and the
+exit status to determine whether workflow wiring passed; it does not report
+runtime execution or acceptance.
 
 Mastermind supports Claude Code, Codex, Cursor, Continue, and generic MCP stdio
 clients. Setup is dry-run-first unless `--write` is present. The MCP surface has

@@ -131,6 +131,8 @@ pub struct WorkflowAuditReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     pub limits: WorkflowAuditLimits,
+    /// Whether the configured inventory, traversal, and input checks completed.
+    /// This is independent of wiring diagnostics, runtime execution, and acceptance.
     pub complete: bool,
     pub nodes: Vec<WorkflowNode>,
     pub edges: Vec<WorkflowEdge>,
@@ -171,7 +173,7 @@ impl WorkflowAuditReport {
             .count();
         let information = self.diagnostics.len().saturating_sub(errors + warnings);
         output.push_str(&format!(
-            "  graph:    {} nodes, {} edges\n  findings: {errors} errors, {warnings} warnings, {information} info\n  complete: {}\n",
+            "  graph:    {} nodes, {} edges\n  findings: {errors} errors, {warnings} warnings, {information} info\n  collection complete: {}\n",
             self.nodes.len(),
             self.edges.len(),
             self.complete
@@ -5280,6 +5282,8 @@ mod tests {
 
         let report = audit_workflow(root.path());
         assert!(report.complete);
+        assert!(report.has_errors());
+        assert!(report.render_text().contains("collection complete: true"));
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "mmcg_server_scope_missing"
                 && diagnostic.component_id.as_deref() == Some("mastermind-broken")

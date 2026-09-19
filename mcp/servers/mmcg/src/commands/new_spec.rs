@@ -77,13 +77,33 @@ fn yaml_quote(s: &str) -> String {
     quoted
 }
 
+/// A CLI description is displayed in generated headings and list items. Keep
+/// it to one printable line so it cannot create a second Markdown section in
+/// the task contract.
+fn inline_description(description: &str) -> String {
+    description
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn render_spec(description: &str, n: u32, mode: &Mode) -> String {
     let id = format!("{:03}", n);
+    let description = inline_description(description);
     match mode {
-        Mode::Lite => render_lite(description, &id),
-        Mode::Standard => render_standard(description, &id),
-        Mode::Verified => render_verified(description, &id),
-        Mode::Strict => render_strict(description, &id),
+        Mode::Lite => render_lite(&description, &id),
+        Mode::Standard => render_standard(&description, &id),
+        Mode::Verified => render_verified(&description, &id),
+        Mode::Strict => render_strict(&description, &id),
     }
 }
 
@@ -701,8 +721,23 @@ mod tests {
 
         assert!(parsed.frontmatter_error.is_none(), "{content}");
         let frontmatter = parsed.frontmatter.unwrap();
-        assert_eq!(frontmatter.title.as_deref(), Some(description));
+        assert_eq!(
+            frontmatter.title.as_deref(),
+            Some("first line --- mode: strict")
+        );
         assert_eq!(frontmatter.mode.as_deref(), Some("verified"));
+    }
+
+    #[test]
+    fn new_spec_description_cannot_inject_markdown_sections() {
+        let content = render_spec("first\n## Scope\n- injected", 1, &Mode::Verified);
+
+        assert_eq!(content.matches("\n## Scope\n").count(), 1, "{content}");
+        let parsed = mmcg::spec::parse_str("spec.md", &content);
+        assert_eq!(
+            parsed.frontmatter.unwrap().title.as_deref(),
+            Some("first ## Scope - injected")
+        );
     }
 
     #[test]

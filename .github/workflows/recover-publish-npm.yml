@@ -1,0 +1,101 @@
+# Resume an interrupted npm release from the tarballs assembled by its original
+# tag workflow. This never rebuilds or moves the immutable release tag.
+name: Recover npm publication
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Immutable npm-v tag to resume, for example npm-v2.1.1
+        required: true
+        type: string
+      source_run_id:
+        description: Failed tag workflow run containing the verified npm-tarballs artifact
+        required: true
+        type: string
+
+concurrency:
+  group: recover-npm-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Resume exact npm tarballs
+    runs-on: ubuntu-latest
+    environment: npm-prod
+    permissions:
+      contents: read
+      id-token: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_tag }}
+          fetch-depth: 0
+
+      - name: Verify immutable tag and version
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          ROOT_VERSION=$(node -p "require('./npm/mastermind/package.json').version")
+          CARGO_VERSION=$(awk -F'"' '/^version *=/ {print $2; exit}' mcp/servers/mmcg/Cargo.toml)
+          test "$RELEASE_TAG" = "npm-v$ROOT_VERSION" || {
+            echo "::error::release_tag must exactly match the checked-out npm version" >&2
+            exit 1
+          }
+          test "$ROOT_VERSION" = "$CARGO_VERSION" || {
+            echo "::error::root package and Cargo versions must match" >&2
+            exit 1
+          }
+          TAG_COMMIT=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
+          test "$TAG_COMMIT" = "$(git rev-parse HEAD)" || {
+            echo "::error::checkout must resolve exactly to release_tag" >&2
+            exit 1
+          }
+          git merge-base --is-ancestor "$TAG_COMMIT" refs/remotes/origin/main || {
+            echo "::error::release tag must point to a commit reachable from main" >&2
+            exit 1
+          }
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Download original verified tarballs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-tarballs
+          path: packed
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run_id }}
+
+      - name: Resume publication or verify existing package bytes
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: bash scripts/publish-npm-tarballs.sh "$GITHUB_WORKSPACE/packed" "$GITHUB_WORKSPACE/npm/mastermind/package.json"
+
+  registry-smoke:
+    name: Public npm install smoke
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_tag }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Install from npm registry and run functional smoke
+        run: bash scripts/smoke-installed-npm-release.sh npm/mastermind/package.json

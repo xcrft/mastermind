@@ -18,8 +18,11 @@ if [ ! -d "$PACKED_DIR" ] || [ ! -f "$ROOT_MANIFEST" ]; then
     exit 2
 fi
 
-VERIFY_ATTEMPTS="${NPM_PUBLISH_VERIFY_ATTEMPTS:-6}"
-VERIFY_DELAY="${NPM_PUBLISH_VERIFY_DELAY_SECONDS:-2}"
+# npm may accept an upload before it is served by `npm view`.  Leave enough
+# time for registry propagation so an accepted package does not turn a normal
+# multi-package release into a failed, one-package-at-a-time recovery.
+VERIFY_ATTEMPTS="${NPM_PUBLISH_VERIFY_ATTEMPTS:-60}"
+VERIFY_DELAY="${NPM_PUBLISH_VERIFY_DELAY_SECONDS:-5}"
 NPM_REGISTRY="https://registry.npmjs.org"
 case "$VERIFY_ATTEMPTS" in ''|*[!0-9]*) echo "error: NPM_PUBLISH_VERIFY_ATTEMPTS must be a positive integer" >&2; exit 2 ;; esac
 case "$VERIFY_DELAY" in ''|*[!0-9]*) echo "error: NPM_PUBLISH_VERIFY_DELAY_SECONDS must be a non-negative integer" >&2; exit 2 ;; esac

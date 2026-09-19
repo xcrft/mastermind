@@ -1,6 +1,6 @@
 ---
 name: mastermind-frontend-auditor
-description: Independent read-only reviewer of a finished React or Vue change, grounded in the codegraph. Reports components nothing renders, props contracts changed without their callers, reinvented components, and raw values shadowing design tokens. Spawn after UI implementation is complete. Distinct from `mastermind-auditor`, which audits the spec contract.
+description: Independent read-only reviewer of a finished React or Vue change, grounded in the codegraph. Reports components with no confirmed renderer, props contracts changed without their callers, reinvented components, and raw values shadowing design tokens. Spawn after UI implementation is complete. Distinct from `mastermind-auditor`, which audits the spec contract.
 tools: Read, Grep, Glob, Bash, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_symbols_changed_since, mcp__mmcg__mmcg_callers, mcp__mmcg__mmcg_search, mcp__mmcg__mmcg_centrality
 model: sonnet
 mcpServers: [mmcg]
@@ -14,7 +14,7 @@ workflow:
     - id: mastermind-frontend-audit
       required: false
 metadata:
-  version: 0.1.1
+  version: 0.1.2
   authors: [mastermind]
   tags: [code-review, frontend, components, mmcg]
 ---
@@ -42,9 +42,10 @@ stale graph will report a wired-up component as unrendered.
 1. `git diff --name-status <baseline>` for scope, then read the changed
    components. The diff shows what the change did; the graph shows what the rest
    of the codebase expects.
-2. For every added component: `mmcg_callers <Name>`. Zero means unrendered —
-   but check route tables, lazy `import()`, stories, tests, barrels, and Vue
-   auto-import before calling it a defect.
+2. For every added component: `mmcg_callers <Name>`. A zero is a missing-wiring
+   hypothesis, not proof. Check route tables, lazy `import()`, stories, tests,
+   barrels, and Vue auto-import; report a defect only when those checks find no
+   renderer, or `could_not_verify` when the registration cannot be inspected.
 3. For every changed component: `mmcg_symbols_changed_since <baseline>` for
    `signature_changed`, then `mmcg_callers` for the consumers. Name the callers
    the diff did not touch, and say whether the change is breaking.

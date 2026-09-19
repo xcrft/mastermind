@@ -178,6 +178,16 @@
     return direct || reverse;
   }
 
+  function semanticEvidenceConfidence(semantic, evidence) {
+    if (!Array.isArray(evidence) || evidence.length === 0) {
+      return "fallback";
+    }
+    const source = record(record(semantic).source);
+    return source.repository_verified === true && source.revision_verified === true
+      ? "high"
+      : "partial";
+  }
+
   function factMatchesGraphEdge(value, edge) {
     const fact = record(value);
     const fromFile = text(edge.from.symbol.file, "");
@@ -4081,7 +4091,12 @@
     const ownership = overlayEnabled("ownership") && edge.ownershipBoundary ? ", ownership boundary" : "";
     const runtime = overlayEnabled("runtime") && edge.runtimeEvidence.length > 0 ? ", runtime trace corroborated" : "";
     const facts = overlayEnabled("facts") && edge.factEvidence.length > 0 ? ", normalized relationship fact matched" : "";
-    const semantic = overlayEnabled("semantic") && edge.semanticEvidence.length > 0 ? ", SCIP compiler-resolved, high confidence" : ", Tree-sitter syntactic, medium confidence";
+    const semanticConfidence = semanticEvidenceConfidence(state.model.semantic, edge.semanticEvidence);
+    const semantic = !overlayEnabled("semantic") || semanticConfidence === "fallback"
+      ? ", Tree-sitter syntactic, medium confidence"
+      : (semanticConfidence === "high"
+        ? ", SCIP compiler-resolved, high confidence"
+        : ", SCIP compiler-resolved, partial revision confidence");
     return relation + " from " + text(edge.from.symbol.name, "unnamed seed")
       + " to " + text(edge.to.symbol.name, "unnamed claim") + boundary + ownership + semantic + runtime + facts + ". Select for details.";
   }
@@ -4664,6 +4679,8 @@
   function renderEdgeInspector(edge) {
     const isTest = edge.type === "test";
     const variant = edge.crossing ? "risk" : (isTest ? "test" : "");
+    const semanticConfidence = semanticEvidenceConfidence(state.model.semantic, edge.semanticEvidence);
+    const hasSemanticEvidence = overlayEnabled("semantic") && semanticConfidence !== "fallback";
     appendClaimHeading(
       edge.crossing ? "Boundary evidence line" : (isTest ? "Test evidence line" : "Impact evidence line"),
       text(edge.from.symbol.name, "Unnamed seed") + " → " + text(edge.to.symbol.name, "Unnamed target"),
@@ -4674,8 +4691,8 @@
     appendClaimGrid([
       ["Relation", isTest ? "Changed seed → candidate test" : "Changed seed → impacted symbol"],
       ["Minimum depth", displayNumber(edge.minimumDepth)],
-      ["Precision", overlayEnabled("semantic") && edge.semanticEvidence.length > 0 ? "high" : (edge.precision.join(", ") || "medium")],
-      ["Static provenance", overlayEnabled("semantic") && edge.semanticEvidence.length > 0 ? "SCIP (preferred)" : "Tree-sitter (fallback)"],
+      ["Precision", hasSemanticEvidence ? (semanticConfidence === "high" ? "high" : "partial revision evidence") : (edge.precision.join(", ") || "medium")],
+      ["Static provenance", hasSemanticEvidence ? (semanticConfidence === "high" ? "SCIP (preferred)" : "SCIP (revision unverified)") : "Tree-sitter (fallback)"],
       ["Evidence kind", edge.evidence ? text(edge.evidence.kind, "Not classified") : "Impact seed"],
       ["Name collisions", displayNumber(edge.collisionCount)],
       ["Boundary crossing", edge.crossing ? "Observed" : "Not returned"],
@@ -4720,7 +4737,7 @@
         "No matching runtime evidence returned."
       );
     }
-    if (overlayEnabled("semantic") && edge.semanticEvidence.length > 0) {
+    if (hasSemanticEvidence) {
       appendClaimList(
         "Compiler-resolved semantic evidence",
         edge.semanticEvidence.map(function (value) {
@@ -4731,7 +4748,7 @@
             + " → " + text(semantic.to_display_name, "symbol unavailable") + " · "
             + text(semantic.to_file, "external symbol") + formatLine(semantic.to_line)
             + " · reference at " + text(semantic.from_file, "file unavailable") + formatLine(semantic.occurrence_line)
-            + " · SCIP / high";
+            + " · SCIP / " + (semanticConfidence === "high" ? "high" : "partial revision");
         }),
         "semantic",
         "No matching SCIP edge returned."
@@ -4774,8 +4791,10 @@
       "claim-note",
       isTest
         ? "This line exists only because the test evidence explicitly names the changed symbol as its seed."
-        : (overlayEnabled("semantic") && edge.semanticEvidence.length > 0
-          ? "SCIP is the preferred static provenance for this exact endpoint and symbol pair; Tree-sitter remains the fallback topology."
+        : (hasSemanticEvidence
+          ? (semanticConfidence === "high"
+            ? "SCIP is the preferred static provenance for this exact endpoint and symbol pair; Tree-sitter remains the fallback topology."
+            : "SCIP exactly matches this endpoint and symbol pair, but its imported revision is unverified; Tree-sitter remains the fallback topology.")
           : "This line exists only because the impacted symbol explicitly names the changed symbol in its seeds array.")
     ));
   }

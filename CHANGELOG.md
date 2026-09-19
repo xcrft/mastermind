@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Lens no longer calls a compiler-resolved edge high confidence when its SCIP
+  artifact cannot prove that it was generated from the current revision. The
+  edge remains inspectable and is labelled as partial revision evidence.
 - Lens now describes an imported relationship as an exact endpoint match rather
   than claiming corroboration for an arbitrary producer-defined relation.
 - Native setup-client inspection no longer reports a completed command as a

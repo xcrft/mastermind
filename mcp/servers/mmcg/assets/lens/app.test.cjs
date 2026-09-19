@@ -1821,6 +1821,22 @@ async function main() {
     harness.nodes.get("evidence-source-list").textContent,
     /manifest sha256 a{12}… · 1,?024 bytes/i
   );
+  const revisionUnverifiedPayload = fixture();
+  revisionUnverifiedPayload.semantic.partial = true;
+  revisionUnverifiedPayload.semantic.source.revision_verified = false;
+  const revisionUnverifiedHarness = await renderFixture(revisionUnverifiedPayload, { width: 390 });
+  revisionUnverifiedHarness.nodes.get("mobile-trace-list").querySelectorAll(".mobile-candidate")[0].dispatch("click");
+  const revisionUnverifiedEdge = revisionUnverifiedHarness.nodes.get("trace-graph").querySelectorAll("[data-edge-id]")[0];
+  assert.ok(revisionUnverifiedEdge, "A matching SCIP edge must remain inspectable when the source revision is unverified");
+  assert.match(revisionUnverifiedEdge.getAttribute("aria-label"), /SCIP compiler-resolved, partial revision confidence/i);
+  assert.doesNotMatch(revisionUnverifiedEdge.getAttribute("aria-label"), /high confidence/i);
+  revisionUnverifiedEdge.dispatch("click");
+  const revisionUnverifiedInspector = revisionUnverifiedHarness.nodes.get("inspector-body").textContent;
+  assert.match(revisionUnverifiedInspector, /Precisionpartial revision evidence/i);
+  assert.match(revisionUnverifiedInspector, /Static provenanceSCIP \(revision unverified\)/i);
+  assert.match(revisionUnverifiedInspector, /SCIP \/ partial revision/i);
+  assert.match(revisionUnverifiedInspector, /imported revision is unverified/i);
+  assert.doesNotMatch(revisionUnverifiedInspector, /SCIP \/ high/i);
   const binaryChurnPayload = fixture();
   binaryChurnPayload.evidence.files.items[0].churn.line_counts_complete = false;
   binaryChurnPayload.evidence.files.items[0].churn.binary_changes = 1;

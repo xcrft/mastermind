@@ -219,9 +219,10 @@ invalidate the packet.
   Dirty worktree state is conservative and informational: metadata-only touches
   can mark it dirty. Neither an unchanged HEAD nor a clean worktree establishes
   correctness. Git metadata reads disable optional index writes and configured
-  filesystem monitors, external diffs, and text conversions. Each read owns a
-  short-lived process group: after Git exits it drains stdout briefly, then
-  terminates lingering helpers instead of waiting for inherited pipe handles.
+  filesystem monitors, external diffs, text conversions, and replacement
+  objects. Each read owns a short-lived process group: after Git exits it drains
+  stdout briefly, then terminates lingering helpers instead of waiting for
+  inherited pipe handles.
 - The snapshot is bound to its local canonical repository root. Recreate it
   when moving to another checkout.
 - **Corpus coverage is limited to the selected non-hidden Markdown documents.**

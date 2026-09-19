@@ -692,6 +692,19 @@ class DocumentGraphTests(unittest.TestCase):
         for marker in ["filter-ran", "process-ran", "monitor-ran", "alias-ran"]:
             self.assertFalse((self.root / marker).exists(), marker)
 
+    def test_git_dirty_state_ignores_local_replacement_refs(self):
+        head = self.git("rev-parse", "HEAD").strip()
+        source = self.root / "src/handler.py"
+        source.write_text(source.read_text(encoding="utf-8").replace("return 1", "return 2"), encoding="utf-8")
+        self.git("add", "src/handler.py")
+        tree = self.git("write-tree").strip()
+        replacement = self.git("commit-tree", tree, "-p", head, "-m", "replacement").strip()
+        self.git("replace", head, replacement)
+        repository = graph.Repository(self.root)
+        self.addCleanup(repository.close)
+
+        self.assertEqual(repository.revision(), {"head": head, "dirty": True})
+
     def test_git_limits_and_root_replacement_fail_closed(self):
         repository = graph.Repository(self.root)
         self.addCleanup(repository.close)

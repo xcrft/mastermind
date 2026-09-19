@@ -474,7 +474,7 @@ class Repository:
         environment.update({"GIT_OPTIONAL_LOCKS": "0", "GIT_CONFIG_NOSYSTEM": "1",
                             "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0",
                             "GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": ""})
-        command = ["git", "--no-optional-locks", "-c", "core.fsmonitor=false",
+        command = ["git", "--no-replace-objects", "--no-optional-locks", "-c", "core.fsmonitor=false",
                    "-c", "core.untrackedCache=false", "-c", f"core.hooksPath={os.devnull}",
                    "-c", "protocol.allow=never", *arguments]
         try:

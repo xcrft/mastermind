@@ -111,6 +111,9 @@ pub enum Finding {
     },
     /// A `## ...` section the template marks MANDATORY is missing or empty.
     EmptyMandatorySection { section: String },
+    /// A normalized `## ...` heading appears more than once, so the contract is
+    /// ambiguous and must be merged before it can be verified.
+    DuplicateSection { section: String },
     /// Pre-edit snapshot symbol has many callers — proceed with awareness.
     LargeBlastRadius {
         symbol: String,
@@ -236,6 +239,11 @@ fn render_finding(f: &Finding) -> String {
         }
         Finding::EmptyMandatorySection { section } => {
             format!("empty_mandatory_section: `{section}` is missing or empty")
+        }
+        Finding::DuplicateSection { section } => {
+            format!(
+                "duplicate_section: `{section}` appears more than once — merge it into one heading"
+            )
         }
         Finding::LargeBlastRadius {
             symbol,
@@ -381,6 +389,13 @@ fn run_internal(
     let deadline = Instant::now() + crate::diff::git_timeout();
     let mut errors: Vec<Finding> = Vec::new();
     let mut warnings: Vec<Finding> = Vec::new();
+
+    errors.extend(
+        spec.duplicate_section_keys
+            .iter()
+            .cloned()
+            .map(|section| Finding::DuplicateSection { section }),
+    );
 
     // 1. Mandatory sections non-empty.
     let spec_mode = spec.frontmatter.as_ref().and_then(|f| f.mode.as_deref());
@@ -1320,6 +1335,41 @@ mode: strict
                 r.errors
             );
         }
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn rejects_duplicate_normalized_contract_sections() {
+        let root = tmp();
+        let body = "\
+---
+id: \"1\"
+mode: verified
+---
+
+## Goals
+- Observable outcome
+## Scope
+- First boundary
+## Scope *(MANDATORY)*
+- Conflicting boundary
+## Acceptance Criteria
+- [ ] Behavior is observable
+## Tests Plan
+- focused test
+## Final Verification
+- repository gate
+";
+        let s = spec::parse_str("t.md", body);
+        let r = run(&s, None, &root);
+        assert!(
+            r.errors.iter().any(|error| matches!(
+                error,
+                Finding::DuplicateSection { section } if section == "scope"
+            )),
+            "duplicate contract headings must fail verification: {:?}",
+            r.errors
+        );
         fs::remove_dir_all(&root).ok();
     }
 }

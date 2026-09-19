@@ -510,6 +510,7 @@ fn unreferenced_candidates_sql() -> String {
                AND (?2 IS NULL OR s.language = ?2)
                AND s.kind != 'module'
                AND (?1 IS NOT NULL OR s.kind != 'constant')
+               AND lower(s.name) != 'main'
                AND NOT (
                    s.name LIKE 'test_%'
                    AND (s.file_path LIKE '%test%' OR s.file_path LIKE '%spec%')
@@ -6084,11 +6085,12 @@ impl Store {
     /// These are candidates, not proof of dead code. Excludes synthetic
     /// `<module>` rows (never "called") and symbols with framework-registered
     /// decorators (pytest, FastAPI/Flask routes, Triton/Numba JIT, Click
-    /// commands, Celery tasks, Rust `#[test]` / `#[tokio::main]`), plus
-    /// pytest-convention test functions (`test_*` in test files).
+    /// commands, Celery tasks, Rust `#[test]` / `#[tokio::main]`), conventional
+    /// `main` entry points, and pytest-convention test functions (`test_*` in
+    /// test files).
     ///
     /// **Remaining false-positives** (caller responsibility):
-    /// - Entry points (`main`, framework handlers without decorators)
+    /// - Framework handlers without decorators and other custom entry points
     /// - Dynamic dispatch / reflection / trait objects whose calls don't surface
     /// - Cross-language calls
     /// - Functions registered via dict / list at runtime
@@ -8728,7 +8730,7 @@ mod tests {
     }
 
     #[test]
-    fn unreferenced_excludes_decorated_and_tests() {
+    fn unreferenced_excludes_known_entry_points_decorated_functions_and_tests() {
         let path = tmp_db("unreferenced_excludes_decorated");
         let store = Store::open(&path).unwrap();
         // Direct insert — insert_symbol can't set the decorators column.
@@ -8749,6 +8751,11 @@ mod tests {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params!["test_foo", "function", "tests/test_lib.py", 5, 7, None::<&str>, None::<i64>, "python", None::<&str>],
         ).unwrap();
+        conn.execute(
+            "INSERT INTO symbols(name, kind, file_path, line_start, line_end, signature, parent_id, language, decorators)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params!["Main", "function", "src/program.cs", 1, 3, None::<&str>, None::<i64>, "csharp", None::<&str>],
+        ).unwrap();
 
         let unref = store.unreferenced(None, None).unwrap();
         let names: Vec<&str> = unref.iter().map(|s| s.name.as_str()).collect();
@@ -8766,6 +8773,10 @@ mod tests {
         assert!(
             !names.contains(&"test_foo"),
             "test_foo is filtered by pytest convention"
+        );
+        assert!(
+            !names.contains(&"Main"),
+            "conventional main entry points are not dead-code candidates"
         );
         std::fs::remove_file(&path).ok();
     }

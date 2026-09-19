@@ -259,6 +259,7 @@ fn graph_precision_notes() -> Vec<String> {
 pub(crate) fn unreferenced_precision_notes() -> Vec<String> {
     let mut notes = graph_precision_notes();
     notes.push("unreferenced_candidates_are_not_proven_dead_code".into());
+    notes.push("conventional_main_entry_points_are_excluded".into());
     notes.push("external_entry_points_and_runtime_registration_may_be_missing".into());
     notes
 }

@@ -2939,6 +2939,7 @@ mod tests {
                 "empty_result_does_not_prove_no_dependencies",
                 "truncated_describes_query_limits_not_extraction_completeness",
                 "unreferenced_candidates_are_not_proven_dead_code",
+                "conventional_main_entry_points_are_excluded",
                 "external_entry_points_and_runtime_registration_may_be_missing",
             ])
         );

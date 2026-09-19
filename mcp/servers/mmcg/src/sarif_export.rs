@@ -493,6 +493,7 @@ mod tests {
             disciplines: ImpactDisciplines {
                 detected: Vec::new(),
                 unclassified: Vec::new(),
+                unclassified_omitted: None,
                 note: String::new(),
                 scope_incomplete_reason: None,
             },

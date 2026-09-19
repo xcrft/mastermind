@@ -1121,6 +1121,12 @@ fn render_change_impact_text(response: ChangeImpactTextView<'_>) -> String {
     for file in &response.disciplines.unclassified {
         output.push_str(&format!("  unclassified — {}\n", safe_text(file)));
     }
+    if let Some(omitted) = response.disciplines.unclassified_omitted {
+        output.push_str(&format!(
+            "  unclassified — {} additional paths omitted\n",
+            omitted
+        ));
+    }
     if !response.disciplines.note.is_empty() {
         output.push_str(&format!(
             "  note — {}\n",
@@ -1753,6 +1759,7 @@ mod map_tests {
                 files: vec!["docs/guide\n.md".into()],
             }],
             unclassified: vec!["unknown.file".into()],
+            unclassified_omitted: None,
             note: "Review the returned paths.".into(),
             scope_incomplete_reason: None,
         };

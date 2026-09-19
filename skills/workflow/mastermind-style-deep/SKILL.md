@@ -2,7 +2,7 @@
 name: mastermind-style-deep
 description: Write a grounded portrait of how the author actually develops — design approach, code shape, comments, tests, optimization habits, what they pay attention to, and commit voice — into the "Design patterns & tendencies" section of ~/.mastermind/style.md. The structural signature the deterministic miner can't measure. Use when the user wants a real "write like me" profile, says "deep style", "design patterns", "qualitative profile", or notices `mastermind miner profile` only produced formatter-level rules.
 metadata:
-  version: 0.3.0
+  version: 0.3.1
   authors:
     - mastermind
   tags:
@@ -42,7 +42,7 @@ Don't just grep. A portrait needs both numbers and read code:
    identity from local evidence; do not assume `git config user.name` matches
    the author being profiled. Read up to 100 matching subjects and a few bodies.
 4. **Enforcing config FIRST.** `rustfmt.toml` / `.eslintrc` / `pyproject` lint config, `#![deny(...)]` / `#![warn(...)]`, `clippy.toml`, CI lint steps. Anything a formatter or linter *forces* is not personal style — exclude it, or mark it "enforced". Do not credit a `///` on every fn as a habit if `#![deny(missing_docs)]` mandates it.
-5. **Optimization signals.** Benchmarks (`criterion` / `#[bench]` / `*.bench.*`), `#[inline]`, `with_capacity`, caching/memoization, `tracing`/profiling spans, comments mentioning perf. Their presence — or absence — tells you whether they optimize and whether it's measured or by feel.
+5. **Optimization signals.** Benchmarks (`criterion` / `#[bench]` / `*.bench.*`), `#[inline]`, `with_capacity`, caching/memoization, `tracing`/profiling spans, comments mentioning perf. Their presence can evidence what they optimize and whether it is measured. Absence is only a bounded observation, never a preference by itself.
 6. **Observability & safety signals.** Logging/tracing/metrics density, assertions, input validation, `#[must_use]`, where error boundaries sit.
 
 ## Dimensions (cover only where evidence supports; omit the rest)
@@ -60,7 +60,7 @@ Don't just grep. A portrait needs both numbers and read code:
 - **Ground every claim in a tell** — a count or a named example. `Optimizes only after measuring (3 criterion benches; no #[inline] in the hot loop)`, not `cares about performance`.
 - **Count the contrast.** "X over Y" needs both numbers.
 - **Exclude tool-enforced traits.** Check fmt/lint config first; a forced trait is a measured rule, not a signature.
-- **Negative space is signal.** What they *don't* do — no property tests, no premature optimization, sparse comments — belongs in the portrait.
+- **Absence needs a denominator and opportunity.** State `not observed in <N> relevant files/tests/commits`, not `never X`; do not infer a preference when the sample lacks a relevant opportunity. A missing property test in a non-algorithmic corpus, for example, says nothing about the author's testing preference.
 - **No generic praise.** `clean`, `readable`, `idiomatic`, `well-structured`, `best practices` — banned. If you can't tie it to a tell, cut it.
 - **Write it as a portrait** — a short grounded paragraph per dimension, not isolated bullets. It should read like a description of a person, not a lint report.
 

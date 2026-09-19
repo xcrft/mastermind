@@ -2010,6 +2010,13 @@ def validate_portable_skill_semantics() -> list[Issue]:
             "required": ("## Original request", "Do not activate just because"),
             "forbidden": ("The planner sees the refined version, not the user's brain dump", "Mounted as the intake gate"),
         },
+        "skills/workflow/mastermind-style-deep/SKILL.md": {
+            "required": (
+                "Absence needs a denominator and opportunity",
+                "not observed in <N> relevant files/tests/commits",
+            ),
+            "forbidden": ("Their presence — or absence — tells you",),
+        },
         "skills/security/mastermind-agent-security-review/SKILL.md": {
             "required": ("self-contained for Codex", "## Review protocol", "## Output"),
             "forbidden": ("The review *protocol* lives in that subagent",),

@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Context doctor now treats a bound semantic-review state without an audit
+  snapshot as unresolved instead of accepting its Markdown dispositions.
 - Workflow status no longer reports a learned or history-review task as
   complete when its audit snapshot binding is missing; it now routes that
   state back through post-flight audit.

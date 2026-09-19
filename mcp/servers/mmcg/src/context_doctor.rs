@@ -508,6 +508,10 @@ fn check_history_review_with_capability(
                 unresolved.push(format!("{task_name}: task state is not repository-bound"));
                 continue;
             }
+            if state.history_snapshot_sha256.is_none() {
+                unresolved.push(format!("{task_name}: audit snapshot missing"));
+                continue;
+            }
         }
         let snapshot = state
             .as_ref()
@@ -1357,10 +1361,14 @@ mod tests {
         }
         write_task_state(&task, "learned", None);
         std::fs::write(task.join("history-review.md"), complete).unwrap();
-        assert!(run(dir.path())
+        let report = run(dir.path());
+        let check = report
             .checks
             .iter()
-            .any(|check| check.name == "history review" && check.status == Status::Ok));
+            .find(|check| check.name == "history review")
+            .unwrap();
+        assert_eq!(check.status, Status::Warn);
+        assert!(check.message.contains("audit snapshot missing"));
     }
 
     #[test]

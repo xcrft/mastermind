@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Lens now marks the document-evidence source summary partial when the packet
+  checks named endpoints only, matching the review coverage status.
 - Endpoint-only document freshness now marks Lens and exported review packets
   partial. Named document bytes can still be current, while unlisted corpus
   documents remain outside the review coverage.

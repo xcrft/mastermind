@@ -1026,6 +1026,13 @@ async function main() {
   assert.match(endpointOnlyGraphHarness.nodes.get("notice-stack").textContent, /Document evidence · endpoint only/i);
   assert.match(endpointOnlyGraphHarness.nodes.get("notice-stack").textContent, /New or unlisted documents are outside/i);
   assert.match(endpointOnlyGraphHarness.nodes.get("evidence-source-list").textContent, /corpus not tracked/i);
+  assert.match(endpointOnlyGraphHarness.nodes.get("evidence-summary").textContent, /partial/i);
+  assert.ok(
+    endpointOnlyGraphHarness.nodes.get("evidence-source-list").querySelectorAll(".evidence-source")
+      .find((card) => /document graph/i.test(card.textContent))
+      .classList.contains("evidence-source--partial"),
+    "Endpoint-only document evidence must be styled as incomplete coverage"
+  );
   assert.match(endpointOnlyGraphHarness.nodes.get("document-graph-summary").textContent, /corpus not tracked/i);
   assert.doesNotMatch(endpointOnlyGraphHarness.nodes.get("document-graph-list").textContent, /Tracked corpus roots/i);
   assert.match(endpointOnlyGraphHarness.nodes.get("precision-list").textContent, /Only named endpoints are freshness-checked/i);

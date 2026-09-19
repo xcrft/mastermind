@@ -182,6 +182,21 @@ test("installer rejects a symlinked managed directory without touching its targe
   }
 });
 
+test("installer rejects a bundle skill without a regular SKILL manifest before writing", () => {
+  const f = fixture();
+  try {
+    fs.mkdirSync(path.join(f.share, "skills", "incomplete"));
+
+    assert.throws(
+      () => copyAll({ home: f.home, share: f.share, client: "claude", version: "1.0.0", profile: "full" }),
+      /workflow bundle skill incomplete must contain a regular SKILL\.md/,
+    );
+    assert.equal(fs.existsSync(path.join(f.home, ".claude")), false);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test("newer manifest schemas fail before replacing installed files", () => {
   const f = fixture();
   try {

@@ -454,6 +454,38 @@ impl RootCapability {
         let _ = unix_mode;
         self.verify()
     }
+
+    /// Flush the retained root directory only while its path still resolves to
+    /// the same no-follow directory. Callers use this after publishing a
+    /// directory entry through a path that was bound to this capability.
+    pub(crate) fn sync(&self) -> Result<(), BoundedReadError> {
+        self.verify()?;
+        sync_directory(&self.directory)?;
+        self.verify()
+    }
+
+    /// Atomically publish one direct child directory without resolving the
+    /// parent through its mutable pathname again. Both names must be single
+    /// directory entries beneath this retained root.
+    pub(crate) fn rename_child_directory_noclobber(
+        &self,
+        source: &std::ffi::OsStr,
+        target: &std::ffi::OsStr,
+    ) -> Result<(), BoundedReadError> {
+        for name in [source, target] {
+            if !matches!(
+                Path::new(name).components().next(),
+                Some(Component::Normal(_))
+            ) || Path::new(name).components().nth(1).is_some()
+            {
+                return Err(BoundedReadError::InvalidPath);
+            }
+        }
+        self.verify()?;
+        rename_directory_noclobber(&self.directory, source, target)
+            .map_err(BoundedReadError::Io)?;
+        self.verify()
+    }
 }
 
 fn absolute_file_target(path: &Path) -> Result<PathBuf, BoundedReadError> {
@@ -882,6 +914,106 @@ fn rename_file_noclobber(
     } else {
         Err(std::io::Error::last_os_error())
     }
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn rename_directory_noclobber(
+    parent: &Dir,
+    source: &std::ffi::OsStr,
+    target: &std::ffi::OsStr,
+) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    let source = CString::new(source.as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in source name"))?;
+    let target = CString::new(target.as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in target name"))?;
+    // SAFETY: both names are live NUL-terminated direct children of the same
+    // retained directory descriptor. RENAME_EXCL never replaces the target.
+    let status = unsafe {
+        libc::renameatx_np(
+            parent.as_raw_fd(),
+            source.as_ptr(),
+            parent.as_raw_fd(),
+            target.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn rename_directory_noclobber(
+    parent: &Dir,
+    source: &std::ffi::OsStr,
+    target: &std::ffi::OsStr,
+) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    let source = CString::new(source.as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in source name"))?;
+    let target = CString::new(target.as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in target name"))?;
+    // SAFETY: both names are live NUL-terminated direct children of the same
+    // retained directory descriptor. RENAME_NOREPLACE is one atomic check and
+    // rename, so a concurrent creator cannot be overwritten after validation.
+    let status = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            parent.as_raw_fd(),
+            source.as_ptr(),
+            parent.as_raw_fd(),
+            target.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn rename_directory_noclobber(
+    parent: &Dir,
+    source: &std::ffi::OsStr,
+    target: &std::ffi::OsStr,
+) -> std::io::Result<()> {
+    // Windows directory rename rejects an existing target; cap-std performs
+    // the operation relative to the retained parent descriptor.
+    match parent.rename(source, parent, target) {
+        Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => Err(
+            std::io::Error::new(std::io::ErrorKind::AlreadyExists, error),
+        ),
+        result => result,
+    }
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "linux",
+    target_os = "android",
+    windows
+)))]
+fn rename_directory_noclobber(
+    _parent: &Dir,
+    _source: &std::ffi::OsStr,
+    _target: &std::ffi::OsStr,
+) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "atomic no-clobber directory publication is unavailable on this platform",
+    ))
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]

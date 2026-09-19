@@ -214,7 +214,10 @@ export function profileBundle(bundle, profile, share = DEFAULT_SHARE) {
   }
   for (const skill of skills) {
     for (const linked of linkedSkills(path.join(share, "skills", skill))) {
-      if (available.has(linked) && !selected.has(linked)) {
+      if (!available.has(linked)) {
+        throw new Error(`workflow bundle skill ${skill} references missing skill ${linked}`);
+      }
+      if (!selected.has(linked)) {
         throw new Error(`workflow profile ${profile} is not closed: ${skill} links to ${linked}`);
       }
     }

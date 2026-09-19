@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot revision, partial state, and unverified relation boundary.
 
 ### Fixed
+- Brief packets now retain bounded API-crossing candidates with component, seed,
+  impacted symbol, depth, and omission coverage, so a public-boundary risk is
+  not lost between change-impact analysis and role handoff.
 - Brief caller rows now retain their bounded changed-symbol seeds, exact seed
   count, name-collision count, and language-edge precision from change impact,
   including in the text projection, so role packets keep both the cause and

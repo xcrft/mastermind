@@ -1623,6 +1623,7 @@ const BRIEF_CHANGED_FILE_LIMIT: usize = 100;
 const BRIEF_CHANGED_SYMBOL_LIMIT: usize = 100;
 const BRIEF_CALLER_LIMIT: usize = 100;
 const BRIEF_CALLER_SEED_LIMIT: usize = 8;
+const BRIEF_API_CROSSING_LIMIT: usize = 50;
 const BRIEF_TEST_LIMIT: usize = 50;
 const BRIEF_TEST_EVIDENCE_LIMIT: usize = 8;
 const BRIEF_HISTORY_LIMIT: usize = 10;
@@ -1967,6 +1968,7 @@ pub struct BriefPacket {
     pub changes: BriefChanges,
     pub disciplines: BriefDisciplines,
     pub callers: BriefCollection<BriefCaller>,
+    pub api_crossings: BriefCollection<BriefApiCrossing>,
     pub tests: BriefCollection<BriefTest>,
     pub history: BriefHistory,
     pub citations: BriefCollection<BriefHistoryCitation>,
@@ -2089,6 +2091,23 @@ pub struct BriefCaller {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BriefApiCrossing {
+    pub seed: BriefSeed,
+    pub changed_component: String,
+    pub impacted: BriefSymbol,
+    pub impacted_component: String,
+    pub minimum_depth: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BriefSymbol {
+    pub file: String,
+    pub name: String,
+    pub kind: String,
+    pub line: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BriefSeed {
     pub file: String,
     pub name: String,
@@ -2156,6 +2175,7 @@ pub struct BriefOmitted {
     pub changed_files: BriefOmissionCount,
     pub changed_symbols: BriefOmissionCount,
     pub callers: BriefOmissionCount,
+    pub api_crossings: BriefOmissionCount,
     pub tests: BriefOmissionCount,
     pub history_citations: BriefOmissionCount,
 }
@@ -2166,6 +2186,7 @@ pub struct BriefLimits {
     pub changed_symbols: u32,
     pub callers: u32,
     pub caller_seeds: u32,
+    pub api_crossings: u32,
     pub tests: u32,
     pub test_evidence: u32,
     pub history_citations: u32,
@@ -3334,6 +3355,15 @@ fn brief_seed(seed: &SeedEvidence) -> Option<BriefSeed> {
     })
 }
 
+fn brief_symbol(symbol: &SymbolEvidence) -> Option<BriefSymbol> {
+    Some(BriefSymbol {
+        file: safe_brief_string(&symbol.file)?,
+        name: safe_brief_string(&symbol.name)?,
+        kind: safe_brief_string(&symbol.kind)?,
+        line: symbol.line,
+    })
+}
+
 fn brief_test_evidence(evidence: &TestEvidence) -> Option<BriefTestEvidence> {
     Some(BriefTestEvidence {
         kind: safe_brief_string(&evidence.kind)?,
@@ -3481,6 +3511,7 @@ fn sync_brief_counts(packet: &mut BriefPacket) {
     packet.changes.files.returned = brief_u32(packet.changes.files.items.len());
     packet.changes.symbols.returned = brief_u32(packet.changes.symbols.items.len());
     packet.callers.returned = brief_u32(packet.callers.items.len());
+    packet.api_crossings.returned = brief_u32(packet.api_crossings.items.len());
     packet.tests.returned = brief_u32(packet.tests.items.len());
     packet.citations.returned = brief_u32(packet.citations.items.len());
     packet.history.total = packet.citations.total;
@@ -3490,27 +3521,31 @@ fn sync_brief_counts(packet: &mut BriefPacket) {
 #[derive(Clone, Copy)]
 enum BriefSection {
     Changes,
+    ApiCrossings,
     Callers,
     Tests,
     History,
 }
 
-fn brief_priority(role: BriefRole) -> [BriefSection; 4] {
+fn brief_priority(role: BriefRole) -> [BriefSection; 5] {
     match role {
         BriefRole::Planner => [
             BriefSection::Changes,
+            BriefSection::ApiCrossings,
             BriefSection::Callers,
             BriefSection::History,
             BriefSection::Tests,
         ],
         BriefRole::Executor => [
             BriefSection::Changes,
+            BriefSection::ApiCrossings,
             BriefSection::Tests,
             BriefSection::Callers,
             BriefSection::History,
         ],
         BriefRole::Auditor => [
             BriefSection::Tests,
+            BriefSection::ApiCrossings,
             BriefSection::Callers,
             BriefSection::Changes,
             BriefSection::History,
@@ -3537,6 +3572,15 @@ fn remove_brief_candidate(packet: &mut BriefPacket) -> bool {
             BriefSection::Callers => {
                 if packet.callers.items.pop().is_some() {
                     packet.omitted.callers.budget = packet.omitted.callers.budget.saturating_add(1);
+                    true
+                } else {
+                    false
+                }
+            }
+            BriefSection::ApiCrossings => {
+                if packet.api_crossings.items.pop().is_some() {
+                    packet.omitted.api_crossings.budget =
+                        packet.omitted.api_crossings.budget.saturating_add(1);
                     true
                 } else {
                     false
@@ -3584,6 +3628,11 @@ fn clear_brief_candidates(packet: &mut BriefPacket) {
         .callers
         .budget
         .saturating_add(brief_u32(packet.callers.items.len()));
+    packet.omitted.api_crossings.budget = packet
+        .omitted
+        .api_crossings
+        .budget
+        .saturating_add(brief_u32(packet.api_crossings.items.len()));
     packet.omitted.tests.budget = packet
         .omitted
         .tests
@@ -3597,6 +3646,7 @@ fn clear_brief_candidates(packet: &mut BriefPacket) {
     packet.changes.files.items.clear();
     packet.changes.symbols.items.clear();
     packet.callers.items.clear();
+    packet.api_crossings.items.clear();
     packet.tests.items.clear();
     packet.citations.items.clear();
     sync_brief_counts(packet);
@@ -3832,6 +3882,26 @@ pub fn brief(
         caller_source_limit,
     );
 
+    let crossing_source_limit =
+        brief_source_omitted(&impact.api_crossings, BRIEF_API_CROSSING_LIMIT);
+    let (api_crossings, omitted_api_crossings) = safe_brief_collection(
+        impact
+            .api_crossings
+            .items
+            .iter()
+            .take(BRIEF_API_CROSSING_LIMIT)
+            .map(|crossing| {
+                Some(BriefApiCrossing {
+                    seed: brief_seed(&crossing.seed)?,
+                    changed_component: safe_brief_string(&crossing.changed_component)?,
+                    impacted: brief_symbol(&crossing.impacted)?,
+                    impacted_component: safe_brief_string(&crossing.impacted_component)?,
+                    minimum_depth: crossing.minimum_depth,
+                })
+            }),
+        crossing_source_limit,
+    );
+
     let test_source_limit = brief_source_omitted(&impact.tests, BRIEF_TEST_LIMIT);
     let (tests, omitted_tests) = safe_brief_collection(
         impact
@@ -3944,6 +4014,7 @@ pub fn brief(
         changes: BriefChanges { files, symbols },
         disciplines,
         callers,
+        api_crossings,
         tests,
         history: BriefHistory {
             query_terms: terms,
@@ -3963,6 +4034,7 @@ pub fn brief(
             changed_files: omitted_files,
             changed_symbols: omitted_symbols,
             callers: omitted_callers,
+            api_crossings: omitted_api_crossings,
             tests: omitted_tests,
             history_citations: omitted_history,
         },
@@ -3971,6 +4043,7 @@ pub fn brief(
             changed_symbols: BRIEF_CHANGED_SYMBOL_LIMIT as u32,
             callers: BRIEF_CALLER_LIMIT as u32,
             caller_seeds: BRIEF_CALLER_SEED_LIMIT as u32,
+            api_crossings: BRIEF_API_CROSSING_LIMIT as u32,
             tests: BRIEF_TEST_LIMIT as u32,
             test_evidence: BRIEF_TEST_EVIDENCE_LIMIT as u32,
             history_citations: BRIEF_HISTORY_LIMIT as u32,
@@ -8523,6 +8596,10 @@ mod tests {
                     "src/test_app.py",
                     "from src.app import target\n\ndef test_target():\n    assert target() == 1\n",
                 ),
+                (
+                    "api/consumer.py",
+                    "from src.app import target\n\ndef boundary():\n    return target()\n",
+                ),
                 (escaped_source_path, "def unicode_target():\n    return 1\n"),
                 (
                     "CONTEXT.md",
@@ -8594,6 +8671,15 @@ mod tests {
         assert!(!caller.seeds_truncated);
         assert_eq!(caller.seeds.len(), 1);
         assert_eq!(caller.seeds[0].name, "target");
+        let crossing = first
+            .api_crossings
+            .items
+            .iter()
+            .find(|crossing| crossing.impacted.name == "boundary")
+            .expect("brief should retain the component crossing");
+        assert_eq!(crossing.seed.name, "target");
+        assert_eq!(crossing.changed_component, "src");
+        assert_eq!(crossing.impacted_component, "api");
         let test = first
             .tests
             .items
@@ -9040,6 +9126,7 @@ mod tests {
                 .into_iter()
                 .map(|section| match section {
                     BriefSection::Changes => "changes",
+                    BriefSection::ApiCrossings => "api_crossings",
                     BriefSection::Callers => "callers",
                     BriefSection::Tests => "tests",
                     BriefSection::History => "history",
@@ -9048,15 +9135,15 @@ mod tests {
         };
         assert_eq!(
             names(BriefRole::Planner),
-            ["changes", "callers", "history", "tests"]
+            ["changes", "api_crossings", "callers", "history", "tests"]
         );
         assert_eq!(
             names(BriefRole::Executor),
-            ["changes", "tests", "callers", "history"]
+            ["changes", "api_crossings", "tests", "callers", "history"]
         );
         assert_eq!(
             names(BriefRole::Auditor),
-            ["tests", "callers", "changes", "history"]
+            ["tests", "api_crossings", "callers", "changes", "history"]
         );
     }
 

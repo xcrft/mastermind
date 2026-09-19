@@ -522,12 +522,63 @@ fn section_key(raw: &str) -> String {
     s.trim().to_lowercase()
 }
 
+#[derive(Clone, Copy)]
+struct CodeFence {
+    marker: char,
+    width: usize,
+}
+
+fn fence_opener(line: &str) -> Option<CodeFence> {
+    let trimmed = line.trim_start();
+    let marker = trimmed.chars().next()?;
+    if !matches!(marker, '`' | '~') {
+        return None;
+    }
+    let width = trimmed
+        .chars()
+        .take_while(|character| *character == marker)
+        .count();
+    (width >= 3).then_some(CodeFence { marker, width })
+}
+
+fn fence_closes(line: &str, fence: CodeFence) -> bool {
+    let trimmed = line.trim_start();
+    let width = trimmed
+        .chars()
+        .take_while(|character| *character == fence.marker)
+        .count();
+    width >= fence.width && trimmed.chars().skip(width).all(char::is_whitespace)
+}
+
+/// Returns true for a code-fence delimiter or a line inside its payload.
+fn consume_fenced_code_line(line: &str, active: &mut Option<CodeFence>) -> bool {
+    if let Some(fence) = *active {
+        if fence_closes(line, fence) {
+            *active = None;
+        }
+        return true;
+    }
+    if let Some(fence) = fence_opener(line) {
+        *active = Some(fence);
+        return true;
+    }
+    false
+}
+
 fn split_sections(body: &str) -> (BTreeMap<String, String>, Vec<String>) {
     let mut sections: BTreeMap<String, String> = BTreeMap::new();
     let mut order: Vec<String> = Vec::new();
     let mut current: Option<(String, String)> = None;
+    let mut code_fence = None;
 
     for line in body.lines() {
+        if consume_fenced_code_line(line, &mut code_fence) {
+            if let Some((_, body)) = current.as_mut() {
+                body.push_str(line);
+                body.push('\n');
+            }
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("## ") {
             // Commit previous section.
             if let Some((name, body)) = current.take() {
@@ -558,7 +609,11 @@ fn split_sections(body: &str) -> (BTreeMap<String, String>, Vec<String>) {
 /// (case-insensitive).
 fn extract_snapshot(body: &str) -> Vec<SymbolClaim> {
     let mut out: Vec<SymbolClaim> = Vec::new();
+    let mut code_fence = None;
     for line in body.lines() {
+        if consume_fenced_code_line(line, &mut code_fence) {
+            continue;
+        }
         let trimmed = line.trim();
         if !trimmed.starts_with('-') {
             continue;
@@ -623,13 +678,28 @@ fn extract_caller_count(text: &str) -> Option<u32> {
 fn extract_mentioned_files(body: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut chars = body.char_indices().peekable();
+    let mut code_fence = None;
+    for line in body.lines() {
+        if consume_fenced_code_line(line, &mut code_fence) {
+            continue;
+        }
+        extract_mentioned_files_from_line(line, &mut out, &mut seen);
+    }
+    out
+}
+
+fn extract_mentioned_files_from_line(
+    line: &str,
+    out: &mut Vec<String>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    let mut chars = line.char_indices().peekable();
     while let Some((i, c)) = chars.next() {
         if c != '`' {
             continue;
         }
         // Matching closing backtick on the same line.
-        let rest = &body[i + 1..];
+        let rest = &line[i + 1..];
         let Some(end_rel) = rest.find('`') else {
             continue;
         };
@@ -651,7 +721,6 @@ fn extract_mentioned_files(body: &str) -> Vec<String> {
             chars.next();
         }
     }
-    out
 }
 
 fn looks_like_path(s: &str) -> bool {
@@ -670,7 +739,11 @@ fn looks_like_path(s: &str) -> bool {
 /// leading bold marker, returns the command text.
 fn extract_verify_commands(body: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
+    let mut code_fence = None;
     for line in body.lines() {
+        if consume_fenced_code_line(line, &mut code_fence) {
+            continue;
+        }
         let trimmed = line.trim();
         let after = trimmed
             .strip_prefix("**VERIFY**:")
@@ -715,9 +788,13 @@ fn extract_find_blocks(body: &str) -> Vec<FindBlock> {
     let mut out: Vec<FindBlock> = Vec::new();
     let mut current_file: Option<String> = None;
     let mut current_phase: Option<String> = None;
+    let mut code_fence = None;
     let mut lines = body.lines().peekable();
 
     while let Some(line) = lines.next() {
+        if consume_fenced_code_line(line, &mut code_fence) {
+            continue;
+        }
         let trimmed = line.trim();
 
         // Track phase headings — `## Phase N: ...` and `### N.M ...`.
@@ -754,28 +831,29 @@ fn extract_find_blocks(body: &str) -> Vec<FindBlock> {
         if trimmed == "FIND:" || trimmed == "**FIND:**" || trimmed == "**FIND**:" {
             let mut payload = String::new();
             // Skip blanks, then expect fence opener.
-            let mut opened = false;
+            let mut opened = None;
             while let Some(next) = lines.peek() {
                 let nt = next.trim();
-                if nt.is_empty() && !opened {
+                if nt.is_empty() && opened.is_none() {
                     lines.next();
                     continue;
                 }
-                if !opened {
-                    if nt.starts_with("```") {
-                        opened = true;
+                if let Some(fence) = opened {
+                    if fence_closes(next, fence) {
+                        lines.next();
+                        break;
+                    }
+                    payload.push_str(next);
+                    payload.push('\n');
+                    lines.next();
+                } else {
+                    if let Some(fence) = fence_opener(next) {
+                        opened = Some(fence);
                         lines.next();
                         continue;
                     }
                     break; // No fence after FIND: — abandon this block.
                 }
-                if nt.starts_with("```") {
-                    lines.next();
-                    break;
-                }
-                payload.push_str(next);
-                payload.push('\n');
-                lines.next();
             }
             let payload = payload.trim_end_matches('\n').to_string();
             if !payload.is_empty() {
@@ -961,6 +1039,46 @@ pub fn refresh(&self) -> Result<Session> {
             s.verify_commands,
             vec!["cargo test session_count_returns_current_size".to_string()]
         );
+    }
+
+    #[test]
+    fn ignores_semantic_markers_inside_fenced_code() {
+        let body = "\
+## Goals
+- Real outcome
+
+~~~markdown
+## Scope
+- Fake scope in an example
+VERIFY: `false`
+**File:** `src/decoy.rs`
+FIND:
+```rust
+fn decoy() {}
+```
+~~~
+
+## Scope
+- Edit `src/real.rs`
+
+## Pre-edit symbol snapshot
+~~~text
+- `decoy` — 99 callers
+~~~
+- `real` — 1 caller
+";
+        let s = parse_str("test.md", body);
+
+        assert_eq!(section_body(&s, "Scope"), Some("- Edit `src/real.rs`"));
+        assert_eq!(
+            s.section_order,
+            vec!["Goals", "Scope", "Pre-edit symbol snapshot"]
+        );
+        assert_eq!(s.mentioned_files, vec!["src/real.rs"]);
+        assert!(s.verify_commands.is_empty());
+        assert!(s.find_blocks.is_empty());
+        assert_eq!(s.pre_edit_snapshot.len(), 1);
+        assert_eq!(s.pre_edit_snapshot[0].name, "real");
     }
 
     #[test]

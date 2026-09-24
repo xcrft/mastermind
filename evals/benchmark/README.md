@@ -1,128 +1,69 @@
-# Research benchmark transport and calibration corpus
+# Research benchmark
 
-`evals/benchmark.py` prepares independent source snapshots and runs a pinned
-executable adapter through a bounded JSON protocol. The deterministic tests use
-small executable adapters, a fixture Claude CLI, a real Python MCP broker and a
-SQLite-producing fixture indexer. No model calls or native builds are part of
-those tests.
+This workflow prepares the same research task under three tool conditions and
+retains full answers for manual review. It has no accepted quality score.
+The built-in Claude adapter has deterministic tests but has not been validated
+against a live model.
 
-The built-in Claude CLI adapter is runnable with an explicitly pinned CLI and
-API key. It has not been validated against a live model. This layer does not
-include an automatic semantic grader or a measured quality baseline. Every result
-has `comparability.eligible: false`; every batch has
-`comparison_accepted: false` and `quality_uplift: null`.
+## Conditions
 
-## Three conditions
-
-| Condition | Instructions | Exposed tool contract |
+| Condition | Instructions | Tools |
 |---|---|---|
-| `source` | Common neutral research instruction | Read, search, Git source inspection |
-| `portable` | Neutral instruction plus pinned shipped research skill | Same source tools |
-| `portable_mmcg` | Exactly the same instructions as `portable` | Same source tools plus mmcg |
+| `source` | Neutral research instruction | Source read, search, Git |
+| `portable` | Neutral instruction plus shipped research skill | Same source tools |
+| `portable_mmcg` | Same instructions as `portable` | Source tools plus mmcg |
 
-The public task, source revision and file bytes/modes, hidden rubric, exact
-requested model, adapter identity and budgets share a `common_sha256`.
-`condition_sha256` adds the condition, instruction bytes and indexer identity,
-including index contracts and declared indexed files. Each trial also hashes
-its actual adapter request, including its unique paths.
-
-The private rubric must name the public task's `id` as `task_id` and its exact
-`revision` as `source_revision`. An absent or different rubric revision is a
-configuration error, so updating the task snapshot cannot silently reuse an old
-answer key. The checked-in calibration keys have received independent agent source
-review, including phase continuity, document evidence, definition selection and
-reference evidence for code-removal reviews.
-This does not establish runtime behavior or grade a model answer. Changing a task
-or key requires fresh trials; their full contents participate in trial identity.
-
-Preparation reads exact Git objects from an explicit file allowlist. It creates
-a new repository with one synthetic commit. The original repository's objects,
-history, local configuration and omitted files are not copied. Allowed blobs
-keep their original bytes even when supplied `.gitignore` or `.gitattributes`
-files would change a normal `git add`. Symlinks, submodules, traversal paths,
-client configuration directories and benchmark answer keys under `evals/` are
-excluded. Product documentation can be included explicitly.
-
-Only `portable_mmcg` runs the configured indexer. Setup rejects a nonzero exit,
-partial or invalid SQLite database, nonempty WAL/journal, wrong schema/root, or
-an indexed-file inventory whose hashes differ from the declared source subset.
-The subset must account for what that mmcg version indexes; Markdown documents
-remain available to source tools even when they are not indexed.
+The public task, pinned source, private rubric, model, adapter, and budgets are
+shared. Condition identity adds the instruction and graph runtime. Preparation
+copies only allowlisted files from pinned Git objects into a one-commit
+repository. Only `portable_mmcg` builds an index.
 
 ## Calibration corpus
 
-`corpus.json` binds each public question to its private review key and the source
-subset the native graph can index:
+[`corpus.json`](corpus.json) binds each public task to a private review key and
+its indexed source files.
 
-| Case | Coverage | Indexed subset |
-|---|---|---|
-| `task-phase-continuity-01` | Historical workflow defect, Held/Drift/Broken outcomes and persistence failures | Three Rust files |
-| `document-evidence-boundaries-01` | Correct helper behavior, explicit document relations, freshness versus truth and coverage limits | Python helper; the two Markdown files remain available to source tools |
-| `callees-definition-boundaries-01` | Definition ambiguity through MCP/query/storage, empty results and source selection versus outgoing target resolution | Three Rust files |
-| `reference-removal-evidence-01` | Rust function values through extraction/storage/queries, calls versus references and evidence needed before removing code | Three Rust files |
+| Case | Focus |
+|---|---|
+| `task-phase-continuity-01` | Workflow history and persistence |
+| `document-evidence-boundaries-01` | Document freshness and evidence limits |
+| `callees-definition-boundaries-01` | Ambiguous definitions and outgoing calls |
+| `reference-removal-evidence-01` | References needed before code removal |
 
-All cases are published calibrations. They are neither held out nor a
-representative sample of research quality. The correct-behavior cases ask what
-the implementation establishes and what remains unknown without assuming that
-it contains a defect. A source-grounded uncertainty statement is not a failed
-answer merely because it does not identify a bug.
-
-The newer graph cases pin `cbc8179320d815c07609f859810b3e64ebc74d48`; the
-original two retain their earlier revision. Each case keeps its own source and
-key identities. In the callees case, selecting a source declaration is distinct
-from resolving outgoing targets. In the reference case, the question traces one
-supported producer form and asks for removal evidence, not a claim that every
-language feature is covered or permission to delete actual code.
-
-Check the corpus without invoking a model, indexer or researched code:
+These are published calibration cases, not held-out or representative tasks.
+Their keys were source-reviewed; that does not grade a model answer. Check the
+pinned files and anchors without invoking a model:
 
 ```bash
-python3 -m evals.benchmark_corpus --source-repo /absolute/path/to/mastermind
+python3 -m evals.benchmark_corpus --source-repo .
 ```
 
-The checker requires the pinned commits and blobs to exist in the local Git
-repository. It does not fetch them; a shallow checkout may need its history
-fetched separately. CI supplies full history for this check. Current worktree
-edits do not alter the evidence: the checker reads only the pinned Git objects.
+The checker needs the pinned commits in local Git history. It does not fetch
+them.
 
-Checks cover task/key identity, required review fields, unscored calibration
-status, source types and byte limits, indexed-file scope and every required
-anchor's path and line range. They reject evidence outside the source allowlist
-and symbolic links in case files or case directories. The JSON report includes
-source hashes and sizes, task/key/corpus hashes and declared coverage. It does
-not include key claims, and it does **not** verify that claims follow from the
-cited lines. Source review is a declared property, not a machine attestation.
+## Prepare and run
 
-For a custom corpus inside the source repository, the registry and every
-registered task/key path are excluded from research source, even if the pinned
-commit contains an older key. Keep those control files out of source allowlists.
-
-## Prepare trials
-
-Requires Python 3.10+ and Git on a POSIX host. Choose an output directory outside
-the source repository. Supply a trusted adapter implementing the protocol below
-and an already available matching mmcg executable. The runner never builds,
-downloads or falls back to a binary from PATH.
-
-Create a local config using actual values in place of these placeholders:
+Use Python 3.10+, Git, a trusted adapter, and a matching `mmcg` executable on
+POSIX. Put output outside the source repository. A config pins the model,
+adapter, tool revision, graph runtime, and budgets:
 
 ```json
 {
-  "model": "exact-model-id-observed-by-the-adapter",
-  "tool_revision": "full-lowercase-tool-commit-id",
+  "model": "exact-model-id",
+  "tool_revision": "full-tool-commit-id",
   "instruction_path": "skills/workflow/mastermind-codegraph-research/SKILL.md",
   "adapter": {
     "path": "/absolute/path/to/trusted-adapter",
-    "sha256": "sha256-of-that-executable",
-    "version": "exact-adapter-version",
-    "origin": "how-this-runtime-was-obtained"
+    "sha256": "sha256-of-executable",
+    "version": "exact-version",
+    "origin": "runtime-origin"
   },
   "mmcg": {
     "path": "/absolute/path/to/mmcg",
-    "sha256": "sha256-of-that-executable",
-    "version": "exact-mmcg-version",
+    "sha256": "sha256-of-executable",
+    "version": "exact-version",
     "source_revision": "same-full-tool-commit-id",
-    "origin": "how-this-runtime-was-obtained",
+    "origin": "runtime-origin",
     "index_contract": {
       "schema_version": "8",
       "extractor_contract_version": "mmcg-extractors-v6",
@@ -140,291 +81,76 @@ Create a local config using actual values in place of these placeholders:
 }
 ```
 
-The harness caps a trial at 3,600 seconds, 16 MiB per trace/diagnostic stream,
-64 turns and 65,536 declared output tokens. Lower per-experiment limits remain
-part of the frozen common identity; values above the hard caps are rejected
-before any trial directory or model invocation is created.
-
-The task's source revision and the tool/instruction revision are separate. Each
-calibration investigates a fixed repository commit. Pin the instruction and
-mmcg source together without changing the task revision.
-
 ```bash
 python3 evals/benchmark.py prepare \
   --case document-evidence-boundaries-01 \
-  --config /absolute/path/to/local-config.json \
+  --config /absolute/path/to/config.json \
   --source-repo /absolute/path/to/mastermind \
   --tool-repo /absolute/path/to/mastermind \
   --output /absolute/path/to/benchmark-output
 ```
 
-`--case` checks the selected task and key before creating any trial. It supplies
-`mmcg.indexed_files` from the registry so one runtime config can serve different
-cases. If the config already declares a different subset, preparation fails
-instead of overriding it. `--corpus PATH` selects an alternative registry.
-`batch.json` retains the checked case summary; coverage tags and key content are
-not added to the model request.
-
-Corpus selection also rejects an `instruction_path` listed in the task's
-`source_allowlist`, before creating any trial or invoking the indexer. The source
-baseline must not receive the same declared portable instruction through source
-tools. This is a path-overlap check; it does not detect copied instructions under
-other paths or establish that the benchmark is otherwise free of contamination.
-
-Custom tasks still use `--task PATH --rubric PATH` in place of `--case`. That path
-keeps its existing task/key identity check and defaults the indexed subset to
-the source allowlist. Supply `mmcg.indexed_files` explicitly when some source
-files are not indexed. Custom selection does not apply the stricter corpus
-schema or imply that the key has been source reviewed.
-
-This creates nine trials by default: three repetitions with rotating condition
-order. `batch.json` records the planned sequence, including setup failures, and
-hashes the full plan. Every new batch trial binds that hash, its batch ID and its
-position into its condition identity.
-Preparation never invokes the model adapter. A failed index setup remains a
-failed graph trial; it cannot become a source-only result.
-
-Run prepared trials in the recorded order, retaining all planned attempts:
-
-```bash
-python3 evals/benchmark.py run /absolute/path/to/batch-id/trial-id
-```
-
-`--credential-env OPENAI_API_KEY` explicitly forwards that credential from the
-invoking environment. The other accepted names are `ANTHROPIC_API_KEY` and
-`CLAUDE_CODE_OAUTH_TOKEN`. Credentials are not written into the request or
-manifest. All other inherited environment variables are cleared. Each trial
-gets fresh HOME, XDG and temporary directories. A batch-level lock allows only
-one active attempt and requires every earlier planned result before the next
-trial can start. An out-of-order or overlapping command is rejected before that
-trial's one-shot `run.lock` is created. The runner holds the batch directory
-while acquiring this lock and rejects a replaced batch root before an attempt
-can start. Each result links the hash of its
-predecessor, so offline review can verify a complete execution chain. A crash
-after claiming an attempt leaves the batch incomplete; it does not permit a
-selective retry. Prepare a new balanced batch when the runtime or experiment
-configuration changes.
-
-One-shot control files, retained answers, transport logs and results use
-exclusive publication. The runner fsyncs each artifact, reopens its final name,
-and verifies the owned file identity and exact bytes before returning success.
-Replacing a parent directory or final file during publication fails the
-attempt without deleting an external replacement.
-
-## Adapter protocol
-
-For the generic adapter, the pinned executable receives no arguments. Its working directory is the
-allowlisted source projection; stdin contains one JSON object followed by a
-newline. `request.json` holds that object:
-
-- `protocol: mastermind-research-adapter-v1`;
-- public `task`, `source_root` and file hashes;
-- the synthetic `projection_revision` in manifest version 2;
-- `system_instruction`, `portable_instruction`, `model`, `limits`;
-- `available_tools`: `source_read`, `source_search`, `source_git`, and only in
-  condition three, `mmcg` with its binary and index paths. Version 2 also includes
-  the pinned native runtime, index hash, contracts and indexed-file inventory.
-
-Previously prepared version 1 generic requests retain their original shape and
-remain runnable. Standalone trials use manifest version 2. New batch-bound
-trials use version 3; their adapter request keeps the version 2 transport shape.
-
-The request does not contain the rubric, expected conclusions, other trials, or
-the original repository path. It describes a read-only tool contract. The
-adapter must expose only these tools, honor the model/turn/output budgets,
-disable unrelated settings, plugins, hooks, memory and conversation history,
-and preserve the supplied instructions. The portable skill's embedded
-references are not resolved by the harness; the adapter receives its exact
-file bytes. Do not substitute researcher-agent frontmatter with a different
-model or mandatory graph tools.
-
-stdout is UTF-8 JSON Lines, with exactly one `init`, zero or more `trace` events,
-then exactly one terminal `result`. stderr is a separate bounded diagnostic
-stream. Non-JSON logging on stdout is a protocol error.
-
-```jsonl
-{"type":"init","model":"exact-model-id","adapter_version":"exact-adapter-version"}
-{"type":"trace","tool":"source_read","path":"src/service.py","start_line":1}
-{"type":"result","answer":"Observed behavior at src/service.py:2.","model_error":false,"turns":1,"usage":{"input_tokens":25,"output_tokens":12,"cache_read_tokens":0,"cache_write_tokens":0},"cost_usd":0}
-```
-
-`answer` must be a string and nonempty on success. An adapter-reported model
-failure uses `model_error: true`; it may preserve a partial answer. Required
-telemetry is nonnegative integer token counts and a positive integer turn count.
-Cost is optional; absent or invalid cost is unknown, never inferred to be zero.
-The observed model and adapter version must match the manifest exactly.
-
-A failed adapter may emit `failure: {"state": "setup_error", "code": "reason"}`
-alongside an empty answer and `model_error: false`. Allowed failure states are
-`setup_error`, `protocol_error`, `identity_mismatch`, `timeout`, `output_limit`,
-`invocation_error`, `model_error` and `budget_exceeded`. Only `model_error` uses
-`model_error: true`. `init.model` may be null when setup fails before observing a
-model. Missing telemetry stays unknown; it is not fabricated for failed runs.
-
-The supervisor enforces wall time and stdout/stderr byte caps. It retains a
-complete final answer only if it fits the answer byte cap. It kills its own
-process group on timeout, output overflow or completion. Token/turn enforcement
-is the adapter's responsibility; the harness reports exceedances separately.
-
-## Built-in Claude CLI adapter
-
-Replace the config's `adapter` object with:
-
-```json
-{
-  "kind": "claude_cli",
-  "cli": {
-    "path": "/absolute/path/to/claude",
-    "sha256": "sha256-of-that-executable",
-    "version": "2.1.236",
-    "origin": "how-this-runtime-was-obtained"
-  }
-}
-```
-
-The command/stream contract was checked against CLI 2.1.236 and the official
-[CLI reference](https://code.claude.com/docs/en/cli-reference),
-[headless guide](https://code.claude.com/docs/en/headless) and
-[SDK message types](https://code.claude.com/docs/en/agent-sdk/typescript).
-Deterministic subprocess tests exercise that contract with a fixture executable;
-they do not establish compatibility with another installed version or a live API.
-
-Preparation copies the adapter and its Python modules into each trial and pins
-every file, the preparation Python executable and the declared Claude binary.
-Executable identities are streamed under the binary byte cap instead of loading
-the complete executable into memory.
-Python uses `-I -S -B` to disable user/site imports and bytecode writes. Verification
-checks the bundle, sidecar descriptor and executable hashes before and after
-invocation. The CLI's `--version` output and stream version must match the pin.
-This does not attest the interpreter's shared libraries or CLI provenance.
-
-The CLI runs in a new empty `client/` directory with fresh HOME/XDG state, bare
-mode, an explicit system prompt, no general-purpose built-in tools, no slash
-commands, empty setting sources, no session persistence and one strict MCP
-configuration. Claude Code keeps its built-in `EndConversation` entry while MCP
-tools exist; the adapter expects that entry but does not report it as a research
-tool. The adapter checks the observed tool inventory, server connection,
-permission mode, extensions, working directory and model identities. Partial
-and final events must keep each tool-call ID bound to one name, with exactly one
-observed result before a successful terminal event. Managed host policies can
-still affect execution; separate directories are not an OS sandbox.
-
-Bare mode requires an explicitly forwarded `ANTHROPIC_API_KEY`:
+Preparation creates nine trials by default: three repetitions with rotating
+condition order. It does not call a model. Run every trial once, in the order
+recorded in `batch.json`:
 
 ```bash
 python3 evals/benchmark.py run /absolute/path/to/batch-id/trial-id \
   --credential-env ANTHROPIC_API_KEY
 ```
 
-The adapter does not read OAuth/keychain credentials or fall back to another
-auth mode. The broker's environment blanks credential variables, and the native
-server receives a fresh environment without credentials. The model prompt
-contains only the public task fields and supplied instructions.
+`--credential-env` forwards only the named credential. Accepted names are
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `CLAUDE_CODE_OAUTH_TOKEN`. Other
+inherited environment variables are cleared. A failed or interrupted attempt
+stays in the record; prepare a new batch instead of selectively retrying.
 
-The broker exposes UTF-8 source ranges of at most 200 lines, bounded literal
-search and a frozen Git view with `files`, `log` and `show`. Every path must be in
-the source allowlist; each directory component is opened without following
-symlinks, and the broker retains an immutable source snapshot. Empty files and
-form-feed characters preserve file/AST line numbering.
+For custom tasks, use `--task PATH --rubric PATH` instead of `--case`. Declare
+`mmcg.indexed_files` if some allowed source files are not indexed. Custom keys
+do not inherit the corpus's source-review claim.
 
-Only condition three also exposes `mmcg_concept`, `mmcg_search`, `mmcg_outline`,
-`mmcg_files`, `mmcg_callers` and `mmcg_callees`. Arguments cannot change the root,
-index, command, environment or SQL. `mmcg_files.prefix` rejects `%`, `_` and
-backslash because the native implementation treats them as LIKE metacharacters.
-The broker invokes the pinned `--index FILE serve` read-only snapshot path,
-checks index contracts and uses the stable hash returned by that validation,
-and preserves native `isError`, ambiguity,
-freshness, precision notes and truncation. A failed transport is closed before
-the next query. Tool replies are capped at 64 KiB and calls at 128 per server.
+## Adapter contract
 
-The CLI receives `--max-turns`. Output tokens have a per-response CLI cap and a
-live stop when observed cumulative message usage exceeds the trial budget; this
-is **not an exact aggregate token cap** and can overshoot. Repeated cumulative
-updates are counted once. A token-cutoff answer, model switch, permission denial
-or missing success telemetry cannot become `completed`.
+A generic adapter reads one JSON request from stdin and writes JSON Lines to
+stdout: one `init`, optional `trace` events, then one `result`. The request
+includes the public task, source root, instructions, model, limits, and allowed
+tools. It never includes the private rubric or another trial.
 
-`claude-stream.jsonl` retains bounded raw events as they arrive, including tool
-inputs/results, while `trace.jsonl` records normalized tool calls and the terminal
-envelope. Wall time covers version checking and model invocation; the outer
-supervisor briefly drains pipes after the adapter exits and then kills nested
-CLI/MCP processes, including descendants that kept those pipes open.
-These are resource and protocol controls over a trusted CLI, not a host sandbox.
+The adapter must expose only the declared tools and honor the model and budget.
+A successful result needs a nonempty answer, observed model identity, turns,
+and token usage. Protocol, identity, setup, budget, and model failures remain
+distinct; missing telemetry is not treated as zero.
+
+For the built-in Claude CLI adapter, replace `adapter` in the config with:
+
+```json
+{
+  "kind": "claude_cli",
+  "cli": {
+    "path": "/absolute/path/to/claude",
+    "sha256": "sha256-of-executable",
+    "version": "exact-version",
+    "origin": "runtime-origin"
+  }
+}
+```
+
+It uses bare mode and requires an explicitly forwarded
+`ANTHROPIC_API_KEY`. The source broker allows bounded reads, search, and Git;
+only the third condition gets graph tools. Managed host policy can still affect
+the CLI.
 
 ## Results and review
 
-Each trial retains a frozen `manifest.json`, public `request.json`, private
-`rubric.json`, bounded `trace.jsonl` and `stderr.txt`, complete bounded
-`answer.md` when present, and `result.json`. Indexing output and elapsed setup
-time are recorded separately from the adapter's investigation time.
-Preparation requires the declared tool revision to resolve to that exact commit
-in the selected tool repository for every condition. Git lazy fetching and
-transport protocols are disabled while source and tool objects are frozen.
-Executable and SQLite pins are streamed through bounded hashing. Index
-validation binds one file identity across integrity, contract and exact source
-coverage checks, and rejects SQLite sidecars that appear before or during them.
+Each trial retains its manifest, request, private rubric, trace, diagnostics,
+full bounded answer when available, and result. `run_status` records transport
+and setup outcomes; `quality` is `review_pending` for retained answers or
+`not_evaluated` otherwise. A completed process is not a correctness grade.
 
-| Result field | Meaning |
-|---|---|
-| `run_status` | Setup, timeout, output cap, model budget, invocation, protocol, model, identity or input-mutation failure; otherwise `completed` |
-| `quality` | `not_evaluated`, or `review_pending` when an answer is retained; score is always null |
-| `diagnostics` | Usage completeness, reported tools, budget exceedances, elapsed time, exit code and protocol issues |
-| `batch_execution` | For bound trials, exact batch/plan position and the previous result hash |
-| `comparability` | Always ineligible in this transport slice; records additional failure reasons |
+Use [offline answer review](REVIEW.md) to export every planned attempt and
+import independent assessments. Reviews do not change the original run result
+or produce an accepted uplift score.
 
-Standalone results retain schema version 1. Batch-bound results use version 2
-because they include the execution-chain receipt.
-
-Missing usage or an unexpected reported tool does not become an incorrect
-research finding. Conversely, a successful process or valid citation syntax
-does not prove the answer's reasoning. A valid partial answer can remain
-available for review even when invocation or input verification fails.
-
-The [offline review workflow](REVIEW.md) exports all planned attempts into a
-blinded reviewer folder, checks source/answer identities and retains independent
-claim-level assessments. It does not invoke runtimes or mutate the original run
-results. Reviewer judgments and runtime status remain separate; importing a
-review does not make the experiment comparable or produce a quality score. Its
-status output summarizes declared evidence coverage and aligned reviewer
-disagreement by condition without averaging those judgments.
-
-The generic adapter runs as the host user. Separate directories, filtered
-environment, read-only file modes and hash checks are **not an OS sandbox**: an
-adapter could read sibling rubrics, escape its process group or access unrelated
-host files. Executable hashes detect mismatched bytes; supplied source revision
-and origin are declarations, not verified attestations. These limitations are
-recorded in every result and prevent any accepted quality comparison.
-
-The checked-in tasks calibrate source reading and uncertainty at their pinned
-commits. Their source-reviewed private keys do not make them a representative or
-held-out quality benchmark. Before drawing
-conclusions, validate the adapter with a live API and enforced host isolation and
-verified runtime provenance, independently review additional tasks and keys,
-run all conditions, then review blinded final answers against the same rubric.
-
-## Deterministic checks
-
-```bash
-python3 -m unittest evals/test_benchmark.py evals/test_claude_adapter.py evals/test_benchmark_corpus.py evals/test_benchmark_review.py
-python3 -m evals.benchmark_corpus --source-repo .
-```
-
-The tests use real subprocess I/O, disposable Git histories and SQLite indexes.
-They cover source projection, configuration separation, input identity checks,
-failed and partial indexes, full answer retention, timeout and process cleanup,
-malformed protocol events, telemetry separation, counterbalanced preparation,
-ordered one-shot execution and result-chain verification.
-The Claude tests also cover actual source/MCP subprocesses, graph result fidelity,
-transport recovery, credentials, pinned bundle tampering, model switches, live
-budget stops, partial stream retention and nested process cleanup.
-Corpus tests exercise pinned Git evidence despite worktree edits, invalid keys
-and anchors, source and control-file symlinks, historical key leakage from a
-custom corpus, and real CLI selection across all
-three conditions with a fixture indexer and adapter. Invalid selection fails
-before trial creation or runtime invocation.
-
-The bundled-corpus integration test also prepares and runs every published case
-against its real pinned source snapshot, then exports and imports a complete
-review. Its indexer only creates fixture metadata/file inventories and its
-adapter returns explicitly non-research text. These checks verify that shipped
-task/key/index scopes work through the artifact workflow; they do not exercise
-native extraction, evaluate model reasoning or establish semantic review quality.
+The adapter runs as the host user. Directory separation, environment filtering,
+and hashes are not an OS sandbox or proof of runtime provenance. Every result
+keeps `comparability.eligible: false`; every batch keeps
+`comparison_accepted: false` and `quality_uplift: null`.

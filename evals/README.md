@@ -1,438 +1,105 @@
 # Behavioral evaluations
 
-Can the shipped instruction still produce the behavior it promises under one
-focused adversarial scenario? These suites make that question replayable for
-Mastermind agents and workflow skills.
+Each case checks one behavior of a shipped agent or workflow skill. A pass rate
+is a regression signal, not product coverage or proof of real-world reliability.
 
-One case probes one expected behavior. A pass rate is not coverage, product
-correctness, or evidence that the behavior survives a long real-world task.
+## Suites
 
-## Suite map
+| Cases | Checks |
+|---|---|
+| [`critic.jsonl`](critic.jsonl) | Final design verdict |
+| [`researcher.jsonl`](researcher.jsonl) | Source-backed facts, citations, and unknowns |
+| [`auditor.jsonl`](auditor.jsonl) | Post-change verdict against a real Git fixture |
+| [`intake.jsonl`](intake.jsonl) | Prompt intake decision |
+| [`workflow.jsonl`](workflow.jsonl) | Required and forbidden workflow signals |
 
-| File | Target | Expected result |
-|---|---|---|
-| `critic.jsonl` | Design critic | `rethink`, `revise`, `insufficient evidence`, `ship with caveats`, or `ship it` |
-| `researcher.jsonl` | Codegraph researcher | Cited facts, explicit unknowns, or planner handoff |
-| `auditor.jsonl` | Post-flight auditor | `held`, `drift`, or `broken` |
-| `intake.jsonl` | Prompt intake | `refined`, `passthrough`, or `ask` |
-| `workflow.jsonl` | Planner, executor, and portable skills | Required and forbidden signals |
-| `fixtures/` | Real Git histories for researcher/auditor cases | Exact planted change |
-| `scorecard.md` | Dated full-suite results | Environment and trust notes |
-| `benchmark/` | Three-condition research trial preparation and adapter transport | Full answers retained for semantic review; no quality score yet |
+[Fixture READMEs](fixtures/) describe the planted changes.
+[Scorecard](scorecard.md) records complete model-backed runs.
+[Research benchmark](benchmark/README.md) is a separate, unscored comparison
+workflow.
 
-`runner.py` invokes `claude -p`. Researcher and auditor cases load the shipped
-agents through Claude's `--agents` / `--agent` runtime contract, so frontmatter
-tool scoping is part of the eval instead of a separate handwritten allowlist.
-`test_runner.py` and `test_evidence.py` test the deterministic parser, isolation,
-runtime contract, allowlist, report gate, fixtures, and source citations without
-calling a model.
+## Run
 
-Case files have a fail-closed schema. The loader rejects unknown case, input,
-expectation, tool-policy, citation, and comment-policy fields; invalid verdicts
-or actions; contradictory phrase checks; impossible budgets; unavailable tool
-names; and cases without a positive output oracle. This happens before a model
-is called. Citation anchors must already identify exactly one line in the named
-after-tree.
-
-Every case and suite summary reports turns, input/output tokens, prompt-cache
-creation/read tokens, API time, and Claude CLI reported cost. Retries aggregate
-both attempts, so a recovered flaky case does not hide its token spend. Reports
-also retain the resolved model IDs and tool identities. Streamed runs require
-one init and one successful result event, and every tool-use ID must have one
-matching result. Error results, incomplete model accounting, and permission
-denials fail the case. Tool inputs and tool results are not persisted, including
-in failed-run diagnostics. Each case also checks the init event against the
-pinned CLI version, disposable working directory, `dontAsk` permission mode,
-exact tool inventory, connected MCP servers, and empty skill/plugin inventory.
-For tool-enabled suites the expected inventory includes Claude Code's implicit
-`EndConversation` entry; it is not treated as research evidence.
-The runner passes each role's shipped effort explicitly, enforces a physical
-`--max-turns` cap, and sets the CLI output-token ceiling from the case or suite
-default before inference. The same limits remain post-run grading assertions
-when a case declares them.
-Transport, stream, telemetry, and permission failures stop semantic grading for
-that case, so the report keeps the primary infrastructure reason instead of
-adding unrelated missing-verdict, phrase, citation, or tool failures. A run that
-fails before model identity is observed records an empty resolved-model list and
-remains a structurally valid failed report.
-
-Each model-backed case also runs under bounded POSIX process supervision: 480
-seconds of wall time, 8 MiB of stdout, and 64 KiB of stderr. Crossing a limit
-fails the case without copying process output into the report. The runner kills
-the case process group after every outcome so MCP descendants cannot leak into
-the next case. Model-backed cases fail closed on platforms without this POSIX
-supervision.
-
-Model-backed subprocesses retain the normal login location and an explicit
-`CLAUDE_CODE_OAUTH_TOKEN`, when present. They remove inherited provider, model,
-effort, thinking, MCP, tool-search, and telemetry overrides; in particular,
-`ANTHROPIC_API_KEY` cannot silently replace a logged-in subscription in print
-mode. Filesystem setting sources and auto memory are disabled. They also remove
-inherited `GIT_*` state, disable global/system Git
-configuration and hooks, use deterministic fixture commit identities, and put
-the hashed fixture Git directory first in `PATH`. Managed organization policy
-can still affect Claude Code. The observed
-init checks catch tool, server, permission, working-directory, and CLI-version
-drift, but reports from different managed-policy environments are not proven
-comparable.
-
-## Run the right layer
-
-Model-backed runs require authenticated `claude` and `git` executables:
+Model-backed runs need authenticated `claude` and Git. Researcher and auditor
+cases also need a matching `mmcg` binary. Run from the repository root:
 
 ```bash
-./evals/runner.py
-./evals/runner.py --suite critic
-./evals/runner.py --suite workflow
 ./evals/runner.py --case c-001-slop-rethink
-./evals/runner.py --model sonnet
-./evals/runner.py --keep-fixtures
-./evals/runner.py --verbose-failures
-./evals/runner.py --suite critic --model opus \
-  --report /tmp/mastermind-critic.json
-./evals/runner.py --suite critic --model opus \
-  --report /tmp/mastermind-critic-current.json \
-  --baseline-report evals/baselines/critic-opus-pre-lean.json
+./evals/runner.py --suite critic
+./evals/runner.py --report /tmp/mastermind-evals.json
 ```
 
-Run deterministic repository gates before every model-backed suite:
+`run-verified.sh` runs repository checks, builds `mmcg`, then runs the model
+suites:
 
 ```bash
 bash evals/run-verified.sh --model sonnet
 ```
 
-Model-backed evals are hand-run, not ordinary CI. CI runs the deterministic
-harness contract through:
+Model-backed suites are hand-run. CI runs the deterministic harness checks.
+
+## What a pass means
+
+- Critic cases read the final `## Verdict` section.
+- Auditor cases read the structured YAML verdict. A claimed test rerun counts
+  only if the tool stream shows that exact command succeeded.
+- Researcher cases can require source-line citations. A valid location does
+  not prove the reasoning drawn from it.
+- Workflow and intake cases check deterministic output signals. They run with
+  no tools in disposable directories.
+- Tool, permission, telemetry, or transport failures fail the case before
+  semantic checks. The runner does not use an LLM judge.
+
+Researcher and auditor fixtures are temporary Git repositories built from
+[`fixtures/`](fixtures/). The runner checks the live tool inventory and bounds
+each model process. Managed Claude policy can still vary between machines.
+
+## Add a case
+
+Copy a nearby case in the relevant JSONL file. Keep one behavior per case and
+explain the regression in `why`. Use only the assertions that behavior needs:
+
+| Field | Use |
+|---|---|
+| `expect.verdict` | Final critic or auditor decision |
+| `expect.contains` / `contains_any` | Required signals or equivalent wording |
+| `expect.not_contains` | A forbidden affirmative claim, not a phrase that may appear in a denial |
+| `expect.citations` | A source anchor that matches one line in the fixture |
+| `expect.code_comments` | Comment limits when generated code is under test |
+
+Do not put the expected answer in a fixture. For an auditor case, add a complete
+after-tree under `fixtures/<name>/changes/<variant>/`; missing baseline files are
+deleted. `staged_paths` can leave changes staged, unstaged, and untracked for a
+pre-commit audit.
+
+Run the focused case, then the full suite. Record only complete suite results
+in the [scorecard](scorecard.md).
+
+## Reports and comparison
+
+`--report` writes case results, token use, runtime identity, and selected-input
+identity. Infrastructure failures stay distinct from failed behavioral checks.
+Tool inputs and results are not saved in the report.
+
+`--baseline-report` compares the same model, cases, inputs, and runtime
+controls. Every previously passing case must still pass; suite pass rate cannot
+drop; context-token p50 and p95 must both fall. Incomparable reports fail the
+gate. The checked-in critic baseline has a documented legacy capture exception.
 
 ```bash
-python3 -m unittest \
-  evals/test_runner.py evals/test_evidence.py evals/test_benchmark.py \
-  evals/test_claude_adapter.py evals/test_benchmark_corpus.py \
-  evals/test_benchmark_review.py
+./evals/runner.py --suite critic --model opus \
+  --report /tmp/mastermind-critic.json \
+  --baseline-report evals/baselines/critic-opus-pre-lean.json
 ```
 
-## Reports and token gates
+## Auditor ablation
 
-`--report` atomically writes and verifies a `mastermind-eval-report` schema-v1
-JSON file. On POSIX, success also requires a durable parent-directory update and
-the final path, inode, and bytes to remain the ones published by the runner.
-Every case retains quality, retry state, duration, API duration, turns, input
-and output tokens, prompt-cache creation/read tokens, reported cost, and
-telemetry completeness. It also records the effective effort, turn and output
-caps, process transport limits, settings/session isolation, tool allowlist and
-expected stream inventory, MCP servers, and outcome-affecting environment
-controls. Suite summaries use the nearest-rank rule for p50 and p95; raw cases
-stay in the same report so each aggregate is auditable. Gate inputs are
-recomputed from those raw cases, and an inconsistent summary fails closed.
-
-Context tokens are `input_tokens + cache_creation_input_tokens +
-cache_read_input_tokens`. Output tokens remain separately reported because
-response length varies with generation. A missing, malformed, negative, or
-non-finite required telemetry field fails the case and cannot become a zero-cost
-improvement.
-
-Report loading is fail-closed: unknown fields or suites, malformed or missing
-repository identity, filter/selection mismatches, incomplete runtime, harness,
-target, or fixture evidence, inconsistent retry and telemetry states, and
-summaries that do not recompute from the raw case records are rejected before
-comparison. Report files must also be bounded stable regular files; symlinks and
-special files are rejected. An unfiltered report must contain every suite.
-
-Evaluation JSONL and evaluated agent/workflow definitions are read as bounded,
-stable regular UTF-8 files. Symlinks, special files, files above the 4 MiB
-per-file cap, and definitions replaced while being read fail before execution.
-
-`--baseline-report` is intentionally strict. Current and baseline evidence must
-have the same requested model, resolved model IDs, Claude CLI version,
-suite/case filters, selected suites, case order, and SHA-256 digest of the
-selected JSONL definitions plus referenced fixture trees and their file modes.
-The runner loads each selected JSONL case before the suite starts and copies
-fixture inputs into a private snapshot. Fixture inventory is capped at 4096
-entries, 4 MiB per file, and 64 MiB per tree; citation sources must also be
-valid UTF-8. The copier rereads each source through the same bounded stable-file
-contract and writes only those verified bytes. Disposable repositories are
-created from that snapshot rather than the live fixture tree. If a selected
-definition changes before the suite finishes, every result in that suite fails
-and the report is marked non-comparable. The evaluated agent or workflow skill
-is frozen the same way and recorded as `target_definition_digest`; target
-changes are allowed between baseline and current because that is the product under test,
-but a target change within either run makes its report non-comparable. For every
-suite, the pass rate cannot fall, every baseline-passing case must still pass,
-and both p50 and p95 context tokens must be strictly lower. Malformed or
-incomparable evidence exits non-zero. A case filter that matches nothing is also
-an error.
-
-The checked-in critic baseline predates report emission and target identity, and
-was transcribed from the runner's console output. A legacy baseline may omit the
-target digest and per-case runtime controls; a current report may not. Its
-capture metadata records that only aggregate API duration was observable; the
-token and quality fields used by the gate were recorded per case. That explicit
-legacy capture exception is accepted only when `--baseline-report` resolves to
-the checked-in `evals/baselines/critic-opus-pre-lean.json`; a copied report
-cannot self-declare the exception. New-format baselines must carry complete
-evidence and the same effective per-case runtime controls as the current run.
-Its capture metadata also states how the resolved Opus model ID was verified
-immediately afterward with the same alias and CLI.
-New runs resolve one exact Claude executable before evaluation, call that path
-for every case, and record its SHA-256 and version. A runtime change before the
-run finishes fails every case. A legacy baseline may omit this binary identity;
-when both reports contain it, the gate requires an exact match. Claude CLI
-reported cost is retained as telemetry, but these runs use the maintainer's
-existing Claude subscription rather than per-token API billing. New reports
-freeze the repository HEAD before running cases and retain that revision; a HEAD
-change during the run fails every case instead of relabeling frozen inputs with
-the later commit. Metadata probes, fixture Git operations, and mmcg indexing use
-the same bounded process supervisor as model-backed cases. Reports also bind the
-grader to `runner.py`, `benchmark_process.py`, `evidence.py`, Python, the
-platform, and PyYAML with `evaluation_harness.sha256`. That harness must remain
-stable within a run and match any non-legacy baseline, so a grader change cannot
-masquerade as agent quality improvement. Researcher and auditor runs also pin
-the exact Git and mmcg executables used to construct and index fixtures. Their
-hashes, Git version, and stability are recorded as `fixture_runtime`; future
-baselines must match them. An auditor case that reports a supported test command
-grants only its exact `cargo test --locked <test-filter>` command. The runner
-resolves rustup proxies to the selected Cargo and rustc toolchain binaries, pins
-those binaries ahead of the inherited PATH, removes inherited Cargo/Rust
-overrides, and uses private external `CARGO_HOME` and `CARGO_TARGET_DIR`
-directories so a test cannot dirty the fixture. Their binary hashes, verbose
-versions, and stability are recorded as `verification_runtime`.
-
-Executable identities are streamed through non-blocking, no-follow reads where
-the platform supports them, with a 512 MiB per-file cap and stable device, inode,
-mode, size, mtime, and ctime checks. Evaluation-harness sources use the stricter
-4 MiB definition-file cap. Special files, oversized runtimes, and files changed
-while hashing fail before a trial can use or report that runtime identity.
-
-Prompt-only suites do not require Git, mmcg, Cargo, or rustc.
-
-## Researcher and auditor fixture lifecycle
-
-Each researcher or auditor case names `fixtures/<name>/`, a baseline tag, and an
-after-tree variant. Fixture names, tags, and staged paths must be canonical;
-baseline and after tags cannot overlap. Trees containing symlinks or Git
-metadata are rejected. The runner:
-
-1. creates a temporary Git repository;
-2. commits the fixture baseline and tags it;
-3. replaces the tree with the named after-state, then commits and tags it by
-   default; when `staged_paths` is present, leaves HEAD at baseline and stages
-   only the listed paths;
-4. indexes the after-state with `mmcg`;
-5. gives the shipped custom agent the temporary repository and a live stdio MCP
-   server;
-6. checks the suite's deterministic verdict, phrase, tool identity, and
-   tool-turn signals.
-
-The auditor compares baseline to the current working tree and reads untracked
-files separately, covering audits before commit. Audit prompts use full
-`refs/tags/...` names so a tag cannot resolve as `HEAD`, a branch, or a path.
-When a case requires a verification rerun, its structured `pass` attestation is
-accepted only when the stream also contains a successful Bash result for that
-exact command. A claimed rerun cannot satisfy the grader by itself.
-The researcher queries the same graph and reads source before reporting a fact.
-JSONL cases do not provide synthetic diffs or structural answers. Fixture
-copies are checked against the source manifest before use. The runner prefers
-the in-tree release
-binary at `mcp/servers/mmcg/target/release/mmcg`, then falls back to `mmcg` on
-`PATH`. A failed copy or Git setup removes the partial temporary repository.
-An mmcg error or timeout leaves the index unavailable; cases that require mmcg
-then fail through the normal result contract instead of leaking setup state.
-`allow_no_mmcg` is valid only when the case does not require an mmcg tool, so a
-source-only boundary or Read case can still run without an index. For those
-cases, the generated custom-agent definition and CLI allowlist remove mmcg tools
-and the absent server instead of advertising an unusable capability.
-
-Build the matching binary before a model-backed researcher or auditor run:
+`ablation.py` compares a neutral Git reviewer with the shipped auditor on the
+same fixture cases:
 
 ```bash
-cargo build --release --manifest-path mcp/servers/mmcg/Cargo.toml --locked
-```
-
-## Add a critic case
-
-`expect.verdict` names one exact aggregate verdict or a list of acceptable
-verdicts. The grader reads the single final `## Verdict` section; mentions in
-prose, table rows, and quoted code examples cannot satisfy it. Missing or
-conflicting final verdicts fail. `concern` and `fail` belong to dimension rows,
-along with `pass` and `unknown`, so test those with phrase assertions when
-needed. The portable critical-review workflow uses the same final-section
-grader when its case sets `expect.verdict`.
-
-Missing facts produce `insufficient evidence` unless an independently evidenced
-failure already requires `revise` or `rethink`. A missing graph alone is not a
-design failure when source evidence answers the claim. Verdict format checks
-do not establish that dimension scores or their reasoning are correct.
-
-```jsonc
-{
-  "id": "c-NNN-short-name",
-  "why": "single regression scenario",
-  "input": {
-    "problem": "behavior to assess",
-    "design": "proposed implementation",
-    "alternatives": "considered options",
-    "constraints": "known limits",
-    "mmcg_snapshot": "quoted structural evidence or Unavailable"
-  },
-  "expect": {
-    "verdict": "rethink",
-    "contains": ["required phrase"],
-    "not_contains": ["forbidden phrase"]
-  }
-}
-```
-
-## Source-backed research cases
-
-`researcher.jsonl` includes a small regression corpus for ambiguous definitions,
-callback registration, docs/code contradictions, superseded ADRs, dynamic
-registration, and natural-language discovery. These are real disposable source
-trees, not a measured product-quality baseline or a representative benchmark.
-The researcher chooses the tool path; cases assert the facts and evidence the
-answer must preserve.
-
-Add source anchors to a case when a named file alone would allow a false pass:
-
-```jsonc
-"expect": {
-  "contains": ["session_count"],
-  "citations": [
-    {"path": "src/session.rs", "anchor": "pub fn session_count("}
-  ]
-}
-```
-
-Each anchor must match exactly one line in the selected fixture tree. The answer
-must cite that line with `path:line` or `path:start-end`, either directly, in
-backticks, or in a Markdown link. Absolute paths inside the disposable fixture
-are accepted. Ranges are limited to 40 lines so a whole-file citation cannot
-satisfy every fact. Fenced/quoted examples do not count. Fabricated files,
-out-of-range lines, and paths outside the fixture fail even when other required
-citations are correct. Definitions and fixtures participate in the existing
-case digest, so edited evidence cannot reuse an old baseline silently.
-
-Case reports add optional `citation_checks` with `expected` and `matched`
-anchors, `total` and `valid` unique citation locations, and failure `issues`.
-`null` means no citation check was requested, not a perfect score. These counts
-measure location validity and required anchor coverage. They do not establish
-that a sentence follows from a source, that every dependency was found, or that
-an architectural decision is correct. Phrase checks remain separate.
-
-To establish a research-quality baseline, run this corpus with a fixed model,
-CLI version, revision, and budgets, and review final reasoning for unsupported
-claims and appropriate abstention. Compare prompt changes only on the same
-case digest. Add unseen tasks and a source-search baseline before optimizing
-skills against scores; do not treat passing parser tests as a model result.
-
-The separate [research benchmark transport](benchmark/README.md) freezes one
-public task, source allowlist, hidden rubric and budgets across source-only,
-portable-instruction and portable-plus-mmcg conditions. It saves full bounded
-answers and separates infrastructure and telemetry from semantic quality. Its
-current trusted-adapter boundary is not an OS sandbox, so all comparison results
-remain ineligible for an uplift claim.
-
-## Add an auditor case
-
-```jsonc
-{
-  "id": "a-NNN-short-name",
-  "why": "single planted defect",
-  "fixture": "fake-session",
-  "baseline_ref": "baseline",
-  "after_ref": "scope-creep",
-  "allow_no_mmcg": false,
-  "input": {
-    "spec_summary": "...",
-    "executor_report": "..."
-  },
-  "expect": {
-    "verdict": ["drift", "broken"],
-    "contains": ["config", "scope"],
-    "not_contains": ["contract held"]
-  }
-}
-```
-
-Verdict assertions read the YAML block between
-`<!-- mastermind:audit-begin -->` and `<!-- mastermind:audit-end -->`. Missing
-or malformed structured output fails the case. Add a full after-tree under
-`fixtures/<name>/changes/<after_ref>/`; files absent from that tree are deleted
-from the generated working tree. To audit before commit, add
-`"staged_paths": ["src/staged.py"]` to the case. Other modified tracked files
-remain unstaged and new files remain untracked. Use `"staged_paths": []` to
-leave every change unstaged.
-
-## Add a workflow case
-
-```jsonc
-{
-  "id": "w-NNN-short-name",
-  "artifact": "skills/workflow/example/SKILL.md",
-  "input": {"prompt": "self-contained scenario"},
-  "expect": {
-    "contains": ["required signal"],
-    "contains_any": [["equivalent A", "equivalent B"]],
-    "not_contains": ["forbidden claim"],
-    "code_comments": {"prefixes": ["//", "/*"], "min": 0, "max": 0}
-  }
-}
-```
-
-Workflow artifacts are allowlisted and loaded from the repository. Cases run
-from the system temporary directory in Claude safe mode with no tools, so the
-prompt under evaluation cannot operate on the maintainer checkout.
-
-## Keep cases honest
-
-- One adversarial or golden behavior per case.
-- Explain the regression in `why`; do not leak the expected answer into source
-  fixture files.
-- Use deterministic verdict and phrase assertions. The harness does not use an
-  LLM judge.
-- Use `min_turns`, `max_turns`, or `max_output_tokens` only when the behavior
-  has a real tool-use or response budget. Claude's reported output includes
-  intermediate tool-call turns, not only the final prose.
-- Keep `verification_rerun` to one focused canonical command:
-  `cargo test --locked <test-filter>`. Additional flags, wrappers, redirections,
-  pipes, and compound shell commands are rejected.
-- Use `code_comments` only when generated code, rather than prose advice, is
-  under test.
-- Run the focused case before the full suite and record full-suite results in
-  `scorecard.md`.
-
-## Ablation
-
-`ablation.py` runs a diagnostic comparison under two conditions on equivalent
-Git fixture trees, preserving staged, unstaged, and untracked changes:
-
-- `vanilla`: a neutral reviewer with shell access, but no mmcg or Mastermind
-  auditor contract;
-- `mastermind`: the shipped auditor with the live codegraph.
-
-Both conditions use the same pinned Claude and Git executables, explicit model,
-effort, turn and output limits, scrubbed environment, bounded process transport,
-and isolated Claude settings. Case records and fixture trees are copied once
-before either condition runs; both conditions build their disposable repository
-from that immutable snapshot. With `--with-mastermind`, the auditor definition
-is frozen too. Every successful condition must report the same resolved model
-IDs across cases and conditions. Input, target, harness, repository HEAD, model,
-or executable drift makes the comparison exit non-zero. The vanilla condition
-exposes only built-in read/search tools and read-only Git commands, builds no
-mmcg index, and counts a phrase result only after the event stream proves a
-successful Git inspection. Runtime, parse, permission, and transport failures
-are reported as errors and make the command exit non-zero.
-
-Golden `held` cases are excluded because there is no defect to catch.
-
-```bash
-python evals/ablation.py
 python evals/ablation.py --with-mastermind
 ```
 
-The vanilla column uses phrase checks; the Mastermind column uses the full
-auditor contract, including structured verdict and verification requirements.
-The columns have different grading criteria, so the tool reports no quality
-uplift and never inserts a historical score for a condition it did not run.
-
-Phrase checks can miss subtly incorrect reasoning that happens
-to contain the expected signals; record that limitation with every result.
+The two columns use different grading rules. Treat the output as diagnostics,
+not a quality-uplift score.
